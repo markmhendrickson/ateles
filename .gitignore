@@ -1,6 +1,11 @@
 # Sensitive credentials and configuration
 .env
-.env.*
+.env.local
+.env.*.local
+.env.swp
+.env.backups/
+execution/.env.backups/
+!.env.example
 .creds/
 credentials.json
 *.pem

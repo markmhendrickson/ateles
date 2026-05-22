@@ -1,0 +1,113 @@
+title = "Personal Repository Secrets Detection"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "env-files"
+description = "Detect .env files"
+regex = '''\.env'''
+path = '''\.env.*'''
+
+[[rules]]
+id = "protected-patterns"
+description = "Detect secrets, credentials patterns"
+regex = '''(?i)(secret|credential|password|api[_-]?key|private[_-]?key|access[_-]?token|bearer[_-]?token)'''
+tags = ["secret", "credential"]
+
+[[rules]]
+id = "aws-keys"
+description = "AWS access keys"
+regex = '''AKIA[0-9A-Z]{16}'''
+tags = ["aws", "key"]
+
+[[rules]]
+id = "private-keys"
+description = "Private keys (RSA, DSA, EC)"
+regex = '''-----BEGIN (RSA|DSA|EC) PRIVATE KEY-----'''
+tags = ["key", "private"]
+
+[[rules]]
+id = "github-tokens"
+description = "GitHub tokens"
+regex = '''ghp_[a-zA-Z0-9]{36}'''
+tags = ["github", "token"]
+
+# Allowlist: env var names in code (not actual secrets)
+[allowlist]
+description = "Env var names and common words in code (not real secrets)"
+paths = [
+  "execution/scripts/ga_last_7_days_report.py",
+  "truth/mcp-servers/parquet/parquet_mcp_server.py",
+  ".github/workflows/deploy-website.yml",
+  ".cursor/skills/deploy-website/SKILL.md",
+  '''execution/\.venv-pdf-filler/''',
+  ".cursor/rules/development_workflows.mdc",
+  "execution/scripts/email_preview_send.py",
+  "execution/scripts/email_preview_readme.md",
+  "execution/scripts/fetch_sent_mail_recipients.py",
+  "execution/scripts/mcp_authenticated_proxy.py",
+  "execution/scripts/newsletter_send.py",
+  "execution/scripts/newsletter_subscribe_api.py",
+  "execution/scripts/newsletter_unsubscribe_api.py",
+  "execution/scripts/setup_google_oauth_cli.py",
+  "execution/scripts/parquet_mcp_authenticated_proxy.py",
+  "execution/scripts/onepassword_client.py",
+  "mcp/onepassword/onepassword_mcp_server.py",
+  "scripts/fix_gmail_mcp_config.py",
+  "reports/newsletter_recipients_report.md",
+  ".cursor/skills/analyze/SKILL.md",
+  ".cursor/skills/debug/SKILL.md",
+  ".cursor/skills/push/SKILL.md",
+  ".cursor/skills/sync-env-from-1password/SKILL.md",
+  ".cursor/skills/report/SKILL.md",
+  ".cursor/skills/report-error/SKILL.md",
+  "docs/cursor_directory.md",
+  "docs/cursor_rules/cursor_rules_inventory.md",
+  "execution/scripts/populate_foundation_skills_from_commands.py",
+  "execution/scripts/sync_foundation_commands_to_neotoma_skills.py",
+  "execution/scripts/daily_tasks_email.py",
+  "execution/scripts/run_daily_tasks_email.sh",
+  "execution/scripts/run-daily-tasks-email.sh",
+  "shared/docs/agent-data-rules.md",
+  "execution/scripts/extract_meeting_frames.py",
+  "execution/scripts/transcribe_audio.py",
+  ".cursor/skills/record_meeting/SKILL.md",
+  # .claude/ skills and agents (env var names in skill docs, not secrets)
+  '''.claude/''',
+  # execution/daemons/formica (code using API key env var names)
+  '''execution/daemons/formica/''',
+  # execution/docs, execution/reports, execution/scripts (new files)
+  "execution/docs/gws_cli_calendar.md",
+  "execution/reports/aauth/phase4_cutover_2026-04-27.md",
+  "execution/reports/aauth/phase6_scoping_2026-04-27.md",
+  "execution/reports/cursor_session_artifacts/2026-04-30/secondary_report_2026-04-21.md",
+  "execution/scripts/aauth_provision_identity.py",
+  "execution/scripts/aauth_signer.py",
+  "execution/scripts/archive/parquet/add_aquarea_ha_tasks_to_parquet.py",
+  "execution/scripts/archive/parquet/parquet_mcp_authenticated_proxy.py",
+  "execution/scripts/archive/parquet/setup_parquet_mcp_cloudflare_tunnel.sh",
+  "execution/scripts/install_formica_launchd_from_ateles_env.sh",
+  "execution/scripts/link_transcription_neotoma_relations.py",
+  "execution/scripts/mcp_identity_proxy.py",
+  "execution/scripts/run_formica_launchd.sh",
+  "execution/scripts/run_neotoma_identity_proxy.sh",
+  "execution/scripts/setup_formica_launchagent.sh",
+  "execution/scripts/setup_neotoma_api_launchagent.sh",
+  # mcp docs
+  "mcp/IDENTITY_PROXY.md",
+  "mcp/google-maps/SETUP.md",
+  "mcp/google-maps/run-google-maps-mcp.sh",
+  # truth transcripts (entity JSON, not secrets)
+  '''truth/operations/admin/transcripts/''',
+  # ateles public repo files (env var names and placeholder words — not actual secrets)
+  ".gitignore",
+  ".env.example",
+  "scripts/linters/security_audit.py",
+  "docs/architecture.md",
+  "execution/daemons/monedula/monedula.py",
+  "execution/daemons/monedula/handlers/payment_profile.py",
+  "execution/daemons/monedula/handlers/wise_transfer.py",
+  "execution/daemons/monedula/handlers/btc_transfer.py",
+]
+

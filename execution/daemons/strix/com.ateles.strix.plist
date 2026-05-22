@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ateles.strix</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/markmhendrickson/repos/ateles/execution/venv/bin/python</string>
+        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/strix/strix.py</string>
+    </array>
+
+    <!-- Run at login -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart if it crashes -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Must run in a GUI session for menu bar access -->
+    <key>LSUIElement</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/com.ateles.strix.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/com.ateles.strix.err</string>
+
+    <!-- Source the user environment so DATA_DIR, auth tokens, etc. are available -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/markmhendrickson</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+    </dict>
+</dict>
+</plist>
