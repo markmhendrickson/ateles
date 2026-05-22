@@ -43,6 +43,20 @@ Ateles is a Neotoma-canonical personal agent swarm. "Neotoma-canonical" means:
 └─────────────────────────────────────────────────────┘
 ```
 
+### T1 is a role, not a product
+
+T1 describes any process that owns a channel message loop and spawns T2 residents per session. The implementation is deliberately open:
+
+| Implementation | When to use |
+|---|---|
+| **OpenClaw** | Multi-channel setups (Telegram + WhatsApp + web); mature plugin/harness lifecycle; right choice when channel breadth matters |
+| **Claude Agent SDK (custom)** | Single-channel or bespoke needs; full control with minimal surface area; T3 daemons like Monedula are already close to this pattern |
+| **NanoClaw / equivalent** | Lightweight self-hosted variant; same role as OpenClaw with less overhead |
+| **Raw webhook loop** | `aiohttp` + Bot API directly; valid when you don't need a framework; low ceremony, easy to audit |
+| **Claude Code / Cursor** | IDE-driven T1 for development workflows; not suitable for always-on daemon swarms |
+
+The current Ateles T1 for Onychomys is OpenClaw. For a single-channel operator setup, a thin custom loop using the Agent SDK is equally valid and has less surface area to maintain.
+
 ---
 
 ## Neotoma integration
@@ -101,6 +115,7 @@ In Phase 1, payment profiles will migrate to Neotoma `payment_profile` entities 
 
 | Layer | Decision |
 |---|---|
+| T1 host | OpenClaw (current, multi-channel); custom Agent SDK loop valid for single-channel |
 | Agent orchestration | Claude Agent SDK (native); Temporal evaluated at Phase 3 |
 | Notification delivery | Apprise Python lib — Telegram-native, zero infra |
 | Daemon scheduling | launchd (macOS); Temporal eval at Phase 3 |
