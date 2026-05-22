@@ -21,9 +21,9 @@ Covers Phase 0–5 goals and task checklists. Each phase has a defined goal and 
 - [x] Write `docs/architecture.md` system design
 - [x] Refactor Monedula handlers: `therapy.py` + `yoga.py` → generic `WiseTransferHandler` + `BtcTransferHandler` + `PaymentProfile` (env-var driven, no PII in public code)
 - [x] Rename `TELEGRAM_TOPIC_PAYMENTS` → `TELEGRAM_TOPIC_MONEDULA` (legacy alias kept)
-- [ ] Create `markmhendrickson/ateles-private` private repo
-- [ ] Write `.env.example` with all required env var names (no values)
-- [ ] Rename Strix daemon (mic recorder) in codebase
+- [x] Create `markmhendrickson/ateles-private` private repo
+- [x] Write `.env.example` with all required env var names (no values)
+- [x] Rename Strix daemon (mic recorder) in codebase
 
 ---
 
