@@ -74,7 +74,9 @@ Daemons load their own `agent_definition` at spawn time via the Neotoma API. No 
 Each daemon has a per-role AAuth keypair (`sub = <name>@ateles-swarm`). All Neotoma observations carry agent attribution. Capabilities are enforced at the data layer via `AgentGrant` — Menura cannot write private entities regardless of what code it runs.
 
 ### Webhook + mirror system
-Neotoma sends HMAC-signed webhooks to Apus (`apus.markmhendrickson.com`) on entity changes. Apus triggers mirror profile rebuilds and commits to the public `ateles` repo via `ateles-agent` GitHub identity. This file is one such mirror artifact.
+Neotoma sends HMAC-signed webhooks to Apus (`apus.markmhendrickson.com`) on entity changes. Apus triggers mirror profile rebuilds and commits to the public `ateles` repo via `ateles-agent` GitHub identity.
+
+**Mirror is one-way: Neotoma → disk only.** Mirrored files are a read surface (IDE, git, Inspector). Human edits to mirrored files are overwritten on the next mirror run. To write back from disk: `neotoma edit <entity-id>` or `neotoma corrections create <entity-id> --field-name <field> --corrected-value "$(cat file.md)"`. The mirror profile has no automatic write-back option.
 
 ### Notification routing
 All agent notifications flow through `lib/notify/` which reads a `priority_rubric` entity from Neotoma at startup. Routing rules (silence windows, digest collapse, escalation ladder) are Neotoma config — not hardcoded. Delivery via [Apprise](https://github.com/caronc/apprise) (Telegram-primary).

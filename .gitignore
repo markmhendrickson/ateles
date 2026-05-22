@@ -52,6 +52,9 @@ docs/plans/
 execution/daemons/monedula/handlers/therapy.py
 execution/daemons/monedula/handlers/yoga.py
 
+# mic-recorder directory (superseded by strix daemon)
+execution/daemons/mic-recorder/
+
 # Daemon runtime state
 execution/daemons/**/.monedula_last_run
 execution/daemons/**/.monedula_tg_offset
