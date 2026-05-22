@@ -63,8 +63,11 @@ Covers Phase 0–5 goals and task checklists. Each phase has a defined goal and 
 - [ ] Menura: separate OpenClaw instance, public-scoped AAuth identity, live at markmhendrickson.com/agent/
 - [ ] Migrate Formica from JS to Python using lib/daemon_runtime/
 - [ ] All daemons using lib/notify/ for notifications
-- [ ] `agent_definition_override` entity type + Loxia evaluation (GHA vs. named agent)
-- [ ] Temporal evaluation: assess for T3 daemons if in-flight state loss has occurred
+- [ ] `agent_definition_override` entity type: register schema in Neotoma; enforcement logic already in PR #398
+- [ ] Loxia evaluation: GHA + Claude API first (~30 lines); promote to named T3 only if Neotoma attribution of actions matters
+- [ ] Temporal evaluation: adopt only if a daemon crash causes lost in-flight state that demonstrably hurts operations; Inngest as fallback
+- [ ] Lanius (stale issue sweeper): GHA cron job first; promote to T3 if attribution/Neotoma logging needed
+- [ ] neotoma-agent: due-date hygiene T4 skill — fires on `task` entity creation to add due dates and domain tags
 
 ---
 
@@ -89,7 +92,14 @@ Covers Phase 0–5 goals and task checklists. Each phase has a defined goal and 
 
 ---
 
+## Pending setup (not phase-gated)
+
+- **`ateles-agent` GitHub machine account**: create account; wire `ATELES_AGENT_GIT_EMAIL` into Apus launchd plist
+- **`neotoma-agent` GitHub identity**: `castor-agent` account (Pull Shark x2) remains as-is; create new `neotoma-agent` GitHub account for future automation; `castor-agent` cannot be renamed
+- **Apus env wiring**: populate launchd plist with `NEOTOMA_BEARER_TOKEN`, `ATELES_REPO_PATH`, `ATELES_PRIVATE_REPO_PATH`, `ATELES_AGENT_GIT_EMAIL`, `APUS_WEBHOOK_SECRET`
+- **Neotoma webhook subscription**: register Apus endpoint (`https://apus.markmhendrickson.com/webhook`) as Neotoma webhook subscriber
+
 ## Deferred
 
 - **Temporal orchestration**: evaluate at Phase 3 when 5+ daemons active and in-flight state loss has occurred; Inngest as fallback
-- **agent_definition_override**: Phase 1 Neotoma PR; operator customisation of agent prompts
+- **agent_definition_override**: Phase 1 Neotoma PR (#398 merged); schema registration deferred to Phase 3

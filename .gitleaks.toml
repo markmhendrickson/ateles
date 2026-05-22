@@ -111,6 +111,7 @@ paths = [
   "execution/daemons/neotoma-agent/neotoma_agent.py",
   "execution/daemons/apus/apus.py",
   "docs/architecture.md",
+  "docs/phases.md",
   "execution/daemons/monedula/monedula.py",
   "execution/daemons/monedula/handlers/payment_profile.py",
   "execution/daemons/monedula/handlers/wise_transfer.py",
