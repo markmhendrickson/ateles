@@ -33,8 +33,8 @@ Covers Phase 0–5 goals and task checklists. Each phase has a defined goal and 
 
 - [x] Neotoma: register `agent_definition` entity type with `prompt_markdown`, `tool_allowlist`, `agent_grant`, `override_policy` fields
 - [x] Neotoma PR: `src/services/override_validation.ts` — enforce `override_policy` at write time (PR #398)
-- [x] Create `agent_definition` entities for Onychomys, Monedula, Castor, Formica, Menura in Neotoma
-- [x] Mint AAuth keypairs for Onychomys, Monedula, Formica, Castor (stored in ateles-private/keys/)
+- [x] Create `agent_definition` entities for Onychomys, Monedula, neotoma-agent, Formica, Menura in Neotoma
+- [x] Mint AAuth keypairs for Onychomys, Monedula, Formica, neotoma-agent (stored in ateles-private/keys/)
 - [x] `lib/notify/` — Apprise wrapper + priority_rubric loader (notifier.py ~130 LOC)
 - [x] `lib/daemon_runtime/` — SSE subscription + agent_definition loader + AAuth signer (3 modules ~250 LOC)
 - [x] Create `priority_rubric` entity in Neotoma (`ent_29ca079940c1e996a8c782f2`)
