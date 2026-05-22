@@ -110,6 +110,7 @@ paths = [
   "lib/daemon_runtime/aauth_signer.py",
   "execution/daemons/neotoma-agent/neotoma_agent.py",
   "execution/daemons/apus/apus.py",
+  "execution/daemons/apus/com.ateles.apus.plist",
   "docs/architecture.md",
   "docs/phases.md",
   "execution/daemons/monedula/monedula.py",

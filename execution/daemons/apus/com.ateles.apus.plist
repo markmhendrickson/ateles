@@ -17,6 +17,20 @@
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>NEOTOMA_BASE_URL</key>
+        <string>https://neotoma.markmhendrickson.com</string>
+        <key>ATELES_REPO_PATH</key>
+        <string>/Users/markmhendrickson/repos/ateles</string>
+        <key>ATELES_PRIVATE_REPO_PATH</key>
+        <string>/Users/markmhendrickson/repos/ateles-private</string>
+        <key>ATELES_AGENT_GIT_NAME</key>
+        <string>ateles-agent</string>
+        <key>ATELES_AGENT_GIT_EMAIL</key>
+        <string>ateles-agent@users.noreply.github.com</string>
+        <key>APUS_WEBHOOK_SECRET</key>
+        <string>apus-neotoma-webhook-2026</string>
+        <key>APUS_PORT</key>
+        <string>8741</string>
     </dict>
 
     <key>KeepAlive</key>
