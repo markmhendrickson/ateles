@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.ateles.castor</string>
+    <string>com.ateles.neotoma-agent</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/Users/markmhendrickson/repos/ateles/execution/venv/bin/python</string>
-        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/castor/castor.py</string>
+        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/neotoma-agent/neotoma_agent.py</string>
     </array>
 
     <!-- Load at login -->
@@ -20,9 +20,9 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/tmp/com.ateles.castor.log</string>
+    <string>/tmp/com.ateles.neotoma-agent.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/com.ateles.castor.err</string>
+    <string>/tmp/com.ateles.neotoma-agent.err</string>
 
     <key>EnvironmentVariables</key>
     <dict>

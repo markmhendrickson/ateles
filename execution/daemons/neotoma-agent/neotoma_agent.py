@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Castor — Neotoma-repo automation daemon.
+neotoma-agent — Neotoma-repo automation daemon.
 
 Castor genus: beavers. T3 daemon in the Ateles swarm.
 
@@ -8,7 +8,7 @@ Subscribes to Neotoma issue/PR events and processes them against the
 neotoma repository. Mirrors the Formica pattern but scoped to the
 neotoma repo rather than general GitHub automation.
 
-AAuth sub: castor@ateles-swarm
+AAuth sub: neotoma-agent@ateles-swarm
 Phase 1: skeleton only — event loop stubbed, full logic in Phase 3.
 
 Startup sequence (T3 daemon pattern):
@@ -19,12 +19,12 @@ Startup sequence (T3 daemon pattern):
   5. Process events
 
 Environment variables:
-  NEOTOMA_BEARER_TOKEN    Neotoma API auth token
-  NEOTOMA_BASE_URL        Neotoma API base URL (default: https://neotoma.markmhendrickson.com)
-  TELEGRAM_BOT_TOKEN      Telegram bot token
-  TELEGRAM_CHAT_ID        Telegram chat ID
-  TELEGRAM_TOPIC_CASTOR   Telegram topic ID for Castor notifications (optional)
-  CASTOR_AGENT_DEFINITION_ID  Neotoma entity ID for Castor's agent_definition (optional)
+  NEOTOMA_BEARER_TOKEN          Neotoma API auth token
+  NEOTOMA_BASE_URL              Neotoma API base URL (default: https://neotoma.markmhendrickson.com)
+  TELEGRAM_BOT_TOKEN            Telegram bot token
+  TELEGRAM_CHAT_ID              Telegram chat ID
+  TELEGRAM_TOPIC_NEOTOMA_AGENT  Telegram topic ID for neotoma-agent notifications (optional)
+  NEOTOMA_AGENT_DEFINITION_ID   Neotoma entity ID for neotoma-agent's agent_definition (optional)
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ import sys
 from pathlib import Path
 
 # ── Path bootstrap ────────────────────────────────────────────────────────────
-# Allow running as `python castor.py` from the daemon directory
+# Allow running as `python neotoma_agent.py` from the daemon directory
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -55,14 +55,14 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
-log = logging.getLogger("castor")
+log = logging.getLogger("neotoma-agent")
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DAEMON_NAME = "castor"
+DAEMON_NAME = "neotoma-agent"
 SUBSCRIBE_ENTITY_TYPES = ["issue", "pull_request"]
 
 # Neotoma repo slug for GitHub automation
-NEOTOMA_REPO = os.environ.get("CASTOR_NEOTOMA_REPO", "markmhendrickson/neotoma")
+NEOTOMA_REPO = os.environ.get("NEOTOMA_AGENT_REPO", "markmhendrickson/neotoma")
 
 
 # ── Event handler ─────────────────────────────────────────────────────────────
@@ -79,7 +79,7 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
     entity_id = event.entity_id
     action = event.action
 
-    log.info(f"[castor] Event: {entity_type}/{entity_id} action={action}")
+    log.info(f"[neotoma-agent] Event: {entity_type}/{entity_id} action={action}")
 
     # Phase 3: check if this issue/PR is targeted at the neotoma repo
     # and dispatch to process_issues / process_prs skill via claude --print
