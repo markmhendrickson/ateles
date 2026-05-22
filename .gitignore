@@ -1,0 +1,58 @@
+# Sensitive credentials and configuration
+.env
+.env.*
+.creds/
+credentials.json
+*.pem
+*.key
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+node_modules/
+
+# Playwright authentication state
+playwright/.auth/
+venv
+.venv*/
+execution/venv
+execution/homeassistant-venv
+
+# Foundation local overrides
+foundation-config.local.yaml
+
+# Temporary files (may contain sensitive data)
+tmp
+
+# Tesseract language data files (large binary files)
+*.traineddata
+
+# Cursor configuration (generated symlinks and user-specific settings)
+.cursor/rules/
+.cursor/commands/
+.cursor/environment.json
+.cursor/error_reports/
+
+data.creds/
+data/
+
+# Website cache (generated from Neotoma export at build time; do not commit)
+execution/website/markmhendrickson/react-app/cache/
+
+# Neotoma plan mirrors (local only, regenerated via `neotoma mirror rebuild --profile ateles-plans`)
+docs/plans/
+
+# Private handler files (superseded by generic handlers — contain personal config)
+execution/daemons/monedula/handlers/therapy.py
+execution/daemons/monedula/handlers/yoga.py
+
+# Daemon runtime state
+execution/daemons/**/.monedula_last_run
+execution/daemons/**/.monedula_tg_offset
+
+# Private docs submodule (not part of public repo)
+docs/private/
+
+# macOS
+.DS_Store
