@@ -109,6 +109,7 @@ paths = [
   "lib/daemon_runtime/sse_client.py",
   "lib/daemon_runtime/aauth_signer.py",
   "execution/daemons/castor/castor.py",
+  "execution/daemons/apus/apus.py",
   "docs/architecture.md",
   "execution/daemons/monedula/monedula.py",
   "execution/daemons/monedula/handlers/payment_profile.py",
