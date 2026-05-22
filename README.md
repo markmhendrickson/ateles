@@ -21,9 +21,9 @@ See [docs/taxonomy.md](docs/taxonomy.md) for the full agent table.
 
 | Tier | Role | Examples |
 |---|---|---|
-| **T1** | Hosts | OpenClaw, launchd |
+| **T1** | Hosts (T1 is a role — see docs/architecture.md for alternatives) | OpenClaw, launchd |
 | **T2** | Resident agents (always-on) | Onychomys, Menura |
-| **T3** | Daemons (event-driven background) | Formica, Castor, Apis, Apus, Piculet, Strix |
+| **T3** | Daemons (event-driven background) | Formica, neotoma-agent, Apis, Apus, Piculet, Strix |
 | **T4** | Invocable agents (stateless, spawned per task) | Loxia, skill-based agents |
 
 ## Structure
@@ -38,7 +38,10 @@ ateles/
 │   └── daemons/             # T3 daemon implementations
 │       ├── monedula/        # recurring payment daemon (Wise + BTC)
 │       ├── formica/         # GitHub issue/PR automation
-│       └── piculet/         # audio transcription daemon
+│       ├── piculet/         # audio transcription daemon
+│       ├── strix/           # meeting/ambient audio recorder
+│       ├── neotoma-agent/   # neotoma-repo automation daemon
+│       └── apus/            # HTTPS webhook receiver (Neotoma mirror triggers)
 └── lib/
     ├── notify/              # Apprise-backed notification routing
     └── daemon_runtime/      # SSE subscription, agent_definition loader, AAuth signer

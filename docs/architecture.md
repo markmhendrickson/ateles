@@ -32,7 +32,7 @@ Ateles is a Neotoma-canonical personal agent swarm. "Neotoma-canonical" means:
 ├─────────────────────────────────────────────────────┤
 │  T2 Resident: Onychomys (operator), Menura (public)       │
 ├─────────────────────────────────────────────────────┤
-│  T3 Daemons: Monedula / Formica / Castor / Apis / Apus    │
+│  T3 Daemons: Monedula / Formica / neotoma-agent / Apis / Apus │
 │              Piculet / Strix / Anthus / Tyto / Turdus     │
 ├─────────────────────────────────────────────────────┤
 │  T4 Invocable: Loxia, skill-based agents                  │

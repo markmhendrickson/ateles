@@ -38,7 +38,7 @@ Covers Phase 0–5 goals and task checklists. Each phase has a defined goal and 
 - [x] `lib/notify/` — Apprise wrapper + priority_rubric loader (notifier.py ~130 LOC)
 - [x] `lib/daemon_runtime/` — SSE subscription + agent_definition loader + AAuth signer (3 modules ~250 LOC)
 - [x] Create `priority_rubric` entity in Neotoma (`ent_29ca079940c1e996a8c782f2`)
-- [x] Castor daemon: Python, neotoma-repo automation skeleton
+- [x] neotoma-agent daemon: Python, neotoma-repo automation skeleton
 
 ---
 
@@ -85,7 +85,7 @@ Covers Phase 0–5 goals and task checklists. Each phase has a defined goal and 
 - [ ] Formica: full Python rewrite using lib/daemon_runtime/ (lib/telegram/ JS stays for Telegram delivery)
 - [ ] All agent_definition entities populated for active daemons
 - [ ] Public "last 30 agent actions" feed via Menura (proof artifact for Neotoma Tier 1 ICPs)
-- [ ] Quarterly AAuth keypair rotation via Castor
+- [ ] Quarterly AAuth keypair rotation via neotoma-agent
 
 ---
 

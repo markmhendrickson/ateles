@@ -47,7 +47,7 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 |---|---|---|---|---|
 | **Monedula** | *Corvus monedula* (jackdaw) | Python | Recurring payment daemon; Wise IBAN + BTC transfers triggered by calendar events and Neotoma task due dates | active |
 | **Formica** | *Formica* (wood ant) | JS → Python (Phase 5) | GitHub issue/PR automation; drives `process_issues` and `process_prs` skills | active |
-| **Castor** | *Castor* (beaver) | Python | Neotoma-repo automation; processes issues and PRs against neotoma repo | planned (Phase 1) |
+| **neotoma-agent** | *Castor* (beaver) | Python | Neotoma-repo automation; processes issues and PRs against the neotoma repo | active (Phase 1 skeleton) |
 | **Anthus** | *Anthus* (pipit) | Python | Metrics and analytics ingestion (Umami, etc.) | planned (Phase 2) |
 | **Apis** | *Apis* (honeybee) | Python | General task processor; absorbs Monedula's task scope; yoga/therapy tasks become Apis templates | planned (Phase 1) |
 | **Apus** | *Apus* (swift) | Python | Lightweight HTTPS webhook receiver; listens for Neotoma webhooks; triggers mirror rebuilds and git commits | planned (Phase 2) |
@@ -88,5 +88,5 @@ Each T2 and T3 agent has a distinct AAuth keypair with `sub = <name>@ateles-swar
 | Menura | `menura@ateles-swarm` | read-only, `visibility=public` entities only |
 | Monedula | `monedula@ateles-swarm` | task + transaction write |
 | Formica | `formica@ateles-swarm` | issue + PR write |
-| Castor | `castor@ateles-swarm` | neotoma-repo issue + PR write |
+| neotoma-agent | `neotoma-agent@ateles-swarm` | neotoma-repo issue + PR write |
 | Apus | `apus@ateles-swarm` | mirror trigger + event write |
