@@ -47,10 +47,10 @@ Covers Phase 0–5 goals and task checklists. Each phase has a defined goal and 
 **Goal:** Neotoma → git mirror pipeline live; Onychomys config migrated to Neotoma.
 
 - [ ] Neotoma: configure four mirror profiles (ateles-public-agents, ateles-public-skills, ateles-architecture-docs, ateles-private-agents)
-- [ ] Apus daemon: HTTPS webhook receiver (~200 LOC) + Cloudflare Tunnel at `apus.markmhendrickson.com`
+- [x] Apus daemon: HTTPS webhook receiver (~200 LOC) + Cloudflare Tunnel at `apus.markmhendrickson.com`
 - [ ] Apus: handle all four profiles; commit via `ateles-agent` GitHub identity; log delivery status to Neotoma
 - [ ] OpenClaw PR: `workspace-neotoma.ts` (~300 LOC) with file→API fallback chain
-- [ ] Migrate Onychomys SOUL.md → `prompt_markdown` field in `agent_definition` entity
+- [x] Migrate Onychomys SOUL.md → `prompt_markdown` field in `agent_definition` entity
 - [ ] Anthus daemon skeleton: metrics ingestion
 - [ ] Tyto daemon skeleton: email triage
 
