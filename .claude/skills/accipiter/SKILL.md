@@ -44,6 +44,44 @@ Full prompt at `ent_7079893d01e208cde15a4f52`. Load via:
 mcp__mcpsrv_neotoma__retrieve_entity_snapshot(entity_id="ent_7079893d01e208cde15a4f52")
 ```
 
+## Gate handoff — ux gate
+
+When Accipiter completes a UX review on a GitHub issue, sign off the `ux` gate. Accipiter runs **in parallel with Bombycilla (arch gate)** in Phase 2 — both must be signed off before Phase 3 begins (join condition).
+
+```python
+# 1. Sign off ux gate on the issue entity
+correct(entity_id=<issue_entity_id>, fields={
+  "gate_status": {**existing_gate_status, "ux": "signed_off"},
+  # Only advance current_owner to "gryllus" if arch is ALSO signed_off
+  # Otherwise leave current_owner as-is (parallel phase still in progress)
+  "owner_history": [*existing_history, {"agent": "accipiter", "gate": "ux", "at": "<ISO timestamp>", "action": "signed_off"}]
+}, observation_source="workflow_state")
+
+# 2. Check join condition: if arch is also signed_off, advance to Phase 3
+if existing_gate_status.get("arch") == "signed_off":
+    correct(entity_id=<issue_entity_id>, fields={"current_owner": "gryllus"}, observation_source="workflow_state")
+
+# 3. Store a plan_contribution entity
+store(entities=[{
+  "entity_type": "plan_contribution",
+  "plan_entity_id": <issue_entity_id>,
+  "contributing_agent": "accipiter",
+  "contribution_type": "sign_off",
+  "gate": "ux",
+  "summary": "<one-line UX review outcome>",
+  "blocking": False,
+  "action_required": None
+}])
+```
+
+To **waive** the ux gate (e.g. for a bug fast-path):
+```python
+correct(entity_id=<issue_entity_id>, fields={
+  "gate_status": {**existing_gate_status, "ux": "waived"},
+  "owner_history": [*existing_history, {"agent": "accipiter", "gate": "ux", "at": "<ISO timestamp>", "action": "waived", "reason": "<reason>"}]
+}, observation_source="workflow_state")
+```
+
 ## Notes
 
 - Always includes error states and empty states — not just happy paths

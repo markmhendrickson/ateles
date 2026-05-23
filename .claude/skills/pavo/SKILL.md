@@ -60,6 +60,36 @@ Then use `prompt_markdown` as the system context for the agent.
 - `list_observations` — data currency checks
 - `WebSearch`, `WebFetch` — competitive/market context when needed
 
+## Gate handoff — pm gate
+
+When Pavo completes PM scoping on a GitHub issue, sign off the `pm` gate and hand to the next phase:
+
+```python
+# 1. Sign off pm gate on the issue entity
+correct(entity_id=<issue_entity_id>, fields={
+  "gate_status": {**existing_gate_status, "pm": "signed_off"},
+  "current_owner": "accipiter",   # next phase owner (or "gryllus" for bug/security fast paths)
+  "owner_history": [*existing_history, {"agent": "pavo", "gate": "pm", "at": "<ISO timestamp>", "action": "signed_off"}]
+}, observation_source="workflow_state")
+
+# 2. Store a plan_contribution entity for audit trail
+store(entities=[{
+  "entity_type": "plan_contribution",
+  "plan_entity_id": <issue_entity_id>,
+  "contributing_agent": "pavo",
+  "contribution_type": "sign_off",
+  "gate": "pm",
+  "summary": "<one-line PM scoping outcome>",
+  "blocking": False,
+  "action_required": None
+}])
+```
+
+**Fast paths** (skip ux/arch):
+- `label:bug` → set `current_owner: "gryllus"` (Phase 3 impl)
+- `label:security` → set `current_owner: "gryllus"` (Phase 3 impl, skip all non-security gates)
+- `label:copy` → set `current_owner: "paradisaea"` (Phase 2 copy gate)
+
 ## Notes
 
 - Pavo does not scope features in detail (Bombycilla's job)
