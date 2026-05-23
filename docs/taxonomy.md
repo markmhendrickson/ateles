@@ -68,9 +68,8 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 | **Vanellus** | *Vanellus* (lapwing) | PR steward — triages and merges eligible PRs | planned (Phase 5) |
 | **Sturnus** | *Sturnus* (starling) | Feedback digester — extracts entities from `product_feedback` | planned (Phase 6) |
 | **Strigops** | *Strigops* (kakapo) | Analytics gatherer — pluggable backends: Umami, GA4, GSC, X, Typefully, LinkedIn, Instagram | planned (Phase 7) |
-| **Corvus** | *Corvus* (crow) | Content writer + outbound poster — long-form drafts, platform-adapted social copy, sends after operator approval | planned (Phase 8) |
-| **Lanius** | *Lanius* (shrike) | GitHub workflow coordinator — artifact ownership routing, shift-left discipline gates, PR gate inheritance, waiver proposals, stale sweeps | planned (Phase 8) |
-| **Struthio** | *Struthio* (ostrich) | Autonomous release agent — evaluates `release_criteria` entity, cuts release when all criteria pass, triggers Ciconia | planned (Phase 8) |
+| **Corvus** | *Corvus* (crow) | Outbound poster — sends drafts to social platforms after operator approval | planned |
+| **Lanius** | *Lanius* (shrike) | Stale issue sweeper — GHA cron first; promote to T3 if Neotoma attribution needed | planned (Phase 3 eval) |
 | **Anas** | *Anas* (duck) | Receipt extractor — Amazon, restaurant, hotel | planned |
 | **Aquila** | *Aquila* (eagle) | Quarterly portfolio review | planned |
 | **Falco** | *Falco* (falcon) | Deployment monitor — GitHub Actions polling | planned |
@@ -101,17 +100,10 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 
 | Name | Genus | Role | Status |
 |---|---|---|---|
-| **Pavo** | *Pavo* (peacock) | Product manager — prioritisation synthesiser, frames decisions, sequences work | active (Phase 8) |
-| **Paradisaea** | *Paradisaea* (bird-of-paradise) | Copy + positioning — UI text, marketing copy, messaging hierarchy; no visual design | active (Phase 8) |
-| **Bombycilla** | *Bombycilla* (waxwing) | Technical architect — layered architecture, interface contracts, schema review | active (Phase 8) |
-| **Phoenicurus** | *Phoenicurus* (redstart) | QA — test coverage, regression, scorecard; shift-left QA gate before release | active (Phase 8) |
-| **Columba** | *Columba* (dove) | Constitution keeper — north star, founding principles, audience, GTM positioning; all agents defer to Columba on strategy conflicts | active (Phase 8) |
-| **Ciconia** | *Ciconia* (stork) | Marketing + GTM — launch sequencing, ICP messaging, announcement copy; works with Paradisaea for copy | active (Phase 8) |
-| **Regulus** | *Regulus* (kinglet) | Developer relations — docs audit, onboarding path review, credibility signals, API ergonomics (cold-start test) | active (Phase 8) |
-| **Aythya** | *Aythya* (diving duck) | Visual + brand design — design system, brand identity, colour, type, design tokens; every decision traceable to a principle | active (Phase 8) |
-| **Accipiter** | *Accipiter* (hawk) | UX + product design — user flows, information architecture, UI implementation specs, usability review; structure and friction, not aesthetics | active (Phase 8) |
-| **Buteo** | *Buteo* (buzzard) | Legal — contract review, marketing copy legal risk, GDPR/privacy compliance, IP + open-source licence audit; risk analysis, not legal advice | active (Phase 8) |
-| **Luscinia** | *Luscinia* (nightingale) | Session compliance supervisor — audits sessions for SKILL.md compliance, backfills Neotoma data gaps, auto-fixes violations (Tier 1), proposes structural changes (Tier 2), escalates attribution issues (Tier 3) | active (Phase 8) |
+| **Pavo** | *Pavo* (peacock) | Product manager — prioritisation synthesiser | planned (Phase 8) |
+| **Paradisaea** | *Paradisaea* (bird-of-paradise) | Designer — UI/copy review | planned (Phase 8) |
+| **Bombycilla** | *Bombycilla* (waxwing) | Technical architect — layered architecture, schema review | planned (Phase 8) |
+| **Phoenicurus** | *Phoenicurus* (redstart) | QA — test coverage, regression, scorecard | planned (Phase 8) |
 
 ---
 
