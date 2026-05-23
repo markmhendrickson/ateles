@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ateles.tyto</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>python3</string>
+        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/tyto/tyto.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>NEOTOMA_BASE_URL</key>
+        <string>https://neotoma.markmhendrickson.com</string>
+        <key>TYTO_SCREENSHOTS_DIR</key>
+        <string>/Users/markmhendrickson/Desktop/Screenshots</string>
+        <key>TYTO_POLL_INTERVAL</key>
+        <string>10</string>
+    </dict>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/com.ateles.tyto.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/com.ateles.tyto.err.log</string>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>
