@@ -118,5 +118,9 @@ paths = [
   "execution/daemons/monedula/handlers/payment_profile.py",
   "execution/daemons/monedula/handlers/wise_transfer.py",
   "execution/daemons/monedula/handlers/btc_transfer.py",
+  "execution/daemons/anthus/anthus.py",
+  "execution/daemons/anthus/com.ateles.anthus.plist",
+  "execution/daemons/tyto/tyto.py",
+  "execution/daemons/tyto/com.ateles.tyto.plist",
 ]
 

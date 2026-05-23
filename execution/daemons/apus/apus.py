@@ -80,6 +80,14 @@ DAEMON_NAME = "apus"
 APUS_PORT = int(os.environ.get("APUS_PORT", "8741"))
 WEBHOOK_SECRET = os.environ.get("APUS_WEBHOOK_SECRET", "")
 
+# Path to the mirror-rebuild script (used by /rebuild endpoint)
+MIRROR_REBUILD_SCRIPT = Path(
+    os.environ.get(
+        "ATELES_MIRROR_REBUILD_SCRIPT",
+        str(Path.home() / "repos" / "ateles" / "scripts" / "mirror-rebuild-skills.sh"),
+    )
+)
+
 # Local repo paths
 ATELES_REPO = Path(
     os.environ.get("ATELES_REPO_PATH", str(Path.home() / "repos" / "ateles"))
@@ -226,6 +234,65 @@ async def handle_webhook(request: web.Request) -> web.Response:
 async def handle_health(request: web.Request) -> web.Response:
     """Simple health check endpoint."""
     return web.json_response({"status": "ok", "daemon": DAEMON_NAME})
+
+
+async def handle_rebuild(request: web.Request) -> web.Response:
+    """
+    Trigger a mirror rebuild for a specific profile (or all profiles).
+
+    POST /rebuild
+    Body (JSON, optional): {"profile": "ateles-public-skills"}
+    If profile is omitted, runs the default mirror-rebuild-skills.sh for all.
+
+    This endpoint is for local/operator use only — the Cloudflare Tunnel
+    restricts access. No HMAC auth is required (webhook secret is for
+    Neotoma-push path only).
+    """
+    try:
+        body_bytes = await request.read()
+        payload = json.loads(body_bytes) if body_bytes.strip() else {}
+    except json.JSONDecodeError:
+        payload = {}
+
+    profile = payload.get("profile", "")
+    log.info(f"[apus] Rebuild triggered: profile={profile or 'all'}")
+
+    if not MIRROR_REBUILD_SCRIPT.exists():
+        return web.json_response(
+            {
+                "status": "error",
+                "message": f"Rebuild script not found: {MIRROR_REBUILD_SCRIPT}",
+            },
+            status=500,
+        )
+
+    cmd = [str(MIRROR_REBUILD_SCRIPT)]
+    if profile:
+        cmd += ["--profile", profile]
+
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        log.info(f"[apus] Rebuild OK: {result.stdout.strip()}")
+        return web.json_response(
+            {
+                "status": "ok",
+                "profile": profile or "all",
+                "output": result.stdout.strip(),
+            }
+        )
+    except subprocess.CalledProcessError as exc:
+        err = exc.stderr.strip() if exc.stderr else str(exc)
+        log.error(f"[apus] Rebuild failed: {err}")
+        return web.json_response(
+            {"status": "error", "profile": profile or "all", "output": err},
+            status=500,
+        )
 
 
 # ── Git operations ─────────────────────────────────────────────────────────────
@@ -418,6 +485,7 @@ async def main() -> None:
     app["signer"] = signer
     app.router.add_post("/webhook", handle_webhook)
     app.router.add_get("/health", handle_health)
+    app.router.add_post("/rebuild", handle_rebuild)
 
     notifier.send(
         f"{DAEMON_NAME} started on port {APUS_PORT}",
