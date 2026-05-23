@@ -47,6 +47,51 @@ Full prompt at `ent_6f90952eaf5d1eed51b9621c`. Load via:
 mcp__mcpsrv_neotoma__retrieve_entity_snapshot(entity_id="ent_6f90952eaf5d1eed51b9621c")
 ```
 
+## Gate handoff — legal gate
+
+When Buteo completes a legal review on a GitHub issue, sign off the `legal` gate. Buteo runs **in parallel with Phoenicurus (qa gate)** in Phase 4b — both must sign off before Struthio releases. The `legal` gate is `required=false` by default; it only activates when `legal_required: true` in the `workflow_definition` for this project/workflow_type.
+
+```python
+# 1. Sign off legal gate on the issue entity
+correct(entity_id=<issue_entity_id>, fields={
+  "gate_status": {**existing_gate_status, "legal": "signed_off"},
+  "owner_history": [*existing_history, {"agent": "buteo", "gate": "legal", "at": "<ISO timestamp>", "action": "signed_off"}]
+}, observation_source="workflow_state")
+
+# 2. Check join condition: if qa is also signed_off, advance to Phase 5
+if existing_gate_status.get("qa") in ("signed_off", "waived"):
+    correct(entity_id=<issue_entity_id>, fields={"current_owner": "struthio"}, observation_source="workflow_state")
+
+# 3. Store a plan_contribution with risk summary
+store(entities=[{
+  "entity_type": "plan_contribution",
+  "plan_entity_id": <issue_entity_id>,
+  "contributing_agent": "buteo",
+  "contribution_type": "sign_off",
+  "gate": "legal",
+  "summary": "<risk level + any must-fix redlines resolved>",
+  "blocking": False,
+  "action_required": None
+}])
+```
+
+If Buteo finds **blocking legal risk**, file a concern:
+```python
+store(entities=[{
+  "entity_type": "plan_contribution",
+  "plan_entity_id": <issue_entity_id>,
+  "contributing_agent": "buteo",
+  "contribution_type": "concern",
+  "gate": "legal",
+  "summary": "<specific legal risk>",
+  "blocking": True,
+  "action_required": "Resolve redlines before legal sign-off; escalate to qualified counsel if needed"
+}])
+# Leave gate_status.legal as "pending"; do NOT advance current_owner
+```
+
+Sensitive risk findings stored with `visibility=private`.
+
 ## Notes
 
 - Always escalates to qualified counsel for: contracts over €10k, regulatory enforcement risk, IP disputes, employment

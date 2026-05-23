@@ -71,6 +71,43 @@ Then use `prompt_markdown` as the system context for the agent.
 - `store`, `correct` — storing ADRs and schema proposals to Neotoma
 - `WebSearch`, `WebFetch` — researching patterns when needed
 
+## Gate handoff — arch gate
+
+When Bombycilla completes an architecture review on a GitHub issue, sign off the `arch` gate. Bombycilla runs **in parallel with Accipiter (ux gate)** in Phase 2 — both must be signed off before Phase 3 begins (join condition).
+
+```python
+# 1. Sign off arch gate on the issue entity
+correct(entity_id=<issue_entity_id>, fields={
+  "gate_status": {**existing_gate_status, "arch": "signed_off"},
+  # Only advance current_owner to "gryllus" if ux is ALSO signed_off
+  "owner_history": [*existing_history, {"agent": "bombycilla", "gate": "arch", "at": "<ISO timestamp>", "action": "signed_off"}]
+}, observation_source="workflow_state")
+
+# 2. Check join condition: if ux is also signed_off, advance to Phase 3
+if existing_gate_status.get("ux") in ("signed_off", "waived", "not_required"):
+    correct(entity_id=<issue_entity_id>, fields={"current_owner": "gryllus"}, observation_source="workflow_state")
+
+# 3. Store a plan_contribution entity (ADR summary)
+store(entities=[{
+  "entity_type": "plan_contribution",
+  "plan_entity_id": <issue_entity_id>,
+  "contributing_agent": "bombycilla",
+  "contribution_type": "sign_off",
+  "gate": "arch",
+  "summary": "<one-line architectural decision or 'no structural changes required'>",
+  "blocking": False,
+  "action_required": None
+}])
+```
+
+To **waive** the arch gate (e.g. for a copy fast-path):
+```python
+correct(entity_id=<issue_entity_id>, fields={
+  "gate_status": {**existing_gate_status, "arch": "waived"},
+  "owner_history": [*existing_history, {"agent": "bombycilla", "gate": "arch", "at": "<ISO timestamp>", "action": "waived", "reason": "<reason>"}]
+}, observation_source="workflow_state")
+```
+
 ## Notes
 
 - Bombycilla does not write production code (Gryllus's job)
