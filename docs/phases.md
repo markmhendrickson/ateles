@@ -4,15 +4,15 @@
 
 ## Purpose
 
-Tracks the Ateles implementation roadmap across six phases from initial scaffolding (Phase 0) to full swarm operational status (Phase 5). Serves as the public mirror of the Neotoma plan entity.
+Tracks the Ateles implementation roadmap across ten phases from initial scaffolding (Phase 0) to full swarm operational status (Phase 9). Serves as the public mirror of the Neotoma plan entity.
 
 ## Scope
 
-Covers Phase 0–5 goals and task checklists. Each phase has a defined goal and a list of deliverables. Deferred items (not scheduled to any phase) are listed at the end. For agent details see `taxonomy.md`; for design rationale see `architecture.md`.
+Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and a list of deliverables. Deferred items (not scheduled to any phase) are listed at the end. For agent details see `taxonomy.md`; for design rationale see `architecture.md`.
 
 ---
 
-## Phase 0 — Foundations (current)
+## Phase 0 — Foundations ✅
 
 **Goal:** Public repo exists, taxonomy documented, env vars renamed, daemon code clean.
 
@@ -27,7 +27,7 @@ Covers Phase 0–5 goals and task checklists. Each phase has a defined goal and 
 
 ---
 
-## Phase 1 — Schema + identity
+## Phase 1 — Schema + identity ✅
 
 **Goal:** Neotoma has `agent_definition` entity type; first AAuth identities minted; lib/notify/ and lib/daemon_runtime/ scaffolded.
 
@@ -63,7 +63,7 @@ Covers Phase 0–5 goals and task checklists. Each phase has a defined goal and 
 - [ ] Menura: separate OpenClaw instance, public-scoped AAuth identity, live at markmhendrickson.com/agent/
 - [ ] Migrate Formica from JS to Python using lib/daemon_runtime/
 - [ ] All daemons using lib/notify/ for notifications
-- [ ] `agent_definition_override` entity type: register schema in Neotoma; enforcement logic already in PR #398
+- [x] `agent_definition_override` entity type: registered schema in Neotoma (schema ID `308d67b1`); enforcement via PR #398
 - [ ] Loxia evaluation: GHA + Claude API first (~30 lines); promote to named T3 only if Neotoma attribution of actions matters
 - [ ] Temporal evaluation: adopt only if a daemon crash causes lost in-flight state that demonstrably hurts operations; Inngest as fallback
 - [ ] Lanius (stale issue sweeper): GHA cron job first; promote to T3 if attribution/Neotoma logging needed
@@ -92,14 +92,61 @@ Covers Phase 0–5 goals and task checklists. Each phase has a defined goal and 
 
 ---
 
+---
+
+## Phase 6 — Swarm coordinator + integrity monitor
+
+**Goal:** Anthus and Otus operational; webhook secret rotation automated.
+
+- [ ] Anthus daemon: swarm coordinator — global view of work-in-flight, surfaces conflicts to Onychomys
+- [ ] Otus daemon: integrity monitor — weekly audit, due-date hygiene, system-issue self-healing, override conflict diff
+- [ ] Implement webhook secret quarterly rotation via Otus with 7-day grace period
+
+---
+
+## Phase 7 — Ingestion agents
+
+**Goal:** All external data sources flowing into Neotoma via dedicated ingestion agents.
+
+- [ ] Cygnus: Google Calendar polling via `gws` CLI
+- [ ] Aix: Asana webhook + bidirectional sync
+- [ ] Mergus: Coinbase + Wise + Plaid + BTC + Stacks daily snapshots
+- [ ] Geococcyx: Twilio SMS webhook
+- [ ] Tinamus: HomeAssistant polling (5 min cadence)
+- [ ] Turdus: email triage daemon — hourly Gmail poll → tasks for Apis
+- [ ] Strigops: analytics gatherer — GA4, GSC, Umami, X, Typefully, Instagram backends
+
+---
+
+## Phase 8 — Product role panel
+
+**Goal:** Product perspective agents operational for product development workflows.
+
+- [ ] Wire Sturnus to `product_feedback.created` subscription
+- [ ] Build product role panel: Pavo (PM), Paradisaea (designer), Bombycilla (architect), Phoenicurus (QA)
+
+---
+
+## Phase 9 — Meta-agent + remaining invocables
+
+**Goal:** Cathartes can define new agents; all planned invocable agents operational.
+
+- [ ] Cathartes meta-agent: writes new `agent_definition` entities from operator description
+- [ ] Remaining invocable agents: Anas, Aquila, Falco, Tachornis, Procyon, Lutra, Lupinus, Salvia
+- [ ] Expand Loxia/Gryllus to handle PRs across all `ateles-agents/<genus>` repos
+
+---
+
 ## Pending setup (not phase-gated)
 
-- **`ateles-agent` GitHub machine account**: create account; wire `ATELES_AGENT_GIT_EMAIL` into Apus launchd plist
-- **`neotoma-agent` GitHub identity**: `castor-agent` account (Pull Shark x2) remains as-is; create new `neotoma-agent` GitHub account for future automation; `castor-agent` cannot be renamed
-- **Apus env wiring**: populate launchd plist with `NEOTOMA_BEARER_TOKEN`, `ATELES_REPO_PATH`, `ATELES_PRIVATE_REPO_PATH`, `ATELES_AGENT_GIT_EMAIL`, `APUS_WEBHOOK_SECRET`
-- **Neotoma webhook subscription**: register Apus endpoint (`https://apus.markmhendrickson.com/webhook`) as Neotoma webhook subscriber
+- **`ateles-agent` GitHub machine account**: create account; generate fine-grained PAT (Contents: write on `ateles` repo); store in `ateles-private/.env` as `ATELES_AGENT_PAT`; wire into Apus installed plist
+- **`neotoma-agent` GitHub identity**: `castor-agent` account (Pull Shark x2) remains as-is; create new `neotoma-agent` GitHub account for future automation
+
+## Completed setup (done)
+
+- ~~**Apus env wiring**~~: all env vars wired into installed plist (`~/Library/LaunchAgents/com.ateles.apus.plist`) including `NEOTOMA_BEARER_TOKEN`
+- ~~**Neotoma webhook subscription**~~: Apus endpoint (`https://apus.markmhendrickson.com/webhook`) registered as Neotoma webhook subscriber (subscription ID `7ce524e4`, entity `ent_6ba1914462908f682f206b56`)
 
 ## Deferred
 
 - **Temporal orchestration**: evaluate at Phase 3 when 5+ daemons active and in-flight state loss has occurred; Inngest as fallback
-- **agent_definition_override**: Phase 1 Neotoma PR (#398 merged); schema registration deferred to Phase 3

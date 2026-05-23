@@ -35,7 +35,7 @@ Ateles is a Neotoma-canonical personal agent swarm. "Neotoma-canonical" means:
 │  T3 Daemons: Monedula / Formica / neotoma-agent / Apis / Apus │
 │              Piculet / Strix / Anthus / Tyto / Turdus     │
 ├─────────────────────────────────────────────────────┤
-│  T4 Invocable: Loxia, skill-based agents                  │
+│  T4 Invocable: Gryllus / Vanellus / Lanius / Cathartes / 20+ domain agents │
 ├─────────────────────────────────────────────────────┤
 │  Shared libs: lib/notify/ · lib/daemon_runtime/           │
 ├─────────────────────────────────────────────────────┤
@@ -109,7 +109,7 @@ Monedula is a recurring payment daemon. All payment-specific configuration — r
 
 Adding a new recurring payment requires zero code changes: add a new profile prefix to `MONEDULA_PROFILES` and set the corresponding env vars (or a Neotoma `payment_profile` entity in Phase 1+).
 
-In Phase 1, payment profiles will migrate to Neotoma `payment_profile` entities (visibility=private), making them queryable and versioned alongside all other agent configuration.
+In Phase 4, payment profiles will migrate to Neotoma `payment_profile` entities (visibility=private), making them queryable and versioned alongside all other agent configuration.
 
 ---
 
@@ -135,7 +135,7 @@ In Phase 1, payment profiles will migrate to Neotoma `payment_profile` entities 
 |---|---|---|
 | `markmhendrickson/ateles` | public | Agent code, architecture docs, shared libs |
 | `markmhendrickson/ateles-private` | private | Keys, secrets, personal config |
-| `markmhendrickson/personal` | private | Operator workspace (skills, dotfiles, scripts) |
+| `markmhendrickson/ateles-agents/<genus>` | public | Graduated per-agent repos with independent lifecycle |
 | `markmhendrickson/neotoma` | public | Neotoma server (canonical store) |
 
 ---
