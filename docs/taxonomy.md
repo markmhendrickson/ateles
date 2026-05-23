@@ -1,6 +1,6 @@
 # Ateles Agent Taxonomy
 
-*Generated from Neotoma plan `ent_99ace4dd6673aa36ed08b1fe`. Do not edit manually.*
+*Mirror of Neotoma plan `ent_99ace4dd6673aa36ed08b1fe`. Do not edit manually — update via Neotoma.*
 
 ## Purpose
 
@@ -16,19 +16,21 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 
 | Tier | Role | Description |
 |---|---|---|
-| **T1** | Hosts | Long-running processes that host or spawn agents |
-| **T2** | Resident agents | Always-on agents with persistent identity and state |
-| **T3** | Daemons | Event-driven background processes, one concern each |
-| **T4** | Invocable agents | Stateless, spawned per task, return structured output |
+| **T1** | Hosts | A role, not a product. Any process that owns a channel message loop and spawns T2 residents. Valid implementations: OpenClaw (multi-channel), custom Agent SDK loop (single-channel), raw aiohttp+Bot API (low-ceremony), NanoClaw (lightweight self-hosted). |
+| **T2** | Resident agents | Always-on agents with persistent identity, persona, and conversational state |
+| **T3** | Daemons | Event-driven background processes; no persona; subscribe to Neotoma SSE or external webhooks |
+| **T4** | Invocable agents | Stateless, spawned per task, stable AAuth identity, Neotoma-backed memory via query |
 
 ---
 
 ## T1 — Hosts
 
-| Name | Genus | Description | Status |
-|---|---|---|---|
-| OpenClaw | — | Claude Code host for Onychomys and Menura resident agents | active |
-| launchd | — | macOS system daemon host for all T3 daemons | active |
+| Name | Description | Status |
+|---|---|---|
+| OpenClaw | Multi-channel Claude Code host; current implementation for Onychomys | active |
+| Custom Agent SDK loop | Single-channel bespoke host; valid alternative for low-surface-area setups | available |
+| Raw aiohttp + Bot API | Low-ceremony webhook loop; valid when no framework is needed | available |
+| launchd | macOS system daemon host for all T3 daemons | active |
 
 ---
 
@@ -36,8 +38,8 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 
 | Name | Genus | Description | Status |
 |---|---|---|---|
-| **Onychomys** | *Onychomys* (grasshopper mouse) | Primary operator interface; runs in OpenClaw; OnychomysBot on Telegram | active |
-| **Menura** | *Menura* (lyrebird) | Public-facing personal representative at markmhendrickson.com/agent/; read-only public-scoped AAuth identity | planned (Phase 3) |
+| **Onychomys** | *Onychomys* (grasshopper mouse) | Primary operator interface; runs in OpenClaw; OnychomysBot on Telegram; sole pager | active |
+| **Menura** | *Menura* (lyrebird) | Public-facing personal representative at markmhendrickson.com/agent/; read-only public-scoped AAuth identity; routes inbound interest to Onychomys | planned (Phase 3) |
 
 ---
 
@@ -48,39 +50,77 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 | **Monedula** | *Corvus monedula* (jackdaw) | Python | Recurring payment daemon; Wise IBAN + BTC transfers triggered by calendar events and Neotoma task due dates | active |
 | **Formica** | *Formica* (wood ant) | JS → Python (Phase 5) | GitHub issue/PR automation; drives `process_issues` and `process_prs` skills | active |
 | **neotoma-agent** | *Castor* (beaver) | Python | Neotoma-repo automation; processes issues and PRs against the neotoma repo | active (Phase 1 skeleton) |
-| **Anthus** | *Anthus* (pipit) | Python | Metrics and analytics ingestion (Umami, etc.) | planned (Phase 2) |
-| **Apis** | *Apis* (honeybee) | Python | General task processor; absorbs Monedula's task scope; yoga/therapy tasks become Apis templates | planned (Phase 1) |
-| **Apus** | *Apus* (swift) | Python | Lightweight HTTPS webhook receiver; listens for Neotoma webhooks; triggers mirror rebuilds and git commits | planned (Phase 2) |
+| **Apus** | *Apus* (swift) | Python | HTTPS webhook receiver; Neotoma→git mirror pipeline; commits via `ateles-agent` GitHub identity | active |
 | **Piculet** | *Picumnus* (piculet woodpecker) | JS | Audio transcription daemon; monitors for new audio files, transcribes, stores in Neotoma | active |
-| **Strix** | *Strix* (wood owl) | Python | Meeting/ambient audio recorder | active |
-| **Tyto** | *Tyto* (barn owl) | Python | Email triage daemon | planned (Phase 2) |
-| **Turdus** | *Turdus* (thrush) | Python | Social media / content scheduling daemon | planned (Phase 3) |
+| **Strix** | *Strix* (wood owl) | Python | Meeting/ambient audio recorder (menu bar app) | active |
+| **Apis** | *Apis* (honeybee) | Python | Universal task dispatcher; subscribes to task events; routes to right agent + harness; absorbs Monedula's task scope | planned (Phase 4) |
+| **Anthus** | *Anthus* (pipit) | Python | Swarm coordinator — global view of work-in-flight; surfaces conflicts to Onychomys | planned (Phase 2 skeleton, Phase 6 full) |
+| **Tyto** | *Tyto* (barn owl) | Python | Screenshot watcher; visual counterpart to Strix | planned (Phase 2 skeleton) |
+| **Turdus** | *Turdus* (thrush) | Python | Email triage daemon; hourly Gmail poll → tasks for Apis | planned (Phase 4) |
 
 ---
 
-## T4 — Invocable agents
+## T4 — Invocable agents (operations)
 
 | Name | Genus | Description | Status |
 |---|---|---|---|
-| **Loxia** | *Loxia* (crossbill) | Reviews external PRs against ateles mirror files; auto-approves trivial PRs | planned (Phase 3 eval — may be replaced by GHA + Claude API) |
-| Skill-based agents | — | Stateless agents invoked via skills (e.g. `process_issues`, `process_prs`, `import_audio`) | active |
+| **Gryllus** | *Gryllus* (field cricket) | Issue worker — fixes issues, opens PRs across repos via passed-in identity | planned (Phase 3) |
+| **Vanellus** | *Vanellus* (lapwing) | PR steward — triages and merges eligible PRs | planned (Phase 5) |
+| **Sturnus** | *Sturnus* (starling) | Feedback digester — extracts entities from `product_feedback` | planned (Phase 6) |
+| **Strigops** | *Strigops* (kakapo) | Analytics gatherer — pluggable backends: Umami, GA4, GSC, X, Typefully, LinkedIn, Instagram | planned (Phase 7) |
+| **Corvus** | *Corvus* (crow) | Outbound poster — sends drafts to social platforms after operator approval | planned |
+| **Lanius** | *Lanius* (shrike) | Stale issue sweeper — GHA cron first; promote to T3 if Neotoma attribution needed | planned (Phase 3 eval) |
+| **Anas** | *Anas* (duck) | Receipt extractor — Amazon, restaurant, hotel | planned |
+| **Aquila** | *Aquila* (eagle) | Quarterly portfolio review | planned |
+| **Falco** | *Falco* (falcon) | Deployment monitor — GitHub Actions polling | planned |
+| **Tachornis** | *Tachornis* (swift) | Deploy watchdog — post-merge sanity, distinct from Falco | planned |
+| **Pica** | *Pica* (magpie) | Disk cleanup | active (skill) |
+| **Otus** | *Otus* (scops owl) | Integrity monitor + system-issue self-healer; weekly audit, override conflict diff | planned (Phase 6) |
+| **Procyon** | *Procyon* (raccoon) | PR hygiene — stale branches, dependency drift, lint debt | planned |
+| **Lutra** | *Lutra* (otter) | Claims, disputes, and external order tracking (Minted, etc.) | planned |
+| **Lupinus** | *Lupinus* (lupine) | Tax + regulatory filings; Finance Google Sheet reconciliation | planned |
+| **Salvia** | *Salvia* (sage) | Health-data agent — workout scraping, meal logs, biomarkers | planned |
+| **Cathartes** | *Cathartes* (turkey vulture) | Meta-agent — writes new `agent_definition` entities in Neotoma from operator description | planned (Phase 9) |
+
+---
+
+## T4 — Invocable agents (ingestion)
+
+| Name | Genus | Source | Method | Status |
+|---|---|---|---|---|
+| **Cygnus** | *Cygnus* (swan) | Google Calendar | `gws` CLI polling | planned (Phase 7) |
+| **Aix** | *Aix* (wood duck) | Asana | Webhook + bidirectional sync | planned (Phase 7) |
+| **Mergus** | *Mergus* (merganser) | Coinbase, Wise, Plaid, BTC, Stacks | API polling | planned (Phase 7) |
+| **Geococcyx** | *Geococcyx* (roadrunner) | Twilio SMS | Webhook (existing) | planned (Phase 7) |
+| **Tinamus** | *Tinamus* (tinamou) | HomeAssistant | Polling every 5 min | planned (Phase 7) |
+
+---
+
+## T4 — Product role panel
+
+| Name | Genus | Role | Status |
+|---|---|---|---|
+| **Pavo** | *Pavo* (peacock) | Product manager — prioritisation synthesiser | planned (Phase 8) |
+| **Paradisaea** | *Paradisaea* (bird-of-paradise) | Designer — UI/copy review | planned (Phase 8) |
+| **Bombycilla** | *Bombycilla* (waxwing) | Technical architect — layered architecture, schema review | planned (Phase 8) |
+| **Phoenicurus** | *Phoenicurus* (redstart) | QA — test coverage, regression, scorecard | planned (Phase 8) |
 
 ---
 
 ## Naming convention
 
-All persistent agents and daemons are named after bird genera. Names are chosen for:
-- Mnemonic fit to the agent's function (e.g. Monedula = jackdaw = *moneta* = money)
+All persistent agents and daemons are named after bird (or plant) genera. Names are chosen for:
+- Mnemonic fit to the agent's function (e.g. Monedula = jackdaw = *moneta* = money; Gryllus = cricket = small, fast, noisy)
 - Distinctiveness within the swarm
 - Public shareability (no private associations)
 
-T4 invocable agents may use genus names or remain as unnamed skill invocations depending on reuse frequency.
+Plant genera (Lupinus, Salvia) are used for domain agents where no suitable bird fits. T4 invocable agents may also remain as unnamed skill invocations if reuse frequency doesn't warrant a stable identity.
 
 ---
 
 ## AAuth identities
 
-Each T2 and T3 agent has a distinct AAuth keypair with `sub = <name>@ateles-swarm`. Capabilities are enforced at the Neotoma data layer via `AgentGrant`. GitHub automation uses the `ateles-agent` and `neotoma-agent` identities.
+Each T2 and T3 agent has a distinct AAuth keypair with `sub = <name>@ateles-swarm`. Capabilities are enforced at the Neotoma data layer via `AgentGrant`. `sub` is per-role, not per-repo — GitHub automation uses the separate `ateles-agent` and `neotoma-agent` GitHub identities.
 
 | Agent | AAuth sub | Scope |
 |---|---|---|
@@ -90,3 +130,7 @@ Each T2 and T3 agent has a distinct AAuth keypair with `sub = <name>@ateles-swar
 | Formica | `formica@ateles-swarm` | issue + PR write |
 | neotoma-agent | `neotoma-agent@ateles-swarm` | neotoma-repo issue + PR write |
 | Apus | `apus@ateles-swarm` | mirror trigger + event write |
+| Piculet | `piculet@ateles-swarm` | audio entity write |
+| Strix | `strix@ateles-swarm` | audio capture write |
+| Apis | `apis@ateles-swarm` | task read + payment_event write (planned) |
+| Anthus | `anthus@ateles-swarm` | swarm metrics read (planned) |

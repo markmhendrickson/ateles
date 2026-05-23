@@ -24,7 +24,7 @@ See [docs/taxonomy.md](docs/taxonomy.md) for the full agent table.
 | **T1** | Hosts (T1 is a role — see docs/architecture.md for alternatives) | OpenClaw, launchd |
 | **T2** | Resident agents (always-on) | Onychomys, Menura |
 | **T3** | Daemons (event-driven background) | Formica, neotoma-agent, Apis, Apus, Piculet, Strix |
-| **T4** | Invocable agents (stateless, spawned per task) | Loxia, skill-based agents |
+| **T4** | Invocable agents (stateless, spawned per task) | Gryllus, Vanellus, Lanius, Cathartes, and 20+ domain agents — see [docs/taxonomy.md](docs/taxonomy.md) |
 
 ## Structure
 
