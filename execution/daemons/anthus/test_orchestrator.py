@@ -193,6 +193,85 @@ def test_phase_6_parallel_dispatch_when_ready():
     assert names == {"growth_announce", "social_draft", "devrel_docs"}
 
 
+def test_satisfaction_falls_back_to_author_match():
+    """
+    When an agent comments without the canonical [agent] artifact: header,
+    the orchestrator still recognizes satisfaction if the comment author
+    contains the agent's name.
+    """
+    wf = _smoke_test_workflow()
+    comments = [
+        # No canonical header — just a generic comment from Pavo's bot account.
+        {
+            "id": 1,
+            "author": "pavo-bot",
+            "body": "Looking at this, I think we should ship Option A with a mailto link only. Acceptance criteria: ...",
+            "url": "https://example/c/1",
+        }
+    ]
+    state, ready = compute_ready_gates(wf, {"labels": []}, comments)
+    assert state["pm_scope"].status == "satisfied"
+    # Phase 2 should still open.
+    assert {g.gate_name for g in ready} == {"ux_design", "arch"}
+
+
+def test_canonical_header_preferred_over_author_match():
+    """
+    When a comment has BOTH a canonical header and matching author, the
+    canonical-header match is taken first. Both should produce satisfaction,
+    so test there's no ordering bug between the two paths.
+    """
+    wf = _smoke_test_workflow()
+    comments = [
+        {
+            "id": 1,
+            "author": "pavo-bot",
+            "body": "[pavo] acceptance_criteria: ship Option A",
+            "url": "https://example/c/1",
+        }
+    ]
+    state, _ = compute_ready_gates(wf, {"labels": []}, comments)
+    assert state["pm_scope"].status == "satisfied"
+    assert state["pm_scope"].artifact_refs == ["https://example/c/1"]
+
+
+def test_unrelated_author_does_not_satisfy():
+    """
+    Comments by authors whose names don't contain the agent name must not
+    satisfy the gate.
+    """
+    wf = _smoke_test_workflow()
+    comments = [
+        {
+            "id": 1,
+            "author": "random-contributor",
+            "body": "Looks fine to me.",
+            "url": "https://example/c/1",
+        }
+    ]
+    state, ready = compute_ready_gates(wf, {"labels": []}, comments)
+    assert state["pm_scope"].status == "pending"
+    assert [g.gate_name for g in ready] == ["pm_scope"]
+
+
+def test_author_substring_does_not_falsely_satisfy():
+    """
+    Whole-word match requirement: an author 'pavolino' should NOT satisfy
+    pavo's gate. Otherwise long-name collisions become an attack surface.
+    """
+    wf = _smoke_test_workflow()
+    comments = [
+        {
+            "id": 1,
+            "author": "pavolino",
+            "body": "random comment",
+            "url": "https://example/c/1",
+        }
+    ]
+    state, _ = compute_ready_gates(wf, {"labels": []}, comments)
+    assert state["pm_scope"].status == "pending"
+
+
 def test_dispatched_gate_can_be_satisfied_by_later_comment():
     """
     When a gate is in "dispatched" state and a satisfying comment arrives
