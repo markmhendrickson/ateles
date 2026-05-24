@@ -1,0 +1,72 @@
+name: Loxia — External PR Review
+
+# Loxia genus: crossbills. T4 invocable agent — reviews incoming PRs on the
+# ateles mirror files and posts a structured review comment.
+#
+# Promotion path: GHA + Claude API first (this file). Promote to named T3
+# daemon only if Neotoma attribution or SSE subscription becomes necessary.
+#
+# Triggers:
+#   - pull_request (opened, synchronize) on any branch
+#   - workflow_dispatch for manual invocations
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to review
+        required: true
+      dry_run:
+        description: Dry run (print review without posting)
+        required: false
+        default: false
+        type: choice
+        options:
+          - false
+          - true
+
+jobs:
+  review:
+    name: Loxia PR review
+    runs-on: ubuntu-latest
+
+    # Only run on PRs targeting main
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.base.ref == 'main'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install httpx
+
+      - name: Determine PR number
+        id: pr
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "number=${{ github.event.inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run Loxia review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}
+          NEOTOMA_BASE_URL: ${{ vars.NEOTOMA_BASE_URL || 'https://neotoma.markmhendrickson.com' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LOXIA_PR_NUMBER: ${{ steps.pr.outputs.number }}
+          LOXIA_REPO: ${{ github.repository }}
+          LOXIA_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          LOXIA_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python execution/scripts/loxia_review.py

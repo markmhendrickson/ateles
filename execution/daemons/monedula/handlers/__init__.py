@@ -4,7 +4,11 @@
 # Use load_handlers() to get the active handler list for the current environment.
 
 from .btc_transfer import BtcTransferHandler
-from .payment_profile import PaymentProfile, load_profiles
+from .payment_profile import (
+    PaymentProfile,
+    load_profiles,
+    load_profiles_with_neotoma_fallback,
+)
 from .wise_transfer import WiseTransferHandler
 
 try:
@@ -15,10 +19,12 @@ except ImportError:
 
 def load_handlers() -> list[PaymentHandler]:
     """
-    Load all active payment handlers from env-var-defined PaymentProfiles.
-    Set MONEDULA_PROFILES=THERAPY,YOGA (or any prefix list) to activate profiles.
+    Load all active payment handlers.
+
+    Phase 5+: tries Neotoma payment_profile entities first, falls back to
+    env-var-defined profiles (MONEDULA_PROFILES=THERAPY,YOGA).
     """
-    profiles = load_profiles()
+    profiles = load_profiles_with_neotoma_fallback()
     handlers: list[PaymentHandler] = []
     for profile in profiles:
         if profile.payment_type == "wise":
@@ -34,5 +40,6 @@ __all__ = [
     "WiseTransferHandler",
     "BtcTransferHandler",
     "load_profiles",
+    "load_profiles_with_neotoma_fallback",
     "load_handlers",
 ]

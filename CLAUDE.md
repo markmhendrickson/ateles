@@ -41,12 +41,57 @@ For full step-by-step guidance: `/update-plan` and `/update-tasks` skills.
 | Apus webhook subscription | `ent_6ba1914462908f682f206b56` |
 | update-plan skill | `ent_5d7f84290f290383e53d1a42` |
 | update-tasks skill | `ent_c21f9fb84691f43f45e6cd55` |
+| agent_definition: Apis | `ent_acdb65a8c5dccc1c5f6c7171` |
+| agent_definition: Turdus | `ent_138a463654de2b1d46cec0db` |
+| agent_definition: Anthus | `ent_887e8fd74d79eb63344df63e` |
+| agent_definition: Tyto | `ent_affecbbecf52edb633c534f8` |
+| agent_definition: Gryllus | `ent_900b8c9589145fde47787fe5` |
+| agent_definition: Vanellus | `ent_fedc0fbabef6ef203f8029c9` |
+| agent_definition: Formica | `ent_d62f1df8784b7f4fcadc7d74` |
+| Neotoma schema: payment_profile | `8f10fe72-2924-422c-b2ee-d537d9952576` |
+| Neotoma schema: escalation | `c005dcb3-d9fb-4791-a154-fdb09ab9da12` |
+| Neotoma schema: daemon_report | `a9ea8131-502f-44e7-87a6-8149bab7d55c` |
+| Neotoma schema: harness_event | `689230f4-cd83-49b6-baa7-a752cf70629d` |
+| Neotoma schema: execution_policy | `0e61f23f-b1bd-46a3-8824-9dde710db9e6` |
+| Neotoma schema: checkpoint_brief | `b0bfcfab-1f07-4526-8fa5-d5ace343b004` |
+| exec policy: Resolve #262 mirror bug | `ent_8b5f56d611bfa01b7efae973` |
+| exec policy: Resolve #158 pull_request schema | `ent_76e195b7dc9b5f22432fd12c` |
+| exec policy: #174/#175/#176 instructions batch | `ent_47061cdf3bf4609db806e495` |
+| exec policy: FU-2026-05-004 Turn Summary widget | `ent_dd00928c59a2a73bff756325` |
+| exec policy: CI security gates GHA | `ent_5002905df344d74b01de30a0` |
+| exec policy: Influencer Research | `ent_3a4bbff3f1a0f17558756ec6` |
+| exec policy: SEO/SERP Copy | `ent_7e32fd9ebec7907673363737` |
 
-## Current phase blockers (Phase 2)
+## Current phase blockers (Phase 5–6)
 
-1. Configure 4 Neotoma mirror profiles — `ent_55649174d7dd2951fb90bf6d`
-2. Create `ateles-agent` GitHub machine account — `ent_1765472ab3536042959f63df`
-3. Create `neotoma-agent` GitHub account — `ent_1273cd3a4d06a34364fb517d`
-4. OpenClaw `workspace-neotoma.ts` PR — `ent_5d6202c08d794ac1b7798b20`
-5. Anthus daemon skeleton — `ent_8a18a26009bb932f0feb411e`
-6. Tyto daemon skeleton — `ent_2482ad3ee9ec3c69d911c4fa`
+**GPG-blocked items resolved 2026-05-24** (operator pushed from Mac Studio with GPG key loaded):
+- ✅ ateles: committed + pushed to origin/main
+- ✅ neotoma feat/seed-pull-request-schema: branch pushed (PR pending `gh auth login`)
+- ✅ neotoma fix/262-content-field-heading-entity-mode: branch pushed (PR pending)
+- ✅ neotoma docs/gryllus-174-175-176-instructions: branch pushed (PR pending)
+- ✅ openclaw feat/neotoma-soul-override: committed (`c1e814610c`) + pushed (PR pending)
+- ⚠️ openclaw main push rejected — local diverged from fork; needs `git pull --rebase origin main` or `--force-with-lease`
+
+**Remaining manual operator steps:**
+- Run `gh auth login` on Mac Studio, then open the 4 pending PRs (neotoma × 3, openclaw × 1)
+- Create `ateles-agent` GitHub machine account + PAT in `ateles-private/.env` — unblocks Apus auto-mirror
+- Create `neotoma-agent` GitHub machine account
+- Add `ANTHROPIC_API_KEY` secret to ateles repo settings — activates Loxia GHA
+- Add `NEOTOMA_PROBE_HOSTS` secret to neotoma repo settings — activates CI security gates
+- Configure neotoma main branch protection after CI gates PR merges
+- Deploy separate OpenClaw instance for Menura
+
+**Requires manual operator action**:
+- Create `ateles-agent` GitHub machine account + PAT in ateles-private/.env
+- Create `neotoma-agent` GitHub account
+- Add `ANTHROPIC_API_KEY` secret to ateles GitHub repo (for Loxia GHA)
+- Deploy separate OpenClaw instance for Menura
+
+## Recently resolved
+
+- **Issues sync runaway** — root cause: `ops.correct()` passed `{corrections:map}` but server expects `{field,value,idempotency_key}`; Zod rejected silently causing repeated corrections. Fix: use `ops.executeTool("correct", {field, value, idempotency_key})` in sync_issues_from_github.ts. 35 orphaned Neotoma issue entities corrected; 520+ duplicate GitHub issues closed; 30 unique open issues remain (#368–#416). Push leg disabled pending GPG commit.
+- **Post-checkout hook in worktrees** — added `[ -d ".git" ]` guard before `touch .git/hooks/.hooks-installed` in scripts/git-hooks/post-checkout and .git/hooks/post-checkout to prevent failure in git worktrees.
+
+## Swarm governance layer
+
+`execution_policy` + `checkpoint_brief` schemas define how any plan can be swarm-executed with permission scopes, quality criteria, blocking checkpoints, and fallback instructions. Replaces binary swarm/human split with per-plan autonomy calibration. 7 execution_policy entities created (see Key entity IDs above).

@@ -76,6 +76,152 @@ class PaymentProfile:
         return self.prefix.lower()
 
 
+def load_profiles_from_neotoma() -> list[PaymentProfile]:
+    """
+    Load PaymentProfiles from Neotoma payment_profile entities (Phase 5+).
+
+    Queries Neotoma for active payment_profile entities belonging to this
+    operator, constructs PaymentProfile objects from snapshot fields.
+
+    Falls back to empty list on any error — caller should then call
+    load_profiles() to use env-var fallback.
+
+    Required env vars:
+      NEOTOMA_BEARER_TOKEN   Neotoma API auth token
+      NEOTOMA_BASE_URL       Neotoma API base URL
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "").strip()
+    base_url = os.environ.get(
+        "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
+    ).rstrip("/")
+
+    if not bearer:
+        log.debug("NEOTOMA_BEARER_TOKEN not set — skipping Neotoma profile load")
+        return []
+
+    try:
+        url = f"{base_url}/entities?entity_type=payment_profile&limit=50&include_snapshots=true"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {bearer}",
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+        log.warning(f"Neotoma payment_profile fetch failed: {exc}")
+        return []
+
+    items: list[dict] = []
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = data.get("entities") or data.get("items") or data.get("results") or []
+
+    profiles: list[PaymentProfile] = []
+    for item in items:
+        snap: dict = item.get("snapshot") or {}
+        if snap.get("status", "active") not in ("active",):
+            continue  # skip paused/archived
+
+        label = snap.get("label", "")
+        prefix = snap.get("prefix", label.upper().replace(" ", "_"))
+        if not label:
+            log.warning(
+                f"payment_profile entity {item.get('entity_id')} missing label — skipped"
+            )
+            continue
+
+        keywords_raw: list | str = snap.get("calendar_keywords", [])
+        if isinstance(keywords_raw, str):
+            try:
+                keywords_raw = json.loads(keywords_raw)
+            except (ValueError, TypeError):
+                keywords_raw = [k.strip() for k in keywords_raw.split(",") if k.strip()]
+        calendar_keywords = [str(k).strip().lower() for k in keywords_raw if k]
+
+        if not calendar_keywords:
+            log.warning(f"payment_profile {label!r} has no calendar_keywords — skipped")
+            continue
+
+        payment_type_raw = str(snap.get("payment_type", "wise")).lower()
+        if payment_type_raw not in ("wise", "btc"):
+            log.warning(
+                f"payment_profile {label!r} unknown payment_type={payment_type_raw!r} — skipped"
+            )
+            continue
+        payment_type: Literal["wise", "btc"] = payment_type_raw  # type: ignore[assignment]
+
+        amount_raw = snap.get("amount_eur", 0)
+        try:
+            amount_eur = int(amount_raw)
+        except (ValueError, TypeError):
+            log.warning(
+                f"payment_profile {label!r} invalid amount_eur={amount_raw!r} — skipped"
+            )
+            continue
+
+        if amount_eur <= 0:
+            log.warning(
+                f"payment_profile {label!r} amount_eur must be positive — skipped"
+            )
+            continue
+
+        task_kw_raw: list | str = snap.get("task_keywords", [])
+        if isinstance(task_kw_raw, str):
+            try:
+                task_kw_raw = json.loads(task_kw_raw)
+            except (ValueError, TypeError):
+                task_kw_raw = [k.strip() for k in task_kw_raw.split(",") if k.strip()]
+        task_keywords = [
+            str(k).strip().lower() for k in task_kw_raw if k
+        ] or calendar_keywords
+
+        profiles.append(
+            PaymentProfile(
+                prefix=prefix,
+                label=label,
+                calendar_keywords=calendar_keywords,
+                payment_type=payment_type,
+                amount_eur=amount_eur,
+                contact_id=snap.get("contact_id", ""),
+                contact_category=snap.get("contact_category", ""),
+                contact_platform=snap.get("contact_platform", ""),
+                wise_reference=snap.get("wise_reference", ""),
+                btc_address=snap.get("btc_address", ""),
+                neotoma_task_id=snap.get("neotoma_task_id", ""),
+                task_keywords=task_keywords,
+            )
+        )
+
+    log.info(
+        f"Loaded {len(profiles)} payment profile(s) from Neotoma: "
+        f"{[p.name for p in profiles]}"
+    )
+    return profiles
+
+
+def load_profiles_with_neotoma_fallback() -> list[PaymentProfile]:
+    """
+    Load PaymentProfiles: try Neotoma first, fall back to env vars.
+
+    Phase 5 entrypoint. Monedula callers should use this instead of
+    load_profiles() to transparently prefer Neotoma-sourced profiles.
+    """
+    profiles = load_profiles_from_neotoma()
+    if profiles:
+        return profiles
+
+    log.info("No Neotoma payment profiles found — falling back to env vars")
+    return load_profiles()
+
+
 def load_profiles() -> list[PaymentProfile]:
     """
     Load all PaymentProfiles from env vars.

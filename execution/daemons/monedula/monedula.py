@@ -40,6 +40,35 @@ if _NEOTOMA_ENV_FILE.exists():
             os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
 
 # ---------------------------------------------------------------------------
+# lib/notify integration (path bootstrap required before import)
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+try:
+    from lib.notify import Notifier  # noqa: E402
+
+    _notifier: Notifier | None = Notifier.from_neotoma()
+except Exception:  # lib unavailable or Neotoma unreachable at import time
+    _notifier = None
+
+
+def _notify(message: str, priority: str = "info") -> None:
+    """Send via lib/notify if available; silently skip if not."""
+    if _notifier is None:
+        return
+    try:
+        from lib.notify import Priority
+
+        p = getattr(Priority, priority.upper(), Priority.INFO)
+        _notifier.send(message, priority=p, handler="monedula")
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Constants / paths
 # ---------------------------------------------------------------------------
 
@@ -192,10 +221,7 @@ def fetch_due_payment_tasks() -> list[dict]:
     today = date.today().isoformat()
 
     try:
-        url = (
-            f"{NEOTOMA_BASE_URL.rstrip('/')}/api/entities"
-            f"?entity_type=task&limit=100"
-        )
+        url = f"{NEOTOMA_BASE_URL.rstrip('/')}/api/entities?entity_type=task&limit=100"
         req = urllib.request.Request(
             url,
             headers={
@@ -597,10 +623,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    _notify("monedula started", priority="info")
     try:
         main()
+        _notify("monedula run complete", priority="info")
     except Exception as exc:
         log.exception(f"Monedula fatal error: {exc}")
+        _notify(f"monedula fatal error: {exc}", priority="blocker")
         try:
             telegram_send(f"🔴 Monedula fatal error: {exc}")
         except Exception:

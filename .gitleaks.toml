@@ -122,5 +122,17 @@ paths = [
   "execution/daemons/anthus/com.ateles.anthus.plist",
   "execution/daemons/tyto/tyto.py",
   "execution/daemons/tyto/com.ateles.tyto.plist",
+  "execution/scripts/lanius_sweep.py",
+  "execution/daemons/piculet/watch.py",
+  ".github/workflows/lanius-stale-issues.yml",
+  "execution/daemons/formica/formica.py",
+  "execution/daemons/formica/com.ateles.formica.plist",
+  "execution/daemons/apis/apis.py",
+  "execution/daemons/apis/com.ateles.apis.plist",
+  "execution/daemons/turdus/turdus.py",
+  "execution/daemons/turdus/com.ateles.turdus.plist",
+  "execution/daemons/monedula/handlers/payment_profile.py",
+  "execution/scripts/loxia_review.py",
+  ".github/workflows/loxia-pr-review.yml",
 ]
 
