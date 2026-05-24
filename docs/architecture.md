@@ -113,6 +113,32 @@ In Phase 4, payment profiles will migrate to Neotoma `payment_profile` entities 
 
 ---
 
+## Swarm governance
+
+`execution_policy` and `checkpoint_brief` entity types define how any plan can be executed with calibrated autonomy:
+
+- **execution_policy**: per-plan permission scope, quality criteria, blocking checkpoints, fallback instructions, and autonomy level (full-auto → checkpoint → human-approval → operator-only)
+- **checkpoint_brief**: structured artifact an agent submits to pause at a defined gate before proceeding
+
+This replaces the binary swarm/human split. Each plan carries its own autonomy calibration. Seven policies are seeded for active work streams (see `CLAUDE.md` key entity IDs).
+
+The **escalation chain**: agent → domain-expert agent → Columba (constitution keeper) → operator via Onychomys. Each escalation resolution is codified as a Neotoma entity for future instances.
+
+The **three-layer constitution**: (1) `core_principles` entity (project-wide); (2) per-repo constitution owned by Columba; (3) per-agent operating principles in `agent_definition`.
+
+---
+
+## MCP harness model
+
+T4 invocable agents connect to capabilities via MCP servers, not local filesystem worktrees:
+
+- **`github_harness`** MCP server: issue/PR read-write, branch management (planned Phase 5)
+- **`code_harness`** MCP server: file read, apply patches, run tests (planned Phase 5)
+
+Neotoma is the config plane (agent_definition, execution_policy, checkpoint_brief). MCP is the capability plane. Worktrees are temporary scaffolding until the harness servers are live.
+
+---
+
 ## Build vs. adopt decisions
 
 | Layer | Decision |

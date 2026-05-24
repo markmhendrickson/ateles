@@ -49,14 +49,14 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 |---|---|---|---|---|
 | **Monedula** | *Corvus monedula* (jackdaw) | Python | Recurring payment daemon; Wise IBAN + BTC transfers triggered by calendar events and Neotoma task due dates | active |
 | **Formica** | *Formica* (wood ant) | JS → Python (Phase 5) | GitHub issue/PR automation; drives `process_issues` and `process_prs` skills | active |
-| **neotoma-agent** | *Castor* (beaver) | Python | Neotoma-repo automation; processes issues and PRs against the neotoma repo | active (Phase 1 skeleton) |
+| **neotoma-agent** | *neotoma-agent* | Python | Neotoma-repo automation; processes issues and PRs against the neotoma repo | active (Phase 1 skeleton) |
 | **Apus** | *Apus* (swift) | Python | HTTPS webhook receiver; Neotoma→git mirror pipeline; commits via `ateles-agent` GitHub identity | active |
 | **Piculet** | *Picumnus* (piculet woodpecker) | JS | Audio transcription daemon; monitors for new audio files, transcribes, stores in Neotoma | active |
 | **Strix** | *Strix* (wood owl) | Python | Meeting/ambient audio recorder (menu bar app) | active |
 | **Apis** | *Apis* (honeybee) | Python | Universal task dispatcher; subscribes to task events; routes to right agent + harness; absorbs Monedula's task scope | planned (Phase 4) |
 | **Anthus** | *Anthus* (pipit) | Python | Swarm coordinator — global view of work-in-flight; surfaces conflicts to Onychomys | planned (Phase 2 skeleton, Phase 6 full) |
 | **Tyto** | *Tyto* (barn owl) | Python | Screenshot watcher; visual counterpart to Strix | planned (Phase 2 skeleton) |
-| **Turdus** | *Turdus* (thrush) | Python | Email triage daemon; hourly Gmail poll → tasks for Apis | planned (Phase 4) |
+| **Turdus** | *Turdus* (thrush) | Python | Email triage daemon; hourly Gmail poll → tasks for Apis | active (Phase 2 skeleton) |
 
 ---
 
@@ -69,7 +69,7 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 | **Sturnus** | *Sturnus* (starling) | Feedback digester — extracts entities from `product_feedback` | planned (Phase 6) |
 | **Strigops** | *Strigops* (kakapo) | Analytics gatherer — pluggable backends: Umami, GA4, GSC, X, Typefully, LinkedIn, Instagram | planned (Phase 7) |
 | **Corvus** | *Corvus* (crow) | Outbound poster — sends drafts to social platforms after operator approval | planned |
-| **Lanius** | *Lanius* (shrike) | Stale issue sweeper — GHA cron first; promote to T3 if Neotoma attribution needed | planned (Phase 3 eval) |
+| **Lanius** | *Lanius* (shrike) | GitHub workflow coordinator — GHA cron; full lifecycle: issues → workflow gates → PR creation → review chain → Struthio release trigger | active (GHA + schema; Phase 6 full) |
 | **Anas** | *Anas* (duck) | Receipt extractor — Amazon, restaurant, hotel | planned |
 | **Aquila** | *Aquila* (eagle) | Quarterly portfolio review | planned |
 | **Falco** | *Falco* (falcon) | Deployment monitor — GitHub Actions polling | planned |
@@ -100,10 +100,18 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 
 | Name | Genus | Role | Status |
 |---|---|---|---|
-| **Pavo** | *Pavo* (peacock) | Product manager — prioritisation synthesiser | planned (Phase 8) |
-| **Paradisaea** | *Paradisaea* (bird-of-paradise) | Designer — UI/copy review | planned (Phase 8) |
+| **Pavo** | *Pavo* (peacock) | Product manager — prioritisation synthesiser, tagging governance | planned (Phase 8) |
+| **Paradisaea** | *Paradisaea* (bird-of-paradise) | Designer — UI/copy review, visual consistency | planned (Phase 8) |
 | **Bombycilla** | *Bombycilla* (waxwing) | Technical architect — layered architecture, schema review | planned (Phase 8) |
 | **Phoenicurus** | *Phoenicurus* (redstart) | QA — test coverage, regression, scorecard | planned (Phase 8) |
+| **Accipiter** | *Accipiter* (hawk) | Growth / go-to-market — ICP research, influencer outreach, distribution | planned (Phase 8) |
+| **Aythya** | *Aythya* (diving duck) | Data analyst — metrics synthesis, cohort analysis, KPI tracking | planned (Phase 8) |
+| **Buteo** | *Buteo* (buzzard) | Legal / compliance — risk assessment, T&C review | planned (Phase 8) |
+| **Ciconia** | *Ciconia* (stork) | Finance advisor — budget, forecasting, financial modelling | planned (Phase 8) |
+| **Columba** | *Columba* (dove) | Constitution keeper — cross-agent principles, escalation codification | planned (Phase 6) |
+| **Luscinia** | *Luscinia* (nightingale) | Compliance supervisor — legal + regulatory, privacy, data governance | planned (Phase 8) |
+| **Regulus** | *Regulus* (kinglet) | Developer relations — SDK docs, community, developer feedback (not end-user support) | planned (Phase 8) |
+| **Struthio** | *Struthio* (ostrich) | Release manager — changelog, version tagging, release notes, Vanellus trigger | planned (Phase 6) |
 
 ---
 
