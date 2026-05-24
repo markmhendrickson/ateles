@@ -32,6 +32,9 @@ Environment variables:
   TELEGRAM_TOPIC_FORMICA      Telegram topic ID for Formica notifications
   FORMICA_AGENT_DEFINITION_ID Neotoma entity ID for Formica's agent_definition
   FORMICA_DRY_RUN             Set to "1" to log events without dispatching agents
+  FORMICA_TRIAGE_LABEL        Issue label that gates dispatch (default: "triage:formica")
+  FORMICA_CLAUDE_BIN          Absolute path to `claude` binary (default: auto-detect on PATH)
+  FORMICA_DISPATCH_TIMEOUT    Per-dispatch timeout in seconds (default: 1800)
   ATELES_REPO_PATH            Local path to ateles clone (default: ~/repos/ateles)
   NEOTOMA_REPO_PATH           Local path to neotoma clone (default: ~/repos/neotoma)
 """
@@ -39,8 +42,10 @@ Environment variables:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -84,6 +89,13 @@ DRY_RUN = os.environ.get("FORMICA_DRY_RUN", "0") == "1"
 GRYLLUS_SKILL = "gryllus"  # issue worker
 VANELLUS_SKILL = "vanellus"  # PR steward
 
+# Path to the Claude CLI binary used to spawn T4 agents. Set by env var or
+# auto-detected from PATH. If absent, dispatch falls back to log-only.
+CLAUDE_BIN = os.environ.get("FORMICA_CLAUDE_BIN") or shutil.which("claude")
+
+# Dispatch timeout per agent invocation (seconds).
+DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("FORMICA_DISPATCH_TIMEOUT", "1800"))
+
 # Triage label filtering.
 # When set, Formica only dispatches issues/PRs that carry this label.
 # Format: "triage:formica" — matches the label convention triage:<agent>.
@@ -117,38 +129,106 @@ def _has_triage_label(snapshot: dict) -> bool:
 # ── T4 agent dispatch ──────────────────────────────────────────────────────────
 
 
-async def dispatch_gryllus(entity_id: str, snapshot: dict) -> None:
+async def _spawn_claude_skill(
+    skill: str,
+    entity_id: str,
+    snapshot: dict,
+    notifier: Notifier,
+) -> None:
     """
-    Dispatch Gryllus (issue worker) for a new issue.
+    Spawn a T4 agent via `claude --print --skill <name>` with the entity
+    context piped on stdin as JSON.
 
-    Phase 3: logs intent only — full subprocess dispatch in Phase 5.
-    Phase 5: spawn `claude --print --skill gryllus` with issue context.
+    Failures are reported via lib/notify/ and logged but do not crash
+    Formica — one bad issue must not take down the daemon.
     """
+    if CLAUDE_BIN is None:
+        log.warning(
+            f"[{DAEMON_NAME}] CLAUDE_BIN not configured and `claude` not on "
+            f"PATH; skipping {skill} dispatch for {entity_id}."
+        )
+        notifier.send(
+            f"{skill} dispatch skipped — claude binary unavailable",
+            priority=Priority.WARN,
+            handler=DAEMON_NAME,
+        )
+        return
+
+    payload = json.dumps(
+        {
+            "entity_id": entity_id,
+            "snapshot": snapshot,
+            "dispatched_by": DAEMON_NAME,
+        }
+    )
+    cmd = [CLAUDE_BIN, "--print", "--skill", skill]
+    log.info(
+        f"[{DAEMON_NAME}] Spawning: {' '.join(cmd)} ← payload({len(payload)}B) "
+        f"timeout={DISPATCH_TIMEOUT_SECONDS}s"
+    )
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=payload.encode()),
+            timeout=DISPATCH_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        log.error(
+            f"[{DAEMON_NAME}] {skill} dispatch timed out after "
+            f"{DISPATCH_TIMEOUT_SECONDS}s for {entity_id}"
+        )
+        notifier.send(
+            f"{skill} timed out on {entity_id}",
+            priority=Priority.WARN,
+            handler=DAEMON_NAME,
+        )
+        return
+
+    if proc.returncode == 0:
+        log.info(
+            f"[{DAEMON_NAME}] {skill} dispatch ok for {entity_id} "
+            f"({len(stdout)}B stdout)"
+        )
+    else:
+        stderr_text = stderr.decode("utf-8", errors="replace")[:500]
+        log.error(
+            f"[{DAEMON_NAME}] {skill} dispatch failed (rc={proc.returncode}) "
+            f"for {entity_id}: {stderr_text}"
+        )
+        notifier.send(
+            f"{skill} failed on {entity_id} (rc={proc.returncode})",
+            priority=Priority.WARN,
+            handler=DAEMON_NAME,
+        )
+
+
+async def dispatch_gryllus(entity_id: str, snapshot: dict, notifier: Notifier) -> None:
+    """Dispatch Gryllus (issue worker) for a new issue."""
     title = snapshot.get("title", "(untitled)")
     repo = snapshot.get("repository", "unknown")
     log.info(
-        f"[{DAEMON_NAME}] → Gryllus: issue={entity_id} repo={repo!r} title={title[:60]!r}"
+        f"[{DAEMON_NAME}] → Gryllus: issue={entity_id} repo={repo!r} "
+        f"title={title[:60]!r}"
     )
 
     if DRY_RUN:
         log.info(f"[{DAEMON_NAME}] DRY RUN — skipping Gryllus dispatch for {entity_id}")
         return
 
-    # Phase 5: full dispatch via claude --print
-    # cmd = [
-    #     "claude", "--print",
-    #     "--skill", GRYLLUS_SKILL,
-    #     "--input", json.dumps({"entity_id": entity_id, "snapshot": snapshot}),
-    # ]
-    # await asyncio.to_thread(subprocess.run, cmd, check=False, capture_output=True)
+    await _spawn_claude_skill(GRYLLUS_SKILL, entity_id, snapshot, notifier)
 
 
-async def dispatch_vanellus(entity_id: str, snapshot: dict) -> None:
-    """
-    Dispatch Vanellus (PR steward) for a new PR.
-
-    Phase 3: logs intent only — full subprocess dispatch in Phase 5.
-    """
+async def dispatch_vanellus(entity_id: str, snapshot: dict, notifier: Notifier) -> None:
+    """Dispatch Vanellus (PR steward) for a new PR."""
     title = snapshot.get("title", "(untitled)")
     log.info(f"[{DAEMON_NAME}] → Vanellus: pr={entity_id} title={title[:60]!r}")
 
@@ -157,6 +237,8 @@ async def dispatch_vanellus(entity_id: str, snapshot: dict) -> None:
             f"[{DAEMON_NAME}] DRY RUN — skipping Vanellus dispatch for {entity_id}"
         )
         return
+
+    await _spawn_claude_skill(VANELLUS_SKILL, entity_id, snapshot, notifier)
 
 
 # ── Event handler ─────────────────────────────────────────────────────────────
@@ -197,7 +279,7 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
             priority=Priority.INFO,
             handler=DAEMON_NAME,
         )
-        await dispatch_gryllus(entity_id, snapshot)
+        await dispatch_gryllus(entity_id, snapshot, notifier)
 
     elif entity_type == "pull_request" and action == "created":
         title = snapshot.get("title", "(untitled)")
@@ -214,7 +296,7 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
             priority=Priority.INFO,
             handler=DAEMON_NAME,
         )
-        await dispatch_vanellus(entity_id, snapshot)
+        await dispatch_vanellus(entity_id, snapshot, notifier)
 
     elif entity_type == "product_feedback" and action == "created":
         log.info(
@@ -233,7 +315,10 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
 async def main() -> None:
     log.info(f"[{DAEMON_NAME}] Starting up (Python migration — Phase 3)...")
     log.info(f"[{DAEMON_NAME}] ateles_repo={ATELES_REPO} neotoma_repo={NEOTOMA_REPO}")
-    log.info(f"[{DAEMON_NAME}] dry_run={DRY_RUN}")
+    log.info(
+        f"[{DAEMON_NAME}] dry_run={DRY_RUN} claude_bin={CLAUDE_BIN or '<not-found>'}"
+    )
+    log.info(f"[{DAEMON_NAME}] dispatch_timeout={DISPATCH_TIMEOUT_SECONDS}s")
 
     # 1. Load agent_definition from Neotoma
     agent_def = AgentLoader(DAEMON_NAME).load()

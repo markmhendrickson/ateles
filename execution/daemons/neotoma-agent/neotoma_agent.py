@@ -6,11 +6,11 @@ Castor genus: beavers. T3 daemon in the Ateles swarm.
 
 Subscribes to Neotoma issue/PR/task events and processes them:
   - task.created → due-date hygiene T4 skill (add due_date + domain tags)
-  - issue.created → log and notify; Phase 5 will spawn Gryllus
-  - pull_request.created → log and notify; Phase 5 will spawn Vanellus
+  - issue.created (neotoma repo + triage label) → spawn Gryllus
+  - pull_request.created (neotoma repo + triage label) → spawn Vanellus
 
 AAuth sub: neotoma-agent@ateles-swarm
-Phase 3: due-date hygiene for tasks added; issue/PR dispatch skeleton retained.
+Phase 5: due-date hygiene + T4 dispatch via `claude --print --skill`.
 
 Startup sequence (T3 daemon pattern):
   1. Load env from ~/.config/neotoma/.env
@@ -27,6 +27,10 @@ Environment variables:
   TELEGRAM_TOPIC_NEOTOMA_AGENT  Telegram topic ID for neotoma-agent notifications (optional)
   NEOTOMA_AGENT_DEFINITION_ID   Neotoma entity ID for neotoma-agent's agent_definition (optional)
   NEOTOMA_AGENT_REPO            GitHub repo slug for automation (default: markmhendrickson/neotoma)
+  NEOTOMA_AGENT_TRIAGE_LABEL    Label gating issue/PR dispatch (default: "triage:neotoma-agent")
+  NEOTOMA_AGENT_CLAUDE_BIN      Absolute path to `claude` binary (default: auto-detect on PATH)
+  NEOTOMA_AGENT_DISPATCH_TIMEOUT Per-dispatch timeout in seconds (default: 1800)
+  NEOTOMA_AGENT_DRY_RUN         Set to "1" to log dispatch intent without spawning (default: 0)
   DUE_DATE_HYGIENE_ENABLED      Set to "0" to disable due-date hygiene (default: enabled)
 """
 
@@ -37,6 +41,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -85,6 +90,13 @@ DUE_DATE_HYGIENE_ENABLED = os.environ.get("DUE_DATE_HYGIENE_ENABLED", "1") != "0
 NEOTOMA_AGENT_TRIAGE_LABEL = os.environ.get(
     "NEOTOMA_AGENT_TRIAGE_LABEL", "triage:neotoma-agent"
 )
+
+# T4 dispatch config
+GRYLLUS_SKILL = "gryllus"
+VANELLUS_SKILL = "vanellus"
+CLAUDE_BIN = os.environ.get("NEOTOMA_AGENT_CLAUDE_BIN") or shutil.which("claude")
+DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("NEOTOMA_AGENT_DISPATCH_TIMEOUT", "1800"))
+DRY_RUN = os.environ.get("NEOTOMA_AGENT_DRY_RUN", "0") == "1"
 
 
 def _issue_has_triage_label(snapshot: dict) -> bool:
@@ -260,6 +272,106 @@ async def apply_due_date_hygiene(entity_id: str, snapshot: dict) -> None:
                 )
 
 
+# ── T4 dispatch ───────────────────────────────────────────────────────────────
+
+
+async def _spawn_claude_skill(
+    skill: str,
+    entity_id: str,
+    snapshot: dict,
+    notifier: Notifier,
+) -> None:
+    """
+    Spawn a T4 agent via `claude --print --skill <name>` with the entity
+    context piped on stdin as JSON.
+
+    Mirrors Formica's _spawn_claude_skill — one daemon failure does not crash
+    neotoma-agent; errors surface via lib/notify/.
+    """
+    if CLAUDE_BIN is None:
+        log.warning(
+            f"[{DAEMON_NAME}] CLAUDE_BIN not configured and `claude` not on "
+            f"PATH; skipping {skill} dispatch for {entity_id}."
+        )
+        notifier.send(
+            f"{skill} dispatch skipped — claude binary unavailable",
+            priority=Priority.WARN,
+            handler=DAEMON_NAME,
+        )
+        return
+
+    payload = json.dumps(
+        {
+            "entity_id": entity_id,
+            "snapshot": snapshot,
+            "dispatched_by": DAEMON_NAME,
+            "target_repo": NEOTOMA_REPO,
+        }
+    )
+    cmd = [CLAUDE_BIN, "--print", "--skill", skill]
+    log.info(
+        f"[{DAEMON_NAME}] Spawning: {' '.join(cmd)} ← payload({len(payload)}B) "
+        f"timeout={DISPATCH_TIMEOUT_SECONDS}s"
+    )
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=payload.encode()),
+            timeout=DISPATCH_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        log.error(
+            f"[{DAEMON_NAME}] {skill} dispatch timed out after "
+            f"{DISPATCH_TIMEOUT_SECONDS}s for {entity_id}"
+        )
+        notifier.send(
+            f"{skill} timed out on {entity_id}",
+            priority=Priority.WARN,
+            handler=DAEMON_NAME,
+        )
+        return
+
+    if proc.returncode == 0:
+        log.info(
+            f"[{DAEMON_NAME}] {skill} dispatch ok for {entity_id} "
+            f"({len(stdout)}B stdout)"
+        )
+    else:
+        stderr_text = stderr.decode("utf-8", errors="replace")[:500]
+        log.error(
+            f"[{DAEMON_NAME}] {skill} dispatch failed (rc={proc.returncode}) "
+            f"for {entity_id}: {stderr_text}"
+        )
+        notifier.send(
+            f"{skill} failed on {entity_id} (rc={proc.returncode})",
+            priority=Priority.WARN,
+            handler=DAEMON_NAME,
+        )
+
+
+def _snapshot_targets_neotoma_repo(snapshot: dict) -> bool:
+    """
+    Return True if the issue/PR snapshot looks like it targets the neotoma repo.
+    Checks `repository` and `repo` fields against NEOTOMA_REPO (e.g. "markmhendrickson/neotoma").
+    """
+    candidates = [
+        str(snapshot.get("repository", "")),
+        str(snapshot.get("repo", "")),
+        str(snapshot.get("github_url", "")),
+    ]
+    target = NEOTOMA_REPO.lower()
+    return any(target in c.lower() for c in candidates if c)
+
+
 # ── Event handler ─────────────────────────────────────────────────────────────
 
 
@@ -299,7 +411,18 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
             priority=Priority.INFO,
             handler=DAEMON_NAME,
         )
-        # Phase 5: check if targeted at neotoma repo → spawn Gryllus
+        if not _snapshot_targets_neotoma_repo(snapshot):
+            log.debug(
+                f"[{DAEMON_NAME}] Issue {entity_id} not in neotoma repo — "
+                "skipping Gryllus dispatch"
+            )
+            return
+        if DRY_RUN:
+            log.info(
+                f"[{DAEMON_NAME}] DRY RUN — skipping Gryllus dispatch for {entity_id}"
+            )
+            return
+        await _spawn_claude_skill(GRYLLUS_SKILL, entity_id, snapshot, notifier)
 
     elif entity_type == "pull_request" and action == "created":
         title = snapshot.get("title", "(untitled)")
@@ -314,7 +437,18 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
             priority=Priority.INFO,
             handler=DAEMON_NAME,
         )
-        # Phase 5: check if targeted at neotoma repo → spawn Vanellus
+        if not _snapshot_targets_neotoma_repo(snapshot):
+            log.debug(
+                f"[{DAEMON_NAME}] PR {entity_id} not in neotoma repo — "
+                "skipping Vanellus dispatch"
+            )
+            return
+        if DRY_RUN:
+            log.info(
+                f"[{DAEMON_NAME}] DRY RUN — skipping Vanellus dispatch for {entity_id}"
+            )
+            return
+        await _spawn_claude_skill(VANELLUS_SKILL, entity_id, snapshot, notifier)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -343,6 +477,11 @@ async def main() -> None:
 
     log.info(
         f"[{DAEMON_NAME}] Due-date hygiene: {'enabled' if DUE_DATE_HYGIENE_ENABLED else 'disabled'}"
+    )
+    log.info(
+        f"[{DAEMON_NAME}] Dispatch: dry_run={DRY_RUN} "
+        f"claude_bin={CLAUDE_BIN or '<not-found>'} "
+        f"timeout={DISPATCH_TIMEOUT_SECONDS}s"
     )
 
     notifier.send(
