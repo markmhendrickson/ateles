@@ -1,0 +1,340 @@
+"""
+Anthus orchestrator — workflow_definition-driven gate dispatcher.
+
+Reads workflow_definition entities from Neotoma. When work entities
+(issues, pull_requests, plans, tasks) match a workflow, Anthus tracks
+which gates have been satisfied and dispatches the owner_agent for the
+next ready gate(s).
+
+Gate readiness:
+  - phase N is ready when all required gates in phase N-1 have status
+    "satisfied" OR have been skipped by a fast_path
+  - within a phase, gates with the same parallel_group dispatch in parallel
+  - a gate is "satisfied" when the owner_agent posts a satisfying
+    artifact (comment, review, or completed sub-task) — what counts varies
+    per gate_name and is encoded in GATE_SATISFACTION_RULES
+
+This is a thin first pass. Phase 6 will replace gate sequencing with
+contract-based emergent participation; see
+docs/swarm_orchestration_emergent.md.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+import httpx
+
+log = logging.getLogger("anthus.orchestrator")
+
+NEOTOMA_BASE_URL = os.environ.get(
+    "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
+).rstrip("/")
+_BEARER_ENV = "NEOTOMA_BEARER_TOKEN"  # gitleaks:allow — env var name, not a secret
+NEOTOMA_BEARER = os.environ.get(_BEARER_ENV, "")  # gitleaks:allow
+
+
+# ── Data shapes ───────────────────────────────────────────────────────────────
+
+
+@dataclass
+class Gate:
+    """One step in a workflow_definition."""
+
+    phase: int
+    gate_name: str
+    owner_agent: str
+    parallel_group: str | None
+    join_gate: str | None
+    required: bool
+
+
+@dataclass
+class WorkflowDefinition:
+    entity_id: str
+    project: str
+    workflow_type: str
+    description: str
+    gates: list[Gate]
+    fast_paths: list[
+        dict[str, Any]
+    ]  # e.g. [{"condition": "label:bug", "skip_gates": ["ux"]}]
+    legal_required: bool
+
+    def gates_by_phase(self) -> dict[int, list[Gate]]:
+        phases: dict[int, list[Gate]] = {}
+        for g in self.gates:
+            phases.setdefault(g.phase, []).append(g)
+        return phases
+
+    def fast_path_skips(self, labels: set[str]) -> set[str]:
+        """Return gate_names skipped by any fast_path matching the labels."""
+        skips: set[str] = set()
+        for fp in self.fast_paths:
+            cond = str(fp.get("condition", ""))
+            if cond.startswith("label:"):
+                label = cond.split(":", 1)[1]
+                if label in labels:
+                    skips.update(fp.get("skip_gates", []))
+        return skips
+
+
+@dataclass
+class GateState:
+    """Tracks satisfaction of one gate for one work entity."""
+
+    gate_name: str
+    status: str  # "pending" | "dispatched" | "satisfied" | "skipped" | "failed"
+    dispatched_at: str | None = None
+    satisfied_at: str | None = None
+    artifact_refs: list[str] = field(default_factory=list)
+
+
+# ── Gate satisfaction rules ───────────────────────────────────────────────────
+# Each rule maps gate_name to a predicate that examines comments/reviews on
+# the work entity. Returns True if the owner_agent has produced a satisfying
+# artifact. These are deliberately conservative — over-strict is recoverable
+# by an operator nudge; under-strict creates false satisfaction.
+
+
+def _comment_from_agent(comments: list[dict], agent_sub: str) -> dict | None:
+    """Return the most recent comment whose author matches the agent's sub."""
+    # Comments come via github_harness; we'll later record agent_sub directly.
+    # For now, match against a soft heuristic on author name or comment body.
+    for c in reversed(comments):
+        author = str(c.get("author", "")).lower()
+        body = str(c.get("body", "")).lower()
+        if agent_sub.split("@")[0] in author or f"[{agent_sub.split('@')[0]}]" in body:
+            return c
+    return None
+
+
+GATE_SATISFACTION_RULES: dict[str, str] = {
+    # Maps gate_name → required artifact_type produced in a comment header.
+    # The comment body is expected to begin with "[<agent>] <artifact_type>:".
+    "pm_scope": "acceptance_criteria",
+    "ux_design": "copy_and_ux_flow",
+    "arch": "schema_or_api_proposal",
+    "impl": "pull_request_link",
+    "qa": "test_plan",
+    "legal": "compliance_review",
+    "compliance_supervisor": "compliance_verdict",
+    "pr_review": "merge_decision",
+    "release": "release_note",
+    "growth_announce": "launch_brief",
+    "social_draft": "social_post_draft",
+    "devrel_docs": "docs_diff_or_no_change_note",
+}
+
+
+def _gate_satisfied_by_comment(gate: Gate, comments: list[dict]) -> str | None:
+    """
+    Inspect comments for one that satisfies this gate. Returns the comment
+    URL/id if satisfied, else None.
+
+    Convention: agents post comments starting with "[<agent>] <artifact_type>:".
+    This is enforced by each agent's SKILL.md and re-checked here.
+    """
+    expected_artifact = GATE_SATISFACTION_RULES.get(gate.gate_name)
+    if expected_artifact is None:
+        return None
+
+    agent_name = gate.owner_agent.lower()
+    header_re = re.compile(
+        rf"^\s*\[{re.escape(agent_name)}\]\s+{re.escape(expected_artifact)}\s*:",
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    for c in comments:
+        body = str(c.get("body", ""))
+        if header_re.search(body):
+            return str(c.get("url") or c.get("id") or "")
+    return None
+
+
+# ── Neotoma fetchers ──────────────────────────────────────────────────────────
+
+
+async def fetch_workflow_definitions(project: str) -> list[WorkflowDefinition]:
+    """Fetch active workflow_definitions for a given project (e.g. 'ateles')."""
+    if not NEOTOMA_BEARER:
+        log.warning(f"{_BEARER_ENV} not set; orchestrator disabled.")
+        return []
+
+    headers = {
+        "Authorization": f"Bearer {NEOTOMA_BEARER}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(headers=headers, timeout=15) as client:
+        resp = await client.post(
+            f"{NEOTOMA_BASE_URL}/retrieve_entities",
+            json={
+                "entity_type": "workflow_definition",
+                "limit": 100,
+                "include_snapshots": True,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    out: list[WorkflowDefinition] = []
+    for e in data.get("entities", []):
+        snap = e.get("snapshot") or {}
+        if snap.get("project") != project:
+            continue
+        if snap.get("status") != "active":
+            continue
+        gates = [
+            Gate(
+                phase=int(g.get("phase", 0)),
+                gate_name=str(g.get("gate_name", "")),
+                owner_agent=str(g.get("owner_agent", "")),
+                parallel_group=g.get("parallel_group"),
+                join_gate=g.get("join_gate"),
+                required=bool(g.get("required", True)),
+            )
+            for g in snap.get("gates", [])
+        ]
+        out.append(
+            WorkflowDefinition(
+                entity_id=str(e.get("entity_id", "")),
+                project=str(snap.get("project", "")),
+                workflow_type=str(snap.get("workflow_type", "")),
+                description=str(snap.get("description", "")),
+                gates=gates,
+                fast_paths=list(snap.get("fast_paths", [])),
+                legal_required=bool(snap.get("legal_required", False)),
+            )
+        )
+    return out
+
+
+# ── Orchestration logic ───────────────────────────────────────────────────────
+
+
+def select_workflow(
+    work_entity: dict, workflows: list[WorkflowDefinition]
+) -> WorkflowDefinition | None:
+    """
+    Pick the workflow_definition that applies to this work entity.
+
+    Selection heuristic:
+      1. Explicit override via label "workflow:<workflow_type>"
+      2. workflow_type matches a label on the entity (e.g. label "bug" → workflow_type "bug")
+      3. workflow_type "feature" as default for issues/plans with no other signal
+    """
+    labels: set[str] = set()
+    raw_labels = work_entity.get("labels", [])
+    if isinstance(raw_labels, str):
+        raw_labels = [s.strip() for s in raw_labels.split(",") if s.strip()]
+    for lbl in raw_labels or []:
+        labels.add(str(lbl).lower())
+
+    # 1. Explicit override
+    for lbl in labels:
+        if lbl.startswith("workflow:"):
+            wt = lbl.split(":", 1)[1]
+            for w in workflows:
+                if w.workflow_type == wt:
+                    return w
+
+    # 2. Label-name match
+    for w in workflows:
+        if w.workflow_type.lower() in labels:
+            return w
+
+    # 3. Default to "feature" for issues
+    for w in workflows:
+        if w.workflow_type == "feature":
+            return w
+
+    return None
+
+
+def compute_ready_gates(
+    workflow: WorkflowDefinition,
+    work_entity: dict,
+    comments: list[dict],
+    existing_state: dict[str, GateState] | None = None,
+) -> tuple[dict[str, GateState], list[Gate]]:
+    """
+    Walk the workflow's phases. For each gate, determine status by checking
+    comments. Return (updated_state, gates_ready_to_dispatch).
+
+    A gate is "ready" iff:
+      - it is currently "pending"
+      - it is not skipped by a fast_path
+      - every required gate in earlier phases is "satisfied" or "skipped"
+      - its join_gate (if any) is already "satisfied"
+    """
+    labels: set[str] = set()
+    raw_labels = work_entity.get("labels", [])
+    if isinstance(raw_labels, str):
+        raw_labels = [s.strip() for s in raw_labels.split(",") if s.strip()]
+    for lbl in raw_labels or []:
+        labels.add(str(lbl).lower())
+
+    skips = workflow.fast_path_skips(labels)
+
+    state = dict(existing_state or {})
+    # Initialize state for any unseen gates.
+    for g in workflow.gates:
+        if g.gate_name in state:
+            continue
+        if g.gate_name in skips:
+            state[g.gate_name] = GateState(gate_name=g.gate_name, status="skipped")
+        else:
+            state[g.gate_name] = GateState(gate_name=g.gate_name, status="pending")
+
+    # Update from comment evidence.
+    for g in workflow.gates:
+        gs = state[g.gate_name]
+        if gs.status in ("satisfied", "skipped", "failed"):
+            continue
+        ref = _gate_satisfied_by_comment(g, comments)
+        if ref:
+            gs.status = "satisfied"
+            gs.artifact_refs.append(ref)
+
+    # Compute readiness phase-by-phase.
+    ready: list[Gate] = []
+    by_phase = workflow.gates_by_phase()
+    for phase in sorted(by_phase.keys()):
+        prior_satisfied = all(
+            state[g.gate_name].status in ("satisfied", "skipped") or not g.required
+            for p in by_phase
+            if p < phase
+            for g in by_phase[p]
+        )
+        if not prior_satisfied:
+            break  # Don't look at later phases until earlier ones are done.
+        for g in by_phase[phase]:
+            gs = state[g.gate_name]
+            if gs.status != "pending":
+                continue
+            # Honor join_gate within the same phase.
+            if g.join_gate:
+                # If join_gate is in the same phase and also pending, dispatch
+                # both anyway (parallel group fires in parallel). We do NOT
+                # block on a same-phase sibling; we DO block on a prior-phase
+                # join.
+                join = next(
+                    (
+                        x
+                        for x in workflow.gates
+                        if x.gate_name == g.join_gate and x.phase < phase
+                    ),
+                    None,
+                )
+                if join and state[join.gate_name].status not in (
+                    "satisfied",
+                    "skipped",
+                ):
+                    continue
+            ready.append(g)
+
+    return state, ready
