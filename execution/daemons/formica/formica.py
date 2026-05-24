@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""
+Formica — Ateles issue-processing daemon.
+
+Formica genus: ants. T3 daemon in the Ateles swarm.
+
+Subscribes to Neotoma SSE events and processes issues/PRs by dispatching
+to T4 invocable agents (Gryllus for issues, Vanellus for PRs).
+
+This Python implementation uses lib/daemon_runtime for SSE and AAuth,
+replacing the legacy Node.js daemon.mjs. The operator approval flow
+(Telegram long-poll + /shipit command) and full PR automation pipeline
+are preserved in the Node.js codebase for now and will migrate in Phase 5.
+
+Migration status:
+  Phase 3: Python entry point + SSE subscription + lib/notify + lib/daemon_runtime
+  Phase 5: Full PR pipeline (worktree management, cursor_sdk_runner, operator_queue)
+
+AAuth sub: formica@ateles-swarm
+Startup sequence (T3 daemon pattern):
+  1. Load env from ~/.config/neotoma/.env
+  2. Load agent_definition from Neotoma via lib/daemon_runtime
+  3. Load AAuth signer
+  4. Load priority_rubric from Neotoma via lib/notify
+  5. Subscribe to Neotoma SSE and dispatch events
+
+Environment variables:
+  NEOTOMA_BEARER_TOKEN        Neotoma API auth token
+  NEOTOMA_BASE_URL            Neotoma API base URL
+  TELEGRAM_BOT_TOKEN          Telegram bot token
+  TELEGRAM_CHAT_ID            Telegram chat ID
+  TELEGRAM_TOPIC_FORMICA      Telegram topic ID for Formica notifications
+  FORMICA_AGENT_DEFINITION_ID Neotoma entity ID for Formica's agent_definition
+  FORMICA_DRY_RUN             Set to "1" to log events without dispatching agents
+  ATELES_REPO_PATH            Local path to ateles clone (default: ~/repos/ateles)
+  NEOTOMA_REPO_PATH           Local path to neotoma clone (default: ~/repos/neotoma)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import sys
+from pathlib import Path
+
+# ── Path bootstrap ────────────────────────────────────────────────────────────
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from lib.daemon_runtime import (  # noqa: E402
+    AAuthSigner,
+    AgentLoader,
+    NeotomaEvent,
+    SSEClient,
+)
+from lib.notify import Notifier, Priority  # noqa: E402
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+log = logging.getLogger("formica")
+
+# ── Config ────────────────────────────────────────────────────────────────────
+DAEMON_NAME = "formica"
+
+SUBSCRIBE_ENTITY_TYPES = ["issue", "pull_request", "product_feedback"]
+
+# Repo paths (used when spawning T4 agents)
+ATELES_REPO = Path(
+    os.environ.get("ATELES_REPO_PATH", str(Path.home() / "repos" / "ateles"))
+)
+NEOTOMA_REPO = Path(
+    os.environ.get("NEOTOMA_REPO_PATH", str(Path.home() / "repos" / "neotoma"))
+)
+
+DRY_RUN = os.environ.get("FORMICA_DRY_RUN", "0") == "1"
+
+# Skills used for T4 dispatch (via `claude --print`)
+GRYLLUS_SKILL = "gryllus"  # issue worker
+VANELLUS_SKILL = "vanellus"  # PR steward
+
+# Triage label filtering.
+# When set, Formica only dispatches issues/PRs that carry this label.
+# Format: "triage:formica" — matches the label convention triage:<agent>.
+# If empty/unset, Formica dispatches all issues regardless of triage label.
+FORMICA_TRIAGE_LABEL = os.environ.get("FORMICA_TRIAGE_LABEL", "triage:formica")
+
+
+def _has_triage_label(snapshot: dict) -> bool:
+    """
+    Return True if the event's labels include FORMICA_TRIAGE_LABEL.
+
+    If FORMICA_TRIAGE_LABEL is empty, always returns True (no filter).
+    Labels may be a list or a comma-separated string in the snapshot.
+    """
+    if not FORMICA_TRIAGE_LABEL:
+        return True
+
+    raw_labels = snapshot.get("labels", [])
+    if isinstance(raw_labels, str):
+        import json as _json
+
+        try:
+            raw_labels = _json.loads(raw_labels)
+        except (ValueError, TypeError):
+            raw_labels = [lbl.strip() for lbl in raw_labels.split(",") if lbl.strip()]
+
+    labels_lower = {str(lbl).lower() for lbl in raw_labels}
+    return FORMICA_TRIAGE_LABEL.lower() in labels_lower
+
+
+# ── T4 agent dispatch ──────────────────────────────────────────────────────────
+
+
+async def dispatch_gryllus(entity_id: str, snapshot: dict) -> None:
+    """
+    Dispatch Gryllus (issue worker) for a new issue.
+
+    Phase 3: logs intent only — full subprocess dispatch in Phase 5.
+    Phase 5: spawn `claude --print --skill gryllus` with issue context.
+    """
+    title = snapshot.get("title", "(untitled)")
+    repo = snapshot.get("repository", "unknown")
+    log.info(
+        f"[{DAEMON_NAME}] → Gryllus: issue={entity_id} repo={repo!r} title={title[:60]!r}"
+    )
+
+    if DRY_RUN:
+        log.info(f"[{DAEMON_NAME}] DRY RUN — skipping Gryllus dispatch for {entity_id}")
+        return
+
+    # Phase 5: full dispatch via claude --print
+    # cmd = [
+    #     "claude", "--print",
+    #     "--skill", GRYLLUS_SKILL,
+    #     "--input", json.dumps({"entity_id": entity_id, "snapshot": snapshot}),
+    # ]
+    # await asyncio.to_thread(subprocess.run, cmd, check=False, capture_output=True)
+
+
+async def dispatch_vanellus(entity_id: str, snapshot: dict) -> None:
+    """
+    Dispatch Vanellus (PR steward) for a new PR.
+
+    Phase 3: logs intent only — full subprocess dispatch in Phase 5.
+    """
+    title = snapshot.get("title", "(untitled)")
+    log.info(f"[{DAEMON_NAME}] → Vanellus: pr={entity_id} title={title[:60]!r}")
+
+    if DRY_RUN:
+        log.info(
+            f"[{DAEMON_NAME}] DRY RUN — skipping Vanellus dispatch for {entity_id}"
+        )
+        return
+
+
+# ── Event handler ─────────────────────────────────────────────────────────────
+
+
+async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
+    """
+    Handle a Neotoma SSE event.
+
+    Phase 3:
+      - issue.created  → dispatch Gryllus (dry-run in Phase 3)
+      - pull_request.created → dispatch Vanellus (dry-run in Phase 3)
+      - product_feedback.created → log (Sturnus handles this in Phase 4)
+
+    Phase 5: full subprocess dispatch with operator Telegram approval loop.
+    """
+    entity_type = event.entity_type
+    entity_id = event.entity_id
+    action = event.action
+    snapshot = event.snapshot or {}
+
+    log.info(f"[{DAEMON_NAME}] Event: {entity_type}/{entity_id} action={action}")
+
+    if entity_type == "issue" and action == "created":
+        title = snapshot.get("title", "(untitled)")
+        audience = snapshot.get("audience", "human")
+        priority_level = snapshot.get("priority", "medium")
+
+        if not _has_triage_label(snapshot):
+            log.debug(
+                f"[{DAEMON_NAME}] Issue {entity_id} skipped — "
+                f"missing label {FORMICA_TRIAGE_LABEL!r}"
+            )
+            return
+
+        notifier.send(
+            f"Issue [{audience}/{priority_level}]: {title[:80]}\n  {entity_id}",
+            priority=Priority.INFO,
+            handler=DAEMON_NAME,
+        )
+        await dispatch_gryllus(entity_id, snapshot)
+
+    elif entity_type == "pull_request" and action == "created":
+        title = snapshot.get("title", "(untitled)")
+
+        if not _has_triage_label(snapshot):
+            log.debug(
+                f"[{DAEMON_NAME}] PR {entity_id} skipped — "
+                f"missing label {FORMICA_TRIAGE_LABEL!r}"
+            )
+            return
+
+        notifier.send(
+            f"PR: {title[:80]}\n  {entity_id}",
+            priority=Priority.INFO,
+            handler=DAEMON_NAME,
+        )
+        await dispatch_vanellus(entity_id, snapshot)
+
+    elif entity_type == "product_feedback" and action == "created":
+        log.info(
+            f"[{DAEMON_NAME}] product_feedback {entity_id} received — "
+            "Sturnus will handle this in Phase 4"
+        )
+
+    elif entity_type == "issue" and action == "updated":
+        # Log updates; Phase 5 will check if operator responded to open PRs
+        log.debug(f"[{DAEMON_NAME}] Issue updated: {entity_id}")
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+
+async def main() -> None:
+    log.info(f"[{DAEMON_NAME}] Starting up (Python migration — Phase 3)...")
+    log.info(f"[{DAEMON_NAME}] ateles_repo={ATELES_REPO} neotoma_repo={NEOTOMA_REPO}")
+    log.info(f"[{DAEMON_NAME}] dry_run={DRY_RUN}")
+
+    # 1. Load agent_definition from Neotoma
+    agent_def = AgentLoader(DAEMON_NAME).load()
+    log.info(
+        f"[{DAEMON_NAME}] agent_definition: status={agent_def.status} "
+        f"grant={agent_def.agent_grant} sub={agent_def.aauth_sub}"
+    )
+
+    # 2. Load AAuth signer
+    signer = AAuthSigner.from_key_file(DAEMON_NAME)
+    if signer.is_stub:
+        log.warning(
+            f"[{DAEMON_NAME}] AAuth keypair not minted yet — "
+            "observations attributed to operator token"
+        )
+
+    # 3. Load notification rubric
+    notifier = Notifier.from_neotoma()
+    notifier.send(
+        f"{DAEMON_NAME} started (Python Phase 3, dry_run={DRY_RUN})",
+        priority=Priority.INFO,
+        handler=DAEMON_NAME,
+    )
+
+    # 4. Subscribe to SSE events
+    sse = SSEClient(
+        entity_types=SUBSCRIBE_ENTITY_TYPES,
+        handler_name=DAEMON_NAME,
+    )
+
+    async def dispatch(event: NeotomaEvent) -> None:
+        await handle_event(event, notifier)
+
+    log.info(f"[{DAEMON_NAME}] Subscribing to SSE: {SUBSCRIBE_ENTITY_TYPES}")
+    await sse.stream(dispatch)
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        log.info(f"[{DAEMON_NAME}] Stopped by operator.")

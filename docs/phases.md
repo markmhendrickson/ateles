@@ -66,7 +66,7 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 - [x] `agent_definition_override` entity type: registered schema in Neotoma (schema ID `308d67b1`); enforcement via PR #398
 - [ ] Loxia evaluation: GHA + Claude API first (~30 lines); promote to named T3 only if Neotoma attribution of actions matters
 - [ ] Temporal evaluation: adopt only if a daemon crash causes lost in-flight state that demonstrably hurts operations; Inngest as fallback
-- [ ] Lanius (stale issue sweeper): GHA cron job first; promote to T3 if attribution/Neotoma logging needed
+- [x] Lanius (GitHub workflow coordinator): GHA cron + workflow_definition schema landed; PR review chain + Struthio release trigger pending Phase 6
 - [ ] neotoma-agent: due-date hygiene T4 skill — fires on `task` entity creation to add due dates and domain tags
 
 ---

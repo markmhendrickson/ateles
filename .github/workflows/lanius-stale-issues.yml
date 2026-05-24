@@ -1,0 +1,44 @@
+name: Lanius — Stale Issue Sweep
+
+on:
+  schedule:
+    # Weekly: Monday 09:00 UTC
+    - cron: 0 9 * * 1
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Dry run (print without modifying)
+        required: false
+        default: false
+        type: choice
+        options:
+          - false
+          - true
+      stale_days:
+        description: Days without update before an issue is stale
+        required: false
+        default: 30
+
+jobs:
+  sweep:
+    name: Sweep stale Neotoma issues
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install httpx
+
+      - name: Run Lanius stale-issue sweep
+        env:
+          NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}
+          NEOTOMA_BASE_URL: ${{ vars.NEOTOMA_BASE_URL || 'https://neotoma.markmhendrickson.com' }}
+          LANIUS_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          LANIUS_STALE_DAYS: ${{ github.event.inputs.stale_days || '30' }}
+        run: python execution/scripts/lanius_sweep.py
