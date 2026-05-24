@@ -136,23 +136,48 @@ def _gate_satisfied_by_comment(gate: Gate, comments: list[dict]) -> str | None:
     Inspect comments for one that satisfies this gate. Returns the comment
     URL/id if satisfied, else None.
 
-    Convention: agents post comments starting with "[<agent>] <artifact_type>:".
-    This is enforced by each agent's SKILL.md and re-checked here.
+    Dual recognition (preferred → fallback):
+
+    1. **Canonical header** — comment body starts with `[<agent>] <artifact_type>:`.
+       Encoded in each agent's prompt_markdown per ateles#5. Strong signal
+       because it includes the expected artifact type.
+
+    2. **Author-only match** — comment author matches the agent's name (e.g.
+       comment authored by `gryllus-bot`, `ateles-agent`, or any string
+       containing the agent's name). Weaker signal — confirms the agent
+       commented, but not what artifact was produced.
+
+    The fallback lets the orchestrator make progress even when agents
+    drift from the canonical convention. To require the strong signal
+    (e.g. for high-stakes gates), set the gate's `require_canonical_header`
+    field to True in the workflow_definition (not yet schema-supported;
+    Phase 6).
     """
     expected_artifact = GATE_SATISFACTION_RULES.get(gate.gate_name)
     if expected_artifact is None:
         return None
 
     agent_name = gate.owner_agent.lower()
+
+    # 1. Canonical header — preferred.
     header_re = re.compile(
         rf"^\s*\[{re.escape(agent_name)}\]\s+{re.escape(expected_artifact)}\s*:",
         re.IGNORECASE | re.MULTILINE,
     )
-
     for c in comments:
         body = str(c.get("body", ""))
         if header_re.search(body):
             return str(c.get("url") or c.get("id") or "")
+
+    # 2. Author-only fallback. Match `gryllus`, `gryllus-agent`, `gryllus-bot`,
+    #    `ateles-gryllus`, etc. Avoid false positives by requiring the agent
+    #    name to be a whole-word match in the author string.
+    author_re = re.compile(rf"\b{re.escape(agent_name)}\b", re.IGNORECASE)
+    for c in comments:
+        author = str(c.get("author", ""))
+        if author_re.search(author):
+            return str(c.get("url") or c.get("id") or "")
+
     return None
 
 
