@@ -267,8 +267,14 @@ async def _spawn_agent(
     body = snapshot.get("body", "")
     repo = snapshot.get("repository") or snapshot.get("repo") or ""
     number = snapshot.get("number") or snapshot.get("issue_number") or ""
+    # NOTE: do NOT prefix the prompt with `/<agent>`. In `claude --print` mode
+    # a leading slash is interpreted as a slash-command and consumed silently,
+    # producing zero-token output. The agent's identity comes from the
+    # `--append-system-prompt` SKILL.md instead. (Tier 1 re-run finding,
+    # 2026-05-25.)
     prompt = (
-        f"/{owner_agent} GitHub issue {repo}#{number}: {title}\n\n{body}\n\n"
+        f"Invoke the {owner_agent} agent per your appended system prompt.\n\n"
+        f"GitHub issue {repo}#{number}: {title}\n\n{body}\n\n"
         f"Gate: {gate_name}. Work entity: {work_entity_id}. "
         f"End your response with the artifact header line as specified in your SKILL.md."
     )
