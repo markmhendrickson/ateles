@@ -16,12 +16,23 @@ AAuth is the agent authentication protocol Ateles uses to give every daemon and 
 
 ## What AAuth does here
 
-AAuth solves one problem: **which agent wrote this observation?** Without it, every Neotoma write comes from the operator-scoped auth, making attribution coarse-grained ("a Claude session did this"). With AAuth, each daemon signs its requests with its own EC keypair, so Neotoma records `agent_sub: anthus@ateles-swarm` (or `cursor@markmhendrickson.com` for IDE sessions) on every observation — provenance down to the agent, not just the operator.
+AAuth solves two intertwined problems:
+
+1. **Attribution — which agent wrote this observation?** Without AAuth, every Neotoma write comes from the operator-scoped auth, making attribution coarse-grained ("a Claude session did this"). With AAuth, each daemon signs its requests with its own EC keypair, so Neotoma records `agent_sub: anthus@ateles-swarm` (or `cursor@markmhendrickson.com` for IDE sessions) on every observation — provenance down to the agent, not just the operator.
+
+2. **Authorization — what is this agent allowed to do, and to which entities?** Each verified `(sub, iss)` is matched against an `agent_grant` entity whose `capabilities` map declares which Neotoma operations the agent can perform. Capabilities can be scoped:
+   - by **operation** (`store_structured`, `create_relationship`, `correct`, `retrieve`, …)
+   - by **entity type** (`store_structured: ["agent_action_observation", "participation_record"]` instead of `*`)
+   - by **field, scope, or external resource** (e.g. `github_harness:write` scoped to specific repos for Gryllus/Vanellus)
+
+   The grant is the per-agent policy boundary. Monedula's grant lets it write `transaction` and `payment_profile` but not `agent_definition`; Gryllus's lets it write `agent_action_observation` but not `business_strategy`; a future read-only auditor agent could have a grant that allows `retrieve: *` and nothing else. Wrong-capability writes fail at admission, before any side effect — the boundary lives in Neotoma, not in agent code.
+
+So AAuth is both **who** (signed identity) and **what they're allowed to touch** (grant-driven capability scope). The two halves are inseparable: signature verification proves who the agent is; grant admission decides whether that agent is allowed to perform this specific operation on this specific entity type. Today only Cursor, Gryllus, and Vanellus have grants populated, and most grants use `*` rather than explicit per-entity-type allowlists — tightening this is in the to-do list below.
 
 Neotoma's AAuth pipeline:
 1. **Signature verification** — checks the RFC 9421 HTTP Message Signature
 2. **Tier resolution** — ES256 software key → `tier=software`; FIDO2-attested key → `tier=hardware`
-3. **Grant admission** — matches the resolved `(sub, iss)` against an `agent_grant` entity; gates `eligible_for_trusted_writes`
+3. **Grant admission** — matches the resolved `(sub, iss)` against an `agent_grant` entity; checks requested operation against `capabilities`; gates `eligible_for_trusted_writes`
 
 ---
 
@@ -54,7 +65,11 @@ Unifying these formats and publishing all public keys to the same JWKS is on the
 | Anthus | `anthus@ateles-swarm` | — | ❌ | ❌ | ❌ |
 | Tyto, Turdus, Apis | `<name>@ateles-swarm` | — | ❌ | ❌ | ❌ |
 | Menura, Piculet, Strix | `<name>@ateles-swarm` | — | ❌ | ❌ | ❌ |
-| YubiKey hardware tier (planned) | `cursor@markmhendrickson.com` | `hw-cursor-yk-1` | not started | not started | covered by existing cursor grant |
+| YubiKey hardware tier — Cursor (planned)     | `cursor@markmhendrickson.com`  | `hw-cursor-yk-1`     | not started | not started | covered by existing cursor grant |
+| YubiKey hardware tier — Operator (planned)   | `mark@markmhendrickson.com`    | `hw-operator-yk-1`   | not started | not started | new grant, full capability set |
+| YubiKey hardware tier — Onychomys (planned)  | `onychomys@ateles-swarm`       | `hw-onychomys-yk-1`  | not started | not started | upgrade existing (TBD) |
+| YubiKey hardware tier — Monedula (planned)   | `monedula@ateles-swarm`        | `hw-monedula-yk-1`   | not started | not started | upgrade existing (TBD) |
+| YubiKey hardware tier — Apus (planned)       | `apus@ateles-swarm`            | `hw-apus-yk-1`       | not started | not started | upgrade existing (TBD) |
 
 ### What "active" means per row
 
@@ -265,9 +280,52 @@ Today `https://markmhendrickson.com/.well-known/jwks.json` serves `sw-cursor-1` 
 
 The split between `.creds/*.jwk` and `ateles-private/keys/*.json` is incidental — both encode the same EC P-256 keypair in different envelopes. Picking one (likely JWK, since that's what the JWKS endpoint serves natively) and updating both signers to consume it would simplify the system and remove the conversion step in (3).
 
-### 5. YubiKey hardware tier (Phase 6)
+### 5. Tighten grants to per-entity-type capabilities
 
-Same identity (`cursor@markmhendrickson.com`), second keypair (`kid: hw-cursor-yk-1`), `cnf.attestation` from a WebAuthn ceremony, `tier=hardware` in Neotoma. Same grant admits it — no grant update needed.
+Today all populated grants use `*` for `store_structured` and `correct` capabilities — meaning any verified agent can write any entity type. The grant schema already supports finer-grained allowlists:
+
+```jsonc
+{
+  "match_sub": "monedula@ateles-swarm",
+  "match_iss": "https://markmhendrickson.com",
+  "capabilities": {
+    "store_structured":   ["transaction", "payment_profile", "daemon_report"],
+    "correct":            ["payment_profile"],
+    "retrieve":           ["transaction", "recurring_expense", "account_balance", "contact"],
+    "create_relationship": ["transaction->contact", "payment_profile->contact"]
+  }
+}
+```
+
+Per-agent allowlists turn the AAuth admission gate into a real policy layer: Monedula physically cannot write an `agent_definition` even if its prompt is hijacked. This is where AAuth shifts from "attribution-only" to "attribution + capability containment."
+
+Mapping work needed:
+- Per agent, list the entity types it legitimately reads (from `context_entity_types` on `agent_definition`)
+- Per agent, list the entity types it legitimately writes (from `operational_entity_types`)
+- Convert `*` grants to allowlists derived from those declarations
+- Add Neotoma-side enforcement test cases that confirm out-of-allowlist writes fail with structured `wrong_capability` errors
+
+### 6. YubiKey hardware tier (Phase 6) — multiple agents
+
+Hardware-attested keys produce `tier=hardware` in Neotoma rather than `tier=software`. Any agent that touches money, mutates global state, or speaks on the operator's behalf in public is a candidate. Same `(sub, iss)` as the software keypair, second `kid`, `cnf.attestation` from a WebAuthn ceremony, no grant update needed (existing grants admit any key under the matched `(sub, iss)` tuple).
+
+Planned hardware-tier agents in priority order:
+
+| Agent     | Why hardware                                                                                       | Suggested kid          |
+| --------- | -------------------------------------------------------------------------------------------------- | ---------------------- |
+| Cursor IDE | Operator's direct authoring surface — corrections, deletions, grants, schema changes               | `hw-cursor-yk-1`       |
+| Operator   | New subject `mark@markmhendrickson.com` — first-party operator writes outside the IDE              | `hw-operator-yk-1`     |
+| Monedula   | Touches money (Wise transfers, BTC sends) — hardware attestation raises bar for compromise         | `hw-monedula-yk-1`     |
+| Onychomys  | Speaks for the operator on Telegram and routes pages — public-facing identity surface              | `hw-onychomys-yk-1`    |
+| Apus       | Mirror pipeline that rewrites disk artifacts from Neotoma — chokepoint for behaviour propagation   | `hw-apus-yk-1`         |
+
+For T4 invocable agents (Gryllus, Vanellus, Pavo, Corvus, etc.), hardware tier is less urgent — they're scoped by `agent_grant` to specific repos/operations, and they don't run as resident services that could be compromised long-term. Software tier remains appropriate for them.
+
+Hardware-tier rollout per agent:
+1. Mint a second keypair on a YubiKey via WebAuthn ceremony for the same `(sub, iss)`
+2. Publish the FIDO2 attestation alongside the public key in JWKS
+3. Verify Neotoma admits with `tier=hardware`
+4. Optionally: add `tier_required: hardware` to high-trust capabilities in `agent_grant` (e.g. Monedula's `store_structured: ["transaction"]` could require hardware while `retrieve: *` accepts software)
 
 ---
 
