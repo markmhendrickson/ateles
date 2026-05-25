@@ -153,21 +153,21 @@ ateles/
 - `neotoma` CLI — Neotoma entity operations
 - `launchd` — macOS scheduling for T3 daemons
 
-## State guarantees
+## State guarantees 🔒
 
 The swarm makes specific commitments about what is verifiable.
 
-| Property                                   | Without swarm infra | Ad-hoc agents      | Ateles                       |
-| ------------------------------------------ | ------------------- | ------------------ | ---------------------------- |
-| Agent identity verifiable                  | ✗                   | ⚠ partial (PAT only) | ✓ AAuth-signed JWT            |
-| Trust boundary visible (sub ≠ pat)         | ✗                   | ✗                  | ✓ both recorded               |
-| Capability scope enforced                  | ✗                   | ⚠ via PAT scopes only | ✓ agent_grant pre-check       |
-| Per-action audit trail                     | ✗                   | ⚠ git commits only  | ✓ agent_action_observation    |
-| Workflow phase ordering                    | ⚠ manual            | ⚠ manual           | ✓ workflow_definition + Anthus |
-| Gate skip conditions                       | ✗                   | ✗                  | ✓ declared per-workflow       |
-| Replayable orchestration                   | ✗                   | ✗                  | ✓ participation_record log    |
-| Agent definitions are versioned            | ✗                   | ⚠ git history       | ✓ Neotoma observation history |
-| Operator paged only on real escalations    | ✗                   | ⚠ notification spam | ✓ priority_rubric filter      |
+| Property                                        | Without swarm infra   | Ad-hoc agents           | Ateles                          |
+| ----------------------------------------------- | --------------------- | ----------------------- | ------------------------------- |
+| 🪪 Agent identity verifiable                    | ✗                     | ⚠ partial (PAT only)    | ✓ AAuth-signed JWT               |
+| 🔍 Trust boundary visible (sub ≠ pat)           | ✗                     | ✗                       | ✓ both recorded                  |
+| 🚧 Capability scope enforced                    | ✗                     | ⚠ via PAT scopes only   | ✓ agent_grant pre-check          |
+| 📋 Per-action audit trail                       | ✗                     | ⚠ git commits only      | ✓ agent_action_observation       |
+| 🔄 Workflow phase ordering                      | ⚠ manual              | ⚠ manual                | ✓ workflow_definition + Anthus   |
+| ⏭️ Gate skip conditions                         | ✗                     | ✗                       | ✓ declared per-workflow          |
+| ⏪ Replayable orchestration                     | ✗                     | ✗                       | ✓ participation_record log       |
+| 📜 Agent definitions are versioned              | ✗                     | ⚠ git history           | ✓ Neotoma observation history    |
+| 🔔 Operator paged only on real escalations      | ✗                     | ⚠ notification spam     | ✓ priority_rubric filter         |
 
 ## Interfaces
 
