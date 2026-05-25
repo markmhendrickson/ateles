@@ -8,17 +8,23 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/env</string>
-        <string>python3</string>
+        <string>/Users/markmhendrickson/repos/ateles/.venv/bin/python3</string>
         <string>/Users/markmhendrickson/repos/ateles/execution/daemons/anthus/anthus.py</string>
     </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/markmhendrickson/repos/ateles/execution/daemons/anthus</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>/Users/markmhendrickson/.nvm/versions/node/v22.15.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>NEOTOMA_BASE_URL</key>
         <string>https://neotoma.markmhendrickson.com</string>
+        <key>NEOTOMA_BEARER_TOKEN</key>
+        <string>__NEOTOMA_BEARER_TOKEN__</string>
+        <key>NEOTOMA_SSE_SUBSCRIPTION_ID_ANTHUS</key>
+        <string>__NEOTOMA_SSE_SUBSCRIPTION_ID_ANTHUS__</string>
     </dict>
 
     <key>KeepAlive</key>
