@@ -31,7 +31,7 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 
 **Goal:** Neotoma has `agent_definition` entity type; first AAuth identities minted; lib/notify/ and lib/daemon_runtime/ scaffolded.
 
-- [x] Neotoma: register `agent_definition` entity type with `prompt_markdown`, `tool_allowlist`, `agent_grant`, `override_policy` fields
+- [x] Neotoma: register `agent_definition` entity type with `prompt_markdown`, `allowed_tools`, `agent_grant`, `override_policy` fields
 - [x] Neotoma PR: `src/services/override_validation.ts` — enforce `override_policy` at write time (PR #398)
 - [x] Create `agent_definition` entities for Onychomys, Monedula, neotoma-agent, Formica, Menura in Neotoma
 - [x] Mint AAuth keypairs for Onychomys, Monedula, Formica, neotoma-agent (stored in ateles-private/keys/)
@@ -46,13 +46,16 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 
 **Goal:** Neotoma → git mirror pipeline live; Onychomys config migrated to Neotoma.
 
-- [ ] Neotoma: configure four mirror profiles (ateles-public-agents, ateles-public-skills, ateles-architecture-docs, ateles-private-agents)
-- [x] Apus daemon: HTTPS webhook receiver (~200 LOC) + Cloudflare Tunnel at `apus.markmhendrickson.com`
-- [ ] Apus: handle all four profiles; commit via `ateles-agent` GitHub identity; log delivery status to Neotoma
-- [ ] OpenClaw PR: `workspace-neotoma.ts` (~300 LOC) with file→API fallback chain
+- [x] Apus daemon: HTTPS webhook receiver (~200 LOC)
+- [x] Neotoma webhook subscription registered (subscription ID `7ce524e4`, entity `ent_6ba1914462908f682f206b56`)
+- [x] Apus env vars wired into installed plist (`~/Library/LaunchAgents/com.ateles.apus.plist`)
 - [x] Migrate Onychomys SOUL.md → `prompt_markdown` field in `agent_definition` entity
-- [ ] Anthus daemon skeleton: metrics ingestion
-- [ ] Tyto daemon skeleton: email triage
+- [x] Neotoma CLI mirror profile configured for SKILL.md generation
+- [ ] Cloudflare Tunnel at `apus.markmhendrickson.com` — broken, tracked in [ateles#17](https://github.com/markmhendrickson/ateles/issues/17)
+- [ ] Apus: handle all four mirror profiles; commit via `ateles-agent` GitHub identity; log delivery status to Neotoma
+- [ ] OpenClaw PR: `workspace-neotoma.ts` (~300 LOC) with file→API fallback chain
+- [ ] Anthus daemon: swarm coordinator — SSE-driven workflow dispatch (full implementation done; Tier 2–5 smoke test validation in flight, see [swarm_smoke_test_plan.md](swarm_smoke_test_plan.md))
+- [ ] Tyto daemon: screenshot/image watcher — skeleton exists; production wiring pending
 
 ---
 
@@ -60,13 +63,13 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 
 **Goal:** Menura live at markmhendrickson.com/agent/; all Phase 1 daemons using lib/daemon_runtime/.
 
-- [ ] Menura: separate OpenClaw instance, public-scoped AAuth identity, live at markmhendrickson.com/agent/
-- [ ] Migrate Formica from JS to Python using lib/daemon_runtime/
-- [ ] All daemons using lib/notify/ for notifications
+- [x] Formica: Python rewrite using lib/daemon_runtime/ (core rewrite done — [ateles#1](https://github.com/markmhendrickson/ateles/issues/1) tracks final production wire-up)
 - [x] `agent_definition_override` entity type: registered schema in Neotoma (schema ID `308d67b1`); enforcement via PR #398
+- [x] Lanius (GitHub workflow coordinator): GHA cron + workflow_definition schema landed
+- [x] All daemons using lib/notify/ for notifications
+- [ ] Menura: separate OpenClaw instance, public-scoped AAuth identity, live at markmhendrickson.com/agent/
 - [ ] Loxia evaluation: GHA + Claude API first (~30 lines); promote to named T3 only if Neotoma attribution of actions matters
 - [ ] Temporal evaluation: adopt only if a daemon crash causes lost in-flight state that demonstrably hurts operations; Inngest as fallback
-- [x] Lanius (GitHub workflow coordinator): GHA cron + workflow_definition schema landed; PR review chain + Struthio release trigger pending Phase 6
 - [ ] neotoma-agent: due-date hygiene T4 skill — fires on `task` entity creation to add due dates and domain tags
 
 ---
@@ -81,26 +84,34 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 
 ---
 
-## Phase 5 — Formica Python + full swarm operational
+## Phase 5 — Full agent_definition coverage + AAuth activation
 
-**Goal:** All daemons in Python; full swarm running with Neotoma-canonical config.
+**Goal:** All daemons have populated agent_definition entities; AAuth fully active for all running daemons.
 
-- [ ] Formica: full Python rewrite using lib/daemon_runtime/ (lib/telegram/ JS stays for Telegram delivery)
-- [ ] All agent_definition entities populated for active daemons
-- [ ] Public "last 30 agent actions" feed via Menura (proof artifact for Neotoma Tier 1 ICPs)
+- [x] All 12 product-panel agent_definition entities populated with `prompt_markdown`, `context_entity_types`, `operational_entity_types`, `allowed_tools`
+- [x] `participation_record`, `agent_action_observation`, `agent_policy` schemas registered ([ateles#16](https://github.com/markmhendrickson/ateles/issues/16) — implementation ongoing)
+- [x] Strategy hierarchy schemas registered (`business_strategy`, `domain_strategy`, `agent_strategy`, `strategy_drift_signal`)
+- [x] agent_grant entities provisioned for Gryllus and Vanellus
+- [ ] agent_grant entities for all remaining daemons: Apus, Formica, Monedula, neotoma-agent, Onychomys, Anthus
+- [ ] All daemon public keys published to JWKS endpoint (today only `sw-cursor-1` published)
+- [ ] Per-entity-type grant tightening — convert `*` grants to allowlists derived from `context_entity_types` + `operational_entity_types` ([ateles#26](https://github.com/markmhendrickson/ateles/issues/26))
 - [ ] Quarterly AAuth keypair rotation via neotoma-agent
+- [ ] Public "last 30 agent actions" feed via Menura (proof artifact for Neotoma Tier 1 ICPs)
 
 ---
 
----
+## Phase 6 — Swarm smoke test + harness integrity
 
-## Phase 6 — Swarm coordinator + integrity monitor
+**Goal:** All five smoke test tiers pass; github_harness MCP operational; Anthus fully autonomous.
 
-**Goal:** Anthus and Otus operational; webhook secret rotation automated.
-
-- [ ] Anthus daemon: swarm coordinator — global view of work-in-flight, surfaces conflicts to Onychomys
-- [ ] Otus daemon: integrity monitor — weekly audit, due-date hygiene, system-issue self-healing, override conflict diff
-- [ ] Implement webhook secret quarterly rotation via Otus with 7-day grace period
+- [x] Operator-driven Tier 1 smoke test: single-agent gate satisfaction (12 agents, artifact-header convention)
+- [ ] Tier 2: phase ordering + parallelism on synthetic issues
+- [ ] Tier 3: multi-repo identity correctness (AAuth → PAT mapping) — [ateles#2](https://github.com/markmhendrickson/ateles/issues/2) (github_harness MCP server)
+- [ ] Tier 4: real product work end-to-end
+- [ ] Tier 5: fully autonomous Anthus dispatch
+- [ ] Input attribution: retrieval_event schema + inputs_consulted on agent_action_observation + participation_record version pinning — [ateles#19](https://github.com/markmhendrickson/ateles/issues/19) / [#20–#25](https://github.com/markmhendrickson/ateles/issues/20)
+- [ ] Tool-level authorization: extend agent_grant to MCP tool calls + parameter constraints — [ateles#26](https://github.com/markmhendrickson/ateles/issues/26)
+- [ ] Webhook signing-key quarterly rotation with 7-day grace period (blocked on Apus tunnel — [ateles#17](https://github.com/markmhendrickson/ateles/issues/17))
 
 ---
 
@@ -140,13 +151,16 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 ## Pending setup (not phase-gated)
 
 - **`ateles-agent` GitHub machine account**: create account; generate fine-grained PAT (Contents: write on `ateles` repo); store in `ateles-private/.env` as `ATELES_AGENT_PAT`; wire into Apus installed plist
-- **`neotoma-agent` GitHub identity**: `castor-agent` account (Pull Shark x2) remains as-is; create new `neotoma-agent` GitHub account for future automation
+- **`neotoma-agent` GitHub identity**: `castor-agent` account (Pull Shark x2) remains as-is; create new `neotoma-agent` GitHub account for future automation (tracked in [ateles#15](https://github.com/markmhendrickson/ateles/issues/15))
+- **Agent strategy hierarchy + drift signals**: [ateles#14](https://github.com/markmhendrickson/ateles/issues/14) — schemas registered, per-agent entities pending
+- **Installable package**: [ateles#18](https://github.com/markmhendrickson/ateles/issues/18) — ten blockers to package-based adoption; depends on architecture stabilising through Phase 6
 
 ## Completed setup (done)
 
-- ~~**Apus env wiring**~~: all env vars wired into installed plist (`~/Library/LaunchAgents/com.ateles.apus.plist`) including `NEOTOMA_BEARER_TOKEN`
+- ~~**Apus env wiring**~~: all env vars wired into installed plist (`~/Library/LaunchAgents/com.ateles.apus.plist`) including Neotoma auth env var
 - ~~**Neotoma webhook subscription**~~: Apus endpoint (`https://apus.markmhendrickson.com/webhook`) registered as Neotoma webhook subscriber (subscription ID `7ce524e4`, entity `ent_6ba1914462908f682f206b56`)
 
 ## Deferred
 
 - **Temporal orchestration**: evaluate at Phase 3 when 5+ daemons active and in-flight state loss has occurred; Inngest as fallback
+- **YubiKey hardware tier**: planned for Cursor, operator, Monedula, Onychomys, Apus — see `docs/aauth.md`

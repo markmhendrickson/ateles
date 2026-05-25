@@ -116,7 +116,7 @@ To run any daemon locally requires Neotoma running (see [neotoma installation](h
 
 ### Open architecture issues to track
 
-Two umbrella issues shape what adoption looks like next:
+Three umbrella issues shape what adoption looks like next:
 
 - **[ateles#18 — Make Ateles installable](https://github.com/markmhendrickson/ateles/issues/18)** — ten blockers to package-based adoption (identity provisioning UX, operator-specific agent definitions, config schema, keypair format unification, launchd plist generation, dependency manifest, `ateles-private/` boundary, versioning, multi-operator path). Adopt-by-forking works today; install-by-package needs this work.
 - **[ateles#19 — Input attribution](https://github.com/markmhendrickson/ateles/issues/19)** — record which Neotoma entities each agent read before deciding. Today the swarm records who acted and what they produced, but not the evidence the decision was built on. Closing this loop enables reverse impact analysis (which downstream decisions does a corrected strategy invalidate?) and precedent graphs. Broken into execution sub-issues [#20–#25](https://github.com/markmhendrickson/ateles/issues/20).
