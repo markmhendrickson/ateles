@@ -119,7 +119,8 @@ To run any daemon locally requires Neotoma running (see [neotoma installation](h
 Two umbrella issues shape what adoption looks like next:
 
 - **[ateles#18 — Make Ateles installable](https://github.com/markmhendrickson/ateles/issues/18)** — ten blockers to package-based adoption (identity provisioning UX, operator-specific agent definitions, config schema, keypair format unification, launchd plist generation, dependency manifest, `ateles-private/` boundary, versioning, multi-operator path). Adopt-by-forking works today; install-by-package needs this work.
-- **[ateles#19 — Input attribution](https://github.com/markmhendrickson/ateles/issues/19)** — record which Neotoma entities each agent read before deciding. Today the swarm records who acted and what they produced, but not the evidence the decision was built on. Closing this loop enables reverse impact analysis (which downstream decisions does a corrected strategy invalidate?) and precedent graphs.
+- **[ateles#19 — Input attribution](https://github.com/markmhendrickson/ateles/issues/19)** — record which Neotoma entities each agent read before deciding. Today the swarm records who acted and what they produced, but not the evidence the decision was built on. Closing this loop enables reverse impact analysis (which downstream decisions does a corrected strategy invalidate?) and precedent graphs. Broken into execution sub-issues [#20–#25](https://github.com/markmhendrickson/ateles/issues/20).
+- **[ateles#26 — Tool-level authorization](https://github.com/markmhendrickson/ateles/issues/26)** — extend `agent_grant` to declare which MCP tools each agent can call, against which resources, with which parameter constraints (e.g. Monedula can call `btc_send_transfer` up to 500k sats; Pavo cannot call `btc-wallet` at all). `github_harness` already implements this pattern; #26 generalizes it across all MCP servers via a proxy enforcement layer.
 
 ## Example
 
@@ -243,7 +244,7 @@ Every swarm-defining record is a typed Neotoma entity. The canonical `entity_typ
 | `entity_type`              | What it stores                                                                                | Key fields                                            |
 | -------------------------- | --------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
 | `agent_definition`         | Identity, prompt, triggers, context types, operational types, allowed tools                   | `name`, `triggers`, `prompt_markdown`, `allowed_tools`, `context_entity_types`, `operational_entity_types` |
-| `agent_grant`              | Capability scope — which tools an agent can invoke against which repos                        | `agent_sub`, `op`, `repos`                            |
+| `agent_grant`              | Capability scope — Neotoma entity-type allowlist + MCP tool allowlist + external resource scope | `agent_sub`, `op`, `repos`, `capabilities` (entity ops + tools — [ateles#26](https://github.com/markmhendrickson/ateles/issues/26)) |
 | `agent_action_observation` | One row per harness tool call — AAuth sub, PAT attribution, tool, owner/repo, result          | `agent_sub`, `pat_attribution`, `tool`, `owner`, `repo`, `result` |
 | `agent_policy`             | Operating rules (mandatory/recommended/prohibited) with scope                                 | `scope`, `rule_kind`, `body`                          |
 | `workflow_definition`      | Phases, gates, owner agents, skip conditions, preconditions                                   | `name`, `gates[]`, `gate_name`, `owner_agent`, `skip_if`, `preconditions` |

@@ -20,14 +20,15 @@ AAuth solves two intertwined problems:
 
 1. **Attribution — which agent wrote this observation?** Without AAuth, every Neotoma write comes from the operator-scoped auth, making attribution coarse-grained ("a Claude session did this"). With AAuth, each daemon signs its requests with its own EC keypair, so Neotoma records `agent_sub: anthus@ateles-swarm` (or `cursor@markmhendrickson.com` for IDE sessions) on every observation — provenance down to the agent, not just the operator.
 
-2. **Authorization — what is this agent allowed to do, and to which entities?** Each verified `(sub, iss)` is matched against an `agent_grant` entity whose `capabilities` map declares which Neotoma operations the agent can perform. Capabilities can be scoped:
+2. **Authorization — what is this agent allowed to do, and to which entities and tools?** Each verified `(sub, iss)` is matched against an `agent_grant` entity whose `capabilities` map declares which Neotoma operations the agent can perform. Capabilities can be scoped:
    - by **operation** (`store_structured`, `create_relationship`, `correct`, `retrieve`, …)
    - by **entity type** (`store_structured: ["agent_action_observation", "participation_record"]` instead of `*`)
    - by **field, scope, or external resource** (e.g. `github_harness:write` scoped to specific repos for Gryllus/Vanellus)
+   - by **MCP tool and parameter** (planned — `btc-wallet:btc_send_transfer` with `max_amount_sats` constraint; see [ateles#26](https://github.com/markmhendrickson/ateles/issues/26))
 
    The grant is the per-agent policy boundary. Monedula's grant lets it write `transaction` and `payment_profile` but not `agent_definition`; Gryllus's lets it write `agent_action_observation` but not `business_strategy`; a future read-only auditor agent could have a grant that allows `retrieve: *` and nothing else. Wrong-capability writes fail at admission, before any side effect — the boundary lives in Neotoma, not in agent code.
 
-So AAuth is both **who** (signed identity) and **what they're allowed to touch** (grant-driven capability scope). The two halves are inseparable: signature verification proves who the agent is; grant admission decides whether that agent is allowed to perform this specific operation on this specific entity type. Today only Cursor, Gryllus, and Vanellus have grants populated, and most grants use `*` rather than explicit per-entity-type allowlists — tightening this is in the to-do list below.
+So AAuth is both **who** (signed identity) and **what they're allowed to touch** (grant-driven capability scope). The two halves are inseparable: signature verification proves who the agent is; grant admission decides whether that agent is allowed to perform this specific operation on this specific entity type or call this specific tool. Today only Cursor, Gryllus, and Vanellus have grants populated, and most grants use `*` rather than explicit per-entity-type allowlists — tightening this is in the to-do list below.
 
 Neotoma's AAuth pipeline:
 1. **Signature verification** — checks the RFC 9421 HTTP Message Signature
@@ -280,7 +281,7 @@ Today `https://markmhendrickson.com/.well-known/jwks.json` serves `sw-cursor-1` 
 
 The split between `.creds/*.jwk` and `ateles-private/keys/*.json` is incidental — both encode the same EC P-256 keypair in different envelopes. Picking one (likely JWK, since that's what the JWKS endpoint serves natively) and updating both signers to consume it would simplify the system and remove the conversion step in (3).
 
-### 5. Tighten grants to per-entity-type capabilities
+### 5. Tighten grants to per-entity-type capabilities (and per-tool — see [ateles#26](https://github.com/markmhendrickson/ateles/issues/26))
 
 Today all populated grants use `*` for `store_structured` and `correct` capabilities — meaning any verified agent can write any entity type. The grant schema already supports finer-grained allowlists:
 
@@ -304,6 +305,8 @@ Mapping work needed:
 - Per agent, list the entity types it legitimately writes (from `operational_entity_types`)
 - Convert `*` grants to allowlists derived from those declarations
 - Add Neotoma-side enforcement test cases that confirm out-of-allowlist writes fail with structured `wrong_capability` errors
+
+The same grant entity will also carry a `tools` capability map covering MCP tool calls once [ateles#26](https://github.com/markmhendrickson/ateles/issues/26) lands — same allowlist principle, extended to `"parquet:read_parquet": { "tables": [...] }` style entries.
 
 ### 6. YubiKey hardware tier (Phase 6) — multiple agents
 

@@ -155,8 +155,9 @@ Dedicated to swarm smoke tests. Isolated from `harness-sandbox` (graveyard of cl
 
 ### Tier 3 prerequisites
 
-- AAuth signed JWTs in `claude --print --skill <gryllus|vanellus>` invocations
+- AAuth signed JWTs in `claude --print --append-system-prompt <gryllus|vanellus>` invocations
 - Under-scoped grant test path documented
+- Note: per-entity-type grant tightening and MCP tool-level authorization tracked in [ateles#26](https://github.com/markmhendrickson/ateles/issues/26) — not a Tier 3 gate but informs the under-scoped test path design
 
 ### Tier 4 prerequisites
 
