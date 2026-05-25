@@ -64,14 +64,22 @@ The current Ateles T1 for Onychomys is OpenClaw. For a single-channel operator s
 ### agent_definition entities
 Each agent's configuration is a Neotoma `agent_definition` entity:
 - `prompt_markdown` — the system prompt
-- `tool_allowlist` — permitted tools
-- `agent_grant` — capability tier (operator / service / public_read)
+- `allowed_tools` — advisory list of permitted tools (enforcement via `agent_grant` capabilities — see [ateles#26](https://github.com/markmhendrickson/ateles/issues/26))
+- `context_entity_types` — entity types the agent reads for context
+- `operational_entity_types` — entity types the agent writes
 - `override_policy` — per-field rules for `agent_definition_override` entities
 
 Daemons load their own `agent_definition` at spawn time via the Neotoma API. No config files.
 
-### AAuth identity
-Each daemon has a per-role AAuth keypair (`sub = <name>@ateles-swarm`). All Neotoma observations carry agent attribution. Capabilities are enforced at the data layer via `AgentGrant` — Menura cannot write private entities regardless of what code it runs.
+### AAuth identity and capability grants
+Each daemon has a per-role AAuth keypair (`sub = <name>@ateles-swarm`). All Neotoma observations carry agent attribution. Capabilities are enforced at the data layer via `agent_grant` entities — Menura cannot write private entities regardless of what code it runs.
+
+Each `agent_grant` entity declares:
+- Which **Neotoma operations** the agent can perform (`store_structured`, `correct`, `retrieve`, etc.), scoped to specific entity types rather than `*` (tightening tracked in [ateles#26](https://github.com/markmhendrickson/ateles/issues/26))
+- Which **MCP tools** the agent can call, with per-parameter constraints (planned — [ateles#26](https://github.com/markmhendrickson/ateles/issues/26))
+- Which **external resources** the agent can touch (e.g. `github_harness:write` scoped to specific repos)
+
+Input attribution — recording which entities an agent *read* before deciding — is tracked in [ateles#19](https://github.com/markmhendrickson/ateles/issues/19) and sub-issues [#20–#25](https://github.com/markmhendrickson/ateles/issues/20).
 
 ### Webhook + mirror system
 Neotoma sends HMAC-signed webhooks to Apus (`apus.markmhendrickson.com`) on entity changes. Apus triggers mirror profile rebuilds and commits to the public `ateles` repo via `ateles-agent` GitHub identity.
