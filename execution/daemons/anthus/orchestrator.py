@@ -51,6 +51,15 @@ class Gate:
     parallel_group: str | None
     join_gate: str | None
     required: bool
+    precondition: dict[str, Any] | None = None
+    """
+    Optional precondition for the gate to be considered dispatchable.
+    Shape: `{"entity_type": "release_criteria", "scope_field": "project"}`
+    means "there must exist an entity of type release_criteria whose
+    `<scope_field>` value matches the project of the work entity."
+    If the precondition is unmet, the gate is auto-skipped (analogous to
+    a fast_path skip). Honored by `compute_ready_gates`.
+    """
 
 
 @dataclass
@@ -71,16 +80,72 @@ class WorkflowDefinition:
             phases.setdefault(g.phase, []).append(g)
         return phases
 
-    def fast_path_skips(self, labels: set[str]) -> set[str]:
-        """Return gate_names skipped by any fast_path matching the labels."""
+    def fast_path_skips(
+        self,
+        labels: set[str],
+        work_entity: dict[str, Any] | None = None,
+    ) -> set[str]:
+        """
+        Return gate_names skipped by any fast_path whose condition matches.
+
+        Supported condition syntaxes:
+          - `label:<name>` — true if `<name>` is in `labels`
+          - `impact_score<N` / `<=` / `>=` / `>` / `==` — compares the work
+            entity's `impact_score` field (0 if absent) against N
+          - `audience:<value>` — true if work_entity.audience == value
+            (e.g. "audience:internal" skips publicity gates)
+        """
+        if work_entity is None:
+            work_entity = {}
         skips: set[str] = set()
+        impact_score = _as_number(work_entity.get("impact_score"), default=0)
+        audience = str(work_entity.get("audience", "")).lower()
+
         for fp in self.fast_paths:
-            cond = str(fp.get("condition", ""))
+            cond = str(fp.get("condition", "")).strip()
+            matched = False
             if cond.startswith("label:"):
-                label = cond.split(":", 1)[1]
-                if label in labels:
-                    skips.update(fp.get("skip_gates", []))
+                matched = cond.split(":", 1)[1] in labels
+            elif cond.startswith("audience:"):
+                matched = audience == cond.split(":", 1)[1].lower()
+            elif cond.startswith("impact_score"):
+                matched = _eval_numeric_condition(cond, impact_score)
+            if matched:
+                skips.update(fp.get("skip_gates", []))
         return skips
+
+
+def _as_number(value: Any, default: float = 0) -> float:
+    """Coerce a value to float for comparison; default if uncoerceable."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+_NUMERIC_RE = re.compile(
+    r"^(?P<field>[a-z_]+)\s*(?P<op><=|>=|==|<|>)\s*(?P<value>-?\d+(?:\.\d+)?)$"
+)
+
+
+def _eval_numeric_condition(cond: str, value: float) -> bool:
+    """Evaluate a numeric fast_path condition like `impact_score < 5`."""
+    m = _NUMERIC_RE.match(cond.replace(" ", ""))
+    if not m:
+        return False
+    rhs = float(m.group("value"))
+    op = m.group("op")
+    if op == "<":
+        return value < rhs
+    if op == "<=":
+        return value <= rhs
+    if op == ">":
+        return value > rhs
+    if op == ">=":
+        return value >= rhs
+    if op == "==":
+        return value == rhs
+    return False
 
 
 @dataclass
@@ -221,6 +286,7 @@ async def fetch_workflow_definitions(project: str) -> list[WorkflowDefinition]:
                 parallel_group=g.get("parallel_group"),
                 join_gate=g.get("join_gate"),
                 required=bool(g.get("required", True)),
+                precondition=g.get("precondition"),
             )
             for g in snap.get("gates", [])
         ]
@@ -236,6 +302,71 @@ async def fetch_workflow_definitions(project: str) -> list[WorkflowDefinition]:
             )
         )
     return out
+
+
+async def resolve_unmet_preconditions(
+    workflow: WorkflowDefinition,
+    project: str,
+) -> set[str]:
+    """
+    For each gate in `workflow` that declares a `precondition`, check whether
+    the precondition is met by querying Neotoma. Returns the set of gate_names
+    whose preconditions are NOT met (those gates will be skipped).
+
+    Precondition shape (see Gate.precondition docstring):
+      {"entity_type": "release_criteria", "scope_field": "project"}
+
+    Meaning: an entity of `entity_type` must exist whose `<scope_field>`
+    equals `project`.
+    """
+    unmet: set[str] = set()
+    bearer = os.environ.get(_BEARER_ENV, "")
+    if not bearer:
+        log.warning(f"{_BEARER_ENV} not set; preconditions cannot be evaluated.")
+        return unmet
+
+    headers = {
+        "Authorization": f"Bearer {bearer}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(headers=headers, timeout=15) as client:
+        for g in workflow.gates:
+            if not g.precondition:
+                continue
+            entity_type = g.precondition.get("entity_type")
+            scope_field = g.precondition.get("scope_field", "project")
+            if not entity_type:
+                continue
+            try:
+                resp = await client.post(
+                    f"{NEOTOMA_BASE_URL}/retrieve_entities",
+                    json={
+                        "entity_type": entity_type,
+                        "limit": 50,
+                        "include_snapshots": True,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as exc:
+                log.warning(f"Precondition check failed for gate {g.gate_name}: {exc}")
+                unmet.add(g.gate_name)
+                continue
+
+            entities = data.get("entities", [])
+            matched = any(
+                str((e.get("snapshot") or {}).get(scope_field, "")).lower()
+                == project.lower()
+                for e in entities
+            )
+            if not matched:
+                log.info(
+                    f"Gate {g.gate_name} precondition unmet: no {entity_type} "
+                    f"with {scope_field}={project}"
+                )
+                unmet.add(g.gate_name)
+
+    return unmet
 
 
 # ── Orchestration logic ───────────────────────────────────────────────────────
@@ -285,6 +416,7 @@ def compute_ready_gates(
     work_entity: dict,
     comments: list[dict],
     existing_state: dict[str, GateState] | None = None,
+    unmet_preconditions: set[str] | None = None,
 ) -> tuple[dict[str, GateState], list[Gate]]:
     """
     Walk the workflow's phases. For each gate, determine status by checking
@@ -293,8 +425,13 @@ def compute_ready_gates(
     A gate is "ready" iff:
       - it is currently "pending"
       - it is not skipped by a fast_path
+      - its precondition is met (if declared); unmet preconditions auto-skip
       - every required gate in earlier phases is "satisfied" or "skipped"
       - its join_gate (if any) is already "satisfied"
+
+    `unmet_preconditions` is the set of gate_names whose precondition the
+    caller (anthus.py) has determined is unmet by querying Neotoma. Those
+    gates are marked "skipped" so the workflow advances past them.
     """
     labels: set[str] = set()
     raw_labels = work_entity.get("labels", [])
@@ -303,7 +440,9 @@ def compute_ready_gates(
     for lbl in raw_labels or []:
         labels.add(str(lbl).lower())
 
-    skips = workflow.fast_path_skips(labels)
+    skips = workflow.fast_path_skips(labels, work_entity=work_entity)
+    if unmet_preconditions:
+        skips = skips | unmet_preconditions
 
     state = dict(existing_state or {})
     # Initialize state for any unseen gates.

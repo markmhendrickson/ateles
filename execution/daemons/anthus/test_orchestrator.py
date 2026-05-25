@@ -272,6 +272,118 @@ def test_author_substring_does_not_falsely_satisfy():
     assert state["pm_scope"].status == "pending"
 
 
+def test_impact_score_low_skips_publicity():
+    """
+    A work entity with impact_score < 5 should skip growth_announce and
+    social_draft via the new numeric fast_path. devrel_docs stays (covers
+    SDK changes regardless of impact).
+    """
+    wf = WorkflowDefinition(
+        entity_id="ent",
+        project="p",
+        workflow_type="smoke",
+        description="",
+        legal_required=False,
+        gates=[
+            Gate(1, "pm_scope", "pavo", None, None, True),
+            Gate(6, "growth_announce", "mimus", None, None, False),
+            Gate(6, "social_draft", "corvus", None, None, False),
+            Gate(6, "devrel_docs", "regulus", None, None, False),
+        ],
+        fast_paths=[
+            {
+                "condition": "impact_score<5",
+                "skip_gates": ["growth_announce", "social_draft"],
+            }
+        ],
+    )
+    state, _ = compute_ready_gates(wf, {"impact_score": 2, "labels": []}, [])
+    assert state["growth_announce"].status == "skipped"
+    assert state["social_draft"].status == "skipped"
+    assert state["devrel_docs"].status == "pending"
+
+
+def test_impact_score_high_keeps_publicity():
+    wf = WorkflowDefinition(
+        entity_id="ent",
+        project="p",
+        workflow_type="smoke",
+        description="",
+        legal_required=False,
+        gates=[
+            Gate(1, "pm_scope", "pavo", None, None, True),
+            Gate(6, "growth_announce", "mimus", None, None, False),
+        ],
+        fast_paths=[{"condition": "impact_score<5", "skip_gates": ["growth_announce"]}],
+    )
+    state, _ = compute_ready_gates(wf, {"impact_score": 8, "labels": []}, [])
+    assert state["growth_announce"].status == "pending"
+
+
+def test_audience_internal_skips_publicity():
+    wf = WorkflowDefinition(
+        entity_id="ent",
+        project="p",
+        workflow_type="smoke",
+        description="",
+        legal_required=False,
+        gates=[
+            Gate(1, "pm_scope", "pavo", None, None, True),
+            Gate(6, "growth_announce", "mimus", None, None, False),
+        ],
+        fast_paths=[
+            {"condition": "audience:internal", "skip_gates": ["growth_announce"]}
+        ],
+    )
+    state, _ = compute_ready_gates(wf, {"audience": "internal", "labels": []}, [])
+    assert state["growth_announce"].status == "skipped"
+
+
+def test_missing_impact_score_treated_as_zero():
+    """Defensive: no impact_score field → 0, which fails impact_score>=5."""
+    wf = WorkflowDefinition(
+        entity_id="ent",
+        project="p",
+        workflow_type="smoke",
+        description="",
+        legal_required=False,
+        gates=[Gate(6, "growth_announce", "mimus", None, None, False)],
+        fast_paths=[{"condition": "impact_score<5", "skip_gates": ["growth_announce"]}],
+    )
+    state, _ = compute_ready_gates(wf, {"labels": []}, [])
+    assert state["growth_announce"].status == "skipped"
+
+
+def test_unmet_precondition_skips_gate():
+    """
+    When a gate's precondition is unmet (passed in by the caller as
+    unmet_preconditions), the gate is auto-skipped and downstream phases
+    advance.
+    """
+    wf = _smoke_test_workflow()
+    # Satisfy through phase 4 so phase 5 (release) is the next concern.
+    comments = [
+        _comment("pavo-bot", "[pavo] acceptance_criteria: ..."),
+        _comment("paradisaea-bot", "[paradisaea] copy_and_ux_flow: ..."),
+        _comment("bombycilla-bot", "[bombycilla] schema_or_api_proposal: ..."),
+        _comment("gryllus-bot", "[gryllus] pull_request_link: #42"),
+        _comment("phoenicurus-bot", "[phoenicurus] test_plan: ..."),
+        _comment("buteo-bot", "[buteo] compliance_review: ..."),
+        _comment("luscinia-bot", "[luscinia] compliance_verdict: approved"),
+        _comment("vanellus-bot", "[vanellus] merge_decision: approved"),
+    ]
+    state, ready = compute_ready_gates(
+        wf,
+        {"labels": ["customer-facing"]},
+        comments,
+        unmet_preconditions={"release"},
+    )
+    assert state["release"].status == "skipped"
+    # Phase 6 should now be reachable since release is treated as skipped.
+    names = {g.gate_name for g in ready}
+    assert {"growth_announce", "social_draft", "devrel_docs"} <= names
+
+
 def test_dispatched_gate_can_be_satisfied_by_later_comment():
     """
     When a gate is in "dispatched" state and a satisfying comment arrives

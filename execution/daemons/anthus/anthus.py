@@ -107,13 +107,16 @@ async def _orchestrate_workflow_for(event) -> None:
     On issue/pull_request event, select a workflow_definition that applies,
     compute ready gates, and dispatch each via `claude --print --skill <owner>`.
 
-    Comments on the issue/PR are read via `gh` CLI (synchronous shell call)
-    rather than the github_harness MCP to keep Anthus self-contained for now.
-    Phase 6 will route this through the harness for proper attribution.
+    State persistence (ateles#9): every dispatch and satisfaction is written
+    to a Neotoma `participation_record` entity. On daemon restart, we load
+    these records and rebuild in-memory state — no double-dispatch.
     """
-    from orchestrator import (  # local import — avoid cost at startup
+    import participation
+    from orchestrator import (  # local imports — avoid cost at startup
+        GateState,
         compute_ready_gates,
         fetch_workflow_definitions,
+        resolve_unmet_preconditions,
         select_workflow,
     )
 
@@ -133,10 +136,48 @@ async def _orchestrate_workflow_for(event) -> None:
         )
         return
 
+    # Hydrate in-memory state from persisted participation_records if we
+    # don't have any in-process state yet for this work entity.
+    if event.entity_id not in _gate_states:
+        persisted = await participation.load_state_for(event.entity_id)
+        if persisted:
+            _gate_states[event.entity_id] = {
+                name: GateState(
+                    gate_name=name,
+                    status=rec.get("status", "pending"),
+                    dispatched_at=rec.get("dispatched_at"),
+                    satisfied_at=rec.get("satisfied_at"),
+                    artifact_refs=list(rec.get("artifact_refs", [])),
+                )
+                for name, rec in persisted.items()
+            }
+            log.info(
+                f"[{DAEMON_NAME}] hydrated {len(persisted)} gate states for "
+                f"{event.entity_id} from Neotoma"
+            )
+
     comments = await _fetch_comments(snap)
     existing = _gate_states.get(event.entity_id, {})
-    state, ready = compute_ready_gates(wf, snap, comments, existing_state=existing)
+
+    unmet = await resolve_unmet_preconditions(wf, project)
+    state, ready = compute_ready_gates(
+        wf,
+        snap,
+        comments,
+        existing_state=existing,
+        unmet_preconditions=unmet,
+    )
     _gate_states[event.entity_id] = state
+
+    # Persist any newly-satisfied / newly-skipped gates discovered this tick.
+    for gate_name, gs in state.items():
+        prior = existing.get(gate_name)
+        if gs.status == "satisfied" and (not prior or prior.status != "satisfied"):
+            ref = gs.artifact_refs[-1] if gs.artifact_refs else ""
+            await participation.record_satisfied(event.entity_id, gate_name, ref)
+        elif gs.status == "skipped" and (not prior or prior.status != "skipped"):
+            reason = "fast_path" if gate_name not in unmet else "precondition_unmet"
+            await participation.record_skipped(event.entity_id, gate_name, reason)
 
     for gate in ready:
         log.info(
@@ -144,6 +185,12 @@ async def _orchestrate_workflow_for(event) -> None:
             f"on {event.entity_id}"
         )
         state[gate.gate_name].status = "dispatched"
+        await participation.record_dispatched(
+            work_entity_id=event.entity_id,
+            workflow_definition_id=wf.entity_id,
+            gate_name=gate.gate_name,
+            agent=gate.owner_agent,
+        )
         # Real dispatch happens in Phase 6 once Anthus has its own
         # `claude --print --skill` spawning helper that signs with AAuth.
         # For now Anthus only logs and notifies — operator runs the agents

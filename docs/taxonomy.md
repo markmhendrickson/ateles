@@ -104,7 +104,8 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 | **Paradisaea** | *Paradisaea* (bird-of-paradise) | Designer — UI/copy review, visual consistency | planned (Phase 8) |
 | **Bombycilla** | *Bombycilla* (waxwing) | Technical architect — layered architecture, schema review | planned (Phase 8) |
 | **Phoenicurus** | *Phoenicurus* (redstart) | QA — test coverage, regression, scorecard | planned (Phase 8) |
-| **Accipiter** | *Accipiter* (hawk) | Growth / go-to-market — ICP research, influencer outreach, distribution | planned (Phase 8) |
+| **Accipiter** | *Accipiter* (hawk) | UX & product design — user flows, information architecture, interaction specs | planned (Phase 8) |
+| **Mimus** | *Mimus* (mockingbird) | Growth / go-to-market — ICP research, launch announcements, distribution channels | planned (Phase 8) |
 | **Aythya** | *Aythya* (diving duck) | Data analyst — metrics synthesis, cohort analysis, KPI tracking | planned (Phase 8) |
 | **Buteo** | *Buteo* (buzzard) | Legal / compliance — risk assessment, T&C review | planned (Phase 8) |
 | **Ciconia** | *Ciconia* (stork) | Finance advisor — budget, forecasting, financial modelling | planned (Phase 8) |
