@@ -114,6 +114,13 @@ less execution/daemons/apus/apus.py
 
 To run any daemon locally requires Neotoma running (see [neotoma installation](https://github.com/markmhendrickson/neotoma#quick-start)), AAuth keypairs provisioned, and `agent_grant` entities for each daemon. The full setup walkthrough lives in [docs/setup.md](docs/setup.md).
 
+### Open architecture issues to track
+
+Two umbrella issues shape what adoption looks like next:
+
+- **[ateles#18 — Make Ateles installable](https://github.com/markmhendrickson/ateles/issues/18)** — ten blockers to package-based adoption (identity provisioning UX, operator-specific agent definitions, config schema, keypair format unification, launchd plist generation, dependency manifest, `ateles-private/` boundary, versioning, multi-operator path). Adopt-by-forking works today; install-by-package needs this work.
+- **[ateles#19 — Input attribution](https://github.com/markmhendrickson/ateles/issues/19)** — record which Neotoma entities each agent read before deciding. Today the swarm records who acted and what they produced, but not the evidence the decision was built on. Closing this loop enables reverse impact analysis (which downstream decisions does a corrected strategy invalidate?) and precedent graphs.
+
 ## Example
 
 A real Pavo dispatch traced through the entity layer. The CLI invocation is one step among ten; the rest happens in Neotoma.
@@ -200,6 +207,11 @@ The swarm makes specific commitments about what is verifiable.
 | ⏪ Replayable orchestration                     | ❌                    | ❌                        | ✅ participation_record log        |
 | 📜 Agent definitions are versioned              | ❌                    | ⚠️ git history            | ✅ Neotoma observation history     |
 | 🔔 Operator paged only on real escalations      | ❌                    | ⚠️ notification spam      | ✅ priority_rubric filter          |
+| 🧠 Inputs to a decision are recorded            | ❌                    | ❌                        | ⚠️ in flight (see [ateles#19](https://github.com/markmhendrickson/ateles/issues/19)) |
+| 🔗 Agent version pinned at dispatch             | ❌                    | ⚠️ git SHA, not entity    | ⚠️ in flight (see [ateles#19](https://github.com/markmhendrickson/ateles/issues/19)) |
+| 🪜 Precedent chain queryable                    | ❌                    | ❌                        | ⚠️ in flight (see [ateles#19](https://github.com/markmhendrickson/ateles/issues/19)) |
+
+The first nine rows are live in operator-driven use today. The final three rows are tracked in [ateles#19](https://github.com/markmhendrickson/ateles/issues/19) — input attribution, which records the Neotoma entities each agent consulted before deciding. Output attribution (who acted, against which capability, producing what) is solved; input attribution closes the loop so decisions can be audited against the evidence they were built on.
 
 ## Interfaces
 
