@@ -191,15 +191,117 @@ async def _orchestrate_workflow_for(event) -> None:
             gate_name=gate.gate_name,
             agent=gate.owner_agent,
         )
-        # Real dispatch happens in Phase 6 once Anthus has its own
-        # `claude --print --skill` spawning helper that signs with AAuth.
-        # For now Anthus only logs and notifies — operator runs the agents
-        # manually per docs/smoke_test_runbook.md.
+        # Spawn the agent via claude CLI. The `--skill` flag does not exist;
+        # the working invocation is `--append-system-prompt` with the SKILL.md
+        # content. Code-writing agents need `--dangerously-skip-permissions`
+        # to avoid interactive prompts under launchd (per Tier 1 smoke test
+        # findings, 2026-05-25).
+        await _spawn_agent(
+            owner_agent=gate.owner_agent,
+            work_entity_id=event.entity_id,
+            gate_name=gate.gate_name,
+            snapshot=snap,
+        )
         _notifier.send(
-            f"Gate ready: {gate.gate_name} ({gate.owner_agent}) on {event.entity_id}",
+            f"Gate dispatched: {gate.gate_name} ({gate.owner_agent}) on {event.entity_id}",
             priority=Priority.INFO,
             handler=DAEMON_NAME,
         )
+
+
+# Agents that need write access to the local filesystem or to call MCP servers
+# that prompt for permission. Anthus runs under launchd with no TTY, so these
+# must be invoked with --dangerously-skip-permissions.
+_AGENTS_NEEDING_SKIP_PERMISSIONS = frozenset(
+    {"gryllus", "vanellus", "apus", "formica", "neotoma-agent"}
+)
+
+
+async def _spawn_agent(
+    owner_agent: str,
+    work_entity_id: str,
+    gate_name: str,
+    snapshot: dict,
+) -> None:
+    """
+    Spawn an agent via `claude --print --append-system-prompt` with the agent's
+    SKILL.md content as the system prompt. Runs in the background; output is
+    logged but not awaited synchronously — the agent posts its artifact to the
+    GitHub issue/PR, and Anthus picks it up on the next SSE event.
+
+    The chosen invocation pattern matches the operator-driven Tier 1 workflow
+    so that operator-run and Anthus-run dispatches produce identical artifacts.
+    """
+    import os
+    import shutil
+    from pathlib import Path
+
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        log.error(
+            f"[{DAEMON_NAME}] `claude` binary not on PATH — cannot dispatch "
+            f"{owner_agent}. Check launchagent PATH includes NVM."
+        )
+        return
+
+    skill_path = (
+        Path(os.environ.get("ATELES_REPO_ROOT", str(_REPO_ROOT)))
+        / ".claude"
+        / "skills"
+        / owner_agent
+        / "SKILL.md"
+    )
+    if not skill_path.exists():
+        log.error(
+            f"[{DAEMON_NAME}] SKILL.md not found for {owner_agent} at {skill_path}"
+        )
+        return
+
+    try:
+        skill_md = skill_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        log.error(f"[{DAEMON_NAME}] failed to read {skill_path}: {exc}")
+        return
+
+    title = snapshot.get("title", "")
+    body = snapshot.get("body", "")
+    repo = snapshot.get("repository") or snapshot.get("repo") or ""
+    number = snapshot.get("number") or snapshot.get("issue_number") or ""
+    prompt = (
+        f"/{owner_agent} GitHub issue {repo}#{number}: {title}\n\n{body}\n\n"
+        f"Gate: {gate_name}. Work entity: {work_entity_id}. "
+        f"End your response with the artifact header line as specified in your SKILL.md."
+    )
+
+    args = [
+        claude_bin,
+        "--print",
+        "--append-system-prompt",
+        skill_md,
+    ]
+    if owner_agent in _AGENTS_NEEDING_SKIP_PERMISSIONS:
+        args.append("--dangerously-skip-permissions")
+    args.append(prompt)
+
+    log.info(
+        f"[{DAEMON_NAME}] spawning {owner_agent} for {work_entity_id} "
+        f"(skip_perms={owner_agent in _AGENTS_NEEDING_SKIP_PERMISSIONS})"
+    )
+
+    # Fire-and-forget: agent runs as background subprocess. Its artifact is
+    # posted to the GitHub issue/PR; Anthus picks up satisfaction on the next
+    # SSE comment event.
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        # Don't await proc.wait() — let it run independently so we don't block
+        # the event loop. The SSE handler picks up the artifact when posted.
+        log.info(f"[{DAEMON_NAME}] spawned {owner_agent} pid={proc.pid}")
+    except OSError as exc:
+        log.error(f"[{DAEMON_NAME}] failed to spawn {owner_agent}: {exc}")
 
 
 def _project_from_repo(repo_slug: str) -> str:
