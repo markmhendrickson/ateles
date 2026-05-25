@@ -70,6 +70,11 @@ class SSEClient:
 
     entity_types: subscribe only to events for these entity types (empty = all)
     handler_name: used in log messages
+    subscription_id: Neotoma SSE subscription UUID (required by the server).
+        Pass the ID returned by POST /events/subscriptions (or the MCP
+        `subscribe` tool with delivery_method="sse"). Set the env var
+        NEOTOMA_SSE_SUBSCRIPTION_ID_<HANDLER_NAME_UPPER> to inject it at
+        runtime without code changes.
     """
 
     def __init__(
@@ -78,12 +83,20 @@ class SSEClient:
         handler_name: str = "daemon",
         bearer_token: str | None = None,
         base_url: str | None = None,
+        subscription_id: str | None = None,
     ) -> None:
         self.entity_types = entity_types or []
         self.handler_name = handler_name
         self._token = bearer_token or NEOTOMA_BEARER_TOKEN
         self._base_url = base_url or NEOTOMA_BASE_URL
         self._running = False
+        # Allow per-daemon env-var override: NEOTOMA_SSE_SUBSCRIPTION_ID_ANTHUS etc.
+        env_key = f"NEOTOMA_SSE_SUBSCRIPTION_ID_{handler_name.upper()}"
+        self._subscription_id = (
+            subscription_id
+            or os.environ.get(env_key)
+            or os.environ.get("NEOTOMA_SSE_SUBSCRIPTION_ID")
+        )
 
     async def stream(
         self,
@@ -125,8 +138,18 @@ class SSEClient:
             self._running = False
             return
 
+        if not self._subscription_id:
+            log.warning(
+                f"[{self.handler_name}] NEOTOMA_SSE_SUBSCRIPTION_ID not set — "
+                "SSE subscription skipped (create a subscription via Neotoma MCP "
+                "subscribe tool with delivery_method=sse and set "
+                f"NEOTOMA_SSE_SUBSCRIPTION_ID_{self.handler_name.upper()})"
+            )
+            self._running = False
+            return
+
         url = f"{self._base_url}/events/stream"
-        params: dict[str, str] = {}
+        params: dict[str, str] = {"subscription_id": self._subscription_id}
         if self.entity_types:
             params["entity_types"] = ",".join(self.entity_types)
 
