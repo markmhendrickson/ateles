@@ -63,6 +63,30 @@ graph TB
 
 Full design: [docs/architecture.md](docs/architecture.md).
 
+## Entities, not files
+
+Everything Ateles knows about itself is a Neotoma entity. The filesystem is a generated mirror — useful for IDE tooling, but never the source of truth.
+
+| Concept                | Lives as              | Mirrored to                              | Direction          |
+| ---------------------- | --------------------- | ---------------------------------------- | ------------------ |
+| Agent prompt           | `agent_definition`    | `.claude/skills/<agent>/SKILL.md`        | Neotoma → disk     |
+| Agent capability       | `agent_grant`         | (none — read live by github_harness)     | Neotoma only       |
+| Workflow phases        | `workflow_definition` | (none — read live by Anthus)             | Neotoma only       |
+| Gate state             | `participation_record`| (none — written by harness)              | Neotoma only       |
+| Every tool call        | `agent_action_observation` | (none — append-only log)            | Neotoma only       |
+| Operating rules        | `agent_policy`        | (none — enforced at dispatch)            | Neotoma only       |
+| Strategy posture       | `business_strategy` / `domain_strategy` / `agent_strategy` | (none) | Neotoma only |
+
+**What this means in practice:**
+
+- **Behaviour changes are corrections, not commits.** Updating Pavo's prompt is `neotoma correct --entity-id ent_… --field prompt_markdown`. Apus regenerates the SKILL.md mirror on the next webhook. Direct edits to `.claude/skills/pavo/SKILL.md` are reverted.
+- **Capability changes are entities, not configs.** Granting Gryllus access to a new repo is a `correct()` on the `agent_grant` entity. The next `github_harness` call sees the new scope on the next pre-check; no daemon restart.
+- **Workflow changes are entities, not code.** Adding a phase to the copy workflow is a `correct()` on the `workflow_definition` entity. Anthus picks it up from the SSE event stream.
+- **Audit is a query, not a grep.** "What did Gryllus do last Tuesday?" is `retrieve_entities --entity-type agent_action_observation --agent-sub gryllus@ateles-swarm`. Git logs only show committed code; observations cover every harness call, including reads.
+- **Reasoning about the swarm is reasoning about entities.** The mental model is "which entities flow through which daemons", not "which files do which scripts read".
+
+The filesystem layout matters for the runtime substrate — daemons need code on disk, Claude Code needs SKILL.md on disk — but it is downstream of the entity model, not the other way around.
+
 ## Agent taxonomy
 
 Four tiers. Twelve product-panel agents plus daemons plus 20+ domain T4s. Naming follows bird and animal genera.
@@ -92,25 +116,33 @@ To run any daemon locally requires Neotoma running (see [neotoma installation](h
 
 ## Example
 
-Spawn an agent from the operator's machine:
+A real Pavo dispatch traced through the entity layer. The CLI invocation is one step among ten; the rest happens in Neotoma.
 
-```bash
-claude --print \
-  --append-system-prompt "$(cat .claude/skills/pavo/SKILL.md)" \
-  --dangerously-skip-permissions \
-  "Invoke the pavo agent. Decide between feature A (bulk-import CSV) and feature B (REST webhook integration) for the next release."
-```
+1. **Operator files an issue.** `gh issue create --repo markmhendrickson/ateles --title "Decide feature A vs B for next release"`. The issue body is the task body for Pavo.
 
-Output:
+2. **`formica` (T3) ingests the issue.** It reads the GitHub webhook event, calls `store(issue, ...)` on Neotoma, and emits a triage observation classifying it as a product decision.
 
-```
-…analysis…
-[pavo] acceptance_criteria: Build feature B first. Higher strategic fit, lower implementation risk after webhook v0.1, customer-signal weight 2.3× feature A.
-```
+3. **`anthus` (T3) reads the SSE event stream.** It matches the new `issue` entity against `workflow_definition` entities and picks the `product_decision_workflow`.
 
-The bracketed artifact-header line is the gate-satisfaction contract that Anthus parses to advance workflow state.
+4. **Anthus opens a `participation_record`.** One per gate. The first gate has `owner_agent: pavo`, `status: dispatched`, `dispatched_at: now()`.
+
+5. **Anthus reads `agent_definition` for Pavo from Neotoma.** It pulls `prompt_markdown`, `context_entity_types`, `operational_entity_types`, and `allowed_tools`. The SKILL.md mirror is the same content on disk — Anthus could use either, but Neotoma is canonical.
+
+6. **Anthus spawns a `claude --print` subprocess** with Pavo's SKILL.md as `--append-system-prompt` and the issue body as the user prompt. Pavo's AAuth keypair is loaded from `ateles-private/keys/`.
+
+7. **Pavo reads context entities through `mcpsrv_neotoma`.** It queries recent `business_strategy`, `domain_strategy`, customer-signal observations, prior `acceptance_criteria` entities — whatever its `context_entity_types` lists.
+
+8. **Pavo writes its decision.** It calls `store(acceptance_criteria, body="Build feature B first…")` on Neotoma. The observation is attributed to `pavo@ateles-swarm` via AAuth signature. Pavo also emits the artifact-header line as its final stdout: `[pavo] acceptance_criteria: Build feature B first. Higher strategic fit, lower implementation risk after webhook v0.1, customer-signal weight 2.3× feature A.`
+
+9. **Anthus parses the artifact header, updates the `participation_record`** to `status: satisfied`, `satisfied_at: now()`, `artifact_ref: ent_…` pointing at the new `acceptance_criteria` entity.
+
+10. **Anthus advances the workflow.** It opens the next `participation_record` for the next gate (e.g. `gryllus` to scaffold the implementation), and the loop repeats.
+
+Everything Anthus does after step 1 is driven by entities. The operator can replay the full sequence later with `retrieve_entities` against `agent_action_observation` and `participation_record`. No grep, no git log.
 
 ## Structure
+
+The filesystem is the runtime substrate that supports the entity layer. This is the mirror, not the source — every behaviour-defining artifact below is generated from or read by Neotoma entities at runtime.
 
 ```
 ateles/
@@ -157,17 +189,17 @@ ateles/
 
 The swarm makes specific commitments about what is verifiable.
 
-| Property                                        | Without swarm infra   | Ad-hoc agents           | Ateles                          |
-| ----------------------------------------------- | --------------------- | ----------------------- | ------------------------------- |
-| 🪪 Agent identity verifiable                    | ✗                     | ⚠ partial (PAT only)    | ✓ AAuth-signed JWT               |
-| 🔍 Trust boundary visible (sub ≠ pat)           | ✗                     | ✗                       | ✓ both recorded                  |
-| 🚧 Capability scope enforced                    | ✗                     | ⚠ via PAT scopes only   | ✓ agent_grant pre-check          |
-| 📋 Per-action audit trail                       | ✗                     | ⚠ git commits only      | ✓ agent_action_observation       |
-| 🔄 Workflow phase ordering                      | ⚠ manual              | ⚠ manual                | ✓ workflow_definition + Anthus   |
-| ⏭️ Gate skip conditions                         | ✗                     | ✗                       | ✓ declared per-workflow          |
-| ⏪ Replayable orchestration                     | ✗                     | ✗                       | ✓ participation_record log       |
-| 📜 Agent definitions are versioned              | ✗                     | ⚠ git history           | ✓ Neotoma observation history    |
-| 🔔 Operator paged only on real escalations      | ✗                     | ⚠ notification spam     | ✓ priority_rubric filter         |
+| Property                                        | Without swarm infra   | Ad-hoc agents             | Ateles                            |
+| ----------------------------------------------- | --------------------- | ------------------------- | --------------------------------- |
+| 🪪 Agent identity verifiable                    | ❌                    | ⚠️ partial (PAT only)     | ✅ AAuth-signed JWT                |
+| 🔍 Trust boundary visible (sub ≠ pat)           | ❌                    | ❌                        | ✅ both recorded                   |
+| 🚧 Capability scope enforced                    | ❌                    | ⚠️ via PAT scopes only    | ✅ agent_grant pre-check           |
+| 📋 Per-action audit trail                       | ❌                    | ⚠️ git commits only       | ✅ agent_action_observation        |
+| 🔄 Workflow phase ordering                      | ⚠️ manual             | ⚠️ manual                 | ✅ workflow_definition + Anthus    |
+| ⏭️ Gate skip conditions                         | ❌                    | ❌                        | ✅ declared per-workflow           |
+| ⏪ Replayable orchestration                     | ❌                    | ❌                        | ✅ participation_record log        |
+| 📜 Agent definitions are versioned              | ❌                    | ⚠️ git history            | ✅ Neotoma observation history     |
+| 🔔 Operator paged only on real escalations      | ❌                    | ⚠️ notification spam      | ✅ priority_rubric filter          |
 
 ## Interfaces
 
@@ -192,20 +224,20 @@ Solo operators running a multi-agent personal stack — agents for code, content
 
 **Not for:** Single-agent setups. Teams (Ateles assumes one operator across all agents — multi-operator requires multi-tenant Neotoma). Hosted-agent providers. Anyone who needs zero-install onboarding (Ateles is a reference architecture, not a packaged product).
 
-## Agent record types
+## Agent entity types
 
-Agent operations are typed Neotoma entities. The canonical types:
+Every swarm-defining record is a typed Neotoma entity. The canonical `entity_type` values that Ateles reads and writes:
 
-| Type                       | What it stores                                                                                | Example field                                      |
-| -------------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| **agent_definition**       | Identity, prompt, triggers, context types, operational types, allowed tools                   | `name: pavo`, `triggers: [pavo, /pavo]`             |
-| **agent_grant**             | Capability scope — which tools an agent can invoke against which repos                        | `op: github_harness:write`, `repos: [neotoma]`      |
-| **agent_action_observation** | One row per harness tool call — sub, pat_attribution, tool, owner/repo, result               | `agent_sub: gryllus@ateles-swarm`                   |
-| **agent_policy**            | Operating rules (mandatory/recommended/prohibited) with scope                                 | `scope: global`, `rule_kind: mandatory`             |
-| **workflow_definition**     | Phases, gates, owner agents, skip conditions, preconditions                                   | `gate_name: pr_review`, `owner_agent: vanellus`     |
-| **participation_record**    | Per-gate dispatch + satisfaction history                                                      | `status: satisfied`, `satisfied_at`, `artifact_ref` |
-| **business_strategy / domain_strategy / agent_strategy** | Hierarchical strategy DAG — root + per-area + per-agent posture        | `north_star_metric`, `assumptions`, `success_criteria` |
-| **strategy_drift_signal**   | Agent-emitted observation when work contradicts current operating assumptions                  | `observation`, `severity`, `relates_to_assumption`   |
+| `entity_type`              | What it stores                                                                                | Key fields                                            |
+| -------------------------- | --------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `agent_definition`         | Identity, prompt, triggers, context types, operational types, allowed tools                   | `name`, `triggers`, `prompt_markdown`, `allowed_tools`, `context_entity_types`, `operational_entity_types` |
+| `agent_grant`              | Capability scope — which tools an agent can invoke against which repos                        | `agent_sub`, `op`, `repos`                            |
+| `agent_action_observation` | One row per harness tool call — AAuth sub, PAT attribution, tool, owner/repo, result          | `agent_sub`, `pat_attribution`, `tool`, `owner`, `repo`, `result` |
+| `agent_policy`             | Operating rules (mandatory/recommended/prohibited) with scope                                 | `scope`, `rule_kind`, `body`                          |
+| `workflow_definition`      | Phases, gates, owner agents, skip conditions, preconditions                                   | `name`, `gates[]`, `gate_name`, `owner_agent`, `skip_if`, `preconditions` |
+| `participation_record`     | Per-gate dispatch + satisfaction history                                                      | `workflow_id`, `gate_name`, `status`, `dispatched_at`, `satisfied_at`, `artifact_ref` |
+| `business_strategy` / `domain_strategy` / `agent_strategy` | Hierarchical strategy DAG — root + per-area + per-agent posture | `north_star_metric`, `assumptions`, `success_criteria`, `parent_strategy_ref` |
+| `strategy_drift_signal`    | Agent-emitted observation when work contradicts current operating assumptions                 | `observation`, `severity`, `relates_to_assumption`    |
 
 Full type catalog: [docs/data_types.md](docs/data_types.md).
 
@@ -241,6 +273,8 @@ See [docs/swarm_smoke_test_plan.md](docs/swarm_smoke_test_plan.md) for the full 
 
 ## Security defaults
 
+The runtime substrate that supports the entity layer. AAuth keypairs, PATs, and the Apus tunnel sit beneath Neotoma; the swarm's trust model and audit trail are defined by entities (`agent_grant`, `agent_action_observation`), not by the on-disk material that runs the daemons.
+
 Ateles is single-operator infrastructure. Defaults assume the operator owns the machine, the keypairs, and the Neotoma instance.
 
 - **Authentication:** AAuth keypairs per agent, signed JWTs verified against published JWKS. Operator token used as fallback for daemons without their own grant.
@@ -250,6 +284,8 @@ Ateles is single-operator infrastructure. Defaults assume the operator owns the 
 - **Tunnel:** Apus webhook receiver listens on `localhost:8741` only; Cloudflare tunnel surfaces it to Neotoma's prod webhook deliveries.
 
 ## Development
+
+Daemons run from disk under launchd; the IDE reads SKILL.md mirrors from disk. Both are runtime conveniences. The only artifact that defines swarm behaviour is an entity in Neotoma — every workflow below reflects that.
 
 **Daemon iteration:**
 
@@ -261,13 +297,29 @@ launchctl load ~/Library/LaunchAgents/com.ateles.anthus.plist
 tail -f /tmp/com.ateles.anthus.err.log
 ```
 
-**Updating an agent's prompt:**
+**Updating an agent's prompt (the canonical path):**
 
 ```bash
 # Never edit .claude/skills/<agent>/SKILL.md directly — Apus reverts on next mirror.
-# Use Neotoma correction:
+# Correct the agent_definition entity instead:
 neotoma correct --entity-id ent_… --field prompt_markdown --value "$(cat new_prompt.md)"
-# Apus webhook fires; SKILL.md regenerates from canonical entity.
+# Apus webhook fires; SKILL.md regenerates from the canonical entity.
+```
+
+**Updating an agent's capability scope:**
+
+```bash
+# agent_grant is also an entity. Add a repo to Gryllus's github_harness:write scope:
+neotoma correct --entity-id <gryllus-grant-id> --field repos --append neotoma-docs
+# Next harness call sees the new scope on the next pre-check; no daemon restart.
+```
+
+**Adding a workflow phase:**
+
+```bash
+# workflow_definition is an entity. Insert a new gate:
+neotoma correct --entity-id <workflow-id> --field gates --json '[...new gate...]'
+# Anthus picks it up from the SSE event stream on the next dispatch.
 ```
 
 **Smoke testing:**
