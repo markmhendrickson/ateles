@@ -106,6 +106,7 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 | **Phoenicurus** | *Phoenicurus* (redstart) | QA — test coverage, regression, scorecard | planned (Phase 8) |
 | **Accipiter** | *Accipiter* (hawk) | UX & product design — user flows, information architecture, interaction specs | planned (Phase 8) |
 | **Mimus** | *Mimus* (mockingbird) | Growth / go-to-market — ICP research, launch announcements, distribution channels | planned (Phase 8) |
+| **Hirundo** | *Hirundo* (swallow) | Customer intelligence — ICP synthesis, contact-level market signal aggregation, competitive analysis, inbound channel consolidation | planned (Phase 8) |
 | **Aythya** | *Aythya* (diving duck) | Data analyst — metrics synthesis, cohort analysis, KPI tracking | planned (Phase 8) |
 | **Buteo** | *Buteo* (buzzard) | Legal / compliance — risk assessment, T&C review | planned (Phase 8) |
 | **Ciconia** | *Ciconia* (stork) | Finance advisor — budget, forecasting, financial modelling | planned (Phase 8) |
