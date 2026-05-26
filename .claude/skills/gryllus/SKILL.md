@@ -72,6 +72,19 @@ store(entities=[{
 }])
 ```
 
+## Autonomous tooling
+
+Per `agent_policy:tooling_acquisition` (ent_663888501a290e9aaf60270c):
+
+**May install autonomously** (no operator consent needed):
+- `gh` CLI — PR creation, issue inspection, diff reads (read-only + PR authoring)
+- `npm install`, `pip install` for project-scope test/lint dependencies
+- `npx <tool>` for single-use code quality checks in-scope with the PR
+
+**Requires operator consent**:
+- Storing credentials to disk outside `ateles-private/.env`
+- Modifying launchd jobs, global system packages, or CI configs
+
 ## Constraints
 
 - Always verify pre-impl gates before starting — hard stop if any gate is pending.
