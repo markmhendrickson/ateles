@@ -23,16 +23,18 @@
     <false/>
 
     <key>StandardOutPath</key>
-    <string>/tmp/com.ateles.morning-brief.log</string>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/morning-brief.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/com.ateles.morning-brief.err</string>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/morning-brief.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
         <string>/Users/markmhendrickson</string>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/Users/markmhendrickson/.nvm/versions/node/v22.15.0/bin</string>
+        <string>/Users/markmhendrickson/.local/bin:/Users/markmhendrickson/.nvm/versions/node/v20.20.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>NEOTOMA_BASE_URL</key>
+        <string>http://localhost:3180</string>
     </dict>
 </dict>
 </plist>

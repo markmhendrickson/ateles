@@ -32,7 +32,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -91,9 +91,6 @@ TELEGRAM_TOPIC_COTINGA = os.environ.get("TELEGRAM_TOPIC_COTINGA", "")
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com")
 
-# Look-ahead window: fetch events starting now through end of tomorrow
-LOOKAHEAD_HOURS = 48
-
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -138,7 +135,7 @@ def _mark_ran_today() -> None:
 
 
 def fetch_upcoming_events() -> list[dict]:
-    """Fetch events from now through the next LOOKAHEAD_HOURS hours."""
+    """Fetch events for the rest of today (midnight-to-midnight Madrid time)."""
     import shutil
 
     gws = shutil.which("gws")
@@ -147,9 +144,9 @@ def fetch_upcoming_events() -> list[dict]:
         return []
 
     now = datetime.now(tz=MADRID_TZ)
-    end = now + timedelta(hours=LOOKAHEAD_HOURS)
-    time_min = now.strftime("%Y-%m-%dT%H:%M:%S+02:00")
-    time_max = end.strftime("%Y-%m-%dT%H:%M:%S+02:00")
+    end_of_day = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=MADRID_TZ)
+    time_min = now.isoformat()
+    time_max = end_of_day.isoformat()
 
     params = {
         "calendarId": "primary",
