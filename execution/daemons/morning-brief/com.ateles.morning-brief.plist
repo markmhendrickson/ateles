@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.ateles.cotinga</string>
+    <string>com.ateles.morning-brief</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/Users/markmhendrickson/repos/ateles/.venv/bin/python3</string>
-        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/cotinga/cotinga.py</string>
+        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/morning-brief/morning-brief.py</string>
     </array>
 
     <key>StartCalendarInterval</key>
@@ -16,23 +16,23 @@
         <key>Hour</key>
         <integer>5</integer>
         <key>Minute</key>
-        <integer>0</integer>
+        <integer>30</integer>
     </dict>
 
     <key>RunAtLoad</key>
     <false/>
 
     <key>StandardOutPath</key>
-    <string>/tmp/com.ateles.cotinga.log</string>
+    <string>/tmp/com.ateles.morning-brief.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/com.ateles.cotinga.err</string>
+    <string>/tmp/com.ateles.morning-brief.err</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
         <string>/Users/markmhendrickson</string>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/Users/markmhendrickson/.nvm/versions/node/v22.15.0/bin</string>
     </dict>
 </dict>
 </plist>
