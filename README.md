@@ -390,7 +390,7 @@ File an `agent_definition` entity in Neotoma. Mint an AAuth keypair. File an `ag
 
 Full documentation lives in `docs/`.
 
-**Getting oriented:** [Architecture](docs/architecture.md), [Taxonomy](docs/taxonomy.md), [Phases](docs/phases.md)
+**Getting oriented:** [Architecture](docs/architecture.md), [Taxonomy](docs/taxonomy.md), [Phases](docs/phases.md), [Neotoma vs. alternatives](docs/neotoma_vs_alternatives.md)
 
 **Operating:** [Swarm orchestration](docs/swarm_orchestration.md), [Swarm smoke-test plan](docs/swarm_smoke_test_plan.md), [Agent execution runbook](docs/agent_execution_runbook.md), [Setup](docs/setup.md)
 
