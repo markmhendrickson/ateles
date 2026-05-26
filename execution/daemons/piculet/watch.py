@@ -134,7 +134,8 @@ logging.basicConfig(
     format="%(asctime)s [piculet] %(levelname)s %(message)s",
     handlers=[
         _FlushingFileHandler(LOG_FILE),
-        logging.StreamHandler(sys.stdout),
+        # stdout is captured by launchd to the same log file — no StreamHandler
+        # here to avoid every line appearing twice in the log.
     ],
 )
 log = logging.getLogger(__name__)
@@ -323,59 +324,94 @@ def report_meeting_recording(recording: Path) -> None:
 
 
 class NeotomaUnavailableError(Exception):
-    """Raised when Neotoma is not usable (CLI missing, server down, auth failure, etc.)."""
+    """Raised when Neotoma is not usable (server down, auth failure, etc.)."""
+
+
+# ---------------------------------------------------------------------------
+# Neotoma HTTP helpers — direct API calls, no CLI subprocess
+# ---------------------------------------------------------------------------
+
+# Base URL resolved from env at startup. The plist also sets NEOTOMA_BASE_URL
+# so this will always resolve to prod (3180), never auto-detect dev (3080).
+_NEOTOMA_BASE_URL: str = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180")
+
+
+def _neotoma_query(
+    entity_type: str,
+    limit: int = 1,
+    offset: int = 0,
+    timeout: float = 15.0,
+) -> dict:
+    """
+    Call POST /entities/query on the Neotoma HTTP API.
+
+    Returns the parsed JSON response dict (keys: entities, total, limit, offset).
+    Raises NeotomaUnavailableError on connection failure, timeout, or non-2xx status.
+    """
+    import urllib.error
+    import urllib.request
+
+    token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
+    if not token:
+        raise NeotomaUnavailableError("NEOTOMA_BEARER_TOKEN not set")
+
+    url = f"{_NEOTOMA_BASE_URL.rstrip('/')}/entities/query"
+    body_bytes = json.dumps(
+        {"entity_type": entity_type, "limit": limit, "offset": offset}
+    ).encode()
+
+    req = urllib.request.Request(
+        url,
+        data=body_bytes,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode()
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode()[:300]
+        if exc.code == 401:
+            raise NeotomaUnavailableError(
+                "Neotoma auth rejected (401) — bearer token may need rotation in 1Password"
+            )
+        raise NeotomaUnavailableError(f"Neotoma HTTP {exc.code}: {body}")
+    except urllib.error.URLError as exc:
+        raise NeotomaUnavailableError(
+            f"Neotoma server not reachable at {_NEOTOMA_BASE_URL}: {exc.reason}"
+        )
+    except TimeoutError:
+        raise NeotomaUnavailableError(f"Neotoma request timed out ({timeout}s)")
+
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise NeotomaUnavailableError(
+            f"Neotoma returned unparseable response: {body[:200]}"
+        ) from exc
+
+    if isinstance(data, dict) and "error" in data:
+        err_msg = data["error"]
+        if "401" in str(err_msg) or "unauthorized" in str(err_msg).lower():
+            raise NeotomaUnavailableError(
+                "Neotoma auth rejected (401) — bearer token may need rotation in 1Password"
+            )
+        raise NeotomaUnavailableError(f"Neotoma API error: {err_msg}")
+
+    return data
 
 
 def check_neotoma() -> None:
     """
-    Verify that Neotoma is ready: CLI present, server reachable, auth valid.
+    Verify that Neotoma is ready: server reachable and auth valid.
     Raises NeotomaUnavailableError with a descriptive message on any failure.
     Call this before any operation that depends on Neotoma.
     """
-    import shutil
-
-    neotoma = shutil.which("neotoma")
-    if not neotoma:
-        raise NeotomaUnavailableError("neotoma CLI not found in PATH")
-
-    try:
-        result = subprocess.run(
-            [
-                "neotoma",
-                "--json",
-                "--api-only",
-                "entities",
-                "list",
-                "--entity-type",
-                "transcription",
-                "--limit",
-                "1",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            env=os.environ,
-        )
-    except subprocess.TimeoutExpired:
-        raise NeotomaUnavailableError("Neotoma health check timed out")
-    except Exception as exc:
-        raise NeotomaUnavailableError(f"Neotoma health check failed: {exc}") from exc
-
-    if result.returncode != 0:
-        stderr = result.stderr.strip() or result.stdout.strip()
-        raise NeotomaUnavailableError(
-            f"Neotoma returned non-zero exit code {result.returncode}: {stderr[:200]}"
-        )
-
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise NeotomaUnavailableError(
-            f"Neotoma returned unparseable response: {result.stdout[:200]}"
-        ) from exc
-
-    if "error" in data:
-        raise NeotomaUnavailableError(f"Neotoma API error: {data['error']}")
+    _neotoma_query("transcription", limit=1)
 
 
 def hydrate_seen_from_neotoma() -> set[str]:
@@ -392,33 +428,7 @@ def hydrate_seen_from_neotoma() -> set[str]:
     offset = 0
     limit = 200
     while True:
-        result = subprocess.run(
-            [
-                "neotoma",
-                "--json",
-                "--api-only",
-                "entities",
-                "list",
-                "--entity-type",
-                "transcription",
-                "--limit",
-                str(limit),
-                "--offset",
-                str(offset),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=os.environ,
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            raise NeotomaUnavailableError(
-                f"Neotoma hydration failed at offset {offset}: "
-                f"{(result.stderr or result.stdout).strip()[:200]}"
-            )
-        data = json.loads(result.stdout)
-        if "error" in data:
-            raise NeotomaUnavailableError(f"Neotoma hydration error: {data['error']}")
+        data = _neotoma_query("transcription", limit=limit, offset=offset, timeout=30.0)
         entities = data.get("entities") or data.get("results") or []
         if not entities:
             break
@@ -625,29 +635,83 @@ def main() -> None:
 
     # Build initial seen-set: load from state file, or hydrate from Neotoma
     # on first ever run. Block until Neotoma is usable before proceeding.
+    # Grace period: suppress Telegram alerts for the first 2 startup failures
+    # so transient races (daemon starts while server is restarting) are silent.
     seen = load_seen()
     if not seen:
+        _startup_failures = 0
+        _STARTUP_GRACE_ATTEMPTS = 2
+        _startup_alerted = False
+        _startup_down_since: float | None = None
         while True:
             try:
                 check_neotoma()
                 seen = hydrate_seen_from_neotoma()
                 save_seen(seen)
+                if _startup_alerted and _startup_down_since is not None:
+                    elapsed = int(time.monotonic() - _startup_down_since)
+                    mins, secs = divmod(elapsed, 60)
+                    duration = f"{mins}m {secs}s" if mins else f"{secs}s"
+                    log.info(f"Neotoma available at startup after {duration}.")
+                    _telegram(f"✅ [piculet] Neotoma available — startup resumed after {duration}")
                 break
             except NeotomaUnavailableError as exc:
-                log_error(
-                    f"Neotoma unavailable at startup — will retry in {POLL_INTERVAL_SECONDS}s: {exc}"
-                )
+                if _startup_failures == 0:
+                    _startup_down_since = time.monotonic()
+                _startup_failures += 1
+                if _startup_failures <= _STARTUP_GRACE_ATTEMPTS:
+                    log.warning(
+                        f"Neotoma unavailable at startup (attempt {_startup_failures}/"
+                        f"{_STARTUP_GRACE_ATTEMPTS} grace period — Telegram suppressed): {exc}"
+                    )
+                else:
+                    _startup_alerted = True
+                    log_error(
+                        f"Neotoma unavailable at startup — will retry in {POLL_INTERVAL_SECONDS}s: {exc}"
+                    )
                 time.sleep(POLL_INTERVAL_SECONDS)
 
     seen_meetings = load_seen_meetings()
+
+    # Track consecutive poll failures to apply the same grace period in the
+    # main loop (e.g. after a daemon restart mid-session).
+    _consecutive_neotoma_failures = 0
+    _POLL_GRACE_ATTEMPTS = 2  # silent retries before Telegram fires
+    _neotoma_alerted = False   # True once Telegram fired for this outage
+    _neotoma_down_since: float | None = None  # monotonic time of first failure
 
     while True:
         try:
             # Guard: verify Neotoma is reachable before doing any work.
             try:
                 check_neotoma()
+
+                # --- Recovery notification ---
+                if _neotoma_alerted and _neotoma_down_since is not None:
+                    elapsed = int(time.monotonic() - _neotoma_down_since)
+                    mins, secs = divmod(elapsed, 60)
+                    duration = f"{mins}m {secs}s" if mins else f"{secs}s"
+                    log.info(f"Neotoma back online after {duration}.")
+                    _telegram(f"✅ [piculet] Neotoma back online (was down {duration})")
+
+                # Reset failure tracking on success
+                _consecutive_neotoma_failures = 0
+                _neotoma_alerted = False
+                _neotoma_down_since = None
+
             except NeotomaUnavailableError as exc:
-                log_error(f"Neotoma unavailable — skipping poll: {exc}")
+                if _consecutive_neotoma_failures == 0:
+                    _neotoma_down_since = time.monotonic()
+                _consecutive_neotoma_failures += 1
+                if _consecutive_neotoma_failures <= _POLL_GRACE_ATTEMPTS:
+                    log.warning(
+                        f"Neotoma unavailable — skipping poll (attempt "
+                        f"{_consecutive_neotoma_failures}/{_POLL_GRACE_ATTEMPTS} "
+                        f"grace, Telegram suppressed): {exc}"
+                    )
+                else:
+                    _neotoma_alerted = True
+                    log_error(f"Neotoma unavailable — skipping poll: {exc}")
                 time.sleep(POLL_INTERVAL_SECONDS)
                 continue
 

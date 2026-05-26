@@ -42,6 +42,8 @@ class AgentDefinition:
     version: str = "1.0.0"
     notes: str = ""
     raw: dict = field(default_factory=dict)
+    # Observation ID that produced the current snapshot (for dispatch pinning, ateles#22)
+    last_observation_id: str = ""
 
     @property
     def tools(self) -> list[str]:
@@ -149,6 +151,12 @@ class AgentLoader:
 
     def _parse(self, entity_id: str, data: dict) -> AgentDefinition:
         snap = data.get("snapshot") or data.get("entity", {}).get("snapshot", {})
+        # Extract a representative observation_id from the reducer provenance map.
+        # We use "name" as the anchor field; fall back to any non-null value.
+        provenance = snap.get("provenance") or {}
+        last_obs_id = provenance.get("name") or next(
+            (v for v in provenance.values() if v), ""
+        )
         return AgentDefinition(
             entity_id=entity_id,
             name=snap.get("name", self.agent_name),
@@ -164,6 +172,7 @@ class AgentLoader:
             version=snap.get("version", "1.0.0"),
             notes=snap.get("notes", ""),
             raw=data,
+            last_observation_id=str(last_obs_id) if last_obs_id else "",
         )
 
     def _stub(self) -> AgentDefinition:
