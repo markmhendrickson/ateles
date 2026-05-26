@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "github_harness": {
+      "command": "node",
+      "args": [
+        "/Users/markmhendrickson/repos/ateles/execution/mcp/github_harness/dist/index.js"
+      ],
+      "env": {
+        "GITHUB_HARNESS_DEBUG": "0"
+      }
+    }
+  }
+}
