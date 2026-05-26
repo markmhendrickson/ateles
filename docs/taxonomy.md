@@ -144,3 +144,25 @@ Each T2 and T3 agent has a distinct AAuth keypair with `sub = <name>@ateles-swar
 | Strix | `strix@ateles-swarm` | audio capture write |
 | Apis | `apis@ateles-swarm` | task read + payment_event write (planned) |
 | Anthus | `anthus@ateles-swarm` | swarm metrics read (planned) |
+
+---
+
+## GitHub machine accounts
+
+Ateles uses dedicated GitHub machine accounts for all automated pushes and PR authorship. These are separate from AAuth identities — they are GitHub OAuth identities used to write commits and interact with GitHub APIs, not Neotoma credentials.
+
+| Account | Used by | Purpose | Status |
+|---|---|---|---|
+| `ateles-agent` | Apus, Formica, Gryllus | Commits mirrored from Neotoma→git; automated PRs and issue comments against the ateles repo | pending creation |
+| `neotoma-agent` | neotoma-agent daemon | Automated PRs and issue comments against the neotoma repo | pending creation |
+
+### Setup checklist
+
+For each account:
+1. Create a GitHub account with the username above
+2. Generate a personal access token (PAT) with `repo` and `workflow` scopes
+3. Store the PAT in `ateles-private/.env` as `ATELES_AGENT_PAT` / `NEOTOMA_AGENT_PAT`
+4. Add the account as a collaborator with write access to the relevant repo
+5. Set the git identity in the daemon's launchagent env (`ATELES_AGENT_GIT_NAME`, `ATELES_AGENT_GIT_EMAIL`)
+
+Both accounts use `noreply@users.noreply.github.com`-style emails (e.g. `ateles-agent@users.noreply.github.com`) to keep commits attributable without exposing personal email addresses.

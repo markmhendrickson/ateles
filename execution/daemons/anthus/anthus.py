@@ -185,11 +185,15 @@ async def _orchestrate_workflow_for(event) -> None:
             f"on {event.entity_id}"
         )
         state[gate.gate_name].status = "dispatched"
+        # Pin the exact agent_definition version at dispatch time (ateles#22).
+        gate_agent_def = AgentLoader(gate.owner_agent).load()
         await participation.record_dispatched(
             work_entity_id=event.entity_id,
             workflow_definition_id=wf.entity_id,
             gate_name=gate.gate_name,
             agent=gate.owner_agent,
+            agent_definition_ref=gate_agent_def.entity_id,
+            agent_definition_observation_id=gate_agent_def.last_observation_id,
         )
         # Spawn the agent via claude CLI. The `--skill` flag does not exist;
         # the working invocation is `--append-system-prompt` with the SKILL.md

@@ -306,176 +306,94 @@ def report_meeting_recording(recording: Path) -> None:
 
 
 class NeotomaUnavailableError(Exception):
-    """Raised when Neotoma is not usable (CLI missing, server down, auth failure, etc.)."""
+    """Raised when Neotoma is not usable (server down, auth failure, etc.)."""
 
 
-# Fixed prod port — the launchagent always binds here; port file can go stale.
-_NEOTOMA_PROD_PORT = 3180
-# Candidate ports to probe when the configured base URL is unreachable.
-# Dev port (3080) is intentionally excluded: falling back to dev would silently
-# write imports to the wrong database. We only ever want the prod server.
-_NEOTOMA_FALLBACK_PORTS = [3180]
-# Project root for reading the port file as a last resort.
-_NEOTOMA_PROJECT_ROOT = Path(
-    os.environ.get("NEOTOMA_PROJECT_ROOT", Path.home() / "repos" / "neotoma")
-)
+# ---------------------------------------------------------------------------
+# Neotoma HTTP helpers — direct API calls, no CLI subprocess
+# ---------------------------------------------------------------------------
+
+# Base URL resolved from env at startup. The plist also sets NEOTOMA_BASE_URL
+# so this will always resolve to prod (3180), never auto-detect dev (3080).
+_NEOTOMA_BASE_URL: str = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180")
 
 
-def _probe_tcp(host: str, port: int, timeout: float = 1.0) -> bool:
-    """Return True if a TCP connection to host:port succeeds within timeout."""
-    import socket
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
-def _find_neotoma_base_url() -> str | None:
+def _neotoma_query(
+    entity_type: str,
+    limit: int = 1,
+    offset: int = 0,
+    timeout: float = 15.0,
+) -> dict:
     """
-    Self-repair: find the prod server's actual URL when the configured one is
-    unreachable.
+    Call POST /entities/query on the Neotoma HTTP API.
 
-    Strategy (in order):
-    1. Port file  — NEOTOMA_PROJECT_ROOT/.dev-serve/local_http_port_prod
-    2. Fixed port — 3180 (launchagent default)
-    3. Dev port   — 3080 (fallback, in case prod is somehow on dev)
-
-    Returns the first URL that has a listening TCP port, or None if none found.
+    Returns the parsed JSON response dict (keys: entities, total, limit, offset).
+    Raises NeotomaUnavailableError on connection failure, timeout, or non-2xx status.
     """
-    candidates: list[int] = []
+    import urllib.error
+    import urllib.request
 
-    # 1. Port file
-    port_file = _NEOTOMA_PROJECT_ROOT / ".dev-serve" / "local_http_port_prod"
-    try:
-        raw = port_file.read_text().strip()
-        if raw.isdigit():
-            candidates.append(int(raw))
-    except Exception:
-        pass
+    token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
+    if not token:
+        raise NeotomaUnavailableError("NEOTOMA_BEARER_TOKEN not set")
 
-    # 2 & 3. Fixed fallbacks (deduped, preserve order)
-    for p in _NEOTOMA_FALLBACK_PORTS:
-        if p not in candidates:
-            candidates.append(p)
+    url = f"{_NEOTOMA_BASE_URL.rstrip('/')}/entities/query"
+    body_bytes = json.dumps(
+        {"entity_type": entity_type, "limit": limit, "offset": offset}
+    ).encode()
 
-    for port in candidates:
-        if _probe_tcp("localhost", port):
-            return f"http://localhost:{port}"
-
-    return None
-
-
-def _neotoma_cmd(extra_args: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
-    """Run a neotoma CLI command, returning the CompletedProcess."""
-    return subprocess.run(
-        ["neotoma", "--json", "--api-only"] + extra_args,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=os.environ,
+    req = urllib.request.Request(
+        url,
+        data=body_bytes,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
     )
-
-
-def check_neotoma() -> None:
-    """
-    Verify that Neotoma is ready: CLI present, server reachable, auth valid.
-    Raises NeotomaUnavailableError with a descriptive message on any failure.
-
-    Self-repair behaviours:
-    - "Server not reachable": probes candidate ports, updates NEOTOMA_BASE_URL
-      in-process, and retries once.
-    - "401 Unauthorized": raises with a clear message distinguishing auth
-      failure from connectivity failure (token rotation required).
-    Call this before any operation that depends on Neotoma.
-    """
-    import shutil
-
-    neotoma = shutil.which("neotoma")
-    if not neotoma:
-        raise NeotomaUnavailableError("neotoma CLI not found in PATH")
-
-    health_args = ["entities", "list", "--entity-type", "transcription", "--limit", "1"]
-
     try:
-        result = _neotoma_cmd(health_args)
-    except subprocess.TimeoutExpired:
-        raise NeotomaUnavailableError("Neotoma health check timed out")
-    except Exception as exc:
-        raise NeotomaUnavailableError(f"Neotoma health check failed: {exc}") from exc
-
-    if result.returncode != 0:
-        raw_err = (result.stderr.strip() or result.stdout.strip())[:300]
-
-        # --- Self-repair: server not reachable ---
-        if "not reachable" in raw_err.lower() or "server not reachable" in raw_err.lower():
-            recovered_url = _find_neotoma_base_url()
-            if recovered_url:
-                current_url = os.environ.get("NEOTOMA_BASE_URL", "")
-                if recovered_url != current_url:
-                    log.warning(
-                        f"Prod server moved: {current_url or '(none)'} → {recovered_url}. "
-                        "Updating NEOTOMA_BASE_URL and retrying."
-                    )
-                    os.environ["NEOTOMA_BASE_URL"] = recovered_url
-                    # Persist to .env so the neotoma CLI subprocess picks it up
-                    try:
-                        env_text = _NEOTOMA_ENV_FILE.read_text()
-                        new_line = f'NEOTOMA_BASE_URL="{recovered_url}"'
-                        import re as _re2
-                        if "NEOTOMA_BASE_URL" in env_text:
-                            env_text = _re2.sub(
-                                r"^NEOTOMA_BASE_URL=.*$", new_line,
-                                env_text, flags=_re2.MULTILINE,
-                            )
-                        else:
-                            env_text += f"\n{new_line}\n"
-                        _NEOTOMA_ENV_FILE.write_text(env_text)
-                    except Exception:
-                        pass
-                # Retry once with the (possibly updated) URL
-                try:
-                    result = _neotoma_cmd(health_args)
-                except subprocess.TimeoutExpired:
-                    raise NeotomaUnavailableError("Neotoma health check timed out (retry)")
-                except Exception as exc:
-                    raise NeotomaUnavailableError(f"Neotoma health check failed (retry): {exc}") from exc
-                if result.returncode != 0:
-                    raw_err2 = (result.stderr.strip() or result.stdout.strip())[:300]
-                    raise NeotomaUnavailableError(
-                        f"Neotoma still unreachable after URL repair ({recovered_url}): {raw_err2}"
-                    )
-            else:
-                raise NeotomaUnavailableError(
-                    f"Neotoma server not reachable on any known port: {raw_err}"
-                )
-
-        # --- Auth failure: distinguish from connectivity ---
-        elif "401" in raw_err or "unauthorized" in raw_err.lower() or "invalid authentication" in raw_err.lower():
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode()
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode()[:300]
+        if exc.code == 401:
             raise NeotomaUnavailableError(
                 "Neotoma auth rejected (401) — bearer token may need rotation in 1Password"
             )
-
-        else:
-            raise NeotomaUnavailableError(
-                f"Neotoma returned non-zero exit code {result.returncode}: {raw_err}"
-            )
+        raise NeotomaUnavailableError(f"Neotoma HTTP {exc.code}: {body}")
+    except urllib.error.URLError as exc:
+        raise NeotomaUnavailableError(
+            f"Neotoma server not reachable at {_NEOTOMA_BASE_URL}: {exc.reason}"
+        )
+    except TimeoutError:
+        raise NeotomaUnavailableError(f"Neotoma request timed out ({timeout}s)")
 
     try:
-        data = json.loads(result.stdout)
+        data = json.loads(body)
     except json.JSONDecodeError as exc:
         raise NeotomaUnavailableError(
-            f"Neotoma returned unparseable response: {result.stdout[:200]}"
+            f"Neotoma returned unparseable response: {body[:200]}"
         ) from exc
 
-    if "error" in data:
-        # One more layer of 401 detection (some versions embed in JSON)
+    if isinstance(data, dict) and "error" in data:
         err_msg = data["error"]
-        if "401" in err_msg or "unauthorized" in err_msg.lower():
+        if "401" in str(err_msg) or "unauthorized" in str(err_msg).lower():
             raise NeotomaUnavailableError(
                 "Neotoma auth rejected (401) — bearer token may need rotation in 1Password"
             )
         raise NeotomaUnavailableError(f"Neotoma API error: {err_msg}")
+
+    return data
+
+
+def check_neotoma() -> None:
+    """
+    Verify that Neotoma is ready: server reachable and auth valid.
+    Raises NeotomaUnavailableError with a descriptive message on any failure.
+    Call this before any operation that depends on Neotoma.
+    """
+    _neotoma_query("transcription", limit=1)
 
 
 def hydrate_seen_from_neotoma() -> set[str]:
@@ -492,33 +410,7 @@ def hydrate_seen_from_neotoma() -> set[str]:
     offset = 0
     limit = 200
     while True:
-        result = subprocess.run(
-            [
-                "neotoma",
-                "--json",
-                "--api-only",
-                "entities",
-                "list",
-                "--entity-type",
-                "transcription",
-                "--limit",
-                str(limit),
-                "--offset",
-                str(offset),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=os.environ,
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            raise NeotomaUnavailableError(
-                f"Neotoma hydration failed at offset {offset}: "
-                f"{(result.stderr or result.stdout).strip()[:200]}"
-            )
-        data = json.loads(result.stdout)
-        if "error" in data:
-            raise NeotomaUnavailableError(f"Neotoma hydration error: {data['error']}")
+        data = _neotoma_query("transcription", limit=limit, offset=offset, timeout=30.0)
         entities = data.get("entities") or data.get("results") or []
         if not entities:
             break

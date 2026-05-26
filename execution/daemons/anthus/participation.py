@@ -39,19 +39,26 @@ async def record_dispatched(
     workflow_definition_id: str,
     gate_name: str,
     agent: str,
+    agent_definition_ref: str = "",
+    agent_definition_observation_id: str = "",
+    agent_strategy_ref: str = "",
 ) -> None:
     """Write/update a participation_record with status=dispatched."""
-    await _upsert(
-        {
-            "work_entity_id": work_entity_id,
-            "workflow_definition_id": workflow_definition_id,
-            "gate_name": gate_name,
-            "agent": agent,
-            "status": "dispatched",
-            "dispatched_at": _now_iso(),
-        },
-        idempotency_key=f"dispatch-{work_entity_id}-{gate_name}",
-    )
+    payload: dict = {
+        "work_entity_id": work_entity_id,
+        "workflow_definition_id": workflow_definition_id,
+        "gate_name": gate_name,
+        "agent": agent,
+        "status": "dispatched",
+        "dispatched_at": _now_iso(),
+    }
+    if agent_definition_ref:
+        payload["agent_definition_ref"] = agent_definition_ref
+    if agent_definition_observation_id:
+        payload["agent_definition_observation_id"] = agent_definition_observation_id
+    if agent_strategy_ref:
+        payload["agent_strategy_ref"] = agent_strategy_ref
+    await _upsert(payload, idempotency_key=f"dispatch-{work_entity_id}-{gate_name}")
 
 
 async def record_satisfied(
