@@ -157,6 +157,45 @@ Escalation entities are created by any daemon or agent when a condition requires
 
 ---
 
+## Strategy hierarchy schemas
+
+Four-layer DAG: `business_strategy → domain_strategy → agent_strategy → agent_definition`. Execution-only agents (Gryllus, Vanellus, Struthio, Regulus) inherit from `domain_strategy` without a personal `agent_strategy` layer.
+
+### `business_strategy`
+**Schema ID**: `21a8a4bb-c5ca-465e-b4ed-2e703a18a8c5` · **v1.0**
+
+Root strategy entity. One per product/company. Fields: `title` (required), `vision`, `north_star_metric`, `time_horizon`, `success_criteria` (array), `constraints` (array), `status`, `version`, `notes`.
+
+### `domain_strategy`
+**Schema ID**: `7089442f-413d-4713-a85c-c4d38ee0893b` · **v1.0**
+
+Per-product-area strategy (product, eng, GTM, compliance, ops). Links to `business_strategy_ref`. Fields: `title` + `domain` (required), plus `objective`, `key_results`, `success_criteria`, `assigned_agents`, `time_horizon`, `status`.
+
+**canonical_name_fields**: `[domain, title]`
+
+### `agent_strategy`
+**Schema ID**: `47f33921-8649-4e42-82d1-35cf6a20013c` · **v1.0**
+
+Per-strategic-agent strategy (Pavo, Bombycilla, Accipiter, Ciconia, Buteo, Columba). Links to `domain_strategy_ref`. Fields: `agent_sub` + `title` (required), plus `objective`, `success_criteria`, `evaluation_schedule`, `drift_signal_threshold`, `status`.
+
+**canonical_name_fields**: `[agent_sub, title]`
+
+### `strategy_revision_proposal`
+**Schema ID**: `b4577273-5775-49e6-af63-7d96e0b40168` · **v1.0**
+
+Created automatically when a pattern of `strategy_drift_signal` lines accumulates. Fields: `proposing_agent_sub` + `target_entity_id` + `proposed_at` (required), plus `target_entity_type`, `summary`, `drift_signal_refs`, `proposed_change`, `affects_higher_layer`, `operator_decision`, `operator_notes`, `status`.
+
+**canonical_name_fields**: `[proposing_agent_sub, target_entity_id, proposed_at]`
+
+### `strategy_evaluation_report`
+**Schema ID**: `94a29cad-f663-42af-8953-2ab02c1d976d` · **v1.0**
+
+Periodic self-evaluation by a strategic agent against its `agent_strategy`. Fields: `agent_sub` + `agent_strategy_ref` + `evaluated_at` (required), plus `period_start`, `period_end`, `observations_reviewed`, `criteria_scores`, `overall_score`, `drift_signals_found`, `revision_proposals`, `summary`, `status`.
+
+**canonical_name_fields**: `[agent_sub, agent_strategy_ref, evaluated_at]`
+
+---
+
 ## Payment schemas
 
 ### `payment_profile`

@@ -196,6 +196,20 @@ If during this work you observed evidence that contradicts your current operatin
 
 Onychomys digests these. They're how the swarm learns. Omit when nothing material surfaced.
 
+## Autonomous tooling
+
+Per `agent_policy:tooling_acquisition` (ent_663888501a290e9aaf60270c):
+
+**May install autonomously** (no operator consent needed):
+- `npx playwright install --with-deps` — browser automation for UI fidelity checks
+- `pip install pytest coverage pytest-asyncio` — test execution and coverage
+- `npm install --save-dev @playwright/test` — Playwright test runner
+
+**Requires operator consent**:
+- Storing credentials or secrets to disk
+- Modifying launchd jobs or cron entries
+- Posting publicly or sending messages
+
 ## Constraints
 
 - Do not prioritise features or sequence roadmap items — that is Pavo's job.

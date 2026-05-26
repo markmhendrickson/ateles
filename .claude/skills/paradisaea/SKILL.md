@@ -115,6 +115,18 @@ If during this work you observed evidence that contradicts your current operatin
 
 Onychomys digests these. They're how the swarm learns. Omit when nothing material surfaced.
 
+## Autonomous tooling
+
+Per `agent_policy:tooling_acquisition` (ent_663888501a290e9aaf60270c):
+
+**May install autonomously** (no operator consent needed):
+- Web fetch / read-only URL inspection for published copy and design references
+- `npx @figma/cli` — read-only Figma file inspection (if `figma_cli` in tool_allowlist)
+
+**Requires operator consent**:
+- Storing API keys or design tokens to disk
+- Publishing or posting to any public channel
+
 ## Constraints
 
 - Do not prioritise features or sequence roadmap items — that is Pavo's job.
