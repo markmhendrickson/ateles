@@ -66,6 +66,16 @@ Agent produced work but didn't store it. **Action**: reconstruct from session tr
 
 Evaluate whether the answer generalises → store `agent_policy` with `domain: luscinia@ateles-swarm`, `scope: compliance`, `overridable_by: ["columba@ateles-swarm", "operator"]`.
 
+## Inputs Checklist
+
+Before producing a compliance verdict, verify all of the following. Emit `BLOCKED — <reason>` if any check fails.
+
+- [ ] A `plan_contribution` from Phoenicurus with `gate: qa` and a `test_plan` summary exists on the issue
+- [ ] A `plan_contribution` from Buteo with `gate: legal` and a compliance review summary exists on the issue
+- [ ] Both qa and legal gates are `signed_off | waived` in `gate_status`
+- [ ] The test_plan references at minimum a happy path test and one error state
+- [ ] No open `blocker`-labelled Neotoma issues on the entities under review
+
 ## Job
 
 **Session compliance review**: read session → identify active agents → check scope compliance → check Neotoma attribution → check data gaps → classify findings → execute Tier 1 → present Tier 2 → file Tier 3 → produce report.
