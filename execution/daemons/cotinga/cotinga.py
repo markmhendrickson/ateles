@@ -1,0 +1,604 @@
+#!/usr/bin/env python3
+"""
+Cotinga — Daily Event-Prep Briefing Daemon
+Named after Cotinga, a genus of brightly coloured birds known for their
+striking appearance — appropriate for a daemon that makes each day vivid
+and well-prepared.
+
+Runs once daily at 05:30 Madrid time via launchd StartCalendarInterval.
+
+Two-phase design:
+  Phase 1 (runs at 05:30, fast ~30s): Fetch today's calendar events,
+    cross-reference attendees against Neotoma, emit a shallow Telegram
+    briefing with known context. For each unknown attendee and each meeting
+    needing deeper prep, create task entities in Neotoma and spawn async
+    Claude agents to do the heavy lifting.
+  Phase 2 (async, runs in background): Spawned Claude agents complete
+    participant research, agenda generation, and pre-event tasks. Each
+    agent sends its own Telegram follow-up when done.
+
+Usage:
+  python3 cotinga.py
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+# ---------------------------------------------------------------------------
+# Env bootstrap (launchd does not source shell profiles)
+# ---------------------------------------------------------------------------
+
+_NEOTOMA_ENV_FILE = Path.home() / ".config" / "neotoma" / ".env"
+if _NEOTOMA_ENV_FILE.exists():
+    for _line in _NEOTOMA_ENV_FILE.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
+
+# ---------------------------------------------------------------------------
+# lib/notify integration
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+try:
+    from lib.notify import Notifier
+    _notifier: "Notifier | None" = Notifier.from_neotoma()
+except Exception:
+    _notifier = None
+
+
+def _notify(message: str, priority: str = "info") -> None:
+    if _notifier is None:
+        return
+    try:
+        from lib.notify import Priority
+        p = getattr(Priority, priority.upper(), Priority.INFO)
+        _notifier.send(message, priority=p, handler="cotinga")
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+LOG_DIR = Path.home() / "Library" / "Logs" / "ateles"
+LOG_FILE = LOG_DIR / "cotinga.log"
+STATE_FILE = Path(__file__).parent / ".cotinga_last_run"
+
+MADRID_TZ = ZoneInfo("Europe/Madrid")
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_TOPIC_COTINGA = os.environ.get("TELEGRAM_TOPIC_COTINGA", "")
+NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
+NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com")
+
+# Look-ahead window: fetch events starting now through end of tomorrow
+LOOKAHEAD_HOURS = 48
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class _FlushingFileHandler(logging.FileHandler):
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        self.flush()
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [cotinga] %(levelname)s %(message)s",
+    handlers=[
+        _FlushingFileHandler(LOG_FILE),
+        logging.StreamHandler(sys.stdout),
+    ],
+)
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Idempotency
+# ---------------------------------------------------------------------------
+
+
+def _check_already_ran_today() -> bool:
+    if STATE_FILE.exists():
+        return STATE_FILE.read_text().strip() == date.today().isoformat()
+    return False
+
+
+def _mark_ran_today() -> None:
+    STATE_FILE.write_text(date.today().isoformat())
+
+
+# ---------------------------------------------------------------------------
+# Calendar: fetch upcoming events
+# ---------------------------------------------------------------------------
+
+
+def fetch_upcoming_events() -> list[dict]:
+    """Fetch events from now through the next LOOKAHEAD_HOURS hours."""
+    import shutil
+
+    gws = shutil.which("gws")
+    if not gws:
+        log.error("gws CLI not found in PATH")
+        return []
+
+    now = datetime.now(tz=MADRID_TZ)
+    end = now + timedelta(hours=LOOKAHEAD_HOURS)
+    time_min = now.strftime("%Y-%m-%dT%H:%M:%S+02:00")
+    time_max = end.strftime("%Y-%m-%dT%H:%M:%S+02:00")
+
+    params = {
+        "calendarId": "primary",
+        "singleEvents": True,
+        "orderBy": "startTime",
+        "timeMin": time_min,
+        "timeMax": time_max,
+    }
+
+    try:
+        result = subprocess.run(
+            [gws, "calendar", "events", "list", "--params", json.dumps(params)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=os.environ,
+        )
+        if result.returncode != 0:
+            log.error(f"gws calendar events list failed: {result.stderr.strip()[:300]}")
+            return []
+
+        data = json.loads(result.stdout)
+        items = data.get("items") or []
+        log.info(f"Fetched {len(items)} upcoming event(s)")
+        return items
+
+    except (json.JSONDecodeError, Exception) as exc:
+        log.error(f"Calendar fetch error: {exc}")
+        return []
+
+
+def _extract_attendees(event: dict) -> list[dict]:
+    """Return list of attendee dicts (name, email) from a calendar event."""
+    attendees = event.get("attendees") or []
+    result = []
+    for a in attendees:
+        email = a.get("email", "").lower()
+        # Skip self and calendar resource rooms
+        if not email or "resource.calendar.google.com" in email:
+            continue
+        result.append({
+            "name": a.get("displayName") or email.split("@")[0],
+            "email": email,
+            "organizer": a.get("organizer", False),
+            "self": a.get("self", False),
+        })
+    return result
+
+
+def _event_start_madrid(event: dict) -> datetime | None:
+    """Return the event start as a Madrid-timezone datetime, or None."""
+    start = event.get("start") or {}
+    dt_str = start.get("dateTime") or start.get("date")
+    if not dt_str:
+        return None
+    try:
+        if "T" in dt_str:
+            dt = datetime.fromisoformat(dt_str)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=MADRID_TZ)
+            return dt.astimezone(MADRID_TZ)
+        else:
+            # All-day event
+            d = date.fromisoformat(dt_str)
+            return datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=MADRID_TZ)
+    except ValueError:
+        return None
+
+
+def _is_meeting(event: dict) -> bool:
+    """True if the event has multiple attendees (i.e. is a real meeting)."""
+    attendees = _extract_attendees(event)
+    # Filter out self
+    others = [a for a in attendees if not a["self"]]
+    return len(others) > 0
+
+
+# ---------------------------------------------------------------------------
+# Neotoma: look up known attendees
+# ---------------------------------------------------------------------------
+
+
+def _neotoma_get(path: str) -> dict | list | None:
+    """Make a GET request to the Neotoma API."""
+    if not NEOTOMA_BEARER_TOKEN or not NEOTOMA_BASE_URL:
+        return None
+    try:
+        url = f"{NEOTOMA_BASE_URL.rstrip('/')}{path}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}",
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+    except Exception as exc:
+        log.debug(f"Neotoma GET {path} failed: {exc}")
+        return None
+
+
+def lookup_person_in_neotoma(email: str, name: str) -> dict | None:
+    """
+    Try to find a person entity in Neotoma by email (preferred) or name.
+    Returns the snapshot dict if found, None otherwise.
+    """
+    # Search by email first
+    data = _neotoma_get(
+        f"/api/entities?entity_type=person&search={urllib.parse.quote(email)}&limit=5"
+    )
+    if data:
+        entities = data.get("entities") or []
+        for e in entities:
+            snap = e.get("snapshot") or {}
+            if email.lower() in (snap.get("email") or "").lower():
+                return snap
+
+    # Fall back to name search
+    data = _neotoma_get(
+        f"/api/entities?entity_type=person&search={urllib.parse.quote(name)}&limit=5"
+    )
+    if data:
+        entities = data.get("entities") or []
+        for e in entities:
+            snap = e.get("snapshot") or {}
+            return snap  # return first name match
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Telegram
+# ---------------------------------------------------------------------------
+
+
+def telegram_send(text: str) -> None:
+    import shutil
+
+    node = shutil.which("node")
+    send_script = PROJECT_ROOT / "execution" / "lib" / "telegram" / "send.mjs"
+    if node and send_script.exists():
+        try:
+            args = [node, str(send_script), "--text", text]
+            if TELEGRAM_TOPIC_COTINGA:
+                args += ["--thread-id", TELEGRAM_TOPIC_COTINGA]
+            subprocess.run(args, timeout=15, capture_output=True, env=os.environ)
+            return
+        except Exception as exc:
+            log.warning(f"send.mjs failed: {exc}, trying fallback")
+
+    telegram_cmd = shutil.which("telegram-send")
+    if telegram_cmd:
+        try:
+            subprocess.run(
+                [telegram_cmd, text], timeout=15, capture_output=True, env=os.environ
+            )
+        except Exception as exc:
+            log.warning(f"telegram-send fallback failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Neotoma task creation
+# ---------------------------------------------------------------------------
+
+
+def create_neotoma_task(title: str, description: str, due_date: str, priority: str = "p2") -> str | None:
+    """
+    Create a task entity in Neotoma via the REST API.
+    Returns entity_id on success, None on failure.
+    """
+    if not NEOTOMA_BEARER_TOKEN or not NEOTOMA_BASE_URL:
+        return None
+
+    payload = json.dumps({
+        "entities": [{
+            "entity_type": "task",
+            "name": title,
+            "description": description,
+            "due_date": due_date,
+            "priority": priority,
+            "status": "open",
+            "domain": "preparation",
+        }],
+        "idempotency_key": f"cotinga-task-{title[:40].replace(' ', '-')}-{due_date}",
+    }).encode()
+
+    try:
+        url = f"{NEOTOMA_BASE_URL.rstrip('/')}/api/store"
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        entities = data.get("entities") or []
+        if entities:
+            eid = entities[0].get("entity_id")
+            log.info(f"Created Neotoma task: {title!r} → {eid}")
+            return eid
+    except Exception as exc:
+        log.warning(f"Neotoma task creation failed for {title!r}: {exc}")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Async deep-prep agent spawn
+# ---------------------------------------------------------------------------
+
+
+def spawn_deep_prep_agent(event: dict, attendees: list[dict], event_dt: datetime) -> None:
+    """
+    Spawn a background Claude agent to do deep participant research,
+    agenda generation, and talking points for a meeting.
+    The agent sends its own Telegram follow-up when done.
+    """
+    import shutil
+
+    claude = shutil.which("claude")
+    if not claude:
+        log.warning("claude CLI not found — cannot spawn deep-prep agent")
+        return
+
+    event_title = event.get("summary") or "(untitled)"
+    event_time = event_dt.strftime("%H:%M")
+    event_date = event_dt.strftime("%Y-%m-%d")
+    attendee_list = "\n".join(
+        f"  - {a['name']} <{a['email']}>" for a in attendees if not a["self"]
+    )
+
+    description = (event.get("description") or "").strip()[:500]
+    location = (event.get("location") or "").strip()
+
+    telegram_thread_flag = (
+        f"--thread-id {TELEGRAM_TOPIC_COTINGA}" if TELEGRAM_TOPIC_COTINGA else ""
+    )
+
+    prompt = f"""You are Cotinga, the daily event-prep agent for Mark Hendrickson (markmhendrickson@gmail.com).
+
+Your job is to prepare a deep briefing for this upcoming meeting and send it via Telegram.
+
+## Meeting details
+- Title: {event_title}
+- Date/time: {event_date} at {event_time} Madrid time
+- Location: {location or '(none)'}
+- Description: {description or '(none)'}
+
+## Attendees (excluding Mark)
+{attendee_list or '(no external attendees — this is a solo event)'}
+
+## Your tasks (complete all, then send Telegram summary)
+
+1. **Participant research** — for each attendee:
+   a. Search Neotoma (mcp__mcpsrv_neotoma__retrieve_entity_by_identifier with their email,
+      then name) for any existing person/company entities.
+   b. If found: pull their snapshot — role, company, prior interactions, notes.
+   c. If NOT found: create a stub person entity in Neotoma (entity_type=person,
+      name, email, notes="Attendee at '{event_title}' on {event_date}").
+   d. Note whether we've met them before (any prior conversation or event entities
+      linked to them in Neotoma).
+
+2. **Pre-event tasks** — identify any concrete preparation steps:
+   - Materials to review, docs to prepare, questions to answer in advance
+   - For each task: create a task entity in Neotoma (entity_type=task, domain=preparation,
+     due_date={event_date}, status=open) and note the entity_id.
+   - If a task can be done by another agent (e.g. research, a code issue),
+     note the suggested agent name in the task description.
+
+3. **Meeting brief** — compose:
+   a. Goals: 2-3 concrete outcomes Mark should aim for
+   b. Agenda: ordered talking points (5-8 bullet points max)
+   c. Context: 1-2 sentences per attendee — who they are, any relevant history
+   d. Open questions: anything Mark should clarify or resolve
+
+4. **Store the brief** — store a checkpoint_brief entity in Neotoma:
+   entity_type=checkpoint_brief (schema: b0bfcfab-1f07-4526-8fa5-d5ace343b004)
+   with the full brief as the body field, linked REFERS_TO the meeting event.
+
+5. **Send Telegram** — send the complete brief to Telegram via:
+   node {PROJECT_ROOT}/execution/lib/telegram/send.mjs --text "<brief>" {telegram_thread_flag}
+
+Format the Telegram message as:
+---
+📅 Cotinga deep prep: {event_title} ({event_time})
+
+👥 Participants
+[one line per attendee: name, role/company, "first meeting" or "met N times"]
+
+🎯 Goals
+[2-3 bullet goals]
+
+📋 Agenda
+[5-8 bullet talking points]
+
+📝 Open questions
+[any pre-meeting questions to resolve]
+
+✅ Pre-event tasks created
+[list task names and Neotoma IDs]
+---
+
+Work through all steps, then stop.
+"""
+
+    log.info(f"Spawning deep-prep agent for: {event_title!r}")
+    try:
+        import re
+        safe_title = re.sub(r"[^A-Za-z0-9_-]", "_", event_title[:20])
+        log_path = LOG_DIR / f"cotinga_deepprep_{event_date}_{safe_title}.log"
+        subprocess.Popen(
+            [claude, "--print", "--dangerously-skip-permissions", prompt],
+            env=os.environ,
+            stdout=open(log_path, "w"),
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        log.info(f"Deep-prep agent spawned for {event_title!r} (background)")
+    except Exception as exc:
+        log.warning(f"Failed to spawn deep-prep agent for {event_title!r}: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: shallow briefing
+# ---------------------------------------------------------------------------
+
+
+def build_shallow_briefing(
+    events: list[dict],
+    attendee_lookup: dict[str, dict | None],
+    today_str: str,
+) -> str:
+    """Build the fast Phase 1 Telegram message."""
+    lines = [f"☀️ Cotinga — daily prep for {today_str}", ""]
+
+    if not events:
+        lines.append("No events in the next 48 hours. Clear schedule.")
+        return "\n".join(lines)
+
+    for event in events:
+        title = event.get("summary") or "(untitled)"
+        event_dt = _event_start_madrid(event)
+        time_str = event_dt.strftime("%H:%M") if event_dt else "?"
+        date_str = event_dt.strftime("%a %-d %b") if event_dt else "?"
+
+        is_meeting = _is_meeting(event)
+        icon = "🤝" if is_meeting else "📌"
+        lines.append(f"{icon} *{title}* — {date_str} {time_str}")
+
+        attendees = _extract_attendees(event)
+        others = [a for a in attendees if not a["self"]]
+
+        if others:
+            for a in others:
+                known = attendee_lookup.get(a["email"])
+                if known:
+                    role = known.get("role") or known.get("title") or ""
+                    company = known.get("company") or ""
+                    context = ", ".join(filter(None, [role, company]))
+                    lines.append(f"  👤 {a['name']}{' — ' + context if context else ' (known)'}")
+                else:
+                    lines.append(f"  👤 {a['name']} — *first meeting* (research queued)")
+
+        if is_meeting:
+            lines.append("  🔍 Deep prep: queued in background")
+
+        lines.append("")
+
+    lines.append("Deep briefs will arrive separately as agents complete.")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    log.info("Cotinga starting.")
+
+    if _check_already_ran_today():
+        log.info("Already ran today — exiting.")
+        return
+
+    _mark_ran_today()
+
+    today_str = date.today().isoformat()
+    log.info(f"Running daily event prep for {today_str}")
+
+    # Fetch upcoming events
+    events = fetch_upcoming_events()
+
+    if not events:
+        log.info("No upcoming events — sending clear-schedule notice.")
+        telegram_send(f"☀️ Cotinga — {today_str}\nNo events in the next 48 hours. Clear schedule.")
+        return
+
+    # Phase 1: fast attendee lookup in Neotoma
+    all_attendees: dict[str, dict] = {}  # email → {name, email, ...}
+    for event in events:
+        for a in _extract_attendees(event):
+            if not a["self"] and a["email"] not in all_attendees:
+                all_attendees[a["email"]] = a
+
+    attendee_lookup: dict[str, dict | None] = {}
+    for email, a in all_attendees.items():
+        attendee_lookup[email] = lookup_person_in_neotoma(email, a["name"])
+        log.info(
+            f"Attendee {a['name']} <{email}>: "
+            f"{'known' if attendee_lookup[email] else 'unknown'}"
+        )
+
+    # Send Phase 1 shallow briefing immediately
+    briefing = build_shallow_briefing(events, attendee_lookup, today_str)
+    log.info("Sending Phase 1 shallow briefing via Telegram...")
+    telegram_send(briefing)
+
+    # Phase 2: spawn async deep-prep agents for each meeting
+    for event in events:
+        if not _is_meeting(event):
+            continue
+
+        event_dt = _event_start_madrid(event)
+        if event_dt is None:
+            continue
+
+        attendees = _extract_attendees(event)
+        spawn_deep_prep_agent(event, attendees, event_dt)
+        # Brief stagger to avoid hammering the API
+        time.sleep(2)
+
+    log.info("Cotinga Phase 1 complete. Deep-prep agents running in background.")
+
+
+if __name__ == "__main__":
+    _notify("cotinga started", priority="info")
+    try:
+        main()
+        _notify("cotinga Phase 1 complete", priority="info")
+    except Exception as exc:
+        log.exception(f"Cotinga fatal error: {exc}")
+        _notify(f"cotinga fatal error: {exc}", priority="blocker")
+        try:
+            telegram_send(f"🔴 Cotinga fatal error: {exc}")
+        except Exception:
+            pass
+        sys.exit(1)
