@@ -143,7 +143,7 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 **Goal:** Cathartes can define new agents; all planned invocable agents operational.
 
 - [ ] Cathartes meta-agent: writes new `agent_definition` entities from operator description
-- [ ] Remaining invocable agents: Anas, Aquila, Falco, Tachornis, Procyon, Lutra, Lupinus, Salvia
+- [ ] Remaining invocable agents: Anas, Aquila, Falco, Tachornis, Procyon, Lutra, Lupinus
 - [ ] Expand Loxia/Gryllus to handle PRs across all `ateles-agents/<genus>` repos
 
 ---
