@@ -154,17 +154,45 @@ async def _spawn_claude_skill(
         )
         return
 
-    payload = json.dumps(
-        {
-            "entity_id": entity_id,
-            "snapshot": snapshot,
-            "dispatched_by": DAEMON_NAME,
-        }
+    # Load SKILL.md for the agent — `claude --print` does not accept a --skill
+    # flag; the working pattern is --append-system-prompt with the SKILL.md
+    # content (confirmed in Tier 1 smoke test, 2026-05-25).
+    skill_path = (
+        Path(os.environ.get("ATELES_REPO_PATH", str(Path.home() / "repos" / "ateles")))
+        / ".claude"
+        / "skills"
+        / skill
+        / "SKILL.md"
     )
-    cmd = [CLAUDE_BIN, "--print", "--skill", skill]
+    if not skill_path.exists():
+        log.error(f"[{DAEMON_NAME}] SKILL.md not found for {skill} at {skill_path}")
+        notifier.send(
+            f"{skill} dispatch skipped — SKILL.md not found",
+            priority=Priority.WARN,
+            handler=DAEMON_NAME,
+        )
+        return
+
+    try:
+        skill_md = skill_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        log.error(f"[{DAEMON_NAME}] failed to read {skill_path}: {exc}")
+        return
+
+    title = snapshot.get("title", "")
+    repo = snapshot.get("repository") or snapshot.get("repo") or ""
+    number = snapshot.get("number") or snapshot.get("issue_number") or ""
+    prompt = (
+        f"Invoke the {skill} agent per your appended system prompt.\n\n"
+        f"GitHub issue {repo}#{number}: {title}\n\n"
+        f"{snapshot.get('body', '')}\n\n"
+        f"Work entity: {entity_id}."
+    )
+
+    cmd = [CLAUDE_BIN, "--print", "--append-system-prompt", skill_md]
     log.info(
-        f"[{DAEMON_NAME}] Spawning: {' '.join(cmd)} ← payload({len(payload)}B) "
-        f"timeout={DISPATCH_TIMEOUT_SECONDS}s"
+        f"[{DAEMON_NAME}] Spawning: claude --print --append-system-prompt <{skill}.SKILL.md> "
+        f"timeout={DISPATCH_TIMEOUT_SECONDS}s entity={entity_id}"
     )
 
     proc = await asyncio.create_subprocess_exec(
@@ -176,7 +204,7 @@ async def _spawn_claude_skill(
 
     try:
         stdout, stderr = await asyncio.wait_for(
-            proc.communicate(input=payload.encode()),
+            proc.communicate(input=prompt.encode()),
             timeout=DISPATCH_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
