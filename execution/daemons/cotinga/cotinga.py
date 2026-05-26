@@ -409,10 +409,14 @@ Your job is to prepare a deep briefing for this upcoming meeting and send it via
    a. Search Neotoma (mcp__mcpsrv_neotoma__retrieve_entity_by_identifier with their email,
       then name) for any existing person/company entities.
    b. If found: pull their snapshot — role, company, prior interactions, notes.
-   c. If NOT found: create a stub person entity in Neotoma (entity_type=person,
-      name, email, notes="Attendee at '{event_title}' on {event_date}").
-   d. Note whether we've met them before (any prior conversation or event entities
-      linked to them in Neotoma).
+   c. If NOT found in Neotoma:
+      - Search Gmail for emails to/from their address:
+        `gws gmail users messages list --params '{{"userId":"me","q":"from:<email> OR to:<email>","maxResults":5}}'`
+        Read the most relevant message(s) to extract name, role, company, context.
+      - Search LinkedIn via web search for their name + email domain to find role/company.
+      - Create a person entity in Neotoma with everything found (entity_type=person,
+        name, email, role, company, notes with context from Gmail/LinkedIn).
+   d. Note whether we've met them before (any prior Gmail threads or Neotoma entities).
 
 2. **Pre-event tasks** — identify any concrete preparation steps:
    - Materials to review, docs to prepare, questions to answer in advance
