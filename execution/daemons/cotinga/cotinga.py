@@ -109,7 +109,6 @@ logging.basicConfig(
     format="%(asctime)s [cotinga] %(levelname)s %(message)s",
     handlers=[
         _FlushingFileHandler(LOG_FILE),
-        logging.StreamHandler(sys.stdout),
     ],
 )
 log = logging.getLogger(__name__)
@@ -307,32 +306,42 @@ def lookup_person_in_neotoma(email: str, name: str) -> dict | None:
 
 
 def telegram_send(text: str) -> None:
-    import shutil
+    """Send a Telegram message directly via the Bot API using Python urllib (no subprocess)."""
+    import json
+    import urllib.request
+    import urllib.error
 
-    node = shutil.which("node")
-    send_script = PROJECT_ROOT / "execution" / "lib" / "telegram" / "send.mjs"
-    if node and send_script.exists():
-        try:
-            args = [node, str(send_script), "--text", text]
-            if TELEGRAM_TOPIC_COTINGA:
-                args += ["--thread-id", TELEGRAM_TOPIC_COTINGA]
-            result = subprocess.run(args, timeout=15, capture_output=True, env=os.environ)
-            if result.returncode == 0:
-                log.info("Telegram send OK via send.mjs")
-                return
-            else:
-                log.warning(f"send.mjs exited {result.returncode}: {result.stderr.decode()[:200]}")
-        except Exception as exc:
-            log.warning(f"send.mjs failed: {exc}, trying fallback")
+    bot_token = TELEGRAM_BOT_TOKEN
+    chat_id = TELEGRAM_CHAT_ID
 
-    telegram_cmd = shutil.which("telegram-send")
-    if telegram_cmd:
-        try:
-            subprocess.run(
-                [telegram_cmd, text], timeout=15, capture_output=True, env=os.environ
-            )
-        except Exception as exc:
-            log.warning(f"telegram-send fallback failed: {exc}")
+    # Fall back to reading from env file if module-level vars are empty
+    if not bot_token or not chat_id:
+        log.warning("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — cannot send")
+        return
+
+    payload: dict = {"chat_id": chat_id, "text": text}
+    if TELEGRAM_TOPIC_COTINGA:
+        payload["message_thread_id"] = TELEGRAM_TOPIC_COTINGA
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    data = json.dumps(payload).encode("utf-8")
+
+    try:
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.loads(resp.read())
+            msg_id = body.get("result", {}).get("message_id")
+            log.info(f"Telegram send OK (message_id={msg_id})")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:300]
+        log.error(f"Telegram HTTP error {exc.code}: {body}")
+    except Exception as exc:
+        log.error(f"Telegram send failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +423,7 @@ def spawn_deep_prep_agent(event: dict, attendees: list[dict], event_dt: datetime
     location = (event.get("location") or "").strip()
 
     telegram_thread_flag = (
-        f"--thread-id {TELEGRAM_TOPIC_COTINGA}" if TELEGRAM_TOPIC_COTINGA else ""
+        f"--topic {TELEGRAM_TOPIC_COTINGA}" if TELEGRAM_TOPIC_COTINGA else ""
     )
 
     prompt = f"""You are Cotinga, the daily event-prep agent for Mark Hendrickson (markmhendrickson@gmail.com).
@@ -445,24 +454,61 @@ Your job is to prepare a deep briefing for this upcoming meeting and send it via
         name, email, role, company, notes with context from Gmail/LinkedIn).
    d. Note whether we've met them before (any prior Gmail threads or Neotoma entities).
 
-2. **Pre-event tasks** — identify any concrete preparation steps:
+2. **Company / organisation research** — for each attendee's employer:
+   a. Web search their company name to find: founding thesis, product/service description,
+      portfolio companies (if VC/investor), recent news, team size, stage/funding.
+   b. If the attendee is an investor: research their fund's thesis, check-size, stage focus,
+      and any portfolio companies that overlap in category with Neotoma or Ateles.
+   c. **Recent news and publications** — web search for:
+      - News about the company or fund in the last 6 months (funding rounds, launches,
+        press coverage, blog posts, announcements).
+      - Any articles, essays, talks, or posts written by or featuring the attendee personally
+        (LinkedIn posts, Substack, conference talks, interviews, podcasts).
+      - Use these to understand their current thinking and surface natural conversation hooks.
+   d. Surface explicit overlap with Neotoma and/or Ateles:
+      - **Competitive overlap**: are they funding or building anything in the structured
+        memory, knowledge graph, MCP/agent tooling, or AI-ops space?
+      - **Complementary overlap**: portfolio companies or products that Neotoma/Ateles
+        could directly integrate with, sell to, or partner with?
+      - **Strategic angle**: why would this person / firm care about Neotoma or Ateles
+        specifically — from their thesis, portfolio gaps, or personal history?
+   e. Include a "🔍 Overlap with Neotoma/Ateles" section in the brief (1-3 bullet points,
+      concrete and specific — not generic). If no meaningful overlap, say so explicitly.
+
+3. **Neotoma/Ateles activity convergence** — query Neotoma to surface recent internal activity
+   that might resonate with this attendee's interests or thesis:
+   a. Pull recent changes: `mcp__mcpsrv_neotoma__list_recent_changes` (last 14 days) —
+      scan for new entity types, schema additions, decisions, or major feature work that
+      overlaps with the attendee's domain.
+   b. Pull recent task/issue activity: retrieve open tasks and GitHub issues in Neotoma
+      that touch areas relevant to the attendee (e.g. if they're a VC interested in
+      agent memory, surface any recent schema work on memory or MCP tooling).
+   c. Pull the Ateles plan entity (ent_99ace4dd6673aa36ed08b1fe) — check decisions and
+      next_steps for anything that aligns with what the attendee works on.
+   d. Synthesise into 1-3 concrete "shared momentum" points: things Neotoma or Ateles
+      is actively building *right now* that speak directly to the attendee's interests —
+      not just product positioning, but live development activity that signals direction.
+   e. Include a "⚡ Live convergence" section in the brief — what's actively happening
+      in Neotoma/Ateles that this person would find directly relevant today.
+
+4. **Pre-event tasks** — identify any concrete preparation steps:
    - Materials to review, docs to prepare, questions to answer in advance
    - For each task: create a task entity in Neotoma (entity_type=task, domain=preparation,
      due_date={event_date}, status=open) and note the entity_id.
    - If a task can be done by another agent (e.g. research, a code issue),
      note the suggested agent name in the task description.
 
-3. **Meeting brief** — compose:
+5. **Meeting brief** — compose:
    a. Goals: 2-3 concrete outcomes Mark should aim for
    b. Agenda: ordered talking points (5-8 bullet points max)
    c. Context: 1-2 sentences per attendee — who they are, any relevant history
    d. Open questions: anything Mark should clarify or resolve
 
-4. **Store the brief** — store a checkpoint_brief entity in Neotoma:
+6. **Store the brief** — store a checkpoint_brief entity in Neotoma:
    entity_type=checkpoint_brief (schema: b0bfcfab-1f07-4526-8fa5-d5ace343b004)
    with the full brief as the body field, linked REFERS_TO the meeting event.
 
-5. **Send Telegram** — send the complete brief to Telegram via:
+7. **Send Telegram** — send the complete brief to Telegram via:
    node {PROJECT_ROOT}/execution/lib/telegram/send.mjs --text "<brief>" {telegram_thread_flag}
 
 Format the Telegram message as:
@@ -477,6 +523,15 @@ Format the Telegram message as:
 
 📋 Agenda
 [5-8 bullet talking points]
+
+📰 Recent news / publications
+[1-3 bullets: notable recent news about their company, or articles/posts by the person]
+
+🔍 Overlap with Neotoma/Ateles
+[1-3 bullets: competitive, complementary, or strategic overlap — specific, not generic]
+
+⚡ Live convergence
+[1-3 bullets: what Neotoma/Ateles is actively building right now that speaks to this person's interests]
 
 📝 Open questions
 [any pre-meeting questions to resolve]
@@ -522,36 +577,40 @@ def build_shallow_briefing(
         lines.append("No events in the next 48 hours. Clear schedule.")
         return "\n".join(lines)
 
+    meetings_shown = 0
     for event in events:
+        # Only show events that have external attendees (real meetings)
+        if not _is_meeting(event):
+            continue
+
         title = event.get("summary") or "(untitled)"
         event_dt = _event_start_madrid(event)
         time_str = event_dt.strftime("%H:%M") if event_dt else "?"
         date_str = event_dt.strftime("%a %-d %b") if event_dt else "?"
 
-        is_meeting = _is_meeting(event)
-        icon = "🤝" if is_meeting else "📌"
-        lines.append(f"{icon} *{title}* — {date_str} {time_str}")
+        lines.append(f"🤝 {title} — {date_str} {time_str}")
 
         attendees = _extract_attendees(event)
         others = [a for a in attendees if not a["self"]]
 
-        if others:
-            for a in others:
-                known = attendee_lookup.get(a["email"])
-                if known:
-                    role = known.get("role") or known.get("title") or ""
-                    company = known.get("company") or ""
-                    context = ", ".join(filter(None, [role, company]))
-                    lines.append(f"  👤 {a['name']}{' — ' + context if context else ' (known)'}")
-                else:
-                    lines.append(f"  👤 {a['name']} — *first meeting* (research queued)")
+        for a in others:
+            known = attendee_lookup.get(a["email"])
+            if known:
+                role = known.get("role") or known.get("title") or ""
+                company = known.get("company") or ""
+                context = ", ".join(filter(None, [role, company]))
+                lines.append(f"  👤 {a['name']}{' — ' + context if context else ' (known)'}")
+            else:
+                lines.append(f"  👤 {a['name']} — first meeting (research queued)")
 
-        if is_meeting:
-            lines.append("  🔍 Deep prep: queued in background")
-
+        lines.append("  🔍 Deep prep: queued in background")
         lines.append("")
+        meetings_shown += 1
 
-    lines.append("Deep briefs will arrive separately as agents complete.")
+    if meetings_shown == 0:
+        lines.append("No external meetings today. Clear schedule.")
+    else:
+        lines.append("Deep briefs will arrive separately as agents complete.")
     return "\n".join(lines)
 
 
