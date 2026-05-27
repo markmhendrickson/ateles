@@ -12,13 +12,16 @@ if [ -f "$ENV_FILE" ]; then
   set +a
 fi
 
-VENV_PYTHON="$ROOT_DIR/execution/venv/bin/python"
+VENV_PYTHON="$ROOT_DIR/.venv/bin/python3"
+if [ ! -x "$VENV_PYTHON" ]; then
+  VENV_PYTHON="$ROOT_DIR/execution/venv/bin/python"
+fi
 if [ ! -x "$VENV_PYTHON" ]; then
   VENV_PYTHON="$(command -v python3 || true)"
 fi
 
 if [ -z "${VENV_PYTHON:-}" ]; then
-  echo "No python runtime found. Install python3 or create execution/venv first."
+  echo "No python runtime found. Install python3 or create .venv first."
   exit 1
 fi
 
@@ -43,6 +46,13 @@ VIDEO_LOG_FILE="$STATE_DIR/video_recording.log"
 LAST_VIDEO_FILE="$STATE_DIR/last_video_path.txt"
 
 mkdir -p "$STATE_DIR"
+
+_telegram() {
+  local msg="$1"
+  if command -v telegram-send >/dev/null 2>&1; then
+    telegram-send "$msg" 2>/dev/null || true
+  fi
+}
 
 # Set RECORD_MEETING_SKIP_TRANSCRIBE=1 on stop (or toggle→stop) to save WAV only — no transcribe_audio / Neotoma transcription row.
 # Useful when you will transcribe later manually.
@@ -265,47 +275,97 @@ stop_recording() {
     return 0
   fi
 
+  local using_diarization=0
   echo "Starting transcription..."
   local transcribe_cmd=("$VENV_PYTHON" "$TRANSCRIBE_SCRIPT" "$audio_path")
   if should_use_diarization; then
     transcribe_cmd+=("--diarize")
+    using_diarization=1
     echo "Diarization enabled (ELEVENLABS_API_KEY detected)."
   else
     echo "Diarization disabled (ELEVENLABS_API_KEY missing or RECORD_MEETING_DIARIZE=0)."
   fi
 
+  local transcribe_ok=1
   if ! "${transcribe_cmd[@]}" | tee "$TRANSCRIBE_LOG_FILE"; then
-    if should_use_diarization; then
+    if [ "$using_diarization" = "1" ]; then
       echo "Diarized transcription failed; retrying with OpenAI Whisper (--no-diarize)..."
-      "$VENV_PYTHON" "$TRANSCRIBE_SCRIPT" "$audio_path" --no-diarize | tee "$TRANSCRIBE_LOG_FILE"
+      using_diarization=0
+      if ! "$VENV_PYTHON" "$TRANSCRIBE_SCRIPT" "$audio_path" --no-diarize | tee "$TRANSCRIBE_LOG_FILE"; then
+        transcribe_ok=0
+      fi
     else
-      exit 1
+      transcribe_ok=0
     fi
   fi
+
+  if [ "$transcribe_ok" = "0" ]; then
+    _telegram "❌ [strix] Transcription failed. Check log: $TRANSCRIBE_LOG_FILE"
+    exit 1
+  fi
+
   echo "Transcription complete."
 
-  echo ""
-  echo "--- TRANSCRIPTION ---"
-  "$VENV_PYTHON" - "$TRANSCRIBE_LOG_FILE" <<'PY'
+  # Extract transcript text and duration for notifications.
+  local transcript_summary duration_str neotoma_tid
+  transcript_summary="$("$VENV_PYTHON" - "$TRANSCRIBE_LOG_FILE" <<'PY'
 from pathlib import Path
 import sys
 log = Path(sys.argv[1])
-if log.exists():
-    lines = log.read_text(errors="ignore").splitlines()
-    in_block = False
-    for line in lines:
-        if line.strip() == "Transcription text:":
-            in_block = True
-            continue
-        if in_block and (line.startswith("Saved to Neotoma") or "--- END TRANSCRIPTION ---" in line):
-            break
-        if in_block:
-            print(line)
+if not log.exists():
+    raise SystemExit(0)
+lines = log.read_text(errors="ignore").splitlines()
+in_block = False
+text_lines = []
+for line in lines:
+    if line.strip() == "Transcription text:":
+        in_block = True
+        continue
+    if in_block and (line.startswith("Saved to Neotoma") or "--- END TRANSCRIPTION ---" in line):
+        break
+    if in_block:
+        text_lines.append(line)
+text = "\n".join(text_lines).strip()
+# First 400 chars, trim at word boundary
+if len(text) > 400:
+    text = text[:400].rsplit(" ", 1)[0] + "…"
+print(text)
 PY
+  )"
+
+  neotoma_tid="$(grep -E '^NEOTOMA_TRANSCRIPTION_ENTITY_ID=' "$TRANSCRIBE_LOG_FILE" 2>/dev/null | tail -1 | sed 's/^NEOTOMA_TRANSCRIPTION_ENTITY_ID=//' || true)"
+
+  # Duration from audio file
+  duration_str="$("$VENV_PYTHON" - "$audio_path" <<'PY'
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+if not p.exists():
+    print("")
+    raise SystemExit(0)
+try:
+    import wave, contextlib
+    with contextlib.closing(wave.open(str(p), 'r')) as f:
+        frames = f.getnframes()
+        rate = f.getframerate()
+        secs = int(frames / rate)
+        print(f"{secs // 60}m {secs % 60}s")
+except Exception:
+    print("")
+PY
+  )"
+
+  if [ "$using_diarization" = "1" ]; then
+    _telegram "🎙️ [strix] Diarization + transcription done${duration_str:+ (${duration_str})}."$'\n'"${transcript_summary}"
+  else
+    _telegram "📝 [strix] Transcription done${duration_str:+ (${duration_str})}."$'\n'"${transcript_summary}"
+  fi
+
+  echo ""
+  echo "--- TRANSCRIPTION ---"
+  echo "$transcript_summary"
   echo "--- END TRANSCRIPTION ---"
   echo ""
-  local neotoma_tid=""
-  neotoma_tid="$(grep -E '^NEOTOMA_TRANSCRIPTION_ENTITY_ID=' "$TRANSCRIBE_LOG_FILE" 2>/dev/null | tail -1 | sed 's/^NEOTOMA_TRANSCRIPTION_ENTITY_ID=//' || true)"
   if [ -n "$neotoma_tid" ]; then
     echo "Neotoma transcription entity ID: $neotoma_tid"
   else
