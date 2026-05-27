@@ -119,6 +119,29 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+LOCK_FILE = Path(__file__).parent / ".cotinga_lock"
+
+
+def _acquire_lock() -> bool:
+    """Return True if we got the lock, False if another instance is running."""
+    if LOCK_FILE.exists():
+        try:
+            pid = int(LOCK_FILE.read_text().strip())
+            # Check if that process is still alive
+            import signal
+            os.kill(pid, 0)
+            log.warning(f"Another Cotinga instance is running (pid {pid}) — exiting.")
+            return False
+        except (ProcessLookupError, ValueError):
+            pass  # stale lock
+    LOCK_FILE.write_text(str(os.getpid()))
+    return True
+
+
+def _release_lock() -> None:
+    LOCK_FILE.unlink(missing_ok=True)
+
+
 def _check_already_ran_today() -> bool:
     if STATE_FILE.exists():
         return STATE_FILE.read_text().strip() == date.today().isoformat()
@@ -293,8 +316,12 @@ def telegram_send(text: str) -> None:
             args = [node, str(send_script), "--text", text]
             if TELEGRAM_TOPIC_COTINGA:
                 args += ["--thread-id", TELEGRAM_TOPIC_COTINGA]
-            subprocess.run(args, timeout=15, capture_output=True, env=os.environ)
-            return
+            result = subprocess.run(args, timeout=15, capture_output=True, env=os.environ)
+            if result.returncode == 0:
+                log.info("Telegram send OK via send.mjs")
+                return
+            else:
+                log.warning(f"send.mjs exited {result.returncode}: {result.stderr.decode()[:200]}")
         except Exception as exc:
             log.warning(f"send.mjs failed: {exc}, trying fallback")
 
@@ -536,6 +563,16 @@ def build_shallow_briefing(
 def main() -> None:
     log.info("Cotinga starting.")
 
+    if not _acquire_lock():
+        return
+
+    try:
+        _main()
+    finally:
+        _release_lock()
+
+
+def _main() -> None:
     if _check_already_ran_today():
         log.info("Already ran today — exiting.")
         return
