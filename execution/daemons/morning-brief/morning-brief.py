@@ -85,6 +85,27 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+LOCK_FILE = Path(__file__).parent / ".morning_brief_lock"
+
+
+def _acquire_lock() -> bool:
+    if LOCK_FILE.exists():
+        try:
+            pid = int(LOCK_FILE.read_text().strip())
+            import signal
+            os.kill(pid, 0)
+            log.warning(f"Another morning-brief instance is running (pid {pid}) — exiting.")
+            return False
+        except (ProcessLookupError, ValueError):
+            pass
+    LOCK_FILE.write_text(str(os.getpid()))
+    return True
+
+
+def _release_lock() -> None:
+    LOCK_FILE.unlink(missing_ok=True)
+
+
 def _already_ran_today() -> bool:
     if STATE_FILE.exists():
         return STATE_FILE.read_text().strip() == date.today().isoformat()
@@ -269,6 +290,16 @@ def _fallback_digest(briefs: list[dict]) -> str:
 def main() -> None:
     log.info("Morning Brief starting.")
 
+    if not _acquire_lock():
+        return
+
+    try:
+        _main()
+    finally:
+        _release_lock()
+
+
+def _main() -> None:
     if _already_ran_today():
         log.info("Already ran today — exiting.")
         return
