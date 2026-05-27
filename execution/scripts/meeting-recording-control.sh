@@ -13,10 +13,14 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 VENV_PYTHON="$ROOT_DIR/.venv/bin/python3"
-if [ ! -x "$VENV_PYTHON" ]; then
+if [ ! -x "$VENV_PYTHON" ] || ! "$VENV_PYTHON" -c "import numpy" 2>/dev/null; then
   VENV_PYTHON="$ROOT_DIR/execution/venv/bin/python"
 fi
-if [ ! -x "$VENV_PYTHON" ]; then
+if [ ! -x "$VENV_PYTHON" ] || ! "$VENV_PYTHON" -c "import numpy" 2>/dev/null; then
+  # Fall back to personal venv (has all audio recording deps)
+  VENV_PYTHON="$HOME/repos/personal/execution/venv/bin/python"
+fi
+if [ ! -x "$VENV_PYTHON" ] || ! "$VENV_PYTHON" -c "import numpy" 2>/dev/null; then
   VENV_PYTHON="$(command -v python3 || true)"
 fi
 

@@ -66,12 +66,21 @@ def stop_recording() -> None:
 
 
 def _telegram(message: str) -> None:
-    """Send a Telegram notification via telegram-send (best-effort)."""
+    """Send a Telegram notification via telegram-send (best-effort).
+
+    Routes to TELEGRAM_TOPIC_CYPHORHINUS when set (recording control
+    notifications belong in the Cyphorhinus/audio thread).
+    """
+    import os
     telegram = shutil.which("telegram-send")
     if not telegram:
         return
+    cmd = [telegram, message]
+    topic = os.environ.get("TELEGRAM_TOPIC_CYPHORHINUS", "").strip()
+    if topic:
+        cmd = [telegram, "--reply-to-message-id", topic, message]
     try:
-        subprocess.run([telegram, message], timeout=10, capture_output=True)
+        subprocess.run(cmd, timeout=10, capture_output=True)
     except Exception:
         pass
 
