@@ -8,10 +8,10 @@ Subscribes to Neotoma task events and dispatches to appropriate T4 agents
 based on domain tags. Replaces Monedula's task-dispatch scope; Monedula
 retains its payment-execution and calendar-detection logic.
 
-Dispatch routing (Phase 4 skeleton — subprocess dispatch in Phase 5):
-  task.created   → tag inference + dispatch to domain handler
+Dispatch routing:
+  task.created   → tag inference + subprocess dispatch to domain handler
   task.updated   → check for status transitions (e.g. approved → execute)
-  task.due_today → remind operator; optionally auto-execute if configured
+  task.due_today → remind operator; auto-execute if APIS_AUTO_EXECUTE=1
 
 AAuth sub: apis@ateles-swarm
 Startup sequence (T3 daemon pattern):
@@ -30,6 +30,8 @@ Environment variables:
   APIS_AGENT_DEFINITION_ID    Neotoma entity ID for Apis's agent_definition (optional)
   APIS_DRY_RUN                Set to "1" to log events without dispatching agents
   APIS_AUTO_EXECUTE           Set to "1" to auto-execute due tasks (default: notify only)
+  APIS_CLAUDE_BIN             Path to the claude CLI (default: autodetect on PATH)
+  APIS_DISPATCH_TIMEOUT       Per-dispatch timeout in seconds (default: 1800)
   ATELES_REPO_PATH            Local path to ateles clone (default: ~/repos/ateles)
 """
 
@@ -39,6 +41,7 @@ import asyncio
 import logging
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -75,6 +78,13 @@ ATELES_REPO = Path(
 DRY_RUN = os.environ.get("APIS_DRY_RUN", "0") == "1"
 AUTO_EXECUTE = os.environ.get("APIS_AUTO_EXECUTE", "0") == "1"
 
+# Path to the Claude CLI binary used to spawn T4 agents. Set by env var or
+# auto-detected from PATH. If absent, dispatch falls back to log-only.
+CLAUDE_BIN = os.environ.get("APIS_CLAUDE_BIN") or shutil.which("claude")
+
+# Dispatch timeout per agent invocation (seconds).
+DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
+
 
 # ── Domain routing ─────────────────────────────────────────────────────────────
 #
@@ -83,11 +93,12 @@ AUTO_EXECUTE = os.environ.get("APIS_AUTO_EXECUTE", "0") == "1"
 # hygiene step (which runs before Apis sees the task.updated event after
 # the correction is applied). Apis uses the snapshot's tags field.
 #
-# Phase 4 skeleton: all routes log intent only.
-# Phase 5: full subprocess dispatch via `claude --print --skill <skill>`.
+# Each tag maps to a T4 skill dispatched via `claude --print` (see
+# _spawn_claude_skill). Set APIS_DRY_RUN=1 to log intent without spawning.
 
 _DOMAIN_ROUTES: dict[str, str] = {
     "finance": "monedula",  # payment execution — handed off to Monedula
+    "health": "gorilla",  # workout logging / fitness tasks → Gorilla
     "ops": "gryllus",  # ops/deploy tasks → issue worker
     "engineering": "gryllus",  # engineering tasks → issue worker
     "agents": "gryllus",  # agent/swarm tasks → issue worker
@@ -104,6 +115,14 @@ _DOMAIN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
             r"\b(payment|invoice|transfer|wage|salary|rent|yoga|therapy)\b", re.I
         ),
         "finance",
+    ),
+    (
+        re.compile(
+            r"\b(workout|gym|fitness|lift|squat|bench|deadlift|training|"
+            r"reps|sets|cardio|gorilla)\b",
+            re.I,
+        ),
+        "health",
     ),
     (
         re.compile(r"\b(deploy|release|build|ci|pipeline|docker|kubernetes)\b", re.I),
@@ -154,17 +173,120 @@ def _resolve_skill(tags: list[str]) -> str | None:
 # ── T4 dispatch ────────────────────────────────────────────────────────────────
 
 
-async def dispatch_task(entity_id: str, snapshot: dict, trigger: str) -> None:
+async def _spawn_claude_skill(
+    skill: str,
+    entity_id: str,
+    snapshot: dict,
+    trigger: str,
+    notifier: Notifier,
+) -> None:
     """
-    Route a task to the appropriate T4 skill.
+    Spawn a T4 agent via `claude --print` with the SKILL.md appended to the
+    system prompt and the task context piped on stdin.
 
-    Phase 4: logs intent only.
-    Phase 5: spawn `claude --print --skill <skill>` with task context.
+    `claude --print` has no --skill flag; the working pattern (mirrors Formica
+    and neotoma-agent) is --append-system-prompt with the SKILL.md content.
+
+    Failures are reported via lib/notify and logged but never crash Apis —
+    one bad task must not take down the dispatcher.
+    """
+    if CLAUDE_BIN is None:
+        log.warning(
+            f"[{DAEMON_NAME}] CLAUDE_BIN not configured and `claude` not on "
+            f"PATH; skipping {skill} dispatch for {entity_id}."
+        )
+        notifier.send(
+            f"{skill} dispatch skipped — claude binary unavailable",
+            priority=Priority.WARN,
+            handler=DAEMON_NAME,
+        )
+        return
+
+    skill_path = ATELES_REPO / ".claude" / "skills" / skill / "SKILL.md"
+    if not skill_path.exists():
+        log.error(f"[{DAEMON_NAME}] SKILL.md not found for {skill} at {skill_path}")
+        notifier.send(
+            f"{skill} dispatch skipped — SKILL.md not found",
+            priority=Priority.WARN,
+            handler=DAEMON_NAME,
+        )
+        return
+
+    try:
+        skill_md = skill_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        log.error(f"[{DAEMON_NAME}] failed to read {skill_path}: {exc}")
+        return
+
+    title = snapshot.get("title", "(untitled)")
+    body = snapshot.get("body", "") or snapshot.get("description", "")
+    prompt = (
+        f"Invoke the {skill} agent per your appended system prompt.\n\n"
+        f"Task {entity_id} (trigger={trigger}): {title}\n\n"
+        f"{body}".strip()
+    )
+
+    cmd = [CLAUDE_BIN, "--print", "--append-system-prompt", skill_md]
+    log.info(
+        f"[{DAEMON_NAME}] Spawning: claude --print --append-system-prompt "
+        f"<{skill}.SKILL.md> timeout={DISPATCH_TIMEOUT_SECONDS}s entity={entity_id}"
+    )
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=prompt.encode()),
+            timeout=DISPATCH_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        log.error(
+            f"[{DAEMON_NAME}] {skill} dispatch timed out after "
+            f"{DISPATCH_TIMEOUT_SECONDS}s for {entity_id}"
+        )
+        notifier.send(
+            f"{skill} timed out on {entity_id}",
+            priority=Priority.WARN,
+            handler=DAEMON_NAME,
+        )
+        return
+
+    if proc.returncode == 0:
+        log.info(
+            f"[{DAEMON_NAME}] {skill} dispatch ok for {entity_id} "
+            f"({len(stdout)}B stdout)"
+        )
+    else:
+        stderr_text = stderr.decode("utf-8", errors="replace")[:500]
+        log.error(
+            f"[{DAEMON_NAME}] {skill} dispatch failed (rc={proc.returncode}) "
+            f"for {entity_id}: {stderr_text}"
+        )
+        notifier.send(
+            f"{skill} failed on {entity_id} (rc={proc.returncode})",
+            priority=Priority.WARN,
+            handler=DAEMON_NAME,
+        )
+
+
+async def dispatch_task(
+    entity_id: str, snapshot: dict, trigger: str, notifier: Notifier
+) -> None:
+    """
+    Route a task to the appropriate T4 skill and spawn it via `claude --print`.
 
     Args:
         entity_id: Neotoma entity ID of the task
         snapshot:  Current task snapshot
         trigger:   Event that triggered dispatch ("created", "updated", "due_today")
+        notifier:  Notifier for dispatch-failure alerts
     """
     title = snapshot.get("title", "(untitled)")
 
@@ -201,17 +323,7 @@ async def dispatch_task(entity_id: str, snapshot: dict, trigger: str) -> None:
         log.info(f"[{DAEMON_NAME}] DRY RUN — skipping {skill} dispatch for {entity_id}")
         return
 
-    # Phase 5: full dispatch via claude --print
-    # cmd = [
-    #     "claude", "--print",
-    #     "--skill", skill,
-    #     "--input", json.dumps({
-    #         "entity_id": entity_id,
-    #         "snapshot": snapshot,
-    #         "trigger": trigger,
-    #     }),
-    # ]
-    # await asyncio.to_thread(subprocess.run, cmd, check=False, capture_output=True)
+    await _spawn_claude_skill(skill, entity_id, snapshot, trigger, notifier)
 
 
 # ── Event handler ─────────────────────────────────────────────────────────────
@@ -221,8 +333,7 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
     """
     Handle a Neotoma SSE task event.
 
-    Phase 4:
-      task.created   → dispatch to domain handler (dry-run)
+      task.created   → dispatch to domain handler
       task.updated   → check status transitions; notify on due-date changes
       task.due_today → remind operator; auto-execute if APIS_AUTO_EXECUTE=1
     """
@@ -246,14 +357,15 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
             priority=Priority.INFO,
             handler=DAEMON_NAME,
         )
-        await dispatch_task(entity_id, snapshot, trigger="created")
+        await dispatch_task(entity_id, snapshot, trigger="created", notifier=notifier)
 
     elif action == "updated":
-        # Watch for approval transitions (Phase 5: will auto-execute)
+        # Tasks dispatch on creation (and on due_today when AUTO_EXECUTE is set);
+        # status transitions are logged for observability only to avoid
+        # re-dispatching work already routed at creation.
         if status in ("approved", "ready"):
             log.info(
-                f"[{DAEMON_NAME}] Task {entity_id} moved to status={status!r} — "
-                "Phase 5 will trigger execution"
+                f"[{DAEMON_NAME}] Task {entity_id} moved to status={status!r}"
             )
         # Watch for due-date changes (raw payload may include a changed_fields list)
         changed = event.raw.get("changed_fields") or []
@@ -271,7 +383,9 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
             log.info(
                 f"[{DAEMON_NAME}] AUTO_EXECUTE=1 — dispatching due task {entity_id}"
             )
-            await dispatch_task(entity_id, snapshot, trigger="due_today")
+            await dispatch_task(
+                entity_id, snapshot, trigger="due_today", notifier=notifier
+            )
         else:
             log.info(
                 f"[{DAEMON_NAME}] AUTO_EXECUTE off — operator notification sent for {entity_id}"
@@ -282,9 +396,12 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
 
 
 async def main() -> None:
-    log.info(f"[{DAEMON_NAME}] Starting up (Phase 4 skeleton)...")
+    log.info(f"[{DAEMON_NAME}] Starting up...")
     log.info(f"[{DAEMON_NAME}] ateles_repo={ATELES_REPO}")
-    log.info(f"[{DAEMON_NAME}] dry_run={DRY_RUN} auto_execute={AUTO_EXECUTE}")
+    log.info(
+        f"[{DAEMON_NAME}] dry_run={DRY_RUN} auto_execute={AUTO_EXECUTE} "
+        f"claude_bin={CLAUDE_BIN or '<none>'} dispatch_timeout={DISPATCH_TIMEOUT_SECONDS}s"
+    )
 
     # 1. Load agent_definition from Neotoma
     agent_def = AgentLoader(DAEMON_NAME).load()
@@ -304,7 +421,7 @@ async def main() -> None:
     # 3. Load notification rubric
     notifier = Notifier.from_neotoma()
     notifier.send(
-        f"{DAEMON_NAME} started (Phase 4: task dispatch skeleton, dry_run={DRY_RUN})",
+        f"{DAEMON_NAME} started (task dispatch, dry_run={DRY_RUN})",
         priority=Priority.INFO,
         handler=DAEMON_NAME,
     )

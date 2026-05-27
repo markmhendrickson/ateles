@@ -125,6 +125,14 @@ _DOMAIN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "finance",
     ),
     (
+        re.compile(
+            r"\b(workout|gym|fitness|lift|squat|bench|deadlift|training|"
+            r"reps|sets|cardio|gorilla)\b",
+            re.I,
+        ),
+        "health",
+    ),
+    (
         re.compile(r"\b(deploy|release|build|ci|pipeline|docker|kubernetes)\b", re.I),
         "ops",
     ),
