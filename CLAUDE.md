@@ -48,6 +48,8 @@ For full step-by-step guidance: `/update-plan` and `/update-tasks` skills.
 | agent_definition: Gryllus | `ent_900b8c9589145fde47787fe5` |
 | agent_definition: Vanellus | `ent_fedc0fbabef6ef203f8029c9` |
 | agent_definition: Formica | `ent_d62f1df8784b7f4fcadc7d74` |
+| agent_definition: Buteo | `ent_92f55cf7bd0bfc97710539c1` |
+| agent_definition: Pavo | `ent_bb1bf70f7c2c1bad4a0bf9b0` |
 | Neotoma schema: payment_profile | `8f10fe72-2924-422c-b2ee-d537d9952576` |
 | Neotoma schema: escalation | `c005dcb3-d9fb-4791-a154-fdb09ab9da12` |
 | Neotoma schema: daemon_report | `a9ea8131-502f-44e7-87a6-8149bab7d55c` |
