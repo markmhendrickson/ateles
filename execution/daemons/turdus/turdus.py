@@ -56,6 +56,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from lib.agents import dispatch as anthus_dispatch  # noqa: E402
+from lib.agents import triage as turdus_triage  # noqa: E402
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
     AgentLoader,
@@ -134,19 +136,16 @@ _NOISE_PATTERNS = [
 
 def _classify_message(sender: str, subject: str, snippet: str) -> str:
     """
-    Classify a Gmail message into one of: actionable | informational | noise
-
-    Phase 4: simple keyword matching.
-    Phase 7: LLM-based classification via `claude --print` invocation.
+    Legacy 3-bucket classifier kept for backwards compatibility with older
+    Turdus callers and tests. New code path goes through
+    `lib.agents.triage.classify` for fine-grained agent routing.
     """
     text_lower = f"{sender} {subject} {snippet}".lower()
 
-    # Noise first
     for pattern in _NOISE_PATTERNS:
         if pattern in text_lower:
             return "noise"
 
-    # Actionable check
     for keyword in _ACTIONABLE_SENDER_KEYWORDS:
         if keyword in sender.lower():
             return "actionable"
@@ -156,6 +155,21 @@ def _classify_message(sender: str, subject: str, snippet: str) -> str:
             return "actionable"
 
     return "informational"
+
+
+def _classify_and_plan(
+    sender: str, subject: str, body: str, thread_context: str = ""
+) -> tuple[turdus_triage.ClassificationResult, anthus_dispatch.DispatchPlan]:
+    """
+    Phase 7 path: Claude-based classification + Anthus dispatch plan.
+
+    Returns the classification result and the downstream agent chain.
+    """
+    classification = turdus_triage.classify(
+        sender=sender, subject=subject, body=body, thread_context=thread_context
+    )
+    plan = anthus_dispatch.plan(classification)
+    return classification, plan
 
 
 # ── State management ──────────────────────────────────────────────────────────
