@@ -599,14 +599,27 @@ def build_shallow_briefing(
 
     events_shown = 0
     meetings_with_deepprep = 0
+    seen_titles: set[str] = set()  # dedup by normalised title
+
     for event in events:
         # Skip pure routine/personal blocks
         if _is_routine(event):
             continue
 
         title = event.get("summary") or "(untitled)"
+
+        # Deduplicate: skip if a very similar title already shown
+        import re as _re
+        norm_title = _re.sub(r"[^a-z0-9]", "", title.lower())
+        if norm_title in seen_titles:
+            continue
+        seen_titles.add(norm_title)
+
+        # Detect all-day events (start has "date" not "dateTime")
+        start = event.get("start") or {}
+        is_all_day = "date" in start and "dateTime" not in start
         event_dt = _event_start_madrid(event)
-        time_str = event_dt.strftime("%H:%M") if event_dt else "?"
+        time_str = "all day" if is_all_day else (event_dt.strftime("%H:%M") if event_dt else "?")
 
         is_meeting = _is_meeting(event)
         icon = "🤝" if is_meeting else "📌"
