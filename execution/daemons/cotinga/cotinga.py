@@ -166,8 +166,10 @@ def fetch_upcoming_events() -> list[dict]:
         return []
 
     now = datetime.now(tz=MADRID_TZ)
+    # Use start of day so events that began before 05:00 (e.g. overnight flights) are included
+    start_of_day = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=MADRID_TZ)
     end_of_day = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=MADRID_TZ)
-    time_min = now.isoformat()
+    time_min = start_of_day.isoformat()
     time_max = end_of_day.isoformat()
 
     params = {
@@ -236,6 +238,24 @@ def _event_start_madrid(event: dict) -> datetime | None:
             return datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=MADRID_TZ)
     except ValueError:
         return None
+
+
+_ROUTINE_TITLES = {
+    "wake", "work", "busy", "focus", "lunch", "break",
+    "prepare for bed", "lights out", "fall asleep", "sleep",
+    "walk bimba", "ana bed prep",
+}
+
+def _is_routine(event: dict) -> bool:
+    """True if the event is a personal routine block that shouldn't appear in the brief."""
+    title = (event.get("summary") or "").lower().strip()
+    # Strip leading emoji (up to first space after emoji block)
+    import re
+    title_clean = re.sub(r"^[\U00010000-\U0010ffff☀-⟿︀-️\U0001f300-\U0001f9ff]+\s*", "", title).strip()
+    for pattern in _ROUTINE_TITLES:
+        if title_clean == pattern or title_clean.startswith(pattern):
+            return True
+    return False
 
 
 def _is_meeting(event: dict) -> bool:
@@ -577,18 +597,20 @@ def build_shallow_briefing(
         lines.append("No events in the next 48 hours. Clear schedule.")
         return "\n".join(lines)
 
-    meetings_shown = 0
+    events_shown = 0
+    meetings_with_deepprep = 0
     for event in events:
-        # Only show events that have external attendees (real meetings)
-        if not _is_meeting(event):
+        # Skip pure routine/personal blocks
+        if _is_routine(event):
             continue
 
         title = event.get("summary") or "(untitled)"
         event_dt = _event_start_madrid(event)
         time_str = event_dt.strftime("%H:%M") if event_dt else "?"
-        date_str = event_dt.strftime("%a %-d %b") if event_dt else "?"
 
-        lines.append(f"🤝 {title} — {date_str} {time_str}")
+        is_meeting = _is_meeting(event)
+        icon = "🤝" if is_meeting else "📌"
+        lines.append(f"{icon} {title} — {time_str}")
 
         attendees = _extract_attendees(event)
         others = [a for a in attendees if not a["self"]]
@@ -603,13 +625,16 @@ def build_shallow_briefing(
             else:
                 lines.append(f"  👤 {a['name']} — first meeting (research queued)")
 
-        lines.append("  🔍 Deep prep: queued in background")
-        lines.append("")
-        meetings_shown += 1
+        if is_meeting:
+            lines.append("  🔍 Deep prep: queued in background")
+            meetings_with_deepprep += 1
 
-    if meetings_shown == 0:
-        lines.append("No external meetings today. Clear schedule.")
-    else:
+        lines.append("")
+        events_shown += 1
+
+    if events_shown == 0:
+        lines.append("Clear schedule.")
+    elif meetings_with_deepprep > 0:
         lines.append("Deep briefs will arrive separately as agents complete.")
     return "\n".join(lines)
 
