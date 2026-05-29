@@ -56,6 +56,7 @@ if str(_REPO_ROOT) not in sys.path:
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
     AgentLoader,
+    GrantChecker,
     NeotomaEvent,
     SSEClient,
 )
@@ -337,11 +338,14 @@ async def _spawn_claude_skill(
         f"timeout={DISPATCH_TIMEOUT_SECONDS}s entity={entity_id}"
     )
 
+    subprocess_env = {**os.environ, "ATELES_PARTICIPATION_REF": entity_id}
+
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=subprocess_env,
     )
 
     try:
@@ -398,7 +402,7 @@ def _snapshot_targets_neotoma_repo(snapshot: dict) -> bool:
 # ── Event handler ─────────────────────────────────────────────────────────────
 
 
-async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
+async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChecker) -> None:
     """
     Handle a Neotoma SSE event.
 
@@ -440,6 +444,9 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
                 "skipping Gryllus dispatch"
             )
             return
+        if grants.is_suspended():
+            log.warning(f"[{DAEMON_NAME}] Grant suspended — skipping Gryllus for {entity_id}")
+            return
         if DRY_RUN:
             log.info(
                 f"[{DAEMON_NAME}] DRY RUN — skipping Gryllus dispatch for {entity_id}"
@@ -465,6 +472,9 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
                 f"[{DAEMON_NAME}] PR {entity_id} not in neotoma repo — "
                 "skipping Vanellus dispatch"
             )
+            return
+        if grants.is_suspended():
+            log.warning(f"[{DAEMON_NAME}] Grant suspended — skipping Vanellus for {entity_id}")
             return
         if DRY_RUN:
             log.info(
@@ -495,6 +505,14 @@ async def main() -> None:
             "observations attributed to operator token"
         )
 
+    # 2b. Check agent_grant status
+    grants = GrantChecker(agent_def.aauth_sub).load()
+    if grants.is_revoked():
+        log.error(f"[{DAEMON_NAME}] Agent grant is revoked — daemon cannot start.")
+        sys.exit(1)
+    if grants.is_suspended():
+        log.warning(f"[{DAEMON_NAME}] Agent grant is suspended — dispatch disabled.")
+
     # 3. Load notification rubric
     notifier = Notifier.from_neotoma()
 
@@ -520,7 +538,7 @@ async def main() -> None:
     )
 
     async def dispatch(event: NeotomaEvent) -> None:
-        await handle_event(event, notifier)
+        await handle_event(event, notifier, grants)
 
     log.info(f"[{DAEMON_NAME}] Subscribing to SSE: {SUBSCRIBE_ENTITY_TYPES}")
     await sse.stream(dispatch)
