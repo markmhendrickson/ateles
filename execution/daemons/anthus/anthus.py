@@ -337,15 +337,14 @@ async def _harvest_drift_signals(comments: list) -> None:
     the agent-local generalization loop over them. Best-effort: any failure is
     logged and swallowed so it never blocks workflow orchestration.
     """
-    from lib.daemon_runtime import cluster_signals, parse_comments
+    from lib.daemon_runtime import parse_comments
     from lib.daemon_runtime import generalizer
 
     try:
         signals = parse_comments(comments)
         if not signals:
             return
-        clusters = cluster_signals(signals)
-        decisions = await generalizer.process_signals(clusters)
+        decisions = await generalizer.harvest(signals)
         for d in decisions:
             if d.action.value != "noop":
                 log.info(
