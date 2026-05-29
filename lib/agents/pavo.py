@@ -15,7 +15,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from lib.agents.buteo import RedlineReport
-from lib.claude_client import MODEL_SONNET, call_claude
+from lib.claude_client import call_claude
+from lib.model_tiers import resolve_model
 
 log = logging.getLogger(__name__)
 
@@ -105,7 +106,7 @@ def frame(
     )
 
     resp = call_claude(
-        model=MODEL_SONNET,
+        model=resolve_model("pavo"),
         system=PAVO_SYSTEM_PROMPT,
         user=user_prompt,
         max_tokens=2048,

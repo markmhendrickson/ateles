@@ -12,4 +12,4 @@ Current skills:
     pavo        — Commercial framing + reply drafting
 """
 
-from . import buteo, dispatch, pavo, triage  # noqa: F401
+from . import buteo, dispatch, pavo, runner, triage  # noqa: F401

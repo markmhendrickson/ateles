@@ -9,24 +9,30 @@ T4 skill. Wired on branch `claude/email-routing-agent-EQcLJ`.
 Gmail message
   │
   ▼
-Turdus            lib/agents/triage.py        Claude Haiku 4.5
+Turdus            lib/agents/triage.py        model_tier=triage
   │  ClassificationResult {bucket, target_agent, priority,
   │                        requires_operator, summary, rationale}
+  │  (writes email_message + task entities in Neotoma)
   ▼
-Anthus            lib/agents/dispatch.py      label-based routing table
+Anthus            lib/agents/dispatch.py      bucket → DispatchPlan
   │  DispatchPlan {chain: [...], requires_operator_signoff}
+  │  (encoded into task.domain_tags + task.dispatch_chain)
   ▼
-Buteo             lib/agents/buteo.py         Claude Opus 4.7
+Apis              execution/daemons/apis      universal task dispatcher
+  │  SSE: task.created → _resolve_skill via _DOMAIN_ROUTES
+  │  lib/agents/runner.dispatch(ctx, plan) walks the chain
+  ▼
+Buteo             lib/agents/buteo.py         model_tier=reasoning
   │  RedlineReport {headline_risk, alignment_summary,
   │                 clause_review[], open_questions,
   │                 next_steps, operator_signoff_required}
   ▼
-Pavo              lib/agents/pavo.py          Claude Sonnet 4.6
+Pavo              lib/agents/pavo.py          model_tier=synthesis
   │  CommercialFraming {tone_read, concessions, non_negotiables,
   │                     reply_draft, escalation_note,
   │                     send_recommendation}
   ▼
-Onychomys         escalation note surfaced to operator
+Onychomys         escalation entity surfaced to operator
   │
   ▼
 Operator approves → Gmail draft (not yet wired) → send
@@ -56,13 +62,25 @@ python scripts/run_email_flow.py \
 
 Dry-run only — does NOT save a Gmail draft and does NOT send anything.
 
-## Models
+## Models (via capability tiers, not hardwired)
 
-| Skill | Model | Why |
-|---|---|---|
-| Turdus (triage) | `claude-haiku-4-5-20251001` | Fast, cheap, one call per message |
-| Buteo (legal) | `claude-opus-4-7` | Clause-by-clause reasoning needs strong inference |
-| Pavo (framing) | `claude-sonnet-4-6` | Synthesis + tone-matching balanced model |
+Agents never name a concrete model. Each declares a **tier** in its
+`agent_definition.model_tier`; `lib/model_tiers.py` resolves tier → model
+ID at call time. Bumping a family is one `correct()` call, never a code
+commit.
+
+| Skill | Tier | Default model | Why |
+|---|---|---|---|
+| Turdus (triage) | `triage` | `claude-haiku-4-5-20251001` | One call per message; fast + cheap |
+| Buteo (legal) | `reasoning` | `claude-opus-4-7` | Clause-by-clause inference |
+| Pavo (framing) | `synthesis` | `claude-sonnet-4-6` | Synthesis + tone-matching |
+
+Override order (first match wins):
+1. `MODEL_<AGENT>` env var (per-agent absolute override)
+2. `agent_definition.model_tier` from Neotoma
+3. `DEFAULT_AGENT_TIER` in `lib/model_tiers.py`
+
+Then resolve tier → model: `MODEL_TIER_<TIER>` env var, else `DEFAULT_TIER_TO_MODEL`.
 
 Without `ANTHROPIC_API_KEY` set, each skill returns a structured stub that
 explains what the live call would do, so the dry-run pipeline still produces
@@ -78,14 +96,34 @@ a complete artifact in CI / sandboxed environments.
 
 Both new entities are linked `PART_OF` the Ateles plan `ent_99ace4dd6673aa36ed08b1fe`.
 
+## Apis integration
+
+Apis (`execution/daemons/apis/apis.py`) is the universal task dispatcher.
+Two new routes wired:
+
+```python
+_DOMAIN_ROUTES = {
+    ...,
+    "legal":      "buteo",
+    "commercial": "pavo",
+}
+```
+
+With matching `_DOMAIN_PATTERNS` for `legal` (contract / NDA / IP /
+indemnity / clause / SOW) and `commercial` (sourcing fee / revenue share /
+deal terms / GTM / partnership). In production, Apis's SSE handler picks
+the task off the stream, calls `lib.agents.runner.dispatch()`, and the
+runner walks the chain — same code path as the dry-run driver.
+
 ## Scope of this slice
 
-This is the minimal end-to-end implementation (per the design call on
-2026-05-28). What's intentionally NOT in scope here:
+What's intentionally NOT in scope here:
 
-- Turdus daemon poll loop using the new classifier (still uses
-  snippet-only keyword classifier; new path exposed via
-  `_classify_and_plan` for future promotion)
+- Turdus daemon poll loop creating actual `task` entities with the
+  dispatch chain encoded (still uses snippet-only keyword classifier;
+  new path exposed via `_classify_and_plan` for future promotion)
+- Apis subprocess dispatch (`claude --print --skill <skill>`) — currently
+  log-only per the existing Phase 4 skeleton
 - Full Phase 6 `participant_contract` emergent dispatch
 - Buteo / Pavo as standing daemons with AAuth keypairs
 - Gmail draft creation

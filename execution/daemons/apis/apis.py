@@ -94,6 +94,8 @@ _DOMAIN_ROUTES: dict[str, str] = {
     "neotoma": "gryllus",  # neotoma-repo tasks → issue worker
     "product": "gryllus",  # product/design tasks → issue worker
     "comms": "gryllus",  # comms tasks → issue worker
+    "legal": "buteo",  # legal/contract review → Buteo
+    "commercial": "pavo",  # commercial framing / PM synthesis → Pavo
 }
 
 # Domain keyword patterns (mirrors neotoma-agent's patterns — kept in sync manually
@@ -126,6 +128,14 @@ _DOMAIN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "agents",
     ),
     (re.compile(r"\b(email|newsletter|telegram|social|post|draft)\b", re.I), "comms"),
+    (
+        re.compile(r"\b(contract|nda|mnda|redline|ip ownership|terms|license|sow|clause|indemnity)\b", re.I),
+        "legal",
+    ),
+    (
+        re.compile(r"\b(sourcing fee|revenue share|pricing|deal terms|gtm|partnership|commercial)\b", re.I),
+        "commercial",
+    ),
 ]
 
 
