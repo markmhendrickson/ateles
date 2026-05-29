@@ -35,7 +35,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from lib.agents import buteo, dispatch, pavo, triage  # noqa: E402
+from lib.agents import buteo, dispatch, pavo, runner, triage  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 log = logging.getLogger("run_email_flow")
@@ -118,6 +118,17 @@ def _render_markdown(
     parts.append(f"- chain: **{' → '.join(plan.chain) or '(none)'}**")
     parts.append(f"- operator sign-off required: **{plan.requires_operator_signoff}**")
     parts.append(f"- notify_handler: **{plan.notify_handler}**")
+
+    parts.append("\n## Apis — task dispatch\n")
+    parts.append(
+        "- In production: Turdus creates `email_message` + `task` entities; "
+        "Apis SSE handler resolves domain tag → skill via `_DOMAIN_ROUTES` "
+        "(`legal → buteo`, `commercial → pavo`); subprocess-spawns the skill."
+    )
+    parts.append(
+        f"- This dry-run: same `lib.agents.runner.dispatch()` invoked in-process "
+        f"({len([a for a in plan.chain if a in ('buteo', 'pavo')])} skill(s) executed)."
+    )
 
     if redline is not None:
         parts.append("\n## Buteo — legal review\n")
@@ -209,32 +220,22 @@ def main(argv: list[str]) -> int:
     plan = dispatch.plan(classification)
     log.info("anthus: chain=%s", plan.chain)
 
-    redline = None
-    framing = None
-    if "buteo" in plan.chain:
-        log.info("buteo: reviewing clauses")
-        redline = buteo.review(
-            thread_summary=thread_summary,
-            latest_message=latest_body,
-            prior_positions=prior_positions,
-        )
-    if "pavo" in plan.chain and redline is not None:
-        log.info("pavo: drafting reply")
-        framing = pavo.frame(
-            thread_summary=thread_summary,
-            latest_message=latest_body,
-            redline=redline,
-            counterparty_first_name=_counterparty_first_name(sender),
-        )
-    elif "pavo" in plan.chain:
-        # Commercial-only path (no legal review needed): give Pavo an empty redline
-        log.info("pavo: drafting reply (no legal review)")
-        framing = pavo.frame(
-            thread_summary=thread_summary,
-            latest_message=latest_body,
-            redline=buteo.RedlineReport(),
-            counterparty_first_name=_counterparty_first_name(sender),
-        )
+    # In production Turdus would create an email_message + task entity here;
+    # Apis would pick the task off SSE and call runner.dispatch(). We invoke
+    # the same runner directly so the in-process flow matches the daemon flow.
+    log.info("apis: dispatching chain=%s", plan.chain)
+    ctx = runner.TaskContext(
+        sender=sender,
+        subject=subject,
+        latest_body=latest_body,
+        thread_summary=thread_summary,
+        prior_positions=prior_positions,
+        counterparty_first_name=_counterparty_first_name(sender),
+        classification=classification,
+    )
+    ctx = runner.dispatch(ctx, plan)
+    redline: buteo.RedlineReport | None = ctx.artifacts.get("buteo")
+    framing: pavo.CommercialFraming | None = ctx.artifacts.get("pavo")
 
     md = _render_markdown(
         sender=sender,

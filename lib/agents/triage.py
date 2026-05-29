@@ -21,7 +21,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from lib.claude_client import MODEL_HAIKU, call_claude
+from lib.claude_client import call_claude
+from lib.model_tiers import resolve_model
 
 log = logging.getLogger(__name__)
 
@@ -126,7 +127,7 @@ def classify(
     )
 
     resp = call_claude(
-        model=MODEL_HAIKU,
+        model=resolve_model("turdus"),
         system=TRIAGE_SYSTEM_PROMPT,
         user=user_prompt,
         max_tokens=512,
