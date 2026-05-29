@@ -23,6 +23,24 @@ See individual modules for full API.
 
 from .aauth_signer import AAuthSigner
 from .agent_loader import AgentDefinition, AgentLoader
+from .drift import (
+    DriftCluster,
+    DriftSignal,
+    cluster_signals,
+    parse_comments,
+    parse_drift_signals,
+)
 from .sse_client import NeotomaEvent, SSEClient
 
-__all__ = ["AgentLoader", "AgentDefinition", "SSEClient", "NeotomaEvent", "AAuthSigner"]
+__all__ = [
+    "AgentLoader",
+    "AgentDefinition",
+    "SSEClient",
+    "NeotomaEvent",
+    "AAuthSigner",
+    "DriftSignal",
+    "DriftCluster",
+    "parse_drift_signals",
+    "parse_comments",
+    "cluster_signals",
+]
