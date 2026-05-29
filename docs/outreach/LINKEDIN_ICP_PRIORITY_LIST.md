@@ -1,0 +1,845 @@
+# LinkedIn contacts by Neotoma ICP priority
+
+Source: LinkedIn data export (Connections, Invitations, Endorsements).
+ICP tiers: `neotoma/docs/specs/ICP_PRIORITY_TIERS.md`.
+
+**Warm** = reached out to you (Invitations) or endorsed you (Endorsement_Received).
+Within each tier, warm contacts are listed first, then by connection date (newest first).
+
+---
+
+## Tier 1 — MVP target (AI-Native Individuals, Knowledge Workers, Small Teams)
+
+- Simon Bergeron **[WARM]** — Co-Founder @ Verified Node | [Profile](https://www.linkedin.com/in/slbergeron) | 11 Feb 2026
+- Sandra G Ghindea **[WARM]** — Operations Coordinator @ Wordsmith AI | [Profile](https://www.linkedin.com/in/sandra-goujon-ghindea) | 05 Feb 2026
+- Noah Kagan **[WARM]** — Chief Sumo & CEO @ AppSumo | [Profile](https://www.linkedin.com/in/noahkagan) | 26 Oct 2025
+- Hector Zarco **[WARM]** — CTO @ Harcus | [Profile](https://www.linkedin.com/in/hector-zarco) | 02 Apr 2015
+- Kirin Kalia **[WARM]** — Founder and CEO @ Grow Through Story | [Profile](https://www.linkedin.com/in/kirinkalia) | 16 Sep 2014
+- Markus Wilhelms **[WARM]** — CEO & Co-Founder @ MOWOOT | [Profile](https://www.linkedin.com/in/markuswilhelms) | 17 Aug 2014
+- Chris Kaufman **[WARM]** — Co-Founder @ StockX | [Profile](https://www.linkedin.com/in/meetkauf) | 02 Dec 2013
+- Sameen Karim **[WARM]** — Senior Product Manager @ GitHub | [Profile](https://www.linkedin.com/in/sameenkarim) | 24 Nov 2012
+- Jonathan Pasky **[WARM]** — Founder & Executive Producer @ DevNetwork | [Profile](https://www.linkedin.com/in/jonathanpasky) | 21 May 2012
+- Jeremy Stanley **[WARM]** — Founder @ Subroutine | [Profile](https://www.linkedin.com/in/jeremymstanley) | 14 Feb 2012
+- Grant Walsh **[WARM]** — Co-Founder/Product Design @ Impresa Products | [Profile](https://www.linkedin.com/in/grant-walsh-64370441) | 05 Nov 2011
+- John-Mark Ikeda **[WARM]** — Head of Product Marketing @ Lyra Health | [Profile](https://www.linkedin.com/in/john-mark-ikeda-93237512) | 16 May 2011
+- Erick Schonfeld **[WARM]** — President and Co-Founder @ Traction Technology | [Profile](https://www.linkedin.com/in/erickschonfeld) | 23 Dec 2010
+- Dan Olsen **[WARM]** — Product Management Leader, Consultant & Trainer @ Olsen Solutions | [Profile](https://www.linkedin.com/in/danolsen98) | 23 Sep 2010
+- Eric Nakagawa **[WARM]** — CEO & Co-founder @ Self | [Profile](https://www.linkedin.com/in/ericnakagawa) | 11 Aug 2010
+- Isaac Silverman **[WARM]** — CEO & Co-Founder @ Daydream [Acquired by SBI] | [Profile](https://www.linkedin.com/in/isaacsilverman) | 09 Aug 2010
+- Frank Yoo **[WARM]** — Co-Founder @ Big Basin Labs | [Profile](https://www.linkedin.com/in/frankyoo) | 09 Aug 2010
+- Ashish Chordia **[WARM]** — Founder & Member Board Of Directors @ LG Ads Solutions | [Profile](https://www.linkedin.com/in/ashishchordia) | 09 Aug 2010
+- Marcus Nelson **[WARM]** — Founder @ Exec Academy | [Profile](https://www.linkedin.com/in/marcusnelson) | 17 Jul 2009
+- Courtney Walsh **[WARM]** — Founder @ Oxford Comma Ink, LLC | [Profile](https://www.linkedin.com/in/courtneyalisawalsh) | 14 Mar 2009
+- Brendan Mortimer **[WARM]** — Founder | Principal @ Avid Squid | [Profile](https://www.linkedin.com/in/brendanmortimer) | 14 Mar 2009
+- Calley Nye **[WARM]** — Founder @ Naughty Gits | [Profile](https://www.linkedin.com/in/calleynye) | 14 Mar 2009
+- Trey Shelton — Founder @ Position | [Profile](https://www.linkedin.com/in/treyshelton) | 11 Jun 2025
+- Michael Oxton — Co-Founder & Chief Business Officer @ Everfur | [Profile](https://www.linkedin.com/in/michael-oxton) | 10 Apr 2025
+- Clara Serrano Solsona — Global Product Manager - Telefonica Tech IoT and Big Data @ Telefónica | [Profile](https://www.linkedin.com/in/clara-serrano-solsona-70378a9) | 09 Mar 2025
+- Gerard Cervelló — CEO & Co-Founder | Post-Quantum Authentication & Sensitive Data Protection @ Secrets Vault | [Profile](https://www.linkedin.com/in/gcervello-pqc) | 28 Feb 2025
+- Andy Kittler — Founder & CEO @ PlayerUp | [Profile](https://www.linkedin.com/in/andy-kittler-42995116) | 03 Jun 2024
+- Guido Lonetti — Head of Product @ Merchant Experience @ dLocal | [Profile](https://www.linkedin.com/in/guido-lonetti) | 19 May 2024
+- Franziska Amann — Technical Product Manager @ Elli - A Brand of the Volkswagen Group | [Profile](https://www.linkedin.com/in/franziskaamann) | 17 May 2024
+- Rebeca Marcos Roca — Co-Founder @ Kribeca House | [Profile](https://www.linkedin.com/in/rebeca-marcos-roca-73963563) | 02 May 2024
+- Sean M. Longstreet — Curriculum and Social Media Consultant @ Keenan Learning, LLC | [Profile](https://www.linkedin.com/in/sean-longstreet) | 02 Apr 2024
+- Maya Miller, ACC — Leadership Coach & HR Consultant @ Maya Miller Coaching and Consulting | [Profile](https://www.linkedin.com/in/mayapaulmiller) | 13 Mar 2024
+- Aubrey Strobel — Co-Founder @ Halcyon | [Profile](https://www.linkedin.com/in/aubrey-strobel-64bbb7119) | 29 Jan 2024
+- Ashton Stephens — Founder @ Blue Green Panda Inc. | [Profile](https://www.linkedin.com/in/ashtons) | 28 Nov 2023
+- Laszlo L. Mari — Founder & Board Member @ Dakai Group | [Profile](https://www.linkedin.com/in/laszlolm) | 28 Sep 2023
+- Gregory Magarshak — Chief Technology Architect @ Safebots AI | [Profile](https://www.linkedin.com/in/magarshak) | 01 Sep 2023
+- Darren Alawi — Head of Product Design @ Variational | [Profile](https://www.linkedin.com/in/darrenalawi) | 27 Jun 2023
+- Blaize Wallace — Co-Founder @ Granite Finance | [Profile](https://www.linkedin.com/in/blaizewallace) | 27 Jun 2023
+- Joel Dalmas — Founder & CEO @ Dalma.io | [Profile](https://www.linkedin.com/in/joel-dalmas-76237964) | 02 Jun 2023
+- Sergii Rabenko — Founder @ QORE Global | [Profile](https://www.linkedin.com/in/sergii-rabenko) | 02 Jun 2023
+- Michael Libus — Co-Founder & Advisor @ Aliiiens | [Profile](https://www.linkedin.com/in/mlibus) | 02 Jun 2023
+- Victor Kanu — AI Technical Product Advocate @ TurinTech AI | [Profile](https://www.linkedin.com/in/victor-kanu-ai-devrel) | 02 Jun 2023
+- Kory Hoang — Co-Founder & CEO @ Stably | [Profile](https://www.linkedin.com/in/koryhoang) | 30 May 2023
+- Kurt Grela — Founder & CEO @ Think Exponential | [Profile](https://www.linkedin.com/in/kurtgrela) | 20 Apr 2023
+- Nathaniel Cole — Founder/Head of Operations @ 2140Art | [Profile](https://www.linkedin.com/in/nathaniel-cole-5b75747b) | 03 Mar 2023
+- Tyler Eide — Founder & Creative Director @ Parker Studio | [Profile](https://www.linkedin.com/in/tyler-eide-76723823) | 03 Mar 2023
+- Jason Berg — Co-Founder & COO @ Studio Everywhere | [Profile](https://www.linkedin.com/in/jasonaberg1) | 12 Dec 2022
+- Mark Hamrick — Interim General Counsel @ Iosis Digital | [Profile](https://www.linkedin.com/in/r-mark-hamrick) | 16 Nov 2022
+- Fabio Federici — Co-Founder @ GLAM | [Profile](https://www.linkedin.com/in/fabiofederici) | 02 Oct 2022
+- David Apple — Founder & CEO @ Shark Tooth Biotech | [Profile](https://www.linkedin.com/in/appledavid) | 03 Aug 2022
+- Kabir Mathur — Founder & CEO @ Leen | [Profile](https://www.linkedin.com/in/mathurkabir) | 02 Aug 2022
+- Jacob Cohen — Founder @ Stackhouse | [Profile](https://www.linkedin.com/in/jacob--cohen) | 21 Jul 2022
+- David Leiberman — Co-Founder @ Mibblio | [Profile](https://www.linkedin.com/in/david-leiberman) | 16 Jun 2022
+- Tariq Krim — Founder @ Cybernetica.fr | [Profile](https://www.linkedin.com/in/tariqkrim) | 06 Apr 2022
+- Sullivan Whitely — Chief of Staff @ Surge AI | [Profile](https://www.linkedin.com/in/sullivan-whitely) | 04 Apr 2022
+- Greg Coppola — President @ coppola.ai | [Profile](https://www.linkedin.com/in/gregory-f-coppola) | 13 Jan 2022
+- Sabrina Bonini — Founder & CEO @ curiosa lab. | [Profile](https://www.linkedin.com/in/sabrinabonini) | 31 Aug 2021
+- Marianne Masculino Bethel — Senior Product Consultant @ Sand Cherry | [Profile](https://www.linkedin.com/in/mariannemasculino) | 30 Jul 2021
+- Paul Russo — Chief of Staff & Interim Head of GTM @ Pump.co | [Profile](https://www.linkedin.com/in/paul-russo-) | 30 Jul 2021
+- Wei Escala — CEO @ Eggschain | [Profile](https://www.linkedin.com/in/wei-escala) | 30 Jul 2021
+- Shankar G — CTO (Building Digital Blanket) @ digital blanket® | [Profile](https://www.linkedin.com/in/spillaiy) | 30 Jul 2021
+- Dan Trevino — Co-Founder @ Boom Platforms | [Profile](https://www.linkedin.com/in/dantrevino) | 30 Jul 2021
+- Marcos Casagrande — Founder & CTO @ Denode | [Profile](https://www.linkedin.com/in/marcos-casagrande) | 24 Mar 2021
+- Anthony Johnston — CEO @ CoVentured | [Profile](https://www.linkedin.com/in/johnstoa) | 27 Feb 2021
+- Patrick Chang — Founder @ Dispersion Capital | [Profile](https://www.linkedin.com/in/patricknchang) | 25 Feb 2021
+- Luba Yudasina — Founder @ Paloma | [Profile](https://www.linkedin.com/in/yudasinal) | 22 Nov 2020
+- David Tena Vicente — Technical Product Owner @ Flight Centre Travel Group | [Profile](https://www.linkedin.com/in/david-tena-vicente) | 02 Nov 2020
+- John Rolla — Principal Consultant @ Silver Anchor Consulting | [Profile](https://www.linkedin.com/in/johnrolla) | 10 Sep 2020
+- David Bardos — Co-founder and CEO @ UNIVRSE | [Profile](https://www.linkedin.com/in/david-bardos-a0b4895) | 07 Aug 2020
+- Brandon Corbin — Founder / Chief Designer-in-the-Loop @ Wickedform | [Profile](https://www.linkedin.com/in/brandoncorbin) | 05 Aug 2020
+- Prakhar Sharma — Founder & CEO @ Quboid | [Profile](https://www.linkedin.com/in/prakhar14) | 06 Apr 2020
+- Ken Liao — Founder & CEO @ Xverse | [Profile](https://www.linkedin.com/in/yukanliao) | 19 Mar 2020
+- Jesse Soslow — Co-Founder @ Poppy Legal | [Profile](https://www.linkedin.com/in/jessesoslow) | 13 Mar 2020
+- Alexander Graebe — Head of Product & GTM @ Trunk | [Profile](https://www.linkedin.com/in/graebe) | 08 Mar 2020
+- Tom Gerrity — Founder, CEO & Chief People Officer @ Talent Genius | [Profile](https://www.linkedin.com/in/tgerrity) | 18 Jan 2020
+- Evelyn Rusli — Co-Founder, Co-CEO @ Yumi | [Profile](https://www.linkedin.com/in/evelynrusli) | 29 Oct 2019
+- Ludo Galabru — Co-Founder & CEO @ Txtx | [Profile](https://www.linkedin.com/in/lgalabru) | 29 Oct 2019
+- Jay Cuthrell — Chief Product Officer @ NexusTek | [Profile](https://www.linkedin.com/in/jaycuthrell) | 29 Oct 2019
+- Xan Ditkoff — Founder & CEO @ Daemon Technologies 地灵科技 | [Profile](https://www.linkedin.com/in/xanditkoff) | 24 Apr 2019
+- Justin Hunter — Head of Product @ Stablecore | [Profile](https://www.linkedin.com/in/justin-hunter-b30a1b80) | 22 Apr 2019
+- Adam Wood — Fractional Chief Product Officer @ Future State | [Profile](https://www.linkedin.com/in/woodad) | 04 Mar 2019
+- Elizabeth Thys — Chief of Staff @ nyra health | [Profile](https://www.linkedin.com/in/elizabeth-thys) | 04 Mar 2019
+- Anthony Villalona — Founder / Organizer @ EthBuilders Meetup | [Profile](https://www.linkedin.com/in/anthonyvillalona) | 12 Feb 2019
+- Jakub Vysoky — Founder & CTO @ Roomstorm | [Profile](https://www.linkedin.com/in/jakubvysoky) | 11 Feb 2019
+- Kartik Mandaville — CEO @ SpringVerify | [Profile](https://www.linkedin.com/in/kartik-mandaville-springworks) | 14 Jan 2019
+- Ferran Reyes — Product Manager @ Vocdoni: Secure Digital Voting | [Profile](https://www.linkedin.com/in/ferranrg) | 14 Jan 2019
+- Jan Halfar — Business Development Consultant @ Newlife.ai | [Profile](https://www.linkedin.com/in/jan-halfar-b666095a) | 21 Dec 2018
+- Melina Correa — Founder @ Bornisimo | [Profile](https://www.linkedin.com/in/melina-correa-3a946b34) | 16 Dec 2018
+- David Pich Canes — Founder & Organiser @ JSCamp | [Profile](https://www.linkedin.com/in/davidpichcanes) | 10 Dec 2018
+- Ivan Zhao — Founder @ Notion | [Profile](https://www.linkedin.com/in/ivanhzhao) | 10 Dec 2018
+- Fela Hughes — Founder @ 1st Thing Apps | [Profile](https://www.linkedin.com/in/felahughes) | 10 Dec 2018
+- Guiem Bosch — AI Safety Researcher @ Cambridge AI Safety Hub | [Profile](https://www.linkedin.com/in/guiem) | 02 Nov 2018
+- Pete Van Velden — BI Solution Analyst @ Ness Digital Engineering | [Profile](https://www.linkedin.com/in/blockpac) | 02 Nov 2018
+- Wen Sang — Co-Founder & COO @ Genspark | [Profile](https://www.linkedin.com/in/wen-sang) | 19 Aug 2018
+- Thao-Nguyen Le — Chief of Staff @ Xverse | [Profile](https://www.linkedin.com/in/thaonguyenle) | 19 Aug 2018
+- Eugenia Jongewaard de Boer — Product & Experience Design | Founder @UXTips @ Eugenia Jongewaard | [Profile](https://www.linkedin.com/in/eugeniajongewaard) | 02 Apr 2018
+- Daniel Gartenberg PhD — Founder & CEO @ SleepSpace | [Profile](https://www.linkedin.com/in/daniel-gartenberg-phd-54aa5713) | 16 Mar 2018
+- John Peterson — CEO and Cofounder @ The Nudge | [Profile](https://www.linkedin.com/in/johnpetersonius) | 02 Jan 2018
+- Chrys Bader — Co-founder & CEO @ Rosebud | [Profile](https://www.linkedin.com/in/chrysb) | 02 Jan 2018
+- Ario Jafarzadeh — Head of Product Design @ Onebrief | [Profile](https://www.linkedin.com/in/arioxyz) | 12 Dec 2017
+- Robert Burns — Co-Founder & President @ Night Shift Brewing, Inc. | [Profile](https://www.linkedin.com/in/robertlawrenceburns) | 12 Dec 2017
+- Steve Recio — Founder / CEO @ Pipefile | [Profile](https://www.linkedin.com/in/steverecio) | 29 Sep 2017
+- Tom Hayton — Founder @ Storytelling for Techies | [Profile](https://www.linkedin.com/in/tomhayton) | 26 Sep 2017
+- Matt Martin — Co-Founder and CEO @ Grow Progress | [Profile](https://www.linkedin.com/in/matt-martin-5420b0148) | 29 Aug 2017
+- Magda Cebrián — Sustainability Consultant @ Te lo sirvo verde | [Profile](https://www.linkedin.com/in/magdacebrian) | 24 Aug 2017
+- Andrew Michael Henderson — Founder @ 5-Star Creator | [Profile](https://www.linkedin.com/in/andrewmhenderson) | 24 Aug 2017
+- Erika Larson — International Sales Consultant @ SK Films | [Profile](https://www.linkedin.com/in/erika-l-30a73820) | 24 Aug 2017
+- David Oehm — CEO @ RISE Festival | [Profile](https://www.linkedin.com/in/davidoehm) | 22 Jul 2017
+- Casey Winters — Co-Founder @ SuperMe | [Profile](https://www.linkedin.com/in/caseywinters) | 15 Jun 2017
+- Grant Nelson — GTM @ ReflectionAI | [Profile](https://www.linkedin.com/in/grantwnelson) | 11 Apr 2017
+- Flavia Chen — Consultant Researcher @ University of Texas Southwestern Medical Center | [Profile](https://www.linkedin.com/in/flavia-chen-86826395) | 07 Mar 2017
+- Sinziana Dulama — Founder @ One Wellness Space | [Profile](https://www.linkedin.com/in/sinzianadulama) | 15 Feb 2017
+- Matteo Lombardi — Founder @ Beauty Companies | [Profile](https://www.linkedin.com/in/matteo-lombardi-7733ba) | 22 Nov 2016
+- Camille Tyan — CEO @ Swan | [Profile](https://www.linkedin.com/in/camilletyan) | 02 Aug 2016
+- Kevin Marshall — CTO and Co-Founder @ SWYM.ai | [Profile](https://www.linkedin.com/in/falicon) | 02 Aug 2016
+- Nuria Juárez — Founder & CEO at Spanish Alter Ego @ Spanish Alter Ego | [Profile](https://www.linkedin.com/in/nuria-ju%C3%A1rez-9a326780) | 30 May 2016
+- Fernando Drumond — Product Manager @ Rover.com | [Profile](https://www.linkedin.com/in/fernando-drumond) | 30 May 2016
+- Malte Marx — CTO @ neoLab Migge GmbH | [Profile](https://www.linkedin.com/in/mamarx) | 20 Apr 2016
+- Hursh Agrawal — Co-founder / CTO @ The Browser Company | [Profile](https://www.linkedin.com/in/hurshagrawal) | 03 Mar 2016
+- Marc Jordana Soldevila — Co-founder @ Norrsken Barcelona | [Profile](https://www.linkedin.com/in/marcjordana) | 23 Feb 2016
+- Robert Wernerowski — CEO and English Language Trainer @ Linguatracks Languages for Professionals | [Profile](https://www.linkedin.com/in/robert-wernerowski) | 19 Feb 2016
+- Josh Miller — CEO & Co-Founder @ The Browser Company | [Profile](https://www.linkedin.com/in/josh-miller-b31259106) | 19 Jan 2016
+- Berta Lázaro — Global Ecosystem Leader & Co-Founder @ TEAMLABS/ | [Profile](https://www.linkedin.com/in/bertalazaro) | 02 Dec 2015
+- Sara Manzoni — Product Manager @ eDreams ODIGEO | [Profile](https://www.linkedin.com/in/sara-manzoni-024ab866) | 05 Nov 2015
+- Nadine Meisel — Founder & Strategic Lead @ Nadine Meisel - Strategic Design & Innovation Consulting | [Profile](https://www.linkedin.com/in/nadinemeisel) | 29 Sep 2015
+- Jennifer Ruiz Gomez — Senior Marketing Analyst @ Criteo | [Profile](https://www.linkedin.com/in/jennlrg) | 19 Sep 2015
+- Kyle Sollenberger — Software Product Manager @ Breville | Sage | [Profile](https://www.linkedin.com/in/iamkyle) | 08 Sep 2015
+- Alex Huff — Founder @ DAFshare | [Profile](https://www.linkedin.com/in/alexhuff) | 17 Aug 2015
+- Tom Byrom — Recruiting and HR Consultant @ Contract Consulting | [Profile](https://www.linkedin.com/in/tombyrom) | 17 Aug 2015
+- McKay Thomas — CEO & Co-Founder @ Felt | [Profile](https://www.linkedin.com/in/mckaythomas) | 11 Aug 2015
+- Kristian Mølgaard Sørensen — Founder @ Wismondo | [Profile](https://www.linkedin.com/in/kristian-m%C3%B8lgaard-s%C3%B8rensen) | 05 Aug 2015
+- Vanessa Goslow — Fractional VP of Sales @ VOICEB.ai | [Profile](https://www.linkedin.com/in/vanessagoslow) | 05 Aug 2015
+- Michael Murray — Founder @ Beehive Engineering | [Profile](https://www.linkedin.com/in/mdmurray) | 14 Jul 2015
+- Armaan Gupta — Founder @ Indo Warehouse | [Profile](https://www.linkedin.com/in/armaangupta) | 22 Jun 2015
+- Andrew Bellay — Principal Product Manager (Owner) @ MetaNeer Labs | [Profile](https://www.linkedin.com/in/bellay) | 22 Jun 2015
+- Ezgi Ercan — Senior Strategy Consultant/ Engagement Manager @ Gartner | [Profile](https://www.linkedin.com/in/ezercan) | 22 Jun 2015
+- Dr. April Pawar — Founder and Director @ Oxford Writers’ House | [Profile](https://www.linkedin.com/in/dr-april-pawar-8720a817) | 25 May 2015
+- Alex Weidauer — Co-founder & Strategic Advisor @ Rasa | [Profile](https://www.linkedin.com/in/aweidauer) | 25 May 2015
+- Danny Freeman — Founder @ Joto | [Profile](https://www.linkedin.com/in/freemandanny) | 05 May 2015
+- Wil Schroter — Founder + CEO @ Startups.com | [Profile](https://www.linkedin.com/in/wilschroter) | 05 May 2015
+- Laura Fernández Giménez — CEO & Co-Founder @ AllWomen | [Profile](https://www.linkedin.com/in/laurafg1) | 26 Mar 2015
+- Pere Codina — Co-Founder & CEO @ PlayGTM | [Profile](https://www.linkedin.com/in/perecodina) | 04 Mar 2015
+- Enrico Giordani — Owner @ Self Employed Software Consultant | [Profile](https://www.linkedin.com/in/enricogiordani) | 03 Mar 2015
+- Miquel Lopez — Head of Product (Platform) @ Keyrock | [Profile](https://www.linkedin.com/in/miquellopez) | 03 Mar 2015
+- Alexis Campailla — CEO & Cofounder @ BigFilter.ai | [Profile](https://www.linkedin.com/in/alexisca) | 02 Mar 2015
+- Noemi Stauffer — Founder & CEO @ Fresh Fonts | [Profile](https://www.linkedin.com/in/noemistauffer) | 01 Mar 2015
+- Nelson Melina — Co-Founder @ CryptoMondays Barcelona | [Profile](https://www.linkedin.com/in/nelsonmelina) | 26 Feb 2015
+- Cristina Apple Georgoulakis — Advisor & Founder Mentor @ WHIPSAW | [Profile](https://www.linkedin.com/in/claki) | 17 Jan 2015
+- Àlex Rodríguez Bacardit — Founder & CEO @ MarsBased | [Profile](https://www.linkedin.com/in/alexrodba) | 25 Dec 2014
+- Rishi Talwar — Product Manager, Webex @ Cisco | [Profile](https://www.linkedin.com/in/rishitalwar) | 25 Dec 2014
+- Tina Hui — Founder & Innovator @ The Gage | [Profile](https://www.linkedin.com/in/tinahui) | 25 Dec 2014
+- Josh Silverman — Founder + CEO @ PeopleWork Partners | [Profile](https://www.linkedin.com/in/mynameisjoshsilverman) | 25 Dec 2014
+- Patrick Prokesch — Co-Founder & CEO @ Solid | [Profile](https://www.linkedin.com/in/prokesch) | 16 Nov 2014
+- Megan Rose Dickey — Director @ GrowthX AI | [Profile](https://www.linkedin.com/in/meganrosedickey) | 11 Nov 2014
+- Jenna Isken — Founder & Principal @ Hey Isken | [Profile](https://www.linkedin.com/in/jennaisken) | 08 Nov 2014
+- Boris Hageney — Founder @ Robinsun | [Profile](https://www.linkedin.com/in/hageney) | 24 Oct 2014
+- Brandon Wright — CEO @ Clientbook | [Profile](https://www.linkedin.com/in/brandonewright) | 24 Oct 2014
+- Jordan Berg — Chief Creative Officer and Co-Founder @ Questus | [Profile](https://www.linkedin.com/in/jordan-berg-4ba458) | 14 Oct 2014
+- Omar Bohsali — Founder & CEO @ Center Pixel, Inc | [Profile](https://www.linkedin.com/in/omarbohsali) | 26 Sep 2014
+- Sean Cook — Co-Founder and CTO @ Exer Labs, Inc. | [Profile](https://www.linkedin.com/in/cooks) | 17 Sep 2014
+- Evangelos Simoudis — Founder and Managing Director @ Synapse Partners | [Profile](https://www.linkedin.com/in/evangelossimoudis) | 05 Sep 2014
+- Jesse Drummond — Senior Health Data Analyst @ Onpoint Health Data | [Profile](https://www.linkedin.com/in/jesse-drummond-bb6240a1) | 05 Sep 2014
+- Marissa Louie — Head of Product & UX Design, Advisory Board Member (Consultant) @ Marissa Louie | [Profile](https://www.linkedin.com/in/malouie) | 28 Aug 2014
+- Dan Frommer — Founder and Editor in Chief @ The New Consumer | [Profile](https://www.linkedin.com/in/fromedome) | 22 Jul 2014
+- Manas Mudbari — Global Product Lead, RVI @ Evident Industrial | [Profile](https://www.linkedin.com/in/manasmudbari) | 01 Jul 2014
+- Captain Hoff (Steven Hoffman) — Founder @ Captain's Future Foundation | [Profile](https://www.linkedin.com/in/captainhoff) | 24 Jun 2014
+- Tony Adam — Founder & CEO @ Visible Factors | [Profile](https://www.linkedin.com/in/tonyadam) | 17 May 2014
+- Jasjit Singh — Founder @ Rockstar | [Profile](https://www.linkedin.com/in/jasjitsingh85) | 01 May 2014
+- Mike Walsh — Founder and Executive Director @ Blind Travel Foundation | [Profile](https://www.linkedin.com/in/mikegwalsh) | 24 Apr 2014
+- Stephen Powell — Founder @ Gustin | [Profile](https://www.linkedin.com/in/stephenwpowell) | 08 Apr 2014
+- Bing Cai — Chief AI Officer @ AI Profit for CEOs | [Profile](https://www.linkedin.com/in/bingcai) | 29 Mar 2014
+- George Pearkes — Analyst @ Bespoke Investment Group | [Profile](https://www.linkedin.com/in/georgepearkes) | 10 Mar 2014
+- Gemma Rial — Founder & CEO @ Real Kids | [Profile](https://www.linkedin.com/in/gemmarial) | 03 Feb 2014
+- Jon Brod — Founder & Chief Marketing Officer @ Roam | [Profile](https://www.linkedin.com/in/jonbrod) | 20 Jan 2014
+- Frannie Coggeshall, MBA — Founder & Lead Strategist @ Elevate Her Marketing | [Profile](https://www.linkedin.com/in/franniecoggeshall) | 13 Jan 2014
+- Matthew W. Marcus — Cryptocurrency Consultant @ Good KarMa Capital | [Profile](https://www.linkedin.com/in/themarcus) | 18 Dec 2013
+- Milosh Citakovic — Co-Founder, COO, Head of Product @ Evermed | [Profile](https://www.linkedin.com/in/miloshnyc) | 11 Dec 2013
+- Sean Power — Co-founder & CEO @ Musical AI | [Profile](https://www.linkedin.com/in/iamseanpower) | 02 Dec 2013
+- Luke Miller — Co-founder // CEO @ SLNG | [Profile](https://www.linkedin.com/in/lukemiller1) | 24 Oct 2013
+- Brenden Mulligan — Founder @ Premint | [Profile](https://www.linkedin.com/in/mulligan) | 24 Oct 2013
+- Todd Hamilton — Co-Founder @ AIProxy | [Profile](https://www.linkedin.com/in/toddham) | 24 Oct 2013
+- Kristina Ng — Counsel @ Feuerstein Kulick LLP | [Profile](https://www.linkedin.com/in/kristina-ng-6228b814) | 08 Oct 2013
+- Peter Tanoury — Co-Founder @ P&P Imports LLC | [Profile](https://www.linkedin.com/in/peter-tanoury-b791992) | 02 Oct 2013
+- Megan Dhilla — Chief of Staff, Co-CEO @ Netflix | [Profile](https://www.linkedin.com/in/megan-dhilla-5476816) | 26 Sep 2013
+- Franc Carreras Comes — Co-Founder @ Fundación Comes Montiel | [Profile](https://www.linkedin.com/in/franccarreras) | 26 Sep 2013
+- Bala Musrif — Founder & CEO @ Eventbee Inc | [Profile](https://www.linkedin.com/in/balamusrif) | 22 Sep 2013
+- Scott Mackin — Co-Founder & CEO @ Hello Operator | [Profile](https://www.linkedin.com/in/scottmackin) | 21 Sep 2013
+- DROdio - Daniel R. Odio — Chief Executive Officer @ Storytell.ai | [Profile](https://www.linkedin.com/in/drodio) | 09 Sep 2013
+- Cecilia MoSze Tham — CEO @ Futurity Systems | [Profile](https://www.linkedin.com/in/ceciliatham) | 02 Sep 2013
+- Joe Suh — Founder @ Pastors AI | [Profile](https://www.linkedin.com/in/joesuh) | 02 Sep 2013
+- Saul Klein — Co-Founder @ ZINC | [Profile](https://www.linkedin.com/in/saulklein) | 22 Aug 2013
+- Mike Silva — Chairman & Founder @ KnuVu | [Profile](https://www.linkedin.com/in/mikepsilva) | 18 Aug 2013
+- Carla Pellicano — Head of Product (Interim) @ Faire | [Profile](https://www.linkedin.com/in/carlapellicano) | 09 Aug 2013
+- Geoff McQueen — Founder & CEO @ Ascendius Inc | [Profile](https://www.linkedin.com/in/geoffmcqueen) | 28 Jul 2013
+- Jin Koh — Founder & Chairman @ Bodygram, Inc. | [Profile](https://www.linkedin.com/in/jinkoh) | 25 Jul 2013
+- Robert Kawalsky — Global Head of Product @ Canva | [Profile](https://www.linkedin.com/in/robkawalsky) | 16 Jul 2013
+- Danielle Morrill — Cofounder & CEO @ First Party Labs | [Profile](https://www.linkedin.com/in/daniellemorrill) | 08 Jul 2013
+- Alexia Bonatsos — Founder, Managing Director @ Dream Machine | [Profile](https://www.linkedin.com/in/alexiatsotsis) | 21 Jun 2013
+- Renée Warren — Founder @ The Pink Skirt Project | [Profile](https://www.linkedin.com/in/warrenrenee) | 06 Jun 2013
+- Blake Commagere — Co-founder and COO @ Vault12 | [Profile](https://www.linkedin.com/in/commagere) | 22 May 2013
+- Vanessa Dawson — Founder & CEO @ Arber | [Profile](https://www.linkedin.com/in/vanessandawson) | 10 May 2013
+- Helena Price — Founder @ Dagmar Studios | [Profile](https://www.linkedin.com/in/helenaprice) | 09 May 2013
+- Ajay Yadav — CEO & Co-Founder @ Otto AI | [Profile](https://www.linkedin.com/in/yadavajay) | 02 May 2013
+- Rob Strain — Founder @ Lemon Battery | [Profile](https://www.linkedin.com/in/rob-strain-0aa0998) | 02 May 2013
+- Priya Nayak — User Experience Researcher & Strategist @ Grindr | [Profile](https://www.linkedin.com/in/priya-nayak) | 02 May 2013
+- Ron Palmeri — Co-Founder & CEO @ Trainspot, Inc. | [Profile](https://www.linkedin.com/in/ronpalmeri) | 18 Apr 2013
+- Jitendra Gupta — Co-founder & CEO @ MyYogaTeacher | [Profile](https://www.linkedin.com/in/jngupta) | 18 Apr 2013
+- Eran Ben-Shushan — Co-Founder & CEO @ Bizzabo | [Profile](https://www.linkedin.com/in/eranbenshushan) | 08 Apr 2013
+- Bonin Bough — Co-Founder & Chief Strategy Officer @ Portrait Media Group | [Profile](https://www.linkedin.com/in/boughb) | 01 Apr 2013
+- Timothy Lum — Senior Product Manager @ Clover | [Profile](https://www.linkedin.com/in/tdlum) | 12 Feb 2013
+- Tegan Monique Gaan — Founder, CEO, Chief Product Officer @ EcoVerse Inc | [Profile](https://www.linkedin.com/in/tegan-monique-gaan-960087a) | 28 Jan 2013
+- Alon Alroy — Co-Founder | CMO & CCO @ Bizzabo | [Profile](https://www.linkedin.com/in/alonalroy) | 22 Jan 2013
+- Andrea Wien — Founder @ LADDER | [Profile](https://www.linkedin.com/in/andreawien) | 07 Jan 2013
+- Don Mosites — Co-founder and Contributor @ AirSwap | [Profile](https://www.linkedin.com/in/dmosites) | 06 Jan 2013
+- Jeremy Gordon — CEO, Founder @ Circuitly | [Profile](https://www.linkedin.com/in/jeremysf) | 23 Dec 2012
+- Mike Zientara — Founder, Creative Director / Designer @ Sovereign Studios | [Profile](https://www.linkedin.com/in/mikezientara) | 22 Dec 2012
+- Brett Hellman — CEO & Founder @ Matter | [Profile](https://www.linkedin.com/in/bretthellman) | 21 Dec 2012
+- Sunil Saha — CEO @ Middle | [Profile](https://www.linkedin.com/in/sunilsaha) | 14 Dec 2012
+- Matt Matteson — Co-Founder & CTO @ Northstar | [Profile](https://www.linkedin.com/in/mattmatteson) | 12 Dec 2012
+- Bryan Goldberg — Founder, CEO @ BDG | [Profile](https://www.linkedin.com/in/goldbergbryan) | 10 Dec 2012
+- Thomas Foley — co-founder and CEO @ Archer | [Profile](https://www.linkedin.com/in/thomassfoley) | 02 Dec 2012
+- Gabe Rivera — CEO @ Techmeme | [Profile](https://www.linkedin.com/in/gabe-rivera-ab94a79) | 02 Dec 2012
+- Biz Stone — Co-founder and CEO @ Jelly Industries, Inc. | [Profile](https://www.linkedin.com/in/bizstone) | 05 Nov 2012
+- Omer Perchik — Founder & CEO @ Any.do | [Profile](https://www.linkedin.com/in/omerperchik) | 29 Oct 2012
+- Silona Bonewald — Founder @ Leadingbit Solutions | [Profile](https://www.linkedin.com/in/silona) | 06 Oct 2012
+- Michael Chang — Product Manager, AI/ML Media Infra @ Meta | [Profile](https://www.linkedin.com/in/michaeldchang) | 19 Jul 2012
+- Christine Guibara — Jeweler, designer, and tech consultant @ Christine Guibara | [Profile](https://www.linkedin.com/in/christine-guibara-3540a89) | 04 Jun 2012
+- Nick O'Neill — Co-Founder, CEO @ The Nifty | [Profile](https://www.linkedin.com/in/nicko) | 28 May 2012
+- Mike Blanchette — Principal Product Manager @ Toro TMS | [Profile](https://www.linkedin.com/in/mikeblanchette) | 26 May 2012
+- Ryan Graves — Founder & CEO @ Saltwater | [Profile](https://www.linkedin.com/in/ragraves) | 26 May 2012
+- Zack Maas — Owner & CEO @ The Center SF | [Profile](https://www.linkedin.com/in/zackwexlerberon) | 16 May 2012
+- Mark Schmulen — Co-Founder & CEO @ PropMatic | [Profile](https://www.linkedin.com/in/markschmulen) | 20 Apr 2012
+- Jaclyn Rice Nelson — Co-founder & CEO @ Tribe AI | [Profile](https://www.linkedin.com/in/jaclyn-rice-nelson-473b1a8) | 13 Apr 2012
+- Jamie Davidson — Co-Founder @ Omni | [Profile](https://www.linkedin.com/in/jamescdavidson) | 28 Mar 2012
+- Greg Schwartz — Co-Founder and CEO @ StockX | [Profile](https://www.linkedin.com/in/greglschwartz) | 18 Mar 2012
+- Vinay Jain — VP and Senior Counsel for Technology & IP @ American Express Global Business Travel | [Profile](https://www.linkedin.com/in/vinayjain1) | 14 Mar 2012
+- Brian Chaikelson — Principal Product Manager @ Adobe | [Profile](https://www.linkedin.com/in/chaik) | 14 Mar 2012
+- Andrew Lee — Founder & CEO @ Tasklet | [Profile](https://www.linkedin.com/in/startupandrew) | 13 Mar 2012
+- Christopher Burrage — Co-Founder, CEO @ Proclamation Goods | [Profile](https://www.linkedin.com/in/christopherburrage) | 01 Mar 2012
+- Simeon Simeonov — Founder & CTO @ Swoop | [Profile](https://www.linkedin.com/in/simeons) | 25 Feb 2012
+- Beth Bayerd — Consultant, Special Projects @ Connery Consulting | [Profile](https://www.linkedin.com/in/beth-bayerd-3039507) | 17 Feb 2012
+- Bruce Carlisle — Independent Strategy, Media and Marketing, AI Consultant @ CARLISLE STRATEGIES | [Profile](https://www.linkedin.com/in/bcarlisle) | 16 Feb 2012
+- Greg Whalin — Co-Founder @ Kinfolk Hunting Collective | [Profile](https://www.linkedin.com/in/gregwhalin) | 16 Feb 2012
+- Kush Kapila — Founder & CEO @ STERLINGS Mobile Events | [Profile](https://www.linkedin.com/in/kushkapila) | 04 Feb 2012
+- Joshua Cippel — Assistant General Counsel @ Federal Home Loan Bank of Pittsburgh | [Profile](https://www.linkedin.com/in/joshuacippel) | 19 Jan 2012
+- Scott Heiferman — Co-Founder/Chairman @ Meetup | [Profile](https://www.linkedin.com/in/sheif) | 21 Dec 2011
+- Arash Ferdowsi — Co-Founder @ Dropbox | [Profile](https://www.linkedin.com/in/arashferdowsi) | 13 Dec 2011
+- Greg Ryan — Co-Founder, Chief Executive Officer @ Daric | [Profile](https://www.linkedin.com/in/greg-ryan-77690037) | 26 Oct 2011
+- Pokin Yeung — Co-Founder @ Talkadot | [Profile](https://www.linkedin.com/in/pokinyeung) | 26 Oct 2011
+- Ken Yeung — Founder and Content Lead @ The AI Economy | [Profile](https://www.linkedin.com/in/kyeung) | 26 Oct 2011
+- Sam Bitetti — Global Industry Analyst @ Wellington Management | [Profile](https://www.linkedin.com/in/sambitetti) | 19 Oct 2011
+- Yong-Soo Chung — Founder @ URBAN EDC® | [Profile](https://www.linkedin.com/in/yongsoo) | 19 Oct 2011
+- Ash Damle — Founder @ Healiom | [Profile](https://www.linkedin.com/in/ashdamle) | 08 Oct 2011
+- Bryce Maddock — CEO @ TaskUs | [Profile](https://www.linkedin.com/in/brycemaddock) | 28 Sep 2011
+- Jeevan Kalanithi — CEO @ OpenSpace | [Profile](https://www.linkedin.com/in/jeevan) | 20 Sep 2011
+- Tammy Camp — Founder & CEO @ Stronghold | [Profile](https://www.linkedin.com/in/tammycamp) | 17 Sep 2011
+- Jeany Kwon — HR and People Operations Consultant @ People Partners Consulting | [Profile](https://www.linkedin.com/in/jeanykwon) | 14 Aug 2011
+- Michael Freed — Principal Product Manager @ Amazon | [Profile](https://www.linkedin.com/in/michaelalanfreed) | 01 Aug 2011
+- Jon Lee — Strategy and Insights Analyst @ Stanford University School of Medicine | [Profile](https://www.linkedin.com/in/jlee8) | 29 Jul 2011
+- Casey Gibbons — Founder @ Quality Products | [Profile](https://www.linkedin.com/in/caseygibbons) | 29 Jul 2011
+- Satish Kanwar — Co-Founder, Principal @ Good Future | [Profile](https://www.linkedin.com/in/skanwar) | 06 Jul 2011
+- Andy Smith — Co-Founder and COO @ Skiffra | [Profile](https://www.linkedin.com/in/andysmithlinkedin) | 06 Jul 2011
+- Susan Hobbs — Global Operations, Chief of Staff to the CEO @ Automattic | [Profile](https://www.linkedin.com/in/susanhobbs) | 06 Jul 2011
+- Kimball Bighorse — Owner/Co-Founder @ Lakeraven, LLC | [Profile](https://www.linkedin.com/in/bighorse) | 06 Jul 2011
+- Kari Barber — Co-Founder, Co-CEO @ Crowdflix | [Profile](https://www.linkedin.com/in/kari-barber-12263a5) | 06 Jul 2011
+- Tom Piamenta — Founder | Connecting Nurses to Careers @ Nurse Career Initiative Israel | [Profile](https://www.linkedin.com/in/tompiamenta) | 06 Jul 2011
+- Brendan Lyall — Product Growth @ Microsoft AI | [Profile](https://www.linkedin.com/in/brendanlyall) | 06 Jul 2011
+- Tevis Howard — Founder & CEO @ Komaza | [Profile](https://www.linkedin.com/in/tevishoward) | 06 Jul 2011
+- Matt Dearborn — Chief Product Officer @ Swivel | [Profile](https://www.linkedin.com/in/matthewdearborn) | 06 Jul 2011
+- Jesse Thomas — Founder, CEO @ JESS3 | [Profile](https://www.linkedin.com/in/jess3) | 06 Jul 2011
+- Sujan Patel — Co-Founder @ Mailshake | [Profile](https://www.linkedin.com/in/sujanpatel) | 06 Jul 2011
+- Mark Silva — Founder & CEO @ KITE Solutions Inc. | [Profile](https://www.linkedin.com/in/marksilva) | 06 Jul 2011
+- Immad Akhund — CEO & Founder @ Mercury - Banking for Startups | [Profile](https://www.linkedin.com/in/iakhund) | 06 Jul 2011
+- Manu Kumar — Co-Founder and CEO @ HiHello, Inc. | [Profile](https://www.linkedin.com/in/sneaker) | 06 Jul 2011
+- Chris Bank — Chief of Staff @ Kamber Group | [Profile](https://www.linkedin.com/in/chrisbank) | 06 Jul 2011
+- David Trindall — Founder @ Hall Street Venture Studio | [Profile](https://www.linkedin.com/in/davidtrindall) | 06 Jul 2011
+- Dana Hendrickson — President & Founder @ Rebuild Hope | [Profile](https://www.linkedin.com/in/dana-hendrickson-7206a6) | 30 Apr 2011
+- Andrew Dumont — Founder & CEO @ Curious | [Profile](https://www.linkedin.com/in/andrewdumont) | 24 Feb 2011
+- 🚀 Mark Brooks — CEO @ Courtland Brooks | [Profile](https://www.linkedin.com/in/mcbrooks) | 24 Feb 2011
+- Madelin Woods — Product Lead, Global Expansion & EOR @ Rippling | [Profile](https://www.linkedin.com/in/madelinwoods) | 24 Feb 2011
+- Robert Ross — Founder/CEO @ Dreamable, Inc. | [Profile](https://www.linkedin.com/in/robross) | 24 Feb 2011
+- Chris Hutchins — Founder, Creator and Host @ All the Hacks | [Profile](https://www.linkedin.com/in/chrishutchins) | 24 Feb 2011
+- Guy Goldstein — CEO @ Next Insurance | [Profile](https://www.linkedin.com/in/guygoldstein) | 24 Feb 2011
+- Aaron Apple — Co-founder/President @ Impresa Products | [Profile](https://www.linkedin.com/in/aaron-apple-ab035810) | 24 Feb 2011
+- Martin Wells — Fractional CTO @ Harken | [Profile](https://www.linkedin.com/in/martinjwells) | 24 Feb 2011
+- Eric Ly — Co-Founder, CEO @ KarmaCheck | [Profile](https://www.linkedin.com/in/ericly) | 24 Feb 2011
+- Rohit Jain, MBA — Sr Principal Consultant @ Oracle | [Profile](https://www.linkedin.com/in/rohitjain11) | 24 Feb 2011
+- Renee Blodgett — Co-Founder @ Blue Soul Earth | [Profile](https://www.linkedin.com/in/reneeblodgett) | 24 Feb 2011
+- Sachin Agarwal — Co-founder, Director @ GrowSF | [Profile](https://www.linkedin.com/in/a4agarwal) | 01 Feb 2011
+- Alon Shwartz — Co-Founder and COO @ Trellis Law | [Profile](https://www.linkedin.com/in/alonshwartz) | 16 Jan 2011
+- John McCrea — Founder and Chair @ IndiGo PAC | [Profile](https://www.linkedin.com/in/therealmccrea) | 11 Jan 2011
+- Sachin Agarwal 🤙🏽 — Group Product Manager @ Google | [Profile](https://www.linkedin.com/in/sachinag) | 05 Dec 2010
+- Laura Fitton — SVP Partnerships @ Agent.ai | [Profile](https://www.linkedin.com/in/pistachio) | 22 Nov 2010
+- Cathy Brooks — Founder @ Unleashed Leadership LLC | [Profile](https://www.linkedin.com/in/cathybrooks) | 21 Nov 2010
+- Aaron Levie — CEO @ Box | [Profile](https://www.linkedin.com/in/boxaaron) | 11 Nov 2010
+- David Cohen — Founder and CEO @ Techstars | [Profile](https://www.linkedin.com/in/davidgcohen) | 25 Oct 2010
+- Stuart McFaul — Founder / Principal Consultant @ Stuart McFaul Associates | [Profile](https://www.linkedin.com/in/stuartmcfaul) | 16 Sep 2010
+- Matt Galligan — Co-Founder & Board Member @ Ephemera | [Profile](https://www.linkedin.com/in/mattgalligan) | 12 Sep 2010
+- Neil Patel — Co-Founder @ Neil Patel Digital | [Profile](https://www.linkedin.com/in/neilkpatel) | 12 Sep 2010
+- Drew Houston — Founder & CEO @ Dropbox | [Profile](https://www.linkedin.com/in/drewhouston) | 09 Sep 2010
+- Matt Van Horn — Co-Founder @ Zimride (now Lyft) @ Lyft | [Profile](https://www.linkedin.com/in/mattvanhorn) | 07 Sep 2010
+- Travis Kalanick — CEO @ CSS and 10100 | [Profile](https://www.linkedin.com/in/traviskalanick) | 03 Sep 2010
+- Nik Bonaddio — Founder and CEO @ BigBrain | [Profile](https://www.linkedin.com/in/nbonaddio) | 31 Aug 2010
+- Dick Hardt — Founder/CEO @ Hellō | [Profile](https://www.linkedin.com/in/dickhardt) | 31 Aug 2010
+- Melody McCloskey — Founder, CEO @ StyleSeat | [Profile](https://www.linkedin.com/in/melodymccloskey) | 25 Aug 2010
+- Shinyoung Park — Co-Founder @ AI Health Startup | [Profile](https://www.linkedin.com/in/shinyoungp) | 25 Aug 2010
+- Blake Byers — Co-Founder @ NewLimit | [Profile](https://www.linkedin.com/in/blbyers) | 24 Aug 2010
+- Tim Chang — Co-Founder @ The Portal | [Profile](https://www.linkedin.com/in/timchang1) | 21 Aug 2010
+- Tom Montgomery — Founder @ Marathon | [Profile](https://www.linkedin.com/in/tomgmontgomery) | 18 Aug 2010
+- Josh Merrill — Founder @ Voyance | [Profile](https://www.linkedin.com/in/josh-io) | 18 Aug 2010
+- Jared Goralnick — CEO, Co-Founder @ Your360 AI | [Profile](https://www.linkedin.com/in/goralnick) | 18 Aug 2010
+- Doug Williams — CEO, Co-Founder @ NextGrid Inc | [Profile](https://www.linkedin.com/in/dougwdougw) | 18 Aug 2010
+- Braughm Ricke — Founder @ Aduro Advisors | [Profile](https://www.linkedin.com/in/braughm) | 18 Aug 2010
+- Garry Tan — Founder @ Garry's List | [Profile](https://www.linkedin.com/in/garrytan) | 18 Aug 2010
+- Drew Olanoff — Co-Founder @ Thumbs Up | [Profile](https://www.linkedin.com/in/drewolanoff) | 17 Aug 2010
+- Sarah Lacy — Co-Founder @ Best Bookstore Corp | [Profile](https://www.linkedin.com/in/sarahcuda) | 17 Aug 2010
+- R "Ray" Wang — Principal Analyst, Founder & Chairman @ Constellation Research | [Profile](https://www.linkedin.com/in/rwang0) | 16 Aug 2010
+- Dave Nemetz — Founder Coach @ Dave Nemetz Coaching | [Profile](https://www.linkedin.com/in/davenemetz) | 13 Aug 2010
+- Ryan Kuder — Founder @ Founders & Co. | [Profile](https://www.linkedin.com/in/ryankuder) | 13 Aug 2010
+- Shervin Pishevar — Executive Chairman & Co-Founder @ Telly | [Profile](https://www.linkedin.com/in/shervinpishevar) | 11 Aug 2010
+- Erin Bury — CEO & Co-founder @ Willful | [Profile](https://www.linkedin.com/in/erinbury) | 11 Aug 2010
+- Chris Howard — Founder and Managing Director @ Ritual Capital | [Profile](https://www.linkedin.com/in/chrisfhoward) | 11 Aug 2010
+- Brian Hendrickson — Co-Founder and CEO @ Launching soon.... | [Profile](https://www.linkedin.com/in/bhendrickson) | 10 Aug 2010
+- David Diaz — Co-Founder and CEO @ Ray Browser | [Profile](https://www.linkedin.com/in/diazdavid) | 10 Aug 2010
+- Trip Adler — Cofounder + CEO @ Created by Humans | [Profile](https://www.linkedin.com/in/tripadler) | 10 Aug 2010
+- Binh Tran — Co-Founder @ AVV | [Profile](https://www.linkedin.com/in/binhqtran) | 10 Aug 2010
+- Prashant Samant — CEO & Co-Founder @ Akido Labs | [Profile](https://www.linkedin.com/in/prashantsamant) | 10 Aug 2010
+- Katherine Woo — Founder and Principal @ Impact Sight, LLC | [Profile](https://www.linkedin.com/in/katherinewoo) | 10 Aug 2010
+- Frank Gruber — Cofounder & Co-CEO @ Established | [Profile](https://www.linkedin.com/in/frankgruber) | 09 Aug 2010
+- Jason Kincaid — Founder @ Bootlauncher LLC | [Profile](https://www.linkedin.com/in/jasonmkincaid) | 09 Aug 2010
+- Ben Henretig — Founder & Director @ ben.film studios | [Profile](https://www.linkedin.com/in/benhenretig) | 09 Aug 2010
+- Brian Phillips — Founder @ Porch Swing Labs | [Profile](https://www.linkedin.com/in/brianphillips) | 09 Aug 2010
+- Kim Ngo Woodward — Co-Founder & Chief Growth Officer @ DishDash.co | [Profile](https://www.linkedin.com/in/kimkngo) | 09 Aug 2010
+- Mark Soper — Founder @ New Venture (Pre-Launch) | [Profile](https://www.linkedin.com/in/marksoper) | 09 Aug 2010
+- Jordy Mont-Reynaud — Founder @ Perceptual | [Profile](https://www.linkedin.com/in/perceptual) | 09 Aug 2010
+- Laura Gluhanich — Founder and Principal @ Fortuitous Advisory | [Profile](https://www.linkedin.com/in/lauraglu) | 09 Aug 2010
+- Jeff Holden — Founder & CEO @ Atomic Machines | [Profile](https://www.linkedin.com/in/jeffholden) | 09 Aug 2010
+- Robyn Ward — CEO @ FounderForward | [Profile](https://www.linkedin.com/in/robynmward) | 09 Aug 2010
+- Isaac Saldana — Founder @ Laneful | [Profile](https://www.linkedin.com/in/isaacsaldana) | 09 Aug 2010
+- Fadi Bishara — Founder @ blackbox | [Profile](https://www.linkedin.com/in/fadibishara) | 09 Aug 2010
+- Sarah Prevette — Founder & CEO @ Future Design School (FDS) | [Profile](https://www.linkedin.com/in/sarahprevette) | 09 Aug 2010
+- Oren Michels — Co-Founder & CEO @ Barndoor AI | [Profile](https://www.linkedin.com/in/omichels) | 09 Aug 2010
+- Jennifer Consalvo — Cofounder & Co-CEO @ Established | [Profile](https://www.linkedin.com/in/jcsalvo) | 09 Aug 2010
+- Tobias Crawford — Senior Associate General Counsel @ Yale University | [Profile](https://www.linkedin.com/in/tobiascrawford) | 09 Aug 2010
+- Catrina Cartagena Kohn — Counsel @ Assured Guaranty | [Profile](https://www.linkedin.com/in/catrinakohn) | 09 Aug 2010
+- Ezra Pierce — Chief Product Officer @ Lumen Research Ltd | [Profile](https://www.linkedin.com/in/ezrapierce) | 09 Aug 2010
+- Chris Turitzin — Founder @ Single Aim | [Profile](https://www.linkedin.com/in/turitzin) | 09 Aug 2010
+- Marco Zappacosta — Co-founder & CEO @ Thumbtack, Inc. | [Profile](https://www.linkedin.com/in/marcozappacosta) | 09 Aug 2010
+- Maria Ly — Co-founder @ Skimble, Inc. | [Profile](https://www.linkedin.com/in/marialy) | 09 Aug 2010
+- Shakil Khan — Co-Founder @ Prima Materia | [Profile](https://www.linkedin.com/in/shakilkhan) | 09 Aug 2010
+- Timothy Bentley — CEO, Founder @ Giftly | [Profile](https://www.linkedin.com/in/callsignbentley) | 09 Aug 2010
+- Adam Rifkin — Co-founder, Director, and Co-CEO @ PandaWhale | [Profile](https://www.linkedin.com/in/adamrifkin) | 09 Aug 2010
+- m boulette — Attorney @ boulette, PLLC | [Profile](https://www.linkedin.com/in/michaelboulette) | 09 Aug 2010
+- Corey van der Wal — Co-Founder & Chief Product Officer @ Frame | [Profile](https://www.linkedin.com/in/corey-van-der-wal) | 09 Aug 2010
+- Jonathan Joseph — Co-Founder @ SmartFunds | [Profile](https://www.linkedin.com/in/jonathanjoseph) | 09 Aug 2010
+- Marshall Kirkpatrick — Founder @ Earth Catalyst | [Profile](https://www.linkedin.com/in/marshallkirkpatrick) | 09 Aug 2010
+- Jay Marcyes — Co-Founder @ Bodega | [Profile](https://www.linkedin.com/in/jaymon) | 09 Aug 2010
+- Christine Lu — Co-Founder @ IP3 Labs Inc | [Profile](https://www.linkedin.com/in/christineludotcom) | 09 Aug 2010
+- Dr. Serkan Toto — CEO & Founder @ Kantan Games, Inc. | [Profile](https://www.linkedin.com/in/serkantoto) | 09 Aug 2010
+- Alexander Abbott — President and CEO @ Northfield Hospital + Clinics | [Profile](https://www.linkedin.com/in/zanderabbott) | 09 Aug 2010
+- Chris Hulls — Co-Founder and Executive Chairman @ Life360 | [Profile](https://www.linkedin.com/in/chrishulls) | 09 Aug 2010
+- Ted Power — Co-Founder @ Versa | [Profile](https://www.linkedin.com/in/tedpower) | 09 Aug 2010
+- Joe Hyrkin — CEO and Executive Coach @ Care Grit Learning, LLC | [Profile](https://www.linkedin.com/in/joehyrkin) | 09 Aug 2010
+- Ben Roodman — Co-Founder & CEO @ heyBTW AI | [Profile](https://www.linkedin.com/in/benroodman) | 09 Aug 2010
+- Tyler Crowley — Consultant @ Tyler Crowley Consulting | [Profile](https://www.linkedin.com/in/tylercrowley) | 09 Aug 2010
+- Richard Zeidel — Founder @ Richard Zeidel Consulting | [Profile](https://www.linkedin.com/in/zeidel) | 09 Aug 2010
+- Scott Thorpe — Founder @ HiBird, Inc. | [Profile](https://www.linkedin.com/in/scottthorpe) | 09 Aug 2010
+- Rashmi Sinha — Co-Founder @ Jaunt | [Profile](https://www.linkedin.com/in/rashmisinha) | 09 Aug 2010
+- Ed Baker — Chief Product Officer @ WHOOP | [Profile](https://www.linkedin.com/in/edwardsbaker) | 09 Aug 2010
+- Marc Gingras — Co-Founder & CEO @ Bloks | [Profile](https://www.linkedin.com/in/marcgingras) | 09 Aug 2010
+- Brady Forrest — CEO & Curator @ Ignite Talks | [Profile](https://www.linkedin.com/in/bradyforrest) | 09 Aug 2010
+- Dave Finocchio — Co-Founder, CEO, Chairman @ The Cool Down | [Profile](https://www.linkedin.com/in/dave-finocchio-90b2a93) | 09 Aug 2010
+- Gregarious Narain — Co-Founder @ Zealous | [Profile](https://www.linkedin.com/in/gregarious) | 09 Aug 2010
+- Vanessa Camones — CMO (fractional) @ Incantor AI | [Profile](https://www.linkedin.com/in/nessasf) | 09 Aug 2010
+- Thomas Knoll — Founder, Host, & Coach @ Self Healing Leaders | [Profile](https://www.linkedin.com/in/thomasknoll) | 09 Aug 2010
+- Joe Fernandez — Co-Founder & CEO @ allUP | [Profile](https://www.linkedin.com/in/joeyfernandez) | 09 Aug 2010
+- Tristan Harris — Co-Founder @ The Center for Humane Technology | [Profile](https://www.linkedin.com/in/tristanharris) | 09 Aug 2010
+- Kevin Hartz — Co-Founder & Chairman @ Sauron | [Profile](https://www.linkedin.com/in/hartz) | 19 Jan 2010
+- Dug Song — Founder & Funder @ Song United | [Profile](https://www.linkedin.com/in/dugsong) | 17 Jul 2009
+- Michael Su — Co-founder, CEO @ Cooler | [Profile](https://www.linkedin.com/in/mikesu) | 17 Jul 2009
+- James Levine — Head of Product @ Megagon Labs | [Profile](https://www.linkedin.com/in/jamesdlevine) | 17 Jul 2009
+- David Marcus — Co-Founder & CEO @ Lightspark | [Profile](https://www.linkedin.com/in/dmarcus) | 14 Mar 2009
+- Tom Federico — CEO & Co-founder @ Team Rankings, LLC | [Profile](https://www.linkedin.com/in/thomasfederico) | 14 Mar 2009
+- James Lindenbaum — Founder & Principal Investigator @ Ink & Switch | [Profile](https://www.linkedin.com/in/jameslindenbaum) | 14 Mar 2009
+- Keely Boyer — Healthcare Consultant @ Huron | [Profile](https://www.linkedin.com/in/keely-boyer-9338201) | 14 Mar 2009
+- Alison Johnston — CEO and cofounder @ Parent Haven | [Profile](https://www.linkedin.com/in/alisonjohnston) | 14 Mar 2009
+- Joshua Tully — Trial Attorney @ U.S. Department of Justice | [Profile](https://www.linkedin.com/in/joshuatully) | 14 Mar 2009
+- Eyal Gura — EIR , co-founder HealingOct7 @ MAPS Israel | [Profile](https://www.linkedin.com/in/eyalgura) | 14 Mar 2009
+- Vibhav Sreekanti — Co-founder & CTO @ Prophet Security | [Profile](https://www.linkedin.com/in/vibhavs) | 14 Mar 2009
+- Till Quack — CEO/CPO, Co-Founder @ Zerofy | [Profile](https://www.linkedin.com/in/tillquack) | 14 Mar 2009
+- YaJie Siamwalla — Principal Program/Product Manager Lead @ Microsoft | [Profile](https://www.linkedin.com/in/yajie-siamwalla-58b116) | 14 Mar 2009
+- Peter Sauer — Group Product Manager @ Lyft | [Profile](https://www.linkedin.com/in/petesauer) | 14 Mar 2009
+- Kerem Ozkan — Co-Founder @ Soar Robotics | [Profile](https://www.linkedin.com/in/keremozkan) | 06 Oct 2008
+- Jacob Pierce — Founder @ Private | [Profile](https://www.linkedin.com/in/jacobpierce) | 09 Jun 2008
+- Carnet Williams — COO & Co-Founder @ The Assembly | [Profile](https://www.linkedin.com/in/carnet) | 30 Apr 2008
+- Mark McLaughlin — Co-Founder @ Fida | [Profile](https://www.linkedin.com/in/markmclaughlin1) | 30 Apr 2008
+- Dan Greenberg — Co-Founder @ Pendium.ai | [Profile](https://www.linkedin.com/in/danackermangreenberg) | 29 Mar 2008
+- Luke Sontag — Principal Consultant @ The Internet Department | [Profile](https://www.linkedin.com/in/lsontag) | 26 Mar 2008
+- Jeff Wang — Product Lead @ Facebook | [Profile](https://www.linkedin.com/in/jeffkwang) | 23 Mar 2008
+- AJ Arora — Founder @ DBL | [Profile](https://www.linkedin.com/in/ajaror) | 23 Mar 2008
+- ⚡Nir Ofir — Founder and CEO @ Jetpack Apps | [Profile](https://www.linkedin.com/in/nirofir) | 21 Mar 2008
+- J. Bryan Scott — Cofounder, CEO @ Stealth | [Profile](https://www.linkedin.com/in/jbryanscott) | 18 Mar 2008
+- Sam Mathews — CEO & Founder @ Fnatic | [Profile](https://www.linkedin.com/in/sammathews) | 28 Feb 2008
+- Felix Shpilman — Co-Founder @ Moses Capital | [Profile](https://www.linkedin.com/in/felixshpilman) | 27 Feb 2008
+- Kelsey Abbruzzese — Founder @ ZZ Ink | [Profile](https://www.linkedin.com/in/kelsey-abbruzzese) | 15 Feb 2008
+- Auston Bunsen — Founder and CEO @ AccessGrid | [Profile](https://www.linkedin.com/in/austonbunsen) | 12 Feb 2008
+- Scott Kveton — Co-Founder @ Association for AI in Legal (A4L) | [Profile](https://www.linkedin.com/in/kveton) | 11 Feb 2008
+- Nick Gonzalez — Co-Founder @ UNXD | [Profile](https://www.linkedin.com/in/nickgonzalez) | 02 Jan 2008
+- Mike Butcher ✍️ — Founder and Editor @ Pathfounders | [Profile](https://www.linkedin.com/in/mikebutcher) | 14 Dec 2007
+- Elizabeth Moe — Researcher @ Rutgers University–New Brunswick | [Profile](https://www.linkedin.com/in/elizabeth-moe-3812406) | 12 Dec 2007
+- Keith Teare — Founder and CEO @ SignalRank | [Profile](https://www.linkedin.com/in/kteare) | 12 Dec 2007
+
+## Tier 2 — Early B2B (Product Teams, Ops, Developer/AI Integrators)
+
+- Spencer Schoeben **[WARM]** — Founding Staff Software Engineer @ Delphi | [Profile](https://www.linkedin.com/in/netspencer) | 18 Jan 2013
+- Alex Yim **[WARM]** — Senior Software Engineer @ Upgrade, Inc. | [Profile](https://www.linkedin.com/in/alexyimcal) | 28 Sep 2011
+- Jason Lavoie **[WARM]** — SRE Principal, NetOps @ Akamai Technologies | [Profile](https://www.linkedin.com/in/jlavoie) | 16 Aug 2011
+- Asad Akbar **[WARM]** — Senior Software Engineer @ Socialmark | [Profile](https://www.linkedin.com/in/asadakbar) | 09 Aug 2010
+- Jeremy Fishman **[WARM]** — Principal Systems Engineer @ Cloudflare | [Profile](https://www.linkedin.com/in/jeremyfishman) | 09 Aug 2010
+- Andrija Colovic — Engineering @ Attio | [Profile](https://www.linkedin.com/in/aki-colovic) | 06 Nov 2024
+- Travis Prebble — Marketing Operations Manager @ webAI | [Profile](https://www.linkedin.com/in/travisprebble) | 11 Sep 2023
+- Daniel Cruz — Senior Software Developer @ Pydantic | [Profile](https://www.linkedin.com/in/ddanielcruzz) | 01 Sep 2023
+- Angel Gomez — GTM Lead @ Sodot | [Profile](https://www.linkedin.com/in/angel-gomez-7932315b) | 02 Jun 2023
+- Luis Aguilar — Staff Software Engineer @ Double-Spent Labs | [Profile](https://www.linkedin.com/in/ldiego08) | 30 May 2023
+- Monika Kantor — Product Designer @ Lifesum | [Profile](https://www.linkedin.com/in/monika-kantor-028b62167) | 18 Apr 2023
+- Yousef Amin — Software Engineer @ Two Sigma | [Profile](https://www.linkedin.com/in/yousef-amin) | 08 Apr 2023
+- Max Efremov — AI Engineer @ Superbuilders | [Profile](https://www.linkedin.com/in/maxim-efremov) | 01 Feb 2023
+- Muhammad Bilal — Senior Software Engineer @ Tintash | [Profile](https://www.linkedin.com/in/mbilall) | 05 Oct 2022
+- Nathan Sorochan 🤘 — Head of Design @ Rubicon | [Profile](https://www.linkedin.com/in/nathansorochan) | 25 Aug 2022
+- Igor Sylvester — Founding Software Engineer @ Ritual | [Profile](https://www.linkedin.com/in/igorsyl) | 11 Aug 2022
+- Mario José Maurello García — Software Engineer - Web3 Developer @ OpsLayer | [Profile](https://www.linkedin.com/in/mariojmaurello) | 26 Jul 2022
+- Raúl Vallejo — Principal Product Manager - Developer Platform & Ecosystem @ Celonis | [Profile](https://www.linkedin.com/in/raulvallejo) | 15 Jul 2022
+- Thomas O. — Senior, IT Operations Engineer @ Stability AI | [Profile](https://www.linkedin.com/in/tojr) | 16 Jun 2022
+- Vishal Agarwala 🌴 — Senior Webflow Developer @ Agarwala Inc | [Profile](https://www.linkedin.com/in/vishalagarwala) | 16 Jun 2022
+- Fernando Carrettoni — Product Designer @ WorkOS | [Profile](https://www.linkedin.com/in/fernandocarrettoni) | 06 Oct 2021
+- Shakiran Sathiyanathan — Software Engineer @ ShareCal | [Profile](https://www.linkedin.com/in/shakiran-sathiyanathan-409a6017a) | 30 Jul 2021
+- Patrick Gray — Principal Technical Writer @ Circle | [Profile](https://www.linkedin.com/in/patrick-gray-28b2163a) | 05 May 2021
+- Fabrizio Ferri-Benedetti — Principal Technical Writer @ Elastic | [Profile](https://www.linkedin.com/in/fabrizioferri) | 19 Mar 2021
+- Charlie Cantoni — Senior Site Reliability Engineer @ NVIDIA | [Profile](https://www.linkedin.com/in/charlescantoni) | 29 Oct 2020
+- Layton Diament — Product Design Manager @ Magic Eden | [Profile](https://www.linkedin.com/in/laytond) | 29 Oct 2020
+- John Mulhausen — Director, Documentation @ Weights & Biases | [Profile](https://www.linkedin.com/in/john-mulhausen-1937b528) | 10 Sep 2020
+- Jason Schrader — DevOps Engineer @ STX Freehold | [Profile](https://www.linkedin.com/in/therealjs) | 05 Aug 2020
+- Thomas Osmonson — Product Engineer @ ineffable.co | [Profile](https://www.linkedin.com/in/thomas-osmonson) | 06 May 2020
+- Eva Guasch — Senior QA Engineer @ Santévet | [Profile](https://www.linkedin.com/in/eva-guasch) | 29 Oct 2019
+- Mary Anthony — Staff Technical Writer @ Confluent | [Profile](https://www.linkedin.com/in/marymanthony) | 27 Aug 2019
+- Laura Spinaci — AI/HPC Data Centers Business Developer @ — | [Profile](https://www.linkedin.com/in/lauraspinaci) | 17 Apr 2019
+- Ryan Northway — Senior Staff Design Manager @ TikTok | [Profile](https://www.linkedin.com/in/northway) | 12 Feb 2019
+- Andrew Braswell — Principal Product Designer @ Shopify | [Profile](https://www.linkedin.com/in/abraswell) | 11 Feb 2019
+- Alberto Rodríguez Núñez — Team Lead & Product Lead & Senior Full-Stack Software Engineer @ Telescope Inc. | [Profile](https://www.linkedin.com/in/albertoronu) | 20 Dec 2018
+- Robert Anthony — Full Stack Developer @ Axa Go (through Amaris) | [Profile](https://www.linkedin.com/in/robertanthonybcn) | 16 Dec 2018
+- Matteo Cellerino — Lead Digital Product Designer / Brand Art Director @ Stark Future SL | [Profile](https://www.linkedin.com/in/matteo-cellerino) | 08 May 2018
+- Taher A — WebKit Engineer @ Apple | [Profile](https://www.linkedin.com/in/taher-a-0971b537) | 12 Dec 2017
+- Jesse Butterfield — Software Engineer @ August Health | [Profile](https://www.linkedin.com/in/jesse-butterfield-33081036) | 16 Oct 2017
+- Jeff Orr — Product Design Manager @ Grow Therapy | [Profile](https://www.linkedin.com/in/jeff-warren-orr) | 24 Aug 2017
+- Lorène García — Product designer @ N26 | [Profile](https://www.linkedin.com/in/lorene-garcia-ux) | 17 Jan 2016
+- Nicola Bassan — Chief Systems Engineer @ United Autosports | [Profile](https://www.linkedin.com/in/bassannicola) | 08 Sep 2015
+- Keegan Jones — Senior Staff Product Designer @ Instagram | [Profile](https://www.linkedin.com/in/keegan) | 21 Aug 2015
+- Alícia Gómez Garcia — Product Designer @ Dexma Energy Intelligence By Spacewell | [Profile](https://www.linkedin.com/in/aliciagomezgarcia) | 05 Aug 2015
+- Daniela Malkin — Lead Marketing Operations Manager @ Epsilon | [Profile](https://www.linkedin.com/in/danielamalkin) | 05 May 2015
+- Francisco Caro Díaz — Mobile Engineer @ TVUp Media Telecom S.L. | [Profile](https://www.linkedin.com/in/franciscocarodiaz) | 26 Feb 2015
+- Hajime Furukawa — Senior Software Engineer @ Block | [Profile](https://www.linkedin.com/in/hajifurukawa) | 29 Jan 2015
+- Reeve Thompson — Developer Engagement Manager @ Apple | [Profile](https://www.linkedin.com/in/reevethompson) | 17 Sep 2014
+- Zack Prager — AI Consultant & Forward Deployed Engineer @ Multiple Companies | [Profile](https://www.linkedin.com/in/zack-prager) | 01 Jul 2014
+- Jayme Woogerd — Software Engineer @ Plaid | [Profile](https://www.linkedin.com/in/jayme-woogerd) | 22 Feb 2014
+- Brooke Thomas Still — Principal Software Engineer @ Twilio | [Profile](https://www.linkedin.com/in/brookeellenthomas) | 22 Jan 2014
+- Adam Lord — Senior IT Infrastructure Engineer @ Bowdoin College | [Profile](https://www.linkedin.com/in/adamjlord) | 11 Dec 2013
+- Emilee Serafine — Product Designer @ Instagram | [Profile](https://www.linkedin.com/in/emilee-serafine) | 12 Sep 2013
+- Elliot Lynde — Software Engineer @ Figma | [Profile](https://www.linkedin.com/in/elliot-lynde-78287676) | 16 Jul 2013
+- Shawn Deprey — Senior Software Engineer II @ Recurly | [Profile](https://www.linkedin.com/in/shawn-deprey-0bab974a) | 19 May 2013
+- Rochelle Lee — Senior Software Engineer @ Cisco Meraki | [Profile](https://www.linkedin.com/in/rochelleylee) | 10 May 2013
+- Kelly Dern — Senior Staff Product Designer @ SoFi | [Profile](https://www.linkedin.com/in/kellydern) | 27 Mar 2013
+- Jamie Martin — Head of Design @ Reka AI | [Profile](https://www.linkedin.com/in/jamiemartin) | 05 Mar 2013
+- Sridhar Srinivasan — Software Engineer @ Facebook | [Profile](https://www.linkedin.com/in/sridsrin) | 06 Oct 2012
+- Jacob Scheckman — Systems Engineer/Supervisor @ TSI Incorporated | [Profile](https://www.linkedin.com/in/jacobscheckman) | 08 Jul 2012
+- Dustin Senos — Head of Design, The Browser Company @ Atlassian | [Profile](https://www.linkedin.com/in/dustinsenos) | 03 Apr 2012
+- Duane Nason — Lead Web Developer @ California Lawyers Association | [Profile](https://www.linkedin.com/in/duanenason) | 16 Feb 2012
+- Connor Montgomery — Product Engineer @ The Browser Company | [Profile](https://www.linkedin.com/in/connormontgomery) | 14 Dec 2011
+- Bennett Hiles — Staff Software Engineer @ Perennial | [Profile](https://www.linkedin.com/in/bennetthiles) | 08 Oct 2011
+- Paul Kilmurray — Web developer @ The Kilbot Factory | [Profile](https://www.linkedin.com/in/kilbot) | 28 Sep 2011
+- John Intrater — Staff Product Designer @ Faire | [Profile](https://www.linkedin.com/in/intrater) | 01 Sep 2011
+- Topher Fischer — Software Engineer @ Amazon | [Profile](https://www.linkedin.com/in/topher-fischer-b2494a3) | 25 Aug 2011
+- Nick Sullivan — AI Tools & Infrastructure Developer @ Self Employed | [Profile](https://www.linkedin.com/in/nicksullivan) | 29 Jul 2011
+- Taylor Harwin — Software Engineer @ Kargo | [Profile](https://www.linkedin.com/in/taylorharwin) | 02 Nov 2010
+- Nicholas Dunn — Staff Software Engineer @ Waymo | [Profile](https://www.linkedin.com/in/nicholascdunn) | 20 Aug 2010
+- Laurie Voss — Head of Developer Relations @ Arize AI | [Profile](https://www.linkedin.com/in/seldo) | 18 Aug 2010
+- David Lipa — Chatbot Developer @ The Data Economics Company (DECO) | [Profile](https://www.linkedin.com/in/david-lipa-94a08b4) | 17 Aug 2010
+- Chris Lea — Principal Software Engineer @ Marqeta | [Profile](https://www.linkedin.com/in/chrislealinkedin) | 15 Aug 2010
+- Leah Culver — Senior iOS Engineer @ Airbnb | [Profile](https://www.linkedin.com/in/leahculver) | 10 Aug 2010
+- Matt Paul — Principal Software Engineer @ LGND AI, Inc. | [Profile](https://www.linkedin.com/in/mattpaul) | 10 Aug 2010
+- Mark Leaman — Systems Engineer III @ Bowdoin College | [Profile](https://www.linkedin.com/in/mleaman) | 09 Aug 2010
+- Aaron Macy — Principal Engineer @ PayPal | [Profile](https://www.linkedin.com/in/aaronmacy) | 09 Aug 2010
+- Ryan Freitas — Managing Director & Head of Design @ JPMorgan Chase & Co. | [Profile](https://www.linkedin.com/in/ryanfreitas) | 09 Aug 2010
+- Mager Mager — Staff Software Engineer @ Uber | [Profile](https://www.linkedin.com/in/magerleagues) | 09 Aug 2010
+- Dustin Whittle — Developer Advocate @ Uber | [Profile](https://www.linkedin.com/in/dustinwhittle) | 09 Aug 2010
+- Alec Berryman — Software Engineer @ Google | [Profile](https://www.linkedin.com/in/alecberryman) | 13 Jul 2010
+- Ryan Dunlavey — Senior Product Designer @ Berkshire Hathaway Specialty Insurance | [Profile](https://www.linkedin.com/in/ryandunlavey) | 17 Jul 2009
+- Jesse Hammons — Senior/Lead Python Developer @ Self | [Profile](https://www.linkedin.com/in/jessehammons) | 17 Jul 2009
+- Rob Olson — Software Engineer @ Teads | [Profile](https://www.linkedin.com/in/robertolson) | 14 Mar 2009
+- Jeff Widman — Software Engineer @ GitHub | [Profile](https://www.linkedin.com/in/jeffwidman) | 14 Mar 2009
+- Noah Ready-Campbell — Founder, CEO & Engineer @ Built Robotics | [Profile](https://www.linkedin.com/in/noahreadycampbell) | 22 Mar 2008
+- Christopher Harris — Staff Engineer @ Datadog | [Profile](https://www.linkedin.com/in/cnharris) | 09 Feb 2008
+
+## Tier 3 — B2C Power Users (Solopreneurs, Multi-System, Households)
+
+- Melody Quintana **[WARM]** — UX Design and Writing Consultant @ Freelance | [Profile](https://www.linkedin.com/in/melody-quintana) | 20 Sep 2011
+- Peter Momjian — Freelance Designer @ Self-employed | [Profile](https://www.linkedin.com/in/petermomjian) | 27 Feb 2025
+- Derek Pym — Startup Growth Consulting @ Freelance | [Profile](https://www.linkedin.com/in/derekpym) | 31 Oct 2022
+- Georgina García-Mauriño — Author and Designer @ Freelance Self-Employed | [Profile](https://www.linkedin.com/in/georginagarciamaurino) | 14 Nov 2019
+- Sara Van-Deste — Sabbatical - Travel, Recharge & Future Projects Exploration @ Self-employed | [Profile](https://www.linkedin.com/in/saravandeste) | 11 Feb 2019
+- Edna Zhou — Freelance Writer & Photographer @ ExpatEdna.com | [Profile](https://www.linkedin.com/in/ednazhou) | 24 Sep 2017
+- Pablo Recolons Brugueras — Management and Business Process Innovation @ Freelance | [Profile](https://www.linkedin.com/in/precolons) | 05 May 2015
+- Norman Liang — Advisor, Coach, and Mentor @ Self-employed | [Profile](https://www.linkedin.com/in/normanliang) | 13 Mar 2014
+- Aneet Makin — Consultant @ Self-employed | [Profile](https://www.linkedin.com/in/aneetmakin) | 17 Jul 2013
+- Susan Leigh Babcock — Writer, Editor, Photographer @ Freelance | [Profile](https://www.linkedin.com/in/susanbabcock) | 06 Oct 2012
+- Jonathan Cowperthwait — Marketing Advisor and Fractional Chief Marketing Officer @ Self-employed | [Profile](https://www.linkedin.com/in/cowperthwait) | 16 Mar 2012
+- Jacqueline Hughes — Fractional Event Producer @ Self-employed | [Profile](https://www.linkedin.com/in/jacquelineslife) | 28 Sep 2011
+- Susan Coyne — Freelance Illustrator @ Coyneworks | [Profile](https://www.linkedin.com/in/coyneworks) | 29 Jul 2011
+- Courtenay Bird — Digital Strategy, Marketing Operations, Email/Web Dev @ Freelance | [Profile](https://www.linkedin.com/in/courtenaybird) | 24 Feb 2011
+- Diana M. Heald — Freelance Digital Strategist & Brand Manager @ Freelance | [Profile](https://www.linkedin.com/in/dianamaclarenheald) | 24 Feb 2011
+- Justin Shaffer — Multidisciplinary Artist @ Freelance | [Profile](https://www.linkedin.com/in/shafferj) | 25 Aug 2010
+- Adam Jackson — Founder & CEO of Freelance Labs, Builders of Braintrust @ Braintrust Network | [Profile](https://www.linkedin.com/in/ajackson) | 17 Jul 2009
+- Orli Yakuel — Freelance @ Self-employed | [Profile](https://www.linkedin.com/in/orliyakuel) | 15 Mar 2009
+
+## Tier 4 — Strategy layer (HNW, Crypto, Founders/Equity)
+
+- Frederique Dame **[WARM]** — General Partner @ GV | [Profile](https://www.linkedin.com/in/frederiquedame) | 03 Jan 2012
+- Ben Metcalfe **[WARM]** — Founder & General Partner @ Monochrome Capital | [Profile](https://www.linkedin.com/in/benmetcalfe) | 06 Jul 2011
+- Suvda Myagmar **[WARM]** — VC Fund Partner @ Reaction | [Profile](https://www.linkedin.com/in/suvda) | 14 Mar 2009
+- Prerna Sharma — General Partner @ Antler | [Profile](https://www.linkedin.com/in/prernash) | 08 Apr 2025
+- David K. — Information Technology Business Partner @ Kayo Ventures | [Profile](https://www.linkedin.com/in/davidkayo) | 23 Mar 2024
+- Dan Held — General Partner @ Asymmetric | [Profile](https://www.linkedin.com/in/dheld) | 16 Jan 2024
+- Daniela Perlein — Angel Investor & Startup Advisor @ Startups | [Profile](https://www.linkedin.com/in/danielaperlein) | 16 Jan 2024
+- Pepe Agell — Partner @ Pear VC | [Profile](https://www.linkedin.com/in/joseluisagell) | 28 Nov 2023
+- Jaasir Ali — Partner @ Rarepublic | [Profile](https://www.linkedin.com/in/jaasirali) | 19 Oct 2023
+- Katherine A. — Global Head of Field, Partner, & Event Marketing @ Mashgin | [Profile](https://www.linkedin.com/in/katherine-a-hsu) | 03 Oct 2023
+- Jonathan Turnham — Partner - NXT Law | Offshore and Digital Law - Web3, Funds, Private Clients & Family Offices @ NXT Law | [Profile](https://www.linkedin.com/in/jonathan-turnham) | 02 Jun 2023
+- Catherine Lu — Early Stage Investor @ Spell AI | [Profile](https://www.linkedin.com/in/catherine-lu-54bba9b6) | 02 Jun 2023
+- Erica Lindgren — Talent Acquisition Partner @ Sumitomo Pharma America, Inc. | [Profile](https://www.linkedin.com/in/ejlindgren) | 02 Oct 2022
+- Jahed Momand — Co-Founder and General Partner @ Cerulean Ventures | [Profile](https://www.linkedin.com/in/jahedmomand) | 25 Aug 2022
+- Chris Castig — Investor @ Fifty Years | [Profile](https://www.linkedin.com/in/castig) | 11 Aug 2022
+- Frederick Lee — Partner @ Boies Schiller Flexner LLP | [Profile](https://www.linkedin.com/in/frederick-lee) | 19 Mar 2021
+- Karina Victorino — Real Estate Broker & Investor @ Royal LePage | [Profile](https://www.linkedin.com/in/karina-victorino) | 10 Sep 2020
+- Hannah Lloyd-Goh — Talent Partner, Organization & People - Non-Executive Talent @ Temasek | [Profile](https://www.linkedin.com/in/hanlloyd) | 08 Apr 2020
+- Jason Cavnar — Founder and Managing Partner @ Vitality Labs | [Profile](https://www.linkedin.com/in/jasoncavnar) | 06 Apr 2020
+- Karolina Coss — Headhunter and Managing Partner @ Staffr | [Profile](https://www.linkedin.com/in/karolinacoss) | 04 Mar 2019
+- Pavel V Moreno Narvaez — Real Estate Investor  & Strategic Advisor @ Owner | [Profile](https://www.linkedin.com/in/pavelmn) | 02 Jan 2018
+- Mark Suster — General Partner @ Upfront Ventures | [Profile](https://www.linkedin.com/in/marksuster) | 12 Dec 2017
+- Leah Solivan — Founder and Managing Director @ Precedent.vc | [Profile](https://www.linkedin.com/in/leahsolivan) | 11 Oct 2017
+- Chris Bixby — Managing Director, Venture Capital Strategies @ Rice Park Capital Management | [Profile](https://www.linkedin.com/in/chris-bixby-127b7a5b) | 05 May 2017
+- Johann Romefort — Tech Due Diligence (VC, PE) @ Freelance | [Profile](https://www.linkedin.com/in/romefort) | 05 May 2017
+- Frank Malek — Investor and Product Management @ Cachengo | [Profile](https://www.linkedin.com/in/frmalek) | 15 Feb 2017
+- José Moreno — Partner @ AIJ Global | [Profile](https://www.linkedin.com/in/jmorenor) | 22 Nov 2016
+- Gabriela Ghimis — Investor @ — | [Profile](https://www.linkedin.com/in/gabrielaghimis) | 30 May 2016
+- Mary Minno — Investor @ Stealth Platform | [Profile](https://www.linkedin.com/in/maryminno) | 20 Apr 2016
+- Cathryn Lyman — Director, Global Networking Partner Sales @ Cisco | [Profile](https://www.linkedin.com/in/cathrynlyman) | 06 Apr 2016
+- Travis Granfar — Managing Partner @ Bitesize Ventures | [Profile](https://www.linkedin.com/in/travisgranfar) | 17 Jan 2016
+- Michael Klein — Partner @ Savvy STR Agents | [Profile](https://www.linkedin.com/in/mvklein) | 05 Nov 2015
+- Sebastian Pollok — Founding Partner @ Visionaries Tomorrow | [Profile](https://www.linkedin.com/in/sebastianpollok) | 08 Sep 2015
+- Joanna Lee Shevelenko — Co-Founder and General Partner @ Perplexity Fund | [Profile](https://www.linkedin.com/in/joannaleeshevelenko) | 05 Aug 2015
+- Mike Ghaffary — General Partner @ Burst Capital | [Profile](https://www.linkedin.com/in/mikeghaffary) | 25 May 2015
+- Aaron Frank — Partner @ Lightspeed | [Profile](https://www.linkedin.com/in/arfrank) | 05 May 2015
+- Anna van Dam - Bofill Bert — Executive Business Partner to the COO @ Virtuozzo | [Profile](https://www.linkedin.com/in/anna-vandam) | 08 Nov 2014
+- Minal Hasan — Founder and General Partner @ Cyphr | [Profile](https://www.linkedin.com/in/minalhasan) | 28 Aug 2014
+- Bernard Slede — Investor, Applied AI-only fund @ BootstrapLabs | [Profile](https://www.linkedin.com/in/bernardslede) | 28 Aug 2014
+- Blake Ilstrup — Partner & Leader of Technology Companies Group in the Pacific Northwest @ Orrick, Herrington & Sutcliffe LLP | [Profile](https://www.linkedin.com/in/blakeilstrup) | 01 Jul 2014
+- Sarah Austin — Partner Marketing Manager @ Tiltedxyz | [Profile](https://www.linkedin.com/in/sarahmarieaustin) | 07 Jun 2014
+- Edward Carr — Partner @ Energy and Environmental Research Associates (EERA) | [Profile](https://www.linkedin.com/in/edwardwcarr) | 13 Feb 2014
+- Martin Shen — Investor @ Shen Capital | [Profile](https://www.linkedin.com/in/martinshen) | 03 Feb 2014
+- Akash Malhotra — Partner @ Necessary Ventures | [Profile](https://www.linkedin.com/in/aemalhotra) | 18 Dec 2013
+- Chad Byers — Seed Investor @ Together AI | [Profile](https://www.linkedin.com/in/chadabyers) | 11 Dec 2013
+- sam haviland — partner @ o | [Profile](https://www.linkedin.com/in/sam-haviland-170ab63) | 02 Sep 2013
+- Stein T. Aalvik — CEO/partner @ Prismaflex Iberica SA | [Profile](https://www.linkedin.com/in/stein-t-aalvik-2030049) | 29 Aug 2013
+- Tikhon Bernstam — General Partner @ Uncommon Capital | [Profile](https://www.linkedin.com/in/tikhonbernstam) | 14 Aug 2013
+- Alicia Lin — Senior Talent Partner @ Next Gen Advisors | [Profile](https://www.linkedin.com/in/alicialin) | 19 May 2013
+- Matthew Brezina — Early stage technology investor and advisor @ Ford Street Ventures | [Profile](https://www.linkedin.com/in/brezina) | 13 May 2013
+- Daniel Ha — Managing Partner @ Antigravity Capital | [Profile](https://www.linkedin.com/in/danielha) | 10 May 2013
+- Wesley Chan — Co-Founder & Managing Partner @ FPV Ventures | [Profile](https://www.linkedin.com/in/weschan) | 02 May 2013
+- John Fogelsong — Founding Partner @ Friends & Family Capital | [Profile](https://www.linkedin.com/in/john-fogelsong) | 02 May 2013
+- Chris Ovitz — General Partner @ Gallery Ventures | [Profile](https://www.linkedin.com/in/chrisovitz) | 29 Apr 2013
+- Daniel Gruneberg — Partner @ Quiet Capital | [Profile](https://www.linkedin.com/in/danielgruneberg) | 29 Apr 2013
+- Stephan Goupille — General Partner @ Data Tech Fund | [Profile](https://www.linkedin.com/in/stephan-goupille) | 29 Apr 2013
+- Joshua Cook — Partner @ Lowenstein Sandler LLP | [Profile](https://www.linkedin.com/in/joshuaccook) | 16 Apr 2013
+- Andy Young — Angel Investor @ Various startups | [Profile](https://www.linkedin.com/in/andrewyoung) | 01 Apr 2013
+- Julia French — Partner @ Galileo Ventures | [Profile](https://www.linkedin.com/in/juliafrench) | 08 Jan 2013
+- Stefan Szpajda — Partner @ Folio Law Group PLLC | [Profile](https://www.linkedin.com/in/sszpajda) | 12 Nov 2012
+- Ash Fontana — Investor @ Me | [Profile](https://www.linkedin.com/in/ashfontana) | 27 Aug 2012
+- Ryan Sarver — Investor @ Forum Ventures | [Profile](https://www.linkedin.com/in/rsarver) | 11 Jul 2012
+- Nick Talwar — CTO & Partner @ Bottega8 | [Profile](https://www.linkedin.com/in/nicktalwar) | 03 Jul 2012
+- Julia White — Partner @ Goodwin | [Profile](https://www.linkedin.com/in/julia-white-95942854) | 03 Jul 2012
+- Edward Wexler-Beron — CEO / Founder, Executive Coach and Leadership Development Strategic Partner @ Wexler-Beron Coaching & Leadership Development | [Profile](https://www.linkedin.com/in/edwardwexlerberon) | 10 May 2012
+- Tomasz Tunguz — General Partner @ Theory Ventures | [Profile](https://www.linkedin.com/in/tomasztunguz) | 20 Apr 2012
+- Hunter Walk — Partner, Co-Founder @ Homebrew | [Profile](https://www.linkedin.com/in/hunterwalk) | 10 Apr 2012
+- Katherine Alpert — Director FOS @ Private Family Office | [Profile](https://www.linkedin.com/in/katherine-a-6094a728) | 13 Feb 2012
+- Bernadette Joy — Head Personal Finance Coach, Angel Investor and Pro Speaker @ Crush Your Money Goals | [Profile](https://www.linkedin.com/in/bernadebtjoy) | 28 Dec 2011
+- Jyri Engeström — General Partner @ Lifeline Ventures | [Profile](https://www.linkedin.com/in/jyriengestrom) | 21 Dec 2011
+- Avi Muchnick — Investor, Advisor & Consulting @ Unleavened Capital | [Profile](https://www.linkedin.com/in/avimuchnick) | 08 Dec 2011
+- Dave Morin — Co-Founder & Managing Partner @ Offline Ventures | [Profile](https://www.linkedin.com/in/davemorin) | 05 Oct 2011
+- Lauri J. Moore — Partner @ Bessemer Venture Partners | [Profile](https://www.linkedin.com/in/laurijmoore) | 08 Sep 2011
+- Laura Gifford — Executive Business Partner @ GV | [Profile](https://www.linkedin.com/in/lauragifford) | 05 Aug 2011
+- Scott Roberts — Managing Partner @ 4Q Advisors | [Profile](https://www.linkedin.com/in/scotthroberts) | 29 Jul 2011
+- Brian Zisk — Investor @ Brian Zisk | [Profile](https://www.linkedin.com/in/brianzisk) | 29 Jul 2011
+- Stephen Venuto — Partner @ Orrick Herrington & Sutcliffe LLP | [Profile](https://www.linkedin.com/in/sjvenuto) | 06 Jul 2011
+- Ben Joffe — Senior Partner @ SOSV | [Profile](https://www.linkedin.com/in/benjaminjoffe) | 06 Jul 2011
+- Jordan Kretchmer — Senior Partner @ Outlander VC | [Profile](https://www.linkedin.com/in/jordankretchmer) | 06 Jul 2011
+- Steve Jang — Founder & Managing Partner @ Kindred Ventures | [Profile](https://www.linkedin.com/in/stevejang1) | 06 Jul 2011
+- Bernard Moon — Co-founder & Partner @ SparkLabs Group | [Profile](https://www.linkedin.com/in/bernardmoon) | 06 Jul 2011
+- Adam Marchick — Consulting @ Chestnut VC Advisory | [Profile](https://www.linkedin.com/in/adammarchick) | 06 Jul 2011
+- William Barnes — Founding Partner @ Karman Ventures | [Profile](https://www.linkedin.com/in/williampbarnes) | 28 May 2011
+- Dean Riskas — Venture Partner @ Atlantic Blue Ventures | [Profile](https://www.linkedin.com/in/dean-riskas-068371b) | 12 Apr 2011
+- Adam D'Augelli — Partner @ True Ventures | [Profile](https://www.linkedin.com/in/adamdaugelli) | 18 Mar 2011
+- Enrique Allen — Co-Founder, Managing Partner @ Designer Fund | [Profile](https://www.linkedin.com/in/enriqueallen) | 08 Mar 2011
+- Nicholas J. Gammell — Managing Partner @ Next Epic | [Profile](https://www.linkedin.com/in/nicholasgammell) | 24 Feb 2011
+- Eric Lagier — Founder & Managing Partner @ byFounders | [Profile](https://www.linkedin.com/in/elagier) | 24 Feb 2011
+- Mike Walsh — Investor and Board Member @ HIFI Labs | [Profile](https://www.linkedin.com/in/themikewalsh) | 24 Feb 2011
+- renée berry — Senior Partner Development Manager, AI Startups, Global Startup Program @ Amazon Web Services (AWS) | [Profile](https://www.linkedin.com/in/reneeberry) | 24 Feb 2011
+- Brandon Farwell — General Partner @ Xfund | [Profile](https://www.linkedin.com/in/brandonfarwell) | 24 Feb 2011
+- Julia Lam — Angel Investor & Startup Advisor @ Kayak Ventures | [Profile](https://www.linkedin.com/in/juliaclam) | 22 Oct 2010
+- Sarah Smith — Founder and Managing Partner @ Sarah Smith Fund | [Profile](https://www.linkedin.com/in/sasmith4) | 12 Oct 2010
+- Joshua Schachter — Angel Investor @ Angel Investor | [Profile](https://www.linkedin.com/in/joshuaschachter) | 08 Oct 2010
+- Eric Eldon — Angel Investor @ angel investor | [Profile](https://www.linkedin.com/in/ericeldon) | 29 Sep 2010
+- M.G. Siegler — Venture Partner @ GV (Google Ventures) | [Profile](https://www.linkedin.com/in/mgsiegler) | 17 Sep 2010
+- Jeremiah Owyang — General Partner, AI Investments @ Blitzscaling Ventures | [Profile](https://www.linkedin.com/in/jowyang) | 03 Sep 2010
+- Kevin Carter — Founder and General Partner @ Night Capital | [Profile](https://www.linkedin.com/in/carterkev) | 01 Sep 2010
+- Toni Schneider — Partner @ True Ventures | [Profile](https://www.linkedin.com/in/tonischneider) | 30 Aug 2010
+- Saar Gur — General Partner and Venture Capitalist @ CRV | [Profile](https://www.linkedin.com/in/saargur) | 24 Aug 2010
+- Jay Levy — Co-Founder & Partner @ Zelkova Ventures | [Profile](https://www.linkedin.com/in/jaylevy) | 23 Aug 2010
+- Jessica Livingston — Co-Founder @ Y Combinator | [Profile](https://www.linkedin.com/in/jessicalivingston1) | 20 Aug 2010
+- Janet Zhou — Partner @ Mission Ventures | [Profile](https://www.linkedin.com/in/janetz) | 19 Aug 2010
+- Sarah Tavel — Partner @ Benchmark | [Profile](https://www.linkedin.com/in/sarahtavel) | 18 Aug 2010
+- Thomas McInerney — Angel Investor @ TGM | [Profile](https://www.linkedin.com/in/tommcinerney) | 18 Aug 2010
+- Suzanne Xie — Partner @ Neo | [Profile](https://www.linkedin.com/in/suzannexie) | 14 Aug 2010
+- Anthony Atlas — Managing Partner @ Science Fair Fund | [Profile](https://www.linkedin.com/in/anthonyatlas) | 12 Aug 2010
+- Julio Vasconcellos — Partner @ Atlantico | [Profile](https://www.linkedin.com/in/juliovasconcellos) | 12 Aug 2010
+- Aydin Senkut — Founder and Managing Partner @ Felicis | [Profile](https://www.linkedin.com/in/aydins) | 12 Aug 2010
+- Ron Bouganim — Limited Partner @ Lowercarbon Capital | [Profile](https://www.linkedin.com/in/ronbouganim) | 10 Aug 2010
+- Shai Goldman — Partner @ Next Wave NYC | [Profile](https://www.linkedin.com/in/shaigoldman) | 10 Aug 2010
+- Brad Feld — Partner @ Foundry | [Profile](https://www.linkedin.com/in/bfeld) | 10 Aug 2010
+- Ian Hogarth — Partner @ Plural | [Profile](https://www.linkedin.com/in/ianhogarth) | 10 Aug 2010
+- Joe Beninato — Investor/Advisor/Executive Coach @ Self-employed | [Profile](https://www.linkedin.com/in/beninato) | 10 Aug 2010
+- Maya Baratz — Angel Invesor, Advisor & LP @ MBJ Advisory | [Profile](https://www.linkedin.com/in/mayabaratz) | 10 Aug 2010
+- Chris Messina — General Partner @ Ride Home Fund, Llc | [Profile](https://www.linkedin.com/in/factoryjoe) | 10 Aug 2010
+- Anik Guha — Partner, Co-Chair, Technology Companies Group @ Orrick, Herrington & Sutcliffe | [Profile](https://www.linkedin.com/in/anik-guha-a1946a3) | 10 Aug 2010
+- Sanford Lincoln — Partner & COO @ HackLegacy VC | [Profile](https://www.linkedin.com/in/sanfordl) | 10 Aug 2010
+- Paige Craig — Managing Partner + Founder @ Outlander VC | [Profile](https://www.linkedin.com/in/paigecraig) | 10 Aug 2010
+- Tommy Leep — Founding Partner @ Jetstream | [Profile](https://www.linkedin.com/in/tommyleep) | 09 Aug 2010
+- Jacob Mullins — Venture Partner @ Village Global | [Profile](https://www.linkedin.com/in/jacobmullins) | 09 Aug 2010
+- Pascale Diaine — Partner @ Storm Ventures | [Profile](https://www.linkedin.com/in/paskale) | 09 Aug 2010
+- Harj Taggar — Managing Partner @ Y Combinator | [Profile](https://www.linkedin.com/in/harjtaggar) | 09 Aug 2010
+- Jonathan Strauss — Operating Partner @ Lowercarbon Capital | [Profile](https://www.linkedin.com/in/jonathanhstrauss) | 09 Aug 2010
+- Joel Yarmon — Partner @ Pipeline Capital Partners | [Profile](https://www.linkedin.com/in/joelyarmon) | 09 Aug 2010
+- Britta B. Bene — Partner @ Mainstay Human Capital Advisors GmbH | [Profile](https://www.linkedin.com/in/brittabene) | 09 Aug 2010
+- Martina Welkhoff — Founding Partner @ The WXR Fund | [Profile](https://www.linkedin.com/in/mwelkhoff) | 09 Aug 2010
+- Jesse Draper — General Partner @ Halogen Ventures | [Profile](https://www.linkedin.com/in/jessedraper) | 09 Aug 2010
+- Jason Yeh — General Partner @ Patron | [Profile](https://www.linkedin.com/in/jasonoliveryeh) | 09 Aug 2010
+- Ryan Lottering — Value-Add Investor @ Self Employed | [Profile](https://www.linkedin.com/in/ryanlottering) | 09 Aug 2010
+- Dev Khare — Partner @ Lightspeed India | [Profile](https://www.linkedin.com/in/dkhare) | 09 Aug 2010
+- Marcus Ogawa — Managing Partner @ Quest Venture Partners | [Profile](https://www.linkedin.com/in/mogawa) | 09 Aug 2010
+- Alexandre Scialom — GP @ Fresh Ventures | [Profile](https://www.linkedin.com/in/ascialom) | 09 Aug 2010
+- Daniel Rumennik — Co-Founder / General Partner @ AirAngels | [Profile](https://www.linkedin.com/in/rumennik) | 09 Aug 2010
+- Edith Yeung — General Partner @ Race Capital | [Profile](https://www.linkedin.com/in/edithyeung) | 09 Aug 2010
+- Adam Pritzker — Founding Partner @ The States Project | [Profile](https://www.linkedin.com/in/adampritzker) | 09 Aug 2010
+- M. Jackson Wilkinson — Venture / Operating Partner @ F-Prime Capital | [Profile](https://www.linkedin.com/in/mjacksonw) | 09 Aug 2010
+- Chester Ng — General Partner @ Atomic | [Profile](https://www.linkedin.com/in/chest) | 09 Aug 2010
+- Brian Wong — General Partner @ Ascii Ventures | [Profile](https://www.linkedin.com/in/wongbrian) | 09 Aug 2010
+- Emily Siegel — President & Managing Partner @ Lafayette American | [Profile](https://www.linkedin.com/in/emilylugersiegel) | 09 Aug 2010
+- Tomas Barreto — Operating Partner, Engineering @ Kleiner Perkins | [Profile](https://www.linkedin.com/in/tomasrb) | 09 Aug 2010
+- Dave McClure — Founder, Managing Partner @ Practical Venture Capital | [Profile](https://www.linkedin.com/in/davemcclure) | 23 Apr 2010
+- Jeff Clavier — Founding Partner @ Uncork Capital | [Profile](https://www.linkedin.com/in/jeffclavier) | 18 Apr 2010
+- Tony Conrad — Partner @ True Ventures | [Profile](https://www.linkedin.com/in/tonyconrad) | 19 Jan 2010
+- Romain David — Advisor & Investor @ Various startups | [Profile](https://www.linkedin.com/in/romaindavid) | 19 Jan 2010
+- Chris McCann — Partner @ Race Capital | [Profile](https://www.linkedin.com/in/mccannatron) | 19 Jan 2010
+- Toffler Niemuth — Limited Partner Investor @ Portfolia | [Profile](https://www.linkedin.com/in/toffler) | 17 Jul 2009
+- David Speiser — Partner, co-founder, Be Good PR @ Be Good PR | [Profile](https://www.linkedin.com/in/davidspeiser) | 14 Mar 2009
+- Paul Bragiel — Managing Partner @ Bragiel Brothers | [Profile](https://www.linkedin.com/in/bragiel) | 30 Apr 2008
+- Mick Liubinskas — Partner - Sustainable Technology and Investment @ Melomys Advisory | [Profile](https://www.linkedin.com/in/mliubinskas) | 11 Mar 2008
+- Heather Harde — Partner @ Arrington Capital | [Profile](https://www.linkedin.com/in/heatherharde) | 21 Dec 2007
+- Daniel Kimerling — Founder and Managing Partner @ Deciens Capital | [Profile](https://www.linkedin.com/in/dkimerling) | 13 Dec 2007
+
+## Tier 5 — Execution layer (Bitcoin/Stacks, On-chain, Protocol)
+
+- Anastasios Alexanov **[WARM]** — Founder @ 1tao.io | [Profile](https://www.linkedin.com/in/anastasios-alexanov-64a5b8182) | 11 Feb 2026
+- Steven Rupp **[WARM]** — Founder @ block9 | [Profile](https://www.linkedin.com/in/stevenrupp) | 05 Feb 2026
+- Cristina Insignares, PhD **[WARM]** — Client Delivery Lead @ Kraken | [Profile](https://www.linkedin.com/in/cristinainsignares) | 10 Dec 2025
+- Marvin Janssen **[WARM]** — Co-Founder / CTO @ Ryder | [Profile](https://www.linkedin.com/in/marvinjanssen) | 23 Sep 2025
+- Sean Longstreet — Content Strategist @ Stacks Open Internet Foundation | [Profile](https://www.linkedin.com/in/sean-longstreet-5b0a95361) | 29 May 2025
+- Albert Liang — Founder & Investor @ Bitcoin Ai Startup Lab | [Profile](https://www.linkedin.com/in/albert-liang-01341913) | 08 Apr 2025
+- Melanie Carstens — Podcast Host @ BITCOIN AND BEYOND | [Profile](https://www.linkedin.com/in/melaniecarstens) | 10 Mar 2025
+- Jovan Vuleta — Site Reliability Engineer @ Galaxy | [Profile](https://www.linkedin.com/in/jovan-vuleta) | 28 Feb 2025
+- Talha Buğra Bulut — Engineering Partner @ Trust Machines | [Profile](https://www.linkedin.com/in/talhabulut) | 04 Dec 2024
+- Edgar Khanzadian — Senior React / React Native Engineer @ Trust Machines | [Profile](https://www.linkedin.com/in/edgar-khanzadian) | 04 Dec 2024
+- Don Ruiz — GM - Orange Domains @ Trust Machines | [Profile](https://www.linkedin.com/in/donruiz) | 06 Nov 2024
+- Will Cameron — Senior Software Engineer / Engineering Manager @ Kraken Digital Asset Exchange | [Profile](https://www.linkedin.com/in/will-cameron-81b71141) | 17 Jun 2024
+- Jacinta Ferrant — Senior Software Engineer @ Stacks Labs | [Profile](https://www.linkedin.com/in/jacinta-ferrant) | 17 Jun 2024
+- Jannik Siebert — Senior Software Engineer @ Hiro | [Profile](https://www.linkedin.com/in/janniks) | 06 May 2024
+- Stephen Dodge — CoFounder & Co-CEO: Head of Product, Infrastructure, & Operations @ Joltz | [Profile](https://www.linkedin.com/in/stephendodge3) | 23 Mar 2024
+- Shailee Adinolfi — Business Development Lead @ Stacks Labs | [Profile](https://www.linkedin.com/in/shailee-adinolfi-08bb131) | 07 Mar 2024
+- Michelly Sugui — Senior Product Designer @ Trust Machines | [Profile](https://www.linkedin.com/in/michelly-sugui-b172623a) | 27 Feb 2024
+- Adam Haun — Head of Community Programs @ Stacks Open Internet Foundation | [Profile](https://www.linkedin.com/in/adamhaun) | 16 Jan 2024
+- Joey Yandle — Staff Software Engineer @ Stacks Labs | [Profile](https://www.linkedin.com/in/joeyyandle) | 28 Nov 2023
+- Fabricio Rosa Marques — Senior Product Designer @ Trust Machines | [Profile](https://www.linkedin.com/in/fabriciorm) | 28 Nov 2023
+- Will Corcoran — Research Coordinator @ Ethereum Foundation | [Profile](https://www.linkedin.com/in/corcoranwill) | 28 Nov 2023
+- Julian Bachelet — Product & Partner Marketing Head @ Mercuryo | [Profile](https://www.linkedin.com/in/julianbachelet) | 20 Oct 2023
+- Brandon Marshall — Community Growth Manager @ Stacks Labs | [Profile](https://www.linkedin.com/in/brandonjamesmarshall) | 11 Oct 2023
+- Ileana Malacrino — Ecosystem Programs Lead @ Stacks Labs | [Profile](https://www.linkedin.com/in/ileanamalacrino) | 11 Sep 2023
+- Resh Singh — Head of Partnership Development and Community @ Velar | [Profile](https://www.linkedin.com/in/resh-singh-7596b3276) | 11 Sep 2023
+- Hugo C — Senior Software Engineer @ Hiro | [Profile](https://www.linkedin.com/in/hcaillard) | 27 Jun 2023
+- Andre Serrano — Senior Product Manager @ Stacks | [Profile](https://www.linkedin.com/in/andre-serrano) | 02 Jun 2023
+- Leeor Shimron — Head of US @ Chorus One | [Profile](https://www.linkedin.com/in/leeor-shimron) | 02 Jun 2023
+- Beguène Permale — Senior Front-End Engineer @ Hiro | [Profile](https://www.linkedin.com/in/beguene) | 07 Apr 2023
+- Zoe Glaysher — Business Development, Crypto @ Alkimi | [Profile](https://www.linkedin.com/in/zoe-glaysher-a39745137) | 22 Feb 2023
+- Rafael Cárdenas — Staff Software Engineer @ Stacks Labs | [Profile](https://www.linkedin.com/in/rafaelcr) | 30 Jan 2023
+- Jayson Lynn — Communications Lead @ Stacks Labs | [Profile](https://www.linkedin.com/in/jaysonlynn) | 16 Nov 2022
+- Heloisa Ceni — Senior Account Executive @ Hacken, Blockchain Security Auditor | [Profile](https://www.linkedin.com/in/heloisaceni) | 24 Aug 2022
+- Rena Shah — Chief Operating Officer @ Trust Machines | [Profile](https://www.linkedin.com/in/renapeteshah) | 11 Aug 2022
+- Elizabeth Olson — Director of Product Marketing @ OKX | [Profile](https://www.linkedin.com/in/elizabethaliceolson) | 09 Aug 2022
+- Ezinne Okpo — General Counsel @ Hiro Systems | [Profile](https://www.linkedin.com/in/ezinneokpo) | 02 Aug 2022
+- Christopher Perceptions — Lead @ Jubilee Protocol | [Profile](https://www.linkedin.com/in/christopherperceptions) | 13 Jul 2022
+- Max Crawford — Growth Marketing Manager @ Alchemy | [Profile](https://www.linkedin.com/in/max-crawford-141624b3) | 04 Jul 2022
+- Andrew Keller — Senior Recruiter @ Hiro Systems | [Profile](https://www.linkedin.com/in/andrew-keller) | 18 Feb 2022
+- Brice Dobry — Staff Engineer @ Stacks Labs | [Profile](https://www.linkedin.com/in/brice-dobry) | 11 Jan 2022
+- Sarala B — CTO @ Hiro | [Profile](https://www.linkedin.com/in/saralab) | 11 Jan 2022
+- Kendal B, PHR — Senior People Ops Partner @ Stacks Labs | [Profile](https://www.linkedin.com/in/kendalbrock) | 24 Aug 2021
+- Fara Woolf — Software Engineer @ Ethereum Foundation | [Profile](https://www.linkedin.com/in/fbwoolf) | 24 Aug 2021
+- Gina Abrams — Chief Of Staff @ Trust Machines | [Profile](https://www.linkedin.com/in/ginaabrams) | 23 Aug 2021
+- Alex Miller — CEO @ Stacks Labs | [Profile](https://www.linkedin.com/in/alexlmiller) | 23 Aug 2021
+- Tycho Onnasch — Co-Founder @ Zest Protocol | [Profile](https://www.linkedin.com/in/tychokoonnasch) | 30 Jul 2021
+- Shannon Voight — Director of Events @ Stacks Labs | [Profile](https://www.linkedin.com/in/shannon-v-4387183) | 30 Jul 2021
+- Jonas Gerber 🟧 — Head of Business Development @ Stacks Labs | [Profile](https://www.linkedin.com/in/jonastgerber) | 15 Apr 2021
+- Andres Galante — Senior Engineering Manager @ Stacks Labs | [Profile](https://www.linkedin.com/in/andresgalante) | 27 Feb 2021
+- Pieter D — Head of People @ Stacks Labs | [Profile](https://www.linkedin.com/in/dpieter) | 11 Nov 2020
+- Louise Ivan Valencia Payawal — CEO | Co-Founder @ Ryder | [Profile](https://www.linkedin.com/in/louise-ivan-valencia-payawal-233652b6) | 29 Oct 2020
+- Saurabh Pathak — CFO @ Hiro Systems | [Profile](https://www.linkedin.com/in/saurabhpathakcpa) | 29 Oct 2020
+- Matthew Little — Staff Software Engineer @ Hiro Systems PBC | [Profile](https://www.linkedin.com/in/zone117x) | 02 Apr 2020
+- Mitchell Cuevas — Interim Executive Director @ Stacks Open Internet Foundation | [Profile](https://www.linkedin.com/in/cuevasm) | 10 Mar 2020
+- Brittany Laughlin — Chairperson of the Board @ Stacks Open Internet Foundation | [Profile](https://www.linkedin.com/in/brittanylaughlin) | 18 Jan 2020
+- Muneeb Ali — Founder @ Stacks | [Profile](https://www.linkedin.com/in/muneebali) | 29 Oct 2019
+- Kyran Burraston — Engineering Lead @ Trust Machines | [Profile](https://www.linkedin.com/in/kyranjamie) | 29 Oct 2019
+- Diwaker Gupta — Chief Technology Officer @ Hiro Systems | [Profile](https://www.linkedin.com/in/diwakergupta) | 27 Aug 2019
+- Ryan S — Founder and CEO @ Opus Wallet | [Profile](https://www.linkedin.com/in/ryaneshea) | 06 Jun 2019
+- Emilie Choi — President and Chief Operating Officer @ Coinbase | [Profile](https://www.linkedin.com/in/emiliechoi) | 29 Jul 2011
+- Monica Mitchel — Owner @ alchemy | [Profile](https://www.linkedin.com/in/monica-mitchel-8b60a71) | 24 Feb 2011
+- Ethan Bloch — Founder & Co-CEO @ Hiro Finance | [Profile](https://www.linkedin.com/in/ebloch) | 23 Aug 2010
+- Evan Kohn — Global Head of Marketing & Growth | Kraken Pro, Kraken Institutional, Kraken VIP @ Kraken | [Profile](https://www.linkedin.com/in/evankohn) | 09 Aug 2010
+- Ouriel Ohayon — CEO, Co-Founder @ Zengo Wallet | [Profile](https://www.linkedin.com/in/ourielohayon) | 14 Dec 2007
+
+## Tier 6 — Enterprise AI deployments
+
+- Tim Savage — VP AI/ML/Agentic Business Development @ PARiTA | [Profile](https://www.linkedin.com/in/timothywsavage) | 29 Aug 2017
+- Ross Mayfield — Head of AI Partnerships @ Zoom | [Profile](https://www.linkedin.com/in/rossmayfield) | 05 Nov 2015
+
+## Unclassified (no ICP tier match)
+
+- Karel Geldhof **[WARM]** — Iberian Peninsula & Overseas Manager @ Lanfer-Wauters | [Profile](https://www.linkedin.com/in/karel-geldhof-59910b27)
+- Michael Cecchin **[WARM]** — EMEA Director & Advisor @ Business Exits Inc | [Profile](https://www.linkedin.com/in/michael-cecchin-a8a093269)
+- Katie Powers **[WARM]** — Associate Director of Undergraduate Studies @ Harvard University | [Profile](https://www.linkedin.com/in/kpowers220)
+- Amelia Leigner **[WARM]** — Chief Marketing Officer - Fractional @ Tech Leaders | [Profile](https://www.linkedin.com/in/amelialeigner)
+- Diego Torres **[WARM]** — Head of Information Technology Department @ Peninsula - Corporate Innovation | [Profile](https://www.linkedin.com/in/torreslopezdiego)
+- Igino Cafiero **[WARM]** — Sabbatical @ Self | [Profile](https://www.linkedin.com/in/igino-cafiero-43b213b0)
+- Sebouh Alexandrian **[WARM]** — International Project Coordinator @ JG ingenieros S.A. | [Profile](https://www.linkedin.com/in/sebouhalexandrian)
+- Pablo Bermejo Puertas **[WARM]** — Fundador/Socio/Manager/Camarero @ La Moodstore | [Profile](https://www.linkedin.com/in/pablo-bermejo-puertas-7750a547)
+- Natalie Compton **[WARM]** — Travel Reporter @ The Washington Post | [Profile](https://www.linkedin.com/in/natbco)
+- Tarah Malhotra-Feinberg **[WARM]** — Strategic Advisor & Producer | Media Strategy, IP Development, Partnerships, and Brand Storytelling @ Consulting Independently | [Profile](https://www.linkedin.com/in/tarahf)
+- Nick Mathers **[WARM]** — Chief Operating Officer @ WorQFlow | [Profile](https://www.linkedin.com/in/nmathers)
+- Allen Young **[WARM]** — Vice President at Cobalt Public Affairs @ Cobalt Public Affairs | [Profile](https://www.linkedin.com/in/allenmyoung)
+- Yulia Savitskaya **[WARM]** — Global Vice President of Customer Success @ Constructor | [Profile](https://www.linkedin.com/in/yulia-savitskaya-a9a0524)
+- Richard Svinkin **[WARM]** — Commercial Innovation AI Lead @ Astellas Pharma | [Profile](https://www.linkedin.com/in/richardsvinkin)
+- J. Weston Rose **[WARM]** — President @ Sharon Oaks Advisors | [Profile](https://www.linkedin.com/in/jwestonrose)
+- Jeremiah Shackelford **[WARM]** — Lifeguard @ The Y (YMCA) | [Profile](https://www.linkedin.com/in/jeremiahshackelford)
+- Aaron Strout **[WARM]** — Host and Executive Producer @ Reaching Higher Podcast | [Profile](https://www.linkedin.com/in/aaronstrout)
+- Timothy Kantor **[WARM]** — Senior Lecturer of Violin @ Sydney Conservatorium of Music | [Profile](https://www.linkedin.com/in/timothy-kantor-32885a2a)
+- Karsten Moran **[WARM]** — Independent Photographer @ The New York Times | [Profile](https://www.linkedin.com/in/karsten-moran-1637916)
+- Margaret Bowers **[WARM]** — Marketing Director @ Northern Michigan Sports Medicine Center | [Profile](https://www.linkedin.com/in/margaret-bowers-8567465)
+- Dennis Quintela **[WARM]** — Senior Director of Engineering @ Engine | [Profile](https://www.linkedin.com/in/dennisq)
+- Alex Cornell **[WARM]** — Director, Product Design (Generative AI) @ Meta | [Profile](https://www.linkedin.com/in/alex-cornell-5449a99)
+- Landon Massey **[WARM]** — Chief Digital Marketing Officer (Head of Digital Marketing), Chubb North America @ Chubb | [Profile](https://www.linkedin.com/in/landonmassey)
+- Lisa Hendrickson **[WARM]** — Director @ Avidbank | [Profile](https://www.linkedin.com/in/lisa-hendrickson-08822212)
+- James Knuckles, Ph.D. **[WARM]** — Senior Energy Specialist @ The World Bank | [Profile](https://www.linkedin.com/in/knuckles)
+- Vince Maniago **[WARM]** — Advisor @ Opto Investments | [Profile](https://www.linkedin.com/in/uvince)
+- Duncan Riley **[WARM]** — Senior Writer @ SiliconANGLE Media, Inc. | [Profile](https://www.linkedin.com/in/duncanriley)
+- Mario Sundar **[WARM]** — Head of Marketing and Public Relations @ goodfin | [Profile](https://www.linkedin.com/in/mariosundar)
+- Frank Alonso Paillissé — Investment Manager @ Cosan investments | [Profile](https://www.linkedin.com/in/frank-alonso-pai)
+- Manuel Medina Sánchez — Head of Data & Analytics for Ferrovial Construction @ Ferrovial | [Profile](https://www.linkedin.com/in/manumedinasanchez)
+- Anne-Lise Laurain — Senior Technical Leader - Incubatenergy Europe @ Electric Power Research Institute (EPRI) | [Profile](https://www.linkedin.com/in/anneliselaurain)
+- Olga Permanyer Martinez — Program Support & Innovation @ Fundación Nous Cims | [Profile](https://www.linkedin.com/in/opermanyer)
+- Irwin Liu — COO @ IFTech Inventing Future Technology Inc. | [Profile](https://www.linkedin.com/in/irwinliu)
+- Vlad Margulis — VP of Product Design @ AirHelp | [Profile](https://www.linkedin.com/in/vladmargulis)
+- Annie Pei — Marketing Lead @ Nomina | [Profile](https://www.linkedin.com/in/annie-pei-a66a3040)
+- Cindy Koller — Digital Sales District Manager @ ADP | [Profile](https://www.linkedin.com/in/cindy-koller)
+- Roger Palau — Strategy & Operations Manager @ Revolut | [Profile](https://www.linkedin.com/in/roger-palau)
+- James Wren — Human Resources and Business Development Manager @ Liquidium (Fungus Inc.) | [Profile](https://www.linkedin.com/in/james-wren-15b8b759)
+- Algorithm A-D — Self Employed @ Self Employed | [Profile](https://www.linkedin.com/in/algorithm-a-d-8541331a7)
+- Hadan Esperidiao — Content Director @ Tessera PE | [Profile](https://www.linkedin.com/in/hadan-esperidiao-3a6656220)
+- Filipe Santos, EMBA — Head of SEO @ Babbel | [Profile](https://www.linkedin.com/in/filipe-santos-seo)
+- Nicholas Quinn — Chief Executive Officer @ Beechat Network Systems Ltd. | [Profile](https://www.linkedin.com/in/nicholas-quinne)
+- Radu Ciocan — AI / Business Intelligence Expert @ European Anti-Fraud Office (OLAF) | [Profile](https://www.linkedin.com/in/ciocan)
+- Soledad Contreras — Director Of Partnerships @ CoinDesk | [Profile](https://www.linkedin.com/in/soledad-contreras-5b35a04)
+- Sue Li — Senior Director of Product Management @ L2L | [Profile](https://www.linkedin.com/in/sueli88)
+- Francesca Ricaldi — Career Lead - Student Engagement - ESADE Careers @ Esade | [Profile](https://www.linkedin.com/in/francesca-ricaldi)
+- Shehan Jayatilaka — Trader and Fund Administrator @ Glynn Capital | [Profile](https://www.linkedin.com/in/shehanjay)
+- Joshua Pullar — Producer & Video Editor @ Betterment | [Profile](https://www.linkedin.com/in/joshua-pullar-4647b82b)
+- Julien Paredes 🐸 — Europe Hub Lead @ TON Foundation | [Profile](https://www.linkedin.com/in/julien-paredes-metafroggy)
+- Arturo García Ramon — Project Manager @ JELLIBY | [Profile](https://www.linkedin.com/in/arturgr)
+- Amanda Hall — Recruitment Coordinator @ Fanatics | [Profile](https://www.linkedin.com/in/amandajeanhall)
+- NXE . — — @ — | [Profile](https://www.linkedin.com/in/nxellent)
+- Michael Ionita — YouTuber @ Michael Automates | [Profile](https://www.linkedin.com/in/michaelionita)
+- Ahmad Alkabra — Product, Bridges & Rootstock Access Experience @ RootstockLabs | [Profile](https://www.linkedin.com/in/aalkabra)
+- Alberto De Pablo — Business Development Manager @ Allora Labs | [Profile](https://www.linkedin.com/in/albertod91)
+- Jesse Guerrero — Digital Marketing & Business Development Specialist @ Q1Media | [Profile](https://www.linkedin.com/in/guerrero-jesse)
+- Brian Rider — Corporate AI Strategy & Execution @ Symbolic.Systems | [Profile](https://www.linkedin.com/in/bfrider)
+- Jessica Greenwalt — Chief Executive Officer @ Nice Industries | [Profile](https://www.linkedin.com/in/jgreenwalt)
+- Pat Dunbar — Business Development Manager @ Wert | [Profile](https://www.linkedin.com/in/pat-dunbar-74268215b)
+- Sae'Von Springer — Strategic Partnerships Dealmaker @ Mysten Labs | [Profile](https://www.linkedin.com/in/saevonspringer)
+- Judith Roman Lopez — Responsable de Comunicación @ CYBER& | [Profile](https://www.linkedin.com/in/judithroman)
+- Camille Loth — B2G General Manager @ Cooltra | [Profile](https://www.linkedin.com/in/camille-loth-90253551)
+- William Voinot-Baron — Research Associate @ James Bell Associates | [Profile](https://www.linkedin.com/in/willvb)
+- Simon Piehl — Owner @ Bureau for Visual Affairs | [Profile](https://www.linkedin.com/in/simon-piehl-a356411)
+- Azhar Yousuf — Director @ Tintash | [Profile](https://www.linkedin.com/in/azhar-yousuf10)
+- Matt Buehler — Global Manager of Customer Loyalty & Growth @ AnyDesk Software | [Profile](https://www.linkedin.com/in/matt-buehler-349830231)
+- Sam Elfarra — Ecosystem Development Lead @ TRON DAO | [Profile](https://www.linkedin.com/in/samelfarra)
+- Can Ertugrul — Managing Director @ triplestory | [Profile](https://www.linkedin.com/in/canertugrul)
+- Manas Mohapatra — Chief Legal Officer @ Alliance | [Profile](https://www.linkedin.com/in/manasmo)
+- Alexander Hipp — AI Product Builder @ Abend Studio | [Profile](https://www.linkedin.com/in/hippalexander)
+- DOT LUNG 🐉 — 🔥Mother of Social Dragons🔥 @ DOT LUNG | [Profile](https://www.linkedin.com/in/dotlung)
+- Christian Hresko — Director of Product @ Venmo | [Profile](https://www.linkedin.com/in/autoconfig)
+- Rebecca Rutkoff — Corporate Communications & Public Affairs Director @ Google | [Profile](https://www.linkedin.com/in/rebeccaginsberg)
+- Tessa McAtee — Assistant @ WV Supreme Court of Appeals | [Profile](https://www.linkedin.com/in/tessa-m-recruiting)
+- Joseph Bender — Community & Social Lead @ Daylight | [Profile](https://www.linkedin.com/in/josephbender)
+- Sabby Anandan — Building @ Stealth Startup | [Profile](https://www.linkedin.com/in/sabbyanandan)
+- Serhii Bets — Technical Team Lead @ BrainRocket | [Profile](https://www.linkedin.com/in/serjbets)
+- Adrià Cruz — Operations & Business Development @ Reset TV | [Profile](https://www.linkedin.com/in/adriacruz)
+- Dr John Bethell — Executive Director @ Ccentric Group | [Profile](https://www.linkedin.com/in/johnbethell)
+- Alejandro Papadopoulos — Member Board of Directors @ European Creative Hubs Network | [Profile](https://www.linkedin.com/in/alejandropapadopoulos)
+- … and 548 more

@@ -57,6 +57,7 @@ if str(_REPO_ROOT) not in sys.path:
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
     AgentLoader,
+    GrantChecker,
     NeotomaEvent,
     SSEClient,
 )
@@ -134,6 +135,7 @@ async def _spawn_claude_skill(
     entity_id: str,
     snapshot: dict,
     notifier: Notifier,
+    participation_ref: str = "",
 ) -> None:
     """
     Spawn a T4 agent via `claude --print --skill <name>` with the entity
@@ -195,11 +197,18 @@ async def _spawn_claude_skill(
         f"timeout={DISPATCH_TIMEOUT_SECONDS}s entity={entity_id}"
     )
 
+    # Pass ATELES_PARTICIPATION_REF so the mcpsrv_neotoma MCP server can stamp
+    # retrieval_event entities keyed to this dispatch (#23 — auto retrieval attribution).
+    subprocess_env = {**os.environ}
+    if participation_ref:
+        subprocess_env["ATELES_PARTICIPATION_REF"] = participation_ref
+
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=subprocess_env,
     )
 
     try:
@@ -239,8 +248,14 @@ async def _spawn_claude_skill(
         )
 
 
-async def dispatch_gryllus(entity_id: str, snapshot: dict, notifier: Notifier) -> None:
+async def dispatch_gryllus(
+    entity_id: str, snapshot: dict, notifier: Notifier, grants: GrantChecker
+) -> None:
     """Dispatch Gryllus (issue worker) for a new issue."""
+    if grants.is_suspended():
+        log.warning(f"[{DAEMON_NAME}] Grant suspended — skipping Gryllus dispatch for {entity_id}")
+        return
+
     title = snapshot.get("title", "(untitled)")
     repo = snapshot.get("repository", "unknown")
     log.info(
@@ -252,11 +267,17 @@ async def dispatch_gryllus(entity_id: str, snapshot: dict, notifier: Notifier) -
         log.info(f"[{DAEMON_NAME}] DRY RUN — skipping Gryllus dispatch for {entity_id}")
         return
 
-    await _spawn_claude_skill(GRYLLUS_SKILL, entity_id, snapshot, notifier)
+    await _spawn_claude_skill(GRYLLUS_SKILL, entity_id, snapshot, notifier, entity_id)
 
 
-async def dispatch_vanellus(entity_id: str, snapshot: dict, notifier: Notifier) -> None:
+async def dispatch_vanellus(
+    entity_id: str, snapshot: dict, notifier: Notifier, grants: GrantChecker
+) -> None:
     """Dispatch Vanellus (PR steward) for a new PR."""
+    if grants.is_suspended():
+        log.warning(f"[{DAEMON_NAME}] Grant suspended — skipping Vanellus dispatch for {entity_id}")
+        return
+
     title = snapshot.get("title", "(untitled)")
     log.info(f"[{DAEMON_NAME}] → Vanellus: pr={entity_id} title={title[:60]!r}")
 
@@ -266,13 +287,13 @@ async def dispatch_vanellus(entity_id: str, snapshot: dict, notifier: Notifier) 
         )
         return
 
-    await _spawn_claude_skill(VANELLUS_SKILL, entity_id, snapshot, notifier)
+    await _spawn_claude_skill(VANELLUS_SKILL, entity_id, snapshot, notifier, entity_id)
 
 
 # ── Event handler ─────────────────────────────────────────────────────────────
 
 
-async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
+async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChecker) -> None:
     """
     Handle a Neotoma SSE event.
 
@@ -307,7 +328,7 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
             priority=Priority.INFO,
             handler=DAEMON_NAME,
         )
-        await dispatch_gryllus(entity_id, snapshot, notifier)
+        await dispatch_gryllus(entity_id, snapshot, notifier, grants)
 
     elif entity_type == "pull_request" and action == "created":
         title = snapshot.get("title", "(untitled)")
@@ -324,7 +345,7 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
             priority=Priority.INFO,
             handler=DAEMON_NAME,
         )
-        await dispatch_vanellus(entity_id, snapshot, notifier)
+        await dispatch_vanellus(entity_id, snapshot, notifier, grants)
 
     elif entity_type == "product_feedback" and action == "created":
         log.info(
@@ -363,6 +384,21 @@ async def main() -> None:
             "observations attributed to operator token"
         )
 
+    # 2b. Check agent_grant status — abort startup if suspended or revoked.
+    grants = GrantChecker(agent_def.aauth_sub).load()
+    if grants.is_revoked():
+        log.error(
+            f"[{DAEMON_NAME}] Agent grant is revoked — daemon cannot start. "
+            "Re-consent required via: python execution/scripts/manage_grants.py restore <id>"
+        )
+        sys.exit(1)
+    if grants.is_suspended():
+        log.warning(
+            f"[{DAEMON_NAME}] Agent grant is suspended — dispatch disabled. "
+            "Restore via: python execution/scripts/manage_grants.py restore <id>"
+        )
+        # Continue running (SSE still streams) but dispatch will be a no-op.
+
     # 3. Load notification rubric
     notifier = Notifier.from_neotoma()
     notifier.send(
@@ -378,7 +414,7 @@ async def main() -> None:
     )
 
     async def dispatch(event: NeotomaEvent) -> None:
-        await handle_event(event, notifier)
+        await handle_event(event, notifier, grants)
 
     log.info(f"[{DAEMON_NAME}] Subscribing to SSE: {SUBSCRIBE_ENTITY_TYPES}")
     await sse.stream(dispatch)
