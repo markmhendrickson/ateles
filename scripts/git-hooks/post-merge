@@ -1,0 +1,30 @@
+#!/bin/bash
+# Git hook to automatically initialize submodules after merge/pull
+# Also regenerates MCP config if template or submodules changed
+# This ensures submodules are initialized when pulling updates
+
+set -e
+
+# Only run if .gitmodules exists
+if [ -f .gitmodules ]; then
+    # Check if there are any uninitialized submodules
+    # The '-' prefix indicates uninitialized submodules
+    uninitialized=$(git submodule status 2>/dev/null | grep "^-" || true)
+    
+    if [ -n "$uninitialized" ]; then
+        echo "Initializing git submodules..."
+        git submodule update --init --recursive 2>&1 | grep -v "^Submodule" || true
+        echo "✓ Submodules initialized"
+    fi
+fi
+
+# Regenerate MCP config if template exists and generate script is available
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -f "$REPO_ROOT/mcp/mcp-config-template.json" ] && [ -f "$REPO_ROOT/scripts/generate_mcp_config.py" ]; then
+    # Check if template or .gitmodules changed (indicates MCP server add/remove)
+    changed_files=$(git diff-tree -r --name-only --no-commit-id HEAD@{1} HEAD 2>/dev/null || echo "")
+    if echo "$changed_files" | grep -qE "(mcp/mcp-config-template.json|\.gitmodules)" || [ -z "$changed_files" ]; then
+        echo "Regenerating MCP configuration..."
+        python3 "$REPO_ROOT/scripts/generate_mcp_config.py" 2>&1 | grep -v "^✓" || true
+    fi
+fi
