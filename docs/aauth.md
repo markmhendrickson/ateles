@@ -24,7 +24,7 @@ AAuth solves two intertwined problems:
    - by **operation** (`store_structured`, `create_relationship`, `correct`, `retrieve`, …)
    - by **entity type** (`store_structured: ["agent_action_observation", "participation_record"]` instead of `*`)
    - by **field, scope, or external resource** (e.g. `github_harness:write` scoped to specific repos for Gryllus/Vanellus)
-   - by **MCP tool and parameter** (planned — `btc-wallet:btc_send_transfer` with `max_amount_sats` constraint; see [ateles#26](https://github.com/markmhendrickson/ateles/issues/26))
+   - by **MCP tool and parameter** — capability ops of the form `tool:<server>:<tool>` with an optional `param_constraints` map (e.g. `tool:btc-wallet:btc_send_transfer` with `{ "max_amount_sats": 500000 }`). Enforced at runtime by the `mcp_tool_grant_proxy` (see [Tool-level authorization](#tool-level-authorization-issue-26) and [ateles#26](https://github.com/markmhendrickson/ateles/issues/26)).
 
    The grant is the per-agent policy boundary. Monedula's grant lets it write `transaction` and `payment_profile` but not `agent_definition`; Gryllus's lets it write `agent_action_observation` but not `business_strategy`; a future read-only auditor agent could have a grant that allows `retrieve: *` and nothing else. Wrong-capability writes fail at admission, before any side effect — the boundary lives in Neotoma, not in agent code.
 
@@ -244,6 +244,85 @@ capabilities:
 ```
 
 No thumbprint pin — any valid ES256 key under the same `(sub, iss)` is admitted. This allows software and hardware keys to rotate without updating the grant.
+
+---
+
+## Tool-level authorization (issue #26)
+
+Entity-level grants gate Neotoma operations. **Tool-level grants** extend the
+same `agent_grant` entity to gate arbitrary MCP tool calls — across any MCP
+server, not just Neotoma. This is what physically stops a Monedula invocation
+from calling `github_harness` tools even if that server is connected at dispatch.
+
+### Grant shape
+
+Tool capabilities are ordinary entries in the grant's `capabilities` array, with
+an `op` of the form `tool:<server>:<tool>` and an optional `param_constraints`
+map:
+
+```jsonc
+{
+  "match_sub": "monedula@ateles-swarm",
+  "match_iss": "https://markmhendrickson.com",
+  "status": "active",
+  "capabilities": [
+    { "op": "store_structured", "entity_types": ["transaction", "payment_profile"] },
+    { "op": "retrieve", "entity_types": ["*"] },
+
+    { "op": "tool:parquet:read_parquet",
+      "param_constraints": { "tables": ["transactions", "accounts"] } },
+    { "op": "tool:btc-wallet:btc_send_transfer",
+      "param_constraints": { "max_amount_sats": 500000, "to_allowlist": true } },
+    { "op": "tool:btc-wallet:btc_wallet_get_balance" }
+    // github_harness: explicitly absent → Monedula cannot touch GitHub
+  ]
+}
+```
+
+Rules:
+- **Absent = denied.** A tool with no matching `tool:<server>:<tool>` entry is blocked.
+- **`{}` (no `param_constraints`) = allowed, unconstrained.**
+- **Wildcards:** `tool:<server>:*` grants every tool on a server; `tool:*` grants all MCP tools.
+
+Supported `param_constraints` keys (extensible; unknown keys are ignored for
+forward-compatibility): `tables`, `max_amount_sats`, `to_allowlist`,
+`max_<field>`, `allowed_<field>`.
+
+### Enforcement: `mcp_tool_grant_proxy`
+
+`execution/mcp/mcp_tool_grant_proxy/proxy.py` is a generic stdio interceptor that
+sits between `claude --print` and a downstream MCP server. It forwards all MCP
+JSON-RPC traffic except `tools/call`, which it gates:
+
+1. Reads `ATELES_AGENT_SUB` (and optional `ATELES_AGENT_GRANT_ID`) from env.
+2. Loads the `agent_grant` via `lib/daemon_runtime.GrantChecker`.
+3. `check_tool(server, tool)` + `check_param_constraints(constraints, args)`.
+4. **Allowed** → forwards to downstream; **Denied** → returns an MCP `isError`
+   result *without forwarding*, so the side-effecting tool is never reached.
+5. Emits a `tool_call_observation` to Neotoma (`result: allowed | denied`) for a
+   unified cross-MCP audit trail.
+
+Launch (in `.mcp.json` or Anthus dispatch config):
+
+```jsonc
+{
+  "command": "python",
+  "args": [
+    "execution/mcp/mcp_tool_grant_proxy/proxy.py",
+    "--server-name", "parquet",
+    "--", "python", "path/to/parquet_mcp/server.py"
+  ]
+}
+```
+
+**Permissive fallback:** if Neotoma is unreachable, or the agent has *no* grant
+declaring *any* tool capability, calls pass through (advisory mode). This lets
+un-migrated agents keep working while migrated agents get hard enforcement —
+the boundary tightens per-agent as `tool:` capabilities are added to each grant.
+
+For owned MCP servers (`github_harness`, `mcpsrv_neotoma`, `parquet`),
+per-server enforcement (option A) can be layered in for defence-in-depth;
+`github_harness` already does this for its `op`-based repo scoping.
 
 ---
 
