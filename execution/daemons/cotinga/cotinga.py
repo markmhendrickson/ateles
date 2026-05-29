@@ -157,8 +157,13 @@ def _mark_ran_today() -> None:
 
 
 def fetch_upcoming_events() -> list[dict]:
-    """Fetch events for the rest of today (midnight-to-midnight Madrid time)."""
+    """Fetch events for today (midnight-to-midnight Madrid time) from all calendars.
+
+    Queries each calendar in parallel and merges results, deduplicating by event id.
+    Excludes birthday and holiday calendars which are noise in a daily brief.
+    """
     import shutil
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     gws = shutil.which("gws")
     if not gws:
@@ -166,40 +171,63 @@ def fetch_upcoming_events() -> list[dict]:
         return []
 
     now = datetime.now(tz=MADRID_TZ)
-    # Use start of day so events that began before 05:00 (e.g. overnight flights) are included
     start_of_day = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=MADRID_TZ)
     end_of_day = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=MADRID_TZ)
     time_min = start_of_day.isoformat()
     time_max = end_of_day.isoformat()
 
-    params = {
-        "calendarId": "primary",
-        "singleEvents": True,
-        "orderBy": "startTime",
-        "timeMin": time_min,
-        "timeMax": time_max,
-    }
+    # All personal/family calendars to include; exclude birthday and holiday feeds
+    CALENDAR_IDS = [
+        "markmhendrickson@gmail.com",                          # primary
+        "kce7ml7l9bjtbj9ndsatnaf87o@group.calendar.google.com",  # Tontitos
+        "family01227972405407168266@group.calendar.google.com",   # Family
+    ]
 
-    try:
-        result = subprocess.run(
-            [gws, "calendar", "events", "list", "--params", json.dumps(params)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=os.environ,
-        )
-        if result.returncode != 0:
-            log.error(f"gws calendar events list failed: {result.stderr.strip()[:300]}")
+    def _fetch_one(cal_id: str) -> list[dict]:
+        params = {
+            "calendarId": cal_id,
+            "singleEvents": True,
+            "orderBy": "startTime",
+            "timeMin": time_min,
+            "timeMax": time_max,
+        }
+        try:
+            result = subprocess.run(
+                [gws, "calendar", "events", "list", "--params", json.dumps(params)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=os.environ,
+            )
+            if result.returncode != 0:
+                log.error(f"gws calendar events list failed for {cal_id}: {result.stderr.strip()[:200]}")
+                return []
+            data = json.loads(result.stdout)
+            items = data.get("items") or []
+            log.info(f"Calendar {cal_id!r}: {len(items)} event(s)")
+            return items
+        except (json.JSONDecodeError, Exception) as exc:
+            log.error(f"Calendar fetch error for {cal_id}: {exc}")
             return []
 
-        data = json.loads(result.stdout)
-        items = data.get("items") or []
-        log.info(f"Fetched {len(items)} upcoming event(s)")
-        return items
+    # Fetch all calendars in parallel
+    all_events: dict[str, dict] = {}  # keyed by event id to deduplicate
+    with ThreadPoolExecutor(max_workers=len(CALENDAR_IDS)) as pool:
+        futures = {pool.submit(_fetch_one, cal_id): cal_id for cal_id in CALENDAR_IDS}
+        for future in as_completed(futures):
+            for event in future.result():
+                eid = event.get("id")
+                if eid and eid not in all_events:
+                    all_events[eid] = event
 
-    except (json.JSONDecodeError, Exception) as exc:
-        log.error(f"Calendar fetch error: {exc}")
-        return []
+    # Sort merged results by start time
+    def _sort_key(ev: dict) -> str:
+        start = ev.get("start") or {}
+        return start.get("dateTime") or start.get("date") or ""
+
+    merged = sorted(all_events.values(), key=_sort_key)
+    log.info(f"Fetched {len(merged)} unique event(s) across {len(CALENDAR_IDS)} calendars")
+    return merged
 
 
 def _extract_attendees(event: dict) -> list[dict]:
