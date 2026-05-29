@@ -3,14 +3,27 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-# Load repo .env so RECORD_MEETING_DEVICE, RECORD_MEETING_MIC, API keys, etc. apply.
-ENV_FILE="$ROOT_DIR/.env"
-if [ -f "$ENV_FILE" ]; then
-  set -a
-  # shellcheck disable=SC1090,SC1091
-  . "$ENV_FILE"
-  set +a
-fi
+# Load repo .env and private .env so API keys, etc. apply.
+# NOTE: personal/.env is intentionally NOT loaded here — it has recording settings
+# (RECORD_MEETING_SKIP_TRANSCRIBE=1, RECORD_MEETING_DIR) that conflict with this script.
+for _env_file in \
+    "$ROOT_DIR/.env" \
+    "$HOME/repos/ateles-private/.env"; do
+  if [ -f "$_env_file" ]; then
+    set -a
+    # shellcheck disable=SC1090,SC1091
+    . "$_env_file"
+    set +a
+  fi
+done
+unset _env_file
+
+# Defaults for recording device (Rogue Amoeba system-wide virtual capture).
+# These override any conflicting values from .env files above.
+# Override by setting these env vars before calling this script.
+export RECORD_MEETING_DEVICE="${RECORD_MEETING_DEVICE:-System-wide capture}"
+export RECORD_MEETING_MIC="${RECORD_MEETING_MIC:-Studio Display Microphone}"
+export RECORD_MEETING_SKIP_TRANSCRIBE="${RECORD_MEETING_SKIP_TRANSCRIBE:-0}"
 
 VENV_PYTHON="$ROOT_DIR/.venv/bin/python3"
 if [ ! -x "$VENV_PYTHON" ] || ! "$VENV_PYTHON" -c "import numpy" 2>/dev/null; then
