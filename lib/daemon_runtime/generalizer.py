@@ -36,7 +36,10 @@ from typing import Any
 
 import httpx
 
-from .drift import DriftCluster, DriftSignal, contradicts
+try:  # package import (production) and bare import (in-dir pytest) both work
+    from .drift import DriftCluster, DriftSignal, cluster_signals, contradicts
+except ImportError:  # pragma: no cover
+    from drift import DriftCluster, DriftSignal, cluster_signals, contradicts
 
 log = logging.getLogger("daemon_runtime.generalizer")
 
@@ -457,19 +460,113 @@ def _first_entity_id(data: dict | None) -> str | None:
     return data.get("entity_id")
 
 
+# ── Drift-signal persistence (durable accumulation across time/work entities) ───
+
+SIGNAL_ENTITY_TYPE = "strategy_drift_signal"
+
+
+def signal_to_entity(signal: DriftSignal) -> dict:
+    """Map a parsed DriftSignal to a strategy_drift_signal entity payload."""
+    agent_sub = signal.agent if "@" in signal.agent else f"{signal.agent}@ateles-swarm"
+    return {
+        "entity_type": SIGNAL_ENTITY_TYPE,
+        "agent_sub": agent_sub,
+        "signal_text": signal.text,
+        "emitted_at": _now_iso(),
+        "source_ref": signal.source_ref,
+        "theme_key": signal.theme_key,
+        "status": "open",
+    }
+
+
+async def persist_signals(signals: list[DriftSignal], bearer: str) -> None:
+    """
+    Store each fresh drift signal idempotently. The idempotency key folds in the
+    source_ref so the same comment line re-seen on a later tick is not counted
+    twice toward a threshold — accumulation must reflect independent occurrences.
+    """
+    for s in signals:
+        payload = signal_to_entity(s)
+        key = f"drift-{s.theme_key}-{s.source_ref or s.text[:32]}"
+        await _post(
+            "store",
+            {"entities": [payload], "idempotency_key": key},
+            bearer,
+        )
+
+
+async def fetch_recent_signals(
+    agent_sub: str, bearer: str, limit: int = 300
+) -> list[DriftSignal]:
+    """
+    Pull this agent's still-open drift signals so clustering can accumulate
+    evidence across many work entities and over time — not just within a single
+    issue's comments. Reconstructs DriftSignal objects (theme_key recomputed from
+    text, keeping the fingerprint authoritative).
+    """
+    data = await _post(
+        "retrieve_entities",
+        {"entity_type": SIGNAL_ENTITY_TYPE, "limit": limit, "include_snapshots": True},
+        bearer,
+    )
+    out: list[DriftSignal] = []
+    for e in (data or {}).get("entities", []):
+        snap = e.get("snapshot") or {}
+        if snap.get("agent_sub") != agent_sub:
+            continue
+        if snap.get("status") not in (None, "open"):
+            continue
+        text = snap.get("signal_text", "")
+        if not text:
+            continue
+        agent = agent_sub.split("@")[0]
+        out.append(DriftSignal(agent=agent, text=text, source_ref=snap.get("source_ref", "")))
+    return out
+
+
 # ── High-level orchestration (called by Anthus) ─────────────────────────────────
 
 
-async def process_signals(clusters: list[DriftCluster], bearer: str | None = None) -> list[Decision]:
+async def _contradiction_sweep(
+    cluster: DriftCluster, policies: list[dict], bearer: str
+) -> None:
+    """Suspend any live auto-policy a fresh signal in this cluster reverses."""
+    for pol in policies:
+        if pol.get("status") not in ("provisional", "active"):
+            continue
+        if not PolicyState.from_notes(pol.get("notes", "")).auto_generated:
+            continue
+        for sig in cluster.signals:
+            if contradicts(sig, pol.get("rule", "") or pol.get("description", "")):
+                await register_contradiction(pol, sig, bearer)
+                break
+
+
+async def _act_on_cluster(
+    cluster: DriftCluster, policies: list[dict], threshold: int, bearer: str
+) -> Decision:
+    """Run the contradiction sweep, decide, and act for a single cluster."""
+    await _contradiction_sweep(cluster, policies, bearer)
+    decision = decide(
+        cluster,
+        threshold=threshold,
+        live_auto_policy_count=count_live_auto_policies(policies),
+        conflicts_with_operator_policy=find_operator_conflict(cluster, policies),
+    )
+    if decision.action == Action.AUTO_APPLY:
+        await create_provisional_policy(cluster, bearer)
+    elif decision.action == Action.PROPOSE:
+        await create_revision_proposal(decision, bearer)
+    return decision
+
+
+async def process_signals(
+    clusters: list[DriftCluster], bearer: str | None = None
+) -> list[Decision]:
     """
-    Run the full agent-local generalization loop over a set of clusters.
-
-    For each cluster: read the agent's threshold + existing policies, decide,
-    and act (auto-apply provisional policy, or open an operator-gated proposal).
-    Also feeds each cluster's signals through the contradiction check against
-    that agent's live auto-policies, suspending any that a fresh signal reverses.
-
-    Returns the decisions for logging/observability. Safe no-op without a token.
+    Lower-level entrypoint: act on a set of already-built clusters. Fetches each
+    agent's threshold + policies once and decides per cluster. Safe no-op without
+    a token. (Anthus uses `harvest`, which persists + corpus-clusters first.)
     """
     bearer = bearer or _bearer()
     decisions: list[Decision] = []
@@ -477,33 +574,51 @@ async def process_signals(clusters: list[DriftCluster], bearer: str | None = Non
         log.debug("No Neotoma bearer token — generalizer is a no-op this run.")
         return decisions
 
+    policies_cache: dict[str, list[dict]] = {}
+    threshold_cache: dict[str, int] = {}
     for cluster in clusters:
         agent_sub = cluster.agent if "@" in cluster.agent else f"{cluster.agent}@ateles-swarm"
+        if agent_sub not in policies_cache:
+            policies_cache[agent_sub] = await fetch_agent_policies(agent_sub, bearer)
+            threshold_cache[agent_sub] = await fetch_threshold(agent_sub, bearer)
+        decisions.append(
+            await _act_on_cluster(
+                cluster, policies_cache[agent_sub], threshold_cache[agent_sub], bearer
+            )
+        )
+    return decisions
+
+
+async def harvest(
+    fresh_signals: list[DriftSignal], bearer: str | None = None
+) -> list[Decision]:
+    """
+    Top-level loop Anthus calls each tick:
+
+      1. persist the freshly-seen signals durably (idempotent)
+      2. for each agent that emitted one, pull its full open-signal corpus
+      3. cluster the corpus and act per cluster
+
+    This is what lets evidence accumulate across many work entities and over
+    time toward an agent's threshold, rather than only within one issue's
+    comments. Safe no-op without a token.
+    """
+    bearer = bearer or _bearer()
+    if not bearer or not fresh_signals:
+        return []
+
+    await persist_signals(fresh_signals, bearer)
+
+    touched = {
+        (s.agent if "@" in s.agent else f"{s.agent}@ateles-swarm") for s in fresh_signals
+    }
+    decisions: list[Decision] = []
+    for agent_sub in touched:
+        corpus = await fetch_recent_signals(agent_sub, bearer)
+        if not corpus:
+            continue
         threshold = await fetch_threshold(agent_sub, bearer)
         policies = await fetch_agent_policies(agent_sub, bearer)
-
-        # Contradiction sweep: any fresh signal that reverses a live auto-policy
-        # suspends it (evidence-based revert, no timer involved).
-        for pol in policies:
-            if pol.get("status") not in ("provisional", "active"):
-                continue
-            if not PolicyState.from_notes(pol.get("notes", "")).auto_generated:
-                continue
-            for sig in cluster.signals:
-                if contradicts(sig, pol.get("rule", "") or pol.get("description", "")):
-                    await register_contradiction(pol, sig, bearer)
-                    break
-
-        decision = decide(
-            cluster,
-            threshold=threshold,
-            live_auto_policy_count=count_live_auto_policies(policies),
-            conflicts_with_operator_policy=find_operator_conflict(cluster, policies),
-        )
-        decisions.append(decision)
-
-        if decision.action == Action.AUTO_APPLY:
-            await create_provisional_policy(cluster, bearer)
-        elif decision.action == Action.PROPOSE:
-            await create_revision_proposal(decision, bearer)
+        for cluster in cluster_signals(corpus):
+            decisions.append(await _act_on_cluster(cluster, policies, threshold, bearer))
     return decisions

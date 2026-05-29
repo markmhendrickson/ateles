@@ -123,9 +123,11 @@ Declarative policy rules scoped to an agent or domain. Used by the harness to ga
 | `effective_until` | string | | ISO 8601 (null = indefinite) |
 | `supersedes` | string | | Entity ID of superseded policy |
 | `overridable_by` | string | | AAuth sub that may override |
-| `status` | string | | `active` / `suspended` / `retired` |
+| `status` | string | | `provisional` / `active` / `suspended` / `retired` |
 
 **canonical_name_fields**: `[domain, rule_kind, description]`
+
+**Autonomous, agent-local generalization** (`lib/daemon_runtime/generalizer.py`): when ≥ the agent's `agent_strategy.drift_signal_threshold` independent same-theme `strategy_drift_signal`s accumulate, the generalizer auto-creates an `agent_policy` with `scope: agent`, `rule_kind: prefer` (never `deny`/`require` autonomously), `overridable_by: columba@ateles-swarm, operator`, and `status: provisional`. Maturation is **exposure-based, not time-based** — the policy graduates `provisional → active` only after a count of clean applications (tracked in `notes`), and a single contradicting drift signal flips it to `suspended` and re-opens a `strategy_revision_proposal`. The `notes` field carries a JSON maturation record: `{auto_generated, application_count, contradiction_count, maturation_threshold, drift_signal_refs, confirmed_at}`. Only `auto_generated` policies are ever auto-modified; operator/Columba-authored policies are never superseded. Revert with `scripts/revert_auto_policy.py`.
 
 ---
 
@@ -180,10 +182,19 @@ Per-strategic-agent strategy (Pavo, Bombycilla, Accipiter, Ciconia, Buteo, Colum
 
 **canonical_name_fields**: `[agent_sub, title]`
 
+### `strategy_drift_signal`
+**Schema ID**: _(register via `scripts/register_drift_signal_schema.py` — pending Neotoma availability)_ · **v1.0**
+
+One emitted drift signal: an agent flagging that observed reality diverges from its encoded guidance (the optional `[<agent>] strategy_drift_signal: …` response line). Persisted by the generalizer so evidence accumulates across work entities and over time, then clustered to drive agent-local policy learning.
+
+Fields: `agent_sub` + `signal_text` + `emitted_at` (required), plus `source_ref` (comment URL / work entity), `theme_key` (clustering fingerprint), `status` (`open` / `consumed` / `dismissed`).
+
+**canonical_name_fields**: `[agent_sub, signal_text, emitted_at]`
+
 ### `strategy_revision_proposal`
 **Schema ID**: `b4577273-5775-49e6-af63-7d96e0b40168` · **v1.0**
 
-Created automatically when a pattern of `strategy_drift_signal` lines accumulates. Fields: `proposing_agent_sub` + `target_entity_id` + `proposed_at` (required), plus `target_entity_type`, `summary`, `drift_signal_refs`, `proposed_change`, `affects_higher_layer`, `operator_decision`, `operator_notes`, `status`.
+Created automatically when a pattern of `strategy_drift_signal` lines accumulates. The generalizer opens one (operator-gated, `operator_decision: pending`) for clusters **outside the agent-local autonomy envelope** — cross-cutting/strategy themes (`affects_higher_layer`), or when a cluster would conflict with an operator-authored policy or exceed the per-agent auto-policy cap. Fields: `proposing_agent_sub` + `target_entity_id` + `proposed_at` (required), plus `target_entity_type`, `summary`, `drift_signal_refs`, `proposed_change`, `affects_higher_layer`, `operator_decision`, `operator_notes`, `status`.
 
 **canonical_name_fields**: `[proposing_agent_sub, target_entity_id, proposed_at]`
 
