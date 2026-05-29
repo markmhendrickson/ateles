@@ -1,0 +1,4 @@
+# Requirements for scripts in this directory
+
+# File watching for watch_mcp_servers.py
+watchdog>=3.0.0

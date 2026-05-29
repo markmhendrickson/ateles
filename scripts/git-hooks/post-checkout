@@ -1,0 +1,38 @@
+#!/bin/bash
+# Git hook to automatically initialize submodules after checkout
+# Also ensures git hooks are installed (for new clones) and regenerates MCP config
+# This ensures submodules are initialized when you:
+# - Clone the repository
+# - Check out branches
+# - Switch branches
+
+set -e
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# Install hooks if they're not already installed (for new clones)
+if [ -f "scripts/install_git_hooks.sh" ] && [ ! -f ".git/hooks/.hooks-installed" ]; then
+    echo "Installing git hooks..."
+    ./scripts/install_git_hooks.sh > /dev/null 2>&1 || true
+    touch .git/hooks/.hooks-installed
+fi
+
+# Initialize submodules if .gitmodules exists
+if [ -f .gitmodules ]; then
+    # Check if there are any uninitialized submodules
+    # The '-' prefix indicates uninitialized submodules
+    uninitialized=$(git submodule status 2>/dev/null | grep "^-" || true)
+    
+    if [ -n "$uninitialized" ]; then
+        echo "Initializing git submodules..."
+        git submodule update --init --recursive 2>&1 | grep -v "^Submodule" || true
+        echo "✓ Submodules initialized"
+    fi
+fi
+
+# Regenerate MCP config after checkout (in case template changed)
+if [ -f "mcp/mcp-config-template.json" ] && [ -f "scripts/generate_mcp_config.py" ]; then
+    echo "Regenerating MCP configuration..."
+    python3 scripts/generate_mcp_config.py 2>&1 | grep -v "^✓" || true
+fi
