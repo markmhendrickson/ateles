@@ -11,7 +11,9 @@ Onychomys for sign-off — Buteo never replies on its own.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,6 +21,11 @@ from lib.claude_client import call_claude
 from lib.model_tiers import resolve_model
 
 log = logging.getLogger(__name__)
+
+# Prompt version is hashed from BUTEO_SYSTEM_PROMPT below. Stamped on every
+# RedlineReport so re-running the same input with the same prompt + pinned
+# model is deterministic and auditable. Bump prompt only via PR review.
+BUTEO_PROMPT_VERSION = "2026-05-28.1"
 
 BUTEO_SYSTEM_PROMPT = """You are Buteo, the legal / compliance review agent in the Ateles swarm.
 
@@ -74,6 +81,66 @@ class ClauseReview:
 
 
 @dataclass
+class Playbook:
+    """Accumulated counterparty / deal-type negotiation memory loaded from
+    Neotoma. Buteo reads it as context so prior operator decisions are
+    pre-baked into the first-pass redline — addresses the "first pass too
+    conservative + complex" failure mode by anchoring on positions we have
+    already settled."""
+
+    entity_id: str = ""
+    name: str = ""
+    counterparty: str = ""
+    deal_type: str = ""
+    version: str = ""
+    summary: str = ""
+    standard_positions: list[dict[str, Any]] = field(default_factory=list)
+    accepted_redlines: list[dict[str, Any]] = field(default_factory=list)
+    rejected_positions: list[dict[str, Any]] = field(default_factory=list)
+    non_negotiables: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def is_empty(self) -> bool:
+        return not (
+            self.standard_positions
+            or self.accepted_redlines
+            or self.rejected_positions
+            or self.non_negotiables
+        )
+
+    def to_prompt_block(self) -> str:
+        if self.is_empty:
+            return ""
+        lines = [
+            f"## Playbook — {self.name} (version {self.version or 'unversioned'})",
+            f"Counterparty: {self.counterparty or '(unspecified)'}",
+            f"Deal type: {self.deal_type or '(unspecified)'}",
+        ]
+        if self.summary:
+            lines.append(f"\nSummary: {self.summary}")
+        if self.standard_positions:
+            lines.append("\nStandard positions (anchor on these — do not re-litigate):")
+            for p in self.standard_positions:
+                lines.append(f"- [{p.get('topic', '')}] {p.get('our_position', '')}  ({p.get('rationale', '')})")
+        if self.non_negotiables:
+            lines.append("\nNon-negotiables (reject any clause attempting to weaken these):")
+            for p in self.non_negotiables:
+                lines.append(f"- [{p.get('topic', '')}] {p.get('line', '')}")
+        if self.accepted_redlines:
+            lines.append("\nPreviously accepted redlines (operator approved — reuse the language):")
+            for p in self.accepted_redlines:
+                lines.append(f"- [{p.get('clause_type', '')}] {p.get('accepted_text', '')[:300]}")
+        if self.rejected_positions:
+            lines.append("\nPreviously rejected counterparty positions (do not concede now):")
+            for p in self.rejected_positions:
+                lines.append(
+                    f"- [{p.get('topic', '')}] them: {p.get('counterparty_position', '')[:200]} "
+                    f"— why rejected: {p.get('why_rejected', '')[:200]}"
+                )
+        return "\n".join(lines)
+
+
+@dataclass
 class RedlineReport:
     headline_risk: str = ""
     alignment_summary: str = ""
@@ -83,6 +150,11 @@ class RedlineReport:
     operator_signoff_required: bool = True
     raw_text: str = ""
     stub: bool = False
+    # Provenance — every report stamps how it was produced so an operator
+    # diffing two runs of the same input knows exactly what changed.
+    prompt_version: str = ""
+    model_id: str = ""
+    playbook_id: str = ""
 
 
 def _coerce(result: dict[str, Any] | None) -> RedlineReport:
@@ -114,13 +186,73 @@ def _coerce(result: dict[str, Any] | None) -> RedlineReport:
     )
 
 
+def load_playbook(
+    *, counterparty: str = "", deal_type: str = "", name: str = ""
+) -> Playbook:
+    """Look up a playbook entity in Neotoma by counterparty / deal_type / name.
+
+    Returns an empty Playbook if Neotoma is unreachable, no token, or no
+    match — Buteo runs without playbook context in that case.
+    """
+    base = os.environ.get("NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com").rstrip("/")
+    token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
+    if not token:
+        return Playbook()
+    identifier = name or counterparty or deal_type
+    if not identifier:
+        return Playbook()
+    try:
+        import httpx
+
+        with httpx.Client(
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            timeout=5.0,
+        ) as client:
+            resp = client.get(
+                f"{base}/entities/by-identifier",
+                params={"entity_type": "playbook", "identifier": identifier},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        log.debug("buteo: playbook lookup failed for %s: %s", identifier, exc)
+        return Playbook()
+    entities = data.get("entities") or []
+    if not entities:
+        return Playbook()
+    ent = entities[0]
+    snap = ent.get("snapshot", {}) or {}
+    inner = snap.get("snapshot", snap)
+    return Playbook(
+        entity_id=ent.get("id", ""),
+        name=str(inner.get("name", "")),
+        counterparty=str(inner.get("counterparty", "")),
+        deal_type=str(inner.get("deal_type", "")),
+        version=str(inner.get("version", "")),
+        summary=str(inner.get("summary", "")),
+        standard_positions=inner.get("standard_positions") or [],
+        accepted_redlines=inner.get("accepted_redlines") or [],
+        rejected_positions=inner.get("rejected_positions") or [],
+        non_negotiables=inner.get("non_negotiables") or [],
+    )
+
+
 def review(
     *,
     thread_summary: str,
     latest_message: str,
     prior_positions: str = "",
+    playbook: Playbook | None = None,
 ) -> RedlineReport:
-    """Run a legal-grade clause review with Claude Opus 4.7."""
+    """Run a legal-grade clause review.
+
+    Model is resolved through `resolve_model("buteo")`, which honours the
+    `model_pin` field on Buteo's agent_definition. The combination of
+    pinned model + frozen prompt version + temperature 0 is what makes a
+    Buteo run deterministic per the design rationale (drift-fighting).
+    """
+    playbook = playbook or Playbook()
+    playbook_block = playbook.to_prompt_block()
     user_prompt = (
         f"Thread summary (oldest → newest, paraphrased):\n{thread_summary[:6000]}\n\n"
         f"Counterparty's latest message (full text):\n{latest_message[:10000]}\n\n"
@@ -129,15 +261,17 @@ def review(
             if prior_positions
             else ""
         )
+        + (f"{playbook_block}\n\n" if playbook_block else "")
         + "Produce a clause-by-clause review. Respond with JSON only."
     )
 
+    model_id = resolve_model("buteo")
     resp = call_claude(
-        model=resolve_model("buteo"),
+        model=model_id,
         system=BUTEO_SYSTEM_PROMPT,
         user=user_prompt,
         max_tokens=4096,
-        temperature=0.1,
+        temperature=0.0,
     )
 
     if resp.stub:
@@ -158,10 +292,21 @@ def review(
             ],
             raw_text=resp.text,
             stub=True,
+            prompt_version=BUTEO_PROMPT_VERSION,
+            model_id=model_id,
+            playbook_id=playbook.entity_id,
         )
         return report
 
     parsed = resp.parse_json()
     out = _coerce(parsed)
     out.raw_text = resp.text
+    out.prompt_version = BUTEO_PROMPT_VERSION
+    out.model_id = model_id
+    out.playbook_id = playbook.entity_id
     return out
+
+
+def prompt_hash() -> str:
+    """SHA-256 of the active system prompt — pin this in eval suites."""
+    return hashlib.sha256(BUTEO_SYSTEM_PROMPT.encode()).hexdigest()

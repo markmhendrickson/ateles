@@ -45,8 +45,8 @@ _cache: dict[str, str] = {}
 _lock = Lock()
 
 
-def _fetch_tier_from_neotoma(agent_name: str) -> str | None:
-    """Best-effort lookup of agent_definition.model_tier. None on any failure."""
+def _fetch_agent_def_from_neotoma(agent_name: str) -> dict | None:
+    """Best-effort fetch of an agent_definition snapshot. None on any failure."""
     base = os.environ.get("NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com").rstrip("/")
     token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     if not token:
@@ -76,9 +76,27 @@ def _fetch_tier_from_neotoma(agent_name: str) -> str | None:
     if not entities:
         return None
     snap = entities[0].get("snapshot", {}) or {}
-    inner = snap.get("snapshot", snap)
+    return snap.get("snapshot", snap)
+
+
+def _fetch_tier_from_neotoma(agent_name: str) -> str | None:
+    inner = _fetch_agent_def_from_neotoma(agent_name)
+    if not inner:
+        return None
     tier = inner.get("model_tier")
     return str(tier).lower() if isinstance(tier, str) else None
+
+
+def _fetch_pin_from_neotoma(agent_name: str) -> str | None:
+    """Read `agent_definition.model_pin` — a frozen exact model ID that
+    overrides tier resolution. Used for high-risk agents (e.g. Buteo) where
+    drift across model versions is unacceptable without explicit operator
+    approval."""
+    inner = _fetch_agent_def_from_neotoma(agent_name)
+    if not inner:
+        return None
+    pin = inner.get("model_pin")
+    return str(pin) if isinstance(pin, str) and pin else None
 
 
 def resolve_model(agent_name: str) -> str:
@@ -93,6 +111,12 @@ def resolve_model(agent_name: str) -> str:
         with _lock:
             _cache[agent_name] = absolute
         return absolute
+
+    pin = _fetch_pin_from_neotoma(agent_name)
+    if pin:
+        with _lock:
+            _cache[agent_name] = pin
+        return pin
 
     tier = _fetch_tier_from_neotoma(agent_name) or DEFAULT_AGENT_TIER.get(agent_name, FALLBACK_TIER)
     tier_override = os.environ.get(f"MODEL_TIER_{tier.upper()}")
