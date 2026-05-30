@@ -134,6 +134,11 @@ def _render_markdown(
         parts.append("\n## Buteo — legal review\n")
         if redline.stub:
             parts.append("*(stub — re-run with ANTHROPIC_API_KEY for full clause analysis)*\n")
+        parts.append(
+            f"**Provenance:** prompt_version=`{redline.prompt_version}` · "
+            f"model=`{redline.model_id}` · "
+            f"playbook=`{redline.playbook_id or '(none)'}`\n"
+        )
         parts.append(f"**Headline risk:** {redline.headline_risk}\n")
         if redline.alignment_summary:
             parts.append(f"**Alignment:** {redline.alignment_summary}\n")
@@ -192,6 +197,11 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--body-file", type=Path)
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--json-output", type=Path, help="Optional structured JSON dump")
+    ap.add_argument(
+        "--counterparty",
+        default="",
+        help="Counterparty name for playbook lookup (e.g. 'Bottega8')",
+    )
     args = ap.parse_args(argv)
 
     if args.thread_json:
@@ -231,6 +241,7 @@ def main(argv: list[str]) -> int:
         thread_summary=thread_summary,
         prior_positions=prior_positions,
         counterparty_first_name=_counterparty_first_name(sender),
+        counterparty=args.counterparty,
         classification=classification,
     )
     ctx = runner.dispatch(ctx, plan)

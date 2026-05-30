@@ -96,6 +96,30 @@ a complete artifact in CI / sandboxed environments.
 
 Both new entities are linked `PART_OF` the Ateles plan `ent_99ace4dd6673aa36ed08b1fe`.
 
+## Buteo determinism + playbook layer
+
+Buteo is the only agent in this pipeline that opts out of capability-tier
+auto-bump. Its `agent_definition` carries:
+
+- `model_pin = "claude-opus-4-7"` — exact model ID, overrides tier resolution
+- `prompt_version = "2026-05-28.1"` — frozen system-prompt version
+- `temperature = 0` — deterministic decoding
+
+Every `RedlineReport` stamps these three values + the `playbook_id` it
+consumed, so re-running the same input is reproducible and any silent
+substrate drift is caught by diff.
+
+The `playbook` entity (schema 1.0.0) carries accumulated negotiation
+memory for a relationship: `standard_positions`, `non_negotiables`,
+`accepted_redlines`, `rejected_positions`. Buteo loads it as context so
+the first-pass redline anchors on operator-approved positions instead of
+re-deriving them. **Playbooks are operator-authored only** — Buteo never
+writes to its own playbook.
+
+Initial Bottega8 partnership playbook: `ent_416966d0c0f8ce0708eb52d0`.
+
+Full design rationale: `docs/buteo_design_rationale.md`.
+
 ## Apis integration
 
 Apis (`execution/daemons/apis/apis.py`) is the universal task dispatcher.

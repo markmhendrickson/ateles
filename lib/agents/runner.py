@@ -42,15 +42,20 @@ class TaskContext:
     thread_summary: str = ""
     prior_positions: str = ""
     counterparty_first_name: str = ""
+    counterparty: str = ""
     classification: ClassificationResult | None = None
     artifacts: dict[str, Any] = field(default_factory=dict)
 
 
 def _invoke_buteo(ctx: TaskContext) -> buteo.RedlineReport:
+    playbook = buteo.load_playbook(counterparty=ctx.counterparty)
+    if playbook.entity_id:
+        log.info("runner: loaded playbook %s for %s", playbook.entity_id, ctx.counterparty)
     return buteo.review(
         thread_summary=ctx.thread_summary,
         latest_message=ctx.latest_body,
         prior_positions=ctx.prior_positions,
+        playbook=playbook,
     )
 
 
