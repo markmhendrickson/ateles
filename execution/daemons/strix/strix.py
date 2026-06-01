@@ -97,9 +97,18 @@ def _ensure_ah_running() -> int | None:
         pid = _ah_pid()
         if pid:
             time.sleep(1.0)  # let AH finish initialising
+            _hide_ah()       # hide windows immediately — dock icon stays but no pop-up
             return pid
     log.warning("[strix] Audio Hijack failed to launch")
     return None
+
+
+def _hide_ah() -> None:
+    """Hide all Audio Hijack windows without quitting (dock icon stays, no pop-up)."""
+    for app in NSWorkspace.sharedWorkspace().runningApplications():
+        if app.bundleIdentifier() == AH_BUNDLE_ID:
+            app.hide()
+            return
 
 
 def _find_tyto_run_button(pid: int) -> object | None:

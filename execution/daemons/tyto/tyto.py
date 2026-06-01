@@ -647,6 +647,39 @@ class RecordingWatcher:
                     return line.split("=", 1)[1].strip() or None
             return None
 
+        def _extract_transcript_text(stdout: str) -> str:
+            """Extract the transcription text from transcribe_audio.py stdout."""
+            lines = stdout.splitlines()
+            in_text = False
+            text_lines: list[str] = []
+            for line in lines:
+                if line.startswith("Transcription text:"):
+                    in_text = True
+                    rest = line[len("Transcription text:"):].strip()
+                    if rest:
+                        text_lines.append(rest)
+                    continue
+                if in_text:
+                    if line.startswith("Saved to Neotoma") or line.startswith("NEOTOMA_"):
+                        break
+                    text_lines.append(line)
+            return "\n".join(text_lines).strip()
+
+        def _format_transcript_notification(label: str, stdout: str) -> str:
+            """
+            Format a Telegram notification for a completed transcription.
+            If the transcript is ≤ ~300 chars (roughly one paragraph), show it verbatim.
+            Otherwise show a one-sentence summary line + the full transcript.
+            """
+            text = _extract_transcript_text(stdout)
+            if not text:
+                return f"📝 [{DAEMON_NAME}] {label}"
+            if len(text) <= 300:
+                return f"📝 [{DAEMON_NAME}] {label}\n\n{text}"
+            # Truncate to first ~300 chars at a word boundary for the summary line
+            summary = text[:300].rsplit(" ", 1)[0].rstrip(".,;:") + "…"
+            return f"📝 [{DAEMON_NAME}] {label}\n\n{summary}\n\n— — —\n{text}"
+
         # Two-file merge path: mic + remote, requires ElevenLabs for word timestamps
         if mic_path is not None and mic_path.exists() and has_elevenlabs:
             log.info(f"[{DAEMON_NAME}] Two-file merge mode: [You] + diarized remote.")
@@ -659,7 +692,9 @@ class RecordingWatcher:
                     f"entity_id={entity_id}"
                 )
                 self._notifier.send(
-                    f"Transcription complete ([You]+diarized): {remote_path.name}",
+                    _format_transcript_notification(
+                        f"[You]+diarized: {remote_path.name}", result.stdout
+                    ),
                     priority=Priority.INFO,
                     handler=DAEMON_NAME,
                 )
@@ -695,7 +730,9 @@ class RecordingWatcher:
                 entity_id = _extract_entity_id(result2.stdout)
                 log.info(f"[{DAEMON_NAME}] Fallback transcription succeeded. entity_id={entity_id}")
                 self._notifier.send(
-                    f"Transcription complete (no diarization): {remote_path.name}",
+                    _format_transcript_notification(
+                        f"(no diarization): {remote_path.name}", result2.stdout
+                    ),
                     priority=Priority.INFO,
                     handler=DAEMON_NAME,
                 )
@@ -709,7 +746,7 @@ class RecordingWatcher:
                 f"entity_id={entity_id}"
             )
             self._notifier.send(
-                f"Transcription complete: {remote_path.name}",
+                _format_transcript_notification(remote_path.name, result.stdout),
                 priority=Priority.INFO,
                 handler=DAEMON_NAME,
             )
