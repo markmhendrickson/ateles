@@ -42,11 +42,27 @@ NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 
 @dataclass
 class AgentGrant:
-    """Snapshot of a single agent_grant entity."""
+    """
+    Snapshot of a single agent_grant entity.
+
+    The live agent_grant schema (v1.0.0) stores ``capabilities`` as an array of
+    objects, each ``{op, entity_types, repos, ...}``. Identity matches on
+    ``match_sub`` / ``match_iss``. We normalise that here:
+
+      - ``ops`` — set of capability op strings (e.g. "store_structured",
+        "github_harness:write", "tool:parquet:read_parquet").
+      - ``tool_grants`` — map of "<server>:<tool>" → param-constraint dict, built
+        from capability entries whose op starts with "tool:" (issue #26). The
+        leading "tool:" prefix is stripped so keys read "<server>:<tool>".
+    """
 
     entity_id: str = ""
-    aauth_sub: str = ""
-    capabilities: list[str] = field(default_factory=list)
+    aauth_sub: str = ""  # populated from match_sub for backward compat
+    match_sub: str = ""
+    match_iss: str = ""
+    capabilities: list = field(default_factory=list)  # raw capability objects
+    ops: set = field(default_factory=set)
+    tool_grants: dict = field(default_factory=dict)
     status: str = "active"
     suspended_at: str = ""
     suspended_reason: str = ""
@@ -66,8 +82,25 @@ class AgentGrant:
         return self.status == "revoked"
 
     def has_capability(self, capability: str) -> bool:
-        """Return True if this grant includes the named capability (or '*')."""
-        return "*" in self.capabilities or capability in self.capabilities
+        """Return True if this grant includes the named capability op (or '*')."""
+        return "*" in self.ops or capability in self.ops
+
+    def tool_constraints(self, server: str, tool: str) -> Optional[dict]:
+        """
+        Return the param-constraint dict for "<server>:<tool>" if granted,
+        else None (denied). An empty dict means allowed with no constraints.
+
+        Wildcards: "tool:<server>:*" grants all tools on a server;
+        "tool:*" grants every MCP tool.
+        """
+        key = f"{server}:{tool}"
+        if key in self.tool_grants:
+            return self.tool_grants[key]
+        if f"{server}:*" in self.tool_grants:
+            return self.tool_grants[f"{server}:*"]
+        if "*" in self.tool_grants:
+            return self.tool_grants["*"]
+        return None
 
 
 class GrantChecker:
@@ -111,7 +144,7 @@ class GrantChecker:
             self._grants = [
                 self._parse(e)
                 for e in entities
-                if (e.get("snapshot") or {}).get("aauth_sub") == self.aauth_sub
+                if self._snapshot_matches_sub(e.get("snapshot") or {})
             ]
             log.info(
                 f"[grant_checker:{self.aauth_sub}] Loaded {len(self._grants)} grant(s)"
@@ -154,26 +187,140 @@ class GrantChecker:
             return True
         return any(g.is_active and g.has_capability(capability) for g in self._grants)
 
+    def check_tool(self, server: str, tool: str) -> tuple[bool, Optional[dict]]:
+        """
+        Check whether an MCP tool call is authorized (issue #26).
+
+        Returns (allowed, constraints):
+          - allowed: True if an active grant covers "<server>:<tool>".
+          - constraints: the param-constraint dict to enforce (may be empty),
+            or None when denied.
+
+        Permissive fallback (allowed=True, constraints=None) when Neotoma was
+        unreachable or no grants are recorded — enforcement is advisory until
+        the proxy and grant tightening land for all agents.
+        """
+        if self._load_error or not self._grants:
+            return True, None
+        # If NO grant declares any tool_grants at all, fall back to permissive —
+        # tool-level enforcement only kicks in once an agent has been migrated
+        # to declare its tool capabilities (avoids breaking un-migrated agents).
+        any_tool_grants = any(g.tool_grants for g in self._grants)
+        if not any_tool_grants:
+            return True, None
+        for g in self._grants:
+            if not g.is_active:
+                continue
+            constraints = g.tool_constraints(server, tool)
+            if constraints is not None:
+                return True, constraints
+        return False, None
+
     @property
     def grants(self) -> list[AgentGrant]:
         return list(self._grants)
 
+    def _snapshot_matches_sub(self, snap: dict) -> bool:
+        """Match a grant snapshot to this checker's sub via match_sub/aauth_sub."""
+        candidate = snap.get("match_sub") or snap.get("aauth_sub") or ""
+        return candidate == self.aauth_sub
+
     @staticmethod
     def _parse(entity: dict) -> AgentGrant:
         snap = entity.get("snapshot") or {}
-        caps = snap.get("capabilities") or []
-        if isinstance(caps, str):
-            caps = [c.strip() for c in caps.split(",") if c.strip()]
+        raw_caps = snap.get("capabilities") or []
+
+        # Normalise capabilities into op strings + tool-grant map.
+        ops: set = set()
+        tool_grants: dict = {}
+        if isinstance(raw_caps, str):
+            # Legacy comma-separated string form.
+            for c in raw_caps.split(","):
+                c = c.strip()
+                if c:
+                    ops.add(c)
+        elif isinstance(raw_caps, list):
+            for cap in raw_caps:
+                if isinstance(cap, str):
+                    ops.add(cap.strip())
+                elif isinstance(cap, dict):
+                    op = cap.get("op", "")
+                    if op:
+                        ops.add(op)
+                    # Tool-grant entries: op == "tool:<server>:<tool>" with
+                    # optional "param_constraints" dict. Key stored without the
+                    # leading "tool:" prefix → "<server>:<tool>".
+                    if op.startswith("tool:"):
+                        key = op[len("tool:"):]
+                        tool_grants[key] = cap.get("param_constraints") or {}
+
+        match_sub = snap.get("match_sub") or snap.get("aauth_sub") or ""
         return AgentGrant(
             entity_id=entity.get("entity_id", ""),
-            aauth_sub=snap.get("aauth_sub", ""),
-            capabilities=caps,
+            aauth_sub=match_sub,
+            match_sub=match_sub,
+            match_iss=snap.get("match_iss", ""),
+            capabilities=raw_caps if isinstance(raw_caps, list) else [],
+            ops=ops,
+            tool_grants=tool_grants,
             status=snap.get("status", "active"),
             suspended_at=snap.get("suspended_at", ""),
             suspended_reason=snap.get("suspended_reason", ""),
             revoked_at=snap.get("revoked_at", ""),
             revoked_reason=snap.get("revoked_reason", ""),
         )
+
+
+def check_param_constraints(
+    constraints: dict, params: dict
+) -> tuple[bool, str]:
+    """
+    Evaluate a tool call's params against a grant's param-constraint dict (#26).
+
+    Returns (ok, reason). ok=True means the call satisfies all constraints.
+    An empty constraints dict always passes. Unknown constraint keys are
+    ignored (forward-compatible — a new constraint added to a grant won't
+    hard-fail an older proxy, but see note below).
+
+    Supported constraint keys:
+      - "tables": [list]        → params["table"] / params["table_name"] must be in list
+      - "max_amount_sats": int  → params["amount_sats"] / params["amount"] must be <=
+      - "to_allowlist": true    → params["to"] must be present (allowlist membership
+                                   is enforced by the tool itself; the grant only
+                                   asserts the flag must be honoured)
+      - "max_<field>": number   → params[<field>] must be <= value
+      - "allowed_<field>": list → params[<field>] must be in list
+    """
+    if not constraints:
+        return True, ""
+
+    for ckey, cval in constraints.items():
+        if ckey == "tables":
+            table = params.get("table") or params.get("table_name") or params.get("name")
+            if table is not None and table not in cval:
+                return False, f"table {table!r} not in allowed tables {cval}"
+        elif ckey == "max_amount_sats":
+            amount = params.get("amount_sats")
+            if amount is None:
+                amount = params.get("amount")
+            if isinstance(amount, (int, float)) and amount > cval:
+                return False, f"amount {amount} exceeds max_amount_sats {cval}"
+        elif ckey == "to_allowlist":
+            if cval and not params.get("to"):
+                return False, "to_allowlist requires a 'to' parameter"
+        elif ckey.startswith("max_"):
+            field_name = ckey[len("max_"):]
+            v = params.get(field_name)
+            if isinstance(v, (int, float)) and v > cval:
+                return False, f"{field_name} {v} exceeds {ckey} {cval}"
+        elif ckey.startswith("allowed_"):
+            field_name = ckey[len("allowed_"):]
+            v = params.get(field_name)
+            if v is not None and isinstance(cval, list) and v not in cval:
+                return False, f"{field_name} {v!r} not in {ckey} {cval}"
+        # Unknown constraint keys: ignored (forward-compatible).
+
+    return True, ""
 
 
 def _write_grant_state(

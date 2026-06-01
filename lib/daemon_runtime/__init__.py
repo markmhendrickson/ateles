@@ -29,7 +29,14 @@ See individual modules for full API.
 
 from .aauth_signer import AAuthSigner
 from .agent_loader import AgentDefinition, AgentLoader
-from .grant_checker import AgentGrant, GrantChecker, restore_grant, revoke_grant, suspend_grant
+from .grant_checker import (
+    AgentGrant,
+    GrantChecker,
+    check_param_constraints,
+    restore_grant,
+    revoke_grant,
+    suspend_grant,
+)
 from .sse_client import NeotomaEvent, SSEClient
 
 __all__ = [
@@ -38,4 +45,5 @@ __all__ = [
     "AAuthSigner",
     "GrantChecker", "AgentGrant",
     "suspend_grant", "restore_grant", "revoke_grant",
+    "check_param_constraints",
 ]
