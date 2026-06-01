@@ -542,6 +542,8 @@ class RecordingWatcher:
         except OSError:
             return False
         if st.st_size == 0:
+            # Mark as seen so we don't keep logging "settling" for empty files.
+            self._seen[path] = st.st_mtime
             return False
         prev = self._seen.get(path)
         if prev is None:
