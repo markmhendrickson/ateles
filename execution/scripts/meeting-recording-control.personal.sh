@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+# ============================================================================
+# PRESERVED VARIANT from personal/execution/scripts/meeting-recording-control.sh
+# Migrated during personal-monorepo decomposition (Phase 3).
+#
+# This diverged from the live meeting-recording-control.sh: it carries an
+# AppleScript-based is_running() that queries Audio Hijack session state, while
+# the live version has ateles .env loading + recording-device defaults.
+# Operator: reconcile the AppleScript is_running() improvement into the live
+# script if desired, then delete this file.
+# ============================================================================
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
