@@ -75,9 +75,7 @@ log = logging.getLogger("gorilla")
 # ── Config ────────────────────────────────────────────────────────────────────
 DAEMON_NAME = "gorilla"
 
-NEOTOMA_BASE_URL = os.environ.get(
-    "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
-).rstrip("/")
+NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 
 POLL_INTERVAL = int(os.environ.get("GORILLA_POLL_INTERVAL", "3600"))  # hourly
@@ -128,8 +126,11 @@ def _fetch_recent_sessions(days: int) -> list[dict]:
     """
     import httpx
 
-    if not NEOTOMA_BEARER_TOKEN:
-        log.debug(f"[{DAEMON_NAME}] No NEOTOMA_BEARER_TOKEN — cannot read sessions")
+    if not NEOTOMA_BEARER_TOKEN or not NEOTOMA_BASE_URL:
+        log.debug(
+            f"[{DAEMON_NAME}] NEOTOMA_BEARER_TOKEN or NEOTOMA_BASE_URL not set — "
+            "cannot read sessions"
+        )
         return []
 
     url = f"{NEOTOMA_BASE_URL}/entities"
