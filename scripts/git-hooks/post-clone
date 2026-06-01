@@ -1,0 +1,20 @@
+#!/bin/bash
+# Git hook to automatically initialize submodules after clone
+# This hook is called when using 'git clone --recurse-submodules'
+# Note: This hook may not be called in all git versions, but post-checkout will handle it
+
+set -e
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$REPO_ROOT"
+
+# Install hooks if they're not already installed
+if [ -f "scripts/install_git_hooks.sh" ]; then
+    ./scripts/install_git_hooks.sh > /dev/null 2>&1 || true
+fi
+
+# Initialize submodules if .gitmodules exists
+if [ -f .gitmodules ]; then
+    echo "Initializing git submodules..."
+    git submodule update --init --recursive
+fi

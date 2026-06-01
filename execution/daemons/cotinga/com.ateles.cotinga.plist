@@ -3,30 +3,29 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.ateles.strix</string>
+    <string>com.ateles.cotinga</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/Users/markmhendrickson/repos/ateles/.venv/bin/python3</string>
-        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/strix/strix.py</string>
+        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/cotinga/cotinga.py</string>
     </array>
 
-    <!-- Run at login -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>5</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
     <key>RunAtLoad</key>
-    <true/>
-
-    <!-- Restart if it crashes -->
-    <key>KeepAlive</key>
-    <true/>
-
-    <!-- Must run in a GUI session for menu bar access -->
-    <key>LSUIElement</key>
-    <true/>
+    <false/>
 
     <key>StandardOutPath</key>
-    <string>/Users/markmhendrickson/Library/Logs/ateles/strix.log</string>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/cotinga.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/markmhendrickson/Library/Logs/ateles/strix.log</string>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/cotinga.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -36,10 +35,6 @@
         <string>/Users/markmhendrickson/.local/bin:/Users/markmhendrickson/.nvm/versions/node/v20.20.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>NEOTOMA_BASE_URL</key>
         <string>http://localhost:3180</string>
-        <key>VIRTUAL_ENV</key>
-        <string>/Users/markmhendrickson/repos/ateles/.venv</string>
-        <key>PYTHONPATH</key>
-        <string>/Users/markmhendrickson/repos/ateles/.venv/lib/python3.14/site-packages</string>
     </dict>
 </dict>
 </plist>
