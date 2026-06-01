@@ -7,11 +7,11 @@
     
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/markmhendrickson/Projects/personal/scripts/twilio_sms_polling_wrapper.sh</string>
+        <string>/Users/markmhendrickson/repos/ateles/scripts/twilio_sms_polling_wrapper.sh</string>
     </array>
     
     <key>WorkingDirectory</key>
-    <string>/Users/markmhendrickson/Projects/personal</string>
+    <string>/Users/markmhendrickson/repos/ateles</string>
     
     <key>RunAtLoad</key>
     <true/>
@@ -28,10 +28,10 @@
     </array>
     
     <key>StandardOutPath</key>
-    <string>/Users/markmhendrickson/Projects/personal/data/logs/twilio_sms_polling.log</string>
+    <string>/Users/markmhendrickson/repos/ateles/data/logs/twilio_sms_polling.log</string>
     
     <key>StandardErrorPath</key>
-    <string>/Users/markmhendrickson/Projects/personal/data/logs/twilio_sms_polling.error.log</string>
+    <string>/Users/markmhendrickson/repos/ateles/data/logs/twilio_sms_polling.error.log</string>
     
     <key>EnvironmentVariables</key>
     <dict>

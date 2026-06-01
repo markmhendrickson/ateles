@@ -7,14 +7,14 @@
     
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/markmhendrickson/Projects/personal/execution/venv/bin/python</string>
-        <string>/Users/markmhendrickson/Projects/personal/execution/scripts/monitor_tunnel_url.py</string>
+        <string>/Users/markmhendrickson/repos/ateles/execution/venv/bin/python</string>
+        <string>/Users/markmhendrickson/repos/ateles/execution/scripts/monitor_tunnel_url.py</string>
         <string>--interval</string>
         <string>30</string>
     </array>
     
     <key>WorkingDirectory</key>
-    <string>/Users/markmhendrickson/Projects/personal</string>
+    <string>/Users/markmhendrickson/repos/ateles</string>
     
     <key>RunAtLoad</key>
     <true/>
@@ -23,10 +23,10 @@
     <true/>
     
     <key>StandardOutPath</key>
-    <string>/Users/markmhendrickson/Projects/personal/data/logs/tunnel_url_monitor.log</string>
+    <string>/Users/markmhendrickson/repos/ateles/data/logs/tunnel_url_monitor.log</string>
     
     <key>StandardErrorPath</key>
-    <string>/Users/markmhendrickson/Projects/personal/data/logs/tunnel_url_monitor.error.log</string>
+    <string>/Users/markmhendrickson/repos/ateles/data/logs/tunnel_url_monitor.error.log</string>
     
     <key>EnvironmentVariables</key>
     <dict>

@@ -14,7 +14,7 @@
     </array>
     
     <key>WorkingDirectory</key>
-    <string>/Users/markmhendrickson/repos/personal</string>
+    <string>/Users/markmhendrickson/repos/ateles</string>
     
     <key>RunAtLoad</key>
     <true/>
@@ -23,10 +23,10 @@
     <true/>
     
     <key>StandardOutPath</key>
-    <string>/Users/markmhendrickson/repos/personal/data/logs/cloudflare_mcp_tunnel.log</string>
+    <string>/Users/markmhendrickson/repos/ateles/data/logs/cloudflare_mcp_tunnel.log</string>
     
     <key>StandardErrorPath</key>
-    <string>/Users/markmhendrickson/repos/personal/data/logs/cloudflare_mcp_tunnel.error.log</string>
+    <string>/Users/markmhendrickson/repos/ateles/data/logs/cloudflare_mcp_tunnel.error.log</string>
     
     <key>EnvironmentVariables</key>
     <dict>

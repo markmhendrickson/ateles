@@ -7,11 +7,11 @@
     
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/markmhendrickson/Projects/personal/execution/homeassistant-venv/bin/hass</string>
+        <string>/Users/markmhendrickson/repos/ateles/execution/homeassistant-venv/bin/hass</string>
     </array>
     
     <key>WorkingDirectory</key>
-    <string>/Users/markmhendrickson/Projects/personal</string>
+    <string>/Users/markmhendrickson/repos/ateles</string>
     
     <key>RunAtLoad</key>
     <true/>
@@ -23,10 +23,10 @@
     </dict>
     
     <key>StandardOutPath</key>
-    <string>/Users/markmhendrickson/Projects/personal/data/logs/homeassistant.log</string>
+    <string>/Users/markmhendrickson/repos/ateles/data/logs/homeassistant.log</string>
     
     <key>StandardErrorPath</key>
-    <string>/Users/markmhendrickson/Projects/personal/data/logs/homeassistant.error.log</string>
+    <string>/Users/markmhendrickson/repos/ateles/data/logs/homeassistant.error.log</string>
     
     
     <key>EnvironmentVariables</key>

@@ -7,11 +7,11 @@
     
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/markmhendrickson/Projects/personal/scripts/watch_audio_transcribe_wrapper.sh</string>
+        <string>/Users/markmhendrickson/repos/ateles/scripts/watch_audio_transcribe_wrapper.sh</string>
     </array>
     
     <key>WorkingDirectory</key>
-    <string>/Users/markmhendrickson/Projects/personal</string>
+    <string>/Users/markmhendrickson/repos/ateles</string>
     
     <key>RunAtLoad</key>
     <true/>
@@ -20,10 +20,10 @@
     <true/>
     
     <key>StandardOutPath</key>
-    <string>/Users/markmhendrickson/Projects/personal/data/logs/audio_transcription_watcher.log</string>
+    <string>/Users/markmhendrickson/repos/ateles/data/logs/audio_transcription_watcher.log</string>
     
     <key>StandardErrorPath</key>
-    <string>/Users/markmhendrickson/Projects/personal/data/logs/audio_transcription_watcher.error.log</string>
+    <string>/Users/markmhendrickson/repos/ateles/data/logs/audio_transcription_watcher.error.log</string>
     
     <key>EnvironmentVariables</key>
     <dict>
