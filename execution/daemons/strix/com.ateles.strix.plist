@@ -35,7 +35,9 @@
         <key>PATH</key>
         <string>/Users/markmhendrickson/.local/bin:/Users/markmhendrickson/.nvm/versions/node/v20.20.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>NEOTOMA_BASE_URL</key>
-        <string>http://localhost:3180</string>
+        <string>https://neotoma.markmhendrickson.com</string>
+        <key>TYTO_AH_SESSION</key>
+        <string>Tyto</string>
         <key>VIRTUAL_ENV</key>
         <string>/Users/markmhendrickson/repos/ateles/.venv</string>
         <key>PYTHONPATH</key>

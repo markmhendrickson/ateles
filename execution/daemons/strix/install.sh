@@ -7,7 +7,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 DEST="$LAUNCH_AGENTS/$PLIST"
 
+VENV_PYTHON="/Users/markmhendrickson/repos/ateles/.venv/bin/python3"
+
 mkdir -p "$LAUNCH_AGENTS"
+
+# Ensure required PyObjC framework is installed.
+"$VENV_PYTHON" -c "import ApplicationServices" 2>/dev/null || \
+  "$VENV_PYTHON" -m pip install --quiet pyobjc-framework-ApplicationServices
 
 # Unload if already installed.
 if launchctl list | grep -q "com.ateles.strix" 2>/dev/null; then
