@@ -9,14 +9,25 @@ Phase 1 status: keypairs are not yet minted. AAuthSigner.from_key_file()
 returns a stub signer that logs a warning. Once keypairs are minted and
 placed in ateles-private/keys/<name>.json, the stub upgrades automatically.
 
-Key file format (ateles-private/keys/<name>.json):
+Supported key file formats (read from ateles-private/keys/<name>.jwk.json
+or legacy ateles-private/keys/<name>.json):
+
+  Canonical JWK format (preferred — produced by execution/scripts/mint_daemon_keypair.py):
+    {
+        "sub": "monedula@ateles-swarm",
+        "kid": "<kid>",
+        "kty": "EC", "crv": "P-256",
+        "x": "<base64url>", "y": "<base64url>", "d": "<base64url private scalar>"
+    }
+
+  Legacy PEM format (still supported for backward compatibility):
     {
         "sub": "monedula@ateles-swarm",
         "key_id": "<kid>",
         "private_key_pem": "-----BEGIN EC PRIVATE KEY-----\\n..."
     }
 
-See docs/architecture.md for AAuth identity design.
+Files must have mode 0600. See docs/aauth/keys.md for layout and rotation guide.
 """
 
 from __future__ import annotations
@@ -59,33 +70,54 @@ class AAuthSigner:
         cls, agent_name: str, keys_dir: Path | None = None
     ) -> AAuthSigner:
         """
-        Load keypair from ateles-private/keys/<agent_name>.json.
-        Returns a stub signer if the file doesn't exist.
+        Load keypair from ateles-private/keys/<agent_name>.jwk.json (canonical)
+        or ateles-private/keys/<agent_name>.json (legacy PEM format).
+        Returns a stub signer if neither file exists.
         """
         keys_dir = keys_dir or _DEFAULT_KEYS_DIR
-        key_path = keys_dir / f"{agent_name.lower()}.json"
+        name = agent_name.lower()
 
-        if not key_path.exists():
+        # Probe canonical JWK path first, then legacy path.
+        jwk_path = keys_dir / f"{name}.jwk.json"
+        legacy_path = keys_dir / f"{name}.json"
+        key_path = jwk_path if jwk_path.exists() else (
+            legacy_path if legacy_path.exists() else None
+        )
+
+        if key_path is None:
             log.warning(
-                f"[{agent_name}] AAuth key not found at {key_path} — "
-                "stub signer in use (Phase 1: mint keypair to enable attribution)"
+                f"[{agent_name}] AAuth key not found at {jwk_path} or {legacy_path} — "
+                "stub signer in use (run: python execution/scripts/mint_daemon_keypair.py "
+                f"--name {name})"
             )
-            return cls(sub=f"{agent_name.lower()}@ateles-swarm")
+            return cls(sub=f"{name}@ateles-swarm")
 
         try:
             data = json.loads(key_path.read_text())
-            signer = cls(
-                sub=data.get("sub", f"{agent_name.lower()}@ateles-swarm"),
-                key_id=data.get("key_id", ""),
+            sub = data.get("sub", f"{name}@ateles-swarm")
+
+            # Canonical JWK format: has "kty" and "d" fields.
+            if "kty" in data and "d" in data:
+                kid = data.get("kid", "")
+                private_key = _load_private_key_jwk(data)
+            else:
+                # Legacy PEM format.
+                kid = data.get("key_id", data.get("kid", ""))
+                private_key = _load_private_key(data.get("private_key_pem", ""))
+
+            signer = cls(sub=sub, key_id=kid)
+            signer._private_key = private_key
+            log.info(
+                f"[{agent_name}] AAuth keypair loaded (sub={sub} kid={kid} "
+                f"format={'jwk' if 'kty' in data else 'pem'})"
             )
-            signer._private_key = _load_private_key(data.get("private_key_pem", ""))
-            log.info(f"[{agent_name}] AAuth keypair loaded (sub={signer.sub})")
             return signer
         except Exception as exc:
             log.warning(
-                f"[{agent_name}] Failed to load AAuth key: {exc} — stub signer in use"
+                f"[{agent_name}] Failed to load AAuth key from {key_path}: {exc} — "
+                "stub signer in use"
             )
-            return cls(sub=f"{agent_name.lower()}@ateles-swarm")
+            return cls(sub=f"{name}@ateles-swarm")
 
     @classmethod
     def stub(cls, agent_name: str) -> AAuthSigner:
@@ -136,6 +168,36 @@ def _load_private_key(pem: str) -> Any:
         return None
     except Exception as exc:
         log.warning(f"[aauth] Could not load private key: {exc}")
+        return None
+
+
+def _load_private_key_jwk(data: dict) -> Any:
+    """Load an EC P-256 private key from a JWK dict (fields: d, x, y, crv)."""
+    try:
+        import base64
+
+        from cryptography.hazmat.primitives.asymmetric.ec import (
+            SECP256R1,
+            EllipticCurvePrivateNumbers,
+            EllipticCurvePublicNumbers,
+        )
+
+        def _b64url_to_int(s: str) -> int:
+            # Pad to a multiple of 4 and decode base64url.
+            pad = (4 - len(s) % 4) % 4
+            return int.from_bytes(base64.urlsafe_b64decode(s + "=" * pad), "big")
+
+        x = _b64url_to_int(data["x"])
+        y = _b64url_to_int(data["y"])
+        d = _b64url_to_int(data["d"])
+        pub = EllipticCurvePublicNumbers(x=x, y=y, curve=SECP256R1())
+        priv = EllipticCurvePrivateNumbers(private_value=d, public_numbers=pub)
+        return priv.private_key()
+    except ImportError:
+        log.warning("[aauth] cryptography not installed — AAuth signing unavailable")
+        return None
+    except Exception as exc:
+        log.warning(f"[aauth] Could not load JWK private key: {exc}")
         return None
 
 

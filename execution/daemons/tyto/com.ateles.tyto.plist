@@ -8,15 +8,20 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/env</string>
-        <string>python3</string>
+        <string>/Users/markmhendrickson/repos/personal/execution/venv/bin/python</string>
         <string>/Users/markmhendrickson/repos/ateles/execution/daemons/tyto/tyto.py</string>
     </array>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>/Users/markmhendrickson/.local/bin:/Users/markmhendrickson/.nvm/versions/node/v20.20.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/markmhendrickson</string>
+        <key>VIRTUAL_ENV</key>
+        <string>/Users/markmhendrickson/repos/personal/execution/venv</string>
+        <key>PYTHONPATH</key>
+        <string>/Users/markmhendrickson/repos/ateles:/Users/markmhendrickson/repos/personal/execution/venv/lib/python3.11/site-packages</string>
         <key>NEOTOMA_BASE_URL</key>
         <string>https://neotoma.markmhendrickson.com</string>
         <key>TYTO_SCREENSHOTS_DIR</key>
@@ -32,10 +37,10 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/tmp/com.ateles.tyto.out.log</string>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/tyto.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/tmp/com.ateles.tyto.err.log</string>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/tyto.log</string>
 
     <key>ThrottleInterval</key>
     <integer>10</integer>
