@@ -50,8 +50,12 @@ if str(_REPO_ROOT) not in sys.path:
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
     AgentLoader,
+    GateAction,
     NeotomaEvent,
     SSEClient,
+    evaluate_gate,
+    resolve_policy_for_agent,
+    write_checkpoint_brief,
 )
 from lib.notify import Notifier, Priority  # noqa: E402
 
@@ -151,20 +155,94 @@ def _resolve_skill(tags: list[str]) -> str | None:
     return None
 
 
+def _resolve_assignee(snapshot: dict, tags: list[str]) -> str | None:
+    """
+    Resolve the executing agent for a task.
+
+    Routing is assign-at-creation: prefer the task's `assigned_to` field, set by
+    whoever created the task via the agent-routing lookup. Apis is the FALLBACK
+    router only — when `assigned_to` is unset or explicitly "apis", fall back to
+    tag-based inference. (See .claude/rules/agent-routing.md.)
+    """
+    assigned = (snapshot.get("assigned_to") or "").strip().lower()
+    if assigned and assigned != "apis":
+        return assigned
+    # Fallback: infer from domain tags (Apis acting as escalation/ambiguity router)
+    return _resolve_skill(tags)
+
+
+# Map a resolved skill/agent + task signals to a coarse action_type, used by the
+# gate to classify blast radius. Conservative: anything that opens PRs, releases,
+# pays, or sends comms is high blast.
+_AGENT_ACTION_TYPE: dict[str, str] = {
+    "gryllus": "open_pr",  # opens PRs against shared repos
+    "vanellus": "merge_pr",  # merges to main
+    "struthio": "release",  # publishes releases
+    "monedula": "payment",  # moves money
+    "corvus": "send_external_comms",  # posts publicly (when not draft-only)
+}
+
+
+def _infer_action_type(skill: str | None, snapshot: dict) -> str | None:
+    """Best-effort action_type for the gate. Explicit task field wins."""
+    explicit = (snapshot.get("action_type") or "").strip().lower()
+    if explicit:
+        return explicit
+    if skill:
+        return _AGENT_ACTION_TYPE.get(skill.lower())
+    return None
+
+
+def _read_confidence(snapshot: dict) -> float:
+    """
+    Read the agent-supplied confidence score (0..1) from the task snapshot.
+
+    Until executing agents write their self-scored confidence back onto the task,
+    Apis cannot know it at dispatch time. Absent an explicit score we return 0.0
+    so the gate fails CLOSED (checkpoint) for any non-low-blast action — the
+    operator is asked rather than the swarm guessing.
+    """
+    raw = snapshot.get("confidence", snapshot.get("confidence_score"))
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _successful_recurrences(snapshot: dict) -> int:
+    raw = snapshot.get("successful_recurrences", 0)
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
 # ── T4 dispatch ────────────────────────────────────────────────────────────────
 
 
-async def dispatch_task(entity_id: str, snapshot: dict, trigger: str) -> None:
+async def dispatch_task(
+    entity_id: str, snapshot: dict, trigger: str, notifier: Notifier | None = None
+) -> None:
     """
-    Route a task to the appropriate T4 skill.
+    Route a task to its executing agent and apply the execution gate.
 
-    Phase 4: logs intent only.
-    Phase 5: spawn `claude --print --skill <skill>` with task context.
+    Routing (assign-at-creation): prefer the task's `assigned_to` field; fall back
+    to domain-tag inference only when unset/"apis" (Apis as escalation router).
+
+    Gating (confidence × blast radius): before dispatching, resolve the governing
+    execution_policy (Monedula gets the strict override), classify the action's
+    blast radius, read the agent-supplied confidence, and evaluate the gate. If the
+    gate says CHECKPOINT, write a blocking checkpoint_brief and notify the operator
+    instead of executing.
+
+    Phase 4: logs intent / writes checkpoints only.
+    Phase 5: spawn `claude --print --skill <skill>` with task context on auto-execute.
 
     Args:
         entity_id: Neotoma entity ID of the task
         snapshot:  Current task snapshot
         trigger:   Event that triggered dispatch ("created", "updated", "due_today")
+        notifier:  Optional notifier for operator checkpoint alerts
     """
     title = snapshot.get("title", "(untitled)")
 
@@ -183,18 +261,69 @@ async def dispatch_task(entity_id: str, snapshot: dict, trigger: str) -> None:
         body = snapshot.get("body", "") or snapshot.get("description", "")
         existing_tags = _infer_tags_from_text(title, body)
 
-    skill = _resolve_skill(existing_tags)
+    # Assign-at-creation: assigned_to wins; tags are the fallback router.
+    skill = _resolve_assignee(snapshot, existing_tags)
 
     if skill is None:
         log.info(
             f"[{DAEMON_NAME}] No route for task {entity_id!r} "
-            f"(trigger={trigger}, tags={existing_tags}) — skipping dispatch"
+            f"(trigger={trigger}, assigned_to={snapshot.get('assigned_to')!r}, "
+            f"tags={existing_tags}) — skipping dispatch"
+        )
+        return
+
+    # ── Execution gate ──────────────────────────────────────────────────────
+    policy = resolve_policy_for_agent(skill)
+    action_type = _infer_action_type(skill, snapshot)
+    confidence = _read_confidence(snapshot)
+    decision = evaluate_gate(
+        confidence=confidence,
+        action_type=action_type,
+        policy=policy,
+        successful_recurrences=_successful_recurrences(snapshot),
+    )
+
+    log.info(
+        f"[{DAEMON_NAME}] gate: task={entity_id} → {skill} "
+        f"action={action_type} blast={decision.blast_radius.value} "
+        f"conf={confidence:.2f}/{decision.threshold:.2f} "
+        f"→ {decision.action.value} ({decision.reason}) policy={decision.policy_id}"
+    )
+
+    if decision.action != GateAction.AUTO_EXECUTE:
+        brief_id = write_checkpoint_brief(
+            task_entity_id=entity_id,
+            decision=decision,
+            title=title,
+            plan_summary=(
+                f"Assigned to {skill}. Action: {action_type or 'unknown'}. "
+                f"Trigger: {trigger}. {decision.reason}."
+            ),
+            handler=DAEMON_NAME,
+            alternatives=(
+                ["Re-scope to a lower-blast action", "Provide missing inputs", "Decline"]
+                if decision.action == GateAction.CHECKPOINT_WITH_ALTERNATIVES
+                else None
+            ),
+        )
+        if notifier is not None:
+            notifier.send(
+                f"PLAN checkpoint: {title[:70]}\n"
+                f"  agent={skill} blast={decision.blast_radius.value} "
+                f"conf={confidence:.2f} — {decision.reason}\n"
+                f"  task={entity_id} brief={brief_id or '(unpersisted)'}",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+        log.info(
+            f"[{DAEMON_NAME}] HELD task {entity_id} for operator approval "
+            f"(checkpoint_brief={brief_id})"
         )
         return
 
     log.info(
         f"[{DAEMON_NAME}] → {skill}: task={entity_id} trigger={trigger} "
-        f"tags={existing_tags} title={title[:60]!r}"
+        f"tags={existing_tags} title={title[:60]!r} (gate: auto-execute)"
     )
 
     if DRY_RUN:
@@ -246,7 +375,7 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
             priority=Priority.INFO,
             handler=DAEMON_NAME,
         )
-        await dispatch_task(entity_id, snapshot, trigger="created")
+        await dispatch_task(entity_id, snapshot, trigger="created", notifier=notifier)
 
     elif action == "updated":
         # Watch for approval transitions (Phase 5: will auto-execute)
@@ -271,7 +400,9 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
             log.info(
                 f"[{DAEMON_NAME}] AUTO_EXECUTE=1 — dispatching due task {entity_id}"
             )
-            await dispatch_task(entity_id, snapshot, trigger="due_today")
+            await dispatch_task(
+                entity_id, snapshot, trigger="due_today", notifier=notifier
+            )
         else:
             log.info(
                 f"[{DAEMON_NAME}] AUTO_EXECUTE off — operator notification sent for {entity_id}"
