@@ -1,0 +1,10 @@
+#!/bin/bash
+# Git hook to regenerate MCP config after rebase/amend
+# Runs after git rebase, git commit --amend, etc.
+
+set -e
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -f "$REPO_ROOT/mcp/mcp-config-template.json" ] && [ -f "$REPO_ROOT/scripts/generate_mcp_config.py" ]; then
+    python3 "$REPO_ROOT/scripts/generate_mcp_config.py" > /dev/null 2>&1 || true
+fi

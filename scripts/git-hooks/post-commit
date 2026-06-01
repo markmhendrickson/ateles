@@ -1,0 +1,15 @@
+#!/bin/bash
+# Git hook to regenerate MCP config if template was changed in the commit
+# This ensures config stays in sync when template is updated
+
+set -e
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+# Check if template was changed in this commit
+if git diff-tree --no-commit-id --name-only -r HEAD | grep -q "mcp/mcp-config-template.json"; then
+    if [ -f "$REPO_ROOT/scripts/generate_mcp_config.py" ]; then
+        echo "Template changed, regenerating MCP configuration..."
+        python3 "$REPO_ROOT/scripts/generate_mcp_config.py" 2>&1 | grep -v "^✓" || true
+    fi
+fi
