@@ -1,0 +1,41 @@
+# Formica — full Phase 4 shape (trim secrets; set real repo paths).
+subscription:
+  entity_types: [issue, product_feedback]
+  event_types: [entity.created, entity.updated]
+  delivery_method: sse
+
+processing:
+  max_concurrent: 1
+  dry_run: true
+  max_prs_per_hour: 5
+  agent_runtime: cursor
+  agent_mode: oneshot
+  conversational_max_turns: 24
+  cursor_sdk_model: composer-2
+  anthropic_model: claude-sonnet-4-20250514
+  auto_classify: false
+  auto_fix: false
+  rebase_policy: strict_reporter
+  default_branch: main
+  align_pr_to_main: false
+  dirty_tree_policy: abort
+
+repos:
+  neotoma:
+    path: /Users/markmhendrickson/repos/neotoma
+    worktree_base: /tmp/neotoma-worktrees
+  ateles:
+    path: /Users/markmhendrickson/repos/ateles
+    worktree_base: /tmp/ateles-worktrees
+
+neotoma:
+  base_url: http://localhost:3080
+
+operator_transport:
+  backend: none
+  telegram_bot_token: ${TELEGRAM_BOT_TOKEN}
+  telegram_allowed_user_ids: []
+  telegram_chat_id: ""
+  use_message_threads: true
+  telegram_message_thread_id: null
+  mirror_to_neotoma: false

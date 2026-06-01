@@ -1,0 +1,66 @@
+{
+  "mcpServers": {
+    "parquet": {
+      "command": "python3",
+      "args": [
+        "${REPO_ROOT}/truth/mcp-servers/parquet/parquet_mcp_server.py"
+      ],
+      "env": {}
+    },
+    "gmail": {
+      "command": "${REPO_ROOT}/execution/mcp-servers/gmail/run-gmail-mcp.sh",
+      "args": [],
+      "env": {}
+    },
+    "dnsimple": {
+      "command": "python3",
+      "args": [
+        "${REPO_ROOT}/execution/mcp-servers/dnsimple/dnsimple_mcp_server.py"
+      ],
+      "env": {}
+    },
+    "google-calendar": {
+      "command": "${REPO_ROOT}/execution/mcp-servers/google-calendar/run-google-calendar-mcp.sh",
+      "args": [],
+      "env": {
+        "GOOGLE_OAUTH_CREDENTIALS": "${HOME}/.gmail-mcp/gcp-oauth.keys.json"
+      }
+    },
+    "instagram": {
+      "command": "python3",
+      "args": [
+        "${REPO_ROOT}/execution/mcp-servers/instagram/src/instagram_mcp_server.py"
+      ],
+      "env": {
+        "INSTAGRAM_ACCESS_TOKEN": "your_access_token",
+        "FACEBOOK_APP_ID": "your_app_id",
+        "FACEBOOK_APP_SECRET": "your_app_secret",
+        "INSTAGRAM_BUSINESS_ACCOUNT_ID": "your_account_id"
+      }
+    },
+    "minted": {
+      "command": "python3",
+      "args": [
+        "${REPO_ROOT}/execution/mcp-servers/minted/minted_mcp_server.py"
+      ],
+      "env": {}
+    },
+    "asana": {
+      "command": "python3",
+      "args": [
+        "${REPO_ROOT}/execution/mcp-servers/asana/asana_mcp_server.py"
+      ],
+      "env": {
+        "ASANA_SOURCE_PAT": "your-source-pat",
+        "SOURCE_WORKSPACE_GID": "source-workspace-gid",
+        "TARGET_WORKSPACE_GID": "target-workspace-gid"
+      }
+    },
+    "typefully": {
+      "command": "${REPO_ROOT}/mcp/typefully/run-typefully-mcp.sh",
+      "args": [],
+      "env": {}
+    }
+  }
+}
+

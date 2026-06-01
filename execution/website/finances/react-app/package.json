@@ -1,0 +1,50 @@
+{
+  "name": "finances-dashboard",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/ensure-neotoma-api.mjs && vite",
+    "dev:vite-only": "vite",
+    "build": "tsc && vite build",
+    "preview": "node scripts/ensure-neotoma-api.mjs && vite preview",
+    "export:modelo": "node scripts/ensure-neotoma-api.mjs && tsx scripts/export-modelo-workbook.ts",
+    "report:modelo-coverage": "node scripts/ensure-neotoma-api.mjs && tsx scripts/report-modelo-coverage.ts",
+    "import:modelo-workbook": "tsx scripts/import-modelo-workbook-neotoma.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@radix-ui/react-dropdown-menu": "^2.1.16",
+    "@radix-ui/react-select": "^2.2.6",
+    "@radix-ui/react-separator": "^1.1.8",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@radix-ui/react-tabs": "^1.1.12",
+    "@radix-ui/react-tooltip": "^1.2.7",
+    "@tanstack/react-query": "^5.75.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "exceljs": "^4.4.0",
+    "file-saver": "^2.0.5",
+    "lucide-react": "^0.562.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.0",
+    "recharts": "^2.15.3",
+    "tailwind-merge": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/file-saver": "^2.0.7",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.13",
+    "tailwindcss-animate": "^1.0.7",
+    "tsx": "^4.20.6",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.6",
+    "vitest": "^4.1.2"
+  }
+}

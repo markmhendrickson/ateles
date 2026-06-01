@@ -1,0 +1,42 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//ateles//bay-area-trip-apr-2026//EN
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+BEGIN:VEVENT
+UID:bay-trip-2026-menlo@ateles.local
+DTSTAMP:20260320T102000Z
+SUMMARY:Menlo Park (Bay Area trip)
+DESCRIPTION:Apr 2: Arrive SFO (IB 3110 + IB 6193 via Madrid/Lisbon)\, Menlo Park. Apr 3: Stanford\, Cantor Museum\, Rodin\, Palo Alto. Apr 4: NASA Ames Visitor Center\, Shoreline Lake\, Computer History Museum.
+LOCATION:Menlo Park\, CA
+DTSTART;VALUE=DATE:20260402
+DTEND;VALUE=DATE:20260406
+END:VEVENT
+BEGIN:VEVENT
+UID:bay-trip-2026-carmel@ateles.local
+DTSTAMP:20260320T102000Z
+SUMMARY:Carmel & coast
+DESCRIPTION:Apr 5: Henry Cowell Redwoods\, Carmel Beach\, Carmel. Apr 6: Monterey Bay Aquarium\, Cannery Row\, 17-Mile Drive\, downtown Carmel.
+LOCATION:Carmel-by-the-Sea\, CA
+DTSTART;VALUE=DATE:20260405
+DTEND;VALUE=DATE:20260408
+END:VEVENT
+BEGIN:VEVENT
+UID:bay-trip-2026-sf@ateles.local
+DTSTAMP:20260320T102000Z
+SUMMARY:San Francisco
+DESCRIPTION:Apr 7: Scenic drive to SF\, de Young Museum\, Sunset District. Apr 8: Union Square\, Chinatown\, North Beach\, Pier 39\, Alcatraz (pm).
+LOCATION:San Francisco\, CA
+DTSTART;VALUE=DATE:20260407
+DTEND;VALUE=DATE:20260409
+END:VEVENT
+BEGIN:VEVENT
+UID:bay-trip-2026-flight-sfo-bcn@ateles.local
+DTSTAMP:20260320T102000Z
+SUMMARY:Flight SFO → BCN (IB2624\, LEVEL)
+DESCRIPTION:Booked. Arrives Barcelona following day.
+LOCATION:SFO Terminal
+DTSTART:20260409T022500Z
+DTEND:20260409T135500Z
+END:VEVENT
+END:VCALENDAR

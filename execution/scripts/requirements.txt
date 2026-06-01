@@ -1,0 +1,52 @@
+pandas>=2.0.0
+pyarrow>=12.0.0
+requests>=2.31.0
+python-dateutil>=2.8.0
+tldextract>=5.0.0
+google-api-python-client>=2.100.0
+google-auth-httplib2>=0.1.1
+google-auth-oauthlib>=1.1.0
+pypdf>=5.0.0
+pdf2image>=1.16.0
+pytesseract>=0.3.10
+pillow>=10.0.0
+google-cloud-vision>=3.0.0
+
+# Asana + config helpers
+python-dotenv>=1.0.0
+asana>=5.0.0
+
+# Bitcoin on-chain payments
+bit>=0.8.0
+bip-utils>=2.8.0
+python-bitcoinlib>=0.12.0
+
+# LLM inference for conversation parsing
+openai>=1.0.0
+
+# MCP server client for parquet data access
+mcp>=0.9.0
+
+# File watching for automatic transcription
+watchdog>=3.0.0
+
+# Webhook server
+flask>=3.0.0
+
+# Twilio API for SMS debugging
+twilio>=8.0.0
+
+# Audio processing for chunking large files
+pydub>=0.25.1
+
+# Meeting recording (record_meeting_audio.py)
+numpy>=1.24.0
+sounddevice>=0.4.6
+
+# Google Analytics Data API (ga_last_7_days_report.py)
+google-analytics-data>=0.20.0
+
+
+
+
+

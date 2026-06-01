@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.homeassistant.server</string>
+    
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/markmhendrickson/Projects/personal/execution/homeassistant-venv/bin/hass</string>
+    </array>
+    
+    <key>WorkingDirectory</key>
+    <string>/Users/markmhendrickson/Projects/personal</string>
+    
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    
+    <key>StandardOutPath</key>
+    <string>/Users/markmhendrickson/Projects/personal/data/logs/homeassistant.log</string>
+    
+    <key>StandardErrorPath</key>
+    <string>/Users/markmhendrickson/Projects/personal/data/logs/homeassistant.error.log</string>
+    
+    
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+    </dict>
+</dict>
+</plist>

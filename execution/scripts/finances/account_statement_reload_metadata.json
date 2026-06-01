@@ -1,0 +1,53 @@
+{
+  "amex_hysa_combined_2025-12": {
+    "statement_as_of_date": "2025-12-31",
+    "statement_period_start": "2025-12-03",
+    "statement_period_end": "2026-01-02",
+    "statement_source_kind": "amex_hysa_combined_pdf",
+    "tax_year_context": 2025
+  },
+  "schwab_individual_brokerage_2025-12-31": {
+    "statement_as_of_date": "2025-12-31",
+    "statement_period_end": "2025-12-31",
+    "statement_source_kind": "schwab_brokerage_statement_pdf",
+    "account_registry_id": "schwab_individual_brokerage",
+    "tax_year_context": 2025
+  },
+  "schwab_roth_ira_2025-12-31": {
+    "statement_as_of_date": "2025-12-31",
+    "statement_period_end": "2025-12-31",
+    "statement_source_kind": "schwab_brokerage_statement_pdf",
+    "account_registry_id": "schwab_roth_ira",
+    "tax_year_context": 2025
+  },
+  "schwab_sep_ira_2025-12-31": {
+    "statement_as_of_date": "2025-12-31",
+    "statement_period_end": "2025-12-31",
+    "statement_source_kind": "schwab_brokerage_statement_pdf",
+    "account_registry_id": "schwab_sep_ira",
+    "tax_year_context": 2025
+  },
+  "schwab_investor_checking_2025-12-31": {
+    "statement_as_of_date": "2025-12-31",
+    "statement_period_end": "2025-12-31",
+    "statement_source_kind": "schwab_bank_statement_pdf",
+    "account_registry_id": "schwab_investor_checking",
+    "tax_year_context": 2025
+  },
+  "capital_one_venture_2025-12-to-2026-01": {
+    "statement_as_of_date": "2025-12-31",
+    "statement_period_start": "2025-12-15",
+    "statement_period_end": "2026-01-14",
+    "statement_source_kind": "capital_one_credit_card_statement_pdf",
+    "account_registry_id": "capital_one_card",
+    "tax_year_context": 2025
+  },
+  "fidelity_lyft_2025-q4": {
+    "statement_as_of_date": "2025-12-31",
+    "statement_period_start": "2025-10-01",
+    "statement_period_end": "2025-12-31",
+    "statement_source_kind": "fidelity_investment_report_pdf",
+    "account_registry_id": "fidelity_lyft_shares",
+    "tax_year_context": 2025
+  }
+}

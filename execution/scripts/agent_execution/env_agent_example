@@ -1,0 +1,19 @@
+# Copy this file to .env.agent and fill values.
+# Do not commit .env.agent with secrets.
+
+# Core command (single long-running runtime)
+OPENCLAW_AGENT_CORE_CMD="cd /Users/markmhendrickson/repos/openclaw && OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:latest docker compose up openclaw-gateway"
+
+# Optional worker command (leave unset unless you have a separate worker service)
+# OPENCLAW_AGENT_WORKERS_CMD=""
+
+# Health checks for smoke/preflight
+OPENCLAW_HEALTHCHECK_URL="http://127.0.0.1:18789/healthz"
+TRUTH_LAYER_HEALTHCHECK_URL="http://127.0.0.1:18789/readyz"
+
+# Optional failover hooks
+OPENCLAW_CLOUD_FAILOVER_HOOK="https://example.com/openclaw/failover"
+OPENCLAW_LOCAL_FAILBACK_HOOK="https://example.com/openclaw/failback"
+
+# Optional: POST JSON {"text":"...","source":"openclaw-watchdog"} on health failure (e.g. Slack incoming webhook)
+# OPENCLAW_WATCHDOG_WEBHOOK_URL="https://hooks.slack.com/services/..."

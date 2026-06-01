@@ -30,8 +30,8 @@ if [ ! -x "$VENV_PYTHON" ] || ! "$VENV_PYTHON" -c "import numpy" 2>/dev/null; th
   VENV_PYTHON="$ROOT_DIR/execution/venv/bin/python"
 fi
 if [ ! -x "$VENV_PYTHON" ] || ! "$VENV_PYTHON" -c "import numpy" 2>/dev/null; then
-  # Fall back to personal venv (has all audio recording deps)
-  VENV_PYTHON="$HOME/repos/personal/execution/venv/bin/python"
+  # Fall back to ateles execution venv (has all audio recording deps)
+  VENV_PYTHON="$HOME/repos/ateles/execution/venv/bin/python"
 fi
 if [ ! -x "$VENV_PYTHON" ] || ! "$VENV_PYTHON" -c "import numpy" 2>/dev/null; then
   VENV_PYTHON="$(command -v python3 || true)"

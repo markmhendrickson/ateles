@@ -1,0 +1,20 @@
+{
+  "schema": {
+    "feedback_id": "string",
+    "source_name": "string",
+    "source_type": "string",
+    "topic": "string",
+    "feedback_date": "date",
+    "summary": "string",
+    "key_themes": "string",
+    "implications": "string",
+    "full_content": "string",
+    "source_file_path": "string",
+    "created_date": "date",
+    "updated_date": "date",
+    "import_date": "date",
+    "import_source_file": "string"
+  },
+  "description": "Structured feedback records (e.g. Neotoma feedback from calls, messages). Source and topic identify context; summary, key_themes, and implications capture actionable content; full_content or source_file_path reference full text.",
+  "version": "1.0.0"
+}

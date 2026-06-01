@@ -1,0 +1,17 @@
+{
+  "name": "@ateles/formica-daemon",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Formica — Neotoma issue-processing daemon (Phase 4 nervous-system plan, ateles execution layer).",
+  "type": "module",
+  "scripts": {
+    "start": "node src/daemon.mjs",
+    "start:verbose": "DEBUG_FORMICA=1 node src/daemon.mjs",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "@cursor/sdk": "^1.0.12",
+    "eventsource": "^2.0.2",
+    "yaml": "^2.6.1"
+  }
+}
