@@ -489,6 +489,22 @@ Your job is to prepare a deep briefing for this upcoming meeting and send it via
 
 ## Your tasks (complete all, then send Telegram summary)
 
+0. **Neotoma event + contact enrichment** — before any web research, query Neotoma for
+   pre-existing context on this meeting and its participants:
+   a. Search for a matching `event` entity: call `mcp__mcpsrv_neotoma__retrieve_entities`
+      with `entity_type=event` and `search="{event_title} {event_date}"`. Also try
+      searching by each attendee's name. If found, read the full `description` field —
+      it may contain email-sourced context (agenda, docs shared, background, prior
+      commitments, source email ID) that is not present in the calendar entry.
+   b. For each attendee, call `mcp__mcpsrv_neotoma__retrieve_entity_by_identifier` with
+      their email address, then their name, to find existing `contact` entities. Pull
+      the full snapshot — role, company, notes, prior interactions, relationship status.
+   c. From any matched event entity, also call `mcp__mcpsrv_neotoma__retrieve_related_entities`
+      to surface linked contacts, tasks, or other entities attached to this meeting.
+   d. Incorporate all Neotoma-sourced context into the brief — treat it as higher-fidelity
+      than web search since it reflects prior direct interactions and email content.
+   e. If no Neotoma event entity is found, proceed with calendar description as-is.
+
 1. **Participant research** — for each attendee:
    a. Search Neotoma (mcp__mcpsrv_neotoma__retrieve_entity_by_identifier with their email,
       then name) for any existing person/company entities.
@@ -557,10 +573,18 @@ Your job is to prepare a deep briefing for this upcoming meeting and send it via
    with the full brief as the body field, linked REFERS_TO the meeting event.
 
 7. **Send Telegram** — send the complete brief to Telegram via:
-   node {PROJECT_ROOT}/execution/lib/telegram/send.mjs --text "<brief>" {telegram_thread_flag}
+   node {PROJECT_ROOT}/execution/lib/telegram/send.mjs --text "<brief>" --plain {telegram_thread_flag}
 
-Format the Telegram message as:
----
+   IMPORTANT — plain text only. Telegram renders the message as plain text (we pass --plain).
+   Do NOT use any Markdown syntax: no **bold**, no *italics*, no _underscores_, no `code`,
+   no # headings, and no --- horizontal rules. Write entity references like REFERS_TO and
+   CORRECTS literally (underscores are fine in plain text). Use the emoji section headers and
+   plain hyphen "- " bullets exactly as shown below. Anything you wrap in asterisks will show
+   the asterisks literally, so omit them entirely.
+
+Format the Telegram message as (plain text, emoji headers, hyphen bullets — no markdown).
+Do not include the surrounding lines below — they only delimit the template:
+===TEMPLATE START===
 📅 Cotinga deep prep: {event_title} ({event_time})
 
 👥 Participants
@@ -586,7 +610,7 @@ Format the Telegram message as:
 
 ✅ Pre-event tasks created
 [list task names and Neotoma IDs]
----
+===TEMPLATE END===
 
 Work through all steps, then stop.
 """
@@ -606,6 +630,57 @@ Work through all steps, then stop.
         log.info(f"Deep-prep agent spawned for {event_title!r} (background)")
     except Exception as exc:
         log.warning(f"Failed to spawn deep-prep agent for {event_title!r}: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Task digest: due and overdue tasks
+# ---------------------------------------------------------------------------
+
+
+def fetch_due_tasks() -> list[dict]:
+    """Fetch Neotoma tasks due today or overdue (due_date <= today, status not done/completed)."""
+    if not NEOTOMA_BEARER_TOKEN or not NEOTOMA_BASE_URL:
+        return []
+    today = date.today().isoformat()
+    path = (
+        f"/api/entities?entity_type=task"
+        f"&limit=50"
+        f"&include_snapshots=true"
+    )
+    data = _neotoma_get(path)
+    if not data:
+        return []
+    entities = data.get("entities") or []
+    due = []
+    for e in entities:
+        snap = (e.get("snapshot") or {}).get("snapshot") or e.get("snapshot") or {}
+        status = (snap.get("status") or "").lower()
+        if status in ("done", "completed", "cancelled", "canceled"):
+            continue
+        due_date = snap.get("due_date") or ""
+        if due_date and due_date <= today:
+            due.append({
+                "title": snap.get("title") or snap.get("name") or "(untitled)",
+                "due_date": due_date,
+                "status": snap.get("status") or "pending",
+                "priority": snap.get("priority") or "",
+                "overdue": due_date < today,
+            })
+    due.sort(key=lambda t: t["due_date"])
+    log.info(f"Task digest: {len(due)} due/overdue task(s)")
+    return due
+
+
+def build_task_digest(tasks: list[dict]) -> str:
+    """Format due/overdue tasks as a Telegram section."""
+    if not tasks:
+        return ""
+    lines = ["📋 Tasks due today / overdue", ""]
+    for t in tasks:
+        prefix = "🔴" if t["overdue"] else "🟡"
+        date_label = f"(due {t['due_date']})" if t["overdue"] else "(due today)"
+        lines.append(f"{prefix} {t['title']} {date_label}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -680,6 +755,14 @@ def build_shallow_briefing(
     return "\n".join(lines)
 
 
+def append_task_digest(briefing: str, tasks: list[dict]) -> str:
+    """Append task digest section to an existing briefing string."""
+    digest = build_task_digest(tasks)
+    if not digest:
+        return briefing
+    return briefing.rstrip() + "\n\n" + digest
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -710,9 +793,13 @@ def _main() -> None:
     # Fetch upcoming events
     events = fetch_upcoming_events()
 
+    # Fetch due/overdue tasks (runs in parallel with event prep)
+    due_tasks = fetch_due_tasks()
+
     if not events:
         log.info("No upcoming events — sending clear-schedule notice.")
-        telegram_send(f"☀️ Cotinga — {today_str}\nNo events in the next 48 hours. Clear schedule.")
+        base = f"☀️ Cotinga — {today_str}\nNo events in the next 48 hours. Clear schedule."
+        telegram_send(append_task_digest(base, due_tasks))
         return
 
     # Phase 1: fast attendee lookup in Neotoma
@@ -732,6 +819,7 @@ def _main() -> None:
 
     # Send Phase 1 shallow briefing immediately
     briefing = build_shallow_briefing(events, attendee_lookup, today_str)
+    briefing = append_task_digest(briefing, due_tasks)
     log.info("Sending Phase 1 shallow briefing via Telegram...")
     telegram_send(briefing)
 
