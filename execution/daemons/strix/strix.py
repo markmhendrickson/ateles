@@ -73,12 +73,25 @@ def _ah_pid() -> int | None:
 
 
 def _ensure_ah_running() -> int | None:
-    """Launch Audio Hijack if not running. Returns PID or None on failure."""
+    """Launch Audio Hijack in the background if not running. Returns PID or None."""
     pid = _ah_pid()
     if pid:
         return pid
-    ws = NSWorkspace.sharedWorkspace()
-    ws.launchApplication_("Audio Hijack")
+    # Launch without activating (no window flash, stays in background).
+    ah_url = NSWorkspace.sharedWorkspace().URLForApplicationWithBundleIdentifier_(
+        AH_BUNDLE_ID
+    )
+    if ah_url:
+        from AppKit import NSWorkspaceLaunchWithoutActivation, NSWorkspaceLaunchAsync
+        NSWorkspace.sharedWorkspace().launchApplicationAtURL_options_configuration_error_(
+            ah_url,
+            NSWorkspaceLaunchWithoutActivation | NSWorkspaceLaunchAsync,
+            {},
+            None,
+        )
+    else:
+        # Fallback: `open -j` launches in background without activating
+        subprocess.Popen(["open", "-j", "-a", "Audio Hijack"])
     for _ in range(20):
         time.sleep(0.5)
         pid = _ah_pid()
