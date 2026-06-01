@@ -55,6 +55,10 @@ execution/daemons/monedula/handlers/yoga.py
 # mic-recorder directory (superseded by strix daemon)
 execution/daemons/mic-recorder/
 
+# launchd plists contain operator-absolute home paths (e.g. /Users/<name>/...).
+# All daemon plists are local-only; never commit them.
+execution/daemons/*/*.plist
+
 # Daemon runtime state
 execution/daemons/**/.monedula_last_run
 execution/daemons/**/.monedula_tg_offset

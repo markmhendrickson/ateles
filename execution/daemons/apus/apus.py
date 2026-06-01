@@ -100,9 +100,7 @@ ATELES_PRIVATE_REPO = Path(
 
 # Git commit identity
 GIT_AUTHOR_NAME = os.environ.get("ATELES_AGENT_GIT_NAME", "ateles-agent")
-GIT_AUTHOR_EMAIL = os.environ.get(
-    "ATELES_AGENT_GIT_EMAIL", "ateles-agent@markmhendrickson.com"
-)
+GIT_AUTHOR_EMAIL = os.environ.get("ATELES_AGENT_GIT_EMAIL", "")
 
 
 # ── Mirror profile registry ───────────────────────────────────────────────────
@@ -423,9 +421,7 @@ def _log_delivery_to_neotoma(
     """
     import httpx
 
-    neotoma_url = os.environ.get(
-        "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
-    )
+    neotoma_url = os.environ.get("NEOTOMA_BASE_URL", "")
     bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     if not bearer:
         return
