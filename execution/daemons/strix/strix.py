@@ -50,8 +50,9 @@ TOOLTIP_RECORDING = "Strix: recording active — click to stop"
 TOOLTIP_IDLE = "Strix: idle — click to start recording"
 
 # Minimum recording duration (seconds) before a "stopped" notification is sent.
-# Prevents phantom Telegram messages when strix restarts with a stale state.
-_MIN_NOTIFY_DURATION = 30
+# Set to 0 to always notify. Kept nonzero only to suppress phantom messages when
+# launchd restarts strix and finds AH already running from before the crash.
+_MIN_NOTIFY_DURATION = 0
 
 # ---------------------------------------------------------------------------
 # Audio Hijack control via Accessibility API
