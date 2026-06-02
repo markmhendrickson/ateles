@@ -57,6 +57,7 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 | **Anthus** | *Anthus* (pipit) | Python | Swarm coordinator — global view of work-in-flight; surfaces conflicts to Onychomys | planned (Phase 2 skeleton, Phase 6 full) |
 | **Tyto** | *Tyto* (barn owl) | Python | Screenshot watcher; visual counterpart to Strix | planned (Phase 2 skeleton) |
 | **Turdus** | *Turdus* (thrush) | Python | Email triage daemon; hourly Gmail poll → tasks for Apis | active (Phase 2 skeleton) |
+| **Gorilla** | *Gorilla* (gorilla) | Python | Health & fitness daemon; proactive weekly training summaries + inactivity nudges from `workout_session` data (companion to the invocable Gorilla agent) | active (skeleton) |
 
 ---
 
@@ -79,7 +80,7 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 | **Procyon** | *Procyon* (raccoon) | PR hygiene — stale branches, dependency drift, lint debt | planned |
 | **Lutra** | *Lutra* (otter) | Claims, disputes, and external order tracking (Minted, etc.) | planned |
 | **Lupinus** | *Lupinus* (lupine) | Tax + regulatory filings; Finance Google Sheet reconciliation | planned |
-| **Salvia** | *Salvia* (sage) | Health-data agent — workout scraping, meal logs, biomarkers | planned |
+| **Gorilla** | *Gorilla* (gorilla) | Health & fitness agent — logs gym workouts, analyzes training progression, consults on health & fitness grounded in `workout_session` data (supersedes the planned *Salvia* health-data slot) | active (skill) |
 | **Cathartes** | *Cathartes* (turkey vulture) | Meta-agent — writes new `agent_definition` entities in Neotoma from operator description | planned (Phase 9) |
 
 ---
@@ -124,7 +125,7 @@ All persistent agents and daemons are named after bird (or plant) genera. Names 
 - Distinctiveness within the swarm
 - Public shareability (no private associations)
 
-Plant genera (Lupinus, Salvia) are used for domain agents where no suitable bird fits. T4 invocable agents may also remain as unnamed skill invocations if reuse frequency doesn't warrant a stable identity.
+Plant genera (Lupinus) are used for domain agents where no suitable bird fits. **Mammal genera** are a sanctioned exception when a strong mnemonic warrants it: *Gorilla* (health & fitness — raw-strength mnemonic) is the first, superseding the previously-planned *Salvia* health-data slot. T4 invocable agents may also remain as unnamed skill invocations if reuse frequency doesn't warrant a stable identity.
 
 ---
 

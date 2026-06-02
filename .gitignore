@@ -10,6 +10,12 @@ execution/.env.backups/
 credentials.json
 *.pem
 *.key
+
+# launchd plists contain operator-absolute home paths (e.g. /Users/<name>/...).
+# New daemons keep them local-only; existing tracked plists on main are
+# grandfathered and not retroactively scrubbed by this rule.
+execution/daemons/gorilla/com.ateles.gorilla.plist
+
 __pycache__/
 *.pyc
 *.pyo
