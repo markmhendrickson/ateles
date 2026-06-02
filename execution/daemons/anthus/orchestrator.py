@@ -31,9 +31,7 @@ import httpx
 
 log = logging.getLogger("anthus.orchestrator")
 
-NEOTOMA_BASE_URL = os.environ.get(
-    "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
-).rstrip("/")
+NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
 _BEARER_ENV = "NEOTOMA_BEARER_TOKEN"  # gitleaks:allow — env var name, not a secret
 NEOTOMA_BEARER = os.environ.get(_BEARER_ENV, "")  # gitleaks:allow
 

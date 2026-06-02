@@ -86,9 +86,7 @@ TELEGRAM_TOPIC_MONEDULA = os.environ.get(
     "TELEGRAM_TOPIC_MONEDULA", ""
 ) or os.environ.get("TELEGRAM_TOPIC_PAYMENTS", "")
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
-NEOTOMA_BASE_URL = os.environ.get(
-    "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
-)
+NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "")
 
 # ---------------------------------------------------------------------------
 # Logging

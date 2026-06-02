@@ -21,9 +21,7 @@ import httpx
 log = logging.getLogger("anthus.participation")
 
 _BEARER_ENV = "NEOTOMA_BEARER_TOKEN"  # gitleaks:allow
-NEOTOMA_BASE_URL = os.environ.get(
-    "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
-).rstrip("/")
+NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
 
 
 def _bearer() -> str | None:

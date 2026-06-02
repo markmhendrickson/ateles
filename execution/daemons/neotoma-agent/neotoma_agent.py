@@ -74,9 +74,7 @@ log = logging.getLogger("neotoma-agent")
 DAEMON_NAME = "neotoma-agent"
 SUBSCRIBE_ENTITY_TYPES = ["issue", "pull_request", "task"]
 
-NEOTOMA_BASE_URL = os.environ.get(
-    "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
-).rstrip("/")
+NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 
 # Neotoma repo slug for GitHub automation (Phase 5)

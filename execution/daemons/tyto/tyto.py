@@ -98,9 +98,7 @@ log = logging.getLogger("tyto")
 # ── Config ────────────────────────────────────────────────────────────────────
 DAEMON_NAME = "tyto"
 
-NEOTOMA_BASE_URL = os.environ.get(
-    "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
-)
+NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "")
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 
 SCREENSHOTS_DIR = Path(
