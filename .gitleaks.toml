@@ -4,6 +4,12 @@ title = "Personal Repository Secrets Detection"
 useDefault = true
 
 [[rules]]
+id = "telegram-bot-token"
+description = "Telegram Bot API token"
+regex = '''\b\d{8,10}:[A-Za-z0-9_-]{35}\b'''
+tags = ["telegram", "token"]
+
+[[rules]]
 id = "env-files"
 description = "Detect .env files"
 regex = '''\.env'''
@@ -11,8 +17,8 @@ path = '''\.env.*'''
 
 [[rules]]
 id = "protected-patterns"
-description = "Detect secrets, credentials patterns"
-regex = '''(?i)(secret|credential|password|api[_-]?key|private[_-]?key|access[_-]?token|bearer[_-]?token)'''
+description = "Detect hardcoded credentials assigned to variables"
+regex = '''(?i)(secret|credential|password|api[_-]?key|private[_-]?key|access[_-]?token|bearer[_-]?token)\s*[:=]\s*['"][^'"]{8,}['"]'''
 tags = ["secret", "credential"]
 
 [[rules]]
