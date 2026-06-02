@@ -95,9 +95,7 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
     import urllib.request
 
     bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "").strip()
-    base_url = os.environ.get(
-        "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
-    ).rstrip("/")
+    base_url = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
 
     if not bearer:
         log.debug("NEOTOMA_BEARER_TOKEN not set — skipping Neotoma profile load")
