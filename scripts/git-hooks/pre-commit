@@ -1,0 +1,31 @@
+#!/bin/bash
+# Pre-commit hook: scan staged changes for secrets using gitleaks.
+# Blocks the commit if any secrets are detected.
+# Requires: gitleaks (brew install gitleaks)
+
+set -e
+
+# Guard: skip in worktrees (no .git directory at repo root)
+if [ ! -d ".git" ]; then
+    exit 0
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+if ! command -v gitleaks &>/dev/null; then
+    echo "⚠️  gitleaks not found — skipping secret scan (run: brew install gitleaks)"
+    exit 0
+fi
+
+GITLEAKS_CONFIG=""
+if [ -f "$REPO_ROOT/.gitleaks.toml" ]; then
+    GITLEAKS_CONFIG="--config $REPO_ROOT/.gitleaks.toml"
+fi
+
+if ! gitleaks protect --staged --no-banner $GITLEAKS_CONFIG 2>/dev/null; then
+    echo ""
+    echo "❌ gitleaks detected secrets in staged files. Commit blocked."
+    echo "   Review the findings above, remove secrets, and re-stage."
+    echo "   To inspect: gitleaks protect --staged --verbose"
+    exit 1
+fi
