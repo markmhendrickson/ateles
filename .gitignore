@@ -1,4 +1,5 @@
 # Sensitive credentials and configuration
+.mcp.json
 .env
 .env.local
 .env.*.local
