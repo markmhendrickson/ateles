@@ -7,7 +7,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/markmhendrickson/repos/ateles/execution/venv/bin/python</string>
+        <string>/Users/markmhendrickson/repos/ateles/.venv/bin/python3</string>
         <string>/Users/markmhendrickson/repos/ateles/execution/daemons/neotoma-agent/neotoma_agent.py</string>
     </array>
 
@@ -20,16 +20,18 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/tmp/com.ateles.neotoma-agent.log</string>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/neotoma-agent.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/com.ateles.neotoma-agent.err</string>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/neotoma-agent.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
         <string>/Users/markmhendrickson</string>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+        <string>/Users/markmhendrickson/.local/bin:/Users/markmhendrickson/.nvm/versions/node/v20.20.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>NEOTOMA_BASE_URL</key>
+        <string>http://localhost:3180</string>
     </dict>
 </dict>
 </plist>

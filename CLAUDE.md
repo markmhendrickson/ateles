@@ -20,6 +20,54 @@ For full step-by-step guidance: `/update-plan` and `/update-tasks` skills.
 
 ---
 
+## Agent routing (automatic)
+
+Before tasking any work to an agent, always look up the right agent for the domain:
+
+1. **Retrieve all `agent_definition` entities** via `mcp__mcpsrv_neotoma__retrieve_entities` with `entity_type: agent_definition`.
+2. **Match by `description` field** — descriptions are the authoritative statement of each agent's domain and job scope.
+3. **Prefer the most specific match** — if one agent explicitly owns the domain (e.g. "owns platform-adapted social content"), that agent wins over a general-purpose one.
+4. **Never assume from name alone** — agent names are bird genera; the description is ground truth.
+5. **If no agent matches** — flag the gap, propose adding the domain to an existing agent's definition or creating a new one, and create the task anyway with `assigned_to` noting the gap.
+
+**Quick reference — current agent roster** (descriptions abbreviated; always verify against live Neotoma snapshot):
+
+| Agent | Tier | Domain |
+|---|---|---|
+| Apis | T3 daemon | Task dispatch / routing |
+| Turdus | T3 daemon | Email triage |
+| Anthus | T3 daemon | Swarm coordination |
+| Tyto | T3 daemon | Screenshot watch |
+| Apus | T3 daemon | Neotoma → git mirror |
+| Cotinga | T3 daemon | Daily calendar briefing |
+| Monedula | T3 daemon | Payment execution |
+| Sylvia | T3 daemon | Recurring task lifecycle |
+| Formica | T3 daemon | GitHub issue/PR automation (ateles) |
+| Neotoma-agent | T3 daemon | GitHub issue/PR automation (neotoma) |
+| Gryllus | T4 worker | GitHub issue implementation + PRs |
+| Vanellus | T4 worker | PR review + merge |
+| Lanius | T4 worker | GitHub workflow gating |
+| Struthio | T4 worker | Release execution |
+| Luscinia | T4 worker | Session compliance audit |
+| Bombycilla | T4 worker | Technical architecture + schema design |
+| Phoenicurus | T4 worker | QA + test coverage |
+| Regulus | T4 worker | Developer relations + docs |
+| Accipiter | T4 worker | UX + product design |
+| Buteo | T4 worker | Legal + compliance |
+| Pavo | T4 worker | Product management |
+| Corvus | T4 worker | **Social content + long-form writing** |
+| Paradisaea | T4 worker | Copy + positioning |
+| Ciconia | T4 worker | Marketing + GTM strategy |
+| Aythya | T4 worker | Visual + brand design |
+| Hirundo | T4 worker | Customer intelligence |
+| Fringilla | T4 worker | Financial analysis + quarterly review |
+| Columba | T4 worker | Constitution / policy authority |
+| Pavo | T4 worker | Product management |
+| Menura | T2 public | Public-facing site agent (read-only) |
+| Onychomys | T2 operator | Primary operator interface (OpenClaw) |
+
+---
+
 ## Standing constraints
 
 - **Never hardcode secrets, IBANs, or contact details** — always read from env or parquet.
@@ -45,9 +93,32 @@ For full step-by-step guidance: `/update-plan` and `/update-tasks` skills.
 | agent_definition: Turdus | `ent_138a463654de2b1d46cec0db` |
 | agent_definition: Anthus | `ent_887e8fd74d79eb63344df63e` |
 | agent_definition: Tyto | `ent_affecbbecf52edb633c534f8` |
+| agent_definition: Apus | `ent_692e8533840be7195240a1e4` |
+| agent_definition: Cotinga | `ent_6c85e2a550580c88024da8f4` |
+| agent_definition: Monedula | `ent_26e45f38f53798eb42961a69` |
+| agent_definition: Sylvia (fka Strix) | `ent_1faed5788fcc0e5200bb0120` |
+| agent_definition: Fringilla | `ent_a6e9d4d4d684a7f3603b1fe3` |
+| agent_definition: Formica | `ent_d62f1df8784b7f4fcadc7d74` |
+| agent_definition: Neotoma-agent | `ent_c5c8d28bd420ca094f9d5a48` |
 | agent_definition: Gryllus | `ent_900b8c9589145fde47787fe5` |
 | agent_definition: Vanellus | `ent_fedc0fbabef6ef203f8029c9` |
-| agent_definition: Formica | `ent_d62f1df8784b7f4fcadc7d74` |
+| agent_definition: Lanius | `ent_f9c2c573e7fba5bc8c3e58c3` |
+| agent_definition: Struthio | `ent_7df43f2bd35df575abfaa920` |
+| agent_definition: Luscinia | `ent_56c7f1f528c2d34a47862362` |
+| agent_definition: Bombycilla | `ent_3425a79b4c39f08cdb0c62f8` |
+| agent_definition: Phoenicurus | `ent_42843b65dd18fc39294e94a1` |
+| agent_definition: Regulus | `ent_46f3385204e51cd91efd1ab3` |
+| agent_definition: Accipiter | `ent_7079893d01e208cde15a4f52` |
+| agent_definition: Buteo | `ent_6f90952eaf5d1eed51b9621c` |
+| agent_definition: Pavo | `ent_bf712273fe3ea48a505c6e81` |
+| agent_definition: Corvus | `ent_b95bf915804ac40bba674529` |
+| agent_definition: Paradisaea | `ent_c842afe3e816aa2d762a6221` |
+| agent_definition: Ciconia | `ent_f2f10ae2c6e4869327831d78` |
+| agent_definition: Aythya | `ent_fe71134e46209c21cf413b9b` |
+| agent_definition: Hirundo | `ent_ba1ea2886064d5365c1bc7bb` |
+| agent_definition: Columba | `ent_949454e143e72df5bf833dfd` |
+| agent_definition: Menura | `ent_78fa62a9d99fac9ba11fc687` |
+| agent_definition: Onychomys | `ent_706f1432822b4a9d9d71c127` |
 | Neotoma schema: payment_profile | `8f10fe72-2924-422c-b2ee-d537d9952576` |
 | Neotoma schema: escalation | `c005dcb3-d9fb-4791-a154-fdb09ab9da12` |
 | Neotoma schema: daemon_report | `a9ea8131-502f-44e7-87a6-8149bab7d55c` |

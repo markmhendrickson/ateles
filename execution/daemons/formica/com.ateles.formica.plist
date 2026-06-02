@@ -16,18 +16,22 @@
 
     <key>EnvironmentVariables</key>
     <dict>
+        <key>HOME</key>
+        <string>/Users/markmhendrickson</string>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>/Users/markmhendrickson/.local/bin:/Users/markmhendrickson/.nvm/versions/node/v20.20.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>NEOTOMA_BASE_URL</key>
+        <string>http://localhost:3180</string>
     </dict>
 
     <key>KeepAlive</key>
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/tmp/com.ateles.formica.out.log</string>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/formica.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/tmp/com.ateles.formica.err.log</string>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/formica.log</string>
 
     <key>RunAtLoad</key>
     <true/>

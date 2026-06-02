@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.ateles.apis</string>
+    <string>com.ateles.piculet</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/Users/markmhendrickson/repos/ateles/.venv/bin/python3</string>
-        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/apis/apis.py</string>
+        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/piculet/watch.py</string>
     </array>
 
     <key>WorkingDirectory</key>
@@ -16,10 +16,12 @@
 
     <key>EnvironmentVariables</key>
     <dict>
-        <key>HOME</key>
-        <string>/Users/markmhendrickson</string>
         <key>PATH</key>
         <string>/Users/markmhendrickson/.local/bin:/Users/markmhendrickson/.nvm/versions/node/v20.20.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/markmhendrickson</string>
+        <key>NEOTOMA_PROJECT_ROOT</key>
+        <string>/Users/markmhendrickson/repos/neotoma</string>
         <key>NEOTOMA_BASE_URL</key>
         <string>http://localhost:3180</string>
     </dict>
@@ -27,13 +29,13 @@
     <key>KeepAlive</key>
     <true/>
 
-    <key>StandardOutPath</key>
-    <string>/Users/markmhendrickson/Library/Logs/ateles/apis.log</string>
-
-    <key>StandardErrorPath</key>
-    <string>/Users/markmhendrickson/Library/Logs/ateles/apis.log</string>
-
     <key>RunAtLoad</key>
     <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/piculet.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/piculet.log</string>
 </dict>
 </plist>

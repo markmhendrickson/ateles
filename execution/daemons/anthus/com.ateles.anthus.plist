@@ -18,9 +18,11 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/Users/markmhendrickson/.nvm/versions/node/v22.15.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>/Users/markmhendrickson/.local/bin:/Users/markmhendrickson/.nvm/versions/node/v20.20.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/markmhendrickson</string>
         <key>NEOTOMA_BASE_URL</key>
-        <string>https://neotoma.markmhendrickson.com</string>
+        <string>http://localhost:3180</string>
         <key>NEOTOMA_BEARER_TOKEN</key>
         <string>__NEOTOMA_BEARER_TOKEN__</string>
         <key>NEOTOMA_SSE_SUBSCRIPTION_ID_ANTHUS</key>
@@ -34,10 +36,10 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/tmp/com.ateles.anthus.out.log</string>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/anthus.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/tmp/com.ateles.anthus.err.log</string>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/anthus.log</string>
 
     <key>ThrottleInterval</key>
     <integer>10</integer>

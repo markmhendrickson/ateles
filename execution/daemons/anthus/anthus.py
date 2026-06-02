@@ -36,6 +36,26 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+# ── Env bootstrap ───────────────────────────────────────────────────────────
+# launchd does not source ~/.config/neotoma/.env. Load it BEFORE importing
+# daemon_runtime, whose modules read NEOTOMA_BEARER_TOKEN /
+# NEOTOMA_SSE_SUBSCRIPTION_ID_* into globals at import time. Use os.environ[]
+# (override) so a stale plist placeholder like __NEOTOMA_BEARER_TOKEN__ is
+# replaced by the real value from .env.
+import os  # noqa: E402
+
+_NEOTOMA_ENV_FILE = Path.home() / ".config" / "neotoma" / ".env"
+if _NEOTOMA_ENV_FILE.exists():
+    for _line in _NEOTOMA_ENV_FILE.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            _v = _v.strip().strip('"').strip("'")
+            # Override plist placeholders (values wrapped in __...__) and empties.
+            _existing = os.environ.get(_k.strip(), "")
+            if not _existing or (_existing.startswith("__") and _existing.endswith("__")):
+                os.environ[_k.strip()] = _v
+
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
     AgentLoader,
@@ -43,6 +63,10 @@ from lib.daemon_runtime import (  # noqa: E402
     SSEClient,
 )
 from lib.notify import Notifier, Priority  # noqa: E402
+from lib.activity import ActivityLogger  # noqa: E402
+
+# ── Activity logger (CyphorhinusBot observation channel) ────────────────────
+_activity = ActivityLogger(agent="anthus")
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -184,6 +208,9 @@ async def _orchestrate_workflow_for(event) -> None:
             f"[{DAEMON_NAME}] dispatch gate {gate.gate_name} → {gate.owner_agent} "
             f"on {event.entity_id}"
         )
+        job = _activity.started(
+            f"dispatching gate {gate.gate_name} → {gate.owner_agent} on {event.entity_id}"
+        )
         state[gate.gate_name].status = "dispatched"
         # Pin the exact agent_definition version at dispatch time (ateles#22).
         gate_agent_def = AgentLoader(gate.owner_agent).load()
@@ -200,12 +227,19 @@ async def _orchestrate_workflow_for(event) -> None:
         # content. Code-writing agents need `--dangerously-skip-permissions`
         # to avoid interactive prompts under launchd (per Tier 1 smoke test
         # findings, 2026-05-25).
-        await _spawn_agent(
-            owner_agent=gate.owner_agent,
-            work_entity_id=event.entity_id,
-            gate_name=gate.gate_name,
-            snapshot=snap,
-        )
+        try:
+            await _spawn_agent(
+                owner_agent=gate.owner_agent,
+                work_entity_id=event.entity_id,
+                gate_name=gate.gate_name,
+                snapshot=snap,
+            )
+            job.finished(
+                f"spawned {gate.owner_agent} for {gate.gate_name} on {event.entity_id}"
+            )
+        except Exception as exc:
+            job.failed(f"spawn failed: {exc}")
+            raise
         _notifier.send(
             f"Gate dispatched: {gate.gate_name} ({gate.owner_agent}) on {event.entity_id}",
             priority=Priority.INFO,
@@ -378,7 +412,36 @@ async def _handle_escalation(event: NeotomaEvent) -> None:
     severity = event.snapshot.get("severity", "unknown")
     summary = event.snapshot.get("summary", event.entity_id)
     blocking = event.snapshot.get("blocking", False)
+    escalation_type = event.snapshot.get("type", "")
 
+    # ── MCP provisioning request ───────────────────────────────────────────────
+    # An agent filed an escalation(type=mcp_not_available) because it needs an
+    # MCP that is not yet installed. Surface this as a structured operator prompt
+    # with approve/reject context. The operator runs provision_mcp.sh manually
+    # (or via Onychomys) after approving.
+    if escalation_type == "mcp_not_available":
+        mcp_id = event.snapshot.get("mcp_id", "unknown")
+        mcp_package = event.snapshot.get("mcp_package", "")
+        requesting_agent = event.snapshot.get("requesting_agent", "unknown")
+        reason = event.snapshot.get("reason", summary)
+        pkg_hint = f" ({mcp_package})" if mcp_package else ""
+        log.info(
+            f"[{DAEMON_NAME}] mcp_not_available escalation {event.entity_id}: "
+            f"mcp={mcp_id} agent={requesting_agent}"
+        )
+        _notifier.send(
+            f"MCP needed: {mcp_id}{pkg_hint}\n"
+            f"Requested by: {requesting_agent}\n"
+            f"Reason: {reason}\n"
+            f"→ To approve: run provision_mcp.sh {mcp_id}\n"
+            f"  (execution/scripts/provision_mcp.sh)\n"
+            f"Escalation entity: {event.entity_id}",
+            priority=Priority.OPERATOR_DECISION,
+            handler=DAEMON_NAME,
+        )
+        return
+
+    # ── Default escalation handling ────────────────────────────────────────────
     priority = Priority.BLOCKER if blocking else Priority.OPERATOR_DECISION
     log.info(
         f"[{DAEMON_NAME}] escalation {event.entity_id}: severity={severity} "

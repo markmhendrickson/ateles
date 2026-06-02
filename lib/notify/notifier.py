@@ -85,7 +85,7 @@ class Notifier:
         self._bot_token = telegram_bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
         self._chat_id = telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
         self._topic_id = telegram_topic_id or os.environ.get(
-            "TELEGRAM_TOPIC_MONEDULA", ""
+            "TELEGRAM_TOPIC_DAEMON", ""
         )
         self._digest_queue: list[str] = []
         self._apprise: Any = None
@@ -103,10 +103,29 @@ class Notifier:
     # ── Factory ──────────────────────────────────────────────────────────────
 
     @classmethod
-    def from_neotoma(cls) -> Notifier:
-        """Load priority_rubric from Neotoma and construct Notifier."""
+    def from_neotoma(
+        cls,
+        *,
+        telegram_topic_env: str | None = None,
+        telegram_topic_id: str | None = None,
+    ) -> "Notifier":
+        """
+        Load priority_rubric from Neotoma and construct Notifier.
+
+        Args:
+            telegram_topic_env: Name of the env var holding the topic ID for
+                this daemon (e.g. "TELEGRAM_TOPIC_TYTO"). Takes precedence over
+                the generic TELEGRAM_TOPIC_DAEMON fallback.
+            telegram_topic_id: Explicit topic ID string. Takes precedence over
+                telegram_topic_env.
+        """
         rubric = _load_rubric_from_neotoma()
-        return cls(rubric=rubric)
+        resolved_topic = (
+            telegram_topic_id
+            or (os.environ.get(telegram_topic_env, "") if telegram_topic_env else "")
+            or None
+        )
+        return cls(rubric=rubric, telegram_topic_id=resolved_topic)
 
     # ── Public API ────────────────────────────────────────────────────────────
 

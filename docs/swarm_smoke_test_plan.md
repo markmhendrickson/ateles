@@ -20,28 +20,67 @@ Each tier maps to a `workflow_definition` entity (existing or new) so Anthus can
 
 Dedicated to swarm smoke tests. Isolated from `harness-sandbox` (graveyard of closed issues) and the operator's real backlog. Easier to grep, replay, and reset.
 
+## Tier 0 — Daemon health checks (new)
+
+**Question:** Are all active T3 daemons reachable, processing events, and persisting entities correctly?
+
+**Mode:** operator-driven (manual trigger or dry-run invocation). Run before Tier 1.
+
+**Tests:** One test per active T3 daemon.
+
+| # | Daemon | How to trigger | Pass signal |
+|---|---|---|---|
+| D1 | **Turdus** | Send a test email to Gmail; wait ≤5 min | `email_message` entity visible in Neotoma inspector within 5 min |
+| D2 | **Sylvia** | Create a recurring task entity in Neotoma; mark done; wait one poll cycle | `task.due_date` rolled forward on next poll; GCal event updated |
+| D3 | **Cotinga** | `python cotinga.py --dry-run` (or trigger Phase 1 manually) | Telegram briefing received with today's events; Neotoma entities created for attendees |
+| D4 | **Tyto** | Drop a screenshot into `$TYTO_SCREENSHOTS_DIR` | `screenshot` entity appears in Neotoma within 10s |
+| D5 | **Apus** | POST a test mirror-profile webhook to `apus.markmhendrickson.com` | Git commit appears in target repo via `ateles-agent` identity (blocked until `ateles-agent` machine account exists) |
+| D6 | **Anthus** | Call `orchestrator.compute_ready_gates` directly on test workflow + synthetic issue dict | Ready gates returned without exception; no dispatch attempted (Phase 6 deferred) |
+| D7 | **Monedula** | Create a payment task entity manually in Neotoma | Telegram notification with payment details sent; no real transfer executed |
+| D8 | **Formica** | Open an issue in `markmhendrickson/ateles` | Neotoma `issue` entity created within 60s; task dispatched to Apis |
+| D9 | **Neotoma-agent** | Open an issue in `markmhendrickson/neotoma` | Neotoma `issue` entity created (daemon status=planned — may not pass yet; document result either way) |
+| D10 | **Apis** | Create a task entity with `auto_executable=true` in Neotoma | Task picked up and routed to correct T4 agent within one poll cycle |
+
+**Pass criteria for each daemon:**
+
+1. Daemon is running (visible in `launchctl list`)
+2. Expected Neotoma entity is created with correct entity_type and fields
+3. No error logged to Telegram system bus (CyphorhinusBot)
+
+**Blockers:**
+- D5 (Apus) blocked until `ateles-agent` GitHub machine account + PAT exist
+- D9 (Neotoma-agent) is in `planned` status — run as a negative/baseline test for now
+
+---
+
 ## Tier 1 — Single-agent gate satisfaction
 
 **Question:** Does each individual agent produce a recognisable artifact when invoked on a relevant work item?
 
 **Workflow:** `single_gate_smoke` (new — one phase, one gate)
 
-**Tests:** 12 issues, one per product-panel agent. Each tests only that agent's artifact-header convention.
+**Prerequisite:** Create `markmhendrickson/swarm-smoke` repo (`gh repo create markmhendrickson/swarm-smoke --public`).
 
-| # | Agent | Issue title | Expected artifact |
-|---|---|---|---|
-| T1.1 | Pavo | Decide: feature A vs feature B | `[pavo] acceptance_criteria:` |
-| T1.2 | Paradisaea | UX flow for subscribe form | `[paradisaea] copy_and_ux_flow:` |
-| T1.3 | Bombycilla | Schema proposal for X | `[bombycilla] schema_or_api_proposal:` |
-| T1.4 | Phoenicurus | Test plan for migration | `[phoenicurus] test_plan:` |
-| T1.5 | Buteo | Legal review of T&Cs change | `[buteo] compliance_review:` |
-| T1.6 | Luscinia | Compliance verdict on data flow | `[luscinia] compliance_verdict:` |
-| T1.7 | Struthio | Release notes for v0.1 | `[struthio] release_note:` |
-| T1.8 | Accipiter | Launch brief for X | `[accipiter] launch_brief:` |
-| T1.9 | Corvus | Social post draft | `[corvus] social_post_draft:` |
-| T1.10 | Regulus | Docs diff for new SDK | `[regulus] docs_diff_or_no_change_note:` |
-| T1.11 | Gryllus | Fix typo in README | `[gryllus] pull_request_link: #N` |
-| T1.12 | Vanellus | Review PR #N | `[vanellus] merge_decision:` |
+**Tests:** 14 issues, one per invocable T4 worker agent. Each tests only that agent's artifact-header convention.
+
+| # | Agent | Status | Issue title | Expected artifact |
+|---|---|---|---|---|
+| T1.1 | Pavo | planned | Decide: feature A vs feature B | `[pavo] acceptance_criteria:` |
+| T1.2 | Paradisaea | planned | UX flow for subscribe form | `[paradisaea] copy_and_ux_flow:` |
+| T1.3 | Bombycilla | planned | Schema proposal for X | `[bombycilla] schema_or_api_proposal:` |
+| T1.4 | Phoenicurus | planned | Test plan for migration | `[phoenicurus] test_plan:` |
+| T1.5 | Buteo | planned | Legal review of T&Cs change | `[buteo] compliance_review:` |
+| T1.6 | Luscinia | planned | Compliance verdict on data flow | `[luscinia] compliance_verdict:` |
+| T1.7 | Struthio | planned | Release notes for v0.1 | `[struthio] release_note:` |
+| T1.8 | Accipiter | planned | Launch brief for X | `[accipiter] launch_brief:` |
+| T1.9 | Corvus | planned | Social post draft for new feature | `[corvus] social_post_draft:` |
+| T1.10 | Regulus | planned | Docs diff for new SDK | `[regulus] docs_diff_or_no_change_note:` |
+| T1.11 | Gryllus | planned | Fix typo in README | `[gryllus] pull_request_link: #N` |
+| T1.12 | Vanellus | planned | Review PR #N | `[vanellus] merge_decision:` |
+| T1.13 | Hirundo | planned | ICP signal summary for Q2 | `[hirundo] icp_synthesis:` |
+| T1.14 | Gorilla | active | Log my workout: squat 5×5 120kg | `[gorilla] workout_logged:` |
+
+**Held (no artifact-header convention yet):** Columba, Ciconia, Aythya. Add to T1 after their SKILL.md artifact headers are defined.
 
 **Pass criteria:**
 
@@ -50,6 +89,25 @@ Dedicated to swarm smoke tests. Isolated from `harness-sandbox` (graveyard of cl
 3. No generic preamble unrelated to the issue
 
 **Mode:** operator-driven (`claude --print --skill <agent>`)
+
+## Tier 1b — Public agent checks (new)
+
+**Question:** Do the T2 public/resident agents respond correctly within their access scope?
+
+**Tests:** 2 checks (no swarm-smoke issues needed — these test live endpoints).
+
+| # | Agent | How to trigger | Expected |
+|---|---|---|---|
+| P1 | **Menura** | `GET markmhendrickson.com/agent/` with a `visibility=public` entity ID | Returns entity data; a `visibility=private` entity returns 403 or empty |
+| P2 | **Onychomys** | Send a Telegram message to OnychomysBot | Routes, responds coherently; does not surface private data in a public reply |
+
+**Pass criteria:**
+1. Menura only exposes `visibility=public` entities — no private data leak
+2. Onychomys responds within 30s
+
+**Blocker:** P1 requires Menura to be deployed (currently `planned`).
+
+---
 
 ## Tier 2 — Phase ordering and parallelism
 
@@ -141,11 +199,19 @@ Dedicated to swarm smoke tests. Isolated from `harness-sandbox` (graveyard of cl
 - agent_grant entities for Gryllus (`ent_8e3101e9c7895abe93735c22`), Vanellus (`ent_09762f11c9ba947edea5d901`)
 - `HARNESS_GRANTS_JSON` fallback removed (neotoma#934)
 
+### Tier 0 prerequisites
+
+- All active daemons installed as launchagents (`launchctl list | grep ateles`)
+- D5 (Apus) blocked until `ateles-agent` GitHub machine account exists
+- D9 (Neotoma-agent) run as baseline/negative until daemon reaches `active` status
+
 ### Tier 1 prerequisites
 
+- Tier 0 passes (daemons healthy)
 - Create `markmhendrickson/swarm-smoke` repo
 - Register `single_gate_smoke` workflow_definition entity
-- File 12 test issues with single-agent labels
+- File 14 test issues with single-agent labels (T1.1–T1.14)
+- Define artifact-header conventions for Columba, Ciconia, Aythya before adding T1.15–T1.17
 
 ### Tier 2 prerequisites
 
@@ -176,11 +242,15 @@ Dedicated to swarm smoke tests. Isolated from `harness-sandbox` (graveyard of cl
 
 | Phase | Run when | Gate to advance |
 |---|---|---|
-| Now | Operator-driven Tier 1 (T1.1–T1.12) | All 12 produce correct artifact headers with substantive content |
+| Now | Tier 0 — daemon health checks (D1–D10) | All active daemons pass; D5/D9 documented as blocked |
+| Now (parallel) | Operator-driven Tier 1 (T1.1–T1.12) | All 12 produce correct artifact headers with substantive content |
+| Now (parallel) | T1.13–T1.14 (Hirundo, Gorilla) | Both produce correct artifact headers |
 | +1 day | Operator-driven Tier 2 (T2.1–T2.3) | Phase ordering correct on synthetic issues |
 | +2 days | Operator-driven Tier 3 (T3.1–T3.3) | Identity boundary enforced |
 | +1 week | Operator-driven Tier 4 (T4.1–T4.3) | Operator-acceptable artifact quality |
 | +2 weeks | Anthus dispatch wiring + Tier 5 | Full autonomous loop |
+| After Menura deployed | Tier 1b — public agent checks (P1–P2) | No private data leak; Onychomys responds |
+| After Columba/Ciconia/Aythya SKILL.md written | T1.15–T1.17 | Artifact headers defined and passing |
 
 ## Critical findings from audit
 
@@ -188,3 +258,6 @@ Dedicated to swarm smoke tests. Isolated from `harness-sandbox` (graveyard of cl
 2. **Anthus doesn't dispatch — only notifies.** `anthus.py:194-202` explicitly defers real dispatch to Phase 6.
 3. **claude binary path** needs to be NVM-aware in launchagent.
 4. **AAuth keys for non-harness agents** not yet needed — only Gryllus/Vanellus call `github_harness`.
+5. **No daemon smoke tests existed (2026-05-27).** T3 daemons (Turdus, Sylvia, Cotinga, Tyto, Apus, Monedula, Formica, Neotoma-agent, Anthus, Apis) were all active/planned with no runbook for end-to-end health validation. Tier 0 added to address this.
+6. **Agent roster grew to 30 agents** but T1 only covered 12. Tier 1 expanded to 14 (Hirundo + Gorilla added); Columba, Ciconia, Aythya held pending artifact-header conventions.
+7. **T2 public agents (Menura, Onychomys) have no smoke tests.** Tier 1b added to cover the public access-control boundary once Menura is deployed.

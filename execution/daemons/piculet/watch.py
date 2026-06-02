@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cyphorhinus — Audio Import & Meeting Recording Daemon
+Piculet — Audio Import & Meeting Recording Daemon
 
 Watches two sources for new audio to process:
 
@@ -10,8 +10,8 @@ Watches two sources for new audio to process:
    produced by mic-recorder / meeting-recording-control.sh, then reports
    transcription and analysis progress via Telegram.
 
-Named after Cyphorhinus, a wren genus known for exceptionally complex song.
-Runs as a launchd agent — see com.markmhendrickson.cyphorhinus.plist.
+Named after Piculet, a small woodpecker genus known for its rapid drumming.
+Runs as a launchd agent — see com.ateles.piculet.plist.
 """
 
 import json
@@ -68,7 +68,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent.parent  # ateles repo root
 IMPORT_SCRIPT = PROJECT_ROOT / "execution" / "scripts" / "import_audio_from_desktop.py"
 
 LOG_DIR = Path.home() / "Library" / "Logs" / "ateles"
-LOG_FILE = LOG_DIR / "cyphorhinus.log"
+LOG_FILE = LOG_DIR / "piculet.log"
 
 # Local state files — track filenames already processed.
 STATE_FILE = Path(__file__).parent / "seen_files.json"
@@ -90,8 +90,7 @@ if _NEOTOMA_ENV_FILE.exists():
             os.environ[_k.strip()] = _v.strip().strip('"').strip("'")
 
 # 2. Refresh NEOTOMA_BEARER_TOKEN from 1Password (best-effort).
-#    This ensures the token is always current without needing `neotoma auth login`.
-#    Requires `op` CLI to be installed and an active 1Password session.
+#    Requires `op` CLI installed and an active 1Password session.
 _OP_REF = "op://Private/Neotoma local bearer token/bearer_token"
 try:
     _op_result = subprocess.run(
@@ -102,21 +101,58 @@ try:
         _token = _op_result.stdout.strip()
         if _token:
             os.environ["NEOTOMA_BEARER_TOKEN"] = _token
-            # Write back to .env so the neotoma CLI picks it up too
             if _NEOTOMA_ENV_FILE.exists():
-                _env_text = _NEOTOMA_ENV_FILE.read_text()
                 import re as _re
+                _env_text = _NEOTOMA_ENV_FILE.read_text()
                 _new_line = f'NEOTOMA_BEARER_TOKEN="{_token}"'
                 if "NEOTOMA_BEARER_TOKEN" in _env_text:
                     _env_text = _re.sub(
                         r'^NEOTOMA_BEARER_TOKEN=.*$', _new_line,
-                        _env_text, flags=_re.MULTILINE
+                        _env_text, flags=_re.MULTILINE,
                     )
                 else:
                     _env_text += f"\n{_new_line}\n"
                 _NEOTOMA_ENV_FILE.write_text(_env_text)
 except Exception:
     pass  # op not available or session expired — proceed with existing token
+
+# ---------------------------------------------------------------------------
+# lib/notify integration
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+try:
+    from lib.notify import Notifier  # noqa: E402
+
+    _lib_notifier: "Notifier | None" = Notifier.from_neotoma()
+except Exception:
+    _lib_notifier = None
+
+
+def _notify_lib(message: str, priority: str = "info") -> None:
+    """Forward a notification through lib/notify if available (best-effort)."""
+    if _lib_notifier is None:
+        return
+    try:
+        from lib.notify import Priority
+
+        p = getattr(Priority, priority.upper(), Priority.INFO)
+        _lib_notifier.send(message, priority=p, handler="piculet")
+    except Exception:
+        pass
+
+
+# Activity-log channel (CyphorhinusBot observation feed).
+try:
+    from lib.activity import ActivityLogger  # noqa: E402
+
+    _activity: "ActivityLogger | None" = ActivityLogger(agent="piculet")
+except Exception:
+    _activity = None
+
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -136,7 +172,7 @@ class _FlushingFileHandler(logging.FileHandler):
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [cyphorhinus] %(levelname)s %(message)s",
+    format="%(asctime)s [piculet] %(levelname)s %(message)s",
     handlers=[
         _FlushingFileHandler(LOG_FILE),
         # stdout is captured by launchd to the same log file — no StreamHandler
@@ -154,9 +190,30 @@ _TELEGRAM_REPEAT_INTERVAL = 3600
 
 
 def _telegram(message: str) -> None:
-    """Send a Telegram message via telegram-send (best-effort, no raise)."""
+    """Send a Telegram message, trying the shared lib first then falling back to
+    telegram-send (best-effort, no raise)."""
     import shutil
 
+    # Try the shared Node.js lib first.
+    node = shutil.which("node")
+    send_script = PROJECT_ROOT / "execution" / "lib" / "telegram" / "send.mjs"
+    if node and send_script.exists():
+        try:
+            args = [node, str(send_script), "--text", message]
+            thread_id = os.environ.get("TELEGRAM_TOPIC_PICULET", "").strip()
+            if thread_id:
+                args += ["--thread-id", thread_id]
+            subprocess.run(
+                args,
+                timeout=10,
+                capture_output=True,
+                env=os.environ,
+            )
+            return
+        except Exception:
+            pass  # fall through to telegram-send
+
+    # Fallback: telegram-send CLI.
     telegram = shutil.which("telegram-send")
     if not telegram:
         return
@@ -200,15 +257,17 @@ def _telegram_clear(message: str) -> None:
 
 
 def log_error(message: str) -> None:
-    """Log at ERROR level and send a deduplicated Telegram alert."""
+    """Log at ERROR level and send a deduplicated Telegram alert + lib/notify."""
     log.error(message)
-    _telegram_deduped(f"🔴 [cyphorhinus] ERROR: {message}")
+    _telegram_deduped(f"🔴 [piculet] ERROR: {message}")
+    _notify_lib(f"piculet error: {message}", priority="blocker")
 
 
 def log_warning(message: str) -> None:
-    """Log at WARNING level and send a deduplicated Telegram alert."""
+    """Log at WARNING level and send a deduplicated Telegram alert + lib/notify."""
     log.warning(message)
-    _telegram_deduped(f"🟡 [cyphorhinus] WARNING: {message}")
+    _telegram_deduped(f"🟡 [piculet] WARNING: {message}")
+    _notify_lib(f"piculet warning: {message}", priority="info")
 
 
 # ---------------------------------------------------------------------------
@@ -472,16 +531,43 @@ def run_import() -> None:
 
 
 def notify(title: str, message: str) -> None:
-    """Send a Telegram message via telegram-send (best-effort; logs on failure)."""
+    """Send a Telegram message (best-effort; logs on failure)."""
     import shutil
 
+    full_message = f"[{title}] {message}"
+
+    # Try the shared Node.js lib first.
+    node = shutil.which("node")
+    send_script = PROJECT_ROOT / "execution" / "lib" / "telegram" / "send.mjs"
+    if node and send_script.exists():
+        try:
+            args = [node, str(send_script), "--text", full_message]
+            thread_id = os.environ.get("TELEGRAM_TOPIC_PICULET", "").strip()
+            if thread_id:
+                args += ["--thread-id", thread_id]
+            result = subprocess.run(
+                args,
+                timeout=10,
+                capture_output=True,
+                text=True,
+                env=os.environ,
+            )
+            if result.returncode != 0:
+                log.warning(f"send.mjs failed: {result.stderr.strip()[:200]}")
+            return
+        except Exception as e:
+            log.warning(
+                f"send.mjs notification failed: {e}, falling back to telegram-send"
+            )
+
+    # Fallback: telegram-send CLI.
     telegram = shutil.which("telegram-send")
     if not telegram:
         log.warning("telegram-send not found in PATH — notification skipped")
         return
     try:
         result = subprocess.run(
-            [telegram, f"[{title}] {message}"],
+            [telegram, full_message],
             timeout=10,
             capture_output=True,
             text=True,
@@ -581,6 +667,9 @@ If no entities were extracted, output: ENTITY_SUMMARY: none
 
 
 def main() -> None:
+    _notify_lib(
+        f"piculet started — polling every {POLL_INTERVAL_SECONDS}s", priority="info"
+    )
     log.info(f"Watcher started. Polling every {POLL_INTERVAL_SECONDS}s.")
     log.info(f"Watching Voice Memos: {RECORDINGS_DIR}")
     log.info(f"Watching meeting recordings: {_audio_imports_dir()}")
@@ -605,7 +694,7 @@ def main() -> None:
                     mins, secs = divmod(elapsed, 60)
                     duration = f"{mins}m {secs}s" if mins else f"{secs}s"
                     log.info(f"Neotoma available at startup after {duration}.")
-                    _telegram(f"✅ [cyphorhinus] Neotoma available — startup resumed after {duration}")
+                    _telegram(f"✅ [piculet] Neotoma available — startup resumed after {duration}")
                 break
             except NeotomaUnavailableError as exc:
                 if _startup_failures == 0:
@@ -644,7 +733,7 @@ def main() -> None:
                     mins, secs = divmod(elapsed, 60)
                     duration = f"{mins}m {secs}s" if mins else f"{secs}s"
                     log.info(f"Neotoma back online after {duration}.")
-                    _telegram(f"✅ [cyphorhinus] Neotoma back online (was down {duration})")
+                    _telegram(f"✅ [piculet] Neotoma back online (was down {duration})")
 
                 # Reset failure tracking on success
                 _consecutive_neotoma_failures = 0
@@ -680,18 +769,29 @@ def main() -> None:
                     "Voice Memos",
                     f"Importing {n} new memo{'s' if n != 1 else ''}…",
                 )
-                run_import()
-                notify(
-                    "Voice Memos",
-                    f"Transcription complete for {n} memo{'s' if n != 1 else ''}. Extracting entities…",
-                )
-                entity_summary = run_entity_extraction(new_files)
-                done_msg = (
-                    f"Done — {n} memo{'s' if n != 1 else ''} imported & transcribed."
-                )
-                if entity_summary and entity_summary != "none":
-                    done_msg += f"\nEntities: {entity_summary}"
-                notify("Voice Memos", done_msg)
+                _job = _activity.started(f"importing {n} new voice memo{'s' if n != 1 else ''}") if _activity else None
+                try:
+                    run_import()
+                    notify(
+                        "Voice Memos",
+                        f"Transcription complete for {n} memo{'s' if n != 1 else ''}. Extracting entities…",
+                    )
+                    entity_summary = run_entity_extraction(new_files)
+                    done_msg = (
+                        f"Done — {n} memo{'s' if n != 1 else ''} imported & transcribed."
+                    )
+                    if entity_summary and entity_summary != "none":
+                        done_msg += f"\nEntities: {entity_summary}"
+                    notify("Voice Memos", done_msg)
+                    if _job:
+                        _summary = f"{n} memo{'s' if n != 1 else ''} imported + transcribed"
+                        if entity_summary and entity_summary != "none":
+                            _summary += f"; entities: {entity_summary[:80]}"
+                        _job.finished(_summary)
+                except Exception as _exc:
+                    if _job:
+                        _job.failed(f"import pipeline error: {type(_exc).__name__}")
+                    raise
                 for f in new_files:
                     seen.add(f.name)
                 save_seen(seen)

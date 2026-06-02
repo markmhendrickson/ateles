@@ -131,6 +131,49 @@ _NOISE_PATTERNS = [
     "noreply@medium.com",
 ]
 
+# ── Invoice detection ─────────────────────────────────────────────────────────
+
+# Subject keywords that indicate an invoice / payment request
+_INVOICE_SUBJECT_KEYWORDS = [
+    "factura",
+    "invoice",
+    "receipt",
+    "billing",
+    "payment due",
+    "amount due",
+    "cobro",
+    "pagament",
+    "your bill",
+    "statement",
+]
+
+# Sender domain/address fragments that indicate an invoice
+_INVOICE_SENDER_KEYWORDS = [
+    "billing@",
+    "invoices@",
+    "accounts@",
+    "facturacion@",
+    "florslloveras.com",
+    "supabase.com",
+    "paypal",
+    "stripe",
+    "xero",
+    "quickbooks",
+]
+
+
+def _is_invoice(sender: str, subject: str, snippet: str) -> bool:
+    """Return True if this message is an invoice or payment request."""
+    subj_lower = subject.lower()
+    sender_lower = sender.lower()
+    for kw in _INVOICE_SUBJECT_KEYWORDS:
+        if kw in subj_lower:
+            return True
+    for kw in _INVOICE_SENDER_KEYWORDS:
+        if kw in sender_lower:
+            return True
+    return False
+
 
 def _classify_message(sender: str, subject: str, snippet: str) -> str:
     """
@@ -190,20 +233,23 @@ def _poll_gmail_messages(max_count: int) -> list[dict]:
 
     Returns a list of dicts with: id, sender, subject, snippet, date_iso.
 
-    Phase 4: calls `gws gmail messages list --unread --limit <n> --json`.
-    Phase 7: additionally queries by date range to avoid re-processing.
+    Uses `gws gmail +triage --format json` which returns:
+      {"messages": [{"id", "from", "subject", "date"}, ...], "query": ..., "resultSizeEstimate": ...}
+
+    Fields are normalised to the internal shape expected by the rest of the daemon:
+      id, sender (from "from"), subject, snippet (empty — not provided by +triage),
+      date_iso (from "date").
     """
     try:
         result = subprocess.run(
             [
                 "gws",
                 "gmail",
-                "messages",
-                "list",
-                "--unread",
-                "--limit",
+                "+triage",
+                "--max",
                 str(max_count),
-                "--json",
+                "--format",
+                "json",
             ],
             capture_output=True,
             text=True,
@@ -211,17 +257,30 @@ def _poll_gmail_messages(max_count: int) -> list[dict]:
         )
         if result.returncode != 0:
             log.warning(
-                f"[{DAEMON_NAME}] gws gmail list failed (rc={result.returncode}): "
+                f"[{DAEMON_NAME}] gws gmail +triage failed (rc={result.returncode}): "
                 f"{result.stderr[:200]}"
             )
             return []
 
-        messages = json.loads(result.stdout)
-        if not isinstance(messages, list):
+        data = json.loads(result.stdout)
+        raw_messages = data.get("messages", []) if isinstance(data, dict) else data
+        if not isinstance(raw_messages, list):
             log.warning(
-                f"[{DAEMON_NAME}] Unexpected gws output format: {type(messages)}"
+                f"[{DAEMON_NAME}] Unexpected gws output format: {type(raw_messages)}"
             )
             return []
+
+        # Normalise field names to internal shape
+        messages = []
+        for msg in raw_messages:
+            messages.append({
+                "id": msg.get("id", ""),
+                "sender": msg.get("from", ""),
+                "subject": msg.get("subject", "(no subject)"),
+                "snippet": "",  # +triage does not expose snippet
+                "date_iso": msg.get("date", ""),
+                "labels": msg.get("labels", []),
+            })
         return messages
 
     except FileNotFoundError:
@@ -231,7 +290,7 @@ def _poll_gmail_messages(max_count: int) -> list[dict]:
         )
         return []
     except subprocess.TimeoutExpired:
-        log.warning(f"[{DAEMON_NAME}] gws gmail list timed out after 30s")
+        log.warning(f"[{DAEMON_NAME}] gws gmail +triage timed out after 30s")
         return []
     except (json.JSONDecodeError, OSError) as exc:
         log.warning(f"[{DAEMON_NAME}] Gmail poll error: {exc}")
@@ -320,9 +379,9 @@ async def _create_task_for_email(message: dict, email_entity_id: str | None) -> 
     """
     Create a Neotoma task entity for an actionable email.
 
-    Phase 4: creates a basic task with audience=agent and domain_tags inferred
-    from subject. The task flows through neotoma-agent's due-date hygiene and
-    then to Apis for dispatch.
+    Invoices/receipts/payment requests are routed directly to Monedula with
+    priority=urgent, bypassing general Apis dispatch. All other actionable
+    emails create a standard agent-audience task routed through Apis.
     """
     import httpx
 
@@ -331,30 +390,55 @@ async def _create_task_for_email(message: dict, email_entity_id: str | None) -> 
 
     subject = message.get("subject", "(no subject)")
     sender = message.get("sender", "")
-    task_title = f"Email triage: {subject[:80]}"
+    snippet = message.get("snippet", "")
+    is_invoice = _is_invoice(sender, subject, snippet)
+
+    if is_invoice:
+        task_title = f"Invoice/payment: {subject[:80]}"
+        snapshot = {
+            "title": task_title,
+            "body": (
+                f"Invoice or payment request detected by Turdus.\n"
+                f"From: {sender}\n"
+                f"Subject: {subject}\n"
+                f"Snippet: {snippet[:200]}\n"
+                f"Source: Gmail message ID {message.get('id', '')}"
+            ),
+            "audience": "agent",
+            "assigned_to": "monedula",
+            "priority": "urgent",
+            "status": "open",
+            "source": "turdus:gmail",
+            "domain_tags": ["finance", "payment"],
+        }
+        log_label = "INVOICE→monedula"
+    else:
+        task_title = f"Email triage: {subject[:80]}"
+        snapshot = {
+            "title": task_title,
+            "body": (
+                f"Actionable email from {sender}.\n"
+                f"Subject: {subject}\n"
+                f"Snippet: {snippet[:200]}\n"
+                f"Source: Gmail message ID {message.get('id', '')}"
+            ),
+            "audience": "agent",
+            "status": "open",
+            "source": "turdus:gmail",
+        }
+        log_label = "actionable"
 
     if DRY_RUN:
         log.info(
-            f"[{DAEMON_NAME}] DRY RUN — would create task for email from {sender!r}: "
-            f"{subject[:60]!r}"
+            f"[{DAEMON_NAME}] DRY RUN — would create {log_label} task for email "
+            f"from {sender!r}: {subject[:60]!r}"
         )
         return
 
     payload = {
         "entity_type": "task",
         "canonical_name": f"task:turdus:email:{message.get('id', 'unknown')}",
-        "snapshot": {
-            "title": task_title,
-            "body": (
-                f"Actionable email from {sender}.\n"
-                f"Subject: {subject}\n"
-                f"Snippet: {message.get('snippet', '')[:200]}\n"
-                f"Source: Gmail message ID {message.get('id', '')}"
-            ),
-            "audience": "agent",
-            "status": "open",
-            "source": "turdus:gmail",
-        },
+        "snapshot": snapshot,
     }
 
     try:
@@ -421,6 +505,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
     log.info(f"[{DAEMON_NAME}] Processing {len(new_messages)} new message(s)")
 
     actionable_count = 0
+    invoice_count = 0
     for msg in new_messages:
         sender = msg.get("sender", msg.get("from", ""))
         subject = msg.get("subject", "(no subject)")
@@ -428,9 +513,11 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
 
         classification = _classify_message(sender, subject, snippet)
         msg["classification"] = classification
+        is_invoice = _is_invoice(sender, subject, snippet)
 
+        label = "INVOICE→monedula" if is_invoice else classification.upper()
         log.info(
-            f"[{DAEMON_NAME}] {classification.upper()}: from={sender[:40]!r} "
+            f"[{DAEMON_NAME}] {label}: from={sender[:40]!r} "
             f"subject={subject[:60]!r}"
         )
 
@@ -440,8 +527,11 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         # Store email entity in Neotoma
         email_entity_id = await _store_email_entity(msg)
 
-        if classification == "actionable":
-            actionable_count += 1
+        if classification == "actionable" or is_invoice:
+            if is_invoice:
+                invoice_count += 1
+            else:
+                actionable_count += 1
             await _create_task_for_email(msg, email_entity_id)
             _label_gmail_message(msg.get("id", ""), "Turdus/processed")
 
@@ -451,6 +541,12 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         state["processed_count"] = state.get("processed_count", 0) + len(new_messages)
         state["last_poll_at"] = datetime.now(UTC).isoformat()
 
+    if invoice_count > 0:
+        notifier.send(
+            f"{DAEMON_NAME}: {invoice_count} invoice(s) → urgent task(s) created for monedula",
+            priority=Priority.BLOCKER,
+            handler=DAEMON_NAME,
+        )
     if actionable_count > 0:
         notifier.send(
             f"{DAEMON_NAME}: {actionable_count} actionable email(s) → tasks created",

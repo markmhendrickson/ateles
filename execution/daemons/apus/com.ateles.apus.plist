@@ -17,8 +17,10 @@
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/markmhendrickson</string>
         <key>NEOTOMA_BASE_URL</key>
-        <string>https://neotoma.markmhendrickson.com</string>
+        <string>http://localhost:3180</string>
         <key>ATELES_REPO_PATH</key>
         <string>/Users/markmhendrickson/repos/ateles</string>
         <key>ATELES_PRIVATE_REPO_PATH</key>
@@ -40,10 +42,10 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/tmp/com.ateles.apus.out.log</string>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/apus.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/tmp/com.ateles.apus.err.log</string>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/apus.log</string>
 
     <key>ThrottleInterval</key>
     <integer>10</integer>

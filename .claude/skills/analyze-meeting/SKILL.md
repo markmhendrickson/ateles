@@ -1,6 +1,6 @@
 ---
 name: analyze-meeting
-description: "General-purpose meeting analysis. Reads a transcript (file path, transcription entity, or pasted text), extracts a structured analysis (summary, decisions, action items, open questions), persists records to Neotoma (meeting_analysis, task, recap_message, proposed_github_issue), drafts recap messages per participant (email via Gmail when address is known, otherwise generic message text), looks up the corresponding Google Calendar event by recording time to resolve participant emails and store a linked calendar_event entity, and (opt-in) opens public follow-up issues in relevant repos with PII scrubbed. Designed to be auto-invoked by /record_meeting on stop, but also runs standalone."
+description: "General-purpose meeting analysis. Reads a transcript (file path, transcription entity, or pasted text), extracts a structured analysis (summary, decisions, action items, open questions), persists records to Neotoma (meeting_analysis, task, recap_message, proposed_github_issue), drafts recap messages per participant (email via Gmail when address is known, otherwise generic message text), looks up the corresponding Google Calendar event by recording time to resolve participant emails and store a linked calendar_event entity, evaluates whether any follow-throughs warrant a shareable rendered-page artifact (via /draft-rendered-page) and surfaces suggested invocations, and (opt-in) opens public follow-up issues in relevant repos with PII scrubbed. Designed to be auto-invoked by /record_meeting on stop, but also runs standalone."
 triggers:
   - analyze meeting
   - analyze this meeting
@@ -30,6 +30,7 @@ When both skills fire on the same transcript (typical for a Neotoma evaluator ca
 /analyze-meeting <source> --open-issues          # open real GH issues instead of staging drafts
 /analyze-meeting <source> --no-email             # skip Gmail draft staging
 /analyze-meeting <source> --participants "Alice <alice@x>, Bob <bob@y>"
+/analyze-meeting <source> --no-artifacts                # skip rendered-page artifact evaluation (Step 4b)
 ```
 
 `<source>` is auto-detected:
@@ -41,22 +42,35 @@ Flags:
 - `--open-issues` — actually open public issues in relevant repos via the GitHub MCP. Default is **off**: issues are staged as `proposed_github_issue` entities in Neotoma and written to the local report only. Same effect as setting `MEETING_ANALYSIS_OPEN_GH_ISSUES=1` in env.
 - `--no-recap` — skip all recap drafting (neither email nor generic message). `recap_message` entities still go to Neotoma.
 - `--participants` — comma-separated `Name <email>` overrides when speaker labels in the transcript are unreliable (diarization missed names, etc.).
+- `--no-artifacts` — skip Step 4b (rendered-page artifact evaluation). The `meeting_analysis` entity will still be stored, but `artifact_recommendations` is set to `[]`. Same effect as setting `MEETING_ANALYSIS_ARTIFACTS=0` in env. Use when running batch analyses or when artifact evaluation is handled separately.
 
-## Step 1: Resolve source + identify participants
+## Step 0: Back-to-back meeting detection (BEFORE everything else)
+
+Before treating the transcript as a single meeting, scan it for natural **session boundaries**:
+
+- **Boundary signals**: greetings ("hi", "hello", "good morning", "nice to meet you", "thanks for joining"), farewells ("bye", "talk soon", "thanks everyone", "take care", "have a good one", "see you later", "goodbye"), significant topic discontinuities, or participant set changes (new names appear, previous names absent).
+- **One session detected** → proceed as a single meeting (standard flow).
+- **Two or more sessions detected** (farewell followed by a new greeting, or clear topic/participant break) → treat each segment as a **separate meeting**. Run the full pipeline (Steps 1–11) independently for each, producing one `meeting_analysis` entity per segment. Number them "Meeting 1 of N", "Meeting 2 of N", etc.
+  - Record `segment_start_approx` and `segment_end_approx` (from word timestamps or turn index if available) on each `meeting_analysis`.
+  - For Google Calendar lookup in Step 1, use each segment's approximate start time (not the recording file timestamp) to find the matching event.
+- **When in doubt, prefer splitting.** A false split produces one extra analysis; a missed split loses an entire meeting's follow-ups.
+
+## Step 1: Resolve source + identify participants + calendar context
 
 1. Resolve the source per the input modes above. Capture raw transcript text.
 2. Resolve associated `transcription` entity (when the source is a file produced by `transcribe_audio.py`, search Neotoma by `audio_file_path` per `is_already_transcribed` in `execution/scripts/transcribe_audio.py`). Reuse if present; otherwise note that no `transcription` entity is linked (skill still proceeds — meeting_analysis stands alone).
 3. **Identify participants:**
-   - Speaker labels in diarized transcripts (`[Speaker 1]`, `[Mark]`, `[System]`/`[Mic]`).
+   - Speaker labels in diarized transcripts (`[You]`, `[Speaker_0]`, `[Speaker_1]`, `[Mark]`, `[System]`/`[Mic]`).
    - Name mentions in transcript ("Thanks, Alice"), salutations, sign-offs.
    - Honor `--participants` flag overrides.
    - For each non-`Mark` participant, resolve via `retrieve_entity_by_identifier` against `contact` / `person`. Capture `entity_id` and `email` when present.
-4. **Resolve missing emails via Google Calendar** (run after step 3, before moving on):
-   - Determine the recording timestamp from the transcript source file's mtime or filename (format `YYYY-MM-DD-HHMMSS`).
-   - Use `gws calendar events list --timezone Europe/Madrid` to fetch events within a ±90-minute window around that timestamp. Pick the best-matching event (title overlap with transcript topics, attendee names matching identified participants, or timing overlap).
+4. **Google Calendar lookup** (run after step 3, before moving on):
+   - Determine the recording timestamp: use `recording_timestamp` when passed by the Tyto daemon (format `YYYY-MM-DDTHH:MM` UTC); otherwise infer from source file mtime or filename (Audio Hijack format: `YYYYMMDD HHMM remote.*`). For multi-segment recordings, use each segment's `segment_start_approx` instead.
+   - Run `gws calendar events list --timezone Europe/Madrid` to fetch events within a **±90-minute window** around the timestamp. Pick the best-matching event by: title overlap with transcript topics > attendee name overlap > timing overlap.
    - If a match is found:
-     - Extract attendee names and emails from the calendar event.
-     - Cross-reference with participants identified in step 3: update any participant whose email was previously unknown.
+     - Extract attendee names and emails.
+     - **Cross-reference attendees with diarized speaker labels**: use names and roles from the calendar event to resolve `[Speaker_0]`, `[Speaker_1]`, etc. to real names. Apply these resolved names throughout the analysis.
+     - Update any participant whose email was previously unknown.
      - Store a `calendar_event` entity in Neotoma (fields: `title`, `start_time`, `end_time`, `attendees` as array of `{ name, email }`; `calendar_event_id` from the API). Link it to the `meeting_analysis` via `REFERS_TO` in the Step 7 store.
      - Record `calendar_event_entity_id` on the `meeting_analysis`.
    - If no calendar match is found: note `_Calendar: no matching event found._` in the report and proceed without it.
@@ -125,6 +139,46 @@ For each proposed issue capture:
 - **`markmhendrickson/neotoma`** — use when the issue is specifically about Neotoma: its MCP, schema, API, product behaviour, data model, or SDK.
 
 When the signal from Step 2 #7 points clearly to Neotoma, route there; otherwise default to `ateles`. Do not create issues for repos outside this list — note them in the report as `_Out-of-scope repo mentioned: <name> — no issue staged._`.
+
+## Step 4b: Evaluate rendered-page artifact candidates
+
+For each of Mark's action items (Step 2 #3 — Mine) AND each external participant, evaluate whether the follow-through deserves a shareable rendered_page artifact (per the [`draft-rendered-page`](../draft-rendered-page/SKILL.md) skill) — i.e. a hosted, visually-designed page at a stable URL rather than (or in addition to) the recap email.
+
+This is a judgment call, not a default. Most meetings warrant zero pages. Some warrant one. A few warrant more than one (e.g. parallel follow-throughs to multiple stakeholders with genuinely different context).
+
+### Checklist (apply per candidate — Mark action item or participant)
+
+A rendered-page artifact is warranted when **all four** are true:
+
+1. **Concrete follow-through owed.** Mark committed to delivering something specific (a proposal, an experiment plan, a comparison, a briefing) — not just "I'll follow up" or "I'll think about it." If there's no specific deliverable, no page.
+2. **Visual or structural content.** The follow-through has elements that would *meaningfully* benefit from layout, charts, diagrams, or sectioned structure — and would *lose* something compressed to an email. Pure prose follow-throughs do not warrant pages.
+3. **High-signal recipient.** The contact's relationship and stakes justify the artifact lift. Signals: peer founder, prospect-aligned operator, advisor, investor, named industry voice, or anyone Mark has invested ≥30 minutes of live time in. Cold contacts or one-off introductions usually do not warrant pages.
+4. **Email would be insufficient.** A 200-word email would either bury the substance, fail to convey the structure, or feel underweight for the level of investment shown by the recipient. If a tight email *would* land, prefer the email.
+
+If any of the four is false, do not recommend a page. State which check failed and move on. Be willing to recommend zero artifacts for a meeting — that's the common case.
+
+### What to capture
+
+For each warranted artifact, capture:
+- **For:** recipient name + contact `entity_id` (or _unknown_)
+- **Purpose:** one-sentence — *"This page is for X so that Y."* (mirrors the `draft-rendered-page` Step 1.3 contract)
+- **Backed by:** which action item / decision / open question this artifact serves; verbatim quote when present
+- **Multi-recipient?:** when one page would serve multiple participants from the same context, name all recipients; otherwise one page per warranted recipient
+- **Suggested invocation:** the literal `/draft-rendered-page` command the operator could run, with `--for` and `--source` flags pre-filled
+
+### Stop conditions
+
+- If the meeting transcript is too thin to know what Mark actually committed to → no recommendations (this skill does not invent commitments).
+- If `--no-artifacts` flag is passed or `MEETING_ANALYSIS_ARTIFACTS=0` is set in env → skip Step 4b entirely.
+- If `analyze-meeting` was auto-invoked by `/record_meeting` and the recording was < 5 minutes → skip Step 4b (real follow-through commitments don't fit in tiny calls).
+
+### Output of this step
+
+Two outputs feed downstream:
+1. A top-level `artifact_recommendations` array on the `meeting_analysis` entity (see Step 7) — one entry per recommended artifact.
+2. A new section in the report (see Step 6 template additions) listing each recommendation with its suggested invocation.
+
+If zero artifacts are warranted, render the section as `_None warranted._` rather than omitting it.
 
 ## Step 5: Draft recap messages
 
@@ -221,6 +275,15 @@ One entry per proposed issue. If none warranted, render `_None._`.
     > <scrubbed body, multi-line>
   - Backed by: action item / open question reference + verbatim quote (private, kept in Neotoma entity not in this rendered body)
 
+## Rendered-page artifact recommendations
+
+One entry per recommended artifact (per Step 4b). If none warranted, render `_None warranted._`.
+
+- **For:** Name (contact=ent_… or _unknown_) — _multi: also for X, Y_ (when applicable)
+  - Purpose: "This page is for <X> so that <Y>."
+  - Backed by: <action item / decision reference> — "<verbatim quote when present>"
+  - Suggested invocation: `/draft-rendered-page <topic-or-purpose> --for "Name <email>" --source <meeting_analysis_entity_id>`
+
 ## Recap messages
 
 One block per participant (or participant group).
@@ -289,6 +352,7 @@ Single `store` (combined entities + relationships) call when batchable. Entities
    - `risks_or_blockers` (array of `{ risk, raised_by, quote? }`)
    - `repo_signal` (array of `{ repo_or_project, related_item_refs, public_issue_candidate }`)
    - `pii_inventory` (object with `names`, `emails`, `other`)
+   - `artifact_recommendations` (array of `{ for_name, for_contact_entity_id?, also_for?: array, purpose, backed_by_ref, backed_by_quote?, suggested_invocation }` — from Step 4b; empty array when none warranted or `--no-artifacts` set)
    - `data_source` (e.g. `analyze-meeting.skill {timestamp} source=<path>`)
 4. One `task` per Mark action item, with `description`, `due_date`, `status: open`, `source: meeting_analysis`, and a `REFERS_TO` edge to the `meeting_analysis`.
 5. One `recap_message` per participant (or group), with `to_name`, `to_email` (or null), `format` (`email` | `message`), `subject` (email only), `body`, `participant_contact_entity_id`, `delivery_channel` (`gmail` | `message`), `delivery_status` (`staged` | `failed:<reason>` | `pending_manual_send`), `gmail_draft_id` (when staged).
@@ -357,6 +421,7 @@ Reply with:
 - **My action items** as a short numbered list (max 5) with due dates.
 - **Recap messages** — one line per message: `→ <Name> — email: <staged|failed> | message: pending_manual_send`.
 - **Proposed issues** — one line per issue: `<owner/repo>: <title> — <opened-URL | draft>`.
+- **Artifact recommendations** — one line per recommended rendered_page: `→ page for <Name> — purpose: <one-line> — run: <suggested-invocation>`. Omit the section when `artifact_recommendations` is empty.
 - Absolute report path.
 - `meeting_analysis` entity id and a list of created `task` / `email_draft` / `proposed_github_issue` entity ids.
 

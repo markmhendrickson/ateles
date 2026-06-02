@@ -125,18 +125,23 @@ class GrantChecker:
             self._loaded = True
             return self
 
-        url = f"{NEOTOMA_BASE_URL}/entities"
-        params = {
+        # POST /entities/query — the GET /entities list endpoint does not exist
+        # on the Neotoma server (returns 404).
+        url = f"{NEOTOMA_BASE_URL}/entities/query"
+        body = {
             "entity_type": "agent_grant",
             "search": self.aauth_sub,
-            "include_snapshots": "true",
+            "include_snapshots": True,
             "limit": 50,
         }
         try:
-            resp = httpx.get(
+            resp = httpx.post(
                 url,
-                params=params,
-                headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+                json=body,
+                headers={
+                    "Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}",
+                    "Content-Type": "application/json",
+                },
                 timeout=10,
             )
             resp.raise_for_status()

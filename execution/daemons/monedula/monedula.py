@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-Monedula — Daily Payments Daemon
+Monedula — Payment Execution Daemon
 Named after Corvus monedula (jackdaw — moneta = money).
 
 Runs once per day via launchd StartCalendarInterval.
 Checks Google Calendar for yesterday's sessions that trigger payment obligations,
 sends a Telegram preview, waits for operator approval, executes payments, and
 sends a Telegram confirmation.
+
+Recurring task lifecycle (recurrence rules, due-date rolling, Calendar sync,
+and human-audience reminders) is owned by Sylvia. Monedula focuses on payment
+execution for finance-domain tasks dispatched by Apis or surfaced from Neotoma.
 
 Usage:
   python3 monedula.py
@@ -66,6 +70,15 @@ def _notify(message: str, priority: str = "info") -> None:
         _notifier.send(message, priority=p, handler="monedula")
     except Exception:
         pass
+
+
+# Activity-log channel (CyphorhinusBot observation feed).
+try:
+    from lib.activity import ActivityLogger  # noqa: E402
+
+    _activity: "ActivityLogger | None" = ActivityLogger(agent="monedula")
+except Exception:
+    _activity = None
 
 
 # ---------------------------------------------------------------------------
@@ -598,9 +611,18 @@ def main() -> None:
             continue
         for match in matches:
             log.info(f"Executing {handler.name} payment...")
-            result = handler.execute(match)
-            all_results.append((handler, result))
-            log.info(f"{handler.name} result: {result}")
+            _job = _activity.started(f"executing {handler.name} payment") if _activity else None
+            try:
+                result = handler.execute(match)
+                all_results.append((handler, result))
+                log.info(f"{handler.name} result: {result}")
+                if _job:
+                    # Keep summary generic — no amounts, IBANs, or memos.
+                    _job.finished(f"{handler.name} payment executed")
+            except Exception as _exc:
+                if _job:
+                    _job.failed(f"{handler.name} payment error: {type(_exc).__name__}")
+                raise
 
     # Send confirmation
     if not all_results:

@@ -58,6 +58,7 @@ from lib.daemon_runtime import (  # noqa: E402
     write_checkpoint_brief,
 )
 from lib.notify import Notifier, Priority  # noqa: E402
+from lib.activity import ActivityLogger  # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -66,6 +67,9 @@ logging.basicConfig(
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
 log = logging.getLogger("apis")
+
+# ── Activity-log channel (CyphorhinusBot observation feed) ──────────────────
+_activity = ActivityLogger(agent="apis")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DAEMON_NAME = "apis"
@@ -272,6 +276,8 @@ async def dispatch_task(
         )
         return
 
+    job = _activity.started(f"routing task {entity_id} → {skill}: {title[:60]}")
+
     # ── Execution gate ──────────────────────────────────────────────────────
     policy = resolve_policy_for_agent(skill)
     action_type = _infer_action_type(skill, snapshot)
@@ -319,6 +325,10 @@ async def dispatch_task(
             f"[{DAEMON_NAME}] HELD task {entity_id} for operator approval "
             f"(checkpoint_brief={brief_id})"
         )
+        job.escalated(
+            f"task {entity_id} → {skill} held for operator "
+            f"(blast={decision.blast_radius.value}, conf={confidence:.2f})"
+        )
         return
 
     log.info(
@@ -328,7 +338,10 @@ async def dispatch_task(
 
     if DRY_RUN:
         log.info(f"[{DAEMON_NAME}] DRY RUN — skipping {skill} dispatch for {entity_id}")
+        job.finished(f"task {entity_id} → {skill} routed (dry-run, gate: auto-execute)")
         return
+
+    job.finished(f"task {entity_id} dispatched → {skill} (gate: auto-execute)")
 
     # Phase 5: full dispatch via claude --print
     # cmd = [

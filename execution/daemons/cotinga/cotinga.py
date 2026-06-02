@@ -638,27 +638,62 @@ Work through all steps, then stop.
 
 
 def fetch_due_tasks() -> list[dict]:
-    """Fetch Neotoma tasks due today or overdue (due_date <= today, status not done/completed)."""
-    if not NEOTOMA_BEARER_TOKEN or not NEOTOMA_BASE_URL:
+    """Fetch Neotoma tasks due today or overdue (due_date <= today, status not done/completed).
+
+    Uses the neotoma CLI (--api-only) to paginate through tasks, filtering client-side.
+    Scans up to 5000 tasks (25 pages × 200) to find all non-terminal tasks with due dates.
+    Falls back to empty list if neotoma CLI is not available.
+    """
+    import shutil
+    neotoma_cli = shutil.which("neotoma")
+    if not neotoma_cli:
+        log.warning("neotoma CLI not found — skipping task digest")
         return []
+
     today = date.today().isoformat()
-    path = (
-        f"/api/entities?entity_type=task"
-        f"&limit=50"
-        f"&include_snapshots=true"
-    )
-    data = _neotoma_get(path)
-    if not data:
-        return []
-    entities = data.get("entities") or []
     due = []
-    for e in entities:
-        snap = (e.get("snapshot") or {}).get("snapshot") or e.get("snapshot") or {}
-        status = (snap.get("status") or "").lower()
-        if status in ("done", "completed", "cancelled", "canceled"):
-            continue
-        due_date = snap.get("due_date") or ""
-        if due_date and due_date <= today:
+    done_statuses = {"done", "completed", "cancelled", "canceled"}
+    page_size = 200
+    max_pages = 25
+    offset = 0
+
+    for _ in range(max_pages):
+        try:
+            result = subprocess.run(
+                [
+                    neotoma_cli, "--json", "entities", "list",
+                    "--entity-type", "task",
+                    "--limit", str(page_size),
+                    "--offset", str(offset),
+                    "--api-only",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=os.environ,
+            )
+            if result.returncode != 0:
+                log.warning(f"neotoma entities list failed (offset={offset}): {result.stderr[:200]}")
+                break
+            data = json.loads(result.stdout)
+        except Exception as exc:
+            log.warning(f"neotoma CLI error at offset={offset}: {exc}")
+            break
+
+        entities = data.get("entities") or []
+        if not entities:
+            break
+
+        for e in entities:
+            snap = (e.get("snapshot") or {})
+            if isinstance(snap, dict) and "snapshot" in snap:
+                snap = snap["snapshot"]
+            status = (snap.get("status") or "").lower()
+            if status in done_statuses:
+                continue
+            due_date = (snap.get("due_date") or "")[:10]
+            if not due_date or due_date > today:
+                continue
             due.append({
                 "title": snap.get("title") or snap.get("name") or "(untitled)",
                 "due_date": due_date,
@@ -666,6 +701,12 @@ def fetch_due_tasks() -> list[dict]:
                 "priority": snap.get("priority") or "",
                 "overdue": due_date < today,
             })
+
+        total = data.get("total", 0)
+        offset += len(entities)
+        if offset >= total or len(entities) < page_size:
+            break
+
     due.sort(key=lambda t: t["due_date"])
     log.info(f"Task digest: {len(due)} due/overdue task(s)")
     return due

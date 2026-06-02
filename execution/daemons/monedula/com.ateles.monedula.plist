@@ -3,16 +3,28 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.ateles.apis</string>
+    <string>com.ateles.monedula</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/Users/markmhendrickson/repos/ateles/.venv/bin/python3</string>
-        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/apis/apis.py</string>
+        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/monedula/monedula.py</string>
     </array>
 
     <key>WorkingDirectory</key>
     <string>/Users/markmhendrickson/repos/ateles</string>
+
+    <!-- Run once per day at 08:00 local time -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -24,16 +36,10 @@
         <string>http://localhost:3180</string>
     </dict>
 
-    <key>KeepAlive</key>
-    <true/>
-
     <key>StandardOutPath</key>
-    <string>/Users/markmhendrickson/Library/Logs/ateles/apis.log</string>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/monedula.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/markmhendrickson/Library/Logs/ateles/apis.log</string>
-
-    <key>RunAtLoad</key>
-    <true/>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/monedula.log</string>
 </dict>
 </plist>

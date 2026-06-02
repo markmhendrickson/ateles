@@ -3,16 +3,30 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.ateles.apis</string>
+    <string>com.ateles.sylvia</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/Users/markmhendrickson/repos/ateles/.venv/bin/python3</string>
-        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/apis/apis.py</string>
+        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/sylvia/sylvia.py</string>
     </array>
 
-    <key>WorkingDirectory</key>
-    <string>/Users/markmhendrickson/repos/ateles</string>
+    <!-- Run daily at 07:15 UTC (09:15 Madrid summer / 08:15 winter) — after Cotinga briefing -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>15</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/sylvia.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/sylvia.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -23,17 +37,5 @@
         <key>NEOTOMA_BASE_URL</key>
         <string>http://localhost:3180</string>
     </dict>
-
-    <key>KeepAlive</key>
-    <true/>
-
-    <key>StandardOutPath</key>
-    <string>/Users/markmhendrickson/Library/Logs/ateles/apis.log</string>
-
-    <key>StandardErrorPath</key>
-    <string>/Users/markmhendrickson/Library/Logs/ateles/apis.log</string>
-
-    <key>RunAtLoad</key>
-    <true/>
 </dict>
 </plist>
