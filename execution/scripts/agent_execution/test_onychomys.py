@@ -37,8 +37,8 @@ import urllib.error
 from pathlib import Path
 from datetime import datetime, timezone
 
-BOT_TOKEN = "8516650745:AAF7K3qcfdjmNVlpX1fna2vrw2cU03f2t10"
-CHAT_ID = "1433950605"
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 GATEWAY_LOG = Path(f"/tmp/openclaw/openclaw-{datetime.now().strftime('%Y-%m-%d')}.log")
 GATEWAY_ERR_LOG = Path.home() / ".openclaw/logs/gateway.err.log"
 AUTH_PROFILES = Path.home() / ".openclaw/agents/main/agent/auth-profiles.json"
