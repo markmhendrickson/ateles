@@ -11,11 +11,14 @@ set -e
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-# Install hooks if they're not already installed (for new clones)
-if [ -f "scripts/install_git_hooks.sh" ] && [ ! -f ".git/hooks/.hooks-installed" ]; then
+# Install hooks if they're not already installed (for new clones).
+# Skip entirely in linked worktrees, where .git is a FILE (gitdir pointer),
+# not a directory — touching .git/hooks/.hooks-installed there fails with
+# "Not a directory" and, under `set -e`, aborts the checkout.
+if [ -d ".git" ] && [ -f "scripts/install_git_hooks.sh" ] && [ ! -f ".git/hooks/.hooks-installed" ]; then
     echo "Installing git hooks..."
     ./scripts/install_git_hooks.sh > /dev/null 2>&1 || true
-    touch .git/hooks/.hooks-installed
+    touch .git/hooks/.hooks-installed 2>/dev/null || true
 fi
 
 # Initialize submodules if .gitmodules exists
