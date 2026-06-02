@@ -55,9 +55,14 @@ execution/daemons/monedula/handlers/yoga.py
 # mic-recorder directory (superseded by strix daemon)
 execution/daemons/mic-recorder/
 
-# Daemon runtime state
+# Daemon runtime state (regenerated at runtime; never commit)
 execution/daemons/**/.monedula_last_run
 execution/daemons/**/.monedula_tg_offset
+execution/daemons/**/.*_last_run
+execution/daemons/**/.*_state.json
+execution/daemons/**/*_tg_offset
+execution/daemons/**/seen_files.json
+execution/daemons/cotinga/briefing_*.md
 
 # Private docs submodule (not part of public repo)
 docs/private/
