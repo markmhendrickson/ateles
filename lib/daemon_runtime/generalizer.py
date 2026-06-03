@@ -94,7 +94,12 @@ class Decision:
 
 @dataclass
 class PolicyState:
-    """Maturation metadata carried in an agent_policy's JSON `notes` field."""
+    """Maturation metadata serialized to/from an agent_policy's JSON `body` field.
+
+    (Method names use `notes` historically; they operate on a JSON string
+    regardless of which schema field stores it. The store field is `body` —
+    agent_policy v1.1.0 has no `notes` field.)
+    """
 
     auto_generated: bool = False
     application_count: int = 0
@@ -283,14 +288,14 @@ async def fetch_agent_policies(agent_sub: str, bearer: str) -> list[dict]:
 
 def _is_operator_authored(policy: dict) -> bool:
     """A policy not flagged auto_generated is treated as human-authored."""
-    return not PolicyState.from_notes(policy.get("notes", "")).auto_generated
+    return not PolicyState.from_notes(policy.get("body", "")).auto_generated
 
 
 def count_live_auto_policies(policies: list[dict]) -> int:
     return sum(
         1
         for p in policies
-        if PolicyState.from_notes(p.get("notes", "")).auto_generated
+        if PolicyState.from_notes(p.get("body", "")).auto_generated
         and p.get("status") in ("provisional", "active")
     )
 
@@ -313,21 +318,27 @@ async def create_provisional_policy(cluster: DriftCluster, bearer: str) -> str |
         drift_signal_refs=cluster.source_refs,
     )
     rule_text = cluster.representative_text
+    agent_sub = cluster.agent if "@" in cluster.agent else f"{cluster.agent}@ateles-swarm"
     payload = {
         "entity_type": "agent_policy",
         "scope": "agent",
-        "agent_sub": cluster.agent if "@" in cluster.agent else f"{cluster.agent}@ateles-swarm",
+        "agent_sub": agent_sub,
+        # `domain` engages agent_policy's canonical_name_fields
+        # [domain, rule_kind, description] so policies resolve by content —
+        # same theme dedupes, different themes stay distinct (not coalesced).
+        "domain": agent_sub,
         "rule_kind": "prefer",  # never auto-create deny/require
         "description": f"[auto] {rule_text}",
         "rule": rule_text,
         "overridable_by": ", ".join(OVERRIDABLE_BY),
         "status": "provisional",
         "effective_from": _now_iso(),
-        "notes": threshold_state.to_notes(),
+        "body": threshold_state.to_notes(),
     }
     body = {
         "entities": [payload],
         "idempotency_key": f"auto-policy-{cluster.theme_key}",
+        "strict": True,  # refuse silent merge into an unrelated per-agent row
     }
     data = await _post("store", body, bearer)
     eid = _first_entity_id(data)
@@ -361,6 +372,7 @@ async def create_revision_proposal(decision: Decision, bearer: str) -> str | Non
     body = {
         "entities": [payload],
         "idempotency_key": f"revision-proposal-{cluster.theme_key}",
+        "strict": True,
     }
     data = await _post("store", body, bearer)
     eid = _first_entity_id(data)
@@ -376,7 +388,7 @@ async def create_revision_proposal(decision: Decision, bearer: str) -> str | Non
 
 async def increment_application(policy: dict, bearer: str) -> None:
     """Record one clean application; promote to active once matured."""
-    state = PolicyState.from_notes(policy.get("notes", ""))
+    state = PolicyState.from_notes(policy.get("body", ""))
     if not state.auto_generated:
         return
     state.application_count += 1
@@ -397,7 +409,7 @@ async def increment_application(policy: dict, bearer: str) -> None:
 
 async def register_contradiction(policy: dict, signal: DriftSignal, bearer: str) -> None:
     """Suspend a contradicted provisional/active auto-policy and re-open a proposal."""
-    state = PolicyState.from_notes(policy.get("notes", ""))
+    state = PolicyState.from_notes(policy.get("body", ""))
     if not state.auto_generated:
         return
     state.contradiction_count += 1
@@ -412,13 +424,14 @@ async def register_contradiction(policy: dict, signal: DriftSignal, bearer: str)
 
 
 async def _correct_policy(entity_id: str, state: PolicyState, status: str, bearer: str) -> None:
-    """Two field corrections (notes + status) with idempotency keys."""
+    """Two field corrections (body maturation JSON + status) with idempotency keys."""
     day = datetime.now(UTC).strftime("%Y-%m-%d-%H%M%S")
-    for field_name, value in (("notes", state.to_notes()), ("status", status)):
+    for field_name, value in (("body", state.to_notes()), ("status", status)):
         await _post(
             "correct",
             {
                 "entity_id": entity_id,
+                "entity_type": "agent_policy",
                 "field": field_name,
                 "value": value,
                 "idempotency_key": f"policy-{field_name}-{entity_id}-{day}",
@@ -433,16 +446,18 @@ async def emit_report(
     """
     Notify-on-every-change: write a daemon_report Anthus already surfaces to
     Onychomys. Autonomy with a paper trail — the operator sees each change.
+    Fields match the canonical daemon_report schema (daemon_name/message/details).
     """
     payload = {
         "entity_type": "daemon_report",
-        "daemon": "generalizer",
+        "daemon_name": "generalizer",
+        "aauth_sub": AUTO_SUB,
         "severity": severity,
-        "summary": summary,
-        "reported_at": _now_iso(),
+        "message": summary,
+        "report_at": _now_iso(),
     }
     if detail:
-        payload["detail"] = json.dumps(detail)
+        payload["details"] = json.dumps(detail)
     await _post(
         "store",
         {"entities": [payload], "idempotency_key": f"genreport-{_now_iso()}-{summary[:40]}"},
@@ -466,16 +481,17 @@ SIGNAL_ENTITY_TYPE = "strategy_drift_signal"
 
 
 def signal_to_entity(signal: DriftSignal) -> dict:
-    """Map a parsed DriftSignal to a strategy_drift_signal entity payload."""
+    """
+    Map a parsed DriftSignal to the canonical strategy_drift_signal schema
+    (emitting_agent, observation, severity required; work_entity_id optional).
+    """
     agent_sub = signal.agent if "@" in signal.agent else f"{signal.agent}@ateles-swarm"
     return {
         "entity_type": SIGNAL_ENTITY_TYPE,
-        "agent_sub": agent_sub,
-        "signal_text": signal.text,
-        "emitted_at": _now_iso(),
-        "source_ref": signal.source_ref,
-        "theme_key": signal.theme_key,
-        "status": "open",
+        "emitting_agent": agent_sub,
+        "observation": signal.text,
+        "severity": "info",
+        "work_entity_id": signal.source_ref,
     }
 
 
@@ -490,7 +506,10 @@ async def persist_signals(signals: list[DriftSignal], bearer: str) -> None:
         key = f"drift-{s.theme_key}-{s.source_ref or s.text[:32]}"
         await _post(
             "store",
-            {"entities": [payload], "idempotency_key": key},
+            # strict: keep each signal a distinct row (the schema has no
+            # canonical_name_fields, so without this they'd all coalesce into
+            # one per-agent entity and occurrence counts would collapse).
+            {"entities": [payload], "idempotency_key": key, "strict": True},
             bearer,
         )
 
@@ -499,9 +518,9 @@ async def fetch_recent_signals(
     agent_sub: str, bearer: str, limit: int = 300
 ) -> list[DriftSignal]:
     """
-    Pull this agent's still-open drift signals so clustering can accumulate
-    evidence across many work entities and over time — not just within a single
-    issue's comments. Reconstructs DriftSignal objects (theme_key recomputed from
+    Pull this agent's drift signals so clustering can accumulate evidence across
+    many work entities and over time — not just within a single issue's comments.
+    Reconstructs DriftSignal objects (theme_key recomputed from the observation
     text, keeping the fingerprint authoritative).
     """
     data = await _post(
@@ -512,15 +531,15 @@ async def fetch_recent_signals(
     out: list[DriftSignal] = []
     for e in (data or {}).get("entities", []):
         snap = e.get("snapshot") or {}
-        if snap.get("agent_sub") != agent_sub:
+        if snap.get("emitting_agent") != agent_sub:
             continue
-        if snap.get("status") not in (None, "open"):
-            continue
-        text = snap.get("signal_text", "")
+        text = snap.get("observation", "")
         if not text:
             continue
         agent = agent_sub.split("@")[0]
-        out.append(DriftSignal(agent=agent, text=text, source_ref=snap.get("source_ref", "")))
+        out.append(
+            DriftSignal(agent=agent, text=text, source_ref=snap.get("work_entity_id", ""))
+        )
     return out
 
 
@@ -534,7 +553,7 @@ async def _contradiction_sweep(
     for pol in policies:
         if pol.get("status") not in ("provisional", "active"):
             continue
-        if not PolicyState.from_notes(pol.get("notes", "")).auto_generated:
+        if not PolicyState.from_notes(pol.get("body", "")).auto_generated:
             continue
         for sig in cluster.signals:
             if contradicts(sig, pol.get("rule", "") or pol.get("description", "")):

@@ -112,12 +112,13 @@ def test_policy_state_handles_garbage_notes():
 
 
 def test_count_live_auto_policies_ignores_human_and_retired():
+    # Maturation JSON lives in the agent_policy `body` field (no `notes` field).
     auto = PolicyState(auto_generated=True).to_notes()
     human = PolicyState(auto_generated=False).to_notes()
     policies = [
-        {"status": "provisional", "notes": auto},
-        {"status": "active", "notes": auto},
-        {"status": "retired", "notes": auto},  # retired -> not counted
-        {"status": "active", "notes": human},  # human-authored -> not counted
+        {"status": "provisional", "body": auto},
+        {"status": "active", "body": auto},
+        {"status": "retired", "body": auto},  # retired -> not counted
+        {"status": "active", "body": human},  # human-authored -> not counted
     ]
     assert count_live_auto_policies(policies) == 2
