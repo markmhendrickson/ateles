@@ -10,11 +10,8 @@
       }
     },
     "notion": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@notionhq/notion-mcp-server"
-      ],
+      "command": "notion-mcp-server",
+      "args": [],
       "env": {
         "OPENAPI_MCP_HEADERS": "{\"Authorization\": \"Bearer ntn_YOUR_INTEGRATION_TOKEN\", \"Notion-Version\": \"2022-06-28\"}"
       }
