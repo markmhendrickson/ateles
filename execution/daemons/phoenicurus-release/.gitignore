@@ -1,0 +1,4 @@
+# Local runtime state — never commit
+.phoenicurus_*
+*.log
+.npmrc-phoenicurus-*
