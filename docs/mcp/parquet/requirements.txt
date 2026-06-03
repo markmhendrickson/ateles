@@ -1,0 +1,10 @@
+# MCP SDK - install from: pip install mcp
+# Or: pip install git+https://github.com/modelcontextprotocol/python-sdk.git
+mcp>=0.9.0
+pandas>=2.0.0
+pyarrow>=12.0.0
+numpy>=1.24.0
+
+# Optional: OpenAI for embeddings (semantic search)
+openai>=1.0.0
+
