@@ -67,9 +67,11 @@ from lib.daemon_runtime import (  # noqa: E402
     write_checkpoint_brief,
 )
 from lib.daemon_runtime.gating import (  # noqa: E402
+    checkpoint_already_dispatched,
     fetch_task_snapshot,
     mark_task_declined,
     read_checkpoint_resolution,
+    stamp_checkpoint_dispatched,
 )
 from lib.notify import Notifier, Priority  # noqa: E402
 
@@ -390,16 +392,23 @@ async def handle_checkpoint_brief(
     rejected → mark the task declined; do not execute.
     pending/unknown → no-op (waiting on the operator).
 
-    Idempotency: a brief that has already driven an action is expected to be
-    moved out of approved/rejected (or the task out of pending) by that action,
-    so replays are naturally bounded; re-dispatch is also safe because the task
-    skill is responsible for its own idempotency.
+    Idempotency: after acting, the brief is stamped resolved_dispatched=true; a
+    replayed approved/rejected event whose brief carries that stamp is a no-op.
+    Re-dispatch is also safe because the task skill owns its own idempotency, but
+    the stamp avoids spawning the work twice on SSE redelivery.
     """
     resolution = read_checkpoint_resolution(snapshot)
     if resolution is None:
         log.info(
             f"[{DAEMON_NAME}] checkpoint_brief {entity_id} still pending "
             f"(status={snapshot.get('status')!r}) — no action"
+        )
+        return
+
+    if checkpoint_already_dispatched(snapshot):
+        log.info(
+            f"[{DAEMON_NAME}] checkpoint_brief {entity_id} already dispatched "
+            f"(resolution={resolution}) — no-op on replay"
         )
         return
 
@@ -417,6 +426,7 @@ async def handle_checkpoint_brief(
         mark_task_declined(
             task_id, reason=f"operator rejected checkpoint {entity_id}", handler=DAEMON_NAME
         )
+        stamp_checkpoint_dispatched(entity_id, handler=DAEMON_NAME)
         notifier.send(
             f"Checkpoint rejected: {title[:70]}\n  task={task_id} declined",
             priority=Priority.INFO,
@@ -447,6 +457,9 @@ async def handle_checkpoint_brief(
         priority=Priority.INFO,
         handler=DAEMON_NAME,
     )
+    # Stamp before dispatch so an SSE replay can't double-spawn the work; the task
+    # skill's own idempotency covers the rare stamp-succeeded-then-dispatch-crashed case.
+    stamp_checkpoint_dispatched(entity_id, handler=DAEMON_NAME)
     await dispatch_task(
         task_id, task_snapshot, trigger="approved", notifier=notifier, gate_override=True
     )
