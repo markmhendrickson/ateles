@@ -61,6 +61,10 @@ For full step-by-step guidance: `/update-plan` and `/update-tasks` skills.
 | exec policy: CI security gates GHA | `ent_5002905df344d74b01de30a0` |
 | exec policy: Influencer Research | `ent_3a4bbff3f1a0f17558756ec6` |
 | exec policy: SEO/SERP Copy | `ent_7e32fd9ebec7907673363737` |
+| **plan: Sitta librarian daemon** | `ent_2174747f18f625a235f46c1a` |
+| agent_definition: Sitta | `ent_0a092db508311dc817c37df3` |
+| exec policy: Sitta librarian curation | `ent_c8abce610d9e2d7086c7faf4` |
+| task: Build Sitta daemon | `ent_b56bf835b6a41cfabef86175` |
 
 ## Current phase blockers (Phase 5–6)
 
