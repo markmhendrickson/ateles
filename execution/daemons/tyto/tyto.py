@@ -488,12 +488,58 @@ class RecordingWatcher:
 
     RECORDING_EXTENSIONS = {".aac", ".m4a", ".mp4", ".wav"}
     SETTLE_SECS = int(os.environ.get("TYTO_RECORDING_SETTLE_SECS", "8"))
+    # Give up on a file that never settles (0-byte orphans, aborted recordings,
+    # files whose mtime keeps changing). Measured from first sighting in THIS
+    # process. Prevents an endless "settling" re-detection loop. 0 disables.
+    GIVE_UP_SECS = int(os.environ.get("TYTO_RECORDING_GIVE_UP_SECS", "300"))
 
     def __init__(self, watch_dir: Path, notifier: Notifier) -> None:
         self._dir = watch_dir
         self._notifier = notifier
         self._seen: dict[Path, float] = {}    # path → mtime at first sight
         self._transcribed: set[Path] = set() # remote paths already transcribed
+        self._first_seen: dict[Path, float] = {}  # path → wall-clock of first poll sighting
+        self._skipped: set[Path] = set()     # paths abandoned (never settled) — logged once
+
+    def seed_existing(self) -> int:
+        """
+        Mark every remote recording already on disk as processed, so a daemon
+        (re)start only acts on recordings that appear *after* startup.
+
+        Without this, the in-memory `_transcribed` set is empty on every start
+        and the watcher would re-transcribe the entire backlog — burning STT
+        credits and creating duplicate transcription/analysis entities. Backfill
+        of historical recordings is a separate, deliberate operation; set
+        TYTO_SEED_EXISTING=0 to disable seeding and reprocess everything.
+
+        Returns the number of remote files marked as already-processed.
+        """
+        if os.environ.get("TYTO_SEED_EXISTING", "1") == "0":
+            return 0
+        if not self._dir.exists():
+            return 0
+        now = datetime.now(tz=UTC).timestamp()
+        # An in-progress recording (mtime within the settle window) must NOT be
+        # seeded — it should transcribe once it settles. Use a margin a bit
+        # larger than SETTLE_SECS so a recording mid-write is always excluded.
+        fresh_margin = max(self.SETTLE_SECS * 3, 30)
+        count = 0
+        for path in self._dir.iterdir():
+            if not self._is_remote_file(path):
+                continue
+            try:
+                age = now - path.stat().st_mtime
+            except OSError:
+                continue
+            if age < fresh_margin:
+                log.info(
+                    f"[{DAEMON_NAME}] Not seeding in-progress recording "
+                    f"(age {age:.0f}s): {path.name}"
+                )
+                continue  # leave it for the poll loop to settle + transcribe
+            self._transcribed.add(path)
+            count += 1
+        return count
 
     # Audio Hijack recorder block names that represent the far-end / system audio track.
     # "remote" = original naming, "system" = after session rename to "Tyto".
@@ -562,11 +608,50 @@ class RecordingWatcher:
                 continue
             if path in self._transcribed:
                 continue
+            if path in self._skipped:
+                continue  # abandoned earlier — never settled
+
+            # Record first sighting (wall-clock) the very first time we see this
+            # remote file, so we can both log "settling" exactly once and enforce
+            # the give-up deadline below — independent of _seen, which is not
+            # populated for 0-byte files.
+            if path not in self._first_seen:
+                self._first_seen[path] = now
+                log.info(f"[{DAEMON_NAME}] New recording detected (settling): {path.name}")
 
             # Ensure remote file is settled
             if not self._is_settled(path, now):
-                if path not in self._seen:
-                    log.info(f"[{DAEMON_NAME}] New recording detected (settling): {path.name}")
+                # Fast-path: a 0-byte file whose mtime is already older than the
+                # give-up window is a stale orphan from a prior run (e.g. an
+                # aborted Audio Hijack session). Abandon it on first sight rather
+                # than waiting GIVE_UP_SECS of fresh process time.
+                stale_orphan = False
+                if self.GIVE_UP_SECS:
+                    try:
+                        st = path.stat()
+                        stale_orphan = (
+                            st.st_size == 0
+                            and (now - st.st_mtime) >= self.GIVE_UP_SECS
+                        )
+                    except OSError:
+                        stale_orphan = False
+
+                # Give up on files that never settle (0-byte orphans, aborted
+                # recordings) so we don't re-detect them every poll forever.
+                if stale_orphan or (
+                    self.GIVE_UP_SECS
+                    and (now - self._first_seen[path]) >= self.GIVE_UP_SECS
+                ):
+                    self._skipped.add(path)
+                    try:
+                        size = path.stat().st_size
+                    except OSError:
+                        size = -1
+                    log.warning(
+                        f"[{DAEMON_NAME}] Abandoning unsettled recording after "
+                        f"{self.GIVE_UP_SECS}s: {path.name} (size={size} bytes). "
+                        "Will not retry until daemon restart."
+                    )
                 continue
 
             # Find matching mic file
@@ -770,6 +855,14 @@ async def main() -> None:
     # 6. Poll loop
     screenshot_watcher = ScreenshotWatcher(SCREENSHOTS_DIR, notifier)
     recording_watcher = RecordingWatcher(RECORDINGS_DIR, notifier) if TRANSCRIBE_ENABLED else None
+    if recording_watcher is not None:
+        seeded = recording_watcher.seed_existing()
+        if seeded:
+            log.info(
+                f"[{DAEMON_NAME}] Seeded {seeded} existing recording(s) as already-processed; "
+                "only recordings created after startup will be transcribed "
+                "(set TYTO_SEED_EXISTING=0 to backfill)."
+            )
     log.info(f"[{DAEMON_NAME}] Poll interval: {POLL_INTERVAL}s")
 
     while True:
