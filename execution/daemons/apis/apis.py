@@ -59,8 +59,17 @@ if str(_DAEMON_DIR) not in sys.path:
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
     AgentLoader,
+    GateAction,
     NeotomaEvent,
     SSEClient,
+    evaluate_gate,
+    resolve_policy_for_agent,
+    write_checkpoint_brief,
+)
+from lib.daemon_runtime.gating import (  # noqa: E402
+    fetch_task_snapshot,
+    mark_task_declined,
+    read_checkpoint_resolution,
 )
 from lib.notify import Notifier, Priority  # noqa: E402
 
@@ -75,7 +84,49 @@ log = logging.getLogger("apis")
 # ── Config ────────────────────────────────────────────────────────────────────
 DAEMON_NAME = "apis"
 
-SUBSCRIBE_ENTITY_TYPES = ["task"]
+SUBSCRIBE_ENTITY_TYPES = ["task", "checkpoint_brief"]
+
+# Coarse action_type per resolved skill — feeds the execution gate's blast-radius
+# classification. Conservative: anything that opens PRs, releases, pays, or posts
+# publicly is high blast. An explicit task.action_type field overrides this.
+_AGENT_ACTION_TYPE: dict[str, str] = {
+    "gryllus": "open_pr",
+    "vanellus": "merge_pr",
+    "struthio": "release",
+    "monedula": "payment",
+    "fringilla": "compute_only_analysis",
+    "corvus": "send_external_comms",
+}
+
+
+def _infer_action_type(skill: str | None, snapshot: dict) -> str | None:
+    """Best-effort action_type for the gate. Explicit task field wins."""
+    explicit = (snapshot.get("action_type") or "").strip().lower()
+    if explicit:
+        return explicit
+    if skill:
+        return _AGENT_ACTION_TYPE.get(skill.lower())
+    return None
+
+
+def _read_confidence(snapshot: dict) -> float:
+    """
+    Read the agent-supplied confidence (0..1) from the task snapshot. Absent an
+    explicit score, return 0.0 so the gate fails CLOSED (checkpoint) for any
+    non-low-blast action — the operator is asked rather than the swarm guessing.
+    """
+    raw = snapshot.get("confidence", snapshot.get("confidence_score"))
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _successful_recurrences(snapshot: dict) -> int:
+    try:
+        return max(0, int(snapshot.get("successful_recurrences", 0)))
+    except (TypeError, ValueError):
+        return 0
 
 ATELES_REPO = Path(
     os.environ.get("ATELES_REPO_PATH", str(Path.home() / "repos" / "ateles"))
@@ -102,7 +153,6 @@ DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
 # (see _spawn_claude_skill). Set APIS_DRY_RUN=1 to log intent without spawning.
 
 from routing import (  # noqa: E402
-    DOMAIN_ROUTES as _DOMAIN_ROUTES,
     infer_tags_from_text as _infer_tags_from_text,
     resolve_skill as _resolve_skill,
 )
@@ -215,16 +265,26 @@ async def _spawn_claude_skill(
 
 
 async def dispatch_task(
-    entity_id: str, snapshot: dict, trigger: str, notifier: Notifier
+    entity_id: str,
+    snapshot: dict,
+    trigger: str,
+    notifier: Notifier,
+    gate_override: bool = False,
 ) -> None:
     """
     Route a task to the appropriate T4 skill and spawn it via `claude --print`.
 
+    Applies the confidence × blast-radius execution gate before spawning: a
+    non-auto-execute decision writes a blocking checkpoint_brief and notifies the
+    operator instead of executing. `gate_override=True` skips the gate — used when
+    re-dispatching a task whose checkpoint the operator has explicitly approved.
+
     Args:
-        entity_id: Neotoma entity ID of the task
-        snapshot:  Current task snapshot
-        trigger:   Event that triggered dispatch ("created", "updated", "due_today")
-        notifier:  Notifier for dispatch-failure alerts
+        entity_id:     Neotoma entity ID of the task
+        snapshot:      Current task snapshot
+        trigger:       Event that triggered dispatch ("created", "due_today", "approved")
+        notifier:      Notifier for dispatch-failure + checkpoint alerts
+        gate_override: When True, bypass the gate (operator already approved)
     """
     title = snapshot.get("title", "(untitled)")
 
@@ -255,9 +315,58 @@ async def dispatch_task(
         )
         return
 
+    # ── Execution gate ──────────────────────────────────────────────────────
+    # Skipped when re-dispatching an operator-approved checkpoint.
+    if not gate_override:
+        policy = resolve_policy_for_agent(skill)
+        action_type = _infer_action_type(skill, snapshot)
+        confidence = _read_confidence(snapshot)
+        decision = evaluate_gate(
+            confidence=confidence,
+            action_type=action_type,
+            policy=policy,
+            successful_recurrences=_successful_recurrences(snapshot),
+        )
+        log.info(
+            f"[{DAEMON_NAME}] gate: task={entity_id} → {skill} "
+            f"action={action_type} blast={decision.blast_radius.value} "
+            f"conf={confidence:.2f}/{decision.threshold:.2f} "
+            f"→ {decision.action.value} ({decision.reason})"
+        )
+        if decision.action != GateAction.AUTO_EXECUTE:
+            brief_id = write_checkpoint_brief(
+                task_entity_id=entity_id,
+                decision=decision,
+                title=title,
+                plan_summary=(
+                    f"Assigned to {skill}. Action: {action_type or 'unknown'}. "
+                    f"Trigger: {trigger}. {decision.reason}."
+                ),
+                handler=DAEMON_NAME,
+                alternatives=(
+                    ["Re-scope to a lower-blast action", "Provide missing inputs", "Decline"]
+                    if decision.action == GateAction.CHECKPOINT_WITH_ALTERNATIVES
+                    else None
+                ),
+            )
+            notifier.send(
+                f"PLAN checkpoint: {title[:70]}\n"
+                f"  agent={skill} blast={decision.blast_radius.value} "
+                f"conf={confidence:.2f} — {decision.reason}\n"
+                f"  task={entity_id} brief={brief_id or '(unpersisted)'}",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+            log.info(
+                f"[{DAEMON_NAME}] HELD task {entity_id} for operator approval "
+                f"(checkpoint_brief={brief_id})"
+            )
+            return
+
     log.info(
         f"[{DAEMON_NAME}] → {skill}: task={entity_id} trigger={trigger} "
         f"tags={existing_tags} title={title[:60]!r}"
+        + (" (gate: override)" if gate_override else " (gate: auto-execute)")
     )
 
     if DRY_RUN:
@@ -265,6 +374,82 @@ async def dispatch_task(
         return
 
     await _spawn_claude_skill(skill, entity_id, snapshot, trigger, notifier)
+
+
+# ── Checkpoint resolution ───────────────────────────────────────────────────
+
+
+async def handle_checkpoint_brief(
+    entity_id: str, snapshot: dict, notifier: Notifier
+) -> None:
+    """
+    React to a checkpoint_brief the gate raised once the operator resolves it.
+
+    approved → re-dispatch the referenced task with the gate bypassed (the
+               operator IS the approval the gate was waiting for).
+    rejected → mark the task declined; do not execute.
+    pending/unknown → no-op (waiting on the operator).
+
+    Idempotency: a brief that has already driven an action is expected to be
+    moved out of approved/rejected (or the task out of pending) by that action,
+    so replays are naturally bounded; re-dispatch is also safe because the task
+    skill is responsible for its own idempotency.
+    """
+    resolution = read_checkpoint_resolution(snapshot)
+    if resolution is None:
+        log.info(
+            f"[{DAEMON_NAME}] checkpoint_brief {entity_id} still pending "
+            f"(status={snapshot.get('status')!r}) — no action"
+        )
+        return
+
+    task_id = snapshot.get("task_entity_id")
+    if not task_id:
+        log.warning(
+            f"[{DAEMON_NAME}] checkpoint_brief {entity_id} {resolution} but has no "
+            "task_entity_id — cannot act"
+        )
+        return
+
+    title = snapshot.get("title", "(untitled)")
+
+    if resolution == "rejected":
+        mark_task_declined(
+            task_id, reason=f"operator rejected checkpoint {entity_id}", handler=DAEMON_NAME
+        )
+        notifier.send(
+            f"Checkpoint rejected: {title[:70]}\n  task={task_id} declined",
+            priority=Priority.INFO,
+            handler=DAEMON_NAME,
+        )
+        return
+
+    # approved → re-dispatch with the gate bypassed
+    task_snapshot = fetch_task_snapshot(task_id)
+    if task_snapshot is None:
+        log.warning(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} approved but task {task_id} "
+            "could not be fetched — not dispatching"
+        )
+        notifier.send(
+            f"Checkpoint approved but task {task_id} unreachable — manual dispatch needed",
+            priority=Priority.WARN,
+            handler=DAEMON_NAME,
+        )
+        return
+
+    log.info(
+        f"[{DAEMON_NAME}] checkpoint {entity_id} APPROVED — re-dispatching task "
+        f"{task_id} with gate override"
+    )
+    notifier.send(
+        f"Checkpoint approved: {title[:70]}\n  re-dispatching task {task_id}",
+        priority=Priority.INFO,
+        handler=DAEMON_NAME,
+    )
+    await dispatch_task(
+        task_id, task_snapshot, trigger="approved", notifier=notifier, gate_override=True
+    )
 
 
 # ── Event handler ─────────────────────────────────────────────────────────────
@@ -284,6 +469,10 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
     snapshot = event.snapshot or {}
 
     log.info(f"[{DAEMON_NAME}] Event: {entity_type}/{entity_id} action={action}")
+
+    if entity_type == "checkpoint_brief":
+        await handle_checkpoint_brief(entity_id, snapshot, notifier)
+        return
 
     if entity_type != "task":
         # Defensive: SSE client filters by entity type, but guard here too

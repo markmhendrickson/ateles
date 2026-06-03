@@ -29,6 +29,16 @@ See individual modules for full API.
 
 from .aauth_signer import AAuthSigner
 from .agent_loader import AgentDefinition, AgentLoader
+from .gating import (
+    BlastRadius,
+    ExecutionPolicy,
+    GateAction,
+    GateDecision,
+    evaluate_gate,
+    load_policy,
+    resolve_policy_for_agent,
+    write_checkpoint_brief,
+)
 from .grant_checker import (
     AgentGrant,
     GrantChecker,
@@ -46,4 +56,8 @@ __all__ = [
     "GrantChecker", "AgentGrant",
     "suspend_grant", "restore_grant", "revoke_grant",
     "check_param_constraints",
+    # gating
+    "BlastRadius", "ExecutionPolicy", "GateAction", "GateDecision",
+    "evaluate_gate", "load_policy", "resolve_policy_for_agent",
+    "write_checkpoint_brief",
 ]
