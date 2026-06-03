@@ -40,7 +40,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import shutil
 import sys
 from pathlib import Path
@@ -49,6 +48,13 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+# Daemons run as standalone scripts (`python apis.py`), so there is no parent
+# package for relative imports. Add this daemon's own directory to sys.path so
+# sibling modules (routing, a2a_executor, a2a_gateway) import as top-level.
+_DAEMON_DIR = Path(__file__).resolve().parent
+if str(_DAEMON_DIR) not in sys.path:
+    sys.path.insert(0, str(_DAEMON_DIR))
 
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
@@ -88,86 +94,18 @@ DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
 
 # ── Domain routing ─────────────────────────────────────────────────────────────
 #
-# Domain tags → T4 skill mappings.
-# Tags are inferred from the task title/body by neotoma-agent's due-date
-# hygiene step (which runs before Apis sees the task.updated event after
-# the correction is applied). Apis uses the snapshot's tags field.
-#
-# Each tag maps to a T4 skill dispatched via `claude --print` (see
-# _spawn_claude_skill). Set APIS_DRY_RUN=1 to log intent without spawning.
+# Domain tags → T4 skill mappings live in routing.py, shared with the A2A
+# gateway (a2a_executor.py) so inbound A2A tasks and SSE-sourced tasks route
+# through one source of truth. Tags are inferred from the task title/body
+# (neotoma-agent's due-date hygiene may set them first; Apis falls back to
+# local inference). Each tag maps to a T4 skill dispatched via `claude --print`
+# (see _spawn_claude_skill). Set APIS_DRY_RUN=1 to log intent without spawning.
 
-_DOMAIN_ROUTES: dict[str, str] = {
-    "finance": "monedula",  # payment execution — handed off to Monedula
-    "health": "gorilla",  # workout logging / fitness tasks → Gorilla
-    "ops": "gryllus",  # ops/deploy tasks → issue worker
-    "engineering": "gryllus",  # engineering tasks → issue worker
-    "agents": "gryllus",  # agent/swarm tasks → issue worker
-    "neotoma": "gryllus",  # neotoma-repo tasks → issue worker
-    "product": "gryllus",  # product/design tasks → issue worker
-    "comms": "gryllus",  # comms tasks → issue worker
-}
-
-# Domain keyword patterns (mirrors neotoma-agent's patterns — kept in sync manually
-# until a shared lib is extracted in Phase 5)
-_DOMAIN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (
-        re.compile(
-            r"\b(payment|invoice|transfer|wage|salary|rent|yoga|therapy)\b", re.I
-        ),
-        "finance",
-    ),
-    (
-        re.compile(
-            r"\b(workout|gym|fitness|lift|squat|bench|deadlift|training|"
-            r"reps|sets|cardio|gorilla)\b",
-            re.I,
-        ),
-        "health",
-    ),
-    (
-        re.compile(r"\b(deploy|release|build|ci|pipeline|docker|kubernetes)\b", re.I),
-        "ops",
-    ),
-    (
-        re.compile(r"\b(bug|fix|error|crash|exception|regression|test)\b", re.I),
-        "engineering",
-    ),
-    (
-        re.compile(r"\b(design|ux|ui|figma|wireframe|mockup|copy|content)\b", re.I),
-        "product",
-    ),
-    (
-        re.compile(r"\b(neotoma|schema|entity|migration|api|endpoint)\b", re.I),
-        "neotoma",
-    ),
-    (
-        re.compile(r"\b(agent|daemon|skill|swarm|formica|apus|tyto|anthus)\b", re.I),
-        "agents",
-    ),
-    (re.compile(r"\b(email|newsletter|telegram|social|post|draft)\b", re.I), "comms"),
-]
-
-
-def _infer_tags_from_text(title: str, body: str = "") -> list[str]:
-    """Infer domain tags from task title + body (fallback when snapshot lacks tags)."""
-    text = f"{title} {body}"
-    tags: list[str] = []
-    for pattern, tag in _DOMAIN_PATTERNS:
-        if pattern.search(text) and tag not in tags:
-            tags.append(tag)
-    return tags
-
-
-def _resolve_skill(tags: list[str]) -> str | None:
-    """
-    Pick the T4 skill for a task based on its domain tags.
-    First match wins; returns None if no tag maps to a route.
-    """
-    for tag in tags:
-        skill = _DOMAIN_ROUTES.get(tag)
-        if skill:
-            return skill
-    return None
+from routing import (  # noqa: E402
+    DOMAIN_ROUTES as _DOMAIN_ROUTES,
+    infer_tags_from_text as _infer_tags_from_text,
+    resolve_skill as _resolve_skill,
+)
 
 
 # ── T4 dispatch ────────────────────────────────────────────────────────────────
@@ -305,12 +243,15 @@ async def dispatch_task(
         body = snapshot.get("body", "") or snapshot.get("description", "")
         existing_tags = _infer_tags_from_text(title, body)
 
-    skill = _resolve_skill(existing_tags)
+    # An explicit assigned_to (set by Sylvia/Turdus) wins over tag inference.
+    assigned_to = snapshot.get("assigned_to") or None
+    skill = _resolve_skill(existing_tags, assigned_to=assigned_to)
 
     if skill is None:
         log.info(
             f"[{DAEMON_NAME}] No route for task {entity_id!r} "
-            f"(trigger={trigger}, tags={existing_tags}) — skipping dispatch"
+            f"(trigger={trigger}, tags={existing_tags}, assigned_to={assigned_to}) "
+            "— skipping dispatch"
         )
         return
 
