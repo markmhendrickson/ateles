@@ -1,0 +1,50 @@
+name: Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-test.txt
+      
+      - name: Run unit tests
+        run: pytest -m unit --cov --cov-report=xml
+      
+      - name: Run integration tests
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          TEST_ASANA_SOURCE_PAT: ${{ secrets.TEST_ASANA_SOURCE_PAT }}
+          TEST_ASANA_TARGET_PAT: ${{ secrets.TEST_ASANA_TARGET_PAT }}
+          TEST_SOURCE_WORKSPACE_GID: ${{ secrets.TEST_SOURCE_WORKSPACE_GID }}
+          TEST_TARGET_WORKSPACE_GID: ${{ secrets.TEST_TARGET_WORKSPACE_GID }}
+        run: pytest -m integration --cov --cov-report=xml
+      
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+
+
+
+
+
+
