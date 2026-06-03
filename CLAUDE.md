@@ -18,6 +18,18 @@ Use `mcp__mcpsrv_neotoma__correct` with idempotency keys in the form `update-pla
 
 For full step-by-step guidance: `/update-plan` and `/update-tasks` skills.
 
+## Session-integrity hooks (mechanical enforcement)
+
+`.claude/settings.json` wires three Claude Code lifecycle hooks (in `.claude/hooks/`) that mechanically enforce the plan-and-task contract above. They implement layer 1 of `docs/session_integrity.md`:
+
+- **`session_start.py`** (SessionStart) — initializes per-session state, binds to the default plan (`ent_99ace4dd6673aa36ed08b1fe`), and injects a one-line reminder of the bind/turn/artifact contract. Always exits 0.
+- **`user_prompt_submit.py`** (UserPromptSubmit) — lightweight per-turn counter. Exits 0.
+- **`stop_finalizer.py`** (Stop) — the enforcement gate. Scans the transcript; classifies the session as **exempt** (no domain writes — grace path), **integral** (domain writes + a plan link + stored turns), or **violated** (domain writes but no plan link or zero turns). Emits a `harness_event` audit row each time.
+
+All hooks are **fail-open** (stdlib-only Python; any error or missing `NEOTOMA_BEARER_TOKEN` → exit 0, never crash a session). Plan binding is judged from the **transcript** (an actual plan touch/link), not the SessionStart default intent.
+
+**Rollout posture:** defaults to **WARN** (logs the violation, exits 0). Set `ATELES_SESSION_INTEGRITY_ENFORCE=1` to switch the Stop hook to **BLOCK** (exit 2 + `{"decision":"block"}`), preventing a clean stop until the session binds a plan and stores its turns. Per-session state lives in `.claude/.session_state/` (gitignored).
+
 ---
 
 ## Standing constraints
