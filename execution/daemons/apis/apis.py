@@ -91,10 +91,14 @@ SUBSCRIBE_ENTITY_TYPES = ["task", "checkpoint_brief"]
 # Coarse action_type per resolved skill — feeds the execution gate's blast-radius
 # classification. Conservative: anything that opens PRs, releases, pays, or posts
 # publicly is high blast. An explicit task.action_type field overrides this.
+# Values MUST match the execution_policy's high/low_blast_action_types vocabulary
+# (default policy ent_dfce6edecefe3eb7fc9e0337) or the gate mis-classifies blast
+# radius. PR open and merge both map to the policy's "open_or_merge_pr"; "release"
+# is treated as high blast via blast_radius_default + the policy's publish set.
 _AGENT_ACTION_TYPE: dict[str, str] = {
-    "gryllus": "open_pr",
-    "vanellus": "merge_pr",
-    "struthio": "release",
+    "gryllus": "open_or_merge_pr",
+    "vanellus": "open_or_merge_pr",
+    "struthio": "publish",
     "monedula": "payment",
     "fringilla": "compute_only_analysis",
     "corvus": "send_external_comms",
