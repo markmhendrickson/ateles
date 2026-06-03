@@ -1,0 +1,1 @@
+"""HomeKit MCP Server package."""

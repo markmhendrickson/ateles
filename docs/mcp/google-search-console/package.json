@@ -1,0 +1,49 @@
+{
+  "name": "google-search-console-mcp",
+  "version": "1.0.0",
+  "description": "Google Search Console MCP server for monitoring indexing issues and search performance",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "google-search-console-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "node scripts/build.js",
+    "start": "node dist/index.js",
+    "auth": "node dist/index.js auth"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "google-search-console",
+    "search-console",
+    "mcp",
+    "cursor",
+    "ai",
+    "oauth",
+    "model-context-protocol",
+    "google",
+    "seo",
+    "indexing"
+  ],
+  "author": "Mark Hendrickson",
+  "license": "ISC",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.1",
+    "google-auth-library": "^9.4.1",
+    "googleapis": "^129.0.0",
+    "open": "^10.0.0",
+    "zod": "^3.22.4",
+    "zod-to-json-schema": "^3.22.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.5",
+    "esbuild": "^0.25.12",
+    "typescript": "^5.3.3"
+  }
+}
