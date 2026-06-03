@@ -413,6 +413,48 @@ def fetch_task_snapshot(task_entity_id: str) -> dict | None:
     return _snapshot_of(data)
 
 
+def checkpoint_already_dispatched(snapshot: dict) -> bool:
+    """
+    True if this checkpoint_brief has already been acted on by the dispatcher
+    (resolved_dispatched stamped). Used to make SSE replays of the same
+    approved/rejected event no-ops.
+    """
+    val = snapshot.get("resolved_dispatched")
+    return val is True or str(val).strip().lower() in {"true", "1", "yes"}
+
+
+def stamp_checkpoint_dispatched(checkpoint_entity_id: str, *, handler: str) -> bool:
+    """
+    Mark a checkpoint_brief `resolved_dispatched: true` after the dispatcher has
+    acted on its resolution, so SSE replays of the same approved/rejected event
+    are no-ops. Best-effort; logs and returns False on failure.
+    """
+    if not NEOTOMA_BEARER_TOKEN:
+        log.warning("[gating] no bearer token — cannot stamp checkpoint dispatched")
+        return False
+    body = {
+        "entity_id": checkpoint_entity_id,
+        "entity_type": "checkpoint_brief",
+        "field": "resolved_dispatched",
+        "value": True,
+        "idempotency_key": f"checkpoint-dispatched-{handler}-{checkpoint_entity_id}",
+    }
+    try:
+        resp = httpx.post(
+            f"{NEOTOMA_BASE_URL}/correct",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            json=body,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            f"[gating] failed to stamp checkpoint {checkpoint_entity_id} dispatched: {exc}"
+        )
+        return False
+
+
 def mark_task_declined(task_entity_id: str, *, reason: str, handler: str) -> bool:
     """
     Correct a task's status to 'declined' after an operator rejects its

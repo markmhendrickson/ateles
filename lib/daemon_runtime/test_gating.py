@@ -144,3 +144,13 @@ def test_checkpoint_resolution_pending_is_none():
     assert read_checkpoint_resolution({"status": ""}) is None
     assert read_checkpoint_resolution({}) is None
     assert read_checkpoint_resolution({"status": "something_else"}) is None
+
+
+def test_checkpoint_already_dispatched():
+    from lib.daemon_runtime.gating import checkpoint_already_dispatched
+    assert checkpoint_already_dispatched({"resolved_dispatched": True}) is True
+    assert checkpoint_already_dispatched({"resolved_dispatched": "true"}) is True
+    assert checkpoint_already_dispatched({"resolved_dispatched": "1"}) is True
+    assert checkpoint_already_dispatched({"resolved_dispatched": False}) is False
+    assert checkpoint_already_dispatched({}) is False
+    assert checkpoint_already_dispatched({"resolved_dispatched": None}) is False
