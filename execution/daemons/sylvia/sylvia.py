@@ -301,6 +301,27 @@ def _neotoma_correct(entity_id: str, field: str, value: str, idem: str) -> None:
         log.warning(f"correction failed ({entity_id}.{field}={value}): {exc}")
 
 
+_APIS_ROUTING_DIR = PROJECT_ROOT / "execution" / "daemons" / "apis"
+
+
+def _route_to_agent(title: str, body: str = "") -> str | None:
+    """
+    Resolve the agent that should own a task, reusing Apis's routing table as the
+    single source of truth. Returns an agent name (e.g. 'monedula', 'gryllus') or
+    None when nothing routes — in which case the task stays human/unassigned.
+    """
+    try:
+        if str(_APIS_ROUTING_DIR) not in sys.path:
+            sys.path.insert(0, str(_APIS_ROUTING_DIR))
+        import routing  # apis/routing.py
+
+        tags = routing.infer_tags_from_text(title, body)
+        return routing.resolve_skill(tags)
+    except Exception as exc:
+        log.warning(f"agent-routing lookup failed for {title!r}: {exc}")
+        return None
+
+
 def _neotoma_create_task(payload: dict) -> None:
     """Create a single task entity via `neotoma entities import` (JSONL)."""
     import tempfile
@@ -564,10 +585,20 @@ def import_calendar_tasks(
         if matched:
             continue
 
-        agent_keywords = {"payment", "pagament", "pago", "deploy", "release", "pr "}
-        audience = (
-            "agent" if any(kw in title.lower() for kw in agent_keywords) else "human"
-        )
+        # Operator-personal events stay human + unassigned; everything else is
+        # routed to an agent via the shared Apis routing table (single source of
+        # truth), and only marked audience=agent when a concrete assignee resolves.
+        personal_kw = {
+            "yoga", "therapy", "osteopath", "haircut", "doctor", "dentist",
+            "medical", "gym", "family", "birthday", "café", "cafe", "lunch",
+            "dinner", "coffee",
+        }
+        if any(kw in title.lower() for kw in personal_kw):
+            audience, assigned_to = "human", None
+        else:
+            assigned_to = _route_to_agent(title)
+            audience = "agent" if assigned_to else "human"
+
         payload = {
             "entity_type": "task",
             "title": title,
@@ -576,10 +607,13 @@ def import_calendar_tasks(
             "status": "pending",
             "notes": "imported from Google Calendar by Sylvia",
         }
+        if assigned_to:
+            payload["assigned_to"] = assigned_to
         try:
             _neotoma_create_task(payload)
             log.info(
-                f"Imported Calendar task: {title!r} due {ev_date} (audience={audience})"
+                f"Imported Calendar task: {title!r} due {ev_date} "
+                f"(audience={audience}, assigned_to={assigned_to or '-'})"
             )
             created += 1
         except Exception as exc:
