@@ -140,5 +140,10 @@ paths = [
   "execution/daemons/monedula/handlers/payment_profile.py",
   "execution/scripts/loxia_review.py",
   ".github/workflows/loxia-pr-review.yml",
+  # docs/mcp/ — migrated MCP setup docs: OAuth env-var names + placeholder
+  # tokens (your-token, generated-access-token, <token>), not real secrets.
+  # Real client-id/secret in TUNNEL_AUTOSTART/CLAUDE_DESKTOP_OAUTH redacted.
+  '''docs/mcp/.*\.md''',
+  "docs/mcp/whatsapp/whatsapp_mcp_server.py",
 ]
 

@@ -1,0 +1,44 @@
+{
+  "_comment": "Template for MCP server configuration. Use scripts/generate_mcp_config.py to generate .cursor/mcp.json from this template.",
+  "mcpServers": {
+    "parquet": {
+      "command": "/absolute/path/to/repo/mcp/parquet/run-parquet-mcp.sh"
+    },
+    "gmail": {
+      "command": "/absolute/path/to/repo/mcp/gmail/run-gmail-mcp.sh"
+    },
+    "dnsimple": {
+      "command": "/absolute/path/to/repo/mcp/dnsimple/run-dnsimple-mcp.sh"
+    },
+    "google-calendar": {
+      "command": "/absolute/path/to/repo/mcp/google-calendar/run-google-calendar-mcp.sh"
+    },
+    "instagram": {
+      "command": "/absolute/path/to/repo/mcp/instagram/run-instagram-mcp.sh"
+    },
+    "minted": {
+      "command": "/absolute/path/to/repo/mcp/minted/run-minted-mcp.sh"
+    },
+    "asana": {
+      "command": "/absolute/path/to/repo/mcp/asana/run-asana-mcp.sh"
+    },
+    "homekit": {
+      "command": "/absolute/path/to/repo/mcp/homekit/run-homekit-mcp.sh"
+    },
+    "whatsapp": {
+      "command": "/absolute/path/to/repo/mcp/whatsapp/run-whatsapp-mcp.sh"
+    },
+    "web-scraper": {
+      "command": "/absolute/path/to/repo/mcp/web-scraper/run-web-scraper-mcp.sh"
+    },
+    "btc-wallet": {
+      "command": "/absolute/path/to/repo/mcp/btc_wallet/run_btc_wallet_mcp.sh"
+    },
+    "google-search-console": {
+      "command": "/absolute/path/to/repo/mcp/google-search-console/run-google-search-console-mcp.sh"
+    },
+    "markmhendrickson": {
+      "command": "/absolute/path/to/repo/mcp/markmhendrickson/run-markmhendrickson-mcp.sh"
+    }
+  }
+}
