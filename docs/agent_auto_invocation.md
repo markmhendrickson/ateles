@@ -33,7 +33,10 @@ manifest therefore lives in a hand-authored file outside the mirror path.
 |---|---|
 | `.claude/agent-routing.json` | Hand-authored manifest: per-agent role, slash command, and match signals. Durable (not mirrored). |
 | `.claude/hooks/agent_auto_invocation.py` | Stdlib-only `UserPromptSubmit` hook. Scores the prompt, emits `additionalContext`. Fails open. |
-| `.claude/settings.json` | Registers the hook on the `UserPromptSubmit` event. |
+| `scripts/install-agent-auto-invocation.sh` | Installs the hook + panel-agent skills **device-wide** (user-level), pointing at this checkout. Idempotent; `--uninstall` reverses it. |
+
+The hook is registered at the **user level** (`~/.claude/settings.json`), not in
+the project's `.claude/settings.json` — see *Scope* below.
 
 ## Matching model
 
@@ -82,12 +85,44 @@ stdin results in exit 0 with no output. It never blocks or delays a prompt, and
 it never modifies state. `additionalContext` is injected for the model only; it
 is not shown to the user as a separate message.
 
-## Scope (v1)
+## Scope: device-wide vs project-only
 
-Covers the 13 core T4 panel agents: Pavo, Accipiter, Bombycilla, Gryllus,
-Vanellus, Lanius, Phoenicurus, Struthio, Buteo, Hirundo, Paradisaea, Corvus,
-Regulus. Domain-utility skills (e.g. `email-triage`, `deploy-website`) and T3
-daemons are intentionally excluded.
+A *project*-level `.claude/settings.json` hook only fires in sessions rooted in
+the ateles repo. Two things are needed for auto-invocation to work in **any**
+repo on the machine:
+
+1. The hook must be registered at the **user level** (`~/.claude/settings.json`),
+   so it runs regardless of which repo the session is in.
+2. The agent skills must be available at the **user level**
+   (`~/.claude/skills/`), or the recommended slash command (`/gryllus`, …) won't
+   resolve outside ateles — panel agents are otherwise *project* skills.
+
+`scripts/install-agent-auto-invocation.sh` does both, by reference rather than
+by copy: user settings point at this checkout's hook script (absolute path), and
+each panel skill is **symlinked** from `~/.claude/skills/<name>` into
+`<ateles>/.claude/skills/<name>`. The ateles repo stays the single source of
+truth, so `git pull` and Apus SKILL.md re-mirrors are picked up automatically.
+
+```bash
+# from the ateles checkout, on the target machine:
+scripts/install-agent-auto-invocation.sh            # install device-wide
+scripts/install-agent-auto-invocation.sh --uninstall
+```
+
+The hook script itself is cwd-independent: its manifest lookup falls back to a
+path relative to the script, so it finds `agent-routing.json` in the ateles
+checkout no matter which repo invoked it. (A different repo may still override
+by shipping its own `.claude/agent-routing.json`.)
+
+> **Do not** also register the hook in the project `.claude/settings.json` once
+> it's installed user-level — both would fire inside ateles and the context
+> would be injected twice. The installer prints this reminder.
+
+The installed skill set is read from `agent-routing.json` at install time, so it
+always matches what the hook can recommend: the 13 core T4 panel agents (Pavo,
+Accipiter, Bombycilla, Gryllus, Vanellus, Lanius, Phoenicurus, Struthio, Buteo,
+Hirundo, Paradisaea, Corvus, Regulus). Domain-utility skills (e.g.
+`email-triage`, `deploy-website`) and T3 daemons are intentionally excluded.
 
 ## Future: Neotoma-canonical routing
 
