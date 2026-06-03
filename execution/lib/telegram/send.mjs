@@ -52,6 +52,7 @@ function parseArgs() {
   const parsed = {
     text: '',
     topic: null,
+    plain: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -61,13 +62,18 @@ function parseArgs() {
     } else if (args[i] === '--topic' && i + 1 < args.length) {
       parsed.topic = args[i + 1];
       i++;
+    } else if (args[i] === '--plain') {
+      // Send as plain text — no Telegram Markdown parsing. Use this when the
+      // message body may contain literal '*' or '_' (e.g. **bold**, REFERS_TO)
+      // that legacy Markdown would mangle into stray formatting.
+      parsed.plain = true;
     }
   }
 
   return parsed;
 }
 
-function sendTelegramMessage(text, messageThreadId = null) {
+function sendTelegramMessage(text, messageThreadId = null, plain = false) {
   if (!BOT_TOKEN || !CHAT_ID) {
     console.error('Error: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set');
     process.exit(1);
@@ -76,8 +82,11 @@ function sendTelegramMessage(text, messageThreadId = null) {
   const payload = {
     chat_id: CHAT_ID,
     text: text,
-    parse_mode: 'Markdown',
   };
+
+  if (!plain) {
+    payload.parse_mode = 'Markdown';
+  }
 
   if (messageThreadId) {
     payload.message_thread_id = messageThreadId;
@@ -123,15 +132,15 @@ function sendTelegramMessage(text, messageThreadId = null) {
 }
 
 async function main() {
-  const { text, topic } = parseArgs();
+  const { text, topic, plain } = parseArgs();
 
   if (!text) {
-    console.error('Usage: node send.mjs --text "Message text" [--topic TOPIC_ID]');
+    console.error('Usage: node send.mjs --text "Message text" [--topic TOPIC_ID] [--plain]');
     process.exit(1);
   }
 
   try {
-    const result = await sendTelegramMessage(text, topic);
+    const result = await sendTelegramMessage(text, topic, plain);
     console.log('Message sent successfully:', result.result.message_id);
   } catch (err) {
     console.error('Failed to send message:', err.message);
