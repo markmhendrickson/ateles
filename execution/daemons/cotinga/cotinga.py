@@ -230,17 +230,57 @@ def fetch_upcoming_events() -> list[dict]:
     return merged
 
 
+def _name_from_event_summary(summary: str, email: str) -> str | None:
+    """Best-effort: pull a human name for an attendee out of the event title.
+
+    Calendar attendee records frequently lack a displayName, leaving only the
+    email local-part (e.g. "amelia"). The event summary often carries the full
+    name (e.g. "VC — Amelia Leigner (ProspectCRM)"). If the email local-part
+    matches a capitalized token in the summary, return the fuller name found
+    around it. Returns None when no confident match is found.
+    """
+    import re as _re
+
+    if not summary or not email:
+        return None
+    local = email.split("@")[0].lower()
+    # First-name guess: split local-part on common separators
+    first_token = _re.split(r"[._\-]", local)[0]
+    if len(first_token) < 2:
+        return None
+
+    # Find capitalized name sequences in the summary (e.g. "Amelia Leigner")
+    name_runs = _re.findall(r"[A-Z][a-zA-Z'’\-]+(?:\s+[A-Z][a-zA-Z'’\-]+)*", summary)
+    for run in name_runs:
+        tokens = run.split()
+        if tokens and tokens[0].lower() == first_token:
+            # Cap at two tokens (first + last) to avoid trailing words
+            return " ".join(tokens[:2])
+    return None
+
+
 def _extract_attendees(event: dict) -> list[dict]:
-    """Return list of attendee dicts (name, email) from a calendar event."""
+    """Return list of attendee dicts (name, email) from a calendar event.
+
+    Name resolution order: explicit displayName -> name parsed from the event
+    summary -> email local-part. This keeps shallow briefs from showing bare
+    "amelia" when the title already says "Amelia Leigner".
+    """
     attendees = event.get("attendees") or []
+    summary = event.get("summary") or ""
     result = []
     for a in attendees:
         email = a.get("email", "").lower()
         # Skip self and calendar resource rooms
         if not email or "resource.calendar.google.com" in email:
             continue
+        name = (
+            a.get("displayName")
+            or _name_from_event_summary(summary, email)
+            or email.split("@")[0]
+        )
         result.append({
-            "name": a.get("displayName") or email.split("@")[0],
+            "name": name,
             "email": email,
             "organizer": a.get("organizer", False),
             "self": a.get("self", False),
@@ -553,40 +593,52 @@ Your job is to prepare a deep briefing for this upcoming meeting and send it via
    d. Open questions: anything Mark should clarify or resolve
 
 6. **Store the brief** — store a checkpoint_brief entity in Neotoma:
-   entity_type=checkpoint_brief (schema: b0bfcfab-1f07-4526-8fa5-d5ace343b004)
-   with the full brief as the body field, linked REFERS_TO the meeting event.
+   entity_type=checkpoint_brief (schema: b0bfcfab-1f07-4526-8fa5-d5ace343b004).
+   Pass the full brief text as a TOP-LEVEL `body` field on the entity (not nested
+   under any wrapper, and not only in raw_fragments). Also set top-level fields
+   `title`, `meeting_date`, `meeting_time`, and `participant_emails`. Link the
+   entity REFERS_TO the meeting event.
 
 7. **Send Telegram** — send the complete brief to Telegram via:
-   node {PROJECT_ROOT}/execution/lib/telegram/send.mjs --text "<brief>" {telegram_thread_flag}
+   node {PROJECT_ROOT}/execution/lib/telegram/send.mjs --text "<brief>" --plain {telegram_thread_flag}
 
-Format the Telegram message as:
----
+   IMPORTANT — plain text only. Telegram renders the message as plain text (we pass --plain).
+   Do NOT use any Markdown syntax: no **bold**, no *italics*, no _underscores_, no `code`,
+   no # headings, and no --- horizontal rules. Write entity references like REFERS_TO and
+   CORRECTS literally (underscores are fine in plain text). Use the emoji section headers
+   EXACTLY as written below (mixed case, e.g. "👥 Participants" — NOT "PARTICIPANTS").
+   Do NOT uppercase the section names; do NOT invent your own headers. Use plain hyphen
+   "- " bullets. Anything you wrap in asterisks will show the asterisks literally.
+
+Format the Telegram message as (plain text, emoji headers exactly as shown, hyphen bullets,
+no markdown). Do not include the ===TEMPLATE=== lines — they only delimit the example:
+===TEMPLATE START===
 📅 Cotinga deep prep: {event_title} ({event_time})
 
 👥 Participants
-[one line per attendee: name, role/company, "first meeting" or "met N times"]
+- [one line per attendee: name, role/company, "first meeting" or "met N times"]
 
 🎯 Goals
-[2-3 bullet goals]
+- [2-3 goals]
 
 📋 Agenda
-[5-8 bullet talking points]
+- [5-8 talking points]
 
 📰 Recent news / publications
-[1-3 bullets: notable recent news about their company, or articles/posts by the person]
+- [1-3 bullets: notable recent news about their company, or articles/posts by the person]
 
 🔍 Overlap with Neotoma/Ateles
-[1-3 bullets: competitive, complementary, or strategic overlap — specific, not generic]
+- [1-3 bullets: competitive, complementary, or strategic overlap — specific, not generic]
 
 ⚡ Live convergence
-[1-3 bullets: what Neotoma/Ateles is actively building right now that speaks to this person's interests]
+- [1-3 bullets: what Neotoma/Ateles is actively building right now that speaks to this person's interests]
 
 📝 Open questions
-[any pre-meeting questions to resolve]
+- [any pre-meeting questions to resolve]
 
 ✅ Pre-event tasks created
-[list task names and Neotoma IDs]
----
+- [list task names and Neotoma IDs]
+===TEMPLATE END===
 
 Work through all steps, then stop.
 """
