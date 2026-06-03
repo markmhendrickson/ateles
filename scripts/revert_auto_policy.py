@@ -34,9 +34,10 @@ def _headers(bearer: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {bearer}", "Content-Type": "application/json"}
 
 
-def _is_auto(notes: str) -> bool:
+def _is_auto(body: str) -> bool:
+    """Maturation metadata lives in the agent_policy `body` field as JSON."""
     try:
-        return bool(json.loads(notes or "{}").get("auto_generated"))
+        return bool(json.loads(body or "{}").get("auto_generated"))
     except (ValueError, TypeError):
         return False
 
@@ -50,6 +51,7 @@ def _retire(client: httpx.Client, entity_id: str, dry_run: bool) -> None:
         f"{NEOTOMA_BASE_URL}/correct",
         json={
             "entity_id": entity_id,
+            "entity_type": "agent_policy",
             "field": "status",
             "value": "retired",
             "idempotency_key": f"revert-{entity_id}-{stamp}",
@@ -90,7 +92,7 @@ def main() -> int:
             for e in resp.json().get("entities", [])
             if (snap := e.get("snapshot") or {}).get("agent_sub") == agent_sub
             and snap.get("status") != "retired"
-            and _is_auto(snap.get("notes", ""))
+            and _is_auto(snap.get("body", ""))
         ]
         if not targets:
             print(f"No auto-generated policies to retire for {agent_sub}.")
