@@ -7,10 +7,14 @@ Operator-approved release executor for Neotoma. Two halves:
   push → `npm publish` → GitHub Release → sandbox deploy → verify → publish draft →
   post-deploy probes → mark published → Telegram confirmation. No LLM. Invoked
   **on demand** after approval, not on a schedule.
-- **`prepare.py`** (future) — the scheduled Mon–Thu prep run that authors the
-  supplement, runs the security + `/review` lanes, opens the RC PR, renders the
-  notes, stores the `release_result` as `status=pending_approval`, and Telegrams
-  the operator. Halts; does not publish.
+- **`prepare.py`** — the scheduled Mon–Thu prep run. Two-phase (like Cotinga):
+  Phase 1 is a fast preflight gate (unreleased commits since the last tag ≥
+  `PHOENICURUS_MIN_COMMITS`? main CI green? no release already in flight?); if it
+  passes, Phase 2 spawns a headless `claude --print` agent that runs the
+  `/release` PREPARE phase up to the RC PR, stores the `release_result` as
+  `status=pending_approval`, and Telegrams the operator the full notes + RC PR
+  link + advisory flags. `prepare.py` exits immediately; the agent sends its own
+  Telegram. It NEVER tags, publishes, or deploys.
 
 This split exists because release approval can take hours — a launchd daemon
 cannot block in-process that long (unlike Monedula's 120 s payment approval).
