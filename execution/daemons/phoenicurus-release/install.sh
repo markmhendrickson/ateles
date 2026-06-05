@@ -61,16 +61,49 @@ if gh auth status >/dev/null 2>&1; then echo "  ✓ authenticated"; else echo " 
 echo "flyctl auth:"
 if flyctl auth whoami >/dev/null 2>&1; then echo "  ✓ authenticated"; else echo "  ✗ run 'flyctl auth login'"; fail=1; fi
 
+echo "claude CLI (for prepare.py agent spawn):"
+check_cmd claude
+
 echo "------------------------------------------"
 if [ "$fail" -eq 0 ]; then
-  echo "✓ Environment OK. publish.py is ready."
+  echo "✓ Environment OK. publish.py and prepare.py are ready."
 else
   echo "✗ Fix the items above before running a real publish."
 fi
+
+# ---------------------------------------------------------------------------
+# Install the scheduled prepare launchd agent (Mon-Thu). publish.py stays
+# on-demand and is NOT scheduled.
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--load-prepare" ]; then
+  PLIST="com.ateles.phoenicurus-prepare.plist"
+  DEST="$HOME/Library/LaunchAgents/$PLIST"
+  # The live .plist is gitignored (repo convention); render it from the tracked
+  # .tmpl if it isn't already present locally.
+  if [ ! -f "$SCRIPT_DIR/$PLIST" ] && [ -f "$SCRIPT_DIR/$PLIST.tmpl" ]; then
+    cp "$SCRIPT_DIR/$PLIST.tmpl" "$SCRIPT_DIR/$PLIST"
+    echo "Rendered $PLIST from template."
+  fi
+  mkdir -p "$HOME/Library/LaunchAgents"
+  if launchctl list 2>/dev/null | grep -q "com.ateles.phoenicurus-prepare"; then
+    echo "Unloading existing phoenicurus-prepare agent..."
+    launchctl unload "$DEST" 2>/dev/null || true
+  fi
+  cp "$SCRIPT_DIR/$PLIST" "$DEST"
+  launchctl load "$DEST"
+  echo "✓ phoenicurus-prepare scheduled (Mon-Thu 09:00 local)."
+else
+  echo
+  echo "To schedule the Mon-Thu prepare run:  bash install.sh --load-prepare"
+fi
+
 echo
-echo "Onychomys invokes on approval:"
+echo "prepare.py (scheduled, or run manually):"
+echo "  python3 $SCRIPT_DIR/prepare.py            # normal run"
+echo "  python3 $SCRIPT_DIR/prepare.py --dry-run  # preflight only, no agent spawn"
+echo "Onychomys invokes publish.py on approval:"
 echo "  python3 $SCRIPT_DIR/publish.py --version <vX.Y.Z>"
-echo "Dry-run anytime:"
+echo "Dry-run a publish anytime:"
 echo "  python3 $SCRIPT_DIR/publish.py --version <vX.Y.Z> --dry-run"
 
 exit "$fail"
