@@ -179,8 +179,26 @@ def _comment_from_agent(comments: list[dict], agent_sub: str) -> dict | None:
 GATE_SATISFACTION_RULES: dict[str, str] = {
     # Maps gate_name → required artifact_type produced in a comment header.
     # The comment body is expected to begin with "[<agent>] <artifact_type>:".
+    #
+    # Two gate-name vocabularies coexist and BOTH must resolve, or the
+    # orchestrator stalls forever at phase 1 (gate_name absent from this
+    # map → _gate_satisfied_by_comment returns None → gate never satisfies):
+    #   • short names — used by the ateles|* and swarm-smoke|*
+    #     workflow_definitions (pm, ux, copy)
+    #   • verbose names — used by the harness-sandbox
+    #     smoke_test_full_lifecycle workflow (pm_scope, ux_design,
+    #     growth_announce, social_draft, devrel_docs)
+    # ── short names (ateles|*, swarm-smoke|*) ──
+    "pm": "acceptance_criteria",
+    "ux": "copy_and_ux_flow",
+    "copy": "copy_and_ux_flow",
+    # ── verbose names (harness-sandbox smoke_test_full_lifecycle) ──
     "pm_scope": "acceptance_criteria",
     "ux_design": "copy_and_ux_flow",
+    "growth_announce": "launch_brief",
+    "social_draft": "social_post_draft",
+    "devrel_docs": "docs_diff_or_no_change_note",
+    # ── shared names (identical in both vocabularies) ──
     "arch": "schema_or_api_proposal",
     "impl": "pull_request_link",
     "qa": "test_plan",
@@ -188,9 +206,6 @@ GATE_SATISFACTION_RULES: dict[str, str] = {
     "compliance_supervisor": "compliance_verdict",
     "pr_review": "merge_decision",
     "release": "release_note",
-    "growth_announce": "launch_brief",
-    "social_draft": "social_post_draft",
-    "devrel_docs": "docs_diff_or_no_change_note",
 }
 
 
@@ -258,8 +273,13 @@ async def fetch_workflow_definitions(project: str) -> list[WorkflowDefinition]:
         "Content-Type": "application/json",
     }
     async with httpx.AsyncClient(headers=headers, timeout=15) as client:
+        # NOTE: the entity-read route is POST /entities/query. The bare prod
+        # HTTP server (localhost:3180) does NOT expose /retrieve_entities
+        # (404) — that path only exists behind the MCP layer. /entities/query
+        # returns the same {entities, total, limit, offset} shape with the
+        # entity_type filter applied server-side and snapshots included.
         resp = await client.post(
-            f"{NEOTOMA_BASE_URL}/retrieve_entities",
+            f"{NEOTOMA_BASE_URL}/entities/query",
             json={
                 "entity_type": "workflow_definition",
                 "limit": 100,
