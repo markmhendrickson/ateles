@@ -821,7 +821,8 @@ async def main() -> None:
         )
 
     # 3. Load notification rubric — route to TELEGRAM_TOPIC_TYTO (Cyphorhinus bot thread)
-    notifier = Notifier.from_neotoma(telegram_topic_env="TELEGRAM_TOPIC_TYTO")
+    notifier = Notifier.from_neotoma()
+    notifier._topic_id = os.environ.get("TELEGRAM_TOPIC_TYTO", notifier._topic_id)
 
     # 4. Validate watch dirs
     if not SCREENSHOTS_DIR.exists():
