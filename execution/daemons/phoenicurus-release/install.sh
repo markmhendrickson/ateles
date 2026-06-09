@@ -91,7 +91,7 @@ if [ "${1:-}" = "--load-prepare" ]; then
   fi
   cp "$SCRIPT_DIR/$PLIST" "$DEST"
   launchctl load "$DEST"
-  echo "✓ phoenicurus-prepare scheduled (Mon-Thu 09:00 local)."
+  echo "✓ phoenicurus-prepare scheduled (Mon-Thu 07:00 local)."
 else
   echo
   echo "To schedule the Mon-Thu prepare run:  bash install.sh --load-prepare"
