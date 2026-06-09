@@ -200,85 +200,79 @@ def fetch_yesterday_events() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def fetch_due_payment_tasks() -> list[dict]:
-    """
-    Query Neotoma prod API for task entities due today (or overdue) with
-    domain='finance' or category containing payment-related keywords.
+def _fetch_entity_by_id(entity_id: str) -> dict | None:
+    """Fetch a single entity (with snapshot) by ID from Neotoma. None on error."""
+    base_url = (NEOTOMA_BASE_URL or "http://localhost:3180").rstrip("/")
+    is_loopback = "localhost" in base_url or "127.0.0.1" in base_url
+    try:
+        url = f"{base_url}/entities/{entity_id}"
+        headers = {"Accept": "application/json"}
+        if NEOTOMA_BEARER_TOKEN and not is_loopback:
+            headers["Authorization"] = f"Bearer {NEOTOMA_BEARER_TOKEN}"
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+        log.warning(f"Neotoma entity fetch failed for {entity_id}: {exc}")
+        return None
 
-    Returns a list of task dicts, each with at least:
-      id, name, due_date, domain, description (if present)
 
-    Falls back to empty list on any error.
+def fetch_due_payment_tasks(handlers: list | None = None) -> list[dict]:
     """
-    if not NEOTOMA_BEARER_TOKEN or not NEOTOMA_BASE_URL:
-        log.warning(
-            "NEOTOMA_BEARER_TOKEN or NEOTOMA_BASE_URL not set — skipping task scan"
-        )
+    Return the payment tasks that are due today or overdue, scoped STRICTLY to
+    the tasks explicitly linked to active payment profiles via
+    `profile.neotoma_task_id`.
+
+    This is deliberately NOT a keyword/domain scan of the whole task corpus —
+    that produced false positives (any finance-domain or BTC-mentioning task).
+    Only tasks a payment profile actually points at are payment tasks.
+
+    Returns a list of task dicts (each the raw entity with a 'snapshot').
+    Falls back to empty list on any error or if no handlers/links exist.
+    """
+    if not NEOTOMA_BASE_URL:
+        log.warning("NEOTOMA_BASE_URL not set — skipping task scan")
+        return []
+
+    if not handlers:
+        log.info("No payment handlers — skipping linked-task scan.")
         return []
 
     today = date.today().isoformat()
 
-    try:
-        url = f"{NEOTOMA_BASE_URL.rstrip('/')}/api/entities?entity_type=task&limit=100"
-        req = urllib.request.Request(
-            url,
-            headers={
-                "Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}",
-                "Accept": "application/json",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-        log.warning(f"Neotoma task fetch failed: {exc}")
+    # Collect the canonical task IDs declared by active payment profiles.
+    task_ids: list[str] = []
+    for h in handlers:
+        tid = getattr(getattr(h, "profile", None), "neotoma_task_id", "") or ""
+        tid = tid.strip()
+        if tid and tid not in task_ids:
+            task_ids.append(tid)
+
+    if not task_ids:
+        log.info("No payment profiles declare a neotoma_task_id — no linked tasks.")
         return []
 
-    # The API may return { entities: [...] } or directly [...]
-    items: list[dict] = []
-    if isinstance(data, list):
-        items = data
-    elif isinstance(data, dict):
-        items = data.get("entities") or data.get("items") or data.get("results") or []
+    def _fields(task: dict) -> dict:
+        return task.get("snapshot") or task.get("fields") or task
 
-    # Filter: tasks due today or earlier, with finance/payment domain or category.
-    # Base keywords always included; profile-specific keywords added from MONEDULA_PROFILES.
-    payment_keywords: set[str] = {"finance", "payment", "pagament", "pago"}
-    for _prefix in os.environ.get("MONEDULA_PROFILES", "").split(","):
-        _prefix = _prefix.strip().upper()
-        if _prefix:
-            for _kw in os.environ.get(f"{_prefix}_CALENDAR_KEYWORDS", "").split(","):
-                _kw = _kw.strip().lower()
-                if _kw:
-                    payment_keywords.add(_kw)
-
-    def _is_finance_task(task: dict) -> bool:
-        fields = task.get("fields") or task  # Neotoma may nest under 'fields'
-        domain = str(fields.get("domain") or "").lower()
-        category = str(fields.get("category") or "").lower()
-        name = str(fields.get("name") or task.get("name") or "").lower()
-        description = str(
-            fields.get("description") or task.get("description") or ""
-        ).lower()
-        combined = f"{domain} {category} {name} {description}"
-        return any(kw in combined for kw in payment_keywords)
-
-    def _is_due(task: dict) -> bool:
-        fields = task.get("fields") or task
-        due = str(fields.get("due_date") or task.get("due_date") or "")
-        if not due:
-            return False
-        return due[:10] <= today  # due today or overdue
-
-    due_tasks = [t for t in items if _is_due(t) and _is_finance_task(t)]
+    due_tasks: list[dict] = []
+    for tid in task_ids:
+        entity = _fetch_entity_by_id(tid)
+        if not entity:
+            continue
+        fields = _fields(entity)
+        due = str(fields.get("due_date") or "")
+        if due and due[:10] <= today:
+            due_tasks.append(entity)
 
     log.info(
-        f"Neotoma task scan: {len(items)} task(s) total, "
-        f"{len(due_tasks)} finance task(s) due today or overdue"
+        f"Neotoma linked-task scan: {len(task_ids)} profile task(s) checked, "
+        f"{len(due_tasks)} due today or overdue"
     )
     for t in due_tasks:
-        fields = t.get("fields") or t
+        fields = _fields(t)
         log.debug(
-            f"  Task: {fields.get('name') or t.get('name')!r} due={fields.get('due_date') or t.get('due_date')!r}"
+            f"  Task: {fields.get('title') or fields.get('name')!r} due={fields.get('due_date')!r}"
         )
 
     return due_tasks
@@ -289,11 +283,11 @@ def _task_to_preview_item(task: dict) -> dict:
     Convert a Neotoma task entity into a generic preview item dict
     compatible with the preview builder.
     """
-    fields = task.get("fields") or task
-    name = str(fields.get("name") or task.get("name") or "(unnamed task)")
-    due = str(fields.get("due_date") or task.get("due_date") or "")
-    description = str(fields.get("description") or task.get("description") or "")
-    entity_id = task.get("id") or task.get("entity_id") or ""
+    fields = task.get("snapshot") or task.get("fields") or task
+    name = str(fields.get("title") or fields.get("name") or "(unnamed task)")
+    due = str(fields.get("due_date") or "")
+    description = str(fields.get("description") or "")
+    entity_id = task.get("entity_id") or task.get("id") or ""
     return {
         "source": "task",
         "name": name,
@@ -475,12 +469,10 @@ def _build_preview_message(
         lines.append("📋 *Due payment tasks (Neotoma)*")
         lines.append("")
         for task in due_tasks:
-            fields = task.get("fields") or task
-            name = str(fields.get("name") or task.get("name") or "(unnamed)")
-            due = str(fields.get("due_date") or task.get("due_date") or "")
-            description = str(
-                fields.get("description") or task.get("description") or ""
-            )
+            fields = task.get("snapshot") or task.get("fields") or task
+            name = str(fields.get("title") or fields.get("name") or "(unnamed)")
+            due = str(fields.get("due_date") or "")
+            description = str(fields.get("description") or "")
             overdue = due and due < yesterday_str
             due_label = f"⚠️ overdue since {due}" if overdue else f"due {due}"
             lines.append(f"  • {name} ({due_label})")
@@ -550,8 +542,8 @@ def main() -> None:
     if triggered:
         log.info(f"Triggered handlers: {[h.name for h, _ in triggered]}")
 
-    # Fetch due payment tasks from Neotoma (FYI / broader scope)
-    due_tasks = fetch_due_payment_tasks()
+    # Fetch due payment tasks from Neotoma, scoped to profile-linked task IDs only.
+    due_tasks = fetch_due_payment_tasks(all_handlers)
 
     # Abort early only if there's truly nothing to show
     if not triggered and not due_tasks:

@@ -95,20 +95,34 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
     import urllib.request
 
     bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "").strip()
-    base_url = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
+    base_url = os.environ.get(
+        "NEOTOMA_BASE_URL", "http://localhost:3180"
+    ).rstrip("/")
 
-    if not bearer:
-        log.debug("NEOTOMA_BEARER_TOKEN not set — skipping Neotoma profile load")
-        return []
+    # On a loopback target the server trusts localhost (NEOTOMA_TRUST_PROD_LOOPBACK)
+    # and a stale/invalid bearer is actively rejected — so omit the header locally.
+    is_loopback = "localhost" in base_url or "127.0.0.1" in base_url
 
     try:
-        url = f"{base_url}/entities?entity_type=payment_profile&limit=50&include_snapshots=true"
+        url = f"{base_url}/entities/query"
+        body = json.dumps(
+            {
+                "entity_type": "payment_profile",
+                "limit": 50,
+                "include_snapshots": True,
+            }
+        ).encode("utf-8")
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        if bearer and not is_loopback:
+            headers["Authorization"] = f"Bearer {bearer}"
         req = urllib.request.Request(
             url,
-            headers={
-                "Authorization": f"Bearer {bearer}",
-                "Accept": "application/json",
-            },
+            data=body,
+            method="POST",
+            headers=headers,
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
