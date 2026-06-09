@@ -32,6 +32,19 @@ For full step-by-step guidance: `/update-plan` and `/update-tasks` skills.
 
 ---
 
+## People-data processing (RGPD legitimate-interest basis)
+
+Neotoma's storage of third-party personal data (contacts, meeting transcripts, enrichment) for relationship management runs under **RGPD Art. 6(1)(f) legitimate interest**, NOT the household exemption — because the data drives professional action toward those people (CJEU *Lindqvist* / *Ryneš*: locally-held, unshared data still falls under the RGPD once it's used to act on people outside the household sphere). Apply these as standing discipline:
+
+- **Minimize at capture.** When storing a person from a transcript or meeting, retain what serves the relationship (role, context, commitments, follow-ups). Do NOT persist incidental sensitive disclosures — health, finances, family situations, political/religious views (RGPD Art. 9 categories) — into durable contact profiles unless directly relevant to a stored task. Summarize, don't transcribe verbatim, when the detail is sensitive and incidental.
+- **Purpose-bind.** Enrichment is for managing the operator's actual relationships. Do not build profiles on people with no relationship to the operator.
+- **Honor objection.** If a person asks not to be tracked, or asks what's held, treat it as an Art. 21 objection / Art. 15 access request: stop enrichment on that entity and surface it to the operator. Never argue the person down.
+- **No external publication of person-data** without the operator's explicit per-case approval (overlaps the PII-scrubbing rule for issues above).
+
+This is the EU counterpart to the recording-disclosure guardrail in the `record_meeting` skill (US all-party-consent + Spain Art. 197). Recording calls the operator is **not** a party to is a hard refusal — it loses both the US one-party basis and the Art. 197 safe harbor.
+
+---
+
 ## Key entity IDs
 
 | Entity | ID |
