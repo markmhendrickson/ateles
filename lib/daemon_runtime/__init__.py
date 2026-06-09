@@ -51,6 +51,16 @@ if _NEOTOMA_ENV_FILE.exists():
 
 from .aauth_signer import AAuthSigner
 from .agent_loader import AgentDefinition, AgentLoader
+from .gating import (
+    BlastRadius,
+    ExecutionPolicy,
+    GateAction,
+    GateDecision,
+    evaluate_gate,
+    load_policy,
+    resolve_policy_for_agent,
+    write_checkpoint_brief,
+)
 from .grant_checker import (
     AgentGrant,
     GrantChecker,
