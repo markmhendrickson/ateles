@@ -2,14 +2,21 @@
 
 ## Plan and task maintenance (automatic)
 
-The Ateles implementation plan lives in Neotoma as entity `ent_99ace4dd6673aa36ed08b1fe`.
+Each session maintains the Neotoma `plan` entity that matches **its own workstream** — never a fixed, hardcoded plan. The swarm-architecture plan `ent_99ace4dd6673aa36ed08b1fe` ("Ateles Agent Swarm Architecture") is the plan for swarm-architecture work **only**. Unrelated workstreams (tax prep, Neotoma release engineering, website, cloud hosting, etc.) each have their own plan and MUST NOT write into the swarm plan. Writing one workstream's `decisions`/`todos` into another's plan is the collision that corrupted this plan in June 2026.
 
-**Apply these rules on every turn, without being asked:**
+**Select the bound plan once per session, as soon as the workstream is clear:**
+1. Resolve the matching plan: `mcp__mcpsrv_neotoma__retrieve_entities` with `entity_type: plan` and a `search` for the workstream; pick the closest match.
+2. If no existing plan fits, create one (`/update-plan` skill) and bind to it.
+3. Maintain only that bound plan for the rest of the session.
 
-- **When a todo item is completed** — immediately correct its `status` to `"done"` in the plan's `todos` field via `mcp__mcpsrv_neotoma__correct`. Include relevant entity IDs, file paths, or PR numbers in a `"notes"` field.
-- **When a decision is settled** — immediately add or correct the relevant entry in the plan's `decisions` map. One sentence, snake_case key.
+**Apply these rules on every turn, without being asked — to the bound plan:**
+
+- **Before correcting `decisions` or `todos`, RE-READ the current field and MERGE.** `correct` replaces the *entire* field, so add or update only the keys/items you authored and preserve every entry already present. NEVER rebuild a field from a stale in-memory copy — that silently deletes other sessions' entries. If the field changed since you last read it, re-read and re-merge before writing.
+- **When a todo item is completed** — correct its `status` to `"done"` in `todos`, with relevant entity IDs, file paths, or PR numbers in a `notes` field.
+- **Never mark a task or todo `done` while citing a commit, branch, file, or PR that does not resolve.** Verify the artifact exists first (git `cat-file`/`ls-remote`, GitHub). Unverifiable completion claims are the second failure mode that corrupted this plan in June 2026.
+- **When a decision is settled** — add or correct one entry in the `decisions` map. One sentence, snake_case key.
 - **When blockers change** (something unblocked, something newly blocked) — correct `next_steps` to reflect the current state.
-- **When a new actionable task is identified** — create a `task` entity in Neotoma and link it `PART_OF` the plan. Use the `update-tasks` skill for guidance on field values and priority mapping.
+- **When a new actionable task is identified** — create a `task` entity and link it `PART_OF` the bound plan. Use the `update-tasks` skill for field values and priority mapping.
 - **When a daemon, entity, or file is renamed** — correct any stale references in `body`, `decisions`, and `todos` in the same turn the rename happens.
 
 Do not wait until end of session. Apply corrections in the same turn as the work, after the work completes.
@@ -49,7 +56,7 @@ This is the EU counterpart to the recording-disclosure guardrail in the `record_
 
 | Entity | ID |
 |---|---|
-| Ateles plan | `ent_99ace4dd6673aa36ed08b1fe` |
+| Ateles Agent Swarm Architecture plan (swarm work only — not a catch-all) | `ent_99ace4dd6673aa36ed08b1fe` |
 | priority_rubric | `ent_29ca079940c1e996a8c782f2` |
 | Apus webhook subscription | `ent_6ba1914462908f682f206b56` |
 | update-plan skill | `ent_5d7f84290f290383e53d1a42` |
