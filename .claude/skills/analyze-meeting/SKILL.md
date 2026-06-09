@@ -88,6 +88,15 @@ Read the full transcript. Extract the following with verbatim quotes from the tr
 
 If a section has no signal, render it as an explicit `_None._` marker rather than omitting it, so the report shape stays stable across meetings.
 
+### Data minimization (RGPD legitimate-interest discipline)
+
+See CLAUDE.md "People-data processing". Neotoma's storage of meeting participants and transcripts runs under RGPD Art. 6(1)(f) legitimate interest, **not** the household exemption, because the data drives professional action. When extracting people into durable `contact`/`person` profiles:
+
+- Keep relationship-relevant facts (role, context, commitments, follow-ups).
+- Do NOT persist incidental Art. 9 sensitive disclosures (health, finances, family situations, political/religious views) into contact profiles unless directly relevant to a stored task — summarize rather than store verbatim when a sensitive detail is incidental.
+
+This governs what **enters** the graph (inbound). It is in addition to Step 3's PII scrubbing, which governs what **leaves** for public issues (outbound). The two are complementary, not duplicative.
+
 ## Step 3: PII scrubbing rules (for public issue drafts only)
 
 Any text destined for a public GitHub issue MUST be scrubbed:

@@ -26,6 +26,30 @@ When the user invokes `/record_meeting` with no argument (or "toggle"): run `npm
 
 - Treat plain `start`/`stop` as meeting-recording commands only when the current thread is clearly about meeting transcription/recording.
 
+## Recording disclosure & consent (legal guardrail)
+
+The operator is always a party to recordings made via this skill (operator-triggered, operator present). That satisfies US federal one-party consent and Spain's Penal Code Art. 197 (no interception of others' communications). The residual gaps are **US all-party-consent states** and EU transparency. Apply this disclosure ladder, best to worst:
+
+1. **Platform-native recording (preferred).** If the call is on Zoom/Meet/Teams, prefer the platform's own Record button: it auto-discloses to everyone — on-screen banner + consent splash + an audio announcement to phone/dial-in participants. This is the only method that reaches dial-ins, and it sidesteps the disclosure problem entirely. Route the resulting file through Tyto's `TYTO_NATIVE_RECORDINGS_DIR` (stamped `capture_method=platform_native`) so the transcribe+analyze pipeline is identical. When the operator is on a supported platform, **suggest native recording instead of starting BlackHole capture.**
+2. **Verbal announcement.** "I'm recording this for my notes." Reaches everyone; continuing to talk after it is valid implied consent in every state.
+3. **In-meeting chat message.** Valid + creates a written record, BUT misses (a) phone/dial-in participants (they never see chat) and (b) late joiners (most platforms don't show pre-arrival messages). If using chat, repeat for late joiners and announce verbally for any dial-in.
+4. **Booking-page disclaimer only** (e.g. markmhendrickson.com/meet): prior notice, not contemporaneous — leaves a residual gap in all-party states (esp. California) for anyone who didn't book through the page (forwarded invite, booked by someone else).
+
+On `record_meeting:start`, after the recorder starts (BlackHole/Audio Hijack local capture path = `capture_method=audio_hijack_system`/`blackhole_system`, which carries **no** built-in disclosure), ALWAYS print:
+
+```
+⚠️  Local capture has no built-in recording notice. If on Zoom/Meet/Teams,
+    prefer the platform Record button (auto-discloses to all, incl. dial-ins).
+    Otherwise announce recording — required in CA, CT, FL, IL, MD, MA, MI, MT,
+    NV, NH, OR, PA, WA and good practice everywhere. Booking-page disclaimer
+    covers participants who booked via /meet; announce verbally for anyone who
+    didn't (forwarded invite, dial-in).
+```
+
+This is a reminder, not a blocking prompt — do not gate the start on a confirmation.
+
+**Hard refusal:** do NOT auto-start or schedule recording of a call the operator is not a party to (e.g. capturing a third-party call autonomously, or starting before the operator has joined). Non-party recording loses both the US one-party basis and the Art. 197 safe harbor. If asked, refuse and explain.
+
 ## Commands
 
 Run from repo root:
@@ -78,7 +102,7 @@ Env overrides:
   - Sends stop signal to recorder.
   - With **`RECORD_MEETING_SKIP_TRANSCRIBE=1`** (env or `.env`), stops after saving the WAV; skips everything below.
   - Reads saved audio path from recorder log.
-  - Runs `transcribe_audio.py` on the saved audio.
+  - Runs `transcribe_audio.py` on the saved audio. Pass `--capture-method blackhole_system` (local capture has no built-in consent disclosure) so the `transcription` entity records its consent posture.
   - **Speaker diarization** is enabled automatically when `ELEVENLABS_API_KEY` is set (passes `--diarize`). Falls back to plain Whisper transcription on failure. Set `RECORD_MEETING_DIARIZE=0` to force plain mode.
   - Prints the transcription in a clear block (--- TRANSCRIPTION --- ... --- END TRANSCRIPTION ---), then prints the **Neotoma `transcription` entity ID** and **audio WAV** path.
   - Stores the transcription as a `transcription` entity in Neotoma via `neotoma store` (combined entities + `--file-path` WAV). No Parquet write.

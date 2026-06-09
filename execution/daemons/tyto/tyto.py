@@ -9,7 +9,10 @@ Tyto watches two directories:
      `screenshot` entities in Neotoma. Phase 3: OCR dispatch.
   2. TYTO_RECORDINGS_DIR — new meeting recording files (*remote*.aac/.m4a),
      auto-transcribed via transcribe_audio.py --diarize immediately on
-     detection (with --no-diarize fallback).
+     detection (with --no-diarize fallback). Optionally also
+     TYTO_NATIVE_RECORDINGS_DIR for platform-native (Zoom/Meet/Teams)
+     recordings, which carry the platform's built-in consent disclosure.
+     Each transcription is stamped with capture_method for consent auditing.
 
 Lives at: launchd on the operator's machine (no external endpoint required)
 
@@ -25,7 +28,15 @@ Environment variables:
   TYTO_POLL_INTERVAL        Polling interval in seconds (default: 10)
   TYTO_AGENT_DEFINITION_ID  Neotoma entity ID for Tyto's agent_definition (optional)
   TYTO_RECORDINGS_DIR       Directory to watch for meeting recordings
-                            (default: $RECORD_MEETING_DIR or ~/Documents/data/recordings)
+                            (default: $RECORD_MEETING_DIR or ~/Documents/data/recordings).
+                            Files here are stamped capture_method=audio_hijack_system
+                            (local system capture, no built-in consent disclosure).
+  TYTO_NATIVE_RECORDINGS_DIR  Optional second dir for platform-NATIVE recordings
+                            (Zoom/Meet/Teams local recordings, which carry the
+                            platform's built-in consent notice). Files here flow
+                            through the identical transcribe+analyze pipeline but
+                            are stamped capture_method=platform_native for
+                            consent-posture auditing. Unset → not watched.
   TYTO_TRANSCRIBE_ENABLED   Set to 0 to disable auto-transcription (default: 1)
   TYTO_TRANSCRIBE_SCRIPT    Path to transcribe_audio.py (auto-detected from repo root)
   ELEVENLABS_API_KEY        When set, enables diarization via ElevenLabs
@@ -118,6 +129,15 @@ _default_recordings_dir = os.environ.get(
 )
 RECORDINGS_DIR = Path(
     os.environ.get("TYTO_RECORDINGS_DIR", _default_recordings_dir)
+)
+# Optional second watch dir for platform-NATIVE recordings (Zoom/Meet/Teams local
+# recordings, which carry the platform's built-in consent disclosure). When set,
+# files here flow through the identical transcribe+analyze pipeline but are stamped
+# capture_method=platform_native for consent-posture auditing. Unset → not watched.
+NATIVE_RECORDINGS_DIR = (
+    Path(os.environ["TYTO_NATIVE_RECORDINGS_DIR"])
+    if os.environ.get("TYTO_NATIVE_RECORDINGS_DIR", "").strip()
+    else None
 )
 TRANSCRIBE_ENABLED = os.environ.get("TYTO_TRANSCRIBE_ENABLED", "1") != "0"
 
@@ -489,9 +509,19 @@ class RecordingWatcher:
     RECORDING_EXTENSIONS = {".aac", ".m4a", ".mp4", ".wav"}
     SETTLE_SECS = int(os.environ.get("TYTO_RECORDING_SETTLE_SECS", "8"))
 
-    def __init__(self, watch_dir: Path, notifier: Notifier) -> None:
+    def __init__(
+        self,
+        watch_dir: Path,
+        notifier: Notifier,
+        capture_method: str = "audio_hijack_system",
+    ) -> None:
         self._dir = watch_dir
         self._notifier = notifier
+        # Consent-posture provenance stamped on every transcription this watcher
+        # produces. "audio_hijack_system" = local system capture (no built-in
+        # disclosure); "platform_native" = Zoom/Meet/Teams recording (carries the
+        # platform's own consent notice). See record_meeting SKILL.md disclosure ladder.
+        self._capture_method = capture_method
         self._seen: dict[Path, float] = {}    # path → mtime at first sight
         self._transcribed: set[Path] = set() # remote paths already transcribed
 
@@ -648,7 +678,11 @@ class RecordingWatcher:
         # Two-file merge path: mic + remote, requires ElevenLabs for word timestamps
         if mic_path is not None and mic_path.exists() and has_elevenlabs:
             log.info(f"[{DAEMON_NAME}] Two-file merge mode: [You] + diarized remote.")
-            cmd = [python, str(TRANSCRIBE_SCRIPT), str(remote_path), "--mic-file", str(mic_path)]
+            cmd = [
+                python, str(TRANSCRIBE_SCRIPT), str(remote_path),
+                "--mic-file", str(mic_path),
+                "--capture-method", self._capture_method,
+            ]
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode == 0:
                 entity_id = _extract_entity_id(result.stdout)
@@ -669,7 +703,10 @@ class RecordingWatcher:
             )
 
         # Single-file fallback: remote only, diarized or plain
-        cmd = [python, str(TRANSCRIBE_SCRIPT), str(remote_path)]
+        cmd = [
+            python, str(TRANSCRIBE_SCRIPT), str(remote_path),
+            "--capture-method", self._capture_method,
+        ]
         if _should_diarize():
             cmd.append("--diarize")
             log.info(f"[{DAEMON_NAME}] Single-file diarization mode.")
@@ -684,7 +721,10 @@ class RecordingWatcher:
             )
             if _should_diarize():
                 log.info(f"[{DAEMON_NAME}] Retrying without diarization...")
-                cmd_fallback = [python, str(TRANSCRIBE_SCRIPT), str(remote_path), "--no-diarize"]
+                cmd_fallback = [
+                    python, str(TRANSCRIBE_SCRIPT), str(remote_path), "--no-diarize",
+                    "--capture-method", self._capture_method,
+                ]
                 result2 = subprocess.run(cmd_fallback, capture_output=True, text=True)
                 if result2.returncode != 0:
                     raise RuntimeError(
@@ -755,6 +795,17 @@ async def main() -> None:
             )
         else:
             log.info(f"[{DAEMON_NAME}] Watching recordings: {RECORDINGS_DIR}")
+        if NATIVE_RECORDINGS_DIR is not None:
+            if not NATIVE_RECORDINGS_DIR.exists():
+                log.warning(
+                    f"[{DAEMON_NAME}] Native recordings dir does not exist: "
+                    f"{NATIVE_RECORDINGS_DIR} — will retry on each poll"
+                )
+            else:
+                log.info(
+                    f"[{DAEMON_NAME}] Watching native recordings (platform_native): "
+                    f"{NATIVE_RECORDINGS_DIR}"
+                )
     else:
         log.info(f"[{DAEMON_NAME}] Auto-transcription disabled (TYTO_TRANSCRIBE_ENABLED=0)")
 
@@ -769,14 +820,24 @@ async def main() -> None:
 
     # 6. Poll loop
     screenshot_watcher = ScreenshotWatcher(SCREENSHOTS_DIR, notifier)
-    recording_watcher = RecordingWatcher(RECORDINGS_DIR, notifier) if TRANSCRIBE_ENABLED else None
+    recording_watchers: list[RecordingWatcher] = []
+    if TRANSCRIBE_ENABLED:
+        recording_watchers.append(
+            RecordingWatcher(RECORDINGS_DIR, notifier, capture_method="audio_hijack_system")
+        )
+        if NATIVE_RECORDINGS_DIR is not None:
+            recording_watchers.append(
+                RecordingWatcher(
+                    NATIVE_RECORDINGS_DIR, notifier, capture_method="platform_native"
+                )
+            )
     log.info(f"[{DAEMON_NAME}] Poll interval: {POLL_INTERVAL}s")
 
     while True:
         try:
             await screenshot_watcher.poll_once()
-            if recording_watcher is not None:
-                await recording_watcher.poll_once()
+            for rw in recording_watchers:
+                await rw.poll_once()
         except Exception as exc:
             log.error(f"[{DAEMON_NAME}] Poll error: {exc}", exc_info=True)
         await asyncio.sleep(POLL_INTERVAL)
