@@ -113,19 +113,26 @@ class AgentLoader:
             return self._stub()
 
     def _load_by_name(self) -> AgentDefinition:
-        """Search for agent_definition by name field."""
-        url = f"{NEOTOMA_BASE_URL}/entities"
-        params = {
+        """Search for agent_definition by name field.
+
+        Uses POST /entities/query (the GET /entities list endpoint does not
+        exist on the Neotoma server and returns 404).
+        """
+        url = f"{NEOTOMA_BASE_URL}/entities/query"
+        body = {
             "entity_type": "agent_definition",
             "search": self.agent_name,
             "limit": 5,
-            "include_snapshots": "true",
+            "include_snapshots": True,
         }
         try:
-            resp = httpx.get(
+            resp = httpx.post(
                 url,
-                params=params,
-                headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+                json=body,
+                headers={
+                    "Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}",
+                    "Content-Type": "application/json",
+                },
                 timeout=10,
             )
             resp.raise_for_status()
