@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ateles.cyphorhinus</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/markmhendrickson/repos/ateles/.venv/bin/python3</string>
+        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/cyphorhinus/cyphorhinus.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/markmhendrickson/repos/ateles</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/markmhendrickson/.local/bin:/Users/markmhendrickson/.nvm/versions/node/v20.20.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/markmhendrickson</string>
+        <key>NEOTOMA_BASE_URL</key>
+        <string>http://localhost:3180</string>
+    </dict>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/cyphorhinus.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/cyphorhinus.log</string>
+</dict>
+</plist>
