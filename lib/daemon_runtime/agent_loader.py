@@ -24,6 +24,19 @@ NEOTOMA_BASE_URL = os.environ.get(
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 
 
+def _auth_headers() -> dict[str, str]:
+    """Authorization header only when a bearer token is configured.
+
+    Open-mode Neotoma instances accept unauthenticated requests and reject any
+    bearer token, so sending an empty/stale token would 401.
+    """
+    return (
+        {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}
+        if NEOTOMA_BEARER_TOKEN
+        else {}
+    )
+
+
 @dataclass
 class AgentDefinition:
     """Snapshot of an agent_definition entity from Neotoma."""
@@ -96,11 +109,12 @@ class AgentLoader:
         Returns a stub AgentDefinition if Neotoma is unavailable.
         """
         if not NEOTOMA_BEARER_TOKEN:
-            log.warning(
+            # Open-mode Neotoma instances accept unauthenticated reads. Proceed
+            # without a token rather than falling back to the stub definition.
+            log.info(
                 f"[{self.agent_name}] NEOTOMA_BEARER_TOKEN not set — "
-                "using stub AgentDefinition (Phase 1 setup incomplete)"
+                "loading agent_definition without auth (open-mode Neotoma)"
             )
-            return self._stub()
 
         # Try explicit entity ID first
         explicit_id = os.environ.get(f"{self._prefix}_AGENT_DEFINITION_ID", "")
@@ -115,7 +129,7 @@ class AgentLoader:
         try:
             resp = httpx.get(
                 url,
-                headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+                headers=_auth_headers(),
                 timeout=10,
             )
             resp.raise_for_status()
@@ -128,10 +142,11 @@ class AgentLoader:
             return self._stub()
 
     def _load_by_name(self) -> AgentDefinition:
-        """Search for agent_definition by name field.
+        """Search for agent_definition by name field via POST /entities/query.
 
-        Uses POST /entities/query (the GET /entities list endpoint does not
-        exist on the Neotoma server and returns 404).
+        GET /entities does not exist on local Neotoma (404); /entities/query is
+        the canonical list route (same fix applied to the Anthus orchestrator in
+        PR #58). Its response nests the field dict as entity.snapshot.snapshot.
         """
         url = f"{NEOTOMA_BASE_URL}/entities/query"
         body = {
@@ -144,18 +159,17 @@ class AgentLoader:
             resp = httpx.post(
                 url,
                 json=body,
-                headers={
-                    "Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}",
-                    "Content-Type": "application/json",
-                },
+                headers=_auth_headers(),
                 timeout=10,
             )
             resp.raise_for_status()
             data = resp.json()
             entities = data.get("entities", [])
             for ent in entities:
-                snap = ent.get("snapshot") or {}
-                if snap.get("name", "").lower() == self.agent_name:
+                # Unwrap the doubly-nested snapshot to the flat field dict.
+                outer = ent.get("snapshot") or {}
+                snap = outer.get("snapshot", outer)
+                if str(snap.get("name", "")).lower() == self.agent_name:
                     log.info(
                         f"[{self.agent_name}] Loaded agent_definition "
                         f"{ent['entity_id']} from Neotoma"
@@ -223,7 +237,7 @@ class AgentLoader:
         try:
             resp = httpx.post(
                 f"{NEOTOMA_BASE_URL}/retrieve_entities",
-                headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+                headers=_auth_headers(),
                 json={
                     "entity_type": "agent_policy",
                     "limit": 200,
