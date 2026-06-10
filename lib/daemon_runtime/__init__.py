@@ -51,6 +51,13 @@ if _NEOTOMA_ENV_FILE.exists():
 
 from .aauth_signer import AAuthSigner
 from .agent_loader import AgentDefinition, AgentLoader
+from .drift import (
+    DriftCluster,
+    DriftSignal,
+    cluster_signals,
+    parse_comments,
+    parse_drift_signals,
+)
 from .gating import (
     BlastRadius,
     ExecutionPolicy,
@@ -69,27 +76,33 @@ from .grant_checker import (
     revoke_grant,
     suspend_grant,
 )
-from .gating import (
-    BlastRadius,
-    ExecutionPolicy,
-    GateAction,
-    GateDecision,
-    evaluate_gate,
-    load_policy,
-    resolve_policy_for_agent,
-    write_checkpoint_brief,
-)
 from .sse_client import NeotomaEvent, SSEClient
 
 __all__ = [
-    "AgentLoader", "AgentDefinition",
-    "SSEClient", "NeotomaEvent",
+    "AgentLoader",
+    "AgentDefinition",
+    "SSEClient",
+    "NeotomaEvent",
     "AAuthSigner",
-    "GrantChecker", "AgentGrant",
-    "suspend_grant", "restore_grant", "revoke_grant",
+    "GrantChecker",
+    "AgentGrant",
+    "suspend_grant",
+    "restore_grant",
+    "revoke_grant",
     "check_param_constraints",
     # gating
-    "BlastRadius", "ExecutionPolicy", "GateAction", "GateDecision",
-    "evaluate_gate", "load_policy", "resolve_policy_for_agent",
+    "BlastRadius",
+    "ExecutionPolicy",
+    "GateAction",
+    "GateDecision",
+    "evaluate_gate",
+    "load_policy",
+    "resolve_policy_for_agent",
     "write_checkpoint_brief",
+    # drift / generalization
+    "DriftSignal",
+    "DriftCluster",
+    "parse_drift_signals",
+    "parse_comments",
+    "cluster_signals",
 ]

@@ -190,3 +190,66 @@ class AgentLoader:
             tool_allowlist="*",
             status="active",
         )
+
+    def load_active_policies(self) -> list[dict]:
+        """
+        Fetch this agent's live agent_policy entities (status active or
+        provisional) from Neotoma. These include autonomously-generalized,
+        agent-local policies produced by the generalizer. Returns snapshot
+        dicts; empty list if Neotoma is unreachable.
+
+        Provisional policies ARE returned and applied — that exposure is
+        exactly what matures them. Their effect remains agent-local and
+        reversible (a contradicting drift signal suspends them).
+        """
+        if not NEOTOMA_BEARER_TOKEN:
+            return []
+        agent_sub = f"{self.agent_name}@ateles-swarm"
+        try:
+            resp = httpx.post(
+                f"{NEOTOMA_BASE_URL}/retrieve_entities",
+                headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+                json={
+                    "entity_type": "agent_policy",
+                    "limit": 200,
+                    "include_snapshots": True,
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            log.warning(f"[{self.agent_name}] could not load agent_policy: {exc}")
+            return []
+
+        out: list[dict] = []
+        for e in data.get("entities", []):
+            snap = e.get("snapshot") or {}
+            if snap.get("agent_sub") != agent_sub:
+                continue
+            if snap.get("status") not in ("active", "provisional"):
+                continue
+            out.append(snap)
+        return out
+
+    def render_policy_prompt(self) -> str:
+        """
+        Render this agent's active/provisional policies as a markdown block to
+        append to the dispatch system prompt — turning the advisory consultation
+        protocol into reliable application. Returns "" when there are none.
+        """
+        policies = self.load_active_policies()
+        if not policies:
+            return ""
+        lines = [
+            "\n\n## Active agent policies (apply these)\n",
+            "These standing policies were learned for you. `provisional` ones "
+            "are being validated by use — follow them and emit a "
+            "`strategy_drift_signal` if one is wrong.\n",
+        ]
+        for p in policies:
+            kind = p.get("rule_kind", "prefer")
+            status = p.get("status", "active")
+            rule = p.get("rule") or p.get("description", "")
+            lines.append(f"- ({kind}, {status}) {rule}")
+        return "\n".join(lines)

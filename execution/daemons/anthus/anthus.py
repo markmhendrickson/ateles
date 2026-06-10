@@ -157,6 +157,13 @@ async def _orchestrate_workflow_for(event) -> None:
             )
 
     comments = await _fetch_comments(snap)
+
+    # Autonomous generalization (ateles agent-operator learning): scan this
+    # work entity's comments for strategy_drift_signal lines, cluster them, and
+    # let the generalizer auto-apply agent-local policies (or open operator-
+    # gated proposals for cross-cutting themes). Fully reversible; best-effort.
+    await _harvest_drift_signals(comments)
+
     existing = _gate_states.get(event.entity_id, {})
 
     unmet = await resolve_unmet_preconditions(wf, project)
@@ -267,6 +274,16 @@ async def _spawn_agent(
         log.error(f"[{DAEMON_NAME}] failed to read {skill_path}: {exc}")
         return
 
+    # Inject this agent's learned, agent-local policies (active + provisional)
+    # into the system prompt so generalized behaviour is actually applied at
+    # dispatch — not merely available to consult.
+    try:
+        policy_block = AgentLoader(owner_agent).render_policy_prompt()
+        if policy_block:
+            skill_md = skill_md + policy_block
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[{DAEMON_NAME}] could not load policies for {owner_agent}: {exc}")
+
     title = snapshot.get("title", "")
     body = snapshot.get("body", "")
     repo = snapshot.get("repository") or snapshot.get("repo") or ""
@@ -312,6 +329,30 @@ async def _spawn_agent(
         log.info(f"[{DAEMON_NAME}] spawned {owner_agent} pid={proc.pid}")
     except OSError as exc:
         log.error(f"[{DAEMON_NAME}] failed to spawn {owner_agent}: {exc}")
+
+
+async def _harvest_drift_signals(comments: list) -> None:
+    """
+    Parse strategy_drift_signal lines out of a work entity's comments and run
+    the agent-local generalization loop over them. Best-effort: any failure is
+    logged and swallowed so it never blocks workflow orchestration.
+    """
+    from lib.daemon_runtime import parse_comments
+    from lib.daemon_runtime import generalizer
+
+    try:
+        signals = parse_comments(comments)
+        if not signals:
+            return
+        decisions = await generalizer.harvest(signals)
+        for d in decisions:
+            if d.action.value != "noop":
+                log.info(
+                    f"[{DAEMON_NAME}] generalizer {d.action.value} for "
+                    f"{d.cluster.agent}: {d.reason}"
+                )
+    except Exception as exc:  # noqa: BLE001 — never let learning break dispatch
+        log.warning(f"[{DAEMON_NAME}] drift-signal harvest failed: {exc}")
 
 
 def _project_from_repo(repo_slug: str) -> str:
