@@ -53,6 +53,7 @@ function parseArgs() {
     text: '',
     topic: null,
     plain: false,
+    html: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -67,13 +68,20 @@ function parseArgs() {
       // message body may contain literal '*' or '_' (e.g. **bold**, REFERS_TO)
       // that legacy Markdown would mangle into stray formatting.
       parsed.plain = true;
+    } else if (args[i] === '--html') {
+      // Send with parse_mode=HTML. Caller is responsible for escaping <>&
+      // in literal text and emitting only Telegram-supported HTML tags
+      // (<b> <i> <u> <s> <a> <code> <pre> <blockquote>). Unlike Markdown,
+      // HTML mode leaves '*' and '_' untouched, so it is safe for bodies
+      // containing REFERS_TO / **emphasis** as long as <>& are escaped.
+      parsed.html = true;
     }
   }
 
   return parsed;
 }
 
-function sendTelegramMessage(text, messageThreadId = null, plain = false) {
+function sendTelegramMessage(text, messageThreadId = null, plain = false, html = false) {
   if (!BOT_TOKEN || !CHAT_ID) {
     console.error('Error: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set');
     process.exit(1);
@@ -84,7 +92,9 @@ function sendTelegramMessage(text, messageThreadId = null, plain = false) {
     text: text,
   };
 
-  if (!plain) {
+  if (html) {
+    payload.parse_mode = 'HTML';
+  } else if (!plain) {
     payload.parse_mode = 'Markdown';
   }
 
@@ -132,15 +142,15 @@ function sendTelegramMessage(text, messageThreadId = null, plain = false) {
 }
 
 async function main() {
-  const { text, topic, plain } = parseArgs();
+  const { text, topic, plain, html } = parseArgs();
 
   if (!text) {
-    console.error('Usage: node send.mjs --text "Message text" [--topic TOPIC_ID] [--plain]');
+    console.error('Usage: node send.mjs --text "Message text" [--topic TOPIC_ID] [--plain] [--html]');
     process.exit(1);
   }
 
   try {
-    const result = await sendTelegramMessage(text, topic, plain);
+    const result = await sendTelegramMessage(text, topic, plain, html);
     console.log('Message sent successfully:', result.result.message_id);
   } catch (err) {
     console.error('Failed to send message:', err.message);
