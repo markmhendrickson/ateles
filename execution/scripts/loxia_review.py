@@ -50,7 +50,7 @@ NEOTOMA_BASE_URL = os.environ.get(
     "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
 ).rstrip("/")
 
-CLAUDE_MODEL = "claude-opus-4-5"
+CLAUDE_MODEL = "claude-opus-4-8"
 CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
 GITHUB_API_URL = "https://api.github.com"
 
@@ -266,6 +266,22 @@ Output format — use this exact structure:
 def main() -> None:
     if not PR_NUMBER:
         print("[loxia] LOXIA_PR_NUMBER not set — nothing to review", file=sys.stderr)
+        sys.exit(1)
+
+    # Fail loud, not silent: a review job that can't actually call Claude must
+    # not exit green — that gives a false "reviewed" signal on the PR. If the
+    # key is genuinely unavailable (e.g. forks without secret access), set
+    # LOXIA_ALLOW_NO_KEY=true to downgrade to a skip that still exits 0.
+    if not ANTHROPIC_API_KEY:
+        msg = (
+            "[loxia] ANTHROPIC_API_KEY not set — cannot perform a real review. "
+            "Set the ANTHROPIC_API_KEY repo secret (see docs). "
+            "Failing so the missing review is visible rather than a false green."
+        )
+        if os.environ.get("LOXIA_ALLOW_NO_KEY", "false").lower() == "true":
+            print(msg + " (LOXIA_ALLOW_NO_KEY=true — exiting 0)", file=sys.stderr)
+            sys.exit(0)
+        print(msg, file=sys.stderr)
         sys.exit(1)
 
     print(f"[loxia] Reviewing PR #{PR_NUMBER} in {REPO} (dry_run={DRY_RUN})")
