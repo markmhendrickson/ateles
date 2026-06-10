@@ -308,6 +308,84 @@ def _event_start_madrid(event: dict) -> datetime | None:
         return None
 
 
+def _event_end_madrid(event: dict) -> datetime | None:
+    """Return the event end as a Madrid-timezone datetime, or None."""
+    end = event.get("end") or {}
+    dt_str = end.get("dateTime") or end.get("date")
+    if not dt_str:
+        return None
+    try:
+        if "T" in dt_str:
+            dt = datetime.fromisoformat(dt_str)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=MADRID_TZ)
+            return dt.astimezone(MADRID_TZ)
+        d = date.fromisoformat(dt_str)
+        return datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=MADRID_TZ)
+    except ValueError:
+        return None
+
+
+def _format_time_range(event: dict) -> str:
+    """Return an hours-first time label, e.g. "8–10h" or "8:30–10h" or "all day".
+
+    Minutes are shown only when non-zero. The trailing "h" marks 24h clock.
+    """
+    start = event.get("start") or {}
+    is_all_day = "date" in start and "dateTime" not in start
+    if is_all_day:
+        return "all day"
+
+    start_dt = _event_start_madrid(event)
+    end_dt = _event_end_madrid(event)
+
+    def _hm(dt: datetime) -> str:
+        return dt.strftime("%-H:%M") if dt.minute else dt.strftime("%-H")
+
+    if start_dt is None:
+        return "?"
+    if end_dt is None or end_dt <= start_dt:
+        return f"{_hm(start_dt)}h"
+    return f"{_hm(start_dt)}–{_hm(end_dt)}h"
+
+
+# Keyword -> emoji for non-meeting events. First match (substring, case-insensitive)
+# wins; falls back to 📌 when nothing matches. Keep specific terms before generic.
+_EVENT_EMOJI = [
+    (("pool", "swim", "piscina", "natación", "natacion"), "🏊"),
+    (("gym", "fitness", "workout", "strength", "lift", "training", "entrenamiento"), "🏋️"),
+    (("yoga",), "🧘"),
+    (("run", "running", "jog"), "🏃"),
+    (("coffee", "café", "cafe", "espresso"), "☕"),
+    (("lunch", "brunch", "almuerzo", "comida"), "🥗"),
+    (("dinner", "cena", "supper"), "🍽️"),
+    (("breakfast", "desayuno"), "🥐"),
+    (("pickup", "pick up", "pick-up", "recoger", "drop off", "drop-off", "dropoff"), "🚗"),
+    (("flight", "fly", "vuelo", "airport", "aeropuerto"), "✈️"),
+    (("train", "tren", "renfe"), "🚆"),
+    (("doctor", "dentist", "medico", "médico", "clinic", "appointment", "cita"), "🩺"),
+    (("therapy", "therapist", "terapia"), "🛋️"),
+    (("haircut", "peluquer", "barber"), "💇"),
+    (("call", "phone", "zoom", "meet", "llamada"), "📞"),
+    (("birthday", "cumpleaños", "cumple"), "🎂"),
+    (("school", "colegio", "escuela", "class", "clase"), "🎒"),
+    (("groceries", "shopping", "compra", "supermercado"), "🛒"),
+    (("parents", "family", "familia", "visiting", "visit"), "👪"),
+    (("travel", "trip", "viaje", "hotel"), "🧳"),
+]
+
+
+def _event_emoji(event: dict, is_meeting: bool) -> str:
+    """Pick a meaningful emoji for the event. Meetings always get 🤝."""
+    if is_meeting:
+        return "🤝"
+    title = (event.get("summary") or "").lower()
+    for keywords, emoji in _EVENT_EMOJI:
+        if any(kw in title for kw in keywords):
+            return emoji
+    return "📌"
+
+
 _ROUTINE_TITLES = {
     "wake", "work", "busy", "focus", "lunch", "break",
     "prepare for bed", "lights out", "fall asleep", "sleep",
@@ -393,8 +471,13 @@ def lookup_person_in_neotoma(email: str, name: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
-def telegram_send(text: str) -> None:
-    """Send a Telegram message directly via the Bot API using Python urllib (no subprocess)."""
+def telegram_send(text: str, parse_mode: str | None = None) -> None:
+    """Send a Telegram message directly via the Bot API using Python urllib (no subprocess).
+
+    parse_mode: None = plain text (default; literal * and _ are safe). Pass "HTML"
+    to enable Telegram HTML formatting (<b>, <blockquote>, etc.) — the caller must
+    then escape <>& in any literal text via html.escape().
+    """
     import json
     import urllib.request
     import urllib.error
@@ -408,6 +491,8 @@ def telegram_send(text: str) -> None:
         return
 
     payload: dict = {"chat_id": chat_id, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     if TELEGRAM_TOPIC_COTINGA:
         payload["message_thread_id"] = TELEGRAM_TOPIC_COTINGA
 
@@ -529,115 +614,124 @@ Your job is to prepare a deep briefing for this upcoming meeting and send it via
 
 ## Your tasks (complete all, then send Telegram summary)
 
+0. **Determine the meeting's NATURE first — before any other research.** Ground this in
+   Neotoma + Gmail context; do NOT assume every meeting is a Neotoma/Ateles business
+   meeting. Classify it as exactly one of:
+   - "business_neotoma": a Neotoma/Ateles BD, partnership, investor, customer, or hiring
+     meeting where Neotoma/Ateles positioning is genuinely relevant.
+   - "personal_or_legal": a personal, family, legal, financial, medical, or life-admin
+     meeting (e.g. estate planning for Mark's family, a lawyer about personal matters,
+     a doctor). Neotoma/Ateles BD framing is NOT relevant here.
+   - "other": social, advisory, or ambiguous; relevant only if Neotoma/Ateles genuinely
+     comes up.
+   How to decide:
+   a. Search Gmail for the intro thread / prior emails with the attendee(s):
+      `gws gmail users messages list --params '{{"userId":"me","q":"from:<email> OR to:<email>","maxResults":8}}'`
+      Read the actual thread to learn WHY they are meeting (the intro context usually states it).
+   b. Search Neotoma (mcp__mcpsrv_neotoma__retrieve_entity_by_identifier by email then name)
+      for the person/company and any prior interaction notes.
+   c. Use the event title/description as a hint, but the email thread is the source of truth.
+   STATE the classification explicitly at the top of the brief as a "🧭 Meeting nature" line
+   with one sentence on WHY (e.g. "Personal estate-planning intro for Mark's family's
+   Spain-US structuring, via Austin Desautels — not a Neotoma BD meeting.").
+   If nature is "personal_or_legal" or "other-with-no-Neotoma-angle", you MUST OMIT the
+   "🔍 Overlap with Neotoma/Ateles" and "⚡ Live convergence" sections entirely and instead
+   produce a brief appropriate to the meeting's real purpose (who they are, what Mark wants
+   from the meeting, what to prepare/ask). Do not shoehorn Neotoma/Ateles in.
+
 1. **Participant research** — for each attendee:
-   a. Search Neotoma (mcp__mcpsrv_neotoma__retrieve_entity_by_identifier with their email,
-      then name) for any existing person/company entities.
-   b. If found: pull their snapshot — role, company, prior interactions, notes.
-   c. If NOT found in Neotoma:
-      - Search Gmail for emails to/from their address:
-        `gws gmail users messages list --params '{{"userId":"me","q":"from:<email> OR to:<email>","maxResults":5}}'`
-        Read the most relevant message(s) to extract name, role, company, context.
-      - Search LinkedIn via web search for their name + email domain to find role/company.
-      - Create a person entity in Neotoma with everything found (entity_type=person,
-        name, email, role, company, notes with context from Gmail/LinkedIn).
-   d. Note whether we've met them before (any prior Gmail threads or Neotoma entities).
+   a. Search Neotoma (retrieve_entity_by_identifier with their email, then name) for any
+      existing person/company entities; pull role, company, prior interactions, notes.
+   b. If NOT found in Neotoma:
+      - Use the Gmail thread from step 0 to extract name, role, company, context.
+      - Search LinkedIn via web search for their name + email domain to confirm role/company.
+      - Create a person entity in Neotoma (entity_type=person, name, email, role, company,
+        notes with context from Gmail/LinkedIn). Do NOT invent a profession from thin signals.
+   c. Note whether we've met them before (prior Gmail threads or Neotoma entities).
 
-2. **Company / organisation research** — for each attendee's employer:
-   a. Web search their company name to find: founding thesis, product/service description,
-      portfolio companies (if VC/investor), recent news, team size, stage/funding.
-   b. If the attendee is an investor: research their fund's thesis, check-size, stage focus,
-      and any portfolio companies that overlap in category with Neotoma or Ateles.
-   c. **Recent news and publications** — web search for:
-      - News about the company or fund in the last 6 months (funding rounds, launches,
-        press coverage, blog posts, announcements).
-      - Any articles, essays, talks, or posts written by or featuring the attendee personally
-        (LinkedIn posts, Substack, conference talks, interviews, podcasts).
-      - Use these to understand their current thinking and surface natural conversation hooks.
-   d. Surface explicit overlap with Neotoma and/or Ateles:
-      - **Competitive overlap**: are they funding or building anything in the structured
-        memory, knowledge graph, MCP/agent tooling, or AI-ops space?
-      - **Complementary overlap**: portfolio companies or products that Neotoma/Ateles
-        could directly integrate with, sell to, or partner with?
-      - **Strategic angle**: why would this person / firm care about Neotoma or Ateles
-        specifically — from their thesis, portfolio gaps, or personal history?
-   e. Include a "🔍 Overlap with Neotoma/Ateles" section in the brief (1-3 bullet points,
-      concrete and specific — not generic). If no meaningful overlap, say so explicitly.
+2. **Company / background research** — for the attendee's employer or relevant context:
+   a. Web search to find what they do, their standing/reputation, recent notable news, and —
+      for the SPECIFIC meeting purpose from step 0 — what's most relevant to know going in.
+   b. **Recent news and publications** — last 6 months of relevant news, plus any articles,
+      essays, talks, or posts by the attendee personally. Use these for conversation hooks.
 
-3. **Neotoma/Ateles activity convergence** — query Neotoma to surface recent internal activity
-   that might resonate with this attendee's interests or thesis:
-   a. Pull recent changes: `mcp__mcpsrv_neotoma__list_recent_changes` (last 14 days) —
-      scan for new entity types, schema additions, decisions, or major feature work that
-      overlaps with the attendee's domain.
-   b. Pull recent task/issue activity: retrieve open tasks and GitHub issues in Neotoma
-      that touch areas relevant to the attendee (e.g. if they're a VC interested in
-      agent memory, surface any recent schema work on memory or MCP tooling).
-   c. Pull the Ateles plan entity (ent_99ace4dd6673aa36ed08b1fe) — check decisions and
-      next_steps for anything that aligns with what the attendee works on.
-   d. Synthesise into 1-3 concrete "shared momentum" points: things Neotoma or Ateles
-      is actively building *right now* that speak directly to the attendee's interests —
-      not just product positioning, but live development activity that signals direction.
-   e. Include a "⚡ Live convergence" section in the brief — what's actively happening
-      in Neotoma/Ateles that this person would find directly relevant today.
+3. **ONLY IF nature == "business_neotoma" (or a real Neotoma/Ateles angle exists):**
+   a. Overlap with Neotoma/Ateles — 1-3 concrete, specific bullets (competitive,
+      complementary, or strategic). If no meaningful overlap, omit the section.
+   b. Live convergence — query `mcp__mcpsrv_neotoma__list_recent_changes` (14 days), open
+      tasks/issues, and the Ateles plan (ent_99ace4dd6673aa36ed08b1fe); surface 1-3 things
+      actively being built right now that speak to this attendee. Omit if not applicable.
+   For "personal_or_legal" / "other" meetings, SKIP this entire step.
 
-4. **Pre-event tasks** — identify any concrete preparation steps:
-   - Materials to review, docs to prepare, questions to answer in advance
-   - For each task: create a task entity in Neotoma (entity_type=task, domain=preparation,
-     due_date={event_date}, status=open) and note the entity_id.
-   - If a task can be done by another agent (e.g. research, a code issue),
-     note the suggested agent name in the task description.
+4. **Pre-event tasks** — identify concrete prep steps (materials to review, questions to
+   answer in advance). For each: create a Neotoma task (entity_type=task, domain=preparation,
+   due_date={event_date}, status=open) and note the entity_id. Note a suggested owning agent
+   in the task description if another agent could do it.
 
-5. **Meeting brief** — compose:
-   a. Goals: 2-3 concrete outcomes Mark should aim for
-   b. Agenda: ordered talking points (5-8 bullet points max)
-   c. Context: 1-2 sentences per attendee — who they are, any relevant history
-   d. Open questions: anything Mark should clarify or resolve
+5. **Meeting brief** — compose, fitted to the meeting's nature:
+   a. Goals: 2-3 concrete outcomes Mark should aim for in THIS meeting (not generic BD goals).
+   b. Agenda: ordered talking points (5-8 max), appropriate to the real purpose.
+   c. Context: 1-2 sentences per attendee — who they are, relevant history.
+   d. Open questions: anything Mark should clarify or resolve.
 
-6. **Store the brief** — store a checkpoint_brief entity in Neotoma:
-   entity_type=checkpoint_brief (schema: b0bfcfab-1f07-4526-8fa5-d5ace343b004).
-   Pass the full brief text as a TOP-LEVEL `body` field on the entity (not nested
-   under any wrapper, and not only in raw_fragments). Also set top-level fields
-   `title`, `meeting_date`, `meeting_time`, and `participant_emails`. Link the
-   entity REFERS_TO the meeting event.
+6. **Store the brief** — store a `meeting_prep` entity in Neotoma (the purpose-built schema
+   for meeting briefs; do NOT use checkpoint_brief). Set these TOP-LEVEL fields (flat):
+   - `title`: e.g. "Meeting prep: {event_title} {event_date} {event_time}"
+   - `subject_name`: the primary counterpart's full name
+   - `meeting_date`: "{event_date}"; `meeting_time_local`: "{event_time}"
+   - `counterpart_company`: their company/firm; `counterpart_role`: their role
+   - `context_summary`: the full brief text (same content sent to Telegram)
+   - `questions_to_ask`: array of open questions; `success_criteria`: array of goals
+   - `strongest_overlaps`: array of Neotoma/Ateles overlap bullets (ONLY if business_neotoma;
+     otherwise omit or empty)
+   - `source_urls`: array of any cited URLs; `notes`: pre-event tasks + their Neotoma IDs
+   - `data_source`: "cotinga_deep_prep"; `status`: "ready"
+   Link the entity REFERS_TO the meeting event. Keep every field at the top level.
 
-7. **Send Telegram** — send the complete brief to Telegram via:
-   node {PROJECT_ROOT}/execution/lib/telegram/send.mjs --text "<brief>" --plain {telegram_thread_flag}
+7. **Send Telegram** — send the complete brief as Telegram HTML via:
+   node {PROJECT_ROOT}/execution/lib/telegram/send.mjs --text "<brief_html>" --html {telegram_thread_flag}
 
-   IMPORTANT — plain text only. Telegram renders the message as plain text (we pass --plain).
-   Do NOT use any Markdown syntax: no **bold**, no *italics*, no _underscores_, no `code`,
-   no # headings, and no --- horizontal rules. Write entity references like REFERS_TO and
-   CORRECTS literally (underscores are fine in plain text). Use the emoji section headers
-   EXACTLY as written below (mixed case, e.g. "👥 Participants" — NOT "PARTICIPANTS").
-   Do NOT uppercase the section names; do NOT invent your own headers. Use plain hyphen
-   "- " bullets. Anything you wrap in asterisks will show the asterisks literally.
+   FORMATTING RULES (parse_mode=HTML):
+   - Wrap the ENTIRE brief body in a single <blockquote>...</blockquote> so it renders
+     indented with a left bar. The title line goes ABOVE the blockquote, in <b>...</b>.
+   - HTML-escape every piece of literal text: replace & with &amp;, < with &lt;, > with &gt;.
+     (So "GA&P" becomes "GA&amp;P".) Asterisks and underscores are SAFE in HTML mode — write
+     REFERS_TO and any * literally; do NOT use Markdown ** or _.
+   - Use ONLY these tags: <b> (section headers / emphasis), <blockquote>, and <a href>.
+     No <h1>, no Markdown, no horizontal rules.
+   - Section headers are the emoji + label in <b>, mixed case exactly as shown below — NOT
+     uppercase. Use "- " hyphen bullets inside sections.
 
-Format the Telegram message as (plain text, emoji headers exactly as shown, hyphen bullets,
-no markdown). Do not include the ===TEMPLATE=== lines — they only delimit the example:
+Format the Telegram HTML message as (do not output the ===TEMPLATE=== delimiter lines):
 ===TEMPLATE START===
-📅 Cotinga deep prep: {event_title} ({event_time})
+📅 <b>Deep prep: {event_title} ({event_time})</b>
+<blockquote>🧭 <b>Meeting nature</b>
+- [one sentence: classification + why]
 
-👥 Participants
-- [one line per attendee: name, role/company, "first meeting" or "met N times"]
+👥 <b>Participants</b>
+- [one line per attendee: name, role/company, first meeting or met N times]
 
-🎯 Goals
-- [2-3 goals]
+🎯 <b>Goals</b>
+- [2-3 goals fitted to this meeting]
 
-📋 Agenda
+📋 <b>Agenda</b>
 - [5-8 talking points]
 
-📰 Recent news / publications
-- [1-3 bullets: notable recent news about their company, or articles/posts by the person]
+📰 <b>Recent news / background</b>
+- [1-3 bullets relevant to the meeting purpose]
 
-🔍 Overlap with Neotoma/Ateles
-- [1-3 bullets: competitive, complementary, or strategic overlap — specific, not generic]
+[ONLY for business_neotoma meetings, otherwise omit both sections:]
+🔍 <b>Overlap with Neotoma/Ateles</b>
+- [1-3 specific bullets]
 
-⚡ Live convergence
-- [1-3 bullets: what Neotoma/Ateles is actively building right now that speaks to this person's interests]
+⚡ <b>Live convergence</b>
+- [1-3 bullets of what's being built right now]
 
-📝 Open questions
-- [any pre-meeting questions to resolve]
+📝 <b>Open questions</b>
+- [pre-meeting questions]
 
-✅ Pre-event tasks created
-- [list task names and Neotoma IDs]
+✅ <b>Pre-event tasks created</b>
+- [task names and Neotoma IDs]</blockquote>
 ===TEMPLATE END===
 
 Work through all steps, then stop.
@@ -670,15 +764,24 @@ def build_shallow_briefing(
     attendee_lookup: dict[str, dict | None],
     today_str: str,
 ) -> str:
-    """Build the fast Phase 1 Telegram message."""
-    lines = [f"☀️ Cotinga — daily prep for {today_str}", ""]
+    """Build the fast Phase 1 Telegram message as Telegram HTML.
+
+    The schedule body is wrapped in a <blockquote> so it stands out with a
+    left-indent bar. All literal text is HTML-escaped; only the blockquote and
+    bold tags are emitted by us. Send with parse_mode="HTML".
+    """
+    import html as _html
+
+    def esc(s: str) -> str:
+        return _html.escape(s, quote=False)
+
+    header = f"☀️ <b>Cotinga — daily prep for {esc(today_str)}</b>"
 
     if not events:
-        lines.append("No events in the next 48 hours. Clear schedule.")
-        return "\n".join(lines)
+        return header + "\n\n<blockquote>No events today. Clear schedule.</blockquote>"
 
+    body: list[str] = []
     events_shown = 0
-    meetings_with_deepprep = 0
     seen_titles: set[str] = set()  # dedup by normalised title
 
     for event in events:
@@ -695,15 +798,11 @@ def build_shallow_briefing(
             continue
         seen_titles.add(norm_title)
 
-        # Detect all-day events (start has "date" not "dateTime")
-        start = event.get("start") or {}
-        is_all_day = "date" in start and "dateTime" not in start
-        event_dt = _event_start_madrid(event)
-        time_str = "all day" if is_all_day else (event_dt.strftime("%H:%M") if event_dt else "?")
-
+        time_label = _format_time_range(event)
         is_meeting = _is_meeting(event)
-        icon = "🤝" if is_meeting else "📌"
-        lines.append(f"{icon} {title} — {time_str}")
+        emoji = _event_emoji(event, is_meeting)
+        # Hours-first format, e.g. "8–10h: 🏋️ Fitness"
+        body.append(f"{esc(time_label)}: {emoji} {esc(title)}")
 
         attendees = _extract_attendees(event)
         others = [a for a in attendees if not a["self"]]
@@ -714,22 +813,17 @@ def build_shallow_briefing(
                 role = known.get("role") or known.get("title") or ""
                 company = known.get("company") or ""
                 context = ", ".join(filter(None, [role, company]))
-                lines.append(f"  👤 {a['name']}{' — ' + context if context else ' (known)'}")
+                tail = f" — {esc(context)}" if context else " (known)"
+                body.append(f"    👤 {esc(a['name'])}{tail}")
             else:
-                lines.append(f"  👤 {a['name']} — first meeting (research queued)")
+                body.append(f"    👤 {esc(a['name'])} — first meeting (deep prep running)")
 
-        if is_meeting:
-            lines.append("  🔍 Deep prep: queued in background")
-            meetings_with_deepprep += 1
-
-        lines.append("")
         events_shown += 1
 
     if events_shown == 0:
-        lines.append("Clear schedule.")
-    elif meetings_with_deepprep > 0:
-        lines.append("Deep briefs will arrive separately as agents complete.")
-    return "\n".join(lines)
+        return header + "\n\n<blockquote>No events today. Clear schedule.</blockquote>"
+
+    return header + "\n\n<blockquote>" + "\n".join(body) + "</blockquote>"
 
 
 # ---------------------------------------------------------------------------
@@ -782,10 +876,10 @@ def _main() -> None:
             f"{'known' if attendee_lookup[email] else 'unknown'}"
         )
 
-    # Send Phase 1 shallow briefing immediately
+    # Send Phase 1 shallow briefing immediately (HTML — blockquote + bold header)
     briefing = build_shallow_briefing(events, attendee_lookup, today_str)
     log.info("Sending Phase 1 shallow briefing via Telegram...")
-    telegram_send(briefing)
+    telegram_send(briefing, parse_mode="HTML")
 
     # Phase 2: spawn async deep-prep agents for each meeting
     for event in events:
