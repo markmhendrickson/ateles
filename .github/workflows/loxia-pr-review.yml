@@ -32,6 +32,12 @@ jobs:
     name: Loxia PR review
     runs-on: ubuntu-latest
 
+    # GITHUB_TOKEN scope: read the code, write the review comment back to the PR.
+    # Without pull-requests: write the comment POST returns HTTP 403 Forbidden.
+    permissions:
+      contents: read
+      pull-requests: write
+
     # Only run on PRs targeting main
     if: >
       github.event_name == 'workflow_dispatch' ||
