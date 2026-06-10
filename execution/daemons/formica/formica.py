@@ -62,6 +62,7 @@ from lib.daemon_runtime import (  # noqa: E402
     SSEClient,
 )
 from lib.notify import Notifier, Priority  # noqa: E402
+from lib.activity import ActivityLogger  # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -70,6 +71,9 @@ logging.basicConfig(
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
 log = logging.getLogger("formica")
+
+# ── Activity-log channel (CyphorhinusBot observation feed) ──────────────────
+_activity = ActivityLogger(agent="formica")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DAEMON_NAME = "formica"
@@ -267,7 +271,13 @@ async def dispatch_gryllus(
         log.info(f"[{DAEMON_NAME}] DRY RUN — skipping Gryllus dispatch for {entity_id}")
         return
 
-    await _spawn_claude_skill(GRYLLUS_SKILL, entity_id, snapshot, notifier, entity_id)
+    job = _activity.started(f"dispatching Gryllus for issue {entity_id} ({repo}): {title[:60]}")
+    try:
+        await _spawn_claude_skill(GRYLLUS_SKILL, entity_id, snapshot, notifier, entity_id)
+        job.finished(f"Gryllus dispatched for issue {entity_id}")
+    except Exception as exc:
+        job.failed(f"Gryllus dispatch failed for {entity_id}: {type(exc).__name__}")
+        raise
 
 
 async def dispatch_vanellus(
@@ -287,7 +297,13 @@ async def dispatch_vanellus(
         )
         return
 
-    await _spawn_claude_skill(VANELLUS_SKILL, entity_id, snapshot, notifier, entity_id)
+    job = _activity.started(f"dispatching Vanellus for PR {entity_id}: {title[:60]}")
+    try:
+        await _spawn_claude_skill(VANELLUS_SKILL, entity_id, snapshot, notifier, entity_id)
+        job.finished(f"Vanellus dispatched for PR {entity_id}")
+    except Exception as exc:
+        job.failed(f"Vanellus dispatch failed for {entity_id}: {type(exc).__name__}")
+        raise
 
 
 # ── Event handler ─────────────────────────────────────────────────────────────

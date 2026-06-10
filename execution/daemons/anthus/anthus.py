@@ -43,6 +43,7 @@ from lib.daemon_runtime import (  # noqa: E402
     SSEClient,
 )
 from lib.notify import Notifier, Priority  # noqa: E402
+from lib.activity import ActivityLogger  # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -51,6 +52,9 @@ logging.basicConfig(
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
 log = logging.getLogger("anthus")
+
+# ── Activity-log channel (CyphorhinusBot observation feed) ──────────────────
+_activity = ActivityLogger(agent="anthus")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DAEMON_NAME = "anthus"
@@ -207,12 +211,22 @@ async def _orchestrate_workflow_for(event) -> None:
         # content. Code-writing agents need `--dangerously-skip-permissions`
         # to avoid interactive prompts under launchd (per Tier 1 smoke test
         # findings, 2026-05-25).
-        await _spawn_agent(
-            owner_agent=gate.owner_agent,
-            work_entity_id=event.entity_id,
-            gate_name=gate.gate_name,
-            snapshot=snap,
+        job = _activity.started(
+            f"dispatching gate {gate.gate_name} → {gate.owner_agent} on {event.entity_id}"
         )
+        try:
+            await _spawn_agent(
+                owner_agent=gate.owner_agent,
+                work_entity_id=event.entity_id,
+                gate_name=gate.gate_name,
+                snapshot=snap,
+            )
+            job.finished(
+                f"spawned {gate.owner_agent} for {gate.gate_name} on {event.entity_id}"
+            )
+        except Exception as exc:
+            job.failed(f"spawn failed: {exc}")
+            raise
         _notifier.send(
             f"Gate dispatched: {gate.gate_name} ({gate.owner_agent}) on {event.entity_id}",
             priority=Priority.INFO,

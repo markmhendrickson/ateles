@@ -68,6 +68,15 @@ def _notify(message: str, priority: str = "info") -> None:
         pass
 
 
+# Activity-log channel (CyphorhinusBot observation feed).
+try:
+    from lib.activity import ActivityLogger  # noqa: E402
+
+    _activity: "ActivityLogger | None" = ActivityLogger(agent="monedula")
+except Exception:
+    _activity = None
+
+
 # ---------------------------------------------------------------------------
 # Constants / paths
 # ---------------------------------------------------------------------------
@@ -588,9 +597,18 @@ def main() -> None:
             continue
         for match in matches:
             log.info(f"Executing {handler.name} payment...")
-            result = handler.execute(match)
-            all_results.append((handler, result))
-            log.info(f"{handler.name} result: {result}")
+            _job = _activity.started(f"executing {handler.name} payment") if _activity else None
+            try:
+                result = handler.execute(match)
+                all_results.append((handler, result))
+                log.info(f"{handler.name} result: {result}")
+                if _job:
+                    # Keep summary generic — no amounts, IBANs, or memos.
+                    _job.finished(f"{handler.name} payment executed")
+            except Exception as _exc:
+                if _job:
+                    _job.failed(f"{handler.name} payment error: {type(_exc).__name__}")
+                raise
 
     # Send confirmation
     if not all_results:
