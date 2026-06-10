@@ -50,7 +50,7 @@ NEOTOMA_BASE_URL = os.environ.get(
     "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
 ).rstrip("/")
 
-CLAUDE_MODEL = "claude-opus-4-5"
+CLAUDE_MODEL = "claude-opus-4-8"
 CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
 GITHUB_API_URL = "https://api.github.com"
 
