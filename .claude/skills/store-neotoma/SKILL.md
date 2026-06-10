@@ -1,6 +1,6 @@
 ---
 name: store-neotoma
-description: "Review chat, preview exact Neotoma payloads, then store conversation, dual agent_message rows per turn (user + assistant, PART_OF conversation), mandatory derived transcript + analysis entities whenever the thread yields recoverable substance (verbatim messages, in-session summaries, tool traces, referenced files), and attachments after user confirmation."
+description: "Review chat and automatically store conversation, dual agent_message rows per turn (user + assistant, PART_OF conversation), mandatory derived transcript + analysis entities whenever the thread yields recoverable substance (verbatim messages, in-session summaries, tool traces, referenced files), and attachments — executing immediately without a confirmation gate, then reporting exactly what was stored."
 triggers:
   - store_neotoma
   - /store_neotoma
@@ -14,15 +14,15 @@ entity_id: ent_ba1320078b84cc4c5b43c29e
 
 ## Purpose
 
-Define the workflow for reviewing chat, building a Neotoma store preview, and executing storage after user confirmation. Neotoma is the only data store; there is no Parquet migration phase.
+Define the workflow for reviewing chat, building the Neotoma store payload, and executing storage automatically — without a confirmation gate — then reporting what was stored. Neotoma is the only data store; there is no Parquet migration phase.
 
 ## Scope
 
-Applies when the user asks to store the current chat in Neotoma. Covers preview, user revisions, confirmation, storage, and relationships. Excludes one-off store operations without preview.
+Applies when the user asks to store the current chat in Neotoma. Covers payload construction, storage, relationships, and a post-store report.
 
-Reviews the current chat conversation, builds a preview of records to store in Neotoma, waits for user confirmation (or revision input), then stores conversation, **two `agent_message` entities per logical turn** (`role: "user"` and `role: "assistant"`), each with `PART_OF` → conversation — the canonical shape from Neotoma MCP live chat instructions — plus **derived transcript and analysis** synthesized from whatever the conversation actually provides (see below), plus attachments.
+Reviews the current chat conversation, builds the records to store in Neotoma, and **stores them immediately**: conversation, **two `agent_message` entities per logical turn** (`role: "user"` and `role: "assistant"`), each with `PART_OF` → conversation — the canonical shape from Neotoma MCP live chat instructions — plus **derived transcript and analysis** synthesized from whatever the conversation actually provides (see below), plus attachments.
 
-Preview-before-execute: On first run, this workflow MUST preview what will be stored and MUST NOT execute storage until the user confirms. User input (corrections, scope changes, exclusions) MUST be applied to revise the preview.
+Auto-execute (no confirmation gate): This workflow stores immediately; it MUST NOT pause to ask the user to confirm or approve before writing. It MUST still build the full, correct payload (dual messages + mandatory derived digests), then **report exactly what was stored** afterward. If the user supplies corrections after the fact, apply them via a follow-up `correct`/`store`. The only thing that suppresses storage is an explicit user instruction not to store (or to exclude specific turns/entities).
 
 ## Prerequisites
 
@@ -30,7 +30,7 @@ Preview-before-execute: On first run, this workflow MUST preview what will be st
 - Neotoma MCP available.
 - Load `.cursor/rules/conversation_tracking.mdc` and `.cursor/rules/neotoma_harness.mdc` for entity schemas and access rules. `conversation_tracking` defines dual-message + `PART_OF`; do not use merged `role_user`/`role_agent` on a single `agent_message`.
 
-## Phase 0: Preview (MANDATORY — Execute First)
+## Phase 0: Build the payload (then auto-store)
 
 ### Step 0.1 — Extract and build preview
 
@@ -62,42 +62,30 @@ Unless the user explicitly excludes them in Phase 0 revision, **always** plan an
 
 **Optional extraction** (still previewed): tasks, contacts, events, transactions, and other types the turns imply — **in addition to** the mandatory transcript + analysis digests above.
 
-Build preview structure:
+Build payload structure:
 
 - Conversation: full payload with every property and exact value to be stored (see Step 0.2).
 - Messages: **two** exact `agent_message` payloads per turn (user and assistant), each with every property and exact value to be stored, plus distinct `idempotency_key` / `turn_key` per row. Include `PART_OF` targets (conversation `entity_id` after conversation is created).
 - Attachments: list of files to store with path, type, and any store payload (`file_path` or `file_content`).
-- **Derived transcript + analysis:** exact payloads (mandatory unless user excludes in revision).
+- **Derived transcript + analysis:** exact payloads (mandatory unless the user explicitly excludes them).
 - Other derived entities: exact payloads for any additional non-chat entities implied by the conversation.
 
-### Step 0.2 — Display preview
+### Step 0.2 — Assemble the payload
 
-Show structured preview to the user with clear sections. Include tables with the exact properties and exact raw values of every structured object that will be sent to Neotoma, so the user can approve precise payloads before proceeding.
+Assemble the full set of records as structured objects with exact properties and values. These same sections are what the post-store report (see Output and Reporting) will enumerate, so build them completely.
 
-Required sections:
+Sections:
 1. Conversation entity (exact payload).
 2. Agent_message entities (exact payloads — **pairs** per turn: user then assistant).
 3. Attachments (all user-uploaded files, @-mentioned paths, file URLs).
 4. Relationships to create.
 5. **Derived transcript entity** (exact payload) and **analysis entity** (exact payload), plus any other derived entities (tasks, contacts, etc.).
 
-End the preview with:
-- Confirm to proceed, or provide input to revise.
-- Revisions can include exclusions, title/topics changes, and "how to store" preferences (field names, exclusions, formats).
+### Step 0.3 — Proceed directly to storage
 
-### Step 0.3 — Wait for user response
+Do **not** pause for confirmation. Once the payload is assembled, proceed immediately to Phase 1. Honor only pre-stated user constraints already present in the conversation (e.g. "skip turn 3", "don't store X", "use conversation_id without date prefix") — apply them while assembling, then store. Any corrections the user raises *after* storage are handled with a follow-up `correct`/`store`, not by withholding the write.
 
-- If user confirms ("proceed", "confirm", "yes", "go ahead", or equivalent): proceed to Phase 1. If the user previously provided "how to store" input, retain it for post-store neotoma-learn.
-- If user provides input: apply it to preview and/or payloads:
-  - Exclude turns (e.g. "skip turn 3").
-  - Change title or topics.
-  - Add or remove derived entities (including opting out of mandatory transcript/analysis digests — default is **include**).
-  - Correct any field.
-  - How to store (e.g. "use conversation_id without date prefix", "store topics as JSON string"). Do not request reverting to merged single-row `role_user`/`role_agent`; dual messages are canonical.
-- Re-display the revised preview (including updated exact payload tables), then wait again.
-- Repeat until user confirms.
-
-## Phase 1: Storage (After Confirmation)
+## Phase 1: Storage (automatic — no confirmation required)
 
 ### Step 1.1 — Create conversation entity
 
