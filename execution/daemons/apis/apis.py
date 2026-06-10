@@ -74,6 +74,10 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     stamp_checkpoint_dispatched,
 )
 from lib.notify import Notifier, Priority  # noqa: E402
+from lib.activity import ActivityLogger  # noqa: E402
+
+# ── Activity-log channel (CyphorhinusBot observation feed) ──────────────────
+_activity = ActivityLogger(agent="apis")
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -321,6 +325,8 @@ async def dispatch_task(
         )
         return
 
+    job = _activity.started(f"routing task {entity_id} → {skill}: {title[:60]}")
+
     # ── Execution gate ──────────────────────────────────────────────────────
     # Skipped when re-dispatching an operator-approved checkpoint.
     if not gate_override:
@@ -367,6 +373,10 @@ async def dispatch_task(
                 f"[{DAEMON_NAME}] HELD task {entity_id} for operator approval "
                 f"(checkpoint_brief={brief_id})"
             )
+            job.escalated(
+                f"task {entity_id} → {skill} held for operator "
+                f"(blast={decision.blast_radius.value}, conf={confidence:.2f})"
+            )
             return
 
     log.info(
@@ -375,11 +385,18 @@ async def dispatch_task(
         + (" (gate: override)" if gate_override else " (gate: auto-execute)")
     )
 
+    _gate_label = "override" if gate_override else "auto-execute"
     if DRY_RUN:
         log.info(f"[{DAEMON_NAME}] DRY RUN — skipping {skill} dispatch for {entity_id}")
+        job.finished(f"task {entity_id} → {skill} routed (dry-run, gate: {_gate_label})")
         return
 
-    await _spawn_claude_skill(skill, entity_id, snapshot, trigger, notifier)
+    try:
+        await _spawn_claude_skill(skill, entity_id, snapshot, trigger, notifier)
+        job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
+    except Exception as exc:
+        job.failed(f"task {entity_id} → {skill} dispatch failed: {type(exc).__name__}")
+        raise
 
 
 # ── Checkpoint resolution ───────────────────────────────────────────────────
