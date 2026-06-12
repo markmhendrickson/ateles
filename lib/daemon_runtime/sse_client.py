@@ -61,6 +61,54 @@ class NeotomaEvent:
         )
 
 
+async def hydrate_snapshot(event: NeotomaEvent) -> NeotomaEvent:
+    """
+    Ensure ``event.snapshot`` is populated by fetching the entity if needed.
+
+    The Neotoma SSE stream delivers only event metadata (entity_id, entity_type,
+    action) — it does NOT embed the entity snapshot. Daemons that route on
+    snapshot fields (tags, assigned_to, labels, title) therefore see an empty
+    dict and drop every event unless they re-fetch. This helper performs that
+    fetch in place: it GETs ``/entities/{entity_id}`` and fills
+    ``event.snapshot`` from the response.
+
+    Async so the fetch never blocks the daemon event loop: a slow Neotoma
+    response yields to other tasks instead of stalling the whole dispatch loop.
+    ``await`` it at the top of each handler.
+
+    Open-mode aware: sends a Bearer header only when NEOTOMA_BEARER_TOKEN is set,
+    matching how the stream itself connects to an open-mode Neotoma.
+
+    Idempotent and fail-soft: a no-op when the snapshot is already present or the
+    event has no entity_id; on any fetch error it logs and returns the event
+    unchanged (with an empty snapshot) rather than raising, so a transient
+    Neotoma blip never crashes the dispatch loop.
+    """
+    if event.snapshot or not event.entity_id:
+        return event
+
+    headers: dict = {}
+    if NEOTOMA_BEARER_TOKEN:
+        headers["Authorization"] = f"Bearer {NEOTOMA_BEARER_TOKEN}"
+
+    url = f"{NEOTOMA_BASE_URL}/entities/{event.entity_id}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+        # GET /entities/{id} returns the computed snapshot fields directly under
+        # the top-level "snapshot" key (title, tags, assigned_to, ...).
+        snapshot = data.get("snapshot")
+        event.snapshot = snapshot if isinstance(snapshot, dict) else {}
+    except Exception as exc:  # noqa: BLE001 — never crash the dispatch loop
+        log.warning(
+            f"[sse] could not hydrate snapshot for {event.entity_type}/"
+            f"{event.entity_id}: {exc}"
+        )
+    return event
+
+
 EventHandler = Callable[[NeotomaEvent], Awaitable[None]]
 
 

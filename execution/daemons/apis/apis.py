@@ -63,6 +63,7 @@ from lib.daemon_runtime import (  # noqa: E402
     NeotomaEvent,
     SSEClient,
     evaluate_gate,
+    hydrate_snapshot,
     resolve_policy_for_agent,
     write_checkpoint_brief,
 )
@@ -497,6 +498,10 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
       task.updated   → check status transitions; notify on due-date changes
       task.due_today → remind operator; auto-execute if APIS_AUTO_EXECUTE=1
     """
+    # SSE events carry only metadata; fetch the entity snapshot so routing
+    # (tags, assigned_to) sees real fields instead of an empty dict.
+    await hydrate_snapshot(event)
+
     entity_type = event.entity_type
     entity_id = event.entity_id
     action = event.action
