@@ -15,6 +15,7 @@ domain-routing knowledge in this module; importers should not redefine it.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 
 # Domain tags → T4 skill mappings. First matching tag wins in _resolve_skill.
 DOMAIN_ROUTES: dict[str, str] = {
@@ -91,6 +92,63 @@ DOMAIN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 # Domains advertised on the A2A Agent Card's delegate-task skill. Derived from
 # the routing table so the external contract tracks internal capability.
 SUPPORTED_DOMAINS: list[str] = list(DOMAIN_ROUTES.keys())
+
+# File-path → domain patterns for PR-review routing (Loxia per-domain fan-out).
+# Distinct from DOMAIN_PATTERNS above, which classify a task's TITLE/BODY text:
+# these match the PATHS of files changed in a pull request. A single PR may
+# touch several domains, so all matches are collected (no first-match-wins).
+#
+# Only specialist domains with a non-generalist owner are listed. The
+# gryllus-owned domains (ops/engineering/agents/neotoma/product/comms) route to
+# the same generalist Loxia already covers as the baseline reviewer, so adding a
+# second gryllus pass buys nothing — they are intentionally omitted here.
+DOMAIN_PATH_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"(^|/)(monedula|payment|invoice|wage|payroll|rent)", re.I),
+        "finance",
+    ),
+    (
+        re.compile(r"(^|/)(fringilla|reconcil|finance[_-]?analysis)", re.I),
+        "finance_analysis",
+    ),
+    (
+        re.compile(r"(^|/)(gorilla|workout|fitness)", re.I),
+        "health",
+    ),
+]
+
+
+def infer_domains_from_paths(paths: Iterable[str]) -> list[str]:
+    """Distinct domains touched anywhere in a PR's changeset, in first-seen order.
+
+    Dedup is global across the whole changeset (not per-path): the question this
+    answers is coverage — which specialists should look at the PR — not which
+    single domain owns a given file. A path may match several patterns, and
+    every distinct domain across all paths is collected once. Contrast
+    infer_tags_from_text, which classifies a single text blob.
+    """
+    domains: list[str] = []
+    for path in paths:
+        for pattern, domain in DOMAIN_PATH_PATTERNS:
+            if pattern.search(path) and domain not in domains:
+                domains.append(domain)
+    return domains
+
+
+def resolve_reviewers(paths: Iterable[str]) -> list[str]:
+    """T4 skills of the domain-owning agents that should review a PR touching
+    these paths, *in addition to* the universal baseline reviewer (Loxia).
+
+    Deduplicated and order-stable; returns [] when no specialist domain is
+    touched. Loxia is intentionally excluded — callers always run the baseline
+    reviewer plus whatever this returns.
+    """
+    reviewers: list[str] = []
+    for domain in infer_domains_from_paths(paths):
+        skill = DOMAIN_ROUTES.get(domain)
+        if skill and skill not in reviewers:
+            reviewers.append(skill)
+    return reviewers
 
 
 def infer_tags_from_text(title: str, body: str = "") -> list[str]:
