@@ -74,18 +74,17 @@ For full step-by-step guidance: `/update-plan` and `/update-tasks` skills.
 
 **Remaining manual operator steps:**
 - Run `gh auth login` on Mac Studio, then open the 4 pending PRs (neotoma × 3, openclaw × 1)
-- Create `ateles-agent` GitHub machine account + PAT in `ateles-private/.env` — unblocks Apus auto-mirror
-- Create `neotoma-agent` GitHub machine account
+- ✅ `ateles-agent` + `neotoma-agent` GitHub machine accounts created; fine-grained PATs in `ateles-private/.env` (`ATELES_AGENT_PAT`, `NEOTOMA_AGENT_PAT`), both `push:true` on their repos — unblocks Apus auto-mirror + Gryllus PRs (verified 2026-06-11)
 - Add `ANTHROPIC_API_KEY` secret to ateles repo settings — activates Loxia GHA
 - Add `NEOTOMA_PROBE_HOSTS` secret to neotoma repo settings — activates CI security gates
 - Configure neotoma main branch protection after CI gates PR merges
 - Deploy separate OpenClaw instance for Menura
 
 **Requires manual operator action**:
-- Create `ateles-agent` GitHub machine account + PAT in ateles-private/.env
-- Create `neotoma-agent` GitHub account
 - Add `ANTHROPIC_API_KEY` secret to ateles GitHub repo (for Loxia GHA)
 - Deploy separate OpenClaw instance for Menura
+
+(✅ `ateles-agent` / `neotoma-agent` accounts + PATs done — see "Remaining manual operator steps" above; PAT→.env wiring captured as `env_var_mapping` entities `ent_03eeb8462eb5e91d96f5ab2d` (NEOTOMA_AGENT_PAT) / `ent_8689c5dd68d7eb93ca2c9bf1` (ATELES_AGENT_PAT) for `/sync-env-from-1password`.)
 
 ## Recently resolved
 
