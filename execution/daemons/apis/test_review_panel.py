@@ -90,3 +90,11 @@ def test_auth_issue_triggers_legal_expectations():
 def test_forward_looking_lenses_never_preregister():
     lenses = select_expectation_agents("Huge content launch", "blog post", [])
     assert "corvus" not in [l.agent for l in lenses]
+
+
+def test_forward_looking_gate_contributor_keeps_seat_on_small_diff():
+    # Loxia review on PR #87: the size threshold is an opt-in path, not an
+    # override — a forward-looking lens that pre-registered expectations on
+    # the parent issue keeps its panel seat even when the diff is small.
+    panel = select_panel({"corvus"}, ["a.py"], max_panel=6)
+    assert "corvus" in _agents(panel)

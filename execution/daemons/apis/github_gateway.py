@@ -142,15 +142,19 @@ def make_app(secret: str, handler: TriggerHandler) -> web.Application:
         event_type = request.headers.get("X-GitHub-Event", "")
         body = await request.read()
 
-        if secret:
-            sig = request.headers.get("X-Hub-Signature-256", "")
-            if not verify_github_signature(secret, body, sig):
-                log.warning(f"[apis] GitHub signature mismatch, delivery={delivery_id}")
-                return web.Response(status=401, text="Signature mismatch")
-        else:
-            log.warning(
-                "[apis] APIS_GITHUB_WEBHOOK_SECRET unset — accepting unsigned delivery"
+        # Fail closed (Loxia review on PR #87): the gateway sits behind a
+        # public tunnel — an unset secret must reject deliveries, not accept
+        # unsigned ones, or anyone who finds the endpoint can spawn pipelines.
+        if not secret:
+            log.error(
+                "[apis] APIS_GITHUB_WEBHOOK_SECRET unset — rejecting delivery "
+                f"{delivery_id} (fail closed)"
             )
+            return web.Response(status=503, text="Webhook secret not configured")
+        sig = request.headers.get("X-Hub-Signature-256", "")
+        if not verify_github_signature(secret, body, sig):
+            log.warning(f"[apis] GitHub signature mismatch, delivery={delivery_id}")
+            return web.Response(status=401, text="Signature mismatch")
 
         if event_type == "ping":
             return web.json_response({"status": "pong"})

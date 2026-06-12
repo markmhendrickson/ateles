@@ -1,12 +1,45 @@
 """Tests for the GitHub webhook gateway (ateles#80)."""
 
+import asyncio
 import hashlib
 import hmac
 import json
 
-from github_gateway import parse_github_event, verify_github_signature
+from aiohttp.test_utils import TestClient, TestServer
+
+from github_gateway import make_app, parse_github_event, verify_github_signature
 
 TEST_HMAC_KEY = "dummy-hmac-fixture-key"
+
+
+def _post_webhook(secret: str, body: bytes, headers: dict) -> int:
+    async def run() -> int:
+        async def handler(trigger):
+            pass
+
+        app = make_app(secret, handler)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/github/webhook", data=body, headers=headers)
+            return resp.status
+
+    return asyncio.run(run())
+
+
+def test_unset_secret_rejects_delivery_fail_closed():
+    # Loxia review on PR #87: an unset secret must reject deliveries (503),
+    # never accept unsigned ones — the gateway sits behind a public tunnel.
+    status = _post_webhook("", b"{}", {"X-GitHub-Event": "ping"})
+    assert status == 503
+
+
+def test_signed_ping_accepted():
+    body = b"{}"
+    status = _post_webhook(
+        TEST_HMAC_KEY,
+        body,
+        {"X-GitHub-Event": "ping", "X-Hub-Signature-256": _sign(body)},
+    )
+    assert status == 200
 
 
 def _sign(body: bytes, secret: str = TEST_HMAC_KEY) -> str:

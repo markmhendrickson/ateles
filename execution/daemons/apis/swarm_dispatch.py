@@ -257,7 +257,7 @@ class SwarmDispatcher:
         #     findings: stdout was the only copy, and Vanellus aggregates
         #     from the PR comments).
         if reviews:
-            agents_by_lens = {l.lens: l.agent for l in panel}
+            agents_by_lens = {p.lens: p.agent for p in panel}
             await self._persist_panel_reviews(trigger, reviews, agents_by_lens)
             await self._post_missing_panel_comments(
                 trigger, reviews, agents_by_lens
@@ -284,14 +284,14 @@ class SwarmDispatcher:
         # 4. Vanellus aggregates panel verdicts. Merge is operator-gated
         #    unless APIS_AUTONOMY_AUTO_MERGE=1 (ateles#80 guardrail).
         await run_skill(
-            "vanellus", self._vanellus_prompt(trigger, parent, [l.lens for l in panel])
+            "vanellus", self._vanellus_prompt(trigger, parent, [p.lens for p in panel])
         )
 
         if not self.config.auto_merge:
-            await self._store_merge_checkpoint(trigger, parent, [l.lens for l in panel])
+            await self._store_merge_checkpoint(trigger, parent, [p.lens for p in panel])
             self.notifier.send(
                 f"PR {ref} reviewed by panel "
-                f"({', '.join(l.lens for l in panel) or 'baseline only'}). "
+                f"({', '.join(p.lens for p in panel) or 'baseline only'}). "
                 "Merge held for operator approval (checkpoint_brief filed).",
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,

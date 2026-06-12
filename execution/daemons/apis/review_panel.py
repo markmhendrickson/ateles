@@ -155,14 +155,18 @@ def select_panel(
             or _matches_diff(lens, changed_files)
         )
         if lens.forward_looking:
-            relevant = len(changed_files) >= lens.min_changed_files
+            # Size threshold is an additional opt-in path, not an override
+            # (Loxia review on PR #87): a forward-looking lens that
+            # pre-registered expectations must keep its panel seat even on
+            # small diffs.
+            relevant = relevant or len(changed_files) >= lens.min_changed_files
         if relevant:
             selected.append(lens)
 
-    blocking = [l for l in selected if not l.forward_looking]
-    forward = [l for l in selected if l.forward_looking]
+    blocking = [item for item in selected if not item.forward_looking]
+    forward = [item for item in selected if item.forward_looking]
     panel = (blocking + forward)[:max_panel]
-    dropped = [l.lens for l in selected if l not in panel]
+    dropped = [item.lens for item in selected if item not in panel]
     if dropped:
         log.info(f"[apis] review panel capped at {max_panel}; dropped: {dropped}")
     return panel
