@@ -5,7 +5,7 @@ Formica — Ateles issue-processing daemon.
 Formica genus: ants. T3 daemon in the Ateles swarm.
 
 Subscribes to Neotoma SSE events and processes issues/PRs by dispatching
-to T4 invocable agents (Gryllus for issues, Vanellus for PRs).
+to T4 invocable agents (Cicada for issues, Vanellus for PRs).
 
 This Python implementation uses lib/daemon_runtime for SSE and AAuth,
 replacing the legacy Node.js daemon.mjs. The operator approval flow
@@ -92,7 +92,7 @@ NEOTOMA_REPO = Path(
 DRY_RUN = os.environ.get("FORMICA_DRY_RUN", "0") == "1"
 
 # Skills used for T4 dispatch (via `claude --print`)
-GRYLLUS_SKILL = "gryllus"  # issue worker
+CICADA_SKILL = "cicada"  # issue worker
 VANELLUS_SKILL = "vanellus"  # PR steward
 
 # Path to the Claude CLI binary used to spawn T4 agents. Set by env var or
@@ -253,31 +253,31 @@ async def _spawn_claude_skill(
         )
 
 
-async def dispatch_gryllus(
+async def dispatch_cicada(
     entity_id: str, snapshot: dict, notifier: Notifier, grants: GrantChecker
 ) -> None:
-    """Dispatch Gryllus (issue worker) for a new issue."""
+    """Dispatch Cicada (issue worker) for a new issue."""
     if grants.is_suspended():
-        log.warning(f"[{DAEMON_NAME}] Grant suspended — skipping Gryllus dispatch for {entity_id}")
+        log.warning(f"[{DAEMON_NAME}] Grant suspended — skipping Cicada dispatch for {entity_id}")
         return
 
     title = snapshot.get("title", "(untitled)")
     repo = snapshot.get("repository", "unknown")
     log.info(
-        f"[{DAEMON_NAME}] → Gryllus: issue={entity_id} repo={repo!r} "
+        f"[{DAEMON_NAME}] → Cicada: issue={entity_id} repo={repo!r} "
         f"title={title[:60]!r}"
     )
 
     if DRY_RUN:
-        log.info(f"[{DAEMON_NAME}] DRY RUN — skipping Gryllus dispatch for {entity_id}")
+        log.info(f"[{DAEMON_NAME}] DRY RUN — skipping Cicada dispatch for {entity_id}")
         return
 
-    job = _activity.started(f"dispatching Gryllus for issue {entity_id} ({repo}): {title[:60]}")
+    job = _activity.started(f"dispatching Cicada for issue {entity_id} ({repo}): {title[:60]}")
     try:
-        await _spawn_claude_skill(GRYLLUS_SKILL, entity_id, snapshot, notifier, entity_id)
-        job.finished(f"Gryllus dispatched for issue {entity_id}")
+        await _spawn_claude_skill(CICADA_SKILL, entity_id, snapshot, notifier, entity_id)
+        job.finished(f"Cicada dispatched for issue {entity_id}")
     except Exception as exc:
-        job.failed(f"Gryllus dispatch failed for {entity_id}: {type(exc).__name__}")
+        job.failed(f"Cicada dispatch failed for {entity_id}: {type(exc).__name__}")
         raise
 
 
@@ -315,7 +315,7 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChe
     Handle a Neotoma SSE event.
 
     Phase 3:
-      - issue.created  → dispatch Gryllus (dry-run in Phase 3)
+      - issue.created  → dispatch Cicada (dry-run in Phase 3)
       - pull_request.created → dispatch Vanellus (dry-run in Phase 3)
       - product_feedback.created → log (Sturnus handles this in Phase 4)
 
@@ -349,7 +349,7 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChe
             priority=Priority.INFO,
             handler=DAEMON_NAME,
         )
-        await dispatch_gryllus(entity_id, snapshot, notifier, grants)
+        await dispatch_cicada(entity_id, snapshot, notifier, grants)
 
     elif entity_type == "pull_request" and action == "created":
         title = snapshot.get("title", "(untitled)")

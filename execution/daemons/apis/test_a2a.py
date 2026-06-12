@@ -63,7 +63,7 @@ def _store_fn_with(transport):
 def test_routing_infer_and_resolve():
     tags = routing.infer_tags_from_text("Fix the deploy pipeline bug")
     assert "ops" in tags and "engineering" in tags, tags
-    assert routing.resolve_skill(tags) == "gryllus"
+    assert routing.resolve_skill(tags) == "cicada"
     assert routing.resolve_skill(routing.infer_tags_from_text("pay rent invoice")) == "monedula"
     assert routing.resolve_skill([]) is None
     # card domains track the routing table
@@ -106,7 +106,7 @@ def test_bridge_submit_creates_task():
     )
     assert result.ok, result
     assert result.neotoma_entity_id == "ent_test123"
-    assert result.skill == "gryllus"
+    assert result.skill == "cicada"
     assert "ops" in result.tags
 
     # the store request hit /api/store with a Bearer header and a task entity
@@ -131,8 +131,8 @@ def test_bridge_submit_idempotent():
     r2 = bridge.submit(msg, caller="b")
     assert r1.a2a_task_id == r2.a2a_task_id
     assert bridge.get(r1.a2a_task_id).title == "Draft a newsletter"
-    assert "comms" in r1.tags  # comms domain → routed to the gryllus skill
-    assert r1.skill == "gryllus"
+    assert "comms" in r1.tags  # comms domain → routed to the cicada skill
+    assert r1.skill == "cicada"
     print("✓ bridge.submit idempotent on identical content")
 
 

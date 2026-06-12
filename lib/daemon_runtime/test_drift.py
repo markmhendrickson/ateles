@@ -17,11 +17,11 @@ from drift import (
 
 def test_parses_canonical_line():
     sigs = parse_drift_signals(
-        "blah blah\n[bombycilla] strategy_drift_signal: operator keeps trimming PR text\n",
+        "blah blah\n[waxwing] strategy_drift_signal: operator keeps trimming PR text\n",
         source_ref="http://gh/c/1",
     )
     assert len(sigs) == 1
-    assert sigs[0].agent == "bombycilla"
+    assert sigs[0].agent == "waxwing"
     assert "trimming" in sigs[0].text
     assert sigs[0].source_ref == "http://gh/c/1"
 

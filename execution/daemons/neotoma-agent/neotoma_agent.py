@@ -6,7 +6,7 @@ Castor genus: beavers. T3 daemon in the Ateles swarm.
 
 Subscribes to Neotoma issue/PR/task events and processes them:
   - task.created → due-date hygiene T4 skill (add due_date + domain tags)
-  - issue.created (neotoma repo + triage label) → spawn Gryllus
+  - issue.created (neotoma repo + triage label) → spawn Cicada
   - pull_request.created (neotoma repo + triage label) → spawn Vanellus
 
 AAuth sub: neotoma-agent@ateles-swarm
@@ -92,7 +92,7 @@ NEOTOMA_AGENT_TRIAGE_LABEL = os.environ.get(
 )
 
 # T4 dispatch config
-GRYLLUS_SKILL = "gryllus"
+CICADA_SKILL = "cicada"
 VANELLUS_SKILL = "vanellus"
 CLAUDE_BIN = os.environ.get("NEOTOMA_AGENT_CLAUDE_BIN") or shutil.which("claude")
 DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("NEOTOMA_AGENT_DISPATCH_TIMEOUT", "1800"))
@@ -415,7 +415,7 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChe
 
     Phase 3:
       - task.created  → due-date hygiene T4 skill
-      - issue.created → log + notify (Phase 5: spawn Gryllus)
+      - issue.created → log + notify (Phase 5: spawn Cicada)
       - pull_request.created → log + notify (Phase 5: spawn Vanellus)
     """
     # SSE events carry only metadata; fetch the entity snapshot so routing
@@ -452,18 +452,18 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChe
         if not _snapshot_targets_neotoma_repo(snapshot):
             log.debug(
                 f"[{DAEMON_NAME}] Issue {entity_id} not in neotoma repo — "
-                "skipping Gryllus dispatch"
+                "skipping Cicada dispatch"
             )
             return
         if grants.is_suspended():
-            log.warning(f"[{DAEMON_NAME}] Grant suspended — skipping Gryllus for {entity_id}")
+            log.warning(f"[{DAEMON_NAME}] Grant suspended — skipping Cicada for {entity_id}")
             return
         if DRY_RUN:
             log.info(
-                f"[{DAEMON_NAME}] DRY RUN — skipping Gryllus dispatch for {entity_id}"
+                f"[{DAEMON_NAME}] DRY RUN — skipping Cicada dispatch for {entity_id}"
             )
             return
-        await _spawn_claude_skill(GRYLLUS_SKILL, entity_id, snapshot, notifier)
+        await _spawn_claude_skill(CICADA_SKILL, entity_id, snapshot, notifier)
 
     elif entity_type == "pull_request" and action == "created":
         title = snapshot.get("title", "(untitled)")

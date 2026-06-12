@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Morning Brief — Onychomys morning digest dispatcher.
+Morning Brief — Ateles morning digest dispatcher.
 
 Runs at 05:30 Madrid time via launchd. Reads checkpoint_briefs stored by
-Cotinga (which ran at 05:00), composes a polished Onychomys-voice digest,
+Cotinga (which ran at 05:00), composes a polished Ateles-voice digest,
 and sends it to Telegram.
 
 If checkpoint_briefs are not yet in Neotoma (Cotinga still running), waits
@@ -202,20 +202,20 @@ def telegram_send(text: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Onychomys digest via Claude
+# Ateles digest via Claude
 # ---------------------------------------------------------------------------
 
 
-def build_onychomys_digest(briefs: list[dict]) -> str:
+def build_ateles_digest(briefs: list[dict]) -> str:
     """
-    Spawn a one-shot Claude agent with Onychomys persona to compose the
+    Spawn a one-shot Claude agent with Ateles persona to compose the
     morning digest from the checkpoint_briefs, return the text.
     Falls back to a raw brief dump if Claude is unavailable.
     """
     import shutil
 
     claude = shutil.which("claude")
-    soul_path = PROJECT_ROOT / ".claude" / "skills" / "onychomys" / "SKILL.md"
+    soul_path = PROJECT_ROOT / ".claude" / "skills" / "ateles" / "SKILL.md"
 
     if not claude or not soul_path.exists():
         return _fallback_digest(briefs)
@@ -223,7 +223,7 @@ def build_onychomys_digest(briefs: list[dict]) -> str:
     today = date.today().strftime("%A %-d %B %Y")
     briefs_json = json.dumps(briefs, indent=2)
 
-    prompt = f"""You are Onychomys. Today is {today}.
+    prompt = f"""You are Ateles. Today is {today}.
 
 Cotinga has already run and stored checkpoint_briefs for today's meetings in Neotoma.
 Here are the briefs:
@@ -308,7 +308,7 @@ def _main() -> None:
     log.info(f"Composing morning brief for {today_str}")
 
     briefs = wait_for_briefs()
-    digest = build_onychomys_digest(briefs)
+    digest = build_ateles_digest(briefs)
 
     log.info("Sending morning digest via Telegram...")
     telegram_send(digest)

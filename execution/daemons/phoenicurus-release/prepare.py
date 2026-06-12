@@ -17,7 +17,7 @@ schedule. Two-phase design, mirroring Cotinga:
     flags. The agent sends its own Telegram; this daemon exits immediately.
 
 This daemon NEVER tags, publishes, or deploys. That is publish.py's job, invoked
-only after the operator approves on Telegram (routed by Onychomys).
+only after the operator approves on Telegram (routed by Ateles).
 
 The schedule (Mon–Thu) is set in the launchd plist via four StartCalendarInterval
 dicts with Weekday 1..4.

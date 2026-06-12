@@ -44,7 +44,7 @@ a2a_executor.create_neotoma_task()  ──Bearer + X-AAuth-Token──▶ POST /
 Neotoma ──task.created SSE──▶ Apis handle_event → dispatch_task (UNCHANGED)
                                        │
                                        ▼  claude --print --append-system-prompt <skill>
-                                  T4 worker (gryllus / monedula / gorilla / …)
+                                  T4 worker (cicada / monedula / gorilla / …)
 ```
 
 ---

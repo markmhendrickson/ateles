@@ -101,7 +101,7 @@ SUBSCRIBE_ENTITY_TYPES = ["task", "checkpoint_brief"]
 # radius. PR open and merge both map to the policy's "open_or_merge_pr"; "release"
 # is treated as high blast via blast_radius_default + the policy's publish set.
 _AGENT_ACTION_TYPE: dict[str, str] = {
-    "gryllus": "open_or_merge_pr",
+    "cicada": "open_or_merge_pr",
     "vanellus": "open_or_merge_pr",
     "struthio": "publish",
     "monedula": "payment",

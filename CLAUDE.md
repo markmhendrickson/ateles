@@ -70,7 +70,7 @@ This is the EU counterpart to the recording-disclosure guardrail in the `record_
 | agent_definition: Turdus | `ent_138a463654de2b1d46cec0db` |
 | agent_definition: Anthus | `ent_887e8fd74d79eb63344df63e` |
 | agent_definition: Tyto | `ent_affecbbecf52edb633c534f8` |
-| agent_definition: Gryllus | `ent_900b8c9589145fde47787fe5` |
+| agent_definition: Cicada | `ent_900b8c9589145fde47787fe5` |
 | agent_definition: Vanellus | `ent_fedc0fbabef6ef203f8029c9` |
 | agent_definition: Formica | `ent_d62f1df8784b7f4fcadc7d74` |
 | Neotoma schema: payment_profile | `8f10fe72-2924-422c-b2ee-d537d9952576` |
@@ -93,7 +93,7 @@ This is the EU counterpart to the recording-disclosure guardrail in the `record_
 - ✅ ateles: committed + pushed to origin/main
 - ✅ neotoma feat/seed-pull-request-schema: branch pushed (PR pending `gh auth login`)
 - ✅ neotoma fix/262-content-field-heading-entity-mode: branch pushed (PR pending)
-- ✅ neotoma docs/gryllus-174-175-176-instructions: branch pushed (PR pending)
+- ✅ neotoma docs/cicada-174-175-176-instructions: branch pushed (PR pending)
 - ✅ openclaw feat/neotoma-soul-override: committed (`c1e814610c`) + pushed (PR pending)
 - ⚠️ openclaw main push rejected — local diverged from fork; needs `git pull --rebase origin main` or `--force-with-lease`
 

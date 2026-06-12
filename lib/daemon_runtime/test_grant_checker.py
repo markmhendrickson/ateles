@@ -57,7 +57,7 @@ def _legacy_grant_entity() -> dict:
     return {
         "entity_id": "ent_legacy",
         "snapshot": {
-            "match_sub": "gryllus@ateles-swarm",
+            "match_sub": "cicada@ateles-swarm",
             "status": "active",
             "capabilities": [
                 {"op": "github_harness:write", "repos": ["markmhendrickson/ateles"]},
@@ -127,7 +127,7 @@ def test_check_tool_denied_when_absent():
 
 def test_check_tool_permissive_when_no_tool_grants_anywhere():
     # Un-migrated agent: no grant declares any tool caps → permissive fallback.
-    c = GrantChecker("gryllus@ateles-swarm")
+    c = GrantChecker("cicada@ateles-swarm")
     c._grants = [GrantChecker._parse(_legacy_grant_entity())]
     c._loaded = True
     allowed, constraints = c.check_tool("btc-wallet", "btc_send_transfer")

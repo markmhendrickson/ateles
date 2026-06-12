@@ -61,12 +61,12 @@ def _install_fake_client(monkeypatch, payload=None, *, capture=None, raises=None
 def test_empty_snapshot_is_hydrated_from_entity(monkeypatch):
     _install_fake_client(
         monkeypatch,
-        payload={"snapshot": {"title": "T", "tags": ["neotoma"], "assigned_to": "gryllus"}},
+        payload={"snapshot": {"title": "T", "tags": ["neotoma"], "assigned_to": "cicada"}},
     )
     ev = NeotomaEvent(entity_type="task", entity_id="ent_x", action="created")
     asyncio.run(hydrate_snapshot(ev))
     assert ev.snapshot["tags"] == ["neotoma"]
-    assert ev.snapshot["assigned_to"] == "gryllus"
+    assert ev.snapshot["assigned_to"] == "cicada"
 
 
 def test_populated_snapshot_is_left_alone_no_fetch(monkeypatch):

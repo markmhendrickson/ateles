@@ -8,7 +8,7 @@ coordinates so aauth_signer.py can load it without a separate public-key file.
 
 Usage:
     python execution/scripts/mint_daemon_keypair.py --name monedula
-    python execution/scripts/mint_daemon_keypair.py --name gryllus --keys-dir /path/to/keys
+    python execution/scripts/mint_daemon_keypair.py --name cicada --keys-dir /path/to/keys
 """
 
 from __future__ import annotations
