@@ -59,6 +59,7 @@ from lib.daemon_runtime import (  # noqa: E402
     GrantChecker,
     NeotomaEvent,
     SSEClient,
+    hydrate_snapshot,
 )
 from lib.notify import Notifier, Priority  # noqa: E402
 
@@ -417,6 +418,10 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChe
       - issue.created → log + notify (Phase 5: spawn Gryllus)
       - pull_request.created → log + notify (Phase 5: spawn Vanellus)
     """
+    # SSE events carry only metadata; fetch the entity snapshot so routing
+    # (labels, tags, repository) sees real fields instead of an empty dict.
+    await hydrate_snapshot(event)
+
     entity_type = event.entity_type
     entity_id = event.entity_id
     action = event.action
