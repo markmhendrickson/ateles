@@ -323,7 +323,7 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChe
     """
     # SSE events carry only metadata; fetch the entity snapshot so routing
     # (labels, tags, repository) sees real fields instead of an empty dict.
-    hydrate_snapshot(event)
+    await hydrate_snapshot(event)
 
     entity_type = event.entity_type
     entity_id = event.entity_id

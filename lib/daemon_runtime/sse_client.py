@@ -61,7 +61,7 @@ class NeotomaEvent:
         )
 
 
-def hydrate_snapshot(event: NeotomaEvent) -> NeotomaEvent:
+async def hydrate_snapshot(event: NeotomaEvent) -> NeotomaEvent:
     """
     Ensure ``event.snapshot`` is populated by fetching the entity if needed.
 
@@ -71,6 +71,10 @@ def hydrate_snapshot(event: NeotomaEvent) -> NeotomaEvent:
     dict and drop every event unless they re-fetch. This helper performs that
     fetch in place: it GETs ``/entities/{entity_id}`` and fills
     ``event.snapshot`` from the response.
+
+    Async so the fetch never blocks the daemon event loop: a slow Neotoma
+    response yields to other tasks instead of stalling the whole dispatch loop.
+    ``await`` it at the top of each handler.
 
     Open-mode aware: sends a Bearer header only when NEOTOMA_BEARER_TOKEN is set,
     matching how the stream itself connects to an open-mode Neotoma.
@@ -83,13 +87,14 @@ def hydrate_snapshot(event: NeotomaEvent) -> NeotomaEvent:
     if event.snapshot or not event.entity_id:
         return event
 
-    headers = {}
+    headers: dict = {}
     if NEOTOMA_BEARER_TOKEN:
         headers["Authorization"] = f"Bearer {NEOTOMA_BEARER_TOKEN}"
 
     url = f"{NEOTOMA_BASE_URL}/entities/{event.entity_id}"
     try:
-        resp = httpx.get(url, headers=headers, timeout=10)
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, headers=headers)
         resp.raise_for_status()
         data = resp.json()
         # GET /entities/{id} returns the computed snapshot fields directly under
