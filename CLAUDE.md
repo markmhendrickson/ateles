@@ -99,7 +99,7 @@ This is the EU counterpart to the recording-disclosure guardrail in the `record_
 
 **Remaining manual operator steps:**
 - Run `gh auth login` on Mac Studio, then open the 4 pending PRs (neotoma × 3, openclaw × 1)
-- ✅ `ateles-agent` + `neotoma-agent` GitHub machine accounts created; fine-grained PATs in `ateles-private/.env` (`ATELES_AGENT_PAT`, `NEOTOMA_AGENT_PAT`), both `push:true` on their repos — unblocks Apus auto-mirror + Gryllus PRs (verified 2026-06-11)
+- ✅ `ateles-agent` + `neotoma-agent` GitHub machine accounts created; PATs provisioned in the private env (see private notes) — unblocks Apus auto-mirror + Gryllus PRs (verified 2026-06-11)
 - Add `ANTHROPIC_API_KEY` secret to ateles repo settings — activates Loxia GHA
 - Add `NEOTOMA_PROBE_HOSTS` secret to neotoma repo settings — activates CI security gates
 - Configure neotoma main branch protection after CI gates PR merges
@@ -109,7 +109,7 @@ This is the EU counterpart to the recording-disclosure guardrail in the `record_
 - Add `ANTHROPIC_API_KEY` secret to ateles GitHub repo (for Loxia GHA)
 - Deploy separate OpenClaw instance for Menura
 
-(✅ `ateles-agent` / `neotoma-agent` accounts + PATs done — see "Remaining manual operator steps" above; PAT→.env wiring captured as `env_var_mapping` entities `ent_03eeb8462eb5e91d96f5ab2d` (NEOTOMA_AGENT_PAT) / `ent_8689c5dd68d7eb93ca2c9bf1` (ATELES_AGENT_PAT) for `/sync-env-from-1password`.)
+(✅ `ateles-agent` / `neotoma-agent` accounts + PATs done — see "Remaining manual operator steps" above; PAT→private-env wiring captured as `env_var_mapping` entities for `/sync-env-from-1password` (entity IDs in private notes).)
 
 ## Recently resolved
 
