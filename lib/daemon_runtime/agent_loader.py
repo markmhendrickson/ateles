@@ -35,7 +35,7 @@ class AgentDefinition:
     genus: str = ""
     status: str = "active"
     prompt_markdown: str = ""
-    tool_allowlist: str = "*"
+    tool_allowlist: "str | list[str]" = "*"
     agent_grant: str = "service"
     override_policy: str = ""
     aauth_sub: str = ""
@@ -47,10 +47,25 @@ class AgentDefinition:
 
     @property
     def tools(self) -> list[str]:
-        """Return tool_allowlist as a list. ['*'] means all tools."""
-        if not self.tool_allowlist or self.tool_allowlist.strip() == "*":
+        """Return tool_allowlist as a list. ['*'] means all tools.
+
+        Accepts tool_allowlist in any of the shapes Neotoma may store it:
+          - "*" (string) or empty -> all tools
+          - a JSON array / Python list (the canonical entity storage shape)
+          - a comma-separated string (legacy / hand-authored shape)
+        """
+        raw = self.tool_allowlist
+        if raw is None:
             return ["*"]
-        return [t.strip() for t in self.tool_allowlist.split(",") if t.strip()]
+        # Array shape (canonical entity storage): list/tuple of tool names.
+        if isinstance(raw, (list, tuple)):
+            items = [str(t).strip() for t in raw if str(t).strip()]
+            return items or ["*"]
+        # String shape: "*" / empty -> wildcard; else split on commas.
+        text = str(raw).strip()
+        if not text or text == "*":
+            return ["*"]
+        return [t.strip() for t in text.split(",") if t.strip()]
 
     @property
     def is_operator(self) -> bool:
