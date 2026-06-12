@@ -35,6 +35,7 @@ graph TB
   Operator[Operator markmhendrickson] -->|Telegram, terminal| Ateles
   Ateles[Ateles T2 — primary interface] -->|paged via priority_rubric| Operator
   Anthus[Anthus T3 — swarm coordinator] -->|notifies| Ateles
+  Apis[Apis T3 — task dispatcher] -->|confidence × blast-radius gate| Cicada
   Anthus -->|dispatch| Cicada[Cicada T4 — code]
   Anthus -->|dispatch| Vanellus[Vanellus T4 — review]
   Anthus -->|dispatch| Pavo[Pavo T4 — PM]
@@ -43,8 +44,9 @@ graph TB
   Harness -->|AAuth verify, PAT lookup, observation record| Neotoma[(Neotoma)]
   Apus[Apus T3 — mirror webhook receiver] -->|regenerates SKILL.md from| Neotoma
   Neotoma -->|SSE events| Anthus
+  Neotoma -->|SSE events| Apis
   Neotoma -->|SSE events| Formica[Formica T3 — issue triage]
-  Neotoma -->|SSE events| Other_Daemons[Piculet · Strix · Turdus · Monedula]
+  Neotoma -->|SSE events| Other_Daemons[Strix · Turdus · Tyto · Sylvia · Cotinga · Monedula]
 ```
 
 - **AAuth-verified.** Every agent has a keypair. Every tool call is signed. The harness verifies before acting.
@@ -95,7 +97,7 @@ Four tiers. Twelve product-panel agents plus daemons plus 20+ domain T4s. Naming
 | ------ | ------------------------------------- | ----------------------------------------------------------------------------------------- |
 | **T1** | Hosts (process that owns a channel)   | OpenClaw (Telegram), launchd (daemon scheduling), raw aiohttp Bot API                     |
 | **T2** | Resident agents (always-on, conversational) | Ateles (primary operator interface), Menura (public-facing personal representative)  |
-| **T3** | Daemons (event-driven, persona-less)  | Formica · Anthus · Apus · Apis · Piculet · Strix · Turdus · Monedula · neotoma-agent · Tyto · mic-recorder · Cyphorhinus |
+| **T3** | Daemons (event-driven, persona-less)  | Anthus · Apis · Apus · Cotinga · Cyphorhinus · Formica · Gorilla · Monedula · Morning-brief · neotoma-agent · Strix · Sylvia · Turdus · Tyto |
 | **T4** | Invocable agents (stateless, spawned per task) | Pavo · Waxwing · Phoenicurus · Buteo · Robin · Struthio · Accipiter · Corvus · Regulus · Cicada · Vanellus · Manucode · and 20+ domain agents |
 
 Full agent table with AAuth identities, grants, and status: [docs/taxonomy.md](docs/taxonomy.md).
@@ -116,11 +118,12 @@ To run any daemon locally requires Neotoma running (see [neotoma installation](h
 
 ### Open architecture issues to track
 
-Three umbrella issues shape what adoption looks like next:
+Two umbrella issues shape what adoption looks like next:
 
 - **[ateles#18 — Make Ateles installable](https://github.com/markmhendrickson/ateles/issues/18)** — ten blockers to package-based adoption (identity provisioning UX, operator-specific agent definitions, config schema, keypair format unification, launchd plist generation, dependency manifest, `ateles-private/` boundary, versioning, multi-operator path). Adopt-by-forking works today; install-by-package needs this work.
-- **[ateles#19 — Input attribution](https://github.com/markmhendrickson/ateles/issues/19)** — record which Neotoma entities each agent read before deciding. Today the swarm records who acted and what they produced, but not the evidence the decision was built on. Closing this loop enables reverse impact analysis (which downstream decisions does a corrected strategy invalidate?) and precedent graphs. Broken into execution sub-issues [#20–#25](https://github.com/markmhendrickson/ateles/issues/20).
-- **[ateles#26 — Tool-level authorization](https://github.com/markmhendrickson/ateles/issues/26)** — extend `agent_grant` to declare which MCP tools each agent can call, against which resources, with which parameter constraints (e.g. Monedula can call `btc_send_transfer` up to 500k sats; Pavo cannot call `btc-wallet` at all). `github_harness` already implements this pattern; #26 generalizes it across all MCP servers via a proxy enforcement layer.
+- **[ateles#19 — Input attribution](https://github.com/markmhendrickson/ateles/issues/19)** — record which Neotoma entities each agent read before deciding. Today the swarm records who acted and what they produced, but not the evidence the decision was built on. Closing this loop enables reverse impact analysis (which downstream decisions does a corrected strategy invalidate?) and precedent graphs. Remaining execution sub-issues: [#23–#25](https://github.com/markmhendrickson/ateles/issues/23).
+
+A third umbrella — [ateles#26, tool-level authorization](https://github.com/markmhendrickson/ateles/issues/26) — shipped: `agent_grant` entities now declare per-agent MCP tool allowlists with parameter constraints, enforced by a grant proxy in front of every MCP server ([#42](https://github.com/markmhendrickson/ateles/pull/42)) with a session-integrity invariant layered on top ([#70](https://github.com/markmhendrickson/ateles/pull/70)).
 
 ## Example
 
@@ -165,22 +168,25 @@ ateles/
 ├── execution/
 │   ├── daemons/                # T3 daemon implementations
 │   │   ├── anthus/             # swarm coordinator — workflow dispatch
+│   │   ├── apis/               # universal task dispatcher — confidence × blast-radius gating
 │   │   ├── apus/               # mirror webhook receiver — Neotoma → git pipeline
-│   │   ├── apis/               # universal task dispatcher
+│   │   ├── cotinga/            # daily event-prep briefings (calendar + Neotoma contacts)
+│   │   ├── cyphorhinus/        # audio-import watcher (Voice Memos + meeting recordings)
 │   │   ├── formica/            # GitHub issue/PR triage
+│   │   ├── gorilla/            # health & fitness summaries + nudges
 │   │   ├── monedula/           # recurring payment daemon (Wise + BTC)
+│   │   ├── morning-brief/      # 05:30 operator digest (Ateles voice)
 │   │   ├── neotoma-agent/      # neotoma-repo automation
-│   │   ├── piculet/            # audio transcription watcher
-│   │   ├── strix/              # meeting/ambient audio recorder
+│   │   ├── strix/              # meeting/ambient audio recorder (menu bar toggle)
+│   │   ├── sylvia/             # recurring-task lifecycle + calendar sync
 │   │   ├── turdus/             # email triage daemon
-│   │   ├── tyto/               # screenshot watcher
-│   │   ├── mic-recorder/       # menu bar mic toggle + launchd
-│   │   └── cyphorhinus/        # recurring report generator
-│   ├── scripts/                # domain scripts (transcription, finance, OCR, etc.)
-│   └── mcp-servers/            # local MCP server packages
+│   │   └── tyto/               # screenshot watcher + recording transcription
+│   ├── scripts/                # domain scripts (transcription, grants, PR review, sweeps)
+│   └── mcp/                    # local MCP server packages (github_harness, mcp_tool_grant_proxy)
 └── lib/
-    ├── daemon_runtime/         # SSE subscription, AAuth signer, agent_definition loader
-    └── notify/                 # Apprise-backed notification routing
+    ├── daemon_runtime/         # SSE subscription, AAuth signer, agent_definition loader, grant checker
+    ├── notify/                 # Apprise-backed notification routing
+    └── issue_labels.py         # frozen GitHub label enums shared by daemons + GHA
 ```
 
 ## Key dependencies
@@ -201,7 +207,7 @@ The swarm makes specific commitments about what is verifiable.
 | ----------------------------------------------- | --------------------- | ------------------------- | --------------------------------- |
 | 🪪 Agent identity verifiable                    | ❌                    | ⚠️ partial (PAT only)     | ✅ AAuth-signed JWT                |
 | 🔍 Trust boundary visible (sub ≠ pat)           | ❌                    | ❌                        | ✅ both recorded                   |
-| 🚧 Capability scope enforced                    | ❌                    | ⚠️ via PAT scopes only    | ✅ agent_grant pre-check           |
+| 🚧 Capability scope enforced                    | ❌                    | ⚠️ via PAT scopes only    | ✅ agent_grant pre-check + MCP tool grant proxy |
 | 📋 Per-action audit trail                       | ❌                    | ⚠️ git commits only       | ✅ agent_action_observation        |
 | 🔄 Workflow phase ordering                      | ⚠️ manual             | ⚠️ manual                 | ✅ workflow_definition + Anthus    |
 | ⏭️ Gate skip conditions                         | ❌                    | ❌                        | ✅ declared per-workflow           |
@@ -244,7 +250,7 @@ Every swarm-defining record is a typed Neotoma entity. The canonical `entity_typ
 | `entity_type`              | What it stores                                                                                | Key fields                                            |
 | -------------------------- | --------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
 | `agent_definition`         | Identity, prompt, triggers, context types, operational types, allowed tools                   | `name`, `triggers`, `prompt_markdown`, `allowed_tools`, `context_entity_types`, `operational_entity_types` |
-| `agent_grant`              | Capability scope — Neotoma entity-type allowlist + MCP tool allowlist + external resource scope | `agent_sub`, `op`, `repos`, `capabilities` (entity ops + tools — [ateles#26](https://github.com/markmhendrickson/ateles/issues/26)) |
+| `agent_grant`              | Capability scope — Neotoma entity-type allowlist + MCP tool allowlist + external resource scope | `agent_sub`, `op`, `repos`, `capabilities` (entity ops + MCP tools, enforced by the grant proxy) |
 | `agent_action_observation` | One row per harness tool call — AAuth sub, PAT attribution, tool, owner/repo, result          | `agent_sub`, `pat_attribution`, `tool`, `owner`, `repo`, `result` |
 | `agent_policy`             | Operating rules (mandatory/recommended/prohibited) with scope                                 | `scope`, `rule_kind`, `body`                          |
 | `workflow_definition`      | Phases, gates, owner agents, skip conditions, preconditions                                   | `name`, `gates[]`, `gate_name`, `owner_agent`, `skip_if`, `preconditions` |
@@ -256,13 +262,17 @@ Full type catalog: [docs/data_types.md](docs/data_types.md).
 
 ## Current status
 
-**Phase:** Reference architecture in operator-driven use. **Operator:** one (Mark Hendrickson). **Daemons running under launchd:** Apus, Formica, Anthus. **License:** MIT.
+**Phase:** Reference architecture in daily autonomous + operator-driven use. **Operator:** one (Mark Hendrickson). **Daemons running under launchd:** Anthus, Apis, Apus, Cotinga, Formica, Monedula, Morning-brief, neotoma-agent, Strix, Sylvia, Turdus, Tyto — auto-deployed from `origin/main` to a stable release-candidate checkout ([#79](https://github.com/markmhendrickson/ateles/pull/79)). **License:** MIT.
 
 ### What works
 
 - **Agent definitions in Neotoma → mirrored to disk** (Apus pipeline)
-- **AAuth verification + capability scoping** (`github_harness` MCP, with `agent_grant` lookup)
+- **AAuth verification + capability scoping** (`github_harness` MCP with `agent_grant` lookup; keypair format + revocation primitives via [#41](https://github.com/markmhendrickson/ateles/pull/41))
+- **MCP tool-level authorization** — grant proxy enforcing per-agent tool allowlists + parameter constraints across all MCP servers ([#42](https://github.com/markmhendrickson/ateles/pull/42)), with session-integrity invariants ([#63](https://github.com/markmhendrickson/ateles/pull/63), [#70](https://github.com/markmhendrickson/ateles/pull/70))
 - **Anthus dispatch via `claude --print --append-system-prompt`** (workflow_definition-driven, fire-and-forget subprocess)
+- **Apis autonomous execution behind a confidence × blast-radius gate** ([#67](https://github.com/markmhendrickson/ateles/pull/67)) — low-blast tasks run unattended; high-blast actions (push, merge, payment, external comms) checkpoint for operator approval
+- **Per-domain PR review routing** — Loxia reviews every PR as baseline; domain specialists fan out by changed paths (Monedula on finance, Gorilla on health) — see [docs/pr_review_routing.md](docs/pr_review_routing.md)
+- **A2A inbound gateway** — the swarm is addressable as an A2A task receiver via Apis ([#61](https://github.com/markmhendrickson/ateles/pull/61))
 - **`participation_record` and `agent_action_observation`** schemas registered and queryable
 - **23-schema slate** for strategy hierarchy, doc surfaces, code review, release criteria, brand voice, etc.
 - **Per-agent context + operational type + allowed_tools declarations** populated for all 12 product-panel agents
@@ -274,6 +284,8 @@ Full type catalog: [docs/data_types.md](docs/data_types.md).
 - **Tier 3** — multi-repo identity correctness (AAuth → PAT mapping)
 - **Tier 4** — real product work end-to-end
 - **Tier 5** — fully autonomous Anthus dispatch
+- **GitHub webhooks → Apis** — issue/PR events dispatched straight to gate agents ([#80](https://github.com/markmhendrickson/ateles/issues/80))
+- **Input attribution** — retrieval_event stamping + inputs_consulted ([#19](https://github.com/markmhendrickson/ateles/issues/19))
 
 ### What is not guaranteed yet
 
@@ -373,7 +385,7 @@ Those frameworks orchestrate multi-step LLM calls inside one process. Ateles orc
 Single operator, one machine. launchd is the lowest-overhead scheduler that survives reboots. The architecture would work the same way under systemd or supervisord; the daemons don't care.
 
 **Is this production-ready?**
-Tier 1 (single-agent gate satisfaction) passes. Tier 5 (full autonomous Anthus dispatch) is still scaffolded. Daily real use: Apus, Formica, Anthus, Monedula run under launchd. Most T4 agents are operator-dispatched. See [docs/swarm_smoke_test_plan.md](docs/swarm_smoke_test_plan.md) for the gating tiers.
+Tier 1 (single-agent gate satisfaction) passes, and the swarm routes, gates, and executes low-blast tasks end-to-end unattended; high-blast actions checkpoint for operator approval. Tier 5 (full autonomous Anthus dispatch) is still in validation. Daily real use: a dozen-plus T3 daemons run under launchd from an auto-deployed release-candidate checkout. See [docs/swarm_smoke_test_plan.md](docs/swarm_smoke_test_plan.md) for the gating tiers.
 
 **What if I want to add a new agent?**
 File an `agent_definition` entity in Neotoma. Mint an AAuth keypair. File an `agent_grant` with the capabilities it needs. Apus mirrors the SKILL.md to disk. Anthus picks it up on next workflow that references its trigger. The whole loop is documented in [docs/swarm_orchestration.md](docs/swarm_orchestration.md).
