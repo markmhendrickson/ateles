@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ateles.apis</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/markmhendrickson/repos/ateles/.venv/bin/python3</string>
+        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/apis/apis.py</string>
+    </array>
+
+    <!-- Run at login -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart if it crashes -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/apis.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/apis.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/markmhendrickson</string>
+        <key>PATH</key>
+        <string>/Users/markmhendrickson/.local/bin:/Users/markmhendrickson/.nvm/versions/node/v20.20.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>NEOTOMA_BASE_URL</key>
+        <string>https://neotoma.markmhendrickson.com</string>
+        <key>VIRTUAL_ENV</key>
+        <string>/Users/markmhendrickson/repos/ateles/.venv</string>
+        <key>PYTHONPATH</key>
+        <string>/Users/markmhendrickson/repos/ateles/.venv/lib/python3.14/site-packages</string>
+        <!-- GitHub webhook gateway (ateles#80). Secret + tokens come from
+             ~/.config/neotoma/.env, loaded by the daemon at startup. -->
+        <key>APIS_GITHUB_WEBHOOK_PORT</key>
+        <string>8742</string>
+        <key>APIS_AUTONOMY_AUTO_MERGE</key>
+        <string>0</string>
+    </dict>
+</dict>
+</plist>

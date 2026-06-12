@@ -33,6 +33,14 @@ Environment variables:
   APIS_CLAUDE_BIN             Path to the claude CLI (default: autodetect on PATH)
   APIS_DISPATCH_TIMEOUT       Per-dispatch timeout in seconds (default: 1800)
   ATELES_REPO_PATH            Local path to ateles clone (default: ~/repos/ateles)
+
+GitHub trigger layer (ateles#80 — see github_gateway.py / swarm_dispatch.py):
+  APIS_GITHUB_WEBHOOK_SECRET  HMAC secret for the GitHub webhook
+  APIS_GITHUB_WEBHOOK_PORT    Webhook listen port (default: 8742)
+  APIS_PANEL_MAX              Max review panelists per PR (default: 4)
+  APIS_AUTONOMY_AUTO_MERGE    "1" lets Vanellus merge without operator approval
+                              (default: 0 — blocking checkpoint_brief instead)
+  GITHUB_TOKEN                Token for changed-files / issue-comment reads
 """
 
 from __future__ import annotations
@@ -43,6 +51,15 @@ import os
 import shutil
 import sys
 from pathlib import Path
+
+# ── Env bootstrap (launchd does not source shell profiles) ───────────────────
+_NEOTOMA_ENV_FILE = Path.home() / ".config" / "neotoma" / ".env"
+if _NEOTOMA_ENV_FILE.exists():
+    for _line in _NEOTOMA_ENV_FILE.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
 
 # ── Path bootstrap ────────────────────────────────────────────────────────────
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -153,6 +170,10 @@ CLAUDE_BIN = os.environ.get("APIS_CLAUDE_BIN") or shutil.which("claude")
 # Dispatch timeout per agent invocation (seconds).
 DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
 
+# GitHub webhook gateway (ateles#80). Port 8742 — Apus owns 8741.
+GITHUB_WEBHOOK_PORT = int(os.environ.get("APIS_GITHUB_WEBHOOK_PORT", "8742"))
+GITHUB_WEBHOOK_SECRET = os.environ.get("APIS_GITHUB_WEBHOOK_SECRET", "")
+
 
 # ── Domain routing ─────────────────────────────────────────────────────────────
 #
@@ -168,6 +189,10 @@ from routing import (  # noqa: E402
     resolve_skill as _resolve_skill,
 )
 
+import github_gateway  # noqa: E402
+from skill_runner import run_skill  # noqa: E402
+from swarm_dispatch import SwarmDispatcher  # noqa: E402
+
 
 # ── T4 dispatch ────────────────────────────────────────────────────────────────
 
@@ -180,43 +205,12 @@ async def _spawn_claude_skill(
     notifier: Notifier,
 ) -> None:
     """
-    Spawn a T4 agent via `claude --print` with the SKILL.md appended to the
-    system prompt and the task context piped on stdin.
-
-    `claude --print` has no --skill flag; the working pattern (mirrors Formica
-    and neotoma-agent) is --append-system-prompt with the SKILL.md content.
+    Spawn a T4 agent for a task event. The subprocess mechanics live in
+    skill_runner.run_skill (shared with the GitHub trigger pipelines).
 
     Failures are reported via lib/notify and logged but never crash Apis —
     one bad task must not take down the dispatcher.
     """
-    if CLAUDE_BIN is None:
-        log.warning(
-            f"[{DAEMON_NAME}] CLAUDE_BIN not configured and `claude` not on "
-            f"PATH; skipping {skill} dispatch for {entity_id}."
-        )
-        notifier.send(
-            f"{skill} dispatch skipped — claude binary unavailable",
-            priority=Priority.WARN,
-            handler=DAEMON_NAME,
-        )
-        return
-
-    skill_path = ATELES_REPO / ".claude" / "skills" / skill / "SKILL.md"
-    if not skill_path.exists():
-        log.error(f"[{DAEMON_NAME}] SKILL.md not found for {skill} at {skill_path}")
-        notifier.send(
-            f"{skill} dispatch skipped — SKILL.md not found",
-            priority=Priority.WARN,
-            handler=DAEMON_NAME,
-        )
-        return
-
-    try:
-        skill_md = skill_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        log.error(f"[{DAEMON_NAME}] failed to read {skill_path}: {exc}")
-        return
-
     title = snapshot.get("title", "(untitled)")
     body = snapshot.get("body", "") or snapshot.get("description", "")
     prompt = (
@@ -225,52 +219,12 @@ async def _spawn_claude_skill(
         f"{body}".strip()
     )
 
-    cmd = [CLAUDE_BIN, "--print", "--append-system-prompt", skill_md]
-    log.info(
-        f"[{DAEMON_NAME}] Spawning: claude --print --append-system-prompt "
-        f"<{skill}.SKILL.md> timeout={DISPATCH_TIMEOUT_SECONDS}s entity={entity_id}"
-    )
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(input=prompt.encode()),
-            timeout=DISPATCH_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
-        log.error(
-            f"[{DAEMON_NAME}] {skill} dispatch timed out after "
-            f"{DISPATCH_TIMEOUT_SECONDS}s for {entity_id}"
-        )
+    result = await run_skill(skill, prompt)
+    if not result.ok:
+        reason = result.error or f"rc={result.returncode}"
         notifier.send(
-            f"{skill} timed out on {entity_id}",
-            priority=Priority.WARN,
-            handler=DAEMON_NAME,
-        )
-        return
-
-    if proc.returncode == 0:
-        log.info(
-            f"[{DAEMON_NAME}] {skill} dispatch ok for {entity_id} "
-            f"({len(stdout)}B stdout)"
-        )
-    else:
-        stderr_text = stderr.decode("utf-8", errors="replace")[:500]
-        log.error(
-            f"[{DAEMON_NAME}] {skill} dispatch failed (rc={proc.returncode}) "
-            f"for {entity_id}: {stderr_text}"
-        )
-        notifier.send(
-            f"{skill} failed on {entity_id} (rc={proc.returncode})",
-            priority=Priority.WARN,
+            f"{skill} failed on {entity_id} ({reason})",
+            priority=Priority.BLOCKER,
             handler=DAEMON_NAME,
         )
 
@@ -595,7 +549,15 @@ async def main() -> None:
         handler=DAEMON_NAME,
     )
 
-    # 4. Subscribe to SSE events
+    # 4. GitHub webhook gateway (ateles#80): issue.opened → Lanius → Pavo;
+    #    pull_request.* → Lanius → review panel → Vanellus. Runs alongside
+    #    the SSE task loop.
+    dispatcher = SwarmDispatcher(notifier)
+    gateway_app = github_gateway.make_app(
+        GITHUB_WEBHOOK_SECRET, dispatcher.handle_trigger
+    )
+
+    # 5. Subscribe to SSE events
     sse = SSEClient(
         entity_types=SUBSCRIBE_ENTITY_TYPES,
         handler_name=DAEMON_NAME,
@@ -605,7 +567,10 @@ async def main() -> None:
         await handle_event(event, notifier)
 
     log.info(f"[{DAEMON_NAME}] Subscribing to SSE: {SUBSCRIBE_ENTITY_TYPES}")
-    await sse.stream(dispatch)
+    await asyncio.gather(
+        sse.stream(dispatch),
+        github_gateway.serve(gateway_app, GITHUB_WEBHOOK_PORT),
+    )
 
 
 if __name__ == "__main__":
