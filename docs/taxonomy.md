@@ -47,17 +47,20 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 
 | Name | Genus | Language | Description | Status |
 |---|---|---|---|---|
-| **Monedula** | *Corvus monedula* (jackdaw) | Python | Recurring payment daemon; Wise IBAN + BTC transfers triggered by calendar events and Neotoma task due dates | active |
-| **Formica** | *Formica* (wood ant) | JS → Python (Phase 5) | GitHub issue/PR automation; drives `process_issues` and `process_prs` skills | active |
-| **neotoma-agent** | *neotoma-agent* | Python | Neotoma-repo automation; processes issues and PRs against the neotoma repo | active (Phase 1 skeleton) |
+| **Anthus** | *Anthus* (pipit) | Python | Swarm coordinator — SSE-driven workflow dispatch, gate tracking via `participation_record`, conflict surfacing to Ateles | active (Tier 2–5 smoke validation in flight) |
+| **Apis** | *Apis* (honeybee) | Python | Universal task dispatcher; subscribes to task events, routes to T4 agents by domain, executes autonomously behind a confidence × blast-radius gate; A2A inbound gateway | active |
 | **Apus** | *Apus* (swift) | Python | HTTPS webhook receiver; Neotoma→git mirror pipeline; commits via `ateles-agent` GitHub identity | active |
-| **Piculet** | *Picumnus* (piculet woodpecker) | JS | Audio transcription daemon; monitors for new audio files, transcribes, stores in Neotoma | active |
-| **Strix** | *Strix* (wood owl) | Python | Meeting/ambient audio recorder (menu bar app) | active |
-| **Apis** | *Apis* (honeybee) | Python | Universal task dispatcher; subscribes to task events; routes to right agent + harness; absorbs Monedula's task scope | planned (Phase 4) |
-| **Anthus** | *Anthus* (pipit) | Python | Swarm coordinator — global view of work-in-flight; surfaces conflicts to Ateles | planned (Phase 2 skeleton, Phase 6 full) |
-| **Tyto** | *Tyto* (barn owl) | Python | Screenshot watcher; visual counterpart to Strix | planned (Phase 2 skeleton) |
-| **Turdus** | *Turdus* (thrush) | Python | Email triage daemon; hourly Gmail poll → tasks for Apis | active (Phase 2 skeleton) |
-| **Gorilla** | *Gorilla* (gorilla) | Python | Health & fitness daemon; proactive weekly training summaries + inactivity nudges from `workout_session` data (companion to the invocable Gorilla agent) | active (skeleton) |
+| **Cotinga** | *Cotinga* (cotinga) | Python | Daily event-prep briefings — fetches calendar events, cross-references Neotoma contacts, spawns meeting-prep agents | active |
+| **Cyphorhinus** | *Cyphorhinus* (musician wren) | Python | Audio-import watcher — Voice Memos + meeting recording imports, transcription + entity extraction | active |
+| **Formica** | *Formica* (wood ant) | Python | GitHub issue/PR automation; dispatches issues and PRs to Cicada/Vanellus | active |
+| **Gorilla** | *Gorilla* (gorilla) | Python | Health & fitness daemon; proactive weekly training summaries + inactivity nudges from `workout_session` data (companion to the invocable Gorilla agent) | active |
+| **Monedula** | *Corvus monedula* (jackdaw) | Python | Recurring payment daemon; Wise IBAN + BTC transfers triggered by calendar events and Neotoma task due dates, operator-approved via Telegram | active |
+| **Morning-brief** | — (utility daemon) | Python | 05:30 operator digest — reads Cotinga's `checkpoint_brief` entities, composes Ateles-voice digest to Telegram | active |
+| **neotoma-agent** | *neotoma-agent* | Python | Neotoma-repo automation; processes issues and PRs against the neotoma repo | active |
+| **Strix** | *Strix* (wood owl) | Python | Meeting/ambient audio recorder (menu bar toggle app) | active |
+| **Sylvia** | *Sylvia* (typical warbler) | Python | Recurring-task lifecycle — rolls due dates on completion, syncs Neotoma ↔ Google Calendar, due-date reminders | active |
+| **Turdus** | *Turdus* (thrush) | Python | Email triage daemon; Gmail poll → Neotoma entities + tasks for Apis; invoice detection routed to Monedula | active |
+| **Tyto** | *Tyto* (barn owl) | Python | Screenshot watcher + meeting-recording transcription; visual counterpart to Strix | active |
 
 ---
 
@@ -65,8 +68,9 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 
 | Name | Genus | Description | Status |
 |---|---|---|---|
-| **Cicada** | *Gryllus* (field cricket) — common insect name adopted for voice/ASR robustness (was Gryllus) | Issue worker — fixes issues, opens PRs across repos via passed-in identity | planned (Phase 3) |
-| **Vanellus** | *Vanellus* (lapwing) | PR steward — triages and merges eligible PRs | planned (Phase 5) |
+| **Cicada** | *Gryllus* (field cricket) — common insect name adopted for voice/ASR robustness (was Gryllus) | Issue worker — fixes issues, opens PRs across repos via passed-in identity | active (dispatched by Formica / Apis / neotoma-agent) |
+| **Vanellus** | *Vanellus* (lapwing) | PR steward — triages and merges eligible PRs | active (dispatched by Formica / neotoma-agent) |
+| **Loxia** | *Loxia* (crossbill) | Baseline PR reviewer on every PR (GHA-invoked), with per-domain specialist fan-out (Monedula on finance paths, Gorilla on health paths) | active (GHA) |
 | **Sturnus** | *Sturnus* (starling) | Feedback digester — extracts entities from `product_feedback` | planned (Phase 6) |
 | **Strigops** | *Strigops* (kakapo) | Analytics gatherer — pluggable backends: Umami, GA4, GSC, X, Typefully, LinkedIn, Instagram | planned (Phase 7) |
 | **Corvus** | *Corvus* (crow) | Outbound poster — sends drafts to social platforms after operator approval | planned |
@@ -141,10 +145,11 @@ Each T2 and T3 agent has a distinct AAuth keypair with `sub = <name>@ateles-swar
 | Formica | `formica@ateles-swarm` | issue + PR write |
 | neotoma-agent | `neotoma-agent@ateles-swarm` | neotoma-repo issue + PR write |
 | Apus | `apus@ateles-swarm` | mirror trigger + event write |
-| Piculet | `piculet@ateles-swarm` | audio entity write |
 | Strix | `strix@ateles-swarm` | audio capture write |
-| Apis | `apis@ateles-swarm` | task read + payment_event write (planned) |
-| Anthus | `anthus@ateles-swarm` | swarm metrics read (planned) |
+| Apis | `apis@ateles-swarm` | task read + dispatch + payment_event write |
+| Anthus | `anthus@ateles-swarm` | workflow dispatch + participation_record write |
+
+Newer daemons (Tyto, Turdus, Sylvia, Cotinga, Cyphorhinus, Gorilla) follow the same pattern; keypairs are minted per daemon via `execution/scripts/mint_daemon_keypair.py` and stored in `ateles-private/keys/`.
 
 ---
 

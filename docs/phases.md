@@ -51,11 +51,11 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 - [x] Apus env vars wired into installed plist (`~/Library/LaunchAgents/com.ateles.apus.plist`)
 - [x] Migrate Ateles SOUL.md → `prompt_markdown` field in `agent_definition` entity
 - [x] Neotoma CLI mirror profile configured for SKILL.md generation
-- [ ] Cloudflare Tunnel at `apus.markmhendrickson.com` — broken, tracked in [ateles#17](https://github.com/markmhendrickson/ateles/issues/17)
-- [ ] Apus: handle all four mirror profiles; commit via `ateles-agent` GitHub identity; log delivery status to Neotoma
-- [ ] OpenClaw PR: `workspace-neotoma.ts` (~300 LOC) with file→API fallback chain
-- [ ] Anthus daemon: swarm coordinator — SSE-driven workflow dispatch (full implementation done; Tier 2–5 smoke test validation in flight, see [swarm_smoke_test_plan.md](swarm_smoke_test_plan.md))
-- [ ] Tyto daemon: screenshot/image watcher — skeleton exists; production wiring pending
+- [x] Cloudflare Tunnel at `apus.markmhendrickson.com` (was [ateles#17](https://github.com/markmhendrickson/ateles/issues/17))
+- [ ] Apus: handle all four mirror profiles; commit via `ateles-agent` GitHub identity; log delivery status to Neotoma (blocked on `ateles-agent` machine account)
+- [ ] OpenClaw PR: `workspace-neotoma.ts` with file→API fallback chain (branch pushed; PR pending)
+- [x] Anthus daemon: swarm coordinator — SSE-driven workflow dispatch (Tier 2–5 smoke test validation in flight, see [swarm_smoke_test_plan.md](swarm_smoke_test_plan.md))
+- [x] Tyto daemon: screenshot watcher + meeting-recording transcription, running under launchd
 
 ---
 
@@ -68,7 +68,7 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 - [x] Lanius (GitHub workflow coordinator): GHA cron + workflow_definition schema landed
 - [x] All daemons using lib/notify/ for notifications
 - [ ] Menura: separate OpenClaw instance, public-scoped AAuth identity, live at markmhendrickson.com/agent/
-- [ ] Loxia evaluation: GHA + Claude API first (~30 lines); promote to named T3 only if Neotoma attribution of actions matters
+- [x] Loxia: GHA-invoked baseline PR reviewer on every PR, with per-domain specialist fan-out (Monedula on finance paths, Gorilla on health paths)
 - [ ] Temporal evaluation: adopt only if a daemon crash causes lost in-flight state that demonstrably hurts operations; Inngest as fallback
 - [ ] neotoma-agent: due-date hygiene T4 skill — fires on `task` entity creation to add due dates and domain tags
 
@@ -78,9 +78,9 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 
 **Goal:** Apis replaces Monedula's task scope; payment profiles migrate to Neotoma entities.
 
-- [ ] Apis daemon: general task processor; yoga/therapy as Apis task templates
-- [ ] `payment_profile` entity type in Neotoma (visibility=private); Monedula loads from Neotoma instead of env vars
-- [ ] Turdus daemon skeleton: social/content scheduling
+- [x] Apis daemon: universal task dispatcher with confidence × blast-radius execution gate, checkpoint resolution loop, and A2A inbound gateway
+- [x] `payment_profile` entity type in Neotoma (visibility=private); Monedula loads profiles from Neotoma
+- [x] Turdus daemon: Gmail triage → Neotoma entities + tasks for Apis; invoice detection routed to Monedula
 
 ---
 
@@ -94,7 +94,7 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 - [x] agent_grant entities provisioned for Cicada and Vanellus
 - [ ] agent_grant entities for all remaining daemons: Apus, Formica, Monedula, neotoma-agent, Ateles, Anthus
 - [ ] All daemon public keys published to JWKS endpoint (today only `sw-cursor-1` published)
-- [ ] Per-entity-type grant tightening — convert `*` grants to allowlists derived from `context_entity_types` + `operational_entity_types` ([ateles#26](https://github.com/markmhendrickson/ateles/issues/26))
+- [ ] Per-entity-type grant tightening — convert `*` grants to allowlists derived from `context_entity_types` + `operational_entity_types`
 - [ ] Quarterly AAuth keypair rotation via neotoma-agent
 - [ ] Public "last 30 agent actions" feed via Menura (proof artifact for Neotoma Tier 1 ICPs)
 
@@ -106,12 +106,13 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 
 - [x] Operator-driven Tier 1 smoke test: single-agent gate satisfaction (12 agents, artifact-header convention)
 - [ ] Tier 2: phase ordering + parallelism on synthetic issues
-- [ ] Tier 3: multi-repo identity correctness (AAuth → PAT mapping) — [ateles#2](https://github.com/markmhendrickson/ateles/issues/2) (github_harness MCP server)
+- [x] github_harness MCP server implemented (was [ateles#2](https://github.com/markmhendrickson/ateles/issues/2))
+- [ ] Tier 3: multi-repo identity correctness (AAuth → PAT mapping) — validation pending
 - [ ] Tier 4: real product work end-to-end
 - [ ] Tier 5: fully autonomous Anthus dispatch
-- [ ] Input attribution: retrieval_event schema + inputs_consulted on agent_action_observation + participation_record version pinning — [ateles#19](https://github.com/markmhendrickson/ateles/issues/19) / [#20–#25](https://github.com/markmhendrickson/ateles/issues/20)
-- [ ] Tool-level authorization: extend agent_grant to MCP tool calls + parameter constraints — [ateles#26](https://github.com/markmhendrickson/ateles/issues/26)
-- [ ] Webhook signing-key quarterly rotation with 7-day grace period (blocked on Apus tunnel — [ateles#17](https://github.com/markmhendrickson/ateles/issues/17))
+- [ ] Input attribution: retrieval_event auto-stamping + inputs_consulted population — [ateles#19](https://github.com/markmhendrickson/ateles/issues/19), remaining sub-issues [#23–#25](https://github.com/markmhendrickson/ateles/issues/23)
+- [x] Tool-level authorization: agent_grant extended to MCP tool calls + parameter constraints, enforced via grant proxy ([ateles#26](https://github.com/markmhendrickson/ateles/issues/26))
+- [ ] Webhook signing-key quarterly rotation with 7-day grace period
 
 ---
 
@@ -124,7 +125,7 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 - [ ] Mergus: Coinbase + Wise + Plaid + BTC + Stacks daily snapshots
 - [ ] Geococcyx: Twilio SMS webhook
 - [ ] Tinamus: HomeAssistant polling (5 min cadence)
-- [ ] Turdus: email triage daemon — hourly Gmail poll → tasks for Apis
+- [x] Turdus: email triage daemon — Gmail poll → Neotoma entities + tasks for Apis
 - [ ] Strigops: analytics gatherer — GA4, GSC, Umami, X, Typefully, Instagram backends
 
 ---

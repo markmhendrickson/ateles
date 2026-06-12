@@ -99,7 +99,7 @@ This is the EU counterpart to the recording-disclosure guardrail in the `record_
 
 **Remaining manual operator steps:**
 - Run `gh auth login` on Mac Studio, then open the 4 pending PRs (neotoma × 3, openclaw × 1)
-- ✅ `ateles-agent` + `neotoma-agent` GitHub machine accounts created; PATs provisioned in the private env (see private notes) — unblocks Apus auto-mirror + Gryllus PRs (verified 2026-06-11)
+- ✅ `ateles-agent` + `neotoma-agent` GitHub machine accounts created; PATs provisioned in the private env (see private notes) — unblocks Apus auto-mirror + Cicada PRs (verified 2026-06-11)
 - Add `ANTHROPIC_API_KEY` secret to ateles repo settings — activates Loxia GHA
 - Add `NEOTOMA_PROBE_HOSTS` secret to neotoma repo settings — activates CI security gates
 - Configure neotoma main branch protection after CI gates PR merges
