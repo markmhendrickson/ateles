@@ -35,7 +35,7 @@ Ateles is a Neotoma-canonical personal agent swarm. "Neotoma-canonical" means:
 │  T3 Daemons: Monedula / Formica / neotoma-agent / Apis / Apus │
 │              Piculet / Strix / Anthus / Tyto / Turdus     │
 ├─────────────────────────────────────────────────────┤
-│  T4 Invocable: Gryllus / Vanellus / Lanius / Cathartes / 20+ domain agents │
+│  T4 Invocable: Cicada / Vanellus / Lanius / Cathartes / 20+ domain agents │
 ├─────────────────────────────────────────────────────┤
 │  Shared libs: lib/notify/ · lib/daemon_runtime/           │
 ├─────────────────────────────────────────────────────┤

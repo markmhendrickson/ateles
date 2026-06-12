@@ -307,7 +307,7 @@ _APIS_ROUTING_DIR = PROJECT_ROOT / "execution" / "daemons" / "apis"
 def _route_to_agent(title: str, body: str = "") -> str | None:
     """
     Resolve the agent that should own a task, reusing Apis's routing table as the
-    single source of truth. Returns an agent name (e.g. 'monedula', 'gryllus') or
+    single source of truth. Returns an agent name (e.g. 'monedula', 'cicada') or
     None when nothing routes — in which case the task stays human/unassigned.
     """
     try:

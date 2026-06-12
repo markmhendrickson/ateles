@@ -221,7 +221,7 @@ def _gate_satisfied_by_comment(gate: Gate, comments: list[dict]) -> str | None:
        because it includes the expected artifact type.
 
     2. **Author-only match** — comment author matches the agent's name (e.g.
-       comment authored by `gryllus-bot`, `ateles-agent`, or any string
+       comment authored by `cicada-bot`, `ateles-agent`, or any string
        containing the agent's name). Weaker signal — confirms the agent
        commented, but not what artifact was produced.
 
@@ -247,8 +247,8 @@ def _gate_satisfied_by_comment(gate: Gate, comments: list[dict]) -> str | None:
         if header_re.search(body):
             return str(c.get("url") or c.get("id") or "")
 
-    # 2. Author-only fallback. Match `gryllus`, `gryllus-agent`, `gryllus-bot`,
-    #    `ateles-gryllus`, etc. Avoid false positives by requiring the agent
+    # 2. Author-only fallback. Match `cicada`, `cicada-agent`, `cicada-bot`,
+    #    `ateles-cicada`, etc. Avoid false positives by requiring the agent
     #    name to be a whole-word match in the author string.
     author_re = re.compile(rf"\b{re.escape(agent_name)}\b", re.IGNORECASE)
     for c in comments:

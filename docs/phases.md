@@ -91,7 +91,7 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 - [x] All 12 product-panel agent_definition entities populated with `prompt_markdown`, `context_entity_types`, `operational_entity_types`, `allowed_tools`
 - [x] `participation_record`, `agent_action_observation`, `agent_policy` schemas registered ([ateles#16](https://github.com/markmhendrickson/ateles/issues/16) — implementation ongoing)
 - [x] Strategy hierarchy schemas registered (`business_strategy`, `domain_strategy`, `agent_strategy`, `strategy_drift_signal`)
-- [x] agent_grant entities provisioned for Gryllus and Vanellus
+- [x] agent_grant entities provisioned for Cicada and Vanellus
 - [ ] agent_grant entities for all remaining daemons: Apus, Formica, Monedula, neotoma-agent, Onychomys, Anthus
 - [ ] All daemon public keys published to JWKS endpoint (today only `sw-cursor-1` published)
 - [ ] Per-entity-type grant tightening — convert `*` grants to allowlists derived from `context_entity_types` + `operational_entity_types` ([ateles#26](https://github.com/markmhendrickson/ateles/issues/26))
@@ -134,7 +134,7 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 **Goal:** Product perspective agents operational for product development workflows.
 
 - [ ] Wire Sturnus to `product_feedback.created` subscription
-- [ ] Build product role panel: Pavo (PM), Paradisaea (designer), Bombycilla (architect), Phoenicurus (QA)
+- [ ] Build product role panel: Pavo (PM), Manucode (designer), Waxwing (architect), Phoenicurus (QA)
 
 ---
 
@@ -144,7 +144,7 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 
 - [ ] Cathartes meta-agent: writes new `agent_definition` entities from operator description
 - [ ] Remaining invocable agents: Anas, Aquila, Falco, Tachornis, Procyon, Lutra, Lupinus
-- [ ] Expand Loxia/Gryllus to handle PRs across all `ateles-agents/<genus>` repos
+- [ ] Expand Loxia/Cicada to handle PRs across all `ateles-agents/<genus>` repos
 
 ---
 

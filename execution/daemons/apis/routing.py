@@ -22,12 +22,12 @@ DOMAIN_ROUTES: dict[str, str] = {
     "finance": "monedula",  # payment EXECUTION (concrete amount + payee) → Monedula
     "finance_analysis": "fringilla",  # review/reconcile/audit/report → Fringilla
     "health": "gorilla",  # workout logging / fitness tasks → Gorilla
-    "ops": "gryllus",  # ops/deploy tasks → issue worker
-    "engineering": "gryllus",  # engineering tasks → issue worker
-    "agents": "gryllus",  # agent/swarm tasks → issue worker
-    "neotoma": "gryllus",  # neotoma-repo tasks → issue worker
-    "product": "gryllus",  # product/design tasks → issue worker
-    "comms": "gryllus",  # comms tasks → issue worker
+    "ops": "cicada",  # ops/deploy tasks → issue worker
+    "engineering": "cicada",  # engineering tasks → issue worker
+    "agents": "cicada",  # agent/swarm tasks → issue worker
+    "neotoma": "cicada",  # neotoma-repo tasks → issue worker
+    "product": "cicada",  # product/design tasks → issue worker
+    "comms": "cicada",  # comms tasks → issue worker
 }
 
 # An explicit task.assigned_to value always wins over tag inference. Maps an
@@ -37,7 +37,7 @@ ASSIGNED_TO_ROUTES: dict[str, str] = {
     "monedula": "monedula",
     "fringilla": "fringilla",
     "gorilla": "gorilla",
-    "gryllus": "gryllus",
+    "cicada": "cicada",
     "sturnus": "sturnus",
 }
 
@@ -99,9 +99,9 @@ SUPPORTED_DOMAINS: list[str] = list(DOMAIN_ROUTES.keys())
 # touch several domains, so all matches are collected (no first-match-wins).
 #
 # Only specialist domains with a non-generalist owner are listed. The
-# gryllus-owned domains (ops/engineering/agents/neotoma/product/comms) route to
+# cicada-owned domains (ops/engineering/agents/neotoma/product/comms) route to
 # the same generalist Loxia already covers as the baseline reviewer, so adding a
-# second gryllus pass buys nothing — they are intentionally omitted here.
+# second cicada pass buys nothing — they are intentionally omitted here.
 DOMAIN_PATH_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(r"(^|/)(monedula|payment|invoice|wage|payroll|rent)", re.I),

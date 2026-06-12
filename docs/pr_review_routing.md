@@ -32,7 +32,7 @@ dispatch. The same table is the natural source of truth for review routing:
 |---|---|---|
 | finance | monedula | `execution/**/finance`, payment/invoice/wage files |
 | health | gorilla | workout/fitness files |
-| ops / engineering / agents / neotoma / product / comms | gryllus | daemons, scripts, schemas, docs |
+| ops / engineering / agents / neotoma / product / comms | cicada | daemons, scripts, schemas, docs |
 | ... | ... | (full map lives in `routing.py` `DOMAIN_ROUTES`) |
 
 Each domain agent already has a SKILL.md (`.claude/skills/<agent>/SKILL.md`)

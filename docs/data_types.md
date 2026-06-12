@@ -161,7 +161,7 @@ Escalation entities are created by any daemon or agent when a condition requires
 
 ## Strategy hierarchy schemas
 
-Four-layer DAG: `business_strategy → domain_strategy → agent_strategy → agent_definition`. Execution-only agents (Gryllus, Vanellus, Struthio, Regulus) inherit from `domain_strategy` without a personal `agent_strategy` layer.
+Four-layer DAG: `business_strategy → domain_strategy → agent_strategy → agent_definition`. Execution-only agents (Cicada, Vanellus, Struthio, Regulus) inherit from `domain_strategy` without a personal `agent_strategy` layer.
 
 ### `business_strategy`
 **Schema ID**: `21a8a4bb-c5ca-465e-b4ed-2e703a18a8c5` · **v1.0**
@@ -178,7 +178,7 @@ Per-product-area strategy (product, eng, GTM, compliance, ops). Links to `busine
 ### `agent_strategy`
 **Schema ID**: `47f33921-8649-4e42-82d1-35cf6a20013c` · **v1.0**
 
-Per-strategic-agent strategy (Pavo, Bombycilla, Accipiter, Ciconia, Buteo, Columba). Links to `domain_strategy_ref`. Fields: `agent_sub` + `title` (required), plus `objective`, `success_criteria`, `evaluation_schedule`, `drift_signal_threshold`, `status`.
+Per-strategic-agent strategy (Pavo, Waxwing, Accipiter, Ciconia, Buteo, Columba). Links to `domain_strategy_ref`. Fields: `agent_sub` + `title` (required), plus `objective`, `success_criteria`, `evaluation_schedule`, `drift_signal_threshold`, `status`.
 
 **canonical_name_fields**: `[agent_sub, title]`
 

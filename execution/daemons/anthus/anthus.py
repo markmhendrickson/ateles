@@ -238,7 +238,7 @@ async def _orchestrate_workflow_for(event) -> None:
 # that prompt for permission. Anthus runs under launchd with no TTY, so these
 # must be invoked with --dangerously-skip-permissions.
 _AGENTS_NEEDING_SKIP_PERMISSIONS = frozenset(
-    {"gryllus", "vanellus", "apus", "formica", "neotoma-agent"}
+    {"cicada", "vanellus", "apus", "formica", "neotoma-agent"}
 )
 
 

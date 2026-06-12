@@ -30,12 +30,12 @@ Expected agent involvement (12):
 | Phase | Gate | Agent | Expected artifact |
 |---|---|---|---|
 | 1 | pm_scope | Pavo | `[pavo] acceptance_criteria:` |
-| 2 | ux_design | Paradisaea | `[paradisaea] copy_and_ux_flow:` |
-| 2 | arch | Bombycilla | `[bombycilla] schema_or_api_proposal:` |
-| 3 | impl | Gryllus | `[gryllus] pull_request_link: #N` |
+| 2 | ux_design | Manucode | `[manucode] copy_and_ux_flow:` |
+| 2 | arch | Waxwing | `[waxwing] schema_or_api_proposal:` |
+| 3 | impl | Cicada | `[cicada] pull_request_link: #N` |
 | 4 | qa | Phoenicurus | `[phoenicurus] test_plan:` |
 | 4 | legal | Buteo | `[buteo] compliance_review:` |
-| 4 | compliance_supervisor | Luscinia | `[luscinia] compliance_verdict:` |
+| 4 | compliance_supervisor | Robin | `[robin] compliance_verdict:` |
 | 4 | pr_review | Vanellus | `[vanellus] merge_decision:` |
 | 5 | release | Struthio | `[struthio] release_note:` |
 | 6 | growth_announce | Accipiter | `[accipiter] launch_brief:` |
@@ -59,18 +59,18 @@ claude --print --skill pavo <<<'{"work_entity_id":"harness-sandbox#1","gate_name
 # Verify Pavo's comment landed on issue #1 with the right header. Then:
 
 # Phase 2 (parallel)
-claude --print --skill paradisaea <<<'{...gate_name: ux_design...}' &
-claude --print --skill bombycilla <<<'{...gate_name: arch...}' &
+claude --print --skill manucode <<<'{...gate_name: ux_design...}' &
+claude --print --skill waxwing <<<'{...gate_name: arch...}' &
 wait
 
 # Phase 3
-claude --print --skill gryllus <<<'{...gate_name: impl...}'
+claude --print --skill cicada <<<'{...gate_name: impl...}'
 
 # Phase 4 (qa + legal parallel; compliance_supervisor + pr_review sequential)
 claude --print --skill phoenicurus <<<'{...}' &
 claude --print --skill buteo <<<'{...}' &
 wait
-claude --print --skill luscinia <<<'{...}'
+claude --print --skill robin <<<'{...}'
 claude --print --skill vanellus <<<'{...}'
 
 # Phase 5
@@ -134,7 +134,7 @@ A passing smoke test:
 2. Phase ordering is correct: no phase-N agent acts before phase-N-1 satisfaction
 3. Parallel groups (phase 2, phase 4 qa/legal, phase 6) fire concurrently
 4. Fast paths skip the right gates when their conditions hit (run with `label:internal-only` once to verify phase 6 skips)
-5. The final PR opened by Gryllus actually changes the README sensibly
+5. The final PR opened by Cicada actually changes the README sensibly
 6. No agent produces a generic "I cannot help with this" response
 
 Failures of (1) or (2) usually mean SKILL.md fixes. Failures of (3)–(4) mean orchestrator bugs. (5)–(6) are agent-quality issues.

@@ -26,12 +26,12 @@ def _smoke_test_workflow() -> WorkflowDefinition:
         legal_required=True,
         gates=[
             Gate(1, "pm_scope", "pavo", None, None, True),
-            Gate(2, "ux_design", "paradisaea", "phase2", "arch", True),
-            Gate(2, "arch", "bombycilla", "phase2", "ux_design", True),
-            Gate(3, "impl", "gryllus", None, None, True),
+            Gate(2, "ux_design", "manucode", "phase2", "arch", True),
+            Gate(2, "arch", "waxwing", "phase2", "ux_design", True),
+            Gate(3, "impl", "cicada", None, None, True),
             Gate(4, "qa", "phoenicurus", "phase4", "legal", True),
             Gate(4, "legal", "buteo", "phase4", "qa", True),
-            Gate(4, "compliance_supervisor", "luscinia", None, None, True),
+            Gate(4, "compliance_supervisor", "robin", None, None, True),
             Gate(4, "pr_review", "vanellus", None, None, True),
             Gate(5, "release", "struthio", None, None, True),
             Gate(6, "growth_announce", "accipiter", "phase6", "social_draft", False),
@@ -121,9 +121,9 @@ def test_only_one_of_phase_2_satisfied_phase_3_blocked():
     comments = [
         _comment("pavo-agent", "[pavo] acceptance_criteria: ..."),
         _comment(
-            "bombycilla-agent", "[bombycilla] schema_or_api_proposal: no schema needed"
+            "waxwing-agent", "[waxwing] schema_or_api_proposal: no schema needed"
         ),
-        # paradisaea has NOT commented
+        # manucode has NOT commented
     ]
     state, ready = compute_ready_gates(wf, {"labels": []}, comments)
     assert state["pm_scope"].status == "satisfied"
@@ -137,8 +137,8 @@ def test_phase_3_ready_when_both_phase_2_satisfied():
     wf = _smoke_test_workflow()
     comments = [
         _comment("pavo-agent", "[pavo] acceptance_criteria: ..."),
-        _comment("bombycilla-agent", "[bombycilla] schema_or_api_proposal: ..."),
-        _comment("paradisaea-agent", "[paradisaea] copy_and_ux_flow: ..."),
+        _comment("waxwing-agent", "[waxwing] schema_or_api_proposal: ..."),
+        _comment("manucode-agent", "[manucode] copy_and_ux_flow: ..."),
     ]
     state, ready = compute_ready_gates(wf, {"labels": []}, comments)
     assert "impl" in [g.gate_name for g in ready]
@@ -158,12 +158,12 @@ def test_fast_path_internal_only_skips_phase_6():
     # Satisfy everything through phase 5
     comments = [
         _comment("pavo-agent", "[pavo] acceptance_criteria: ..."),
-        _comment("paradisaea-agent", "[paradisaea] copy_and_ux_flow: ..."),
-        _comment("bombycilla-agent", "[bombycilla] schema_or_api_proposal: ..."),
-        _comment("gryllus-agent", "[gryllus] pull_request_link: #42"),
+        _comment("manucode-agent", "[manucode] copy_and_ux_flow: ..."),
+        _comment("waxwing-agent", "[waxwing] schema_or_api_proposal: ..."),
+        _comment("cicada-agent", "[cicada] pull_request_link: #42"),
         _comment("phoenicurus-agent", "[phoenicurus] test_plan: ..."),
         _comment("buteo-agent", "[buteo] compliance_review: ..."),
-        _comment("luscinia-agent", "[luscinia] compliance_verdict: approved"),
+        _comment("robin-agent", "[robin] compliance_verdict: approved"),
         _comment("vanellus-agent", "[vanellus] merge_decision: approved"),
         _comment("struthio-agent", "[struthio] release_note: ..."),
     ]
@@ -179,12 +179,12 @@ def test_phase_6_parallel_dispatch_when_ready():
     wf = _smoke_test_workflow()
     comments = [
         _comment("pavo-agent", "[pavo] acceptance_criteria: ..."),
-        _comment("paradisaea-agent", "[paradisaea] copy_and_ux_flow: ..."),
-        _comment("bombycilla-agent", "[bombycilla] schema_or_api_proposal: ..."),
-        _comment("gryllus-agent", "[gryllus] pull_request_link: #42"),
+        _comment("manucode-agent", "[manucode] copy_and_ux_flow: ..."),
+        _comment("waxwing-agent", "[waxwing] schema_or_api_proposal: ..."),
+        _comment("cicada-agent", "[cicada] pull_request_link: #42"),
         _comment("phoenicurus-agent", "[phoenicurus] test_plan: ..."),
         _comment("buteo-agent", "[buteo] compliance_review: ..."),
-        _comment("luscinia-agent", "[luscinia] compliance_verdict: approved"),
+        _comment("robin-agent", "[robin] compliance_verdict: approved"),
         _comment("vanellus-agent", "[vanellus] merge_decision: approved"),
         _comment("struthio-agent", "[struthio] release_note: ..."),
     ]
@@ -364,12 +364,12 @@ def test_unmet_precondition_skips_gate():
     # Satisfy through phase 4 so phase 5 (release) is the next concern.
     comments = [
         _comment("pavo-bot", "[pavo] acceptance_criteria: ..."),
-        _comment("paradisaea-bot", "[paradisaea] copy_and_ux_flow: ..."),
-        _comment("bombycilla-bot", "[bombycilla] schema_or_api_proposal: ..."),
-        _comment("gryllus-bot", "[gryllus] pull_request_link: #42"),
+        _comment("manucode-bot", "[manucode] copy_and_ux_flow: ..."),
+        _comment("waxwing-bot", "[waxwing] schema_or_api_proposal: ..."),
+        _comment("cicada-bot", "[cicada] pull_request_link: #42"),
         _comment("phoenicurus-bot", "[phoenicurus] test_plan: ..."),
         _comment("buteo-bot", "[buteo] compliance_review: ..."),
-        _comment("luscinia-bot", "[luscinia] compliance_verdict: approved"),
+        _comment("robin-bot", "[robin] compliance_verdict: approved"),
         _comment("vanellus-bot", "[vanellus] merge_decision: approved"),
     ]
     state, ready = compute_ready_gates(
@@ -398,9 +398,9 @@ def test_dispatched_gate_can_be_satisfied_by_later_comment():
     for g in ready_v1:
         state_v1[g.gate_name].status = "dispatched"
 
-    # paradisaea now comments; orchestrator re-ticks with the new comment.
+    # manucode now comments; orchestrator re-ticks with the new comment.
     comments_v2 = comments_v1 + [
-        _comment("paradisaea-agent", "[paradisaea] copy_and_ux_flow: ...")
+        _comment("manucode-agent", "[manucode] copy_and_ux_flow: ...")
     ]
     state_v2, _ = compute_ready_gates(
         wf, {"labels": []}, comments_v2, existing_state=state_v1
