@@ -44,3 +44,17 @@ Loaded automatically from `~/.config/neotoma/.env` at startup.
 A `.monedula_last_run` file in the daemon directory records today's date on startup.
 Subsequent launchd invocations within the same day exit immediately — preventing
 double-payment if launchd retries or the machine wakes mid-day.
+
+## Constraints
+
+Standing rules enforced for every payment Monedula makes (see project `CLAUDE.md`):
+
+- **Never hardcode payee data.** IBANs, wallet addresses, amounts, and contact
+  details are read from env or parquet — never inlined in code.
+- **Yoga payments carry no memo / OP_RETURN.** Do not pass a `memo` on the yoga
+  BTC path.
+- **Yoga / therapy tasks are never marked completed.** Only the `due_date` is
+  advanced — these are recurring obligations, not one-off tasks.
+- **Payment paths are idempotent.** Guard against double-send (see Idempotency
+  above) on every execution route.
+
