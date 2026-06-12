@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Phoenicurus-Release publish.py — environment validator.
 #
-# publish.py is invoked ON DEMAND by Onychomys after operator approval, so it
+# publish.py is invoked ON DEMAND by Ateles after operator approval, so it
 # does not register a scheduled launchd agent. This script verifies the host has
-# everything publish.py needs and prints the invocation to wire into Onychomys.
+# everything publish.py needs and prints the invocation to wire into Ateles.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -101,7 +101,7 @@ echo
 echo "prepare.py (scheduled, or run manually):"
 echo "  python3 $SCRIPT_DIR/prepare.py            # normal run"
 echo "  python3 $SCRIPT_DIR/prepare.py --dry-run  # preflight only, no agent spawn"
-echo "Onychomys invokes publish.py on approval:"
+echo "Ateles invokes publish.py on approval:"
 echo "  python3 $SCRIPT_DIR/publish.py --version <vX.Y.Z>"
 echo "Dry-run a publish anytime:"
 echo "  python3 $SCRIPT_DIR/publish.py --version <vX.Y.Z> --dry-run"

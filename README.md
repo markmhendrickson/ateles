@@ -32,9 +32,9 @@ Not a framework. Not a toy. A working production blueprint that runs daily under
 
 ```mermaid
 graph TB
-  Operator[Operator markmhendrickson] -->|Telegram, terminal| Onychomys
-  Onychomys[Onychomys T2 — primary interface] -->|paged via priority_rubric| Operator
-  Anthus[Anthus T3 — swarm coordinator] -->|notifies| Onychomys
+  Operator[Operator markmhendrickson] -->|Telegram, terminal| Ateles
+  Ateles[Ateles T2 — primary interface] -->|paged via priority_rubric| Operator
+  Anthus[Anthus T3 — swarm coordinator] -->|notifies| Ateles
   Anthus -->|dispatch| Cicada[Cicada T4 — code]
   Anthus -->|dispatch| Vanellus[Vanellus T4 — review]
   Anthus -->|dispatch| Pavo[Pavo T4 — PM]
@@ -94,7 +94,7 @@ Four tiers. Twelve product-panel agents plus daemons plus 20+ domain T4s. Naming
 | Tier   | Role                                  | Examples                                                                                  |
 | ------ | ------------------------------------- | ----------------------------------------------------------------------------------------- |
 | **T1** | Hosts (process that owns a channel)   | OpenClaw (Telegram), launchd (daemon scheduling), raw aiohttp Bot API                     |
-| **T2** | Resident agents (always-on, conversational) | Onychomys (primary operator interface), Menura (public-facing personal representative)  |
+| **T2** | Resident agents (always-on, conversational) | Ateles (primary operator interface), Menura (public-facing personal representative)  |
 | **T3** | Daemons (event-driven, persona-less)  | Formica · Anthus · Apus · Apis · Piculet · Strix · Turdus · Monedula · neotoma-agent · Tyto · mic-recorder · Cyphorhinus |
 | **T4** | Invocable agents (stateless, spawned per task) | Pavo · Waxwing · Phoenicurus · Buteo · Robin · Struthio · Accipiter · Corvus · Regulus · Cicada · Vanellus · Manucode · and 20+ domain agents |
 
@@ -220,7 +220,7 @@ The swarm exposes four operational surfaces, all converging on Neotoma as source
 
 | Interface              | Description                                                                                                                  |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| **Telegram (Onychomys)** | Primary operator surface. Bot at `OnychomysBot`. Receives BLOCKER / OPERATOR_DECISION pages; the operator replies inline.    |
+| **Telegram (Ateles)** | Primary operator surface. Bot at `AtelesBot`. Receives BLOCKER / OPERATOR_DECISION pages; the operator replies inline.    |
 | **`claude --print`**   | Agent dispatch surface used by both operator and Anthus. Each invocation passes `--append-system-prompt "$(cat SKILL.md)"`.   |
 | **GitHub harness MCP** | Every code-touching agent's call surface. AAuth-verified, capability-scoped, observation-logged.                              |
 | **Neotoma SSE**        | The substrate. Daemons subscribe by entity type; new issues, PRs, escalations, daemon reports flow through this stream.       |

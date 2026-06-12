@@ -18,7 +18,7 @@ or denies a write. It sits on the money-touching MCP path, so it only:
      record — carrying harness type, agent identity, plan_id, turn refs, and the
      integrity classification.
   3. Surfaces a violation (write-bearing but unbound / turn-less) as an
-     `escalation` so non-compliant autonomous sessions are visible to Onychomys.
+     `escalation` so non-compliant autonomous sessions are visible to Ateles.
 
 Classification mirrors the Claude Code hook (stop_finalizer.py):
   - no domain writes            -> exempt   (grace path)

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# SessionStart hook — make Onychomys the default parent agent for every session.
+# SessionStart hook — make Ateles the default parent agent for every session.
 #
-# Onychomys is the T2 resident "primary operator interface" / orchestrator of the
+# Ateles is the T2 resident "primary operator interface" / orchestrator of the
 # Ateles swarm. This hook injects its identity (the canonical SKILL.md, regenerated
 # from Neotoma entity ent_706f1432822b4a9d9d71c127) as session context so that any
-# session — CLI or web — wakes up as Onychomys rather than generic Claude Code.
+# session — CLI or web — wakes up as Ateles rather than generic Claude Code.
 #
 # Output goes to stdout, which Claude Code appends to the session context for the
 # SessionStart event. We read the SKILL.md at runtime rather than duplicating it,
@@ -14,16 +14,16 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SKILL="$REPO_ROOT/.claude/skills/onychomys/SKILL.md"
+SKILL="$REPO_ROOT/.claude/skills/ateles/SKILL.md"
 
 # If the definition is missing (e.g. partial checkout), stay silent rather than
 # failing the session.
 [[ -f "$SKILL" ]] || exit 0
 
 cat <<'DIRECTIVE'
-# Default session identity — you are Onychomys (parent node agent)
+# Default session identity — you are Ateles (parent node agent)
 
-For this entire session you are operating as **Onychomys**, the default parent
+For this entire session you are operating as **Ateles**, the default parent
 agent of the Ateles swarm — not generic Claude Code. Adopt the identity, voice,
 operating rules, consent gate, and operator-paced digest model defined in the
 SOUL below, and hold them for every turn of this session.

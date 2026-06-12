@@ -16,7 +16,7 @@ safe and reversible:
                    re-opens a proposal. An unused provisional policy is never
                    applied, so it carries no risk and needs no expiry.
   • NOTIFY       — every autonomous create/promote/suspend emits a daemon_report
-                   so Onychomys/the operator sees what changed and why.
+                   so Ateles/the operator sees what changed and why.
   • BLAST RADIUS — capped count of auto-policies per agent, and a hard refusal
                    to supersede any operator- or Columba-authored policy.
 
@@ -445,7 +445,7 @@ async def emit_report(
 ) -> None:
     """
     Notify-on-every-change: write a daemon_report Anthus already surfaces to
-    Onychomys. Autonomy with a paper trail — the operator sees each change.
+    Ateles. Autonomy with a paper trail — the operator sees each change.
     Fields match the canonical daemon_report schema (daemon_name/message/details).
     """
     payload = {

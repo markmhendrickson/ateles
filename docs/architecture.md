@@ -30,7 +30,7 @@ Ateles is a Neotoma-canonical personal agent swarm. "Neotoma-canonical" means:
 ┌─────────────────────────────────────────────────────┐
 │  T1 Hosts: OpenClaw (resident agents), launchd (daemons) │
 ├─────────────────────────────────────────────────────┤
-│  T2 Resident: Onychomys (operator), Menura (public)       │
+│  T2 Resident: Ateles (operator), Menura (public)       │
 ├─────────────────────────────────────────────────────┤
 │  T3 Daemons: Monedula / Formica / neotoma-agent / Apis / Apus │
 │              Piculet / Strix / Anthus / Tyto / Turdus     │
@@ -55,7 +55,7 @@ T1 describes any process that owns a channel message loop and spawns T2 resident
 | **Raw webhook loop** | `aiohttp` + Bot API directly; valid when you don't need a framework; low ceremony, easy to audit |
 | **Claude Code / Cursor** | IDE-driven T1 for development workflows; not suitable for always-on daemon swarms |
 
-The current Ateles T1 for Onychomys is OpenClaw. For a single-channel operator setup, a thin custom loop using the Agent SDK is equally valid and has less surface area to maintain.
+The current Ateles T1 for Ateles is OpenClaw. For a single-channel operator setup, a thin custom loop using the Agent SDK is equally valid and has less surface area to maintain.
 
 ---
 
@@ -130,7 +130,7 @@ In Phase 4, payment profiles will migrate to Neotoma `payment_profile` entities 
 
 This replaces the binary swarm/human split. Each plan carries its own autonomy calibration. Seven policies are seeded for active work streams (see `CLAUDE.md` key entity IDs).
 
-The **escalation chain**: agent → domain-expert agent → Columba (constitution keeper) → operator via Onychomys. Each escalation resolution is codified as a Neotoma entity for future instances.
+The **escalation chain**: agent → domain-expert agent → Columba (constitution keeper) → operator via Ateles. Each escalation resolution is codified as a Neotoma entity for future instances.
 
 The **three-layer constitution**: (1) `core_principles` entity (project-wide); (2) per-repo constitution owned by Columba; (3) per-agent operating principles in `agent_definition`.
 

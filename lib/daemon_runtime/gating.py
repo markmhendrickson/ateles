@@ -365,7 +365,7 @@ def write_checkpoint_brief(
 # ── Checkpoint resolution ───────────────────────────────────────────────────
 #
 # A checkpoint_brief written by the gate sits at status="awaiting_operator"
-# until the operator (via Onychomys) flips it. The terminal states the dispatch
+# until the operator (via Ateles) flips it. The terminal states the dispatch
 # daemon acts on:
 #
 #   approved  → operator override: re-dispatch the referenced task, bypassing

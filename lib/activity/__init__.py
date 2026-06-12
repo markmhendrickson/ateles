@@ -8,7 +8,7 @@ helper:
 1. Writes an `activity_log` entity to Neotoma for durability + reply
    routing later.
 2. Sends a Telegram message to CyphorhinusBot (separate from
-   OnychomysBot) so the operator can passively observe the swarm without
+   AtelesBot) so the operator can passively observe the swarm without
    getting paged.
 
 Message format (fixed vocabulary, parser-friendly):
@@ -135,7 +135,7 @@ def _send_telegram(text: str) -> Optional[int]:
         return None
 
     # Cyphorhinus uses its OWN bot (CYPHORHINUS_TELEGRAM_BOT_TOKEN /
-    # CYPHORHINUS_TELEGRAM_CHAT_ID) rather than OnychomysBot. send.mjs reads
+    # CYPHORHINUS_TELEGRAM_CHAT_ID) rather than AtelesBot. send.mjs reads
     # TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID, so we override via env on
     # the subprocess.
     env = os.environ.copy()

@@ -27,7 +27,7 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 
 | Name | Description | Status |
 |---|---|---|
-| OpenClaw | Multi-channel Claude Code host; current implementation for Onychomys | active |
+| OpenClaw | Multi-channel Claude Code host; current implementation for Ateles | active |
 | Custom Agent SDK loop | Single-channel bespoke host; valid alternative for low-surface-area setups | available |
 | Raw aiohttp + Bot API | Low-ceremony webhook loop; valid when no framework is needed | available |
 | launchd | macOS system daemon host for all T3 daemons | active |
@@ -38,8 +38,8 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 
 | Name | Genus | Description | Status |
 |---|---|---|---|
-| **Onychomys** | *Onychomys* (grasshopper mouse) | Primary operator interface; runs in OpenClaw; OnychomysBot on Telegram; sole pager | active |
-| **Menura** | *Menura* (lyrebird) | Public-facing personal representative at markmhendrickson.com/agent/; read-only public-scoped AAuth identity; routes inbound interest to Onychomys | planned (Phase 3) |
+| **Ateles** | *Ateles* (spider monkey) — root agent; shares the repo's name; renamed for voice/ASR robustness (was Onychomys) | Primary operator interface; runs in OpenClaw; AtelesBot on Telegram; sole pager | active |
+| **Menura** | *Menura* (lyrebird) | Public-facing personal representative at markmhendrickson.com/agent/; read-only public-scoped AAuth identity; routes inbound interest to Ateles | planned (Phase 3) |
 
 ---
 
@@ -54,7 +54,7 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 | **Piculet** | *Picumnus* (piculet woodpecker) | JS | Audio transcription daemon; monitors for new audio files, transcribes, stores in Neotoma | active |
 | **Strix** | *Strix* (wood owl) | Python | Meeting/ambient audio recorder (menu bar app) | active |
 | **Apis** | *Apis* (honeybee) | Python | Universal task dispatcher; subscribes to task events; routes to right agent + harness; absorbs Monedula's task scope | planned (Phase 4) |
-| **Anthus** | *Anthus* (pipit) | Python | Swarm coordinator — global view of work-in-flight; surfaces conflicts to Onychomys | planned (Phase 2 skeleton, Phase 6 full) |
+| **Anthus** | *Anthus* (pipit) | Python | Swarm coordinator — global view of work-in-flight; surfaces conflicts to Ateles | planned (Phase 2 skeleton, Phase 6 full) |
 | **Tyto** | *Tyto* (barn owl) | Python | Screenshot watcher; visual counterpart to Strix | planned (Phase 2 skeleton) |
 | **Turdus** | *Turdus* (thrush) | Python | Email triage daemon; hourly Gmail poll → tasks for Apis | active (Phase 2 skeleton) |
 | **Gorilla** | *Gorilla* (gorilla) | Python | Health & fitness daemon; proactive weekly training summaries + inactivity nudges from `workout_session` data (companion to the invocable Gorilla agent) | active (skeleton) |
@@ -135,7 +135,7 @@ Each T2 and T3 agent has a distinct AAuth keypair with `sub = <name>@ateles-swar
 
 | Agent | AAuth sub | Scope |
 |---|---|---|
-| Onychomys | `onychomys@ateles-swarm` | full operator scope |
+| Ateles | `ateles@ateles-swarm` | full operator scope |
 | Menura | `menura@ateles-swarm` | read-only, `visibility=public` entities only |
 | Monedula | `monedula@ateles-swarm` | task + transaction write |
 | Formica | `formica@ateles-swarm` | issue + PR write |

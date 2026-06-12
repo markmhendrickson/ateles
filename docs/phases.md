@@ -33,8 +33,8 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 
 - [x] Neotoma: register `agent_definition` entity type with `prompt_markdown`, `allowed_tools`, `agent_grant`, `override_policy` fields
 - [x] Neotoma PR: `src/services/override_validation.ts` — enforce `override_policy` at write time (PR #398)
-- [x] Create `agent_definition` entities for Onychomys, Monedula, neotoma-agent, Formica, Menura in Neotoma
-- [x] Mint AAuth keypairs for Onychomys, Monedula, Formica, neotoma-agent (stored in ateles-private/keys/)
+- [x] Create `agent_definition` entities for Ateles, Monedula, neotoma-agent, Formica, Menura in Neotoma
+- [x] Mint AAuth keypairs for Ateles, Monedula, Formica, neotoma-agent (stored in ateles-private/keys/)
 - [x] `lib/notify/` — Apprise wrapper + priority_rubric loader (notifier.py ~130 LOC)
 - [x] `lib/daemon_runtime/` — SSE subscription + agent_definition loader + AAuth signer (3 modules ~250 LOC)
 - [x] Create `priority_rubric` entity in Neotoma (`ent_29ca079940c1e996a8c782f2`)
@@ -42,14 +42,14 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 
 ---
 
-## Phase 2 — Mirror system + Onychomys migration
+## Phase 2 — Mirror system + Ateles migration
 
-**Goal:** Neotoma → git mirror pipeline live; Onychomys config migrated to Neotoma.
+**Goal:** Neotoma → git mirror pipeline live; Ateles config migrated to Neotoma.
 
 - [x] Apus daemon: HTTPS webhook receiver (~200 LOC)
 - [x] Neotoma webhook subscription registered (subscription ID `7ce524e4`, entity `ent_6ba1914462908f682f206b56`)
 - [x] Apus env vars wired into installed plist (`~/Library/LaunchAgents/com.ateles.apus.plist`)
-- [x] Migrate Onychomys SOUL.md → `prompt_markdown` field in `agent_definition` entity
+- [x] Migrate Ateles SOUL.md → `prompt_markdown` field in `agent_definition` entity
 - [x] Neotoma CLI mirror profile configured for SKILL.md generation
 - [ ] Cloudflare Tunnel at `apus.markmhendrickson.com` — broken, tracked in [ateles#17](https://github.com/markmhendrickson/ateles/issues/17)
 - [ ] Apus: handle all four mirror profiles; commit via `ateles-agent` GitHub identity; log delivery status to Neotoma
@@ -92,7 +92,7 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 - [x] `participation_record`, `agent_action_observation`, `agent_policy` schemas registered ([ateles#16](https://github.com/markmhendrickson/ateles/issues/16) — implementation ongoing)
 - [x] Strategy hierarchy schemas registered (`business_strategy`, `domain_strategy`, `agent_strategy`, `strategy_drift_signal`)
 - [x] agent_grant entities provisioned for Cicada and Vanellus
-- [ ] agent_grant entities for all remaining daemons: Apus, Formica, Monedula, neotoma-agent, Onychomys, Anthus
+- [ ] agent_grant entities for all remaining daemons: Apus, Formica, Monedula, neotoma-agent, Ateles, Anthus
 - [ ] All daemon public keys published to JWKS endpoint (today only `sw-cursor-1` published)
 - [ ] Per-entity-type grant tightening — convert `*` grants to allowlists derived from `context_entity_types` + `operational_entity_types` ([ateles#26](https://github.com/markmhendrickson/ateles/issues/26))
 - [ ] Quarterly AAuth keypair rotation via neotoma-agent
@@ -163,4 +163,4 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 ## Deferred
 
 - **Temporal orchestration**: evaluate at Phase 3 when 5+ daemons active and in-flight state loss has occurred; Inngest as fallback
-- **YubiKey hardware tier**: planned for Cursor, operator, Monedula, Onychomys, Apus — see `docs/aauth.md`
+- **YubiKey hardware tier**: planned for Cursor, operator, Monedula, Ateles, Apus — see `docs/aauth.md`

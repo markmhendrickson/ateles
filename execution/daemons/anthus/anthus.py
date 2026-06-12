@@ -5,7 +5,7 @@ Anthus — Swarm coordinator daemon.
 Anthus genus: pipits (small ground-running songbirds). T3 daemon in the Ateles swarm.
 
 Anthus maintains a global view of work-in-flight across all daemons and
-surfaces conflicts, blockers, and anomalies to Onychomys. It subscribes to
+surfaces conflicts, blockers, and anomalies to Ateles. It subscribes to
 Neotoma SSE events for tasks, daemon_reports, escalations, and agent_grants,
 and applies the priority_rubric before paging the operator.
 
@@ -78,7 +78,7 @@ async def handle_event(event: NeotomaEvent) -> None:
     Route Neotoma SSE events to the appropriate handler.
 
     Phase 6 will add full swarm-coordinator logic here. For now Anthus logs
-    events and surfaces escalations + critical daemon_reports to Onychomys.
+    events and surfaces escalations + critical daemon_reports to Ateles.
     """
     log.debug(
         f"[{DAEMON_NAME}] event: {event.entity_type}/{event.action} "
@@ -429,7 +429,7 @@ async def _fetch_comments(snap: dict) -> list:
 
 
 async def _handle_escalation(event: NeotomaEvent) -> None:
-    """Surface escalation entities to Onychomys via Notifier."""
+    """Surface escalation entities to Ateles via Notifier."""
     severity = event.snapshot.get("severity", "unknown")
     summary = event.snapshot.get("summary", event.entity_id)
     blocking = event.snapshot.get("blocking", False)

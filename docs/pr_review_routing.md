@@ -1,7 +1,7 @@
 # Spec — Per-domain PR review routing
 
 **Status:** proposed (spec only, no implementation)
-**Owner:** Onychomys (orchestration) · implementation TBD
+**Owner:** Ateles (orchestration) · implementation TBD
 **Related:** `.github/workflows/loxia-pr-review.yml`, `execution/scripts/loxia_review.py`, `execution/daemons/apis/routing.py`
 
 ## Problem
