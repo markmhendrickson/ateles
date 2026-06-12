@@ -119,11 +119,13 @@ DOMAIN_PATH_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
 
 def infer_domains_from_paths(paths: Iterable[str]) -> list[str]:
-    """Infer domains from PR changed-file paths. Order-stable, deduplicated.
+    """Distinct domains touched anywhere in a PR's changeset, in first-seen order.
 
-    A single path may contribute multiple domains; every distinct match is
-    returned (unlike infer_tags_from_text's first-match-per-pattern walk, this
-    is about coverage — which specialists should look, not which one owns).
+    Dedup is global across the whole changeset (not per-path): the question this
+    answers is coverage — which specialists should look at the PR — not which
+    single domain owns a given file. A path may match several patterns, and
+    every distinct domain across all paths is collected once. Contrast
+    infer_tags_from_text, which classifies a single text blob.
     """
     domains: list[str] = []
     for path in paths:
