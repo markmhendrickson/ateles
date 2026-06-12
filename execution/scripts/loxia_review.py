@@ -349,10 +349,42 @@ guard against double-send. Flag missing idempotency keys or retry-without-guard.
 )
 
 
+GORILLA = Reviewer(
+    skill="gorilla",
+    display="Gorilla",
+    emoji="🦍",
+    persona=(
+        "Gorilla, the health & fitness agent, reviewing only the "
+        "health/fitness-relevant parts of this PR"
+    ),
+    checklist="""\
+1. **Special-category health data** — any literal biomarker, body metric, \
+medical condition, medication, or other RGPD Art. 9 health datum committed in \
+the diff? These MUST come from parquet / the operator's Neotoma data, never \
+inlined. Flag every literal.
+2. **Data minimization** — per CLAUDE.md people-data rules, durable records keep \
+only what serves the relationship/analysis; incidental sensitive disclosures are \
+summarized, not transcribed verbatim. Flag over-capture.
+3. **Grounded in own data** — health/fitness logic reads from the operator's \
+logged Neotoma data, not fabricated, hardcoded, or assumed values.
+4. **Units & correctness** — workout/fitness math (weights, reps, sets, dates, \
+kg/lb units) consistent and sane. Flag unit mismatches or off-by-one date logic.
+5. **No medical overreach** — stays within logged-data analysis; no diagnostic \
+or prescriptive medical claims beyond Gorilla's grounded scope.""",
+    findings="""\
+- 🔴 **Health data (Art. 9)**: <finding or "none — reads from parquet/Neotoma">
+- 🟡 **Data minimization**: <finding or "minimal / no over-capture">
+- 🟡 **Grounded in own data**: <finding or "reads logged data, not hardcoded">
+- 🟢 **Units & correctness**: <finding or "consistent">
+- 🟢 **Medical scope**: <finding or "within grounded scope">""",
+)
+
+
 # Domain skill → Reviewer. Extend this map as domain agents are onboarded; a
 # skill resolve_reviewers() returns without an entry here is skipped (logged).
 DOMAIN_REVIEWERS: dict[str, Reviewer] = {
     "monedula": MONEDULA,
+    "gorilla": GORILLA,
 }
 
 
