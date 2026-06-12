@@ -34,6 +34,7 @@ All hooks are **fail-open** (stdlib-only Python; any error or missing `NEOTOMA_B
 
 ## Standing constraints
 
+- **Plan-mirrored docs are render targets, not source files.** `docs/taxonomy.md`, `docs/phases.md`, and `docs/architecture.md` mirror plan `ent_99ace4dd6673aa36ed08b1fe` fields (`taxonomy_markdown`, `phases_markdown`, `architecture_markdown`). Never edit these files directly: correct the plan field via `mcp__mcpsrv_neotoma__correct`, then run `python3 execution/scripts/render_plan_docs.py`; run `--check` before committing them. For an operator-approved local edit, `--push` writes the files back as plan corrections.
 - **Never hardcode secrets, IBANs, or contact details** — always read from env or parquet.
 - **Yoga payments: never include memo/OP_RETURN** — do not pass `memo` parameter.
 - **Yoga/therapy tasks: never mark as completed** — only update `due_date`.
