@@ -76,13 +76,14 @@ from .grant_checker import (
     revoke_grant,
     suspend_grant,
 )
-from .sse_client import NeotomaEvent, SSEClient
+from .sse_client import NeotomaEvent, SSEClient, hydrate_snapshot
 
 __all__ = [
     "AgentLoader",
     "AgentDefinition",
     "SSEClient",
     "NeotomaEvent",
+    "hydrate_snapshot",
     "AAuthSigner",
     "GrantChecker",
     "AgentGrant",
