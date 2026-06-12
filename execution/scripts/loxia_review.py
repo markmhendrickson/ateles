@@ -29,12 +29,15 @@ Environment variables (set by GHA workflow):
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -55,6 +58,34 @@ CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
 GITHUB_API_URL = "https://api.github.com"
 
 MAX_DIFF_CHARS = 40_000  # truncate large diffs to stay within context
+
+
+# ── Domain routing ─────────────────────────────────────────────────────────────
+#
+# Reuse Apis's single source of truth (execution/daemons/apis/routing.py) for
+# path → domain-owning-agent mapping rather than forking the patterns. Loaded by
+# file path because the repo has no package __init__ files. Best-effort: if the
+# module can't be loaded, Loxia still runs as the baseline reviewer.
+
+
+def _load_resolve_reviewers():
+    """Return routing.resolve_reviewers, or a no-op fallback on import failure."""
+    routing_path = (
+        Path(__file__).resolve().parents[1] / "daemons" / "apis" / "routing.py"
+    )
+    try:
+        spec = importlib.util.spec_from_file_location("apis_routing", routing_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"no spec for {routing_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.resolve_reviewers
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[loxia] routing module unavailable ({exc}) — baseline review only")
+        return lambda _paths: []
+
+
+resolve_reviewers = _load_resolve_reviewers()
 
 
 # ── Git diff ──────────────────────────────────────────────────────────────────
@@ -168,24 +199,25 @@ def post_github_comment(body: str) -> None:
 # ── Neotoma issue filing ───────────────────────────────────────────────────────
 
 
-def file_neotoma_issue(title: str, body: str) -> None:
+def file_neotoma_issue(title: str, body: str, agent: str = "loxia") -> None:
     """
-    File a Neotoma issue for a significant finding.
-    audience=agent, severity=medium. Best-effort; never blocks the review.
+    File a Neotoma issue for a significant finding, attributed to the reviewing
+    agent. audience=agent, severity=medium. Best-effort; never blocks the review.
     """
     if not NEOTOMA_BEARER_TOKEN:
         return
 
     payload = {
         "entity_type": "issue",
-        "canonical_name": f"issue:loxia:pr{PR_NUMBER}:{HEAD_SHA[:8]}",
+        "canonical_name": f"issue:{agent}:pr{PR_NUMBER}:{HEAD_SHA[:8]}",
         "snapshot": {
             "title": title,
             "body": body,
             "audience": "agent",
             "severity": "medium",
             "kind": "code_review",
-            "source": f"loxia:pr{PR_NUMBER}",
+            "source": f"{agent}:pr{PR_NUMBER}",
+            "reviewer": agent,
             "repository": REPO,
         },
     }
@@ -207,13 +239,28 @@ def file_neotoma_issue(title: str, body: str) -> None:
         print(f"[loxia] Failed to file Neotoma issue: {exc}", file=sys.stderr)
 
 
-# ── Review prompt ─────────────────────────────────────────────────────────────
+# ── Reviewers ──────────────────────────────────────────────────────────────────
+#
+# Loxia is the universal baseline reviewer, run on every PR. Domain reviewers are
+# appended when the PR touches their domain (routing.resolve_reviewers). Each
+# reviewer contributes its own checklist + findings legend; everything else (the
+# diff scaffold, output structure, attribution footer) is shared.
 
 
-REVIEW_PROMPT_TEMPLATE = """\
-You are Loxia, a PR review agent for the ateles repository (a public mirror of \
-a Neotoma-canonical agent swarm). Review the following pull request diff and \
-produce a structured review comment.
+@dataclass(frozen=True)
+class Reviewer:
+    skill: str  # routing key returned by resolve_reviewers, e.g. "monedula"
+    display: str  # heading name, e.g. "Loxia"
+    emoji: str
+    persona: str  # one-line role description injected into the prompt intro
+    checklist: str  # numbered "assess each item" block
+    findings: str  # the "### Findings" legend bullets
+
+
+PROMPT_SCAFFOLD = """\
+You are {persona}. Review the following pull request diff for the ateles \
+repository (a public mirror of a Neotoma-canonical agent swarm) and produce a \
+structured review comment.
 
 Repository: {repo}
 PR number: #{pr_number}
@@ -225,18 +272,10 @@ Diff (truncated to {max_diff_chars} chars if large):
 ```
 
 Review checklist — assess each item:
-1. **Scope** — do changed files match a coherent, focused purpose? Flag scope creep.
-2. **Secrets** — any API keys, tokens, passwords, IBANs, or personal data in the diff?
-3. **gitleaks** — if new daemon/script files added that reference env var names \
-(BEARER_TOKEN, API_KEY, etc.), is .gitleaks.toml allowlist updated?
-4. **Linting** — obvious ruff / yamllint / shellcheck issues visible in the diff?
-5. **Pattern consistency** — new daemons should follow the T3 startup pattern \
-(AgentLoader → AAuthSigner → Notifier → work loop). New scripts should use httpx \
-or stdlib urllib (not requests). Flag deviations.
-6. **CLAUDE.md** — if new public files added, does CLAUDE.md need updating?
+{checklist}
 
 Output format — use this exact structure:
-## Loxia Review 🪶
+## {display} Review {emoji}
 
 **Verdict**: APPROVE | REQUEST_CHANGES | COMMENT
 
@@ -245,22 +284,140 @@ Output format — use this exact structure:
 
 ### Findings
 <bullet list — only include non-empty categories>
-- 🔴 **Secrets**: <finding or "none detected">
-- 🟡 **Scope**: <finding or "focused">
-- 🟡 **gitleaks**: <finding or "allowlist updated / not needed">
-- 🟢 **Linting**: <finding or "no issues visible">
-- 🟢 **Pattern**: <finding or "follows T3 pattern">
-- 🟢 **Docs**: <finding or "no doc updates needed">
+{findings}
 
 ### Recommendations
 <optional — only if REQUEST_CHANGES>
 
 ---
-*Loxia automated review · commit {head_sha}*
+*{display} automated review · commit {head_sha}*
 """
 
 
+LOXIA = Reviewer(
+    skill="loxia",
+    display="Loxia",
+    emoji="🪶",
+    persona="Loxia, a generalist PR review agent",
+    checklist="""\
+1. **Scope** — do changed files match a coherent, focused purpose? Flag scope creep.
+2. **Secrets** — any API keys, tokens, passwords, IBANs, or personal data in the diff?
+3. **gitleaks** — if new daemon/script files added that reference env var names \
+(BEARER_TOKEN, API_KEY, etc.), is .gitleaks.toml allowlist updated?
+4. **Linting** — obvious ruff / yamllint / shellcheck issues visible in the diff?
+5. **Pattern consistency** — new daemons should follow the T3 startup pattern \
+(AgentLoader → AAuthSigner → Notifier → work loop). New scripts should use httpx \
+or stdlib urllib (not requests). Flag deviations.
+6. **CLAUDE.md** — if new public files added, does CLAUDE.md need updating?""",
+    findings="""\
+- 🔴 **Secrets**: <finding or "none detected">
+- 🟡 **Scope**: <finding or "focused">
+- 🟡 **gitleaks**: <finding or "allowlist updated / not needed">
+- 🟢 **Linting**: <finding or "no issues visible">
+- 🟢 **Pattern**: <finding or "follows T3 pattern">
+- 🟢 **Docs**: <finding or "no doc updates needed">""",
+)
+
+
+MONEDULA = Reviewer(
+    skill="monedula",
+    display="Monedula",
+    emoji="🪙",
+    persona=(
+        "Monedula, the finance-domain agent, reviewing only the "
+        "finance/payment-relevant parts of this PR"
+    ),
+    checklist="""\
+1. **Hardcoded payee data** — any literal IBAN, account number, wallet address, \
+amount, or contact detail in the diff? These MUST be read from env or parquet, \
+never hardcoded. Flag every literal.
+2. **Payment profiles** — new/changed payment logic should resolve payee + \
+account data from Neotoma payment_profile entities or parquet/env, not inline \
+constants.
+3. **Yoga payments** — must NEVER set a memo / OP_RETURN. Flag any `memo=` on a \
+yoga payment path.
+4. **Yoga / therapy tasks** — must NEVER be marked completed; only `due_date` is \
+updated. Flag any status→done transition on those task types.
+5. **Idempotency / safety** — payment execution paths should be idempotent and \
+guard against double-send. Flag missing idempotency keys or retry-without-guard.""",
+    findings="""\
+- 🔴 **Hardcoded payee data**: <finding or "none — reads from env/parquet">
+- 🔴 **Yoga memo / OP_RETURN**: <finding or "no memo on yoga path">
+- 🟡 **Payment profiles**: <finding or "resolved from entities/parquet">
+- 🟡 **Yoga/therapy completion**: <finding or "due_date-only, never completed">
+- 🟢 **Idempotency**: <finding or "guarded">""",
+)
+
+
+# Domain skill → Reviewer. Extend this map as domain agents are onboarded; a
+# skill resolve_reviewers() returns without an entry here is skipped (logged).
+DOMAIN_REVIEWERS: dict[str, Reviewer] = {
+    "monedula": MONEDULA,
+}
+
+
+def select_reviewers(changed_files: list[str]) -> list[Reviewer]:
+    """Loxia (baseline) plus any registered domain reviewer whose domain the PR
+    touches. Order-stable: Loxia first, then domains in routing order."""
+    reviewers: list[Reviewer] = [LOXIA]
+    for skill in resolve_reviewers(changed_files):
+        reviewer = DOMAIN_REVIEWERS.get(skill)
+        if reviewer:
+            reviewers.append(reviewer)
+        else:
+            print(
+                f"[loxia] domain '{skill}' has no registered reviewer yet — "
+                "skipping (Loxia still covers it)"
+            )
+    return reviewers
+
+
+def build_prompt(reviewer: Reviewer, diff: str, changed_files: list[str]) -> str:
+    return PROMPT_SCAFFOLD.format(
+        persona=reviewer.persona,
+        display=reviewer.display,
+        emoji=reviewer.emoji,
+        checklist=reviewer.checklist,
+        findings=reviewer.findings,
+        repo=REPO,
+        pr_number=PR_NUMBER,
+        changed_files=", ".join(changed_files) if changed_files else "(none)",
+        max_diff_chars=MAX_DIFF_CHARS,
+        diff=diff,
+        head_sha=HEAD_SHA[:12] if HEAD_SHA else "unknown",
+    )
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
+
+
+def run_reviewer(reviewer: Reviewer, diff: str, changed_files: list[str]) -> None:
+    """Build the prompt, call Claude, and (unless dry-run) post the comment and
+    file a Neotoma issue on REQUEST_CHANGES — all attributed to this reviewer."""
+    prompt = build_prompt(reviewer, diff, changed_files)
+    print(f"[{reviewer.skill}] Calling Claude ({CLAUDE_MODEL})...")
+    review = call_claude(prompt)
+
+    print("\n" + "=" * 60)
+    print(review)
+    print("=" * 60 + "\n")
+
+    if DRY_RUN:
+        print(f"[{reviewer.skill}] DRY RUN — not posting comment or filing issue")
+        return
+
+    post_github_comment(review)
+
+    if "REQUEST_CHANGES" in review:
+        file_neotoma_issue(
+            title=f"{reviewer.display}: PR #{PR_NUMBER} requests changes",
+            body=(
+                f"{reviewer.display} automated review found issues in PR "
+                f"#{PR_NUMBER} ({REPO}).\n\nHead SHA: {HEAD_SHA}\n\n"
+                f"Review:\n\n{review}"
+            ),
+            agent=reviewer.skill,
+        )
 
 
 def main() -> None:
@@ -289,37 +446,14 @@ def main() -> None:
     diff = get_pr_diff()
     changed_files = get_changed_files()
 
-    prompt = REVIEW_PROMPT_TEMPLATE.format(
-        repo=REPO,
-        pr_number=PR_NUMBER,
-        changed_files=", ".join(changed_files) if changed_files else "(none)",
-        max_diff_chars=MAX_DIFF_CHARS,
-        diff=diff,
-        head_sha=HEAD_SHA[:12] if HEAD_SHA else "unknown",
+    reviewers = select_reviewers(changed_files)
+    print(
+        f"[loxia] Reviewers: {', '.join(r.display for r in reviewers)} "
+        f"({len(changed_files)} changed files)"
     )
 
-    print(f"[loxia] Calling Claude ({CLAUDE_MODEL})...")
-    review = call_claude(prompt)
-
-    print("\n" + "=" * 60)
-    print(review)
-    print("=" * 60 + "\n")
-
-    if DRY_RUN:
-        print("[loxia] DRY RUN — not posting comment or filing Neotoma issue")
-        return
-
-    post_github_comment(review)
-
-    # File a Neotoma issue if the review contains REQUEST_CHANGES
-    if "REQUEST_CHANGES" in review:
-        file_neotoma_issue(
-            title=f"Loxia: PR #{PR_NUMBER} requests changes",
-            body=(
-                f"Loxia automated review found issues in PR #{PR_NUMBER} "
-                f"({REPO}).\n\nHead SHA: {HEAD_SHA}\n\nReview:\n\n{review}"
-            ),
-        )
+    for reviewer in reviewers:
+        run_reviewer(reviewer, diff, changed_files)
 
 
 if __name__ == "__main__":
