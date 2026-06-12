@@ -38,6 +38,42 @@ SSE_RECONNECT_DELAY_BASE = 2  # seconds
 SSE_RECONNECT_DELAY_MAX = 60  # seconds
 
 
+def _fetch_snapshot(entity_id: str, base_url: str, token: str | None) -> dict:
+    """Fetch an entity's current snapshot by id (token-optional / open-mode).
+
+    Neotoma SSE event payloads carry only entity_id/entity_type/action — no
+    snapshot — so a daemon routing on event.snapshot would see an empty dict
+    (tags=[], assigned_to=None) and dispatch nothing. When the event arrives
+    without a snapshot we re-fetch it here so every handler gets populated
+    routing fields. Best-effort: returns {} on any failure (never raises into
+    the stream). Sends the bearer only when one is configured, matching the
+    open-mode (no-auth) :9180 deployment.
+    """
+    if not entity_id:
+        return {}
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        resp = httpx.get(
+            f"{base_url.rstrip('/')}/entities/{entity_id}",
+            headers=headers,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001 — never break the event loop
+        log.warning(f"[sse] snapshot re-fetch failed for {entity_id}: {exc}")
+        return {}
+    # Unwrap the {snapshot: {...}} envelope Neotoma returns; fall back to the
+    # top-level object if it already looks like a flat snapshot.
+    if isinstance(data, dict):
+        snap = data.get("snapshot")
+        if isinstance(snap, dict) and snap:
+            return snap
+        if isinstance(data.get("entity_id"), str):
+            return data
+    return {}
+
+
 @dataclass
 class NeotomaEvent:
     """A single event from the Neotoma SSE stream."""
@@ -174,6 +210,12 @@ class SSEClient:
                     if not self._running:
                         break
                     if event:
+                        # SSE payloads omit the snapshot; re-fetch it so handlers
+                        # route on real fields instead of an empty dict.
+                        if not event.snapshot and event.entity_id:
+                            event.snapshot = _fetch_snapshot(
+                                event.entity_id, self._base_url, self._token
+                            )
                         try:
                             await handler(event)
                         except Exception as exc:
