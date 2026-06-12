@@ -63,6 +63,19 @@ from lib.daemon_runtime.grant_checker import (  # noqa: E402
     check_param_constraints,
 )
 
+# Session-integrity (ateles#6 layer 2): observe-only invariant riding the same
+# tools/call chokepoint. Soft-imported so a refactor of this sibling module can
+# never break the grant-enforcement path.
+try:
+    from session_integrity import SessionIntegrityTracker  # noqa: E402
+except Exception:  # noqa: BLE001
+    try:
+        from execution.mcp.mcp_tool_grant_proxy.session_integrity import (  # noqa: E402
+            SessionIntegrityTracker,
+        )
+    except Exception:  # noqa: BLE001
+        SessionIntegrityTracker = None  # type: ignore
+
 DEBUG = os.environ.get("MCP_GRANT_PROXY_DEBUG") == "1"
 log = logging.getLogger("mcp_tool_grant_proxy")
 logging.basicConfig(
@@ -175,6 +188,11 @@ async def _pump_downstream_to_client(
 async def run_proxy(server_name: str, downstream_cmd: list[str]) -> int:
     agent_sub = os.environ.get("ATELES_AGENT_SUB", "")
     enforcer = GrantEnforcer(agent_sub, server_name)
+    tracker = (
+        SessionIntegrityTracker(agent_sub, server_name)
+        if SessionIntegrityTracker is not None
+        else None
+    )
 
     log.info(
         f"[proxy] server={server_name} agent_sub={agent_sub or '<none/advisory>'} "
@@ -213,12 +231,18 @@ async def run_proxy(server_name: str, downstream_cmd: list[str]) -> int:
             if not line:
                 break
             forwarded = await _handle_client_line(
-                line, enforcer, server_name, agent_sub, downstream, client_writer
+                line, enforcer, server_name, agent_sub, downstream, client_writer, tracker
             )
             if forwarded:
                 downstream.stdin.write(line)
                 await downstream.stdin.drain()
     finally:
+        # Session-integrity audit (observe-only) — emit before teardown.
+        if tracker is not None:
+            try:
+                tracker.finalize()
+            except Exception as exc:  # noqa: BLE001 — never block teardown
+                log.debug(f"session-integrity finalize error (ignored): {exc}")
         # Client stdin closed: signal EOF to downstream so it can finish
         # emitting any in-flight responses, then drain the relay before exit.
         try:
@@ -245,6 +269,7 @@ async def _handle_client_line(
     agent_sub: str,
     downstream,
     client_writer,
+    tracker=None,
 ) -> bool:
     """
     Decide whether to forward a client line to the downstream server.
@@ -264,6 +289,11 @@ async def _handle_client_line(
     tool = params.get("name", "")
     arguments = params.get("arguments") or {}
     request_id = msg.get("id")
+
+    # Session-integrity (observe-only): record the write signal regardless of
+    # the grant decision. Never affects whether the call is forwarded.
+    if tracker is not None:
+        tracker.observe(tool, arguments)
 
     allowed, reason = enforcer.enforce(tool, arguments)
 
