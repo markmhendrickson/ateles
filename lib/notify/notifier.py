@@ -63,6 +63,12 @@ class Priority(str, Enum):
     CRITICAL = "critical"
     BLOCKER = "blocker"
     OPERATOR_DECISION = "operator_decision"
+    # WARN: degraded-but-running conditions (dispatch failures, skipped work).
+    # Delivers immediately outside the silence window, queues for digest inside
+    # it. Added because daemons (formica, neotoma-agent, apis a2a) already
+    # sent Priority.WARN, which crashed with AttributeError on the very paths
+    # meant to report failures.
+    WARN = "warn"
     INFO = "info"
 
 
@@ -145,6 +151,12 @@ class Notifier:
                 self._digest_queue.append(f"⚠️ {full_message}")
                 return False
             return self._deliver(f"⚠️ {full_message}", force=False)
+
+        if prio == Priority.WARN:
+            if self._in_silence_window() and not bypass_silence:
+                self._digest_queue.append(f"⚠ {full_message}")
+                return False
+            return self._deliver(f"⚠ {full_message}", force=False)
 
         # INFO — always digest
         self._digest_queue.append(full_message)
