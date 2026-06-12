@@ -109,7 +109,7 @@ Records a single tool call or decision emitted by an agent during a gate. Writte
 ### `agent_policy`
 **Schema ID**: `74c79ceb-161b-49d4-b2ef-de2ef5c2168f` · **v1.0**
 
-Declarative policy rules scoped to an agent or domain. Used by the harness to gate tool calls and by Onychomys to surface override conflicts.
+Declarative policy rules scoped to an agent or domain. Used by the harness to gate tool calls and by Ateles to surface override conflicts.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -147,7 +147,7 @@ See [taxonomy.md](taxonomy.md) for the full agent roster and AAuth sub assignmen
 ### `daemon_report`
 **Schema ID**: `a9ea8131-502f-44e7-87a6-8149bab7d55c` · **v1.0**
 
-Structured status/error report emitted by T3 daemons. Anthus surfaces `error` and `critical` severity reports to Onychomys.
+Structured status/error report emitted by T3 daemons. Anthus surfaces `error` and `critical` severity reports to Ateles.
 
 ### `harness_event`
 **Schema ID**: `689230f4-cd83-49b6-baa7-a752cf70629d` · **v1.0**
@@ -155,13 +155,13 @@ Structured status/error report emitted by T3 daemons. Anthus surfaces `error` an
 Low-level harness lifecycle events (gate open, artifact emit, gate close).
 
 ### `escalation`
-Escalation entities are created by any daemon or agent when a condition requires operator attention. Anthus forwards all escalations to Onychomys via Telegram.
+Escalation entities are created by any daemon or agent when a condition requires operator attention. Anthus forwards all escalations to Ateles via Telegram.
 
 ---
 
 ## Strategy hierarchy schemas
 
-Four-layer DAG: `business_strategy → domain_strategy → agent_strategy → agent_definition`. Execution-only agents (Gryllus, Vanellus, Struthio, Regulus) inherit from `domain_strategy` without a personal `agent_strategy` layer.
+Four-layer DAG: `business_strategy → domain_strategy → agent_strategy → agent_definition`. Execution-only agents (Cicada, Vanellus, Struthio, Regulus) inherit from `domain_strategy` without a personal `agent_strategy` layer.
 
 ### `business_strategy`
 **Schema ID**: `21a8a4bb-c5ca-465e-b4ed-2e703a18a8c5` · **v1.0**
@@ -178,7 +178,7 @@ Per-product-area strategy (product, eng, GTM, compliance, ops). Links to `busine
 ### `agent_strategy`
 **Schema ID**: `47f33921-8649-4e42-82d1-35cf6a20013c` · **v1.0**
 
-Per-strategic-agent strategy (Pavo, Bombycilla, Accipiter, Ciconia, Buteo, Columba). Links to `domain_strategy_ref`. Fields: `agent_sub` + `title` (required), plus `objective`, `success_criteria`, `evaluation_schedule`, `drift_signal_threshold`, `status`.
+Per-strategic-agent strategy (Pavo, Waxwing, Accipiter, Ciconia, Buteo, Columba). Links to `domain_strategy_ref`. Fields: `agent_sub` + `title` (required), plus `objective`, `success_criteria`, `evaluation_schedule`, `drift_signal_threshold`, `status`.
 
 **canonical_name_fields**: `[agent_sub, title]`
 

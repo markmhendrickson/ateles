@@ -27,7 +27,7 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 
 | Name | Description | Status |
 |---|---|---|
-| OpenClaw | Multi-channel Claude Code host; current implementation for Onychomys | active |
+| OpenClaw | Multi-channel Claude Code host; current implementation for Ateles | active |
 | Custom Agent SDK loop | Single-channel bespoke host; valid alternative for low-surface-area setups | available |
 | Raw aiohttp + Bot API | Low-ceremony webhook loop; valid when no framework is needed | available |
 | launchd | macOS system daemon host for all T3 daemons | active |
@@ -38,8 +38,8 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 
 | Name | Genus | Description | Status |
 |---|---|---|---|
-| **Onychomys** | *Onychomys* (grasshopper mouse) | Primary operator interface; runs in OpenClaw; OnychomysBot on Telegram; sole pager | active |
-| **Menura** | *Menura* (lyrebird) | Public-facing personal representative at markmhendrickson.com/agent/; read-only public-scoped AAuth identity; routes inbound interest to Onychomys | planned (Phase 3) |
+| **Ateles** | *Ateles* (spider monkey) — root agent; shares the repo's name; renamed for voice/ASR robustness (was Onychomys) | Primary operator interface; runs in OpenClaw; AtelesBot on Telegram; sole pager | active |
+| **Menura** | *Menura* (lyrebird) | Public-facing personal representative at markmhendrickson.com/agent/; read-only public-scoped AAuth identity; routes inbound interest to Ateles | planned (Phase 3) |
 
 ---
 
@@ -54,7 +54,7 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 | **Piculet** | *Picumnus* (piculet woodpecker) | JS | Audio transcription daemon; monitors for new audio files, transcribes, stores in Neotoma | active |
 | **Strix** | *Strix* (wood owl) | Python | Meeting/ambient audio recorder (menu bar app) | active |
 | **Apis** | *Apis* (honeybee) | Python | Universal task dispatcher; subscribes to task events; routes to right agent + harness; absorbs Monedula's task scope | planned (Phase 4) |
-| **Anthus** | *Anthus* (pipit) | Python | Swarm coordinator — global view of work-in-flight; surfaces conflicts to Onychomys | planned (Phase 2 skeleton, Phase 6 full) |
+| **Anthus** | *Anthus* (pipit) | Python | Swarm coordinator — global view of work-in-flight; surfaces conflicts to Ateles | planned (Phase 2 skeleton, Phase 6 full) |
 | **Tyto** | *Tyto* (barn owl) | Python | Screenshot watcher; visual counterpart to Strix | planned (Phase 2 skeleton) |
 | **Turdus** | *Turdus* (thrush) | Python | Email triage daemon; hourly Gmail poll → tasks for Apis | active (Phase 2 skeleton) |
 | **Gorilla** | *Gorilla* (gorilla) | Python | Health & fitness daemon; proactive weekly training summaries + inactivity nudges from `workout_session` data (companion to the invocable Gorilla agent) | active (skeleton) |
@@ -65,7 +65,7 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 
 | Name | Genus | Description | Status |
 |---|---|---|---|
-| **Gryllus** | *Gryllus* (field cricket) | Issue worker — fixes issues, opens PRs across repos via passed-in identity | planned (Phase 3) |
+| **Cicada** | *Gryllus* (field cricket) — common insect name adopted for voice/ASR robustness (was Gryllus) | Issue worker — fixes issues, opens PRs across repos via passed-in identity | planned (Phase 3) |
 | **Vanellus** | *Vanellus* (lapwing) | PR steward — triages and merges eligible PRs | planned (Phase 5) |
 | **Sturnus** | *Sturnus* (starling) | Feedback digester — extracts entities from `product_feedback` | planned (Phase 6) |
 | **Strigops** | *Strigops* (kakapo) | Analytics gatherer — pluggable backends: Umami, GA4, GSC, X, Typefully, LinkedIn, Instagram | planned (Phase 7) |
@@ -102,8 +102,8 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 | Name | Genus | Role | Status |
 |---|---|---|---|
 | **Pavo** | *Pavo* (peacock) | Product manager — prioritisation synthesiser, tagging governance | planned (Phase 8) |
-| **Paradisaea** | *Paradisaea* (bird-of-paradise) | Designer — UI/copy review, visual consistency | planned (Phase 8) |
-| **Bombycilla** | *Bombycilla* (waxwing) | Technical architect — layered architecture, schema review | planned (Phase 8) |
+| **Manucode** | *Manucodia* (manucode, a bird-of-paradise) — adopted for voice/ASR robustness (was Paradisaea) | Designer — UI/copy review, visual consistency | planned (Phase 8) |
+| **Waxwing** | *Bombycilla* (waxwing) — common name adopted as agent name for voice/ASR robustness (was Bombycilla) | Technical architect — layered architecture, schema review | planned (Phase 8) |
 | **Phoenicurus** | *Phoenicurus* (redstart) | QA — test coverage, regression, scorecard | planned (Phase 8) |
 | **Accipiter** | *Accipiter* (hawk) | UX & product design — user flows, information architecture, interaction specs | planned (Phase 8) |
 | **Mimus** | *Mimus* (mockingbird) | Growth / go-to-market — ICP research, launch announcements, distribution channels | planned (Phase 8) |
@@ -112,7 +112,7 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 | **Buteo** | *Buteo* (buzzard) | Legal / compliance — risk assessment, T&C review | planned (Phase 8) |
 | **Ciconia** | *Ciconia* (stork) | Finance advisor — budget, forecasting, financial modelling | planned (Phase 8) |
 | **Columba** | *Columba* (dove) | Constitution keeper — cross-agent principles, escalation codification | planned (Phase 6) |
-| **Luscinia** | *Luscinia* (nightingale) | Compliance supervisor — legal + regulatory, privacy, data governance | planned (Phase 8) |
+| **Robin** | *Erithacus* (robin) — off-theme common name for voice/ASR robustness (was Luscinia) | Compliance supervisor — legal + regulatory, privacy, data governance | planned (Phase 8) |
 | **Regulus** | *Regulus* (kinglet) | Developer relations — SDK docs, community, developer feedback (not end-user support) | planned (Phase 8) |
 | **Struthio** | *Struthio* (ostrich) | Release manager — changelog, version tagging, release notes, Vanellus trigger | planned (Phase 6) |
 
@@ -121,7 +121,7 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 ## Naming convention
 
 All persistent agents and daemons are named after bird (or plant) genera. Names are chosen for:
-- Mnemonic fit to the agent's function (e.g. Monedula = jackdaw = *moneta* = money; Gryllus = cricket = small, fast, noisy)
+- Mnemonic fit to the agent's function (e.g. Monedula = jackdaw = *moneta* = money; Cicada = cricket = small, fast, noisy)
 - Distinctiveness within the swarm
 - Public shareability (no private associations)
 
@@ -135,7 +135,7 @@ Each T2 and T3 agent has a distinct AAuth keypair with `sub = <name>@ateles-swar
 
 | Agent | AAuth sub | Scope |
 |---|---|---|
-| Onychomys | `onychomys@ateles-swarm` | full operator scope |
+| Ateles | `ateles@ateles-swarm` | full operator scope |
 | Menura | `menura@ateles-swarm` | read-only, `visibility=public` entities only |
 | Monedula | `monedula@ateles-swarm` | task + transaction write |
 | Formica | `formica@ateles-swarm` | issue + PR write |
@@ -154,7 +154,7 @@ Ateles uses dedicated GitHub machine accounts for all automated pushes and PR au
 
 | Account | Used by | Purpose | Status |
 |---|---|---|---|
-| `ateles-agent` | Apus, Formica, Gryllus | Commits mirrored from Neotoma→git; automated PRs and issue comments against the ateles repo | pending creation |
+| `ateles-agent` | Apus, Formica, Cicada | Commits mirrored from Neotoma→git; automated PRs and issue comments against the ateles repo | pending creation |
 | `neotoma-agent` | neotoma-agent daemon | Automated PRs and issue comments against the neotoma repo | pending creation |
 
 ### Setup checklist

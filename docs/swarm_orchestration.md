@@ -77,7 +77,7 @@ The orchestrator's loop becomes:
 
 Why this is better:
 
-- **Density emerges from work signals.** A trivial typo: trigger predicates of expensive agents don't match → only Gryllus runs. A customer-facing privacy-touching feature: 12+ triggers match → 12 agents pile on.
+- **Density emerges from work signals.** A trivial typo: trigger predicates of expensive agents don't match → only Cicada runs. A customer-facing privacy-touching feature: 12+ triggers match → 12 agents pile on.
 - **Adding an agent is local.** Define its `participant_contract` and triggers; it joins all matching work automatically.
 - **`required_when` distinguishes "should participate" from "must produce".** A blocking review (Buteo on a legal-tagged PR) is `required_when`. An advisory observation (Buteo notices a small concern on a non-tagged PR) is `triggers` only — informational, not blocking.
 

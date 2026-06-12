@@ -1,7 +1,7 @@
 # Spec — Per-domain PR review routing
 
 **Status:** proposed (spec only, no implementation)
-**Owner:** Onychomys (orchestration) · implementation TBD
+**Owner:** Ateles (orchestration) · implementation TBD
 **Related:** `.github/workflows/loxia-pr-review.yml`, `execution/scripts/loxia_review.py`, `execution/daemons/apis/routing.py`
 
 ## Problem
@@ -32,7 +32,7 @@ dispatch. The same table is the natural source of truth for review routing:
 |---|---|---|
 | finance | monedula | `execution/**/finance`, payment/invoice/wage files |
 | health | gorilla | workout/fitness files |
-| ops / engineering / agents / neotoma / product / comms | gryllus | daemons, scripts, schemas, docs |
+| ops / engineering / agents / neotoma / product / comms | cicada | daemons, scripts, schemas, docs |
 | ... | ... | (full map lives in `routing.py` `DOMAIN_ROUTES`) |
 
 Each domain agent already has a SKILL.md (`.claude/skills/<agent>/SKILL.md`)

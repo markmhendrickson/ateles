@@ -12,7 +12,7 @@ executes the irreversible publish steps:
     sandbox deploy -> verify -> publish GH Release draft -> post-deploy probes ->
     close resolved issues -> mark release published -> Telegram confirmation
 
-It is invoked AFTER operator approval (e.g. by Onychomys when Mark replies
+It is invoked AFTER operator approval (e.g. by Ateles when Mark replies
 "approve vX.Y.Z" on Telegram, or manually with --version). It never publishes
 without an approved (or explicitly forced) release record.
 

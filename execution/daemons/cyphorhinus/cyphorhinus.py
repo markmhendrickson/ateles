@@ -23,7 +23,7 @@ decision (decision:reply-routing-sse-neotoma-2026-05-27): Neotoma is the source
 of truth; transport is decoupled from execution.
 
 Environment:
-  CYPHORHINUS_TELEGRAM_BOT_TOKEN   CyphorhinusBot token (separate from Onychomys)
+  CYPHORHINUS_TELEGRAM_BOT_TOKEN   CyphorhinusBot token (separate from Ateles)
   CYPHORHINUS_TELEGRAM_CHAT_ID     Operator chat id
   NEOTOMA_BASE_URL / NEOTOMA_BEARER_TOKEN
   CYPHORHINUS_POLL_TIMEOUT         getUpdates long-poll timeout (default 50s)

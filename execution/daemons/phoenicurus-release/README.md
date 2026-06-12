@@ -35,7 +35,7 @@ prepared → pending_approval → approved → publishing → published
 ## publish.py
 
 ```bash
-# Publish a specific approved release (normal path, invoked by Onychomys on approval)
+# Publish a specific approved release (normal path, invoked by Ateles on approval)
 python3 publish.py --version v0.16.0
 
 # Plan only — no irreversible actions (safe to run anytime)
@@ -74,18 +74,18 @@ python3 publish.py --version v0.16.0 --force
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram push (via shared `send.mjs`). |
 | `TELEGRAM_TOPIC_PHOENICURUS` | Optional Telegram topic/thread id for release messages. |
 
-## Approval routing (Onychomys)
+## Approval routing (Ateles)
 
-`publish.py` is invoked by Onychomys when the operator replies `approve <version>`
-on Telegram: Onychomys flips the `release_result` to `approved`, then runs
-`python3 publish.py --version <version>`. See the Onychomys SOUL.md
+`publish.py` is invoked by Ateles when the operator replies `approve <version>`
+on Telegram: Ateles flips the `release_result` to `approved`, then runs
+`python3 publish.py --version <version>`. See the Ateles SOUL.md
 "Release approval" section.
 
 ## Install
 
 `publish.py` is invoked on demand, so it does **not** need a scheduled launchd
 agent. `install.sh` only verifies prerequisites (node, npm, gh, flyctl, the env
-vars) and prints the invocation Onychomys should use. Run it once to validate the
+vars) and prints the invocation Ateles should use. Run it once to validate the
 environment:
 
 ```bash

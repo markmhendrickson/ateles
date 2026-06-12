@@ -23,12 +23,12 @@ AAuth solves two intertwined problems:
 2. **Authorization — what is this agent allowed to do, and to which entities and tools?** Each verified `(sub, iss)` is matched against an `agent_grant` entity whose `capabilities` map declares which Neotoma operations the agent can perform. Capabilities can be scoped:
    - by **operation** (`store_structured`, `create_relationship`, `correct`, `retrieve`, …)
    - by **entity type** (`store_structured: ["agent_action_observation", "participation_record"]` instead of `*`)
-   - by **field, scope, or external resource** (e.g. `github_harness:write` scoped to specific repos for Gryllus/Vanellus)
+   - by **field, scope, or external resource** (e.g. `github_harness:write` scoped to specific repos for Cicada/Vanellus)
    - by **MCP tool and parameter** — capability ops of the form `tool:<server>:<tool>` with an optional `param_constraints` map (e.g. `tool:btc-wallet:btc_send_transfer` with `{ "max_amount_sats": 500000 }`). Enforced at runtime by the `mcp_tool_grant_proxy` (see [Tool-level authorization](#tool-level-authorization-issue-26) and [ateles#26](https://github.com/markmhendrickson/ateles/issues/26)).
 
-   The grant is the per-agent policy boundary. Monedula's grant lets it write `transaction` and `payment_profile` but not `agent_definition`; Gryllus's lets it write `agent_action_observation` but not `business_strategy`; a future read-only auditor agent could have a grant that allows `retrieve: *` and nothing else. Wrong-capability writes fail at admission, before any side effect — the boundary lives in Neotoma, not in agent code.
+   The grant is the per-agent policy boundary. Monedula's grant lets it write `transaction` and `payment_profile` but not `agent_definition`; Cicada's lets it write `agent_action_observation` but not `business_strategy`; a future read-only auditor agent could have a grant that allows `retrieve: *` and nothing else. Wrong-capability writes fail at admission, before any side effect — the boundary lives in Neotoma, not in agent code.
 
-So AAuth is both **who** (signed identity) and **what they're allowed to touch** (grant-driven capability scope). The two halves are inseparable: signature verification proves who the agent is; grant admission decides whether that agent is allowed to perform this specific operation on this specific entity type or call this specific tool. Today only Cursor, Gryllus, and Vanellus have grants populated, and most grants use `*` rather than explicit per-entity-type allowlists — tightening this is in the to-do list below.
+So AAuth is both **who** (signed identity) and **what they're allowed to touch** (grant-driven capability scope). The two halves are inseparable: signature verification proves who the agent is; grant admission decides whether that agent is allowed to perform this specific operation on this specific entity type or call this specific tool. Today only Cursor, Cicada, and Vanellus have grants populated, and most grants use `*` rather than explicit per-entity-type allowlists — tightening this is in the to-do list below.
 
 Neotoma's AAuth pipeline:
 1. **Signature verification** — checks the RFC 9421 HTTP Message Signature
@@ -58,25 +58,25 @@ Unifying these formats and publishing all public keys to the same JWKS is on the
 | Cursor IDE | `cursor@markmhendrickson.com` | `sw-cursor-1` | ✅ `.creds/aauth_agent_cursor.private.jwk` | ✅ | ✅ `ent_36b1ccf3...` |
 | Apus | `apus@ateles-swarm` | `apus-edfb838b` | ✅ `ateles-private/keys/apus.json` | ❌ | ❌ |
 | Formica | `formica@ateles-swarm` | `formica-f536eae6` | ✅ `ateles-private/keys/formica.json` | ❌ | ❌ |
-| Gryllus | `gryllus@ateles-swarm` | `gryllus-1534bccd` | ✅ `ateles-private/keys/gryllus.json` | ❌ | ✅ `ent_8e3101e9...` (github_harness:write on ateles) |
+| Cicada | `cicada@ateles-swarm` | `cicada-1534bccd` | ✅ `ateles-private/keys/cicada.json` | ❌ | ✅ `ent_8e3101e9...` (github_harness:write on ateles) |
 | Monedula | `monedula@ateles-swarm` | `monedula-e128133c` | ✅ `ateles-private/keys/monedula.json` | ❌ | ❌ |
 | neotoma-agent | `neotoma-agent@ateles-swarm` | `castor-c50f03d8` | ✅ `ateles-private/keys/neotoma_agent.json` | ❌ | ❌ |
-| Onychomys | `onychomys@ateles-swarm` | `onychomys-854d78fb` | ✅ `ateles-private/keys/onychomys.json` | ❌ | ❌ |
+| Ateles | `ateles@ateles-swarm` | `ateles-854d78fb` | ✅ `ateles-private/keys/ateles.json` | ❌ | ❌ |
 | Vanellus | `vanellus@ateles-swarm` | `vanellus-d919a64c` | ✅ `ateles-private/keys/vanellus.json` | ❌ | ✅ `ent_09762f11...` (github_harness:write on ateles+neotoma) |
 | Anthus | `anthus@ateles-swarm` | — | ❌ | ❌ | ❌ |
 | Tyto, Turdus, Apis | `<name>@ateles-swarm` | — | ❌ | ❌ | ❌ |
 | Menura, Piculet, Strix | `<name>@ateles-swarm` | — | ❌ | ❌ | ❌ |
 | YubiKey hardware tier — Cursor (planned)     | `cursor@markmhendrickson.com`  | `hw-cursor-yk-1`     | not started | not started | covered by existing cursor grant |
 | YubiKey hardware tier — Operator (planned)   | `mark@markmhendrickson.com`    | `hw-operator-yk-1`   | not started | not started | new grant, full capability set |
-| YubiKey hardware tier — Onychomys (planned)  | `onychomys@ateles-swarm`       | `hw-onychomys-yk-1`  | not started | not started | upgrade existing (TBD) |
+| YubiKey hardware tier — Ateles (planned)  | `ateles@ateles-swarm`       | `hw-ateles-yk-1`  | not started | not started | upgrade existing (TBD) |
 | YubiKey hardware tier — Monedula (planned)   | `monedula@ateles-swarm`        | `hw-monedula-yk-1`   | not started | not started | upgrade existing (TBD) |
 | YubiKey hardware tier — Apus (planned)       | `apus@ateles-swarm`            | `hw-apus-yk-1`       | not started | not started | upgrade existing (TBD) |
 
 ### What "active" means per row
 
 - **Keypair on disk + JWKS publish + agent_grant** → fully active, end-to-end attribution and admission. Only Cursor reaches this today.
-- **Keypair on disk only** → daemon can mint AAuth JWTs locally, but external verifiers can't fetch the public key, and Neotoma will verify but won't admit unless a grant matches. Effectively "signs but unadmitted." This covers Apus, Formica, Monedula, neotoma-agent, Onychomys.
-- **Keypair + grant, no JWKS publish** → Gryllus and Vanellus can be admitted by Neotoma for github_harness writes, but only over the local network where Neotoma already has the key. Publishing to JWKS would extend trust to any AAuth resource.
+- **Keypair on disk only** → daemon can mint AAuth JWTs locally, but external verifiers can't fetch the public key, and Neotoma will verify but won't admit unless a grant matches. Effectively "signs but unadmitted." This covers Apus, Formica, Monedula, neotoma-agent, Ateles.
+- **Keypair + grant, no JWKS publish** → Cicada and Vanellus can be admitted by Neotoma for github_harness writes, but only over the local network where Neotoma already has the key. Publishing to JWKS would extend trust to any AAuth resource.
 - **No keypair** → daemon falls back to stub mode (logs a warning, sends no AAuth headers, attribution defaults to operator-scoped auth).
 
 Source for the JWKS file in repo: `execution/website/markmhendrickson/react-app/public/.well-known/`
@@ -94,7 +94,7 @@ Source for the JWKS file in repo: `execution/website/markmhendrickson/react-app/
 
 These are two distinct implementations for two distinct contexts:
 - `execution/scripts/aauth_signer.py` — implements the **full AAuth wire format** (`@hellocoop/httpsig` compatible): signs `@method @authority @path content-type content-digest signature-key`. This is what Neotoma's verifier expects from an external MCP client. Consumes JWK-format keys.
-- `lib/daemon_runtime/aauth_signer.py` — implements a **lighter JWT-only path** for daemons. Consumes PEM-format keys from `ateles-private/keys/<daemon>.json`. Today the daemons that have keypairs (Apus, Formica, Monedula, Gryllus, neotoma-agent, Onychomys, Vanellus) sign locally; daemons without keypairs (Anthus, Tyto, Turdus, Apis) fall back to stub mode.
+- `lib/daemon_runtime/aauth_signer.py` — implements a **lighter JWT-only path** for daemons. Consumes PEM-format keys from `ateles-private/keys/<daemon>.json`. Today the daemons that have keypairs (Apus, Formica, Monedula, Cicada, neotoma-agent, Ateles, Vanellus) sign locally; daemons without keypairs (Anthus, Tyto, Turdus, Apis) fall back to stub mode.
 
 ### Identity provisioning
 
@@ -171,8 +171,8 @@ Current daemon status (May 2026 — see the full topology table above for ground
 | Formica (issue triage) | `formica@ateles-swarm` | ✅ | ❌ | ❌ |
 | Monedula (payments) | `monedula@ateles-swarm` | ✅ | ❌ | ❌ |
 | neotoma-agent | `neotoma-agent@ateles-swarm` | ✅ | ❌ | ❌ |
-| Onychomys (T2 operator) | `onychomys@ateles-swarm` | ✅ | ❌ | ❌ |
-| Gryllus (T4 code worker) | `gryllus@ateles-swarm` | ✅ | ❌ | ✅ (github_harness:write on ateles) |
+| Ateles (T2 operator) | `ateles@ateles-swarm` | ✅ | ❌ | ❌ |
+| Cicada (T4 code worker) | `cicada@ateles-swarm` | ✅ | ❌ | ✅ (github_harness:write on ateles) |
 | Vanellus (T4 PR steward) | `vanellus@ateles-swarm` | ✅ | ❌ | ✅ (github_harness:write on ateles + neotoma) |
 | Anthus (orchestrator) | `anthus@ateles-swarm` | ❌ stub | ❌ | ❌ |
 | Tyto, Turdus, Apis | `<name>@ateles-swarm` | ❌ stub | ❌ | ❌ |
@@ -343,7 +343,7 @@ Note: this script writes a JWK-format key to `.creds/`. The daemon runtime curre
 
 ### 2. Create `agent_grant` entities for remaining subs
 
-Today only Cursor, Gryllus, and Vanellus have grants. Apus, Formica, Monedula, neotoma-agent, and Onychomys sign locally but are not admitted — Neotoma falls back to operator-level attribution. Create one grant per sub, scoped to the operations that daemon needs:
+Today only Cursor, Cicada, and Vanellus have grants. Apus, Formica, Monedula, neotoma-agent, and Ateles sign locally but are not admitted — Neotoma falls back to operator-level attribution. Create one grant per sub, scoped to the operations that daemon needs:
 
 ```bash
 neotoma store agent_grant \
@@ -398,10 +398,10 @@ Planned hardware-tier agents in priority order:
 | Cursor IDE | Operator's direct authoring surface — corrections, deletions, grants, schema changes               | `hw-cursor-yk-1`       |
 | Operator   | New subject `mark@markmhendrickson.com` — first-party operator writes outside the IDE              | `hw-operator-yk-1`     |
 | Monedula   | Touches money (Wise transfers, BTC sends) — hardware attestation raises bar for compromise         | `hw-monedula-yk-1`     |
-| Onychomys  | Speaks for the operator on Telegram and routes pages — public-facing identity surface              | `hw-onychomys-yk-1`    |
+| Ateles  | Speaks for the operator on Telegram and routes pages — public-facing identity surface              | `hw-ateles-yk-1`    |
 | Apus       | Mirror pipeline that rewrites disk artifacts from Neotoma — chokepoint for behaviour propagation   | `hw-apus-yk-1`         |
 
-For T4 invocable agents (Gryllus, Vanellus, Pavo, Corvus, etc.), hardware tier is less urgent — they're scoped by `agent_grant` to specific repos/operations, and they don't run as resident services that could be compromised long-term. Software tier remains appropriate for them.
+For T4 invocable agents (Cicada, Vanellus, Pavo, Corvus, etc.), hardware tier is less urgent — they're scoped by `agent_grant` to specific repos/operations, and they don't run as resident services that could be compromised long-term. Software tier remains appropriate for them.
 
 Hardware-tier rollout per agent:
 1. Mint a second keypair on a YubiKey via WebAuthn ceremony for the same `(sub, iss)`

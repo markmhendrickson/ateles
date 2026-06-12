@@ -60,8 +60,8 @@ Restart the daemon after minting so it picks up the new file.
 | monedula | `monedula.json` | legacy PEM |
 | neotoma_agent | `neotoma_agent.json` | legacy PEM |
 | sylvia | `sylvia.json` | legacy PEM |
-| onychomys | `onychomys.json` | legacy PEM |
-| gryllus | `gryllus.json` | legacy PEM |
+| ateles | `ateles.json` | legacy PEM |
+| cicada | `cicada.json` | legacy PEM |
 | apus | `apus.json` | legacy PEM |
 | vanellus | `vanellus.json` | legacy PEM |
 | formica | `formica.json` | legacy PEM |

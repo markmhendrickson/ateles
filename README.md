@@ -32,14 +32,14 @@ Not a framework. Not a toy. A working production blueprint that runs daily under
 
 ```mermaid
 graph TB
-  Operator[Operator markmhendrickson] -->|Telegram, terminal| Onychomys
-  Onychomys[Onychomys T2 — primary interface] -->|paged via priority_rubric| Operator
-  Anthus[Anthus T3 — swarm coordinator] -->|notifies| Onychomys
-  Anthus -->|dispatch| Gryllus[Gryllus T4 — code]
+  Operator[Operator markmhendrickson] -->|Telegram, terminal| Ateles
+  Ateles[Ateles T2 — primary interface] -->|paged via priority_rubric| Operator
+  Anthus[Anthus T3 — swarm coordinator] -->|notifies| Ateles
+  Anthus -->|dispatch| Cicada[Cicada T4 — code]
   Anthus -->|dispatch| Vanellus[Vanellus T4 — review]
   Anthus -->|dispatch| Pavo[Pavo T4 — PM]
   Anthus -->|dispatch| Others[20+ other T4 agents]
-  Gryllus & Vanellus & Pavo & Others -->|every tool call| Harness[github_harness MCP]
+  Cicada & Vanellus & Pavo & Others -->|every tool call| Harness[github_harness MCP]
   Harness -->|AAuth verify, PAT lookup, observation record| Neotoma[(Neotoma)]
   Apus[Apus T3 — mirror webhook receiver] -->|regenerates SKILL.md from| Neotoma
   Neotoma -->|SSE events| Anthus
@@ -80,9 +80,9 @@ Everything Ateles knows about itself is a Neotoma entity. The filesystem is a ge
 **What this means in practice:**
 
 - **Behaviour changes are corrections, not commits.** Updating Pavo's prompt is `neotoma correct --entity-id ent_… --field prompt_markdown`. Apus regenerates the SKILL.md mirror on the next webhook. Direct edits to `.claude/skills/pavo/SKILL.md` are reverted.
-- **Capability changes are entities, not configs.** Granting Gryllus access to a new repo is a `correct()` on the `agent_grant` entity. The next `github_harness` call sees the new scope on the next pre-check; no daemon restart.
+- **Capability changes are entities, not configs.** Granting Cicada access to a new repo is a `correct()` on the `agent_grant` entity. The next `github_harness` call sees the new scope on the next pre-check; no daemon restart.
 - **Workflow changes are entities, not code.** Adding a phase to the copy workflow is a `correct()` on the `workflow_definition` entity. Anthus picks it up from the SSE event stream.
-- **Audit is a query, not a grep.** "What did Gryllus do last Tuesday?" is `retrieve_entities --entity-type agent_action_observation --agent-sub gryllus@ateles-swarm`. Git logs only show committed code; observations cover every harness call, including reads.
+- **Audit is a query, not a grep.** "What did Cicada do last Tuesday?" is `retrieve_entities --entity-type agent_action_observation --agent-sub cicada@ateles-swarm`. Git logs only show committed code; observations cover every harness call, including reads.
 - **Reasoning about the swarm is reasoning about entities.** The mental model is "which entities flow through which daemons", not "which files do which scripts read".
 
 The filesystem layout matters for the runtime substrate — daemons need code on disk, Claude Code needs SKILL.md on disk — but it is downstream of the entity model, not the other way around.
@@ -94,9 +94,9 @@ Four tiers. Twelve product-panel agents plus daemons plus 20+ domain T4s. Naming
 | Tier   | Role                                  | Examples                                                                                  |
 | ------ | ------------------------------------- | ----------------------------------------------------------------------------------------- |
 | **T1** | Hosts (process that owns a channel)   | OpenClaw (Telegram), launchd (daemon scheduling), raw aiohttp Bot API                     |
-| **T2** | Resident agents (always-on, conversational) | Onychomys (primary operator interface), Menura (public-facing personal representative)  |
+| **T2** | Resident agents (always-on, conversational) | Ateles (primary operator interface), Menura (public-facing personal representative)  |
 | **T3** | Daemons (event-driven, persona-less)  | Formica · Anthus · Apus · Apis · Piculet · Strix · Turdus · Monedula · neotoma-agent · Tyto · mic-recorder · Cyphorhinus |
-| **T4** | Invocable agents (stateless, spawned per task) | Pavo · Bombycilla · Phoenicurus · Buteo · Luscinia · Struthio · Accipiter · Corvus · Regulus · Gryllus · Vanellus · Paradisaea · and 20+ domain agents |
+| **T4** | Invocable agents (stateless, spawned per task) | Pavo · Waxwing · Phoenicurus · Buteo · Robin · Struthio · Accipiter · Corvus · Regulus · Cicada · Vanellus · Manucode · and 20+ domain agents |
 
 Full agent table with AAuth identities, grants, and status: [docs/taxonomy.md](docs/taxonomy.md).
 
@@ -144,7 +144,7 @@ A real Pavo dispatch traced through the entity layer. The CLI invocation is one 
 
 9. **Anthus parses the artifact header, updates the `participation_record`** to `status: satisfied`, `satisfied_at: now()`, `artifact_ref: ent_…` pointing at the new `acceptance_criteria` entity.
 
-10. **Anthus advances the workflow.** It opens the next `participation_record` for the next gate (e.g. `gryllus` to scaffold the implementation), and the loop repeats.
+10. **Anthus advances the workflow.** It opens the next `participation_record` for the next gate (e.g. `cicada` to scaffold the implementation), and the loop repeats.
 
 Everything Anthus does after step 1 is driven by entities. The operator can replay the full sequence later with `retrieve_entities` against `agent_action_observation` and `participation_record`. No grep, no git log.
 
@@ -220,7 +220,7 @@ The swarm exposes four operational surfaces, all converging on Neotoma as source
 
 | Interface              | Description                                                                                                                  |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| **Telegram (Onychomys)** | Primary operator surface. Bot at `OnychomysBot`. Receives BLOCKER / OPERATOR_DECISION pages; the operator replies inline.    |
+| **Telegram (Ateles)** | Primary operator surface. Bot at `AtelesBot`. Receives BLOCKER / OPERATOR_DECISION pages; the operator replies inline.    |
 | **`claude --print`**   | Agent dispatch surface used by both operator and Anthus. Each invocation passes `--append-system-prompt "$(cat SKILL.md)"`.   |
 | **GitHub harness MCP** | Every code-touching agent's call surface. AAuth-verified, capability-scoped, observation-logged.                              |
 | **Neotoma SSE**        | The substrate. Daemons subscribe by entity type; new issues, PRs, escalations, daemon reports flow through this stream.       |
@@ -322,8 +322,8 @@ neotoma correct --entity-id ent_… --field prompt_markdown --value "$(cat new_p
 **Updating an agent's capability scope:**
 
 ```bash
-# agent_grant is also an entity. Add a repo to Gryllus's github_harness:write scope:
-neotoma correct --entity-id <gryllus-grant-id> --field repos --append neotoma-docs
+# agent_grant is also an entity. Add a repo to Cicada's github_harness:write scope:
+neotoma correct --entity-id <cicada-grant-id> --field repos --append neotoma-docs
 # Next harness call sees the new scope on the next pre-check; no daemon restart.
 ```
 
