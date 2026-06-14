@@ -71,6 +71,10 @@ echo "  - Checking workflow file compliance..."
 find ./strategy/operations -name "*.md" | \
     xargs python scripts/linters/check_workflow_compliance.py || ERRORS=$((ERRORS + 1))
 
+# Config sourcing (operator-specific config must be env/Neotoma-sourced)
+echo "  - Checking config sourcing (no hardcoded operator config)..."
+python scripts/linters/check_hardcoded_config.py || ERRORS=$((ERRORS + 1))
+
 echo ""
 if [ $ERRORS -eq 0 ]; then
     echo "✅ All linters passed!"

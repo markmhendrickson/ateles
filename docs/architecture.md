@@ -89,6 +89,11 @@ Neotoma sends HMAC-signed webhooks to Apus (`apus.markmhendrickson.com`) on enti
 ### Notification routing
 All agent notifications flow through `lib/notify/` which reads a `priority_rubric` entity from Neotoma at startup. Routing rules (silence windows, digest collapse, escalation ladder) are Neotoma config — not hardcoded. Delivery via [Apprise](https://github.com/caronc/apprise) (Telegram-primary).
 
+### Operator-specific config
+Anything that varies per operator — operator identity (name, email), calendar IDs, recipients, and per-operator entity IDs — is read from env (or parquet / Neotoma) at runtime, never baked into daemon code. This keeps the swarm portable and operator-agnostic: standing up the swarm for a different operator is a config change, not a code edit.
+
+This is a *sourcing* discipline distinct from the public-repo PII boundary. The `.gitleaks.toml` scan guards against third-party PII leaking into the public repo and therefore deliberately allowlists the operator's own identity; it does not enforce env-sourcing. The `scripts/linters/check_hardcoded_config.py` linter (wired into `scripts/lint.sh`) closes that gap — it fails when operator/personal emails, Google Calendar resource IDs, or IBANs are hardcoded in `lib/`, `execution/daemons/`, or `execution/scripts/`.
+
 ---
 
 ## Daemon pattern
