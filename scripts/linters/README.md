@@ -64,8 +64,9 @@ Enforces the Ateles "Neotoma-canonical / env-sourced" config rule in daemon and
 runtime code.
 
 **Purpose:** Flags operator-specific config (operator/personal email literals,
-Google Calendar resource IDs, IBANs) hardcoded in `lib/`, `execution/daemons/`,
-and `execution/scripts/` Python. Per `docs/architecture.md` and `CLAUDE.md`,
+Google Calendar resource IDs, IBANs, Bitcoin addresses) hardcoded in `lib/`,
+`execution/daemons/`, and `execution/scripts/` Python — including in docstring
+examples, since this is a public repo. Per `docs/architecture.md` and `CLAUDE.md`,
 these must be read from env / parquet / Neotoma at runtime — never baked in so
 the swarm stays portable and operator-agnostic.
 

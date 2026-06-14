@@ -65,6 +65,15 @@ CHECKS: list[tuple[re.Pattern[str], str, str]] = [
         "IBAN literal",
         "read from env or contacts.parquet / Neotoma payment_profile, never hardcode",
     ),
+    (
+        # Bitcoin bech32 (bc1...) addresses — unambiguous and what payment
+        # profiles use. Real destination addresses must come from env, never a
+        # literal (even in a docstring example — this is a public repo).
+        re.compile(r"\bbc1[a-z0-9]{25,59}\b"),
+        "Bitcoin address literal",
+        "read from <PREFIX>_BTC_ADDRESS env (Neotoma payment_profile), use a "
+        "<placeholder> in examples",
+    ),
 ]
 
 # Placeholder / example local-parts that are obviously not real config.
