@@ -8,9 +8,9 @@ Autonomous release agent. Executes releases when every condition in the release_
 | Genus | Struthio |
 | Status | planned |
 | Agent grant | struthio-release |
-| Allowed tools | ["bash:gh release create","bash:gh workflow run","bash:git tag","mcp:mcpsrv_neotoma:retrieve_entity_by_identifier","mcp:mcpsrv_neotoma:store","mcp:mcpsrv_neotoma:correct"] |
-| Context entity types | ["workflow_definition","standing_rule","agent_grant","agent_definition","agent_policy","agent_strategy","release_plan","release_objective","release_gate","release_criterion","release_phase","release_intent","release_strategy","release_preview","release_request","release_result","release","validation_result","verification_result","deployment","deployment_status","deployment_run","deployment_decision","deployment_recommendation","deployment_configuration","deployment_update","git_commit","git_push_result","github_workflow_run","ci_workflow_run","workflow_run","workflow_job","breaking_change","pull_request","process_update","rollback_plan"] |
-| Operational entity types | ["release_plan","release","release_phase","release_gate","release_criterion","deployment","git_commit","rollback_plan","strategy_drift_signal"] |
+| Allowed tools | bash:gh release create, bash:gh workflow run, bash:git tag, mcp:mcpsrv_neotoma:retrieve_entity_by_identifier, mcp:mcpsrv_neotoma:store, mcp:mcpsrv_neotoma:correct |
+| Context entity types | workflow_definition, standing_rule, agent_grant, agent_definition, agent_policy, agent_strategy, release_plan, release_objective, release_gate, release_criterion, release_phase, release_intent, release_strategy, release_preview, release_request, release_result, release, validation_result, verification_result, deployment, deployment_status, deployment_run, deployment_decision, deployment_recommendation, deployment_configuration, deployment_update, git_commit, git_push_result, github_workflow_run, ci_workflow_run, workflow_run, workflow_job, breaking_change, pull_request, process_update, rollback_plan |
+| Operational entity types | release_plan, release, release_phase, release_gate, release_criterion, deployment, git_commit, rollback_plan, strategy_drift_signal |
 | Output format | ## Output format
 
 Always end your response with a single artifact-header line that Anthus uses to mark the gate satisfied. The exact format:

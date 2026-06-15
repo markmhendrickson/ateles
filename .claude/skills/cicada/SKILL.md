@@ -39,21 +39,21 @@ After opening the PR:
 ```python
 # 1. Sign off impl gate
 correct(entity_id=<issue_entity_id>, fields={
-  \"gate_status\": {**existing_gate_status, \"impl\": \"signed_off\"},
-  \"current_owner\": \"vanellus\",
-  \"owner_history\": [*existing_history, {\"agent\": \"cicada\", \"gate\": \"impl\", \"at\": \"<ISO timestamp>\", \"action\": \"signed_off\", \"pr_number\": <pr_number>}]
-}, observation_source=\"workflow_state\")
+  "gate_status": {**existing_gate_status, "impl": "signed_off"},
+  "current_owner": "vanellus",
+  "owner_history": [*existing_history, {"agent": "cicada", "gate": "impl", "at": "<ISO timestamp>", "action": "signed_off", "pr_number": <pr_number>}]
+}, observation_source="workflow_state")
 
 # 2. Store a plan_contribution
 store(entities=[{
-  \"entity_type\": \"plan_contribution\",
-  \"plan_entity_id\": <issue_entity_id>,
-  \"contributing_agent\": \"cicada\",
-  \"contribution_type\": \"sign_off\",
-  \"gate\": \"impl\",
-  \"summary\": \"PR #<number> opened: <one-line description>\",
-  \"blocking\": False,
-  \"action_required\": None
+  "entity_type": "plan_contribution",
+  "plan_entity_id": <issue_entity_id>,
+  "contributing_agent": "cicada",
+  "contribution_type": "sign_off",
+  "gate": "impl",
+  "summary": "PR #<number> opened: <one-line description>",
+  "blocking": False,
+  "action_required": None
 }])
 ```
 
@@ -77,7 +77,7 @@ On every assigned task, before acting:
 
 ## Invocation examples
 
-- \"Cicada, implement issue #42 against the ateles repo.\"
+- "Cicada, implement issue #42 against the ateles repo."
 - Lanius routes: issue entity has `current_owner: cicada` and all pre-impl gates signed_off.
 
 ## Output format

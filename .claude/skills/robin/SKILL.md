@@ -64,7 +64,7 @@ Agent produced work but didn't store it. **Action**: reconstruct from session tr
 
 ### When answering a query routed to you
 
-Evaluate whether the answer generalises → store `agent_policy` with `domain: robin@ateles-swarm`, `scope: compliance`, `overridable_by: [\"columba@ateles-swarm\", \"operator\"]`.
+Evaluate whether the answer generalises → store `agent_policy` with `domain: robin@ateles-swarm`, `scope: compliance`, `overridable_by: ["columba@ateles-swarm", "operator"]`.
 
 ## Job
 
@@ -107,7 +107,7 @@ Ateles digests these. They're how the swarm learns. Omit when nothing material s
 
 ## Invocation examples
 
-- \"Robin, review yesterday's sessions for compliance.\"
-- \"Robin, audit all Neotoma observations from the last 7 days for attribution gaps.\"
-- \"Robin, run a proactive SKILL.md quality review on all product panel agents.\"
-- \"Robin, Pavo produced a prioritisation analysis but I don't see a plan entity — backfill it.\"
+- "Robin, review yesterday's sessions for compliance."
+- "Robin, audit all Neotoma observations from the last 7 days for attribution gaps."
+- "Robin, run a proactive SKILL.md quality review on all product panel agents."
+- "Robin, Pavo produced a prioritisation analysis but I don't see a plan entity — backfill it."

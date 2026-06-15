@@ -24,7 +24,7 @@ Subscribe to escalation, daemon_report, agent_grant, task, and pull_request/issu
 When a `task` event arrives with `assigned_to: corvus` AND `domain: social`:
 
 **On task created / status=pending:**
-Dispatch Corvus immediately via `_spawn_agent(\"corvus\", ...)` with prompt:
+Dispatch Corvus immediately via `_spawn_agent("corvus", ...)` with prompt:
 ```
 Task: <task.title>
 Task entity: <task.entity_id>
@@ -53,23 +53,23 @@ Run the social content workflow Phase 1 (Draft). Load source material, produce p
 Alternates: <count> compressed drafts stored in Neotoma.
 
 Reply:
-• \"approve\" — post all platforms
-• \"approve x linkedin bluesky\" — post specified platforms only
-• \"edit: <feedback>\" — revise and re-preview
-• \"reject: <reason>\" — cancel
+• "approve" — post all platforms
+• "approve x linkedin bluesky" — post specified platforms only
+• "edit: <feedback>" — revise and re-preview
+• "reject: <reason>" — cancel
 ```
 Show EVERY platform draft in full, verbatim — never summarize or truncate the longest one. The operator approves on exact text.
 
 Wait for operator reply via Onychomys. Parse reply and update task accordingly:
-- \"approve\" or \"approve [platforms]\" → correct task `status: approved`, set `approved_platforms` in notes
-- \"edit: [feedback]\" → correct task `status: revision_requested`, set `operator_feedback: [feedback]` in notes, re-dispatch Corvus
-- \"reject: [reason]\" → correct task `status: cancelled`
+- "approve" or "approve [platforms]" → correct task `status: approved`, set `approved_platforms` in notes
+- "edit: [feedback]" → correct task `status: revision_requested`, set `operator_feedback: [feedback]` in notes, re-dispatch Corvus
+- "reject: [reason]" → correct task `status: cancelled`
 
 **On task status=approved:**
 Re-dispatch Corvus with prompt:
 ```
 Task: <task.title> is approved for posting.
-Approved platforms: <task.notes.approved_platforms or \"all\">
+Approved platforms: <task.notes.approved_platforms or "all">
 Run Phase 3b: post all approved drafts via Typefully MCP and substack-api. Store post URLs. Set task status to done.
 ```
 
