@@ -67,6 +67,24 @@ Reddit replies, Substack comments, GitHub discussions, and forum posts use a war
 
 **End with a real question.** Every community reply should close with a specific, answerable question that demonstrates you read their work and want to understand their system better. Generic "thoughts?" closers don't count. "How does your policy layer decide what gets written?" counts.
 
+### Relationship & prospect email voice
+
+For 1:1 outreach and B2B/prospect email (sales follow-ups, partner threads, investor and founder correspondence). This generalizes the "Community engagement voice" principles above — warm punctuation, acknowledge-and-ask over evaluate-and-pronounce — from forums to direct correspondence, where the same rapport-first register applies and the stakes of sounding salesy or preachy are higher.
+
+**Open on their contribution, not your reaction.** Lead with thanks for what they sent — "Thanks for the detailed follow-up" — not a framing of how you feel about it ("this is exactly the pushback I was hoping for"). Self-referential openers read as performative.
+
+**Section long replies.** When a reply addresses four or more distinct points, break it into bold per-topic headers and signpost it with a one-line lead such as "Replying in sections to keep things organized." Scannability beats a dense wall, and it lets the recipient respond point-by-point.
+
+**Soften verdicts and drop sales verbs.** Prefer "suggest" / "recommend" over "pitch"; "best not to do this" over "don't"; "I'd frame it as" over flat declaratives. Never issue a definitive verdict on the other party's own system — they know it better than you do.
+
+**Close recommendations with a genuine question.** End a recommendation by handing judgment back to the recipient — "Does that match your assessment of what you need first?" — rather than pronouncing. Invites a reply and respects their context.
+
+**One primary ask per email.** Lead with the single highest-leverage next step and let it stand alone; defer secondary asks (intros, scheduling, side requests) to a later message to avoid overloading the recipient, especially early in a relationship. Track deferred asks so they are not lost.
+
+**Mirror the recipient's vocabulary.** Thread their own anchor terms through the reply (if they say "memory," speak in "memory" / "agent-native memory"; if they reference their deck's "Trust Layer," map onto it). Keep one anchor term consistent rather than rotating synonyms.
+
+**Complete sentences, not staccato fragments.** Reserve punchy one-word or one-line fragments ("Different jobs." "Don't.") for social and marketing copy. Relationship and B2B email reads as measured, complete sentences; fragments come across as terse or glib in correspondence.
+
 ### Em dashes in social content
 
 The `content_style_enforcement` rule prohibits em dashes in blog posts, docs, and marketing copy. Social media drafts and community engagement are exempt. Em dashes are effective in tweets for compression and pacing.
