@@ -151,3 +151,13 @@ def test_lanius_verdict_on_first_try_not_retried(monkeypatch):
     asyncio.run(dispatcher._handle_pr(_trigger()))
 
     assert calls == ["lanius"]
+
+
+def test_lanius_pr_prompt_carries_legacy_issue_rule():
+    # The PR-gate prompt must teach Lanius the legacy distinction so an issue
+    # that predates the pipeline (no gate metadata) is cleared, not blocked.
+    prompt = SwarmDispatcher._lanius_pr_prompt(_trigger(), parent=80)
+    assert "LEGACY-ISSUE RULE" in prompt
+    assert "never initialized" in prompt or "NO gate_status" in prompt
+    assert "GATE_INHERITANCE: clear" in prompt
+    assert "trigger_swarm_pr.py issue" in prompt
