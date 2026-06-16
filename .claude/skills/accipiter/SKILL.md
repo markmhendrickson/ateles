@@ -3,10 +3,6 @@
 ---
 entity_id: ent_7079893d01e208cde15a4f52
 entity_type: agent_definition
-schema_version: 1.4.0
-last_observation_at: 2026-05-25T10:36:07.902Z
-observation_count: 24
-computed_at: 2026-05-25T10:36:07.902Z
 name: accipiter
 description: Invoke Accipiter, the UX and product design agent — user flows, information architecture, UI implementation specs, usability review. Structure and friction, not aesthetics.
 triggers:

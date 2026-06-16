@@ -3,10 +3,6 @@
 ---
 entity_id: ent_6f90952eaf5d1eed51b9621c
 entity_type: agent_definition
-schema_version: 1.4.0
-last_observation_at: 2026-05-25T10:35:43.602Z
-observation_count: 23
-computed_at: 2026-05-25T10:35:43.602Z
 name: buteo
 description: Invoke Buteo, the legal agent — contract review, marketing copy legal risk, privacy/GDPR compliance, IP and open-source licence audit. Risk analysis, not legal advice.
 triggers:
