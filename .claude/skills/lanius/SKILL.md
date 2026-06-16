@@ -3,10 +3,6 @@
 ---
 entity_id: ent_f9c2c573e7fba5bc8c3e58c3
 entity_type: agent_definition
-schema_version: 1.2.0
-last_observation_at: 2026-05-23T14:42:37.426Z
-observation_count: 16
-computed_at: 2026-05-23T14:42:37.426Z
 name: lanius
 description: Invoke Lanius, the GitHub workflow coordinator — routes issues through the gate pipeline, enforces PR gate inheritance, evaluates waiver requests, and runs stale sweeps.
 triggers:
