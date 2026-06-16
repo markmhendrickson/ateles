@@ -124,6 +124,16 @@ that introduced it — against itself. Fixes that came out of that run:
   agent to open GitHub comments with
   `**🤖 <Agent> — Ateles swarm, <role>**`, and dispatcher-posted fallback
   comments carry the same header plus an on-behalf-of footer.
+- **Legacy-issue gate rule** — Lanius distinguishes "gates never
+  initialized" (an issue that predates the pipeline, with no `gate_status`
+  metadata at all) from "gates evaluated and still pending". A legacy issue
+  is *not* hard-blocked: Lanius initializes the gates retroactively, notes
+  the legacy status, and emits `GATE_INHERITANCE: clear` so review proceeds
+  (merge stays operator-gated regardless). `blocked` is reserved for issues
+  whose gates exist and are genuinely unsigned. Surfaced when PR #87's own
+  parent issue (#80) predated the pipeline and was hard-blocked. To run the
+  full issue pipeline on a legacy issue, backfill with
+  `trigger_swarm_pr.py issue <n>`.
 
 ## Agent identity on GitHub
 
