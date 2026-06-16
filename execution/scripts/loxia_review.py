@@ -168,32 +168,73 @@ def call_claude(prompt: str) -> str:
 # ── GitHub comment ─────────────────────────────────────────────────────────────
 
 
-def post_github_comment(body: str) -> None:
-    """Post a review comment to the PR."""
+def review_comment_marker(reviewer: "Reviewer") -> str:
+    """Stable per-reviewer marker so a re-run updates that reviewer's prior
+    comment in place instead of stacking a new one per push. Matches the
+    `## {display} Review {emoji}` heading the prompt scaffold emits, so each
+    of Loxia/Monedula/Gorilla owns exactly one live comment per PR."""
+    return f"## {reviewer.display} Review {reviewer.emoji}"
+
+
+def _github_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+    }
+
+
+def find_existing_review_comment(marker: str) -> int | None:
+    """Return the id of the most recent review comment carrying `marker` on
+    this PR, if any.
+
+    Matched by marker rather than author so it works whether the comment was
+    posted by github-actions[bot] or a machine account, and so each reviewer
+    only ever matches its own comment."""
+    url = (
+        f"{GITHUB_API_URL}/repos/{REPO}/issues/{PR_NUMBER}/comments"
+        "?per_page=100"
+    )
+    req = urllib.request.Request(url, headers=_github_headers(), method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            comments = json.loads(resp.read())
+    except (urllib.error.URLError, json.JSONDecodeError) as exc:
+        print(f"[loxia] Could not list comments (will POST fresh): {exc}",
+              file=sys.stderr)
+        return None
+    matches = [c for c in comments if marker in (c.get("body") or "")]
+    return matches[-1]["id"] if matches else None
+
+
+def post_github_comment(body: str, marker: str | None = None) -> None:
+    """Upsert a review comment on the PR: when `marker` is supplied and a prior
+    comment carries it, update that comment in place; otherwise post fresh."""
     if not GITHUB_TOKEN or not PR_NUMBER or not REPO:
         print("[loxia] Cannot post comment — missing GITHUB_TOKEN/PR_NUMBER/REPO")
         return
 
-    url = f"{GITHUB_API_URL}/repos/{REPO}/issues/{PR_NUMBER}/comments"
-    payload = {"body": body}
+    existing_id = find_existing_review_comment(marker) if marker else None
+    if existing_id is not None:
+        url = f"{GITHUB_API_URL}/repos/{REPO}/issues/comments/{existing_id}"
+        method, action = "PATCH", "updated"
+    else:
+        url = f"{GITHUB_API_URL}/repos/{REPO}/issues/{PR_NUMBER}/comments"
+        method, action = "POST", "posted"
 
     req = urllib.request.Request(
         url,
-        data=json.dumps(payload).encode(),
-        headers={
-            "Authorization": f"Bearer {GITHUB_TOKEN}",
-            "Accept": "application/vnd.github+json",
-            "Content-Type": "application/json",
-        },
-        method="POST",
+        data=json.dumps({"body": body}).encode(),
+        headers=_github_headers(),
+        method=method,
     )
 
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             result = json.loads(resp.read())
-            print(f"[loxia] Comment posted: {result.get('html_url', '(no url)')}")
+            print(f"[loxia] Comment {action}: {result.get('html_url', '(no url)')}")
     except urllib.error.URLError as exc:
-        print(f"[loxia] Failed to post comment: {exc}", file=sys.stderr)
+        print(f"[loxia] Failed to {action[:-1]} comment: {exc}", file=sys.stderr)
 
 
 # ── Neotoma issue filing ───────────────────────────────────────────────────────
@@ -438,7 +479,7 @@ def run_reviewer(reviewer: Reviewer, diff: str, changed_files: list[str]) -> Non
         print(f"[{reviewer.skill}] DRY RUN — not posting comment or filing issue")
         return
 
-    post_github_comment(review)
+    post_github_comment(review, marker=review_comment_marker(reviewer))
 
     if "REQUEST_CHANGES" in review:
         file_neotoma_issue(
