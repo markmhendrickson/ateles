@@ -532,9 +532,10 @@ class TestResolveRole:
 
 
 class TestRoleSigningEnvInjection:
-    """Stage 3 of ateles#94: when a real agent_def is loaded, subprocess_env
-    must carry NEOTOMA_AAUTH_ROLE (and ATELES_PRIVATE_KEYS_DIR when set in the
-    parent env).  When degraded, neither var is injected."""
+    """Stage 3 of ateles#94: when a real agent_def is loaded and the role JWK
+    file exists, subprocess_env must carry the three Neotoma AAuth client signer
+    vars (NEOTOMA_AAUTH_PRIVATE_JWK_PATH, NEOTOMA_AAUTH_SUB, NEOTOMA_AAUTH_ISS).
+    When the JWK file is absent or the agent_def is degraded, none are injected."""
 
     def setup_method(self) -> None:
         skill_runner._agent_def_cache.clear()
@@ -544,54 +545,14 @@ class TestRoleSigningEnvInjection:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_real_def_injects_neotoma_aauth_role(
+    def test_real_def_with_jwk_injects_signer_vars(
         self, MockLoader, mock_write_harness, monkeypatch
     ) -> None:
-        """NEOTOMA_AAUTH_ROLE must be set to the role name when agent_def is real."""
+        """When agent_def is real, keys_dir is set, and the JWK file exists:
+        subprocess_env must contain NEOTOMA_AAUTH_PRIVATE_JWK_PATH (correct path),
+        NEOTOMA_AAUTH_SUB (== agent_def.aauth_sub), NEOTOMA_AAUTH_ISS (default),
+        and must NOT contain NEOTOMA_AAUTH_ROLE."""
         fake_def = _make_def(prompt_markdown="Role: Gryllus.", aauth_sub="gryllus@ateles-swarm")
-        instance = MagicMock()
-        instance.load.return_value = fake_def
-        MockLoader.return_value = instance
-
-        captured_env: dict = {}
-
-        async def fake_exec(*cmd, **kwargs):
-            captured_env.update(kwargs.get("env", {}))
-            proc = MagicMock()
-            proc.returncode = 0
-
-            async def _communicate(input=None):
-                return b"output", b""
-
-            proc.communicate = _communicate
-            return proc
-
-        with (
-            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
-            patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "read_text", return_value="skill md"),
-            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
-        ):
-            self._run(
-                skill_runner.run_skill(
-                    "gryllus",
-                    "work prompt",
-                    role="gryllus",
-                    task_entity_id="ent_abc",
-                )
-            )
-
-        assert captured_env.get("NEOTOMA_AAUTH_ROLE") == "gryllus", (
-            "Expected NEOTOMA_AAUTH_ROLE='gryllus' in subprocess env"
-        )
-
-    @patch("skill_runner._write_harness_event")
-    @patch("skill_runner.AgentLoader")
-    def test_real_def_injects_keys_dir_when_parent_has_it(
-        self, MockLoader, mock_write_harness, monkeypatch
-    ) -> None:
-        """ATELES_PRIVATE_KEYS_DIR must be forwarded when the parent env has it."""
-        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
         instance = MagicMock()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
@@ -616,6 +577,7 @@ class TestRoleSigningEnvInjection:
             patch.object(Path, "exists", return_value=True),
             patch.object(Path, "read_text", return_value="skill md"),
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch("os.path.exists", return_value=True),
         ):
             self._run(
                 skill_runner.run_skill(
@@ -626,15 +588,27 @@ class TestRoleSigningEnvInjection:
                 )
             )
 
-        assert captured_env.get("ATELES_PRIVATE_KEYS_DIR") == "/secrets/keys"
+        assert captured_env.get("NEOTOMA_AAUTH_PRIVATE_JWK_PATH") == "/secrets/keys/gryllus.jwk.json", (
+            "Expected NEOTOMA_AAUTH_PRIVATE_JWK_PATH='/secrets/keys/gryllus.jwk.json'"
+        )
+        assert captured_env.get("NEOTOMA_AAUTH_SUB") == "gryllus@ateles-swarm", (
+            "Expected NEOTOMA_AAUTH_SUB='gryllus@ateles-swarm' (agent_def.aauth_sub)"
+        )
+        assert captured_env.get("NEOTOMA_AAUTH_ISS") == "https://markmhendrickson.com", (
+            "Expected NEOTOMA_AAUTH_ISS default 'https://markmhendrickson.com'"
+        )
+        assert "NEOTOMA_AAUTH_ROLE" not in captured_env, (
+            "NEOTOMA_AAUTH_ROLE must not be present — it is superseded by the real signer vars"
+        )
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_real_def_does_not_inject_keys_dir_when_parent_lacks_it(
+    def test_real_def_jwk_absent_does_not_inject_signer_vars(
         self, MockLoader, mock_write_harness, monkeypatch
     ) -> None:
-        """When ATELES_PRIVATE_KEYS_DIR is absent in the parent, do not set it."""
-        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        """When the JWK file does not exist at <keys_dir>/<role>.jwk.json,
+        none of the three signer vars should be injected."""
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.", aauth_sub="gryllus@ateles-swarm")
         instance = MagicMock()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
@@ -652,13 +626,14 @@ class TestRoleSigningEnvInjection:
             proc.communicate = _communicate
             return proc
 
-        monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR", raising=False)
+        monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", "/secrets/keys")
 
         with (
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
             patch.object(Path, "exists", return_value=True),
             patch.object(Path, "read_text", return_value="skill md"),
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch("os.path.exists", return_value=False),
         ):
             self._run(
                 skill_runner.run_skill(
@@ -669,18 +644,23 @@ class TestRoleSigningEnvInjection:
                 )
             )
 
-        # Key must be absent (or its value must be empty/unset from the parent)
-        assert "ATELES_PRIVATE_KEYS_DIR" not in captured_env or not captured_env.get(
-            "ATELES_PRIVATE_KEYS_DIR"
-        ), "ATELES_PRIVATE_KEYS_DIR should not be injected when unset in parent"
+        assert "NEOTOMA_AAUTH_PRIVATE_JWK_PATH" not in captured_env, (
+            "NEOTOMA_AAUTH_PRIVATE_JWK_PATH must not be injected when JWK file is absent"
+        )
+        assert "NEOTOMA_AAUTH_SUB" not in captured_env, (
+            "NEOTOMA_AAUTH_SUB must not be injected when JWK file is absent"
+        )
+        assert "NEOTOMA_AAUTH_ISS" not in captured_env, (
+            "NEOTOMA_AAUTH_ISS must not be injected when JWK file is absent"
+        )
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_degraded_def_does_not_inject_role_signing_vars(
+    def test_degraded_def_does_not_inject_signer_vars(
         self, MockLoader, mock_write_harness, monkeypatch
     ) -> None:
-        """When agent_def is degraded (empty prompt_markdown), neither
-        NEOTOMA_AAUTH_ROLE nor ATELES_PRIVATE_KEYS_DIR should be injected."""
+        """When agent_def is degraded (empty prompt_markdown), none of the signer
+        vars should be injected regardless of whether the JWK file exists."""
         stub = _stub_def()
         instance = MagicMock()
         instance.load.return_value = stub
@@ -706,6 +686,7 @@ class TestRoleSigningEnvInjection:
             patch.object(Path, "exists", return_value=True),
             patch.object(Path, "read_text", return_value="skill md"),
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch("os.path.exists", return_value=True),
         ):
             self._run(
                 skill_runner.run_skill(
@@ -716,9 +697,15 @@ class TestRoleSigningEnvInjection:
                 )
             )
 
-        # Degraded path: signing env must NOT have been injected by run_skill.
-        # (The parent env may still pass ATELES_PRIVATE_KEYS_DIR through the
-        # {**os.environ} spread, but NEOTOMA_AAUTH_ROLE must be absent.)
+        assert "NEOTOMA_AAUTH_PRIVATE_JWK_PATH" not in captured_env, (
+            "NEOTOMA_AAUTH_PRIVATE_JWK_PATH must not be injected when agent_def is degraded"
+        )
+        assert "NEOTOMA_AAUTH_SUB" not in captured_env, (
+            "NEOTOMA_AAUTH_SUB must not be injected when agent_def is degraded"
+        )
+        assert "NEOTOMA_AAUTH_ISS" not in captured_env, (
+            "NEOTOMA_AAUTH_ISS must not be injected when agent_def is degraded"
+        )
         assert "NEOTOMA_AAUTH_ROLE" not in captured_env, (
-            "NEOTOMA_AAUTH_ROLE must not be injected when agent_def is degraded"
+            "NEOTOMA_AAUTH_ROLE must not be injected (it is superseded and was never real)"
         )
