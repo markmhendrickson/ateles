@@ -526,3 +526,199 @@ class TestResolveRole:
         from routing import resolve_role
 
         assert resolve_role(["finance"], assigned_to="apis") == "monedula"
+
+
+# ── Stage 3: role-signing env injection (ateles#94) ───────────────────────────
+
+
+class TestRoleSigningEnvInjection:
+    """Stage 3 of ateles#94: when a real agent_def is loaded, subprocess_env
+    must carry NEOTOMA_AAUTH_ROLE (and ATELES_PRIVATE_KEYS_DIR when set in the
+    parent env).  When degraded, neither var is injected."""
+
+    def setup_method(self) -> None:
+        skill_runner._agent_def_cache.clear()
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_real_def_injects_neotoma_aauth_role(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """NEOTOMA_AAUTH_ROLE must be set to the role name when agent_def is real."""
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.", aauth_sub="gryllus@ateles-swarm")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        captured_env: dict = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            captured_env.update(kwargs.get("env", {}))
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "work prompt",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                )
+            )
+
+        assert captured_env.get("NEOTOMA_AAUTH_ROLE") == "gryllus", (
+            "Expected NEOTOMA_AAUTH_ROLE='gryllus' in subprocess env"
+        )
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_real_def_injects_keys_dir_when_parent_has_it(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """ATELES_PRIVATE_KEYS_DIR must be forwarded when the parent env has it."""
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        captured_env: dict = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            captured_env.update(kwargs.get("env", {}))
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", "/secrets/keys")
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "work prompt",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                )
+            )
+
+        assert captured_env.get("ATELES_PRIVATE_KEYS_DIR") == "/secrets/keys"
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_real_def_does_not_inject_keys_dir_when_parent_lacks_it(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """When ATELES_PRIVATE_KEYS_DIR is absent in the parent, do not set it."""
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        captured_env: dict = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            captured_env.update(kwargs.get("env", {}))
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR", raising=False)
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "work prompt",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                )
+            )
+
+        # Key must be absent (or its value must be empty/unset from the parent)
+        assert "ATELES_PRIVATE_KEYS_DIR" not in captured_env or not captured_env.get(
+            "ATELES_PRIVATE_KEYS_DIR"
+        ), "ATELES_PRIVATE_KEYS_DIR should not be injected when unset in parent"
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_degraded_def_does_not_inject_role_signing_vars(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """When agent_def is degraded (empty prompt_markdown), neither
+        NEOTOMA_AAUTH_ROLE nor ATELES_PRIVATE_KEYS_DIR should be injected."""
+        stub = _stub_def()
+        instance = MagicMock()
+        instance.load.return_value = stub
+        MockLoader.return_value = instance
+
+        captured_env: dict = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            captured_env.update(kwargs.get("env", {}))
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", "/secrets/keys")
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "work prompt",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                )
+            )
+
+        # Degraded path: signing env must NOT have been injected by run_skill.
+        # (The parent env may still pass ATELES_PRIVATE_KEYS_DIR through the
+        # {**os.environ} spread, but NEOTOMA_AAUTH_ROLE must be absent.)
+        assert "NEOTOMA_AAUTH_ROLE" not in captured_env, (
+            "NEOTOMA_AAUTH_ROLE must not be injected when agent_def is degraded"
+        )
