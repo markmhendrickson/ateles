@@ -1,8 +1,8 @@
 # Ateles agents
 
-Reference cards for every `agent_definition` entity in Neotoma, mirrored to disk. Neotoma is canonical; these files are generated — see `execution/scripts/render_agent_docs.py`. Operational prompts live in `.claude/skills/<name>/SKILL.md` (also mirrored). Per agent_policy `ent_c3c5e4a9350250cbf69e08bf`, prompts are public and PII-free.
+The canonical, harness-neutral file for every `agent_definition` entity in Neotoma. Each `<name>.md` carries the full definition (frontmatter + metadata table + operational prompt) and is the source any harness can read. Neotoma is canonical; these files are generated — see `execution/scripts/render_agent_docs.py`. The Claude Code harness loads a generated mirror at `.claude/skills/<name>/SKILL.md` (same entity, minimal frontmatter). Per agent_policy `ent_c3c5e4a9350250cbf69e08bf`, prompts are public and PII-free.
 
-| Agent | Tier | Genus | Status | Prompt | Card |
+| Agent | Tier | Genus | Status | Prompt | File |
 | --- | --- | --- | --- | --- | --- |
 | accipiter | T4 | Accipiter | planned | ✅ | [accipiter.md](accipiter.md) |
 | anthus | T3 | Anthus | active | ✅ | [anthus.md](anthus.md) |

@@ -13,6 +13,8 @@ triggers:
 user_invocable: true
 ---
 
+<!-- Claude Code adapter for agent `gorilla`. Canonical file: docs/agents/gorilla.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
+
 # Gorilla — Health & Fitness Agent
 
 ## Identity

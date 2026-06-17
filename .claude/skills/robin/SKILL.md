@@ -6,9 +6,11 @@ entity_type: agent_definition
 name: robin
 description: Session compliance supervisor (formerly Luscinia; renamed 2026-06-12 for voice/ASR robustness). Monitors agent sessions for SKILL.md and agent_definition compliance, checks Neotoma attribution correctness, fills data gaps when agents failed to persist work they should have stored.
 triggers:
-  - ["robin"
-  - "/robin"]
+  - robin
+  - /robin
 ---
+
+<!-- Claude Code adapter for agent `robin`. Canonical file: docs/agents/robin.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
 
 # Robin — Session Compliance Supervisor
 

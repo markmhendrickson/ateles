@@ -11,6 +11,8 @@ triggers:
 user_invocable: true
 ---
 
+<!-- Claude Code adapter for agent `phoenicurus`. Canonical file: docs/agents/phoenicurus.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
+
 # Phoenicurus — QA
 
 ## Identity

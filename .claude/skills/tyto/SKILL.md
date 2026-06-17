@@ -7,6 +7,8 @@ name: tyto
 description: Screenshot watcher + meeting recording transcription + analysis daemon. (1) Polls TYTO_SCREENSHOTS_DIR for new image files, stores screenshot entities in Neotoma. (2) Polls TYTO_RECORDINGS_DIR for new *remote* AAC/M4A/MP4 files from Audio Hijack; pairs with matching mic file, waits for both to settle, runs transcribe_audio.py with two-file [You]/[Speaker_N] merge (ElevenLabs word timestamps) or remote-only diarization fallback. (3) After transcription, invokes claude --print with /analyze-meeting skill (+ /analyze-neotoma-feedback inline when meeting is Neotoma-oriented) to extract insights, decisions, action items (stored as Neotoma tasks), psychological/interpersonal dynamics, and recap messages. Sends Telegram notification on each stage. Set TYTO_ANALYZE_ENABLED=0 to disable analysis.
 ---
 
+<!-- Claude Code adapter for agent `tyto`. Canonical file: docs/agents/tyto.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
+
 # Tyto — Screenshot Watcher + Recording Transcription Daemon
 
 ## Identity

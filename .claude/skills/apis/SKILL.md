@@ -7,6 +7,8 @@ name: apis
 description: Universal task dispatcher daemon. Subscribes to task.created/updated/due_today SSE events, infers domain tags, routes tasks to appropriate T4 agents (Gryllus, Monedula, etc.) via domain routing table. Phase 4 skeleton; Phase 5 adds subprocess dispatch.
 ---
 
+<!-- Claude Code adapter for agent `apis`. Canonical file: docs/agents/apis.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
+
 # Apis — Universal Task Dispatcher
 
 ## Identity

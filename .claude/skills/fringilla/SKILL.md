@@ -6,14 +6,16 @@ entity_type: agent_definition
 name: fringilla
 description: Invoke Fringilla, the financial analysis agent — quarterly financial reviews, portfolio performance analysis, fixed-cost and subscription reconciliation, income-vs-expense tracking, and anomaly surfacing grounded in the operator's own Neotoma transaction and financial data. Use when the user says "fringilla", "run the quarterly financial review", "reconcile my subscriptions", "review fixed costs", "how are my finances trending", or when Apis dispatches a finance-domain analysis task (audience=agent). Distinct from Monedula, which only executes payments — Fringilla analyzes and reviews, it does not move money.
 triggers:
-  - ["fringilla"
-  - "/fringilla"
-  - "run the quarterly financial review"
-  - "reconcile my subscriptions"
-  - "review fixed costs"
-  - "how are my finances trending"]
+  - fringilla
+  - /fringilla
+  - run the quarterly financial review
+  - reconcile my subscriptions
+  - review fixed costs
+  - how are my finances trending
 user_invocable: true
 ---
+
+<!-- Claude Code adapter for agent `fringilla`. Canonical file: docs/agents/fringilla.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
 
 # Fringilla — Financial Analysis Agent
 
