@@ -184,3 +184,18 @@ def resolve_skill(tags: list[str], assigned_to: str | None = None) -> str | None
         if skill:
             return skill
     return None
+
+
+def resolve_role(tags: list[str], assigned_to: str | None = None) -> str | None:
+    """
+    Return the role name for a task (i.e. the agent_definition name to load).
+
+    In this codebase the role is the same string as the resolved skill — the
+    skill name IS the agent name stored in Neotoma's agent_definition entities.
+    Exposing this as a named function gives callers a stable "ask for the role"
+    interface: if the role/skill mapping ever diverges (e.g. a single agent
+    handles multiple skill entry-points), only this function changes.
+
+    Returns None when no route matches (mirrors resolve_skill).
+    """
+    return resolve_skill(tags, assigned_to=assigned_to)

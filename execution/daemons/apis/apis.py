@@ -186,6 +186,7 @@ GITHUB_WEBHOOK_SECRET = os.environ.get("APIS_GITHUB_WEBHOOK_SECRET", "")
 
 from routing import (  # noqa: E402
     infer_tags_from_text as _infer_tags_from_text,
+    resolve_role as _resolve_role,
     resolve_skill as _resolve_skill,
 )
 
@@ -203,10 +204,17 @@ async def _spawn_claude_skill(
     snapshot: dict,
     trigger: str,
     notifier: Notifier,
+    *,
+    role: str | None = None,
 ) -> None:
     """
     Spawn a T4 agent for a task event. The subprocess mechanics live in
     skill_runner.run_skill (shared with the GitHub trigger pipelines).
+
+    `role` is the agent_definition name to load (defaults to skill — in this
+    codebase the two are the same string). Passing it explicitly keeps the
+    caller's routing decision traceable and lets skill_runner load the correct
+    definition even if skill/role names ever diverge.
 
     Failures are reported via lib/notify and logged but never crash Apis —
     one bad task must not take down the dispatcher.
@@ -219,7 +227,13 @@ async def _spawn_claude_skill(
         f"{body}".strip()
     )
 
-    result = await run_skill(skill, prompt)
+    result = await run_skill(
+        skill,
+        prompt,
+        role=role or skill,
+        task_entity_id=entity_id,
+        notifier=notifier,
+    )
     if not result.ok:
         reason = result.error or f"rc={result.returncode}"
         notifier.send(
@@ -271,6 +285,10 @@ async def dispatch_task(
     # An explicit assigned_to (set by Sylvia/Turdus) wins over tag inference.
     assigned_to = snapshot.get("assigned_to") or None
     skill = _resolve_skill(existing_tags, assigned_to=assigned_to)
+    # resolve_role returns the same string as resolve_skill in this codebase;
+    # computed here for explicitness and to thread through to skill_runner so
+    # agent_definition loading asks for "the role" rather than "the skill".
+    role = _resolve_role(existing_tags, assigned_to=assigned_to)
 
     if skill is None:
         log.info(
@@ -347,7 +365,7 @@ async def dispatch_task(
         return
 
     try:
-        await _spawn_claude_skill(skill, entity_id, snapshot, trigger, notifier)
+        await _spawn_claude_skill(skill, entity_id, snapshot, trigger, notifier, role=role)
         job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
     except Exception as exc:
         job.failed(f"task {entity_id} → {skill} dispatch failed: {type(exc).__name__}")
