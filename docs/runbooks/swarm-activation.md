@@ -2,27 +2,46 @@
 
 **Purpose:** with PR ateles#96 merged (Stage 1/2/5 of #94 — dispatch now loads each role's `agent_definition`, stamps `harness_event`s, and flags degraded fallback), this runbook turns on the parts that need host / GitHub / key-material actions. Do it in one sitting; each step says how to verify before moving on.
 
-**Status at time of writing (2026-06-17):**
+**Status (updated 2026-06-17, after the live Step 0 pass):**
 - ✅ #96 merged to `origin/main` (commit `45c3afb`).
+- ✅ **Daemon running merged code** — `com.ateles.apis` restarted (PID cycled), running from `~/ateles-rc-src` @ `45c3afb`, SSE connected, **webhook gateway already listening on :8742 (local)**.
 - ✅ `ateles-agent` GitHub machine account already exists (see the "Github Ateles Agent" LOGIN item in 1Password for its username).
 - ✅ `ATELES_AGENT_PAT` **and** `NEOTOMA_AGENT_PAT` already present in `ateles-private/.env`.
 - ✅ Webhook secret already in 1Password: the **"Ateles Apis GitHub webhook secret"** item.
-- ⬜ Webhook not yet created on the repos / gateway not yet reachable.
+- ⬜ **Tunnel + GitHub webhook registration** not yet done (the gateway listens locally, but no public route / no webhook on the repos). ← biggest remaining external step.
+- ⬜ PATs not yet verified classic/repo-scope; comment-poster not yet pointed at the bot token.
 - ⬜ Daemon AAuth keypairs not yet minted (software ES256 — **no YubiKey needed**).
 
-So most account/PAT/secret prerequisites are DONE. Remaining work is: pull main, verify the two PATs, mint keypairs, point the comment-poster at the machine identity, then activate the webhook and run a pilot.
+So Step 0 is DONE and the gateway is up locally. Remaining: verify the two PATs, mint keypairs, point the comment-poster at the machine identity, expose + register the webhook, then run a pilot.
 
 ---
 
-## Step 0 — Update the running daemon checkout to main
-The live Apis daemon must run the merged code.
-```
-cd ~/repos/ateles            # the STABLE checkout the daemon runs from (not a worktree)
-git checkout main && git pull origin main --ff-only
-```
-Verify `45c3afb` (or later) is HEAD: `git log -1 --oneline`.
+## Step 0 — Update the running daemon checkout to main, then RESTART it
+The live Apis daemon must run the merged code **and** be restarted to load it (a running daemon holds the old code in memory until cycled).
 
-> If the daemon runs from a pinned worktree (per the daemon-deployment-fragility note), update THAT checkout, not a branch-flipped shared one.
+**First find the directory the daemon actually runs from — it is NOT necessarily `~/repos/ateles`.** On this host the launchd job runs from `~/ateles-rc-src` (a stable checkout pinned to origin/main, per the daemon-deployment-fragility note), while `~/repos/ateles` is the shared dev checkout that flips branches. Confirm the real path from the running process, not the plist `WorkingDirectory` (which may be stale):
+```
+PID=$(launchctl list | awk '/com.ateles.apis/{print $1}')
+ps -o command= -p "$PID" | grep -oE '/[^ ]+/apis\.py'   # the dir before /execution/... is the live checkout
+```
+Update **that** checkout (here `~/ateles-rc-src`) to main. Do NOT `git checkout main` in a directory where another worktree already holds `main` — it fails with "'main' is already used by worktree …". If that happens you're in the wrong checkout, or a stale worktree is squatting on the branch: `git worktree list` to find it, `git worktree remove --force <path>` if abandoned.
+```
+DAEMON_SRC=~/ateles-rc-src          # the path you just confirmed
+git -C "$DAEMON_SRC" fetch origin main
+git -C "$DAEMON_SRC" checkout main && git -C "$DAEMON_SRC" pull origin main --ff-only
+git -C "$DAEMON_SRC" log -1 --oneline       # expect 45c3afb (or later)
+```
+Then **restart the daemon** so it loads the new code (modern one-shot; replaces unload+load):
+```
+launchctl kickstart -k "gui/$(id -u)/com.ateles.apis"
+```
+Verify it came back on the merged code:
+```
+NEWPID=$(launchctl list | awk '/com.ateles.apis/{print $1}'); echo "pid=$NEWPID"
+ps -o lstart= -p "$NEWPID"                                   # start time should be ~now
+grep -c 'build_system_prompt' "$DAEMON_SRC/execution/daemons/apis/skill_runner.py"   # 5 = new code on disk
+lsof -nP -iTCP:8742 -sTCP:LISTEN | grep "$NEWPID"            # webhook gateway listening (local)
+```
 
 ---
 
@@ -68,7 +87,7 @@ Verify after activation that a comment shows the **bot** as author, not you.
 ---
 
 ## Step 4 — Activate the GitHub webhook → gateway
-The gateway listens on **:8742** (`APIS_GITHUB_WEBHOOK_PORT`); Apus owns 8741. Public hostname: `apis.markmhendrickson.com`.
+**The gateway already listens on :8742 locally** (confirmed in Step 0). What's left is the *external* plumbing: a public route to it, the webhook secret in the daemon env, and the webhook registered on the repos. Apus owns 8741. Public hostname: `apis.markmhendrickson.com`.
 
 1. **Tunnel:** ensure the cloudflared ingress maps `apis.markmhendrickson.com → http://localhost:8742`, then restart cloudflared to pick it up.
    ```
