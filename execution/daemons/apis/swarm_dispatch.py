@@ -105,6 +105,26 @@ def lenses_missing_comments(
     return [lens for lens in lenses if lens not in posted]
 
 
+def _token_for_repo(repo: str) -> str:
+    """Return the GitHub token appropriate for the given repo slug.
+
+    Per-repo identity (#95): comments and API calls on markmhendrickson/neotoma
+    should use NEOTOMA_AGENT_PAT so they appear under the neotoma-agent machine
+    account rather than the ateles-agent identity.  All other repos use
+    ATELES_AGENT_PAT.  Both fall back to GITHUB_TOKEN when the per-repo PAT is
+    unset, so nothing breaks if only the shared token is configured.
+    """
+    if repo.endswith("/neotoma"):
+        return (
+            os.environ.get("NEOTOMA_AGENT_PAT", "")
+            or os.environ.get("GITHUB_TOKEN", "")
+        )
+    return (
+        os.environ.get("ATELES_AGENT_PAT", "")
+        or os.environ.get("GITHUB_TOKEN", "")
+    )
+
+
 @dataclass
 class DispatchConfig:
     neotoma_base_url: str = os.environ.get(
@@ -454,10 +474,18 @@ class SwarmDispatcher:
         m = _PARENT_ISSUE.search(pr_body or "")
         return int(m.group(1)) if m else None
 
-    def _github_headers(self) -> dict[str, str]:
+    def _github_headers(self, repo: str = "") -> dict[str, str]:
+        """Return GitHub API request headers with the per-repo token (#95).
+
+        When `repo` is supplied the per-repo PAT is preferred (see
+        `_token_for_repo`); the instance-level `config.github_token` is used
+        as a final fallback so behaviour is unchanged for callers that do not
+        yet pass a repo.
+        """
+        token = _token_for_repo(repo) if repo else self.config.github_token
         headers = {"Accept": "application/vnd.github+json"}
-        if self.config.github_token:
-            headers["Authorization"] = f"Bearer {self.config.github_token}"
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         return headers
 
     async def _changed_files(self, t: SwarmTrigger) -> list[str]:
@@ -467,7 +495,7 @@ class SwarmDispatcher:
         )
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(url, headers=self._github_headers())
+                resp = await client.get(url, headers=self._github_headers(t.repository))
                 resp.raise_for_status()
                 return [f["filename"] for f in resp.json()]
         except Exception as exc:
@@ -498,7 +526,7 @@ class SwarmDispatcher:
         out: dict[str, str] = {}
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(url, headers=self._github_headers())
+                resp = await client.get(url, headers=self._github_headers(repository))
                 resp.raise_for_status()
                 for comment in resp.json():
                     m = marker.search(comment.get("body", ""))
@@ -595,7 +623,8 @@ class SwarmDispatcher:
         so their `gh` comment step often fails silently; Vanellus aggregates
         from the PR comments, so the dispatcher posts the captured review
         itself when the comment is missing. Never raises."""
-        if not self.config.github_token:
+        repo_token = _token_for_repo(t.repository)
+        if not repo_token:
             log.warning(
                 f"[{DAEMON_NAME}] no GitHub token — fallback review comments "
                 f"skipped for {t.repository}#{t.number}"
@@ -608,7 +637,7 @@ class SwarmDispatcher:
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.get(
-                    url, params={"per_page": 100}, headers=self._github_headers()
+                    url, params={"per_page": 100}, headers=self._github_headers(t.repository)
                 )
                 resp.raise_for_status()
                 bodies = [c.get("body", "") for c in resp.json()]
@@ -619,7 +648,7 @@ class SwarmDispatcher:
                         lens, agents.get(lens, "unknown panelist"), captured[lens]
                     )
                     post = await client.post(
-                        url, json={"body": body}, headers=self._github_headers()
+                        url, json={"body": body}, headers=self._github_headers(t.repository)
                     )
                     post.raise_for_status()
                     log.info(

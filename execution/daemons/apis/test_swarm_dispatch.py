@@ -10,6 +10,7 @@ from skill_runner import SkillResult
 from swarm_dispatch import (
     DispatchConfig,
     SwarmDispatcher,
+    _token_for_repo,
     attribution_header,
     compose_fallback_comment,
     content_digest,
@@ -161,3 +162,56 @@ def test_lanius_pr_prompt_carries_legacy_issue_rule():
     assert "never initialized" in prompt or "NO gate_status" in prompt
     assert "GATE_INHERITANCE: clear" in prompt
     assert "trigger_swarm_pr.py issue" in prompt
+
+
+# ── _token_for_repo (#95) ────────────────────────────────────────────────────
+
+
+def test_token_for_repo_neotoma_uses_neotoma_agent_pat(monkeypatch):
+    """markmhendrickson/neotoma should use NEOTOMA_AGENT_PAT."""
+    monkeypatch.setenv("NEOTOMA_AGENT_PAT", "neotoma-secret")
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ateles-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "shared-token")
+    assert _token_for_repo("markmhendrickson/neotoma") == "neotoma-secret"
+
+
+def test_token_for_repo_ateles_uses_ateles_agent_pat(monkeypatch):
+    """markmhendrickson/ateles (and any non-neotoma repo) should use ATELES_AGENT_PAT."""
+    monkeypatch.setenv("NEOTOMA_AGENT_PAT", "neotoma-secret")
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ateles-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "shared-token")
+    assert _token_for_repo("markmhendrickson/ateles") == "ateles-secret"
+
+
+def test_token_for_repo_neotoma_falls_back_to_github_token_when_pat_absent(monkeypatch):
+    """When NEOTOMA_AGENT_PAT is unset, fall back to GITHUB_TOKEN."""
+    monkeypatch.delenv("NEOTOMA_AGENT_PAT", raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "shared-token")
+    assert _token_for_repo("markmhendrickson/neotoma") == "shared-token"
+
+
+def test_token_for_repo_ateles_falls_back_to_github_token_when_pat_absent(monkeypatch):
+    """When ATELES_AGENT_PAT is unset, fall back to GITHUB_TOKEN."""
+    monkeypatch.delenv("ATELES_AGENT_PAT", raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "shared-token")
+    assert _token_for_repo("markmhendrickson/ateles") == "shared-token"
+
+
+def test_token_for_repo_returns_empty_string_when_no_tokens(monkeypatch):
+    """When no tokens are set at all, return an empty string (no crash)."""
+    monkeypatch.delenv("NEOTOMA_AGENT_PAT", raising=False)
+    monkeypatch.delenv("ATELES_AGENT_PAT", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    assert _token_for_repo("markmhendrickson/neotoma") == ""
+    assert _token_for_repo("markmhendrickson/ateles") == ""
+
+
+def test_token_for_repo_only_suffix_matters(monkeypatch):
+    """Any repo ending in /neotoma picks the neotoma PAT, not just the canonical slug."""
+    monkeypatch.setenv("NEOTOMA_AGENT_PAT", "neotoma-secret")
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ateles-secret")
+    # An org fork would still route via NEOTOMA_AGENT_PAT.
+    assert _token_for_repo("someorg/neotoma") == "neotoma-secret"
+    # A repo merely containing "neotoma" in the name but not ending in /neotoma
+    # should use ATELES_AGENT_PAT.
+    assert _token_for_repo("markmhendrickson/neotoma-fork") == "ateles-secret"
