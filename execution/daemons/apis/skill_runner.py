@@ -212,7 +212,7 @@ async def run_skill(
     timeout = timeout or DISPATCH_TIMEOUT_SECONDS
 
     # ── Load agent_definition (Stage 1) ───────────────────────────────────────
-    agent_def = _load_agent_def(_role)
+    agent_def = await asyncio.to_thread(_load_agent_def, _role)
 
     if CLAUDE_BIN is None:
         msg = "claude binary unavailable (APIS_CLAUDE_BIN unset, not on PATH)"
@@ -250,7 +250,8 @@ async def run_skill(
 
         # Stage 5: degraded harness_event
         try:
-            _write_harness_event(
+            await asyncio.to_thread(
+                _write_harness_event,
                 task_entity_id=task_entity_id,
                 role=_role,
                 agent_sub=agent_def.aauth_sub,
@@ -286,7 +287,8 @@ async def run_skill(
 
     # ── Stage 2: harness_event at dispatch start ───────────────────────────────
     try:
-        _write_harness_event(
+        await asyncio.to_thread(
+            _write_harness_event,
             task_entity_id=task_entity_id,
             role=_role,
             agent_sub=agent_def.aauth_sub,
@@ -321,7 +323,8 @@ async def run_skill(
 
         # Stage 2: harness_event on timeout (failure)
         try:
-            _write_harness_event(
+            await asyncio.to_thread(
+                _write_harness_event,
                 task_entity_id=task_entity_id,
                 role=_role,
                 agent_sub=agent_def.aauth_sub,
@@ -349,7 +352,8 @@ async def run_skill(
     if result.ok:
         log.info(f"[apis] {skill} dispatch ok ({len(result.stdout)}B stdout)")
         try:
-            _write_harness_event(
+            await asyncio.to_thread(
+                _write_harness_event,
                 task_entity_id=task_entity_id,
                 role=_role,
                 agent_sub=agent_def.aauth_sub,
@@ -367,7 +371,8 @@ async def run_skill(
             f"{result.stderr[:500]}"
         )
         try:
-            _write_harness_event(
+            await asyncio.to_thread(
+                _write_harness_event,
                 task_entity_id=task_entity_id,
                 role=_role,
                 agent_sub=agent_def.aauth_sub,
