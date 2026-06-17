@@ -302,28 +302,25 @@ async def run_skill(
 
     subprocess_env = {**os.environ, **(env_extra or {})}
 
-    # Stage 3 (ateles#94): inject role-signing env into the subprocess so the
-    # child can find the AAuth keypair directory and know which role it is acting
-    # as.  Only inject when the agent_def is a real (non-degraded) definition —
-    # when degraded the child runs unsigned, as today.
-    #
-    # ATELES_PRIVATE_KEYS_DIR — pass through the parent's value so the child's
-    #   AAuthSigner.from_key_file() can find <keys_dir>/<role>.jwk.json.
-    #   Only set when the parent has it; never invent a path.
-    #
-    # NEOTOMA_AAUTH_ROLE — the role name the child should sign as.
-    #   NOTE: as of 2026-06-17 the `claude` subprocess has no built-in
-    #   mechanism to read NEOTOMA_AAUTH_ROLE and call AAuthSigner.from_key_file()
-    #   automatically — the signing path is caller-initiated, not env-driven.
-    #   This env var is injected as a forward contract so Neotoma client/CLI
-    #   authors can wire it up without a separate ateles change.
-    #   TODO(ateles#94 Stage 3): neotoma client must read NEOTOMA_AAUTH_ROLE
-    #   to sign as this role — end-to-end child signing is incomplete until then.
-    if not degraded:
+    # Stage 3 (ateles#94): inject the Neotoma AAuth client signer env vars so
+    # the dispatched child can sign its own Neotoma writes as <role>@ateles-swarm.
+    # The Neotoma client signer (aauth_client_signer.ts) reads three vars:
+    #   NEOTOMA_AAUTH_PRIVATE_JWK_PATH — path to the EC/P-256 JWK keypair file
+    #   NEOTOMA_AAUTH_SUB              — the signing subject (e.g. gryllus@ateles-swarm)
+    #   NEOTOMA_AAUTH_ISS              — the issuer (https://markmhendrickson.com)
+    # We only inject when the role JWK file actually exists at the expected path;
+    # if it is absent the child proceeds unsigned (graceful degradation, as today).
+    # When degraded (empty prompt_markdown) we inject nothing — child runs unsigned.
+    if not degraded and agent_def.aauth_sub:
         keys_dir = os.environ.get("ATELES_PRIVATE_KEYS_DIR", "")
         if keys_dir:
-            subprocess_env["ATELES_PRIVATE_KEYS_DIR"] = keys_dir
-        subprocess_env["NEOTOMA_AAUTH_ROLE"] = _role
+            jwk_path = os.path.join(keys_dir, f"{_role}.jwk.json")
+            if os.path.exists(jwk_path):
+                subprocess_env["NEOTOMA_AAUTH_PRIVATE_JWK_PATH"] = jwk_path
+                subprocess_env["NEOTOMA_AAUTH_SUB"] = agent_def.aauth_sub
+                subprocess_env["NEOTOMA_AAUTH_ISS"] = os.environ.get(
+                    "NEOTOMA_AAUTH_ISS", "https://markmhendrickson.com"
+                )
 
     _start_ns = time.monotonic_ns()
     proc = await asyncio.create_subprocess_exec(
