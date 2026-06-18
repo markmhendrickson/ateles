@@ -66,13 +66,105 @@ def parse_gate_verdict(stdout: str) -> str | None:
     return m.group(1).lower() if m else None
 
 
+# ── Per-agent GitHub account registry (#109) ─────────────────────────────────
+# Canonical login for each of the 8 GitHub-facing agents.  Accounts are named
+# `ateles-<agent>` by convention.  This map is only consulted when the agent's
+# PAT exists (is_provisioned returns True); until then, the per-repo shared
+# identity (#95) is used and native assignment is skipped.
+AGENT_GITHUB_LOGIN: dict[str, str] = {
+    "lanius": "ateles-lanius",
+    "pavo": "ateles-pavo",
+    "vanellus": "ateles-vanellus",
+    "bombycilla": "ateles-bombycilla",
+    "accipiter": "ateles-accipiter",
+    "buteo": "ateles-buteo",
+    "phoenicurus": "ateles-phoenicurus",
+    "corvus": "ateles-corvus",
+}
+
+
+def is_provisioned(agent: str) -> bool:
+    """Return True when the agent's own GitHub PAT is set in the environment.
+
+    Until `<AGENT>_AGENT_PAT` is provisioned this always returns False and the
+    system behaves exactly as today (shared per-repo identity, attribution
+    header in every comment).  This is the NO-OP guard for #109: with no
+    per-agent PATs set, every call site behaves as before.
+
+    Args:
+        agent: lowercase agent genus name (e.g. "pavo", "lanius").
+    """
+    return bool(os.environ.get(f"{agent.upper()}_AGENT_PAT"))
+
+
+def _token_for_agent_on_repo(agent: str, repo: str) -> str:
+    """Three-tier GitHub token resolution for a specific agent + repo.
+
+    Tier 1 — ``<AGENT>_AGENT_PAT`` (e.g. ``PAVO_AGENT_PAT``): the agent's own
+              account.  Present only when the machine account has been created
+              and the PAT stored.
+    Tier 2 — per-repo identity: ``NEOTOMA_AGENT_PAT`` for ``*/neotoma`` repos,
+              else ``ATELES_AGENT_PAT``.  This is the existing #95 behaviour,
+              delegated to ``_token_for_repo``.
+    Tier 3 — ``GITHUB_TOKEN`` (daemon-level fallback).
+
+    The fallback when Tier 1 is absent is the per-repo shared account (Tier 2),
+    NOT a hardcoded ateles-agent.  This preserves the #95 contract exactly.
+
+    Args:
+        agent: lowercase agent genus name (e.g. "pavo").
+        repo:  full repo slug (e.g. "markmhendrickson/ateles").
+    """
+    agent_pat = os.environ.get(f"{agent.upper()}_AGENT_PAT", "")
+    if agent_pat:
+        return agent_pat
+    # Tier 2 → 3 already implemented by _token_for_repo.
+    return _token_for_repo(repo)
+
+
+def _agent_prompt_instruction(agent: str, role: str) -> str:
+    """Return the prompt instruction block for GitHub comment identity.
+
+    When the agent is provisioned (its own PAT exists) the agent posts AS
+    ITSELF — no in-body attribution header is needed and the instruction tells
+    it so.  When unprovisioned (current reality for all agents) it gets the
+    existing "shared account — prepend the header" instruction.
+
+    This helper centralises the conditional so every call site stays coherent
+    in both states without scattered if/else branches.
+
+    Args:
+        agent: lowercase agent genus name.
+        role:  human-readable role description for the header text.
+    """
+    if is_provisioned(agent):
+        return (
+            f"You are posting as your own GitHub account "
+            f"(`{AGENT_GITHUB_LOGIN.get(agent, f'ateles-{agent}')}`). "
+            "Do NOT add an attribution header — your avatar and account name "
+            "already identify you."
+        )
+    return (
+        f"Begin any GitHub comment you post with "
+        f"`{attribution_header(agent, role)}` — the GitHub "
+        "account is shared, so the comment body is your identity."
+    )
+
+
 def attribution_header(agent: str, role: str) -> str:
-    """First line of every swarm-authored GitHub comment.
+    """First line of every swarm-authored GitHub comment posted under a SHARED account.
 
     PR-87 dogfood feedback: comments posted through a shared GitHub identity
     (or the operator's keyring) are indistinguishable from the operator
-    without an in-body attribution line. Until per-repo machine identities
-    are fully wired, this line IS the agent identity on GitHub."""
+    without an in-body attribution line.  Until per-agent machine accounts
+    are provisioned (#109), this line IS the agent identity on GitHub.
+
+    When the agent has its own account (is_provisioned returns True) callers
+    should use _agent_prompt_instruction instead, which omits the header so
+    the agent does not redundantly label itself.  This function always returns
+    the non-empty header string — gating on provisioning belongs at the call
+    site via _agent_prompt_instruction.
+    """
     return f"**\U0001f916 {agent.capitalize()} — Ateles swarm, {role}**"
 
 
@@ -180,7 +272,11 @@ class SwarmDispatcher:
         ref = f"{trigger.repository}#{trigger.number}"
 
         # 1. Lanius: new-issue protocol (init gate_status, assign Pavo, label).
-        lanius = await run_skill("lanius", self._lanius_issue_prompt(trigger))
+        lanius = await run_skill(
+            "lanius",
+            self._lanius_issue_prompt(trigger),
+            github_token=_token_for_agent_on_repo("lanius", trigger.repository),
+        )
         if not lanius.ok:
             self.notifier.send(
                 f"Lanius failed on new issue {ref} — gate init incomplete",
@@ -193,10 +289,18 @@ class SwarmDispatcher:
         #    pre-register what they will check at PR time.
         lenses = select_expectation_agents(trigger.title, trigger.body, trigger.labels)
         for lens in lenses:
-            await run_skill(lens.agent, self._expectation_prompt(trigger, lens))
+            await run_skill(
+                lens.agent,
+                self._expectation_prompt(trigger, lens),
+                github_token=_token_for_agent_on_repo(lens.agent, trigger.repository),
+            )
 
         # 3. Pavo takes Phase 1 (pm scoping) — read-only gate, auto-runs.
-        await run_skill("pavo", self._pavo_prompt(trigger))
+        await run_skill(
+            "pavo",
+            self._pavo_prompt(trigger),
+            github_token=_token_for_agent_on_repo("pavo", trigger.repository),
+        )
 
         self.notifier.send(
             f"Issue {ref} triaged autonomously: Lanius"
@@ -213,7 +317,12 @@ class SwarmDispatcher:
         parent = self._parent_issue_number(trigger.body)
 
         # 1. Lanius: enforce PR gate inheritance against the parent issue.
-        lanius = await run_skill("lanius", self._lanius_pr_prompt(trigger, parent))
+        _lanius_token = _token_for_agent_on_repo("lanius", trigger.repository)
+        lanius = await run_skill(
+            "lanius",
+            self._lanius_pr_prompt(trigger, parent),
+            github_token=_lanius_token,
+        )
         verdict = parse_gate_verdict(lanius.stdout)
         if verdict is None and lanius.ok:
             # PR-87 self-dogfood finding: Lanius sometimes replies without the
@@ -232,6 +341,7 @@ class SwarmDispatcher:
                     "gates from here, emit `GATE_INHERITANCE: clear` — review "
                     "proceeds and merge stays operator-gated regardless."
                 ),
+                github_token=_lanius_token,
             )
             verdict = parse_gate_verdict(lanius.stdout)
         if verdict == "blocked":
@@ -270,6 +380,7 @@ class SwarmDispatcher:
                 self._panelist_prompt(
                     trigger, lens, expectations.get(lens.agent, ""), parent
                 ),
+                github_token=_token_for_agent_on_repo(lens.agent, trigger.repository),
             )
             if result.ok:
                 reviews.append((lens.lens, result.stdout))
@@ -306,7 +417,9 @@ class SwarmDispatcher:
         # 4. Vanellus aggregates panel verdicts. Merge is operator-gated
         #    unless APIS_AUTONOMY_AUTO_MERGE=1 (ateles#80 guardrail).
         await run_skill(
-            "vanellus", self._vanellus_prompt(trigger, parent, [p.lens for p in panel])
+            "vanellus",
+            self._vanellus_prompt(trigger, parent, [p.lens for p in panel]),
+            github_token=_token_for_agent_on_repo("vanellus", trigger.repository),
         )
 
         if not self.config.auto_merge:
@@ -323,6 +436,18 @@ class SwarmDispatcher:
 
     @staticmethod
     def _lanius_issue_prompt(t: SwarmTrigger) -> str:
+        pavo_assign_block = (
+            "Also assign the GitHub issue to Pavo's account when that account "
+            "exists: `gh issue edit {n} --add-assignee {login} --repo {repo}` "
+            "(best-effort — skip silently if the assignee is not a collaborator "
+            "/ account does not exist; never fail triage).".format(
+                n=t.number,
+                repo=t.repository,
+                login=AGENT_GITHUB_LOGIN.get("pavo", "ateles-pavo"),
+            )
+            if is_provisioned("pavo")
+            else ""
+        )
         return (
             "Invoke the lanius agent per your appended system prompt.\n\n"
             f"A new GitHub issue was opened (webhook trigger, no operator in "
@@ -332,10 +457,9 @@ class SwarmDispatcher:
             "initialize gate_status/current_owner/owner_history on the issue "
             "entity, assign Pavo as Phase 1 owner, post the triage comment, "
             "and apply the lanius-triage label (best-effort — create the label "
-            "first if missing, and never fail triage if labeling errors).\n\n"
-            f"Begin any GitHub comment you post with "
-            f"`{attribution_header('lanius', 'issue triage')}` — the GitHub "
-            "account is shared, so the comment body is your identity."
+            "first if missing, and never fail triage if labeling errors)."
+            + (f"\n\n{pavo_assign_block}" if pavo_assign_block else "")
+            + f"\n\n{_agent_prompt_instruction('lanius', 'issue triage')}"
         )
 
     @staticmethod
@@ -373,9 +497,7 @@ class SwarmDispatcher:
             "or block the pm gate on the issue entity. Read any "
             f"`{EXPECTATION_MARKER}` comments on the issue first — they are "
             "the review contract for this issue.\n\n"
-            f"Begin any GitHub comment you post with "
-            f"`{attribution_header('pavo', 'pm gate owner')}` — the GitHub "
-            "account is shared, so the comment body is your identity."
+            f"{_agent_prompt_instruction('pavo', 'pm gate owner')}"
         )
 
     @staticmethod
@@ -407,9 +529,7 @@ class SwarmDispatcher:
             "pre-impl gate is genuinely unsigned. To run the full issue "
             "pipeline on a legacy issue (gate init + expectations + Pavo), the "
             "operator can backfill via `trigger_swarm_pr.py issue <n>`.\n\n"
-            f"Begin any GitHub comment you post with "
-            f"`{attribution_header('lanius', 'PR gate inheritance')}` — the "
-            "GitHub account is shared, so the comment body is your identity.\n\n"
+            f"{_agent_prompt_instruction('lanius', 'PR gate inheritance')}\n\n"
             "End your reply with exactly one line: `GATE_INHERITANCE: clear` "
             "or `GATE_INHERITANCE: blocked` so the dispatcher can route."
         )
@@ -459,6 +579,26 @@ class SwarmDispatcher:
                 f"(`**{EXPECTATION_MARKER} ({lens.lens})**`) and all item text "
                 f"exactly; only toggle the checkboxes from `[ ]` to `[x]`."
             )
+        _panelist_role = f"{lens.lens} lens panelist"
+        if is_provisioned(lens.agent):
+            comment_identity_block = (
+                f"Post your review as a PR comment using the gh CLI. The comment "
+                f"MUST begin with the line `review:{lens.lens}`. "
+                + _agent_prompt_instruction(lens.agent, _panelist_role)
+                + " Repeat the full review text in your reply here (the "
+                "dispatcher parses it and posts the comment for you if your gh "
+                "call fails)."
+            )
+        else:
+            comment_identity_block = (
+                f"Post your review as a PR comment using the gh CLI. The comment "
+                f"MUST begin with the line `review:{lens.lens}` followed by "
+                f"`{attribution_header(lens.agent, _panelist_role)}` "
+                "so readers can tell which agent authored it (the GitHub account "
+                "is shared). Repeat the full review text in your reply here (the "
+                "dispatcher parses it and posts the comment for you if your gh "
+                "call fails)."
+            )
         return (
             f"Invoke the {lens.agent} agent per your appended system prompt.\n\n"
             f"You are a review panelist on PR {t.repository}#{t.number}: "
@@ -467,13 +607,7 @@ class SwarmDispatcher:
             "Do not run a generic full-file review — the Claude GHA already "
             "covers correctness/security as the baseline.\n\n"
             f"{expectation_block}\n\n"
-            f"Post your review as a PR comment using the gh CLI. The comment "
-            f"MUST begin with the line `review:{lens.lens}` followed by "
-            f"`{attribution_header(lens.agent, f'{lens.lens} lens panelist')}` "
-            "so readers can tell which agent authored it (the GitHub account "
-            "is shared). Repeat the full review text in your reply here (the "
-            "dispatcher parses it and posts the comment for you if your gh "
-            "call fails).\n\n"
+            f"{comment_identity_block}\n\n"
             f"{blocking_rules}"
             f"{checkoff_block}"
         )
@@ -491,9 +625,7 @@ class SwarmDispatcher:
             "gate to changes_requested and route back to Gryllus with a "
             "summary comment. All clear ⇒ approve and advance pr_review to "
             "signed_off on the parent issue entity.\n\n"
-            f"Begin any GitHub comment you post with "
-            f"`{attribution_header('vanellus', 'PR steward')}` — the GitHub "
-            "account is shared, so the comment body is your identity.\n\n"
+            f"{_agent_prompt_instruction('vanellus', 'PR steward')}\n\n"
             "AUTONOMY GUARDRAIL — DO NOT MERGE. Merge is operator-gated: a "
             "blocking checkpoint_brief is filed at the merge boundary; the "
             "operator merges or instructs you to. This overrides any merge "
