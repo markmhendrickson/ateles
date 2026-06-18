@@ -6,10 +6,12 @@ entity_type: agent_definition
 name: waxwing
 description: Invoke Waxwing (formerly Bombycilla; renamed 2026-06-12 for voice/ASR robustness), the technical architect agent — architecture reviews, schema design, interface contracts, and ADRs grounded in Ateles settled decisions.
 triggers:
-  - ["waxwing"
-  - "/waxwing"]
+  - waxwing
+  - /waxwing
 user_invocable: true
 ---
+
+<!-- Claude Code adapter for agent `waxwing`. Canonical file: docs/agents/waxwing.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
 
 # Waxwing — Technical Architect
 

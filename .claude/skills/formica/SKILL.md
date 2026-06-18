@@ -7,6 +7,8 @@ name: formica
 description: GitHub issue/PR automation daemon for the ateles repo. SSE subscriber to ateles GitHub events; dispatches issues and PRs to T4 invocable workers (Gryllus for implementation, Vanellus for PR review). Symmetric to neotoma-agent (which handles the neotoma repo). Currently JS; Phase 5 Python rewrite using lib/daemon_runtime/.
 ---
 
+<!-- Claude Code adapter for agent `formica`. Canonical file: docs/agents/formica.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
+
 # Formica — GitHub Issue/PR Triage Daemon (ateles repo)
 
 ## Identity

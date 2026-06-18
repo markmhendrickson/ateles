@@ -7,6 +7,8 @@ name: turdus
 description: Email triage daemon. Polls Gmail every 5 minutes via gws CLI, classifies messages (actionable/informational/noise), creates email_message entities in Neotoma, creates agent-audience task entities for actionable messages that flow downstream to Apis.
 ---
 
+<!-- Claude Code adapter for agent `turdus`. Canonical file: docs/agents/turdus.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
+
 # Turdus — Email Triage Daemon
 
 ## Identity

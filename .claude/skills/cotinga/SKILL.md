@@ -4,8 +4,10 @@
 entity_id: ent_6c85e2a550580c88024da8f4
 entity_type: agent_definition
 name: cotinga
-description: Daily event-prep briefing daemon. Runs at 05:30 Madrid time: Phase 1 (fast ~30s) fetches today's calendar via gws, cross-references attendees against Neotoma, sends shallow Telegram briefing. Phase 2 spawns async Claude agents per meeting to do deep participant research, agenda/goals/talking-points generation, and pre-event task creation.
+description: "Daily event-prep briefing daemon. Runs at 05:30 Madrid time: Phase 1 (fast ~30s) fetches today's calendar via gws, cross-references attendees against Neotoma, sends shallow Telegram briefing. Phase 2 spawns async Claude agents per meeting to do deep participant research, agenda/goals/talking-points generation, and pre-event task creation."
 ---
+
+<!-- Claude Code adapter for agent `cotinga`. Canonical file: docs/agents/cotinga.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
 
 # Cotinga — Meeting Research & Briefing Daemon
 

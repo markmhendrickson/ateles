@@ -11,6 +11,8 @@ triggers:
 user_invocable: true
 ---
 
+<!-- Claude Code adapter for agent `accipiter`. Canonical file: docs/agents/accipiter.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
+
 # Accipiter — UX & Product Designer
 
 ## Identity

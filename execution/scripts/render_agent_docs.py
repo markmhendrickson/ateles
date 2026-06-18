@@ -1,20 +1,32 @@
 #!/usr/bin/env python3
 """
-render_agent_docs.py — render per-agent docs + SKILL.md mirrors from Neotoma.
+render_agent_docs.py — render the canonical per-agent file + Claude Code
+SKILL.md mirror from Neotoma.
 
-`agent_definition` entities in Neotoma are canonical. This script projects them
-to two one-way (Neotoma → disk) surfaces:
+`agent_definition` entities in Neotoma are canonical. This script projects each
+into ONE harness-neutral file plus a thin harness adapter:
 
-    1. docs/agents/<name>.md   — human/contributor reference card (field
-                                 projection: identity, tier, genus, triggers,
-                                 context/operational entity types, allowed
-                                 tools, AAuth sub, grant, status). NEVER the
-                                 raw prompt.
-    2. .claude/skills/<name>/SKILL.md — the operational prompt the LLM loads
-                                 (frontmatter + prompt_markdown), mirrored
-                                 verbatim.
+    1. docs/agents/<name>.md   — THE canonical on-disk agent file. Harness-
+                                 neutral. Rich YAML frontmatter (every
+                                 structured field: tier, genus, status, AAuth
+                                 sub, grant, triggers, allowed tools, context/
+                                 operational entity types, entity_id) + a
+                                 human-readable metadata table + the full
+                                 operational prompt body. Any harness can read
+                                 this; nothing here is Claude-specific.
+    2. .claude/skills/<name>/SKILL.md — a GENERATED MIRROR for Claude Code,
+                                 whose loader hard-requires this exact path.
+                                 Minimal CC frontmatter (name, description,
+                                 triggers, user_invocable, entity_id) + the
+                                 same prompt body + a pointer back to the
+                                 canonical docs/agents file. Not authored;
+                                 regenerated from the same entity.
 
 Plus docs/agents/README.md, an index table over all agents.
+
+Daemons do NOT read either file — they load prompt_markdown straight from
+Neotoma (lib/daemon_runtime/agent_loader.py). These files are for humans and
+the Claude Code harness only.
 
 Per agent_policy ent_c3c5e4a9350250cbf69e08bf, prompt_markdown is always
 public and PII-free — so both surfaces are safe for the public repo and there
@@ -117,19 +129,95 @@ def fetch_agents(base_url: str, token: str) -> list[dict]:
 
 
 def _as_list(v) -> list[str]:
+    """Normalize a list-ish field to a clean list of strings.
+
+    Handles the three shapes seen in stored agent_definition data:
+    a real list; a JSON-encoded array string (e.g. '["a", "b"]'); and a
+    plain comma-separated string. The JSON case matters — some entities
+    store triggers/allowed_tools as a stringified array, which a naive
+    comma split would corrupt into items like '["a"'.
+    """
     if v is None:
         return []
+
+    def _flatten(item) -> list[str]:
+        """Expand one item, JSON-parsing it if it's a stringified array."""
+        if isinstance(item, list):
+            out: list[str] = []
+            for x in item:
+                out += _flatten(x)
+            return out
+        sv = str(item).strip()
+        if not sv:
+            return []
+        if sv[:1] == "[" and sv[-1:] == "]":
+            try:
+                parsed = json.loads(sv)
+                if isinstance(parsed, list):
+                    out = []
+                    for x in parsed:
+                        out += _flatten(x)
+                    return out
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return [sv.strip('"').strip("'")]
+
     if isinstance(v, list):
-        return [str(x) for x in v]
-    return [p.strip() for p in str(v).split(",") if p.strip()]
+        out: list[str] = []
+        for x in v:
+            out += _flatten(x)
+        return [s for s in (i.strip() for i in out) if s]
+    sv = str(v).strip()
+    flat = _flatten(sv)
+    if len(flat) == 1 and "," in flat[0] and not (sv[:1] == "[" and sv[-1:] == "]"):
+        # plain comma-separated string
+        return [p.strip().strip('"').strip("'") for p in flat[0].split(",") if p.strip()]
+    return [s for s in (i.strip() for i in flat) if s]
 
 
-def reference_card(s: dict) -> str:
+def _yaml_scalar(v) -> str:
+    """Quote a YAML scalar when it contains characters that would break parsing."""
+    sv = str(v)
+    if sv == "":
+        return '""'
+    if any(c in sv for c in ':#') or sv[0] in "!&*?{}[]|>@`\"'%,-" or sv != sv.strip():
+        return '"' + sv.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    return sv
+
+
+def _canonical_frontmatter(s: dict) -> list[str]:
+    """Rich, harness-neutral frontmatter — every structured field of the entity."""
+    fm = ["---", "entity_id: " + _yaml_scalar(s.get("_entity_id", "")), "entity_type: agent_definition"]
+    # Only short, single-line scalars belong in frontmatter. Multi-line fields
+    # (e.g. output_format) are rendered as body sections instead.
+    for key in ("name", "description", "tier", "genus", "status", "aauth_sub", "agent_grant",
+                "harness_preferences"):
+        val = s.get(key)
+        if val and "\n" not in str(val):
+            fm.append(f"{key}: {_yaml_scalar(val)}")
+    if s.get("user_invocable") is not None:
+        fm.append(f"user_invocable: {str(bool(s['user_invocable'])).lower()}")
+    for key, alias in (("triggers", None), ("allowed_tools", "tool_allowlist"),
+                       ("context_entity_types", None), ("operational_entity_types", None)):
+        vals = _as_list(s.get(key) or (s.get(alias) if alias else None))
+        if vals:
+            fm.append(f"{key}:")
+            fm += [f"  - {_yaml_scalar(v)}" for v in vals]
+    fm.append("---")
+    return fm
+
+
+def canonical_agent_file(s: dict) -> str:
+    """THE canonical, harness-neutral agent file: rich frontmatter + a
+    human-readable metadata table + the full operational prompt body."""
     name = s["name"]
-    L = [f"# {name}", ""]
+    L = [SKILL_HEADER.rstrip(), ""]
+    L += _canonical_frontmatter(s)
+    L += ["", f"# {name}", ""]
     if s.get("description"):
         L += [s["description"], ""]
-    L += ["| Field | Value |", "| --- | --- |"]
+    # Human-readable metadata table (mirrors the frontmatter for skimming).
+    L += ["## Definition", "", "| Field | Value |", "| --- | --- |"]
     rows = [
         ("Tier", s.get("tier")),
         ("Genus", s.get("genus")),
@@ -141,22 +229,27 @@ def reference_card(s: dict) -> str:
         ("Context entity types", ", ".join(_as_list(s.get("context_entity_types"))) or None),
         ("Operational entity types", ", ".join(_as_list(s.get("operational_entity_types"))) or None),
         ("Harness", s.get("harness_preferences")),
-        ("Output format", s.get("output_format")),
         ("Entity ID", s.get("_entity_id")),
     ]
     for label, val in rows:
         if val:
             L.append(f"| {label} | {val} |")
-    L += ["", "---", ""]
-    has_prompt = bool((s.get("prompt_markdown") or "").strip())
-    if has_prompt:
-        L.append(f"Operational prompt: [`.claude/skills/{name}/SKILL.md`](../../.claude/skills/{name}/SKILL.md)")
+    L.append("")
+    body = (s.get("prompt_markdown") or "").strip()
+    if body:
+        L += ["## Prompt", "", body, ""]
+    elif s.get("status") == "proposed":
+        L += ["## Prompt", "", "_Proposed agent — prompt is a design sketch, not yet operational._", ""]
     else:
-        L.append("_No operational prompt authored yet._")
+        L += ["## Prompt", "", "_No operational prompt authored yet._", ""]
+    # Note: the `output_format` entity field (where set) is already embedded in
+    # prompt_markdown for these agents; we don't repeat it as a separate section.
     L += [
+        "---",
         "",
-        f"*Reference card mirrored from Neotoma `agent_definition` `{s.get('_entity_id','')}`. "
-        "Do not edit directly — correct the entity and run "
+        f"*Canonical agent file, generated from Neotoma `agent_definition` `{s.get('_entity_id','')}`. "
+        "Harness-neutral — the Claude Code mirror at `.claude/skills/" + name + "/SKILL.md` is generated "
+        "from this same entity. Do not edit directly: correct the entity and run "
         "`python3 execution/scripts/render_agent_docs.py`.*",
         "",
     ]
@@ -164,36 +257,43 @@ def reference_card(s: dict) -> str:
 
 
 def skill_md(s: dict) -> str:
-    """Frontmatter + prompt_markdown, matching the existing mirror shape."""
-    fm = ["---"]
-    fm.append(f"entity_id: {s.get('_entity_id','')}")
-    fm.append("entity_type: agent_definition")
+    """Claude Code adapter: minimal frontmatter (only the keys the CC loader
+    consumes) + the same prompt body + a pointer to the canonical file."""
+    name = s["name"]
+    fm = ["---", f"entity_id: {_yaml_scalar(s.get('_entity_id',''))}", "entity_type: agent_definition"]
     if s.get("name"):
-        fm.append(f"name: {s['name']}")
+        fm.append(f"name: {_yaml_scalar(s['name'])}")
     if s.get("description"):
-        fm.append(f"description: {s['description']}")
+        fm.append(f"description: {_yaml_scalar(s['description'])}")
     triggers = _as_list(s.get("triggers"))
     if triggers:
         fm.append("triggers:")
-        fm += [f"  - {t}" for t in triggers]
+        fm += [f"  - {_yaml_scalar(t)}" for t in triggers]
     if s.get("user_invocable") is not None:
         fm.append(f"user_invocable: {str(bool(s['user_invocable'])).lower()}")
     fm.append("---")
     body = (s.get("prompt_markdown") or "").rstrip()
-    return SKILL_HEADER + "\n" + "\n".join(fm) + "\n\n" + body + "\n"
+    pointer = (
+        f"<!-- Claude Code adapter for agent `{name}`. Canonical file: "
+        f"docs/agents/{name}.md (harness-neutral). Both are generated from the "
+        f"same Neotoma agent_definition; daemons load the prompt from Neotoma "
+        f"directly, not from this file. -->"
+    )
+    return SKILL_HEADER + "\n" + "\n".join(fm) + "\n\n" + pointer + "\n\n" + body + "\n"
 
 
 def index_md(agents: list[dict]) -> str:
     L = [
         "# Ateles agents",
         "",
-        "Reference cards for every `agent_definition` entity in Neotoma, mirrored to disk. "
-        "Neotoma is canonical; these files are generated — see "
-        "`execution/scripts/render_agent_docs.py`. Operational prompts live in "
-        "`.claude/skills/<name>/SKILL.md` (also mirrored). Per agent_policy "
-        "`ent_c3c5e4a9350250cbf69e08bf`, prompts are public and PII-free.",
+        "The canonical, harness-neutral file for every `agent_definition` entity in Neotoma. "
+        "Each `<name>.md` carries the full definition (frontmatter + metadata table + operational "
+        "prompt) and is the source any harness can read. Neotoma is canonical; these files are "
+        "generated — see `execution/scripts/render_agent_docs.py`. The Claude Code harness loads a "
+        "generated mirror at `.claude/skills/<name>/SKILL.md` (same entity, minimal frontmatter). "
+        "Per agent_policy `ent_c3c5e4a9350250cbf69e08bf`, prompts are public and PII-free.",
         "",
-        "| Agent | Tier | Genus | Status | Prompt | Card |",
+        "| Agent | Tier | Genus | Status | Prompt | File |",
         "| --- | --- | --- | --- | --- | --- |",
     ]
     for s in agents:
@@ -218,7 +318,7 @@ def _targets(agents: list[dict]) -> dict[Path, str]:
     out: dict[Path, str] = {}
     out[AGENTS_DOC_DIR / "README.md"] = index_md(agents)
     for s in agents:
-        out[AGENTS_DOC_DIR / f"{s['name']}.md"] = reference_card(s)
+        out[AGENTS_DOC_DIR / f"{s['name']}.md"] = canonical_agent_file(s)
         if _has_skill(s):
             out[SKILLS_DIR / s["name"] / "SKILL.md"] = skill_md(s)
     return out

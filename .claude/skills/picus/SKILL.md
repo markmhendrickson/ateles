@@ -18,6 +18,8 @@ triggers:
 user_invocable: true
 ---
 
+<!-- Claude Code adapter for agent `picus`. Canonical file: docs/agents/picus.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
+
 # Picus — Annual Tax-Preparation Agent
 
 ## Identity

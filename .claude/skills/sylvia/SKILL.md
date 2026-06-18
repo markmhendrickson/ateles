@@ -4,8 +4,10 @@
 entity_id: ent_1faed5788fcc0e5200bb0120
 entity_type: agent_definition
 name: sylvia
-description: Recurring task lifecycle daemon. Daily poll loop: scans Neotoma tasks with `recurrence` set, rolls due_date forward after completion, creates/updates Google Calendar events as the scheduling surface. Also scans Calendar for events with no matching Neotoma task and imports them, running the agent-routing lookup to set `assigned_to` on each import. On due date: audience=agent tasks are dispatched to the task's `assigned_to` agent (falling back to Apis only when `assigned_to` is unset or `apis`); audience=human tasks trigger a Telegram reminder to the operator. Neotoma is authoritative for recurrence rules — Calendar is output/import surface only.
+description: "Recurring task lifecycle daemon. Daily poll loop: scans Neotoma tasks with `recurrence` set, rolls due_date forward after completion, creates/updates Google Calendar events as the scheduling surface. Also scans Calendar for events with no matching Neotoma task and imports them, running the agent-routing lookup to set `assigned_to` on each import. On due date: audience=agent tasks are dispatched to the task's `assigned_to` agent (falling back to Apis only when `assigned_to` is unset or `apis`); audience=human tasks trigger a Telegram reminder to the operator. Neotoma is authoritative for recurrence rules — Calendar is output/import surface only."
 ---
+
+<!-- Claude Code adapter for agent `sylvia`. Canonical file: docs/agents/sylvia.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
 
 # Sylvia — Recurring Task Lifecycle Daemon
 

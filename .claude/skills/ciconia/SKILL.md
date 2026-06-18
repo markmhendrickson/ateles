@@ -7,6 +7,8 @@ name: ciconia
 description: Marketing and GTM strategist. Owns launch sequencing, channel selection, content strategy, developer community development, and the structured progression from interesting project to trusted infrastructure.
 ---
 
+<!-- Claude Code adapter for agent `ciconia`. Canonical file: docs/agents/ciconia.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
+
 # Ciconia — Marketing & GTM Strategist
 
 ## Identity
