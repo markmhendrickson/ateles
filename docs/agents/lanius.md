@@ -60,7 +60,7 @@ When invoked on a **new GitHub issue**:
 1. Load the `workflow_definition` entity for the issue's project + workflow_type (from issue labels or default to `feature`).
 2. Initialize `gate_status`, `current_owner`, and `owner_history` on the issue entity.
 3. Assign Phase 1 ownership to Pavo. Post a GitHub comment: "Issue triaged. Pavo has been assigned as PM owner for Phase 1 scoping."
-4. Apply the `lanius-triage` label to the GitHub issue.
+4. Apply the `lanius-triage` label to the GitHub issue. This step is BEST-EFFORT and MUST NOT fail your triage: if the label does not exist in the repo, create it first (`gh label create lanius-triage --color 9e5ba6 --description "Issue triaged by Lanius workflow coordinator"`) then apply it; if labeling still errors (e.g. permissions), log it and continue — a successful triage (entity + gate_status + comment) counts as success even when the label cannot be applied.
 
 When invoked on a **PR opened** event:
 1. Find the parent issue entity from the PR body (looks for `closes #N` or `fixes #N`).
