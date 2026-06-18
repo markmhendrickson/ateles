@@ -10,7 +10,8 @@ genus: Corvus monedula
 status: active
 aauth_sub: monedula@ateles-swarm
 agent_grant: service
-allowed_tools:
+observation_source_default: sensor
+tool_allowlist:
   - btc_wallet_preview_transfer
   - btc_wallet_send_transfer
   - mcp__mcpsrv_neotoma__store
@@ -22,6 +23,16 @@ allowed_tools:
   - mcp__Claude_in_Chrome__find
   - mcp__Claude_in_Chrome__javascript_tool
   - mcp__Claude_in_Chrome__read_network_requests
+context_entity_types:
+  - task
+  - payment_profile
+  - payment_event
+  - calendar_event
+operational_entity_types:
+  - payment_event
+  - task
+  - daemon_report
+  - checkpoint_brief
 ---
 
 # monedula
@@ -37,7 +48,10 @@ Payment execution daemon. Runs once daily via launchd; checks Google Calendar (v
 | Status | active |
 | AAuth sub | monedula@ateles-swarm |
 | Agent grant | service |
+| Observation source | sensor |
 | Allowed tools | btc_wallet_preview_transfer, btc_wallet_send_transfer, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, mcp__mcpsrv_neotoma__retrieve_entities, mcp__Claude_in_Chrome__navigate, mcp__Claude_in_Chrome__get_page_text, mcp__Claude_in_Chrome__read_page, mcp__Claude_in_Chrome__find, mcp__Claude_in_Chrome__javascript_tool, mcp__Claude_in_Chrome__read_network_requests |
+| Context entity types | task, payment_profile, payment_event, calendar_event |
+| Operational entity types | payment_event, task, daemon_report, checkpoint_brief |
 | Entity ID | ent_26e45f38f53798eb42961a69 |
 
 ## Prompt

@@ -9,20 +9,23 @@ tier: T4
 genus: Phoenicurus
 status: planned
 agent_grant: service
+observation_source_default: llm_summary
 user_invocable: true
 triggers:
   - phoenicurus
   - /phoenicurus
-allowed_tools:
-  - "mcp:mcpsrv_neotoma:retrieve_entities"
-  - "mcp:mcpsrv_neotoma:store"
-  - "mcp:mcpsrv_neotoma:correct"
-  - "bash:pytest"
-  - "bash:npm test"
-  - "bash:gh pr checks"
+tool_allowlist:
+  - mcp__mcpsrv_neotoma__retrieve_entities
+  - mcp__mcpsrv_neotoma__retrieve_entity_snapshot
+  - mcp__mcpsrv_neotoma__retrieve_related_entities
+  - mcp__mcpsrv_neotoma__store
+  - mcp__mcpsrv_neotoma__correct
   - Read
   - Grep
   - Bash
+  - "bash:pytest"
+  - "bash:npm test"
+  - "bash:gh pr checks"
 context_entity_types:
   - workflow_definition
   - standing_rule
@@ -83,8 +86,9 @@ Invoke Phoenicurus, the QA agent — test coverage audits, regression assessment
 | Genus | Phoenicurus |
 | Status | planned |
 | Agent grant | service |
+| Observation source | llm_summary |
 | Triggers | phoenicurus, /phoenicurus |
-| Allowed tools | mcp:mcpsrv_neotoma:retrieve_entities, mcp:mcpsrv_neotoma:store, mcp:mcpsrv_neotoma:correct, bash:pytest, bash:npm test, bash:gh pr checks, Read, Grep, Bash |
+| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, Read, Grep, Bash, bash:pytest, bash:npm test, bash:gh pr checks |
 | Context entity types | workflow_definition, standing_rule, agent_grant, agent_definition, agent_policy, agent_strategy, test_plan, coverage_record, bug_report, ui_bug_report, ui_bug, ui_issue, software_issue, technical_issue, validation_result, verification_result, audit_result, audit_run, feedback_finding, neotoma_qa_finding, accessibility_audit, security_finding, behavior_requirement, feature_spec, specification, error_event, runtime_error, javascript_error, frontend_error, frontend_runtime_error, console_error, incident, health_event, release_gate, release_criterion |
 | Operational entity types | test_plan, coverage_record, validation_result, verification_result, bug_report, neotoma_qa_finding, release_gate, audit_run, strategy_drift_signal |
 | Entity ID | ent_42843b65dd18fc39294e94a1 |

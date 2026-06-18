@@ -10,8 +10,28 @@ genus: Ateles
 status: active
 aauth_sub: ateles@ateles-swarm
 agent_grant: operator
-allowed_tools:
+observation_source_default: llm_summary
+tool_allowlist:
   - "*"
+context_entity_types:
+  - task
+  - checkpoint_brief
+  - release_result
+  - conversation
+  - contact
+  - plan
+  - priority_rubric
+  - escalation
+  - daemon_report
+  - agent_definition
+  - workout_session
+operational_entity_types:
+  - conversation
+  - conversation_message
+  - task
+  - plan
+  - checkpoint_brief
+  - release_result
 ---
 
 # ateles
@@ -27,7 +47,10 @@ Primary operator interface and root agent of the Ateles swarm (renamed from Onyc
 | Status | active |
 | AAuth sub | ateles@ateles-swarm |
 | Agent grant | operator |
+| Observation source | llm_summary |
 | Allowed tools | * |
+| Context entity types | task, checkpoint_brief, release_result, conversation, contact, plan, priority_rubric, escalation, daemon_report, agent_definition, workout_session |
+| Operational entity types | conversation, conversation_message, task, plan, checkpoint_brief, release_result |
 | Entity ID | ent_706f1432822b4a9d9d71c127 |
 
 ## Prompt

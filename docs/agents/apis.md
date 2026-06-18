@@ -10,11 +10,24 @@ genus: Apis
 status: active
 aauth_sub: apis@ateles-swarm
 agent_grant: service
+observation_source_default: workflow_state
 harness_preferences: lib/daemon_runtime SSEClient
-allowed_tools:
+tool_allowlist:
   - neotoma_read
   - neotoma_write
   - neotoma_correct
+context_entity_types:
+  - task
+  - agent_definition
+  - execution_policy
+  - checkpoint_brief
+  - confidence_rubric
+  - workflow_definition
+  - priority_rubric
+operational_entity_types:
+  - task
+  - checkpoint_brief
+  - daemon_report
 ---
 
 # apis
@@ -30,7 +43,10 @@ Universal task dispatcher daemon. Subscribes to task.created/updated/due_today S
 | Status | active |
 | AAuth sub | apis@ateles-swarm |
 | Agent grant | service |
+| Observation source | workflow_state |
 | Allowed tools | neotoma_read, neotoma_write, neotoma_correct |
+| Context entity types | task, agent_definition, execution_policy, checkpoint_brief, confidence_rubric, workflow_definition, priority_rubric |
+| Operational entity types | task, checkpoint_brief, daemon_report |
 | Harness | lib/daemon_runtime SSEClient |
 | Entity ID | ent_acdb65a8c5dccc1c5f6c7171 |
 

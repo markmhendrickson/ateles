@@ -9,11 +9,12 @@ tier: T3
 genus: Lanius
 status: planned
 agent_grant: lanius-workflow
+observation_source_default: workflow_state
 user_invocable: true
 triggers:
   - lanius
   - /lanius
-allowed_tools:
+tool_allowlist:
   - mcp__mcpsrv_neotoma__retrieve_entities
   - mcp__mcpsrv_neotoma__retrieve_entity_snapshot
   - mcp__mcpsrv_neotoma__retrieve_entity_by_identifier
@@ -37,6 +38,7 @@ Invoke Lanius, the GitHub workflow coordinator — routes issues through the gat
 | Genus | Lanius |
 | Status | planned |
 | Agent grant | lanius-workflow |
+| Observation source | workflow_state |
 | Triggers | lanius, /lanius |
 | Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_entity_by_identifier, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, mcp__mcpsrv_neotoma__list_observations, mcp__mcpsrv_neotoma__submit_issue, Bash |
 | Entity ID | ent_f9c2c573e7fba5bc8c3e58c3 |

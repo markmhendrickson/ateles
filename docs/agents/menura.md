@@ -10,7 +10,8 @@ genus: Menura
 status: planned
 aauth_sub: menura@ateles-swarm
 agent_grant: public_read
-allowed_tools:
+observation_source_default: llm_summary
+tool_allowlist:
   - mcp__mcpsrv_neotoma__retrieve_entities
   - mcp__mcpsrv_neotoma__retrieve_entity_by_identifier
 ---
@@ -28,6 +29,7 @@ Public-facing personal representative at markmhendrickson.com/agent/. Read-only,
 | Status | planned |
 | AAuth sub | menura@ateles-swarm |
 | Agent grant | public_read |
+| Observation source | llm_summary |
 | Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_by_identifier |
 | Entity ID | ent_78fa62a9d99fac9ba11fc687 |
 

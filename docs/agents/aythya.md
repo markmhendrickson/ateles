@@ -9,7 +9,8 @@ tier: T4
 genus: Aythya
 status: planned
 agent_grant: service
-allowed_tools:
+observation_source_default: llm_summary
+tool_allowlist:
   - mcp__mcpsrv_neotoma__retrieve_entities
   - mcp__mcpsrv_neotoma__retrieve_entity_snapshot
   - mcp__mcpsrv_neotoma__retrieve_related_entities
@@ -31,6 +32,7 @@ Visual and brand designer. Owns brand identity, design system, aesthetic languag
 | Genus | Aythya |
 | Status | planned |
 | Agent grant | service |
+| Observation source | llm_summary |
 | Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, WebSearch, WebFetch |
 | Entity ID | ent_fe71134e46209c21cf413b9b |
 

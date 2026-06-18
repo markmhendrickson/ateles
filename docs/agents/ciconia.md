@@ -9,7 +9,8 @@ tier: T4
 genus: Ciconia
 status: planned
 agent_grant: service
-allowed_tools:
+observation_source_default: llm_summary
+tool_allowlist:
   - mcp__mcpsrv_neotoma__retrieve_entities
   - mcp__mcpsrv_neotoma__retrieve_entity_snapshot
   - mcp__mcpsrv_neotoma__retrieve_related_entities
@@ -31,6 +32,7 @@ Marketing and GTM strategist. Owns launch sequencing, channel selection, content
 | Genus | Ciconia |
 | Status | planned |
 | Agent grant | service |
+| Observation source | llm_summary |
 | Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, WebSearch, WebFetch |
 | Entity ID | ent_f2f10ae2c6e4869327831d78 |
 

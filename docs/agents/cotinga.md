@@ -10,7 +10,8 @@ genus: Cotinga cotinga
 status: active
 aauth_sub: cotinga@ateles-swarm
 agent_grant: service
-allowed_tools:
+observation_source_default: sensor
+tool_allowlist:
   - mcp__mcpsrv_neotoma__retrieve_entities
   - mcp__mcpsrv_neotoma__retrieve_entity_by_identifier
   - mcp__mcpsrv_neotoma__retrieve_entity_snapshot
@@ -20,6 +21,17 @@ allowed_tools:
   - WebSearch
   - WebFetch
   - Bash
+context_entity_types:
+  - calendar_event
+  - event
+  - contact
+  - task
+  - checkpoint_brief
+operational_entity_types:
+  - checkpoint_brief
+  - task
+  - calendar_event
+  - contact
 ---
 
 # cotinga
@@ -35,7 +47,10 @@ Daily event-prep briefing daemon. Runs at 05:30 Madrid time: Phase 1 (fast ~30s)
 | Status | active |
 | AAuth sub | cotinga@ateles-swarm |
 | Agent grant | service |
+| Observation source | sensor |
 | Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_by_identifier, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, WebSearch, WebFetch, Bash |
+| Context entity types | calendar_event, event, contact, task, checkpoint_brief |
+| Operational entity types | checkpoint_brief, task, calendar_event, contact |
 | Entity ID | ent_6c85e2a550580c88024da8f4 |
 
 ## Prompt

@@ -10,11 +10,18 @@ genus: Cicada
 status: planned
 aauth_sub: cicada@ateles-swarm
 agent_grant: cicada-impl
+observation_source_default: llm_summary
 user_invocable: true
 triggers:
   - cicada
   - /cicada
-allowed_tools:
+tool_allowlist:
+  - mcp__mcpsrv_neotoma__retrieve_entities
+  - mcp__mcpsrv_neotoma__retrieve_entity_snapshot
+  - mcp__mcpsrv_neotoma__retrieve_related_entities
+  - mcp__mcpsrv_neotoma__store
+  - mcp__mcpsrv_neotoma__correct
+  - mcp__mcpsrv_neotoma__submit_issue
   - Bash
   - Read
   - Edit
@@ -22,8 +29,8 @@ allowed_tools:
   - "bash:gh pr create"
   - "bash:gh issue*"
   - "bash:git*"
-  - "mcp:github_harness:*"
-  - "mcp:mcpsrv_neotoma:*"
+  - mcp__github_harness__*
+  - mcp__mcpsrv_neotoma__*
 context_entity_types:
   - workflow_definition
   - standing_rule
@@ -78,8 +85,9 @@ Invoke Cicada (formerly Gryllus; renamed 2026-06-12 for voice/ASR robustness), t
 | Status | planned |
 | AAuth sub | cicada@ateles-swarm |
 | Agent grant | cicada-impl |
+| Observation source | llm_summary |
 | Triggers | cicada, /cicada |
-| Allowed tools | Bash, Read, Edit, Write, bash:gh pr create, bash:gh issue*, bash:git*, mcp:github_harness:*, mcp:mcpsrv_neotoma:* |
+| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, mcp__mcpsrv_neotoma__submit_issue, Bash, Read, Edit, Write, bash:gh pr create, bash:gh issue*, bash:git*, mcp__github_harness__*, mcp__mcpsrv_neotoma__* |
 | Context entity types | workflow_definition, standing_rule, agent_grant, agent_definition, agent_policy, agent_strategy, issue, bug_report, ui_bug_report, feature_request, plan, feature_spec, specification, architectural_decision, decision_record, repository, code_change, git_commit, pull_request, code_review_request, task_review, breaking_change, release_gate, release_objective, release_criterion, behavior_requirement, validation_result, verification_result, code_review |
 | Operational entity types | pull_request, code_change, git_commit, plan, task, code_review, rollback_plan, strategy_drift_signal |
 | Entity ID | ent_900b8c9589145fde47787fe5 |

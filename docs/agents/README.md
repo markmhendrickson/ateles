@@ -8,6 +8,7 @@ The canonical, harness-neutral file for every `agent_definition` entity in Neoto
 | anthus | T3 | Anthus | active | ✅ | [anthus.md](anthus.md) |
 | apis | T3 | Apis | active | ✅ | [apis.md](apis.md) |
 | apus | T3 |  | active | ✅ | [apus.md](apus.md) |
+| aquila | T3 | Aquila | active | ✅ | [aquila.md](aquila.md) |
 | ateles | T2 | Ateles | active | ✅ | [ateles.md](ateles.md) |
 | aythya | T4 | Aythya | planned | ✅ | [aythya.md](aythya.md) |
 | buteo | T4 | Buteo | planned | ✅ | [buteo.md](buteo.md) |
@@ -39,4 +40,4 @@ The canonical, harness-neutral file for every `agent_definition` entity in Neoto
 | vanellus | T4 | Vanellus | planned | ✅ | [vanellus.md](vanellus.md) |
 | waxwing | T4 | Bombycilla | planned | ✅ | [waxwing.md](waxwing.md) |
 
-*34 agents. Generated from Neotoma — do not edit directly.*
+*35 agents. Generated from Neotoma — do not edit directly.*

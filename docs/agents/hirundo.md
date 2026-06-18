@@ -9,6 +9,7 @@ tier: T4
 genus: Hirundo
 status: planned
 aauth_sub: hirundo@ateles-swarm
+observation_source_default: llm_summary
 user_invocable: true
 triggers:
   - hirundo
@@ -27,6 +28,7 @@ Customer intelligence and assisted-action agent — ICP synthesis, contact-level
 | Genus | Hirundo |
 | Status | planned |
 | AAuth sub | hirundo@ateles-swarm |
+| Observation source | llm_summary |
 | Triggers | hirundo, /hirundo |
 | Entity ID | ent_ba1ea2886064d5365c1bc7bb |
 

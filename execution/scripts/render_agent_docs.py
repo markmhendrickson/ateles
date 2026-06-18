@@ -191,15 +191,17 @@ def _canonical_frontmatter(s: dict) -> list[str]:
     # Only short, single-line scalars belong in frontmatter. Multi-line fields
     # (e.g. output_format) are rendered as body sections instead.
     for key in ("name", "description", "tier", "genus", "status", "aauth_sub", "agent_grant",
-                "harness_preferences"):
+                "observation_source_default", "harness_preferences"):
         val = s.get(key)
         if val and "\n" not in str(val):
             fm.append(f"{key}: {_yaml_scalar(val)}")
     if s.get("user_invocable") is not None:
         fm.append(f"user_invocable: {str(bool(s['user_invocable'])).lower()}")
-    for key, alias in (("triggers", None), ("allowed_tools", "tool_allowlist"),
-                       ("context_entity_types", None), ("operational_entity_types", None)):
-        vals = _as_list(s.get(key) or (s.get(alias) if alias else None))
+    # tool_allowlist is the canonical tool field (allowed_tools was a diverged
+    # duplicate, merged into tool_allowlist 2026-06-17; stale residue may remain
+    # in allowed_tools but is not surfaced).
+    for key in ("triggers", "tool_allowlist", "context_entity_types", "operational_entity_types"):
+        vals = _as_list(s.get(key))
         if vals:
             fm.append(f"{key}:")
             fm += [f"  - {_yaml_scalar(v)}" for v in vals]
@@ -224,8 +226,9 @@ def canonical_agent_file(s: dict) -> str:
         ("Status", s.get("status")),
         ("AAuth sub", s.get("aauth_sub")),
         ("Agent grant", s.get("agent_grant")),
+        ("Observation source", s.get("observation_source_default")),
         ("Triggers", ", ".join(_as_list(s.get("triggers"))) or None),
-        ("Allowed tools", ", ".join(_as_list(s.get("allowed_tools") or s.get("tool_allowlist"))) or None),
+        ("Allowed tools", ", ".join(_as_list(s.get("tool_allowlist"))) or None),
         ("Context entity types", ", ".join(_as_list(s.get("context_entity_types"))) or None),
         ("Operational entity types", ", ".join(_as_list(s.get("operational_entity_types"))) or None),
         ("Harness", s.get("harness_preferences")),

@@ -9,20 +9,26 @@ tier: T4
 genus: Vanellus
 status: planned
 agent_grant: vanellus-pr
+observation_source_default: workflow_state
 user_invocable: true
 triggers:
   - vanellus
   - /vanellus
-allowed_tools:
+tool_allowlist:
+  - mcp__mcpsrv_neotoma__retrieve_entities
+  - mcp__mcpsrv_neotoma__retrieve_entity_snapshot
+  - mcp__mcpsrv_neotoma__retrieve_entity_by_identifier
+  - mcp__mcpsrv_neotoma__retrieve_related_entities
+  - mcp__mcpsrv_neotoma__store
+  - mcp__mcpsrv_neotoma__correct
+  - mcp__mcpsrv_neotoma__submit_issue
+  - Bash
   - "bash:gh pr*"
   - "bash:gh api"
-  - "mcp:mcpsrv_neotoma:retrieve_entity_by_identifier"
-  - "mcp:mcpsrv_neotoma:store"
-  - "mcp:mcpsrv_neotoma:correct"
-  - "mcp:mcpsrv_neotoma:create_relationship"
+  - mcp__mcpsrv_neotoma__create_relationship
   - Read
   - Grep
-  - "mcp:github_harness:*"
+  - mcp__github_harness__*
 context_entity_types:
   - workflow_definition
   - standing_rule
@@ -68,8 +74,9 @@ Invoke Vanellus, the PR steward agent — enforces PR gate inheritance, reviews 
 | Genus | Vanellus |
 | Status | planned |
 | Agent grant | vanellus-pr |
+| Observation source | workflow_state |
 | Triggers | vanellus, /vanellus |
-| Allowed tools | bash:gh pr*, bash:gh api, mcp:mcpsrv_neotoma:retrieve_entity_by_identifier, mcp:mcpsrv_neotoma:store, mcp:mcpsrv_neotoma:correct, mcp:mcpsrv_neotoma:create_relationship, Read, Grep, mcp:github_harness:* |
+| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_entity_by_identifier, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, mcp__mcpsrv_neotoma__submit_issue, Bash, bash:gh pr*, bash:gh api, mcp__mcpsrv_neotoma__create_relationship, Read, Grep, mcp__github_harness__* |
 | Context entity types | workflow_definition, standing_rule, agent_grant, agent_definition, agent_policy, agent_strategy, pull_request, code_change, git_commit, code_review_request, code_review, repository, architectural_decision, feature_spec, specification, behavior_requirement, bug_report, security_finding, security_question, validation_result |
 | Operational entity types | code_review, task_review, verification_result, bug_report, security_finding, feedback_finding, decision_note, feedback_artifact, strategy_drift_signal |
 | Entity ID | ent_fedc0fbabef6ef203f8029c9 |
