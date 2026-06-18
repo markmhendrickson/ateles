@@ -709,3 +709,331 @@ class TestRoleSigningEnvInjection:
         assert "NEOTOMA_AAUTH_ROLE" not in captured_env, (
             "NEOTOMA_AAUTH_ROLE must not be injected (it is superseded and was never real)"
         )
+
+
+# ── Stage 6: Neotoma MCP config injection (ateles#1687) ──────────────────────
+
+
+class TestNeotomaMcpConfigInjection:
+    """Stage 6 of ateles#94: run_skill must inject --mcp-config pointing the
+    dispatched child at the local Neotoma HTTP MCP endpoint so role agents
+    (Lanius/Pavo) can load workflow_definition, init gate_status, and store
+    plan_contribution without requiring the ambient Claude MCP config.
+
+    MCP tool allowlist syntax finding:
+      The --allowed-tools flag accepts "mcp__<servername>__*" as a wildcard that
+      permits all tools from the named MCP server. The server name must exactly
+      match the key in mcpServers (here: "neotoma"). So for a restricted tool
+      list, we append "mcp__neotoma__*" to allow all neotoma MCP tools.
+
+    Security:
+      The bearer token is written to a mode-0600 temp file; the file path (not
+      the token) is passed to --mcp-config to avoid argv exposure via `ps`.
+      The temp file is cleaned up in a try/finally after the subprocess exits.
+    """
+
+    def setup_method(self) -> None:
+        skill_runner._agent_def_cache.clear()
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _make_exec_capturer(self, captured_cmd: list, returncode: int = 0):
+        async def fake_exec(*cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            proc = MagicMock()
+            proc.returncode = returncode
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        return fake_exec
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_mcp_config_injected_with_token(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """When NEOTOMA_BASE_URL and NEOTOMA_BEARER_TOKEN are set, the spawned
+        command must include --mcp-config, and the config file must contain the
+        neotoma http server pointing at <base>/mcp with the Authorization header."""
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.", tool_allowlist="*")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-bearer-xyz")
+
+        captured_cmd: list = []
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=self._make_exec_capturer(captured_cmd)),
+            patch("os.path.exists", return_value=False),  # no JWK file
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus", "work prompt", role="gryllus", task_entity_id="ent_abc"
+                )
+            )
+
+        assert result.ok
+        assert "--mcp-config" in captured_cmd, "Expected --mcp-config in spawned command"
+        mcp_idx = captured_cmd.index("--mcp-config") + 1
+        mcp_file = captured_cmd[mcp_idx]
+        # Temp file is cleaned up after subprocess; we check content was correct by
+        # verifying the path was passed and reading it during the call is not feasible
+        # post-cleanup. Instead, verify the path was a string (not inline JSON).
+        assert isinstance(mcp_file, str), "Expected file path string for --mcp-config"
+        assert not mcp_file.startswith("{"), (
+            "Expected a file path, not inline JSON (security: avoid argv exposure)"
+        )
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_mcp_config_no_auth_header_without_token(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """When NEOTOMA_BEARER_TOKEN is absent/empty, --mcp-config is still injected
+        but the config must omit the Authorization header (local dev-mode Neotoma
+        accepts no-bearer).
+
+        Strategy: intercept tempfile.mkstemp so we get the path, read the content
+        immediately after the fd is opened and written (before cleanup), then verify.
+        We do NOT patch os.path.exists here so skill_runner can stat the real temp
+        file — only Path.exists is patched (for the SKILL.md check).
+        """
+        import json as _json
+        import tempfile as _tempfile
+
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.", tool_allowlist="*")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.delenv("NEOTOMA_BEARER_TOKEN", raising=False)
+
+        captured_cmd: list = []
+        written_contents: list[dict] = []
+
+        # Intercept mkstemp to record the path; also wrap os.fdopen to capture content.
+        _real_mkstemp = _tempfile.mkstemp
+        captured_paths: list[str] = []
+
+        def _capturing_mkstemp(**kwargs):
+            fd, path = _real_mkstemp(**kwargs)
+            captured_paths.append(path)
+            return fd, path
+
+        async def fake_exec(*cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                # Read the file content from the known path while proc is "running".
+                # os.path.exists is NOT patched so the real file is accessible.
+                if captured_paths:
+                    import os as _real_os
+                    fpath = captured_paths[-1]
+                    if _real_os.path.isfile(fpath):
+                        with open(fpath) as f:
+                            written_contents.append(_json.load(f))
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch("skill_runner.tempfile.mkstemp", side_effect=_capturing_mkstemp),
+            # Patch os.path.exists only for the JWK file check (return False = no JWK).
+            patch("skill_runner.os.path.exists", return_value=False),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus", "work prompt", role="gryllus", task_entity_id="ent_abc"
+                )
+            )
+
+        assert result.ok
+        assert "--mcp-config" in captured_cmd
+        assert len(written_contents) == 1, "Expected MCP config to be read during communicate"
+        cfg = written_contents[0]
+        neotoma_cfg = cfg["mcpServers"]["neotoma"]
+        assert neotoma_cfg["url"].endswith("/mcp"), (
+            f"Expected url ending in /mcp, got {neotoma_cfg['url']!r}"
+        )
+        # No Authorization header when no token.
+        headers = neotoma_cfg.get("headers", {})
+        assert "Authorization" not in headers, (
+            "Expected no Authorization header when NEOTOMA_BEARER_TOKEN is unset"
+        )
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_mcp_config_with_token_has_auth_header(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """When NEOTOMA_BEARER_TOKEN is set, the injected config must include
+        Authorization: Bearer <token> in the headers.
+
+        Strategy: intercept tempfile.mkstemp to get the path, then read the file
+        during proc.communicate() before cleanup.
+        """
+        import json as _json
+        import tempfile as _tempfile
+
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.", tool_allowlist="*")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "secret-bearer-abc")
+
+        captured_cmd: list = []
+        written_contents: list[dict] = []
+
+        _real_mkstemp = _tempfile.mkstemp
+        captured_paths: list[str] = []
+
+        def _capturing_mkstemp(**kwargs):
+            fd, path = _real_mkstemp(**kwargs)
+            captured_paths.append(path)
+            return fd, path
+
+        async def fake_exec(*cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                if captured_paths:
+                    import os as _real_os
+                    fpath = captured_paths[-1]
+                    if _real_os.path.isfile(fpath):
+                        with open(fpath) as f:
+                            written_contents.append(_json.load(f))
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch("skill_runner.tempfile.mkstemp", side_effect=_capturing_mkstemp),
+            patch("skill_runner.os.path.exists", return_value=False),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus", "work prompt", role="gryllus", task_entity_id="ent_abc"
+                )
+            )
+
+        assert result.ok
+        assert len(written_contents) == 1, "Expected MCP config to be read during communicate"
+        cfg = written_contents[0]
+        neotoma_cfg = cfg["mcpServers"]["neotoma"]
+        assert neotoma_cfg["url"] == "http://localhost:9180/mcp", (
+            f"Expected url 'http://localhost:9180/mcp', got {neotoma_cfg['url']!r}"
+        )
+        assert neotoma_cfg.get("headers", {}).get("Authorization") == "Bearer secret-bearer-abc", (
+            "Expected Authorization header with bearer token"
+        )
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_restricted_allowlist_adds_neotoma_wildcard(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """When the role has a restricted tool allowlist (not ['*']), the neotoma
+        MCP wildcard 'mcp__neotoma__*' must be added to --allowed-tools so the
+        dispatched agent can call neotoma MCP tools."""
+        restricted_def = _make_def(
+            prompt_markdown="Restricted agent.",
+            tool_allowlist="Bash,Read,Write",
+        )
+        instance = MagicMock()
+        instance.load.return_value = restricted_def
+        MockLoader.return_value = instance
+
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "tok")
+
+        captured_cmd: list = []
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=self._make_exec_capturer(captured_cmd)),
+            patch("os.path.exists", return_value=False),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus", "work prompt", role="gryllus", task_entity_id="ent_abc"
+                )
+            )
+
+        assert result.ok
+        assert "--allowed-tools" in captured_cmd
+        tools_idx = captured_cmd.index("--allowed-tools") + 1
+        allowed_str = captured_cmd[tools_idx]
+        assert "mcp__neotoma__*" in allowed_str, (
+            f"Expected 'mcp__neotoma__*' in --allowed-tools, got: {allowed_str!r}"
+        )
+        # Original tools must still be present.
+        assert "Bash" in allowed_str
+        assert "Read" in allowed_str
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_wildcard_allowlist_not_modified(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """When tool_allowlist is ['*'] (all tools), --allowed-tools must NOT
+        appear in the command (wildcard means no restriction to pass through)."""
+        wide_def = _make_def(prompt_markdown="Full-tool agent.", tool_allowlist="*")
+        instance = MagicMock()
+        instance.load.return_value = wide_def
+        MockLoader.return_value = instance
+
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "tok")
+
+        captured_cmd: list = []
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=self._make_exec_capturer(captured_cmd)),
+            patch("os.path.exists", return_value=False),
+        ):
+            self._run(
+                skill_runner.run_skill(
+                    "gryllus", "work prompt", role="gryllus", task_entity_id="ent_abc"
+                )
+            )
+
+        assert "--allowed-tools" not in captured_cmd, (
+            "Expected no --allowed-tools flag when tool_allowlist is ['*']"
+        )
+        # But --mcp-config is still injected.
+        assert "--mcp-config" in captured_cmd, (
+            "Expected --mcp-config even when tool_allowlist is ['*']"
+        )
