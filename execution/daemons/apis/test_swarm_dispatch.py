@@ -14,13 +14,17 @@ from github_gateway import SwarmTrigger
 from review_panel import Lens
 from skill_runner import SkillResult
 from swarm_dispatch import (
+    AGENT_GITHUB_LOGIN,
     EXPECTATION_MARKER,
     DispatchConfig,
     SwarmDispatcher,
+    _agent_prompt_instruction,
+    _token_for_agent_on_repo,
     _token_for_repo,
     attribution_header,
     compose_fallback_comment,
     content_digest,
+    is_provisioned,
     lenses_missing_comments,
     parse_gate_verdict,
 )
@@ -340,3 +344,232 @@ def test_panelist_prompt_review_comment_instruction_still_present():
     expectation = "- [ ] Some check\n"
     prompt = SwarmDispatcher._panelist_prompt(t, _sample_lens(), expectation, parent=80)
     assert "Post your review as a PR comment" in prompt
+
+
+# ── ateles#109 — per-agent GitHub identity (NO-OP until provisioned) ─────────
+# These tests cover the three-tier token resolution, attribution_header gating,
+# prompt instruction blocks, and native assignment.  They explicitly assert the
+# NO-OP property: with no <AGENT>_AGENT_PAT env vars set, behaviour is identical
+# to pre-#109.  They also assert correct behaviour when a PAT IS set (mocked).
+
+
+# ── is_provisioned ─────────────────────────────────────────────────────────────
+
+
+def test_is_provisioned_false_when_pat_absent(monkeypatch):
+    """NO-OP: is_provisioned returns False when PAVO_AGENT_PAT is not set."""
+    monkeypatch.delenv("PAVO_AGENT_PAT", raising=False)
+    assert is_provisioned("pavo") is False
+
+
+def test_is_provisioned_true_when_pat_set(monkeypatch):
+    """is_provisioned returns True when PAVO_AGENT_PAT is set."""
+    monkeypatch.setenv("PAVO_AGENT_PAT", "ghp_test_pavo_pat")
+    assert is_provisioned("pavo") is True
+
+
+def test_is_provisioned_uppercases_agent_name(monkeypatch):
+    """Agent name is uppercased before constructing the env var key."""
+    monkeypatch.setenv("LANIUS_AGENT_PAT", "ghp_lanius")
+    assert is_provisioned("lanius") is True
+    assert is_provisioned("LANIUS") is True
+
+
+def test_is_provisioned_empty_string_is_false(monkeypatch):
+    """An empty-string env var is treated as absent (not provisioned)."""
+    monkeypatch.setenv("CORVUS_AGENT_PAT", "")
+    assert is_provisioned("corvus") is False
+
+
+# ── _token_for_agent_on_repo ──────────────────────────────────────────────────
+
+
+def test_token_for_agent_on_repo_tier1_when_agent_pat_set(monkeypatch):
+    """Tier 1: agent's own PAT wins when PAVO_AGENT_PAT is set."""
+    monkeypatch.setenv("PAVO_AGENT_PAT", "ghp_pavo_own")
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_ateles_shared")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_fallback")
+    result = _token_for_agent_on_repo("pavo", "markmhendrickson/ateles")
+    assert result == "ghp_pavo_own"
+
+
+def test_token_for_agent_on_repo_tier2_neotoma_when_unprovisioned(monkeypatch):
+    """NO-OP Tier 2: without agent PAT, neotoma repo uses NEOTOMA_AGENT_PAT."""
+    monkeypatch.delenv("PAVO_AGENT_PAT", raising=False)
+    monkeypatch.setenv("NEOTOMA_AGENT_PAT", "ghp_neotoma_shared")
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_ateles_shared")
+    result = _token_for_agent_on_repo("pavo", "markmhendrickson/neotoma")
+    # Must match _token_for_repo — the existing #95 behaviour.
+    assert result == _token_for_repo("markmhendrickson/neotoma")
+    assert result == "ghp_neotoma_shared"
+
+
+def test_token_for_agent_on_repo_tier2_ateles_when_unprovisioned(monkeypatch):
+    """NO-OP Tier 2: without agent PAT, ateles repo uses ATELES_AGENT_PAT."""
+    monkeypatch.delenv("PAVO_AGENT_PAT", raising=False)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_ateles_shared")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_fallback")
+    result = _token_for_agent_on_repo("pavo", "markmhendrickson/ateles")
+    assert result == _token_for_repo("markmhendrickson/ateles")
+    assert result == "ghp_ateles_shared"
+
+
+def test_token_for_agent_on_repo_tier3_fallback_when_all_absent(monkeypatch):
+    """Tier 3: when no agent PAT and no per-repo PAT, falls back to GITHUB_TOKEN."""
+    monkeypatch.delenv("PAVO_AGENT_PAT", raising=False)
+    monkeypatch.delenv("ATELES_AGENT_PAT", raising=False)
+    monkeypatch.delenv("NEOTOMA_AGENT_PAT", raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_shared_fallback")
+    result = _token_for_agent_on_repo("pavo", "markmhendrickson/ateles")
+    assert result == "ghp_shared_fallback"
+
+
+# ── attribution_header — always returns non-empty ────────────────────────────
+
+
+def test_attribution_header_always_returns_nonempty():
+    """attribution_header always returns the non-empty header string regardless
+    of provisioning state — gating belongs in _agent_prompt_instruction."""
+    assert attribution_header("pavo", "pm gate owner") != ""
+    assert "Pavo" in attribution_header("pavo", "pm gate owner")
+
+
+# ── _agent_prompt_instruction ──────────────────────────────────────────────────
+
+
+def test_agent_prompt_instruction_shared_account_when_unprovisioned(monkeypatch):
+    """NO-OP: without agent PAT, instruction says 'shared account / prepend header'."""
+    monkeypatch.delenv("PAVO_AGENT_PAT", raising=False)
+    instruction = _agent_prompt_instruction("pavo", "pm gate owner")
+    # Must contain the shared-account wording from the current behaviour.
+    assert attribution_header("pavo", "pm gate owner") in instruction
+    assert "shared" in instruction.lower()
+    # Must NOT say the agent is posting as itself.
+    assert "your own GitHub account" not in instruction
+
+
+def test_agent_prompt_instruction_own_account_when_provisioned(monkeypatch):
+    """When PAVO_AGENT_PAT is set, instruction says agent posts AS ITSELF."""
+    monkeypatch.setenv("PAVO_AGENT_PAT", "ghp_pavo_pat")
+    instruction = _agent_prompt_instruction("pavo", "pm gate owner")
+    assert "your own GitHub account" in instruction
+    # Must NOT contain the attribution header (avatar is the identity).
+    assert attribution_header("pavo", "pm gate owner") not in instruction
+    # Must NOT say shared account.
+    assert "account is shared" not in instruction
+
+
+def test_agent_prompt_instruction_provisioned_login_uses_convention(monkeypatch):
+    """When provisioned, the instruction cites the ateles-<agent> login."""
+    monkeypatch.setenv("PAVO_AGENT_PAT", "ghp_pavo_pat")
+    instruction = _agent_prompt_instruction("pavo", "pm gate owner")
+    assert AGENT_GITHUB_LOGIN["pavo"] in instruction  # "ateles-pavo"
+
+
+# ── Prompt-level no-op assertions ─────────────────────────────────────────────
+
+
+def test_lanius_issue_prompt_shared_account_text_when_unprovisioned(monkeypatch):
+    """NO-OP: _lanius_issue_prompt uses shared-account wording when no PAT set."""
+    monkeypatch.delenv("LANIUS_AGENT_PAT", raising=False)
+    monkeypatch.delenv("PAVO_AGENT_PAT", raising=False)
+    t = _trigger(kind="issue_opened", number=1, title="A new issue", body="Body.")
+    prompt = SwarmDispatcher._lanius_issue_prompt(t)
+    assert "account is shared" in prompt
+    assert attribution_header("lanius", "issue triage") in prompt
+    # No GitHub-native assignment when pavo is unprovisioned.
+    assert "--add-assignee" not in prompt
+
+
+def test_lanius_issue_prompt_own_account_and_assignment_when_provisioned(monkeypatch):
+    """When LANIUS and PAVO PATs are set: own-account text + native assignment."""
+    monkeypatch.setenv("LANIUS_AGENT_PAT", "ghp_lanius")
+    monkeypatch.setenv("PAVO_AGENT_PAT", "ghp_pavo")
+    t = _trigger(kind="issue_opened", number=1, title="A new issue", body="Body.")
+    prompt = SwarmDispatcher._lanius_issue_prompt(t)
+    # Lanius should use its own account.
+    assert "your own GitHub account" in prompt
+    assert "account is shared" not in prompt
+    # Native assignment instruction for pavo should appear.
+    assert "--add-assignee" in prompt
+    assert AGENT_GITHUB_LOGIN["pavo"] in prompt
+    # Must be best-effort.
+    assert "best-effort" in prompt.lower() or "skip silently" in prompt.lower()
+
+
+def test_pavo_prompt_shared_account_text_when_unprovisioned(monkeypatch):
+    """NO-OP: _pavo_prompt uses shared-account wording when PAVO_AGENT_PAT absent."""
+    monkeypatch.delenv("PAVO_AGENT_PAT", raising=False)
+    t = _trigger()
+    prompt = SwarmDispatcher._pavo_prompt(t)
+    assert "account is shared" in prompt
+    assert attribution_header("pavo", "pm gate owner") in prompt
+
+
+def test_pavo_prompt_own_account_when_provisioned(monkeypatch):
+    """When PAVO_AGENT_PAT is set, _pavo_prompt instructs own-account posting."""
+    monkeypatch.setenv("PAVO_AGENT_PAT", "ghp_pavo")
+    t = _trigger()
+    prompt = SwarmDispatcher._pavo_prompt(t)
+    assert "your own GitHub account" in prompt
+    assert "account is shared" not in prompt
+
+
+def test_vanellus_prompt_shared_account_text_when_unprovisioned(monkeypatch):
+    """NO-OP: _vanellus_prompt uses shared-account wording when unprovisioned."""
+    monkeypatch.delenv("VANELLUS_AGENT_PAT", raising=False)
+    t = _trigger()
+    prompt = SwarmDispatcher._vanellus_prompt(t, parent=80, lenses=["pm", "qa"])
+    assert "account is shared" in prompt
+    assert attribution_header("vanellus", "PR steward") in prompt
+
+
+def test_vanellus_prompt_own_account_when_provisioned(monkeypatch):
+    """When VANELLUS_AGENT_PAT is set, _vanellus_prompt uses own-account text."""
+    monkeypatch.setenv("VANELLUS_AGENT_PAT", "ghp_vanellus")
+    t = _trigger()
+    prompt = SwarmDispatcher._vanellus_prompt(t, parent=80, lenses=["pm"])
+    assert "your own GitHub account" in prompt
+    assert "account is shared" not in prompt
+
+
+def test_lanius_pr_prompt_shared_account_text_when_unprovisioned(monkeypatch):
+    """NO-OP: _lanius_pr_prompt uses shared-account wording when unprovisioned."""
+    monkeypatch.delenv("LANIUS_AGENT_PAT", raising=False)
+    t = _trigger()
+    prompt = SwarmDispatcher._lanius_pr_prompt(t, parent=80)
+    assert "account is shared" in prompt
+    assert attribution_header("lanius", "PR gate inheritance") in prompt
+
+
+def test_panelist_prompt_shared_account_text_when_unprovisioned(monkeypatch):
+    """NO-OP: _panelist_prompt uses shared-account wording when unprovisioned."""
+    monkeypatch.delenv("PHOENICURUS_AGENT_PAT", raising=False)
+    t = _trigger()
+    prompt = SwarmDispatcher._panelist_prompt(t, _sample_lens(), "", parent=None)
+    assert attribution_header("phoenicurus", "qa lens panelist") in prompt
+
+
+def test_panelist_prompt_own_account_when_provisioned(monkeypatch):
+    """When provisioned, _panelist_prompt instructs own-account posting."""
+    monkeypatch.setenv("PHOENICURUS_AGENT_PAT", "ghp_phoenicurus")
+    t = _trigger()
+    prompt = SwarmDispatcher._panelist_prompt(t, _sample_lens(), "", parent=None)
+    assert "your own GitHub account" in prompt
+    assert "account is shared" not in prompt
+
+
+# ── AGENT_GITHUB_LOGIN convention ─────────────────────────────────────────────
+
+
+def test_agent_github_login_follows_convention():
+    """All 8 GitHub-facing agents map to ateles-<agent> logins."""
+    expected_agents = {
+        "lanius", "pavo", "vanellus", "bombycilla",
+        "accipiter", "buteo", "phoenicurus", "corvus",
+    }
+    assert set(AGENT_GITHUB_LOGIN.keys()) == expected_agents
+    for agent, login in AGENT_GITHUB_LOGIN.items():
+        assert login == f"ateles-{agent}", (
+            f"Expected login 'ateles-{agent}', got {login!r}"
+        )

@@ -191,6 +191,7 @@ async def run_skill(
     timeout: int | None = None,
     env_extra: dict[str, str] | None = None,
     notifier=None,  # lib.notify.Notifier | None — kept optional to avoid hard dep
+    github_token: str | None = None,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
@@ -205,6 +206,13 @@ async def run_skill(
     Stage 5: when agent_definition carries empty prompt_markdown, logs a WARN,
     sends a notifier alert (when a notifier is supplied), and records a
     degraded_generic_subagent harness_event. Dispatch still proceeds.
+
+    ``github_token`` (#109 — per-agent GitHub identity): when supplied, the token
+    is injected into subprocess_env as both ``GITHUB_TOKEN`` and ``GH_TOKEN`` so
+    the spawned agent's ``gh`` calls authenticate as the correct identity.  When
+    not supplied, the child inherits the daemon's ambient env unchanged (current
+    behaviour for all callers that predate #109).  Only GitHub-triggered pipeline
+    call sites pass this; SSE task-path dispatches leave it unset.
 
     `claude --print` tool-allowlist flag: --allowed-tools (confirmed present;
     accepts comma- or space-separated tool names, e.g. "Bash,Edit,Read").
@@ -364,6 +372,17 @@ async def run_skill(
         log.debug(f"[apis] start harness_event write failed (non-fatal): {exc}")
 
     subprocess_env = {**os.environ, **(env_extra or {})}
+
+    # ateles#109 — per-agent GitHub identity: when the caller resolved a
+    # per-agent token (e.g. via _token_for_agent_on_repo in swarm_dispatch),
+    # override both GITHUB_TOKEN and GH_TOKEN so the child's `gh` calls
+    # authenticate as that agent's own account.  When github_token is None
+    # (all SSE task-path and non-GitHub call sites), this block is skipped and
+    # the child inherits the daemon's ambient tokens unchanged — exact
+    # current behaviour, no regression.
+    if github_token:
+        subprocess_env["GITHUB_TOKEN"] = github_token
+        subprocess_env["GH_TOKEN"] = github_token
 
     # Stage 3 (ateles#94): inject the Neotoma AAuth client signer env vars so
     # the dispatched child can sign its own Neotoma writes as <role>@ateles-swarm.
