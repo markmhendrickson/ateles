@@ -267,7 +267,9 @@ class SwarmDispatcher:
         for lens in panel:
             result = await run_skill(
                 lens.agent,
-                self._panelist_prompt(trigger, lens, expectations.get(lens.agent, "")),
+                self._panelist_prompt(
+                    trigger, lens, expectations.get(lens.agent, ""), parent
+                ),
             )
             if result.ok:
                 reviews.append((lens.lens, result.stdout))
@@ -346,7 +348,12 @@ class SwarmDispatcher:
             "post ONE GitHub comment on the issue, formatted exactly as:\n\n"
             f"**{EXPECTATION_MARKER} ({lens.lens})** — what {lens.agent} will "
             "verify when a PR addresses this issue:\n"
-            "- <3 to 6 tight, concrete checklist items scoped to your lens>\n\n"
+            "- [ ] <one concrete, verifiable check>\n"
+            "- [ ] <... 3 to 6 total, each a GitHub task-list item using "
+            "`- [ ] ` exactly>\n\n"
+            "Use GitHub task-list checkbox syntax (`- [ ]`) for every item — "
+            "these are checked off at PR-review time. Do not use plain `-` "
+            "bullets.\n\n"
             "Also store the same checklist in Neotoma as a plan_contribution "
             f"entity (contribution_type: {EXPECTATION_MARKER}, agent: "
             f"{lens.agent}) linked PART_OF the issue entity.\n"
@@ -407,7 +414,9 @@ class SwarmDispatcher:
         )
 
     @staticmethod
-    def _panelist_prompt(t: SwarmTrigger, lens: Lens, expectation: str) -> str:
+    def _panelist_prompt(
+        t: SwarmTrigger, lens: Lens, expectation: str, parent: int | None = None
+    ) -> str:
         expectation_block = (
             "Your pre-registered expectations on the parent issue were:\n"
             f"{expectation}\n\nReview against them first: did the change meet "
@@ -427,6 +436,28 @@ class SwarmDispatcher:
             "<summary>`. Cite the standing rule or guardrail doc when one "
             "applies — that marks the finding as systemic."
         )
+        # Build the check-off instruction only when there is a parent issue AND
+        # this panelist pre-registered expectations (so there is a comment to edit).
+        checkoff_block = ""
+        if parent and expectation:
+            owner_repo = t.repository
+            checkoff_block = (
+                f"\n\nAfter posting your review, update your pre-registered "
+                f"expectation checklist on the parent issue #{parent} to reflect "
+                f"what this PR satisfied: find YOUR OWN `{EXPECTATION_MARKER} "
+                f"({lens.lens})` comment on issue #{parent} (use "
+                f"`gh api repos/{owner_repo}/issues/{parent}/comments` or "
+                f"`gh issue view {parent} --repo {owner_repo} --comments` to "
+                f"locate the comment authored for your lens), then edit it "
+                f"(`gh api -X PATCH repos/{owner_repo}/issues/comments/<id> "
+                f"-f body='...'`) so each item you verified in this PR is "
+                f"`- [x]` and each not-yet-met item stays `- [ ]`. Only check "
+                f"boxes that your review of THIS PR actually confirmed; leave "
+                f"the rest unchecked. Do NOT create a new comment — edit the "
+                f"existing one in place. Preserve the header line "
+                f"(`**{EXPECTATION_MARKER} ({lens.lens})**`) and all item text "
+                f"exactly; only toggle the checkboxes from `[ ]` to `[x]`."
+            )
         return (
             f"Invoke the {lens.agent} agent per your appended system prompt.\n\n"
             f"You are a review panelist on PR {t.repository}#{t.number}: "
@@ -443,6 +474,7 @@ class SwarmDispatcher:
             "dispatcher parses it and posts the comment for you if your gh "
             "call fails).\n\n"
             f"{blocking_rules}"
+            f"{checkoff_block}"
         )
 
     @staticmethod
