@@ -1038,3 +1038,177 @@ class TestNeotomaMcpConfigInjection:
         assert "--mcp-config" in captured_cmd, (
             "Expected --mcp-config even when tool_allowlist is ['*']"
         )
+
+
+# ── ateles#109 — github_token injection ──────────────────────────────────────
+
+
+class TestGithubTokenInjection:
+    """Per-agent GitHub token injection (#109).
+
+    When github_token is passed to run_skill, both GITHUB_TOKEN and GH_TOKEN
+    must be overridden in subprocess_env so the child's gh calls authenticate as
+    the correct agent identity.
+
+    When github_token is None (all SSE / non-GitHub call sites), the env is
+    unchanged — existing ambient GITHUB_TOKEN is preserved.  This is the NO-OP
+    property: callers that do not pass github_token observe zero behaviour change.
+    """
+
+    def setup_method(self) -> None:
+        skill_runner._agent_def_cache.clear()
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _make_exec_capturer_env(self, captured_envs: list) -> object:
+        async def fake_exec(*cmd, **kwargs):
+            captured_envs.append(dict(kwargs.get("env", {})))
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        return fake_exec
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_github_token_injected_when_passed(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """When github_token='ghp_agent_pat' is supplied, subprocess_env must carry
+        GITHUB_TOKEN=<token> and GH_TOKEN=<token>."""
+        fake_def = _make_def(prompt_markdown="Role: Pavo.", tool_allowlist="*")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        captured_envs: list = []
+
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_ambient_daemon_token")
+        monkeypatch.setenv("GH_TOKEN", "ghp_ambient_gh_token")
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._make_exec_capturer_env(captured_envs),
+            ),
+            patch("os.path.exists", return_value=False),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "pavo",
+                    "work prompt",
+                    role="pavo",
+                    task_entity_id="ent_abc",
+                    github_token="ghp_pavo_own_pat",
+                )
+            )
+
+        assert result.ok
+        assert len(captured_envs) == 1
+        env = captured_envs[0]
+        assert env.get("GITHUB_TOKEN") == "ghp_pavo_own_pat", (
+            "GITHUB_TOKEN must be overridden to the per-agent token"
+        )
+        assert env.get("GH_TOKEN") == "ghp_pavo_own_pat", (
+            "GH_TOKEN must be overridden to the per-agent token"
+        )
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_github_token_not_injected_when_none(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """NO-OP: when github_token is not passed (None), GITHUB_TOKEN and GH_TOKEN
+        in subprocess_env must match the ambient daemon env — no override."""
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.", tool_allowlist="*")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        captured_envs: list = []
+
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_ambient_daemon_token")
+        monkeypatch.setenv("GH_TOKEN", "ghp_ambient_gh_token")
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._make_exec_capturer_env(captured_envs),
+            ),
+            patch("os.path.exists", return_value=False),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "work prompt",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                    # github_token intentionally not passed (default None)
+                )
+            )
+
+        assert result.ok
+        assert len(captured_envs) == 1
+        env = captured_envs[0]
+        # Ambient tokens must be preserved unchanged.
+        assert env.get("GITHUB_TOKEN") == "ghp_ambient_daemon_token", (
+            "GITHUB_TOKEN must not be modified when github_token is not passed"
+        )
+        assert env.get("GH_TOKEN") == "ghp_ambient_gh_token", (
+            "GH_TOKEN must not be modified when github_token is not passed"
+        )
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_github_token_not_injected_when_empty_string(
+        self, MockLoader, mock_write_harness, monkeypatch
+    ) -> None:
+        """When github_token='' (falsy), the env override must NOT happen.
+        This guards against passing an unresolved empty token and clobbering a
+        valid ambient GITHUB_TOKEN with an empty string."""
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.", tool_allowlist="*")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        captured_envs: list = []
+
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_ambient_daemon_token")
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._make_exec_capturer_env(captured_envs),
+            ),
+            patch("os.path.exists", return_value=False),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "work prompt",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                    github_token="",
+                )
+            )
+
+        assert result.ok
+        env = captured_envs[0]
+        assert env.get("GITHUB_TOKEN") == "ghp_ambient_daemon_token", (
+            "Empty github_token must not clobber a valid ambient GITHUB_TOKEN"
+        )
