@@ -9,15 +9,22 @@ tier: T4
 genus: Regulus
 status: planned
 agent_grant: service
-allowed_tools:
-  - "mcp:mcpsrv_neotoma:retrieve_entities"
-  - "mcp:mcpsrv_neotoma:store"
-  - "mcp:mcpsrv_neotoma:correct"
-  - "bash:gh repo view"
-  - Read
+observation_source_default: llm_summary
+tool_allowlist:
+  - mcp__mcpsrv_neotoma__retrieve_entities
+  - mcp__mcpsrv_neotoma__retrieve_entity_snapshot
+  - mcp__mcpsrv_neotoma__retrieve_related_entities
+  - mcp__mcpsrv_neotoma__store
+  - mcp__mcpsrv_neotoma__correct
+  - WebSearch
   - WebFetch
+  - Bash
+  - Read
   - Grep
-  - "mcp:github_harness:*"
+  - mcp__github_harness__get_issue
+  - mcp__github_harness__get_pr
+  - "bash:gh repo view"
+  - mcp__github_harness__*
 context_entity_types:
   - workflow_definition
   - standing_rule
@@ -68,7 +75,8 @@ Developer relations agent. Audits docs, README quality, onboarding paths, API er
 | Genus | Regulus |
 | Status | planned |
 | Agent grant | service |
-| Allowed tools | mcp:mcpsrv_neotoma:retrieve_entities, mcp:mcpsrv_neotoma:store, mcp:mcpsrv_neotoma:correct, bash:gh repo view, Read, WebFetch, Grep, mcp:github_harness:* |
+| Observation source | llm_summary |
+| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, WebSearch, WebFetch, Bash, Read, Grep, mcp__github_harness__get_issue, mcp__github_harness__get_pr, bash:gh repo view, mcp__github_harness__* |
 | Context entity types | workflow_definition, standing_rule, agent_grant, agent_definition, agent_policy, agent_strategy, doc_page, api_reference, api_operation, specification, feature_spec, architectural_decision, documentation_feedback, documentation_decision, feedback_artifact, repository, software_project, software_package, code_change, git_commit, breaking_change, tester_feedback, product_feedback, mcp_tool, mcp_endpoint, query_example |
 | Operational entity types | doc_page, api_reference, documentation_decision, documentation_feedback, gist, reference, query_example, strategy_drift_signal |
 | Entity ID | ent_46f3385204e51cd91efd1ab3 |

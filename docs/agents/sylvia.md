@@ -10,13 +10,22 @@ genus: Sylvia
 status: active
 aauth_sub: sylvia@ateles-swarm
 agent_grant: service
+observation_source_default: workflow_state
 harness_preferences: daily poll loop via asyncio.sleep
-allowed_tools:
+tool_allowlist:
   - mcp__mcpsrv_neotoma__retrieve_entities
   - mcp__mcpsrv_neotoma__store
   - mcp__mcpsrv_neotoma__correct
   - gws_calendar
   - telegram_notify
+context_entity_types:
+  - task
+  - calendar_event
+  - recurrence_rule
+operational_entity_types:
+  - task
+  - calendar_event
+  - daemon_report
 ---
 
 # sylvia
@@ -32,7 +41,10 @@ Recurring task lifecycle daemon. Daily poll loop: scans Neotoma tasks with `recu
 | Status | active |
 | AAuth sub | sylvia@ateles-swarm |
 | Agent grant | service |
+| Observation source | workflow_state |
 | Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, gws_calendar, telegram_notify |
+| Context entity types | task, calendar_event, recurrence_rule |
+| Operational entity types | task, calendar_event, daemon_report |
 | Harness | daily poll loop via asyncio.sleep |
 | Entity ID | ent_1faed5788fcc0e5200bb0120 |
 

@@ -10,7 +10,8 @@ genus: Sitta
 status: proposed
 aauth_sub: sitta@ateles-swarm
 agent_grant: service
-allowed_tools:
+observation_source_default: llm_summary
+tool_allowlist:
   - neotoma
 ---
 
@@ -27,6 +28,7 @@ Neotoma librarian daemon (PROPOSED). Background curation agent that monitors ent
 | Status | proposed |
 | AAuth sub | sitta@ateles-swarm |
 | Agent grant | service |
+| Observation source | llm_summary |
 | Allowed tools | neotoma |
 | Entity ID | ent_0a092db508311dc817c37df3 |
 

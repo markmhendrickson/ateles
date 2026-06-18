@@ -9,7 +9,8 @@ tier: T4
 genus: Columba
 status: planned
 agent_grant: service
-allowed_tools:
+observation_source_default: llm_summary
+tool_allowlist:
   - mcp__mcpsrv_neotoma__retrieve_entities
   - mcp__mcpsrv_neotoma__retrieve_entity_snapshot
   - mcp__mcpsrv_neotoma__retrieve_related_entities
@@ -32,6 +33,7 @@ Constitution keeper and cross-cutting policy authority. Holds canonical record o
 | Genus | Columba |
 | Status | planned |
 | Agent grant | service |
+| Observation source | llm_summary |
 | Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, mcp__mcpsrv_neotoma__list_observations, mcp__mcpsrv_neotoma__list_recent_changes, mcp__mcpsrv_neotoma__list_timeline_events |
 | Entity ID | ent_949454e143e72df5bf833dfd |
 

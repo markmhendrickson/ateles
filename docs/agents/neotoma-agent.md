@@ -10,7 +10,8 @@ genus: Castor
 status: planned
 aauth_sub: neotoma-agent@ateles-swarm
 agent_grant: service
-allowed_tools:
+observation_source_default: workflow_state
+tool_allowlist:
   - mcp__mcpsrv_neotoma__retrieve_entities
   - mcp__mcpsrv_neotoma__store
 ---
@@ -28,6 +29,7 @@ Neotoma-repo automation daemon. Subscribes to Neotoma issue/PR entity events and
 | Status | planned |
 | AAuth sub | neotoma-agent@ateles-swarm |
 | Agent grant | service |
+| Observation source | workflow_state |
 | Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__store |
 | Entity ID | ent_c5c8d28bd420ca094f9d5a48 |
 

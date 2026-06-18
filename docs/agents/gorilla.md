@@ -10,13 +10,14 @@ genus: Gorilla
 status: active
 aauth_sub: gorilla@ateles-swarm
 agent_grant: service
+observation_source_default: sensor
 user_invocable: true
 triggers:
   - gorilla
   - /gorilla
   - log my workout
   - track my fitness
-allowed_tools:
+tool_allowlist:
   - mcp__mcpsrv_neotoma__retrieve_entities
   - mcp__mcpsrv_neotoma__retrieve_entity_snapshot
   - mcp__mcpsrv_neotoma__retrieve_entity_by_identifier
@@ -26,6 +27,14 @@ allowed_tools:
   - Read
   - WebSearch
   - WebFetch
+context_entity_types:
+  - workout_session
+  - health_condition
+  - health_episode
+operational_entity_types:
+  - workout_session
+  - task
+  - daemon_report
 ---
 
 # gorilla
@@ -41,8 +50,11 @@ Invoke Gorilla, the health & fitness agent — log gym workouts, analyze trainin
 | Status | active |
 | AAuth sub | gorilla@ateles-swarm |
 | Agent grant | service |
+| Observation source | sensor |
 | Triggers | gorilla, /gorilla, log my workout, track my fitness |
 | Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_entity_by_identifier, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, Read, WebSearch, WebFetch |
+| Context entity types | workout_session, health_condition, health_episode |
+| Operational entity types | workout_session, task, daemon_report |
 | Entity ID | ent_a4697e7c2ba6deeb22be6e41 |
 
 ## Prompt

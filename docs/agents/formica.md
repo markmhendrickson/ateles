@@ -10,8 +10,19 @@ genus: Formica
 status: active
 aauth_sub: formica@ateles-swarm
 agent_grant: service
-allowed_tools:
+observation_source_default: workflow_state
+tool_allowlist:
   - github
+context_entity_types:
+  - issue
+  - pull_request
+  - task
+  - agent_definition
+  - workflow_definition
+operational_entity_types:
+  - task
+  - participation_record
+  - daemon_report
 ---
 
 # formica
@@ -27,7 +38,10 @@ GitHub issue/PR automation daemon for the ateles repo. SSE subscriber to ateles 
 | Status | active |
 | AAuth sub | formica@ateles-swarm |
 | Agent grant | service |
+| Observation source | workflow_state |
 | Allowed tools | github |
+| Context entity types | issue, pull_request, task, agent_definition, workflow_definition |
+| Operational entity types | task, participation_record, daemon_report |
 | Entity ID | ent_d62f1df8784b7f4fcadc7d74 |
 
 ## Prompt

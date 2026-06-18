@@ -9,9 +9,17 @@ tier: T3
 status: active
 aauth_sub: apus@ateles-swarm
 agent_grant: service
-allowed_tools:
+observation_source_default: sensor
+tool_allowlist:
   - git
   - subprocess
+context_entity_types:
+  - agent_definition
+  - skill
+  - plan
+  - mirror_profile
+operational_entity_types:
+  - daemon_report
 ---
 
 # apus
@@ -26,7 +34,10 @@ Neotoma → git mirror webhook daemon. Receives Neotoma mirror profile webhooks 
 | Status | active |
 | AAuth sub | apus@ateles-swarm |
 | Agent grant | service |
+| Observation source | sensor |
 | Allowed tools | git, subprocess |
+| Context entity types | agent_definition, skill, plan, mirror_profile |
+| Operational entity types | daemon_report |
 | Entity ID | ent_692e8533840be7195240a1e4 |
 
 ## Prompt

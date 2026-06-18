@@ -10,11 +10,23 @@ genus: Tyto
 status: active
 aauth_sub: tyto@ateles-swarm
 agent_grant: service
+observation_source_default: sensor
 harness_preferences: polling loop via asyncio.sleep
-allowed_tools:
+tool_allowlist:
   - neotoma_read
   - neotoma_write
   - filesystem_read
+context_entity_types:
+  - screenshot
+  - transcription
+  - meeting_analysis
+  - task
+operational_entity_types:
+  - screenshot
+  - transcription
+  - meeting_analysis
+  - task
+  - daemon_report
 ---
 
 # tyto
@@ -30,7 +42,10 @@ Screenshot watcher + meeting recording transcription + analysis daemon. (1) Poll
 | Status | active |
 | AAuth sub | tyto@ateles-swarm |
 | Agent grant | service |
+| Observation source | sensor |
 | Allowed tools | neotoma_read, neotoma_write, filesystem_read |
+| Context entity types | screenshot, transcription, meeting_analysis, task |
+| Operational entity types | screenshot, transcription, meeting_analysis, task, daemon_report |
 | Harness | polling loop via asyncio.sleep |
 | Entity ID | ent_affecbbecf52edb633c534f8 |
 

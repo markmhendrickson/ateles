@@ -10,11 +10,24 @@ genus: Anthus
 status: active
 aauth_sub: anthus@ateles-swarm
 agent_grant: service
+observation_source_default: workflow_state
 harness_preferences: lib/daemon_runtime SSEClient
-allowed_tools:
+tool_allowlist:
   - neotoma_read
   - neotoma_write
   - telegram
+context_entity_types:
+  - task
+  - escalation
+  - daemon_report
+  - agent_grant
+  - workflow_definition
+  - participation_record
+  - agent_definition
+operational_entity_types:
+  - participation_record
+  - daemon_report
+  - escalation
 ---
 
 # anthus
@@ -30,7 +43,10 @@ Swarm coordinator daemon (Phase 2 skeleton). Subscribes to escalation, daemon_re
 | Status | active |
 | AAuth sub | anthus@ateles-swarm |
 | Agent grant | service |
+| Observation source | workflow_state |
 | Allowed tools | neotoma_read, neotoma_write, telegram |
+| Context entity types | task, escalation, daemon_report, agent_grant, workflow_definition, participation_record, agent_definition |
+| Operational entity types | participation_record, daemon_report, escalation |
 | Harness | lib/daemon_runtime SSEClient |
 | Entity ID | ent_887e8fd74d79eb63344df63e |
 
