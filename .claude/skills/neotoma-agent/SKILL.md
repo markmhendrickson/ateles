@@ -7,6 +7,8 @@ name: neotoma-agent
 description: Neotoma-repo automation daemon. Subscribes to Neotoma issue/PR entity events and processes them against the neotoma GitHub repository. Phase 1 skeleton — full automation in Phase 3.
 ---
 
+<!-- Claude Code adapter for agent `neotoma-agent`. Canonical file: docs/agents/neotoma-agent.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
+
 # neotoma-agent — Neotoma-Repo Automation Daemon
 
 ## Identity

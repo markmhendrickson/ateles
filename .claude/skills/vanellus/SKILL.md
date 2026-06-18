@@ -11,6 +11,8 @@ triggers:
 user_invocable: true
 ---
 
+<!-- Claude Code adapter for agent `vanellus`. Canonical file: docs/agents/vanellus.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
+
 # Vanellus — PR Steward
 
 ## Identity

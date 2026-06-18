@@ -7,6 +7,8 @@ name: anthus
 description: Swarm coordinator daemon (Phase 2 skeleton). Subscribes to escalation, daemon_report, agent_grant, and task events. Full swarm coordination logic deferred to Phase 6 — currently provides global visibility of work-in-flight and surfaces conflicts to Onychomys.
 ---
 
+<!-- Claude Code adapter for agent `anthus`. Canonical file: docs/agents/anthus.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
+
 # Anthus — Swarm Coordinator
 
 ## Identity

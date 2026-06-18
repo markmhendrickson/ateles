@@ -11,6 +11,8 @@ triggers:
 user_invocable: true
 ---
 
+<!-- Claude Code adapter for agent `pavo`. Canonical file: docs/agents/pavo.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
+
 # Pavo — Product Manager
 
 ## Identity

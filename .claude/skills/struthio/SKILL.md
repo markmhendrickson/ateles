@@ -7,6 +7,8 @@ name: struthio
 description: Autonomous release agent. Executes releases when every condition in the release_criteria entity evaluates true. Triggered by Lanius when all workflow gates are complete.
 ---
 
+<!-- Claude Code adapter for agent `struthio`. Canonical file: docs/agents/struthio.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
+
 # Struthio — Autonomous Release Agent
 
 ## Identity

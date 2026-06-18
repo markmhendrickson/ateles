@@ -6,9 +6,11 @@ entity_type: agent_definition
 name: manucode
 description: Copy and positioning agent (formerly Paradisaea; renamed 2026-06-12 for voice/ASR robustness). Owns UI copy, marketing copy, product language, and messaging hierarchy. Produces specific drafts and edits. Visual design and interaction flows belong to Aythya.
 triggers:
-  - ["manucode"
-  - "/manucode"]
+  - manucode
+  - /manucode
 ---
+
+<!-- Claude Code adapter for agent `manucode`. Canonical file: docs/agents/manucode.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
 
 # Manucode — Copy & Positioning
 

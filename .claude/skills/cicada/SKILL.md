@@ -6,10 +6,12 @@ entity_type: agent_definition
 name: cicada
 description: Invoke Cicada (formerly Gryllus; renamed 2026-06-12 for voice/ASR robustness), the issue worker agent — implements GitHub issues after all pre-impl gates are signed off, opens PRs via the ateles-agent identity, and signs off the impl gate.
 triggers:
-  - ["cicada"
-  - "/cicada"]
+  - cicada
+  - /cicada
 user_invocable: true
 ---
+
+<!-- Claude Code adapter for agent `cicada`. Canonical file: docs/agents/cicada.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
 
 # Cicada — Issue Worker
 
