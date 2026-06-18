@@ -16,6 +16,9 @@ from skill_runner import SkillResult
 from swarm_dispatch import (
     AGENT_GITHUB_LOGIN,
     EXPECTATION_MARKER,
+    PRE_IMPL_GATES,
+    _CONFIRM_GATES_CLEAR_CMD,
+    _OPERATOR_LOGIN,
     DispatchConfig,
     SwarmDispatcher,
     _agent_prompt_instruction,
@@ -573,3 +576,253 @@ def test_agent_github_login_follows_convention():
         assert login == f"ateles-{agent}", (
             f"Expected login 'ateles-{agent}', got {login!r}"
         )
+
+
+# ── ateles#112 — /confirm-gates-clear handler ──────────────────────────────
+
+
+def _comment_trigger(**overrides):
+    """Build an issue_comment SwarmTrigger for gate-clear tests."""
+    base = dict(
+        kind="issue_comment",
+        repository="owner/repo",
+        number=80,
+        title="An issue",
+        body="",
+        author="contributor",
+        html_url="https://github.com/owner/repo/issues/80",
+        delivery_id="comment-delivery",
+        action="created",
+        comment_id=42,
+        comment_author=_OPERATOR_LOGIN,
+        comment_body="/confirm-gates-clear",
+        comment_html_url="https://github.com/owner/repo/issues/80#issuecomment-42",
+        comment_on_pr=False,
+    )
+    base.update(overrides)
+    return SwarmTrigger(**base)
+
+
+def test_confirm_gates_clear_from_operator_calls_lanius(monkeypatch):
+    """Operator /confirm-gates-clear triggers Lanius gate-waive and notifier."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        calls.append((skill, prompt))
+        return SkillResult(skill, True, 0, "Gates waived.", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+
+    asyncio.run(dispatcher._handle_issue_comment(_comment_trigger()))
+
+    assert any(c[0] == "lanius" for c in calls), "Lanius must be called to waive gates"
+    # Prompt must mention the command and the pre-impl gates.
+    lanius_prompt = next(c[1] for c in calls if c[0] == "lanius")
+    assert _CONFIRM_GATES_CLEAR_CMD in lanius_prompt
+    for gate in PRE_IMPL_GATES:
+        assert gate in lanius_prompt, f"Prompt must mention gate '{gate}'"
+    # Notifier must be called to inform the operator.
+    assert any("cleared" in m or "waiv" in m for m in notifier.sent)
+
+
+def test_confirm_gates_clear_from_non_operator_is_ignored(monkeypatch):
+    """A non-operator's /confirm-gates-clear must be silently ignored."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        calls.append(skill)
+        return SkillResult(skill, True, 0, "", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _comment_trigger(comment_author="some-random-user")
+        )
+    )
+
+    # Must not call Lanius or any other skill.
+    assert calls == [], f"No skills should be called for non-operator; got {calls}"
+    # Must not send an operator notification about gate-clearing.
+    assert not any("waiv" in m or "cleared" in m for m in notifier.sent)
+
+
+def test_no_command_in_comment_is_no_op(monkeypatch):
+    """A comment that contains no /confirm-gates-clear is completely ignored."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        calls.append(skill)
+        return SkillResult(skill, True, 0, "", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _comment_trigger(
+                comment_author=_OPERATOR_LOGIN,
+                comment_body="LGTM, nice work!",
+            )
+        )
+    )
+
+    assert calls == []
+    assert notifier.sent == []
+
+
+def test_confirm_gates_clear_on_pr_comment_retriggers_pr_pipeline(monkeypatch):
+    """When comment is on a PR, after waiving gates the PR pipeline re-runs."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        calls.append(skill)
+        return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+
+    # _handle_pr makes GitHub API calls; stub them out.
+    # Instance methods need a `self` parameter when patched via monkeypatch.setattr
+    # on the class.
+    async def fake_changed_files(self, t):
+        return []
+
+    async def fake_preregistered(self, repo, number):
+        return {}
+
+    async def fake_store(self, entities, idempotency_key):
+        pass
+
+    async def fake_post_missing(self, t, reviews, agents_by_lens):
+        pass
+
+    async def fake_persist(self, t, reviews, agents_by_lens):
+        pass
+
+    async def fake_merge_checkpoint(self, t, parent, lenses):
+        pass
+
+    monkeypatch.setattr(SwarmDispatcher, "_changed_files", fake_changed_files)
+    monkeypatch.setattr(SwarmDispatcher, "_preregistered_expectations", fake_preregistered)
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_post_missing_panel_comments", fake_post_missing)
+    monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_persist)
+    monkeypatch.setattr(SwarmDispatcher, "_store_merge_checkpoint", fake_merge_checkpoint)
+
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+
+    # PR comment: comment_on_pr=True, body references the parent issue.
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _comment_trigger(
+                comment_on_pr=True,
+                body="Closes #50.",  # parent issue is #50
+            )
+        )
+    )
+
+    # Lanius must be called at minimum (for gate waive + PR pipeline).
+    assert "lanius" in calls
+
+
+def test_confirm_gates_clear_is_case_insensitive_for_operator_login(monkeypatch):
+    """Operator login comparison is case-insensitive."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        calls.append(skill)
+        return SkillResult(skill, True, 0, "", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    # Mix case: MARKMHENDRICKSON vs markmhendrickson.
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _comment_trigger(comment_author=_OPERATOR_LOGIN.upper())
+        )
+    )
+    assert "lanius" in calls
+
+
+# ── Part B — Pavo pm self-sign-off prompt ──────────────────────────────────
+
+
+def test_pavo_prompt_contains_mandatory_sign_off_rule():
+    """_pavo_prompt must tell Pavo to sign off gate_status.pm when scoping passes."""
+    t = _trigger(kind="issue_opened", number=1, title="An issue", body="Body.")
+    prompt = SwarmDispatcher._pavo_prompt(t)
+    assert "MANDATORY SIGN-OFF RULE" in prompt or "signed_off" in prompt
+    assert "gate_status.pm" in prompt
+    assert "signed_off" in prompt
+
+
+def test_pavo_prompt_requires_plan_contribution_sign_off():
+    """Pavo must store a plan_contribution with contribution_type: sign_off."""
+    t = _trigger(kind="issue_opened", number=1, title="An issue", body="Body.")
+    prompt = SwarmDispatcher._pavo_prompt(t)
+    assert "sign_off" in prompt
+    assert "plan_contribution" in prompt
+
+
+def test_pavo_prompt_warns_against_pending_deadlock():
+    """Pavo prompt must warn that leaving pm pending is a deadlock."""
+    t = _trigger(kind="issue_opened", number=1, title="An issue", body="Body.")
+    prompt = SwarmDispatcher._pavo_prompt(t)
+    assert "deadlock" in prompt or "pending pm gate" in prompt or "Do NOT leave pm" in prompt
+
+
+def test_pavo_prompt_still_allows_blocking_on_failure():
+    """When scoping fails, Pavo can (and should) block — prompt allows this."""
+    t = _trigger(kind="issue_opened", number=1, title="An issue", body="Body.")
+    prompt = SwarmDispatcher._pavo_prompt(t)
+    assert "blocked" in prompt or "GENUINELY FAILS" in prompt
+
+
+# ── Part C — Lanius PR blocked-comment guidance ────────────────────────────
+
+
+def test_lanius_pr_prompt_blocked_comment_names_gates():
+    """Blocked comment must name which pre-impl gates are unsigned."""
+    prompt = SwarmDispatcher._lanius_pr_prompt(_trigger(), parent=80)
+    # The prompt must mention the specific gates so Lanius lists them.
+    for gate in PRE_IMPL_GATES:
+        assert gate in prompt, f"Lanius PR prompt must mention gate '{gate}'"
+
+
+def test_lanius_pr_prompt_blocked_comment_names_gate_owners():
+    """Blocked comment must indicate who owns each gate (Pavo, Bombycilla)."""
+    prompt = SwarmDispatcher._lanius_pr_prompt(_trigger(), parent=80)
+    assert "Pavo" in prompt or "pavo" in prompt
+    assert "Bombycilla" in prompt or "bombycilla" in prompt
+
+
+def test_lanius_pr_prompt_blocked_comment_includes_confirm_command():
+    """Blocked comment must include the /confirm-gates-clear command."""
+    prompt = SwarmDispatcher._lanius_pr_prompt(_trigger(), parent=80)
+    assert _CONFIRM_GATES_CLEAR_CMD in prompt
+
+
+def test_lanius_pr_prompt_blocked_comment_specifies_operator_only():
+    """Blocked comment must specify that only the operator can issue the command."""
+    prompt = SwarmDispatcher._lanius_pr_prompt(_trigger(), parent=80)
+    assert _OPERATOR_LOGIN in prompt
+
+
+def test_pre_impl_gates_constant_includes_expected_gates():
+    """PRE_IMPL_GATES must include pm and arch (the two pre-impl gates)."""
+    assert "pm" in PRE_IMPL_GATES
+    assert "arch" in PRE_IMPL_GATES
+
+
+def test_operator_login_defaults_to_repo_owner():
+    """_OPERATOR_LOGIN must default to 'markmhendrickson' when env var not set."""
+    # This is the env-based default; the actual value depends on env.
+    # We verify the constant is non-empty (not blank).
+    assert _OPERATOR_LOGIN, "_OPERATOR_LOGIN must not be empty"

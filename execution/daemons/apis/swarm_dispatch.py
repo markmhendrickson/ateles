@@ -45,6 +45,19 @@ DAEMON_NAME = "apis"
 _PARENT_ISSUE = re.compile(r"\b(?:closes|fixes|resolves)\s+#(\d+)", re.I)
 _GATE_VERDICT = re.compile(r"GATE_INHERITANCE:\s*(clear|blocked)", re.I)
 
+# Operator command that clears (waives) all unsigned pre-impl gates on a PR's
+# parent issue so the PR pipeline can proceed.  Only the operator login may
+# issue this command (ateles#112 guardrail).
+_CONFIRM_GATES_CLEAR_CMD = "/confirm-gates-clear"
+
+# Pre-impl gates that must be signed off before the PR review panel runs.
+# These are the gates Lanius checks for GATE_INHERITANCE.
+PRE_IMPL_GATES = ("pm", "arch")
+
+# Operator GitHub login — only this login may waive gates via the comment
+# command.  Defaults to the repo owner; override with APIS_OPERATOR_LOGIN.
+_OPERATOR_LOGIN = os.environ.get("APIS_OPERATOR_LOGIN", "markmhendrickson")
+
 # Marker the pre-registration pass embeds in issue comments so the PR
 # pipeline can recover which agents pre-registered (and what they promised
 # to check) straight from GitHub — no Neotoma query in the hot path.
@@ -253,6 +266,8 @@ class SwarmDispatcher:
                 await self._handle_issue_opened(trigger)
             elif trigger.is_pr:
                 await self._handle_pr(trigger)
+            elif trigger.kind == "issue_comment":
+                await self._handle_issue_comment(trigger)
         except Exception as exc:  # one bad delivery must not kill the daemon
             log.error(
                 f"[{DAEMON_NAME}] pipeline error for {trigger.kind} "
@@ -432,6 +447,150 @@ class SwarmDispatcher:
                 handler=DAEMON_NAME,
             )
 
+    # ── issue_comment pipeline (ateles#112) ─────────────────────────────────
+
+    async def _handle_issue_comment(self, trigger: SwarmTrigger) -> None:
+        """Handle an issue_comment webhook event.
+
+        Only reacts to `/confirm-gates-clear` from the operator login.
+        All other comments are silently ignored — this is the best-effort,
+        never-crash path.
+
+        When the command is valid:
+          1. Look up the issue entity in Neotoma to find unsigned pre-impl gates.
+          2. Waive each unsigned gate (gate_status.<gate> → "waived") via Lanius.
+          3. Re-trigger the PR pipeline for any open PR that references the issue.
+
+        Security guardrail: only _OPERATOR_LOGIN may clear gates.  Any other
+        commenter — including swarm agents — is silently ignored.
+        """
+        comment_author = trigger.comment_author
+        comment_body = (trigger.comment_body or "").strip()
+        ref = f"{trigger.repository}#{trigger.number}"
+
+        # Guard 1: only react to the /confirm-gates-clear command.
+        if _CONFIRM_GATES_CLEAR_CMD not in comment_body:
+            log.debug(
+                f"[{DAEMON_NAME}] issue_comment on {ref} has no "
+                f"{_CONFIRM_GATES_CLEAR_CMD!r} command — ignored"
+            )
+            return
+
+        # Guard 2: operator-only guardrail.
+        if comment_author.lower() != _OPERATOR_LOGIN.lower():
+            log.warning(
+                f"[{DAEMON_NAME}] {_CONFIRM_GATES_CLEAR_CMD} from "
+                f"non-operator {comment_author!r} on {ref} — ignored "
+                f"(operator login: {_OPERATOR_LOGIN!r})"
+            )
+            return
+
+        log.info(
+            f"[{DAEMON_NAME}] operator {_CONFIRM_GATES_CLEAR_CMD} received "
+            f"on {ref} (comment #{trigger.comment_id})"
+        )
+        self.notifier.send(
+            f"Operator cleared gates on {ref} via {_CONFIRM_GATES_CLEAR_CMD} — "
+            "waiving unsigned pre-impl gates and re-triggering PR pipeline",
+            priority=Priority.INFO,
+            handler=DAEMON_NAME,
+        )
+
+        # Delegate gate-waiving to Lanius (it owns gate_status mutations).
+        # Lanius will correct each unsigned pre-impl gate to "waived", record
+        # the waive in owner_history, and advance current_owner.
+        await self._lanius_waive_gates(trigger)
+
+        # If the comment is on a PR, re-run the PR pipeline immediately.
+        # If it's on the parent issue, the operator needs to re-push or
+        # re-open the PR to re-trigger (we log a note).
+        if trigger.comment_on_pr:
+            # Build a minimal PR-shaped trigger from the issue_comment data
+            # so _handle_pr can be called directly.
+            pr_trigger = SwarmTrigger(
+                kind="pr_opened",
+                repository=trigger.repository,
+                number=trigger.number,
+                title=trigger.title,
+                body=trigger.body,
+                author=trigger.author,
+                html_url=trigger.html_url,
+                delivery_id=trigger.delivery_id,
+                action="reopened",
+                labels=trigger.labels,
+                raw=trigger.raw,
+            )
+            log.info(
+                f"[{DAEMON_NAME}] re-triggering PR pipeline for {ref} "
+                "after gate waive"
+            )
+            await self._handle_pr(pr_trigger)
+        else:
+            log.info(
+                f"[{DAEMON_NAME}] gates waived on issue {ref}; "
+                "PR pipeline will re-run on next push or re-open"
+            )
+            self.notifier.send(
+                f"Gates waived on issue {ref}. Re-push or re-open the PR to "
+                "trigger the review panel.",
+                priority=Priority.INFO,
+                handler=DAEMON_NAME,
+            )
+
+    async def _lanius_waive_gates(self, trigger: SwarmTrigger) -> None:
+        """Ask Lanius to waive all unsigned pre-impl gates on the issue entity.
+
+        Mirrors the gate-waive mechanics in the Lanius SKILL.md (lines 48-52):
+        correct gate_status.<gate> → "waived", append to owner_history, advance
+        current_owner to the next phase.  Best-effort: logs on failure but does
+        not raise.
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
+        issue_number = trigger.number
+        # comment_on_pr means trigger.number IS the PR number; the parent issue
+        # number is in the PR body.  Extract it.
+        if trigger.comment_on_pr:
+            issue_number = self._parent_issue_number(trigger.body) or trigger.number
+
+        prompt = (
+            "Invoke the lanius agent per your appended system prompt.\n\n"
+            f"The operator has issued `{_CONFIRM_GATES_CLEAR_CMD}` on "
+            f"{trigger.repository}#{trigger.number} "
+            f"({trigger.comment_html_url or trigger.html_url}).\n\n"
+            f"Parent issue (where gates live): #{issue_number} in "
+            f"{trigger.repository}.\n\n"
+            "ACTION REQUIRED — operator override, execute immediately:\n"
+            f"For each gate in {list(PRE_IMPL_GATES)} that is currently "
+            "`pending` or `blocked` on the parent issue entity (not already "
+            "`signed_off` or `waived`), do ALL of the following:\n"
+            "  1. `correct()` the issue entity: set `gate_status.<gate>` → "
+            "`\"waived\"`.\n"
+            "  2. Append to `owner_history`: "
+            '`{"gate": "<gate>", "action": "waived", '
+            '"actor": "operator", "reason": "operator /confirm-gates-clear '
+            'override", "timestamp": "<now>"}`.\n'
+            "  3. After waiving all unsigned gates, set `current_owner` to "
+            "the next phase (e.g. `pr_review` if pm and arch are now done).\n"
+            "  4. Post ONE GitHub comment on the PR (or issue) confirming which "
+            "gates were waived and that the review pipeline will now proceed.\n\n"
+            "Do NOT waive gates that are already `signed_off` or `waived`.\n"
+            "If ALL gates are already signed_off/waived, post a comment saying "
+            "the pipeline is already clear.\n\n"
+            f"{_agent_prompt_instruction('lanius', 'gate admin')}"
+        )
+        result = await run_skill(
+            "lanius",
+            prompt,
+            github_token=_token_for_agent_on_repo("lanius", trigger.repository),
+        )
+        if not result.ok:
+            log.error(
+                f"[{DAEMON_NAME}] Lanius gate-waive failed on {ref}: "
+                f"{result.error or f'rc={result.returncode}'}"
+            )
+        else:
+            log.info(f"[{DAEMON_NAME}] Lanius gate-waive completed for {ref}")
+
     # ── prompts ──────────────────────────────────────────────────────────────
 
     @staticmethod
@@ -493,10 +652,30 @@ class SwarmDispatcher:
             f"You are Phase 1 (pm) owner for GitHub issue "
             f"{t.repository}#{t.number}: {t.title}\n{t.html_url}\n\n{t.body}\n\n"
             "Run your pm-gate scoping protocol: validate intent, acceptance "
-            "criteria, and scope; record your gate plan_contribution; advance "
-            "or block the pm gate on the issue entity. Read any "
+            "criteria, and scope. Read any "
             f"`{EXPECTATION_MARKER}` comments on the issue first — they are "
             "the review contract for this issue.\n\n"
+            "MANDATORY SIGN-OFF RULE (ateles#112): when scoping PASSES — "
+            "intent is clear, acceptance criteria exist, and scope is "
+            "adequately bounded — you MUST do ALL of the following:\n"
+            "  1. `correct()` the issue entity: set `gate_status.pm` → "
+            "`\"signed_off\"`.\n"
+            "  2. Store a `plan_contribution` entity with "
+            "`contribution_type: \"sign_off\"`, `gate: \"pm\"`, "
+            "`agent: \"pavo\"`, and a brief `summary` of what you validated.\n"
+            "  3. Append to `owner_history`: "
+            '`{"gate": "pm", "action": "signed_off", "actor": "pavo", '
+            '"timestamp": "<now>"}`.\n'
+            "  4. Set `current_owner` to `\"arch\"` (advancing to the next "
+            "phase).\n"
+            "  5. Post a GitHub comment on the issue confirming the pm gate "
+            "is signed off and what you validated.\n\n"
+            "Only leave pm `pending` or set it to `blocked` when scoping "
+            "GENUINELY FAILS — missing intent, no acceptance criteria, or "
+            "scope is unclear. In that case post a comment explaining exactly "
+            "what is missing so the author can address it. Do NOT leave pm "
+            "`pending` after a successful evaluation — a pending pm gate is "
+            "a deadlock for any PR that closes this issue.\n\n"
             f"{_agent_prompt_instruction('pavo', 'pm gate owner')}"
         )
 
@@ -508,6 +687,7 @@ class SwarmDispatcher:
             else "No parent issue reference found in the PR body — find it "
             "yourself or treat gate inheritance as blocked."
         )
+        operator_login = _OPERATOR_LOGIN
         return (
             "Invoke the lanius agent per your appended system prompt.\n\n"
             f"A pull request event ({t.action}) fired for "
@@ -529,6 +709,17 @@ class SwarmDispatcher:
             "pre-impl gate is genuinely unsigned. To run the full issue "
             "pipeline on a legacy issue (gate init + expectations + Pavo), the "
             "operator can backfill via `trigger_swarm_pr.py issue <n>`.\n\n"
+            "BLOCKED COMMENT REQUIREMENTS (ateles#112): when you post a "
+            "blocking comment, it MUST include:\n"
+            "  1. A list of WHICH pre-impl gates are unsigned and who owns "
+            "each (e.g. `pm` owned by Pavo, `arch` owned by Bombycilla).\n"
+            "  2. The exact operator-override command: "
+            f"`/confirm-gates-clear` — only @{operator_login} may issue this "
+            "command; it waives all unsigned pre-impl gates and re-triggers "
+            "the PR pipeline. No other commenter can clear gates.\n"
+            "  3. The normal resolution path: the gate owner can sign off the "
+            "gate via Neotoma (set gate_status.<gate> → signed_off) or the "
+            "operator can waive it.\n\n"
             f"{_agent_prompt_instruction('lanius', 'PR gate inheritance')}\n\n"
             "End your reply with exactly one line: `GATE_INHERITANCE: clear` "
             "or `GATE_INHERITANCE: blocked` so the dispatcher can route."
