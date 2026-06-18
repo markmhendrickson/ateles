@@ -1,13 +1,20 @@
 """Tests for the PR dispatch pipeline hardening (PR-87 self-dogfood
 findings): content-digest idempotency keys, Lanius verdict retry, and the
-dispatcher-side fallback for unposted panel review comments."""
+dispatcher-side fallback for unposted panel review comments.
+
+Also covers the checkbox definition-of-done changes:
+  A — _expectation_prompt mandates GitHub task-list syntax
+  B — _panelist_prompt includes a check-off instruction when parent + expectation present
+"""
 
 import asyncio
 
 import swarm_dispatch
 from github_gateway import SwarmTrigger
+from review_panel import Lens
 from skill_runner import SkillResult
 from swarm_dispatch import (
+    EXPECTATION_MARKER,
     DispatchConfig,
     SwarmDispatcher,
     _token_for_repo,
@@ -215,3 +222,121 @@ def test_token_for_repo_only_suffix_matters(monkeypatch):
     # A repo merely containing "neotoma" in the name but not ending in /neotoma
     # should use ATELES_AGENT_PAT.
     assert _token_for_repo("markmhendrickson/neotoma-fork") == "ateles-secret"
+
+
+# ── Change A: _expectation_prompt mandates GitHub task-list syntax ───────────
+
+def _sample_lens(forward_looking: bool = False) -> Lens:
+    return Lens(
+        agent="phoenicurus",
+        lens="qa",
+        gate="qa",
+        checks="quality, test coverage, regression risk",
+        forward_looking=forward_looking,
+    )
+
+
+def test_expectation_prompt_contains_checkbox_syntax():
+    """_expectation_prompt must include the `- [ ]` task-list placeholder."""
+    t = _trigger()
+    prompt = SwarmDispatcher._expectation_prompt(t, _sample_lens())
+    assert "- [ ]" in prompt
+
+
+def test_expectation_prompt_instructs_github_task_list():
+    """The prompt must explicitly name 'GitHub task-list' (or equivalent) checkbox syntax."""
+    t = _trigger()
+    prompt = SwarmDispatcher._expectation_prompt(t, _sample_lens())
+    assert "GitHub task-list" in prompt or "task-list checkbox" in prompt
+
+
+def test_expectation_prompt_header_unchanged():
+    """The `review_expectation (<lens>)` header line must survive the change."""
+    t = _trigger()
+    prompt = SwarmDispatcher._expectation_prompt(t, _sample_lens())
+    assert f"**{EXPECTATION_MARKER} (qa)**" in prompt
+
+
+def test_expectation_prompt_no_plain_bullet_placeholder():
+    """Plain `- <...>` placeholder without checkbox must no longer be present."""
+    t = _trigger()
+    prompt = SwarmDispatcher._expectation_prompt(t, _sample_lens())
+    # The old placeholder was literally "- <3 to 6 tight ...>"
+    assert "- <3 to 6 tight" not in prompt
+
+
+# ── Change B: _panelist_prompt check-off instruction ────────────────────────
+
+def test_panelist_prompt_checkoff_included_when_parent_and_expectation():
+    """When parent issue and expectation are both present, check-off block appears."""
+    t = _trigger()
+    expectation = (
+        f"**{EXPECTATION_MARKER} (qa)** — what phoenicurus will verify:\n"
+        "- [ ] Tests exist for the new code path\n"
+        "- [ ] No regressions in existing tests\n"
+    )
+    prompt = SwarmDispatcher._panelist_prompt(t, _sample_lens(), expectation, parent=80)
+    assert "edit" in prompt
+    assert "- [x]" in prompt
+    assert "#80" in prompt
+
+
+def test_panelist_prompt_checkoff_references_correct_parent():
+    """Check-off instruction must reference the actual parent issue number."""
+    t = _trigger()
+    expectation = "- [ ] Some check\n"
+    prompt = SwarmDispatcher._panelist_prompt(t, _sample_lens(), expectation, parent=42)
+    assert "#42" in prompt
+
+
+def test_panelist_prompt_no_checkoff_when_parent_none():
+    """Without a parent issue, the check-off block must NOT appear."""
+    t = _trigger()
+    expectation = "- [ ] Some check\n"
+    prompt = SwarmDispatcher._panelist_prompt(t, _sample_lens(), expectation, parent=None)
+    assert "- [x]" not in prompt
+    assert "edit the existing" not in prompt
+
+
+def test_panelist_prompt_no_checkoff_when_expectation_empty():
+    """Without a pre-registered expectation, the check-off block must NOT appear."""
+    t = _trigger()
+    prompt = SwarmDispatcher._panelist_prompt(t, _sample_lens(), expectation="", parent=80)
+    assert "- [x]" not in prompt
+    assert "edit the existing" not in prompt
+
+
+def test_panelist_prompt_no_checkoff_when_both_missing():
+    """No parent AND no expectation: definitely no check-off."""
+    t = _trigger()
+    prompt = SwarmDispatcher._panelist_prompt(t, _sample_lens(), expectation="", parent=None)
+    assert "- [x]" not in prompt
+
+
+def test_panelist_prompt_checkoff_scoped_to_own_lens():
+    """Check-off instruction must name the lens so the agent edits only its own comment."""
+    t = _trigger()
+    expectation = "- [ ] Some check\n"
+    prompt = SwarmDispatcher._panelist_prompt(t, _sample_lens(), expectation, parent=80)
+    # The instruction must reference the lens-specific comment marker so the
+    # agent doesn't accidentally edit another lens's expectation comment.
+    assert f"{EXPECTATION_MARKER} (qa)" in prompt
+
+
+def test_panelist_prompt_checkoff_forward_looking_lens_also_gets_checkoff():
+    """Forward-looking lenses pre-register too, so they should also check off."""
+    t = _trigger()
+    expectation = "- [ ] Forward-looking check\n"
+    prompt = SwarmDispatcher._panelist_prompt(
+        t, _sample_lens(forward_looking=True), expectation, parent=80
+    )
+    assert "- [x]" in prompt
+    assert "#80" in prompt
+
+
+def test_panelist_prompt_review_comment_instruction_still_present():
+    """The original 'Post your review as a PR comment' instruction must remain."""
+    t = _trigger()
+    expectation = "- [ ] Some check\n"
+    prompt = SwarmDispatcher._panelist_prompt(t, _sample_lens(), expectation, parent=80)
+    assert "Post your review as a PR comment" in prompt
