@@ -10,23 +10,29 @@ genus: Bombycilla
 status: planned
 aauth_sub: waxwing@ateles-swarm
 agent_grant: service
+observation_source_default: llm_summary
 user_invocable: true
 triggers:
   - waxwing
   - /waxwing
-allowed_tools:
-  - "mcp:mcpsrv_neotoma:retrieve_entities"
-  - "mcp:mcpsrv_neotoma:retrieve_entity_by_identifier"
-  - "mcp:mcpsrv_neotoma:store"
-  - "mcp:mcpsrv_neotoma:correct"
-  - "mcp:mcpsrv_neotoma:register_schema"
-  - "mcp:mcpsrv_neotoma:list_entity_types"
-  - "mcp:mcpsrv_neotoma:analyze_schema_candidates"
-  - "mcp:github_harness:*"
-  - "bash:rg"
-  - "bash:gh"
+tool_allowlist:
+  - mcp__mcpsrv_neotoma__retrieve_entities
+  - mcp__mcpsrv_neotoma__retrieve_entity_snapshot
+  - mcp__mcpsrv_neotoma__retrieve_entity_by_identifier
+  - mcp__mcpsrv_neotoma__retrieve_related_entities
+  - mcp__mcpsrv_neotoma__list_observations
+  - mcp__mcpsrv_neotoma__store
+  - mcp__mcpsrv_neotoma__correct
+  - mcp__mcpsrv_neotoma__register_schema
+  - mcp__mcpsrv_neotoma__analyze_schema_candidates
+  - mcp__mcpsrv_neotoma__list_entity_types
+  - WebSearch
+  - WebFetch
   - Read
   - Grep
+  - mcp__github_harness__*
+  - "bash:rg"
+  - "bash:gh"
 context_entity_types:
   - workflow_definition
   - standing_rule
@@ -75,8 +81,9 @@ Invoke Waxwing (formerly Bombycilla; renamed 2026-06-12 for voice/ASR robustness
 | Status | planned |
 | AAuth sub | waxwing@ateles-swarm |
 | Agent grant | service |
+| Observation source | llm_summary |
 | Triggers | waxwing, /waxwing |
-| Allowed tools | mcp:mcpsrv_neotoma:retrieve_entities, mcp:mcpsrv_neotoma:retrieve_entity_by_identifier, mcp:mcpsrv_neotoma:store, mcp:mcpsrv_neotoma:correct, mcp:mcpsrv_neotoma:register_schema, mcp:mcpsrv_neotoma:list_entity_types, mcp:mcpsrv_neotoma:analyze_schema_candidates, mcp:github_harness:*, bash:rg, bash:gh, Read, Grep |
+| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_entity_by_identifier, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__list_observations, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, mcp__mcpsrv_neotoma__register_schema, mcp__mcpsrv_neotoma__analyze_schema_candidates, mcp__mcpsrv_neotoma__list_entity_types, WebSearch, WebFetch, Read, Grep, mcp__github_harness__*, bash:rg, bash:gh |
 | Context entity types | workflow_definition, standing_rule, agent_grant, agent_definition, agent_policy, agent_strategy, architectural_decision, decision_record, specification, feature_spec, technical_research, api_operation, api_reference, breaking_change, repository, software_project, software_product, software_package, mcp_server_status, mcp_endpoint, mcp_tool, data_migration_query, migration_result, doc_page |
 | Operational entity types | architectural_decision, specification, feature_spec, decision_record, plan, api_reference, strategy_drift_signal |
 | Entity ID | ent_3425a79b4c39f08cdb0c62f8 |

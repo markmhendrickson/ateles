@@ -10,11 +10,23 @@ genus: Turdus
 status: active
 aauth_sub: turdus@ateles-swarm
 agent_grant: service
+observation_source_default: sensor
 harness_preferences: polling loop via asyncio.sleep
-allowed_tools:
+tool_allowlist:
   - neotoma_read
   - neotoma_write
   - gws_gmail
+context_entity_types:
+  - email_message
+  - contact
+  - task
+  - calendar_event
+  - transaction
+operational_entity_types:
+  - email_message
+  - task
+  - contact
+  - daemon_report
 ---
 
 # turdus
@@ -30,7 +42,10 @@ Email triage daemon. Polls Gmail every 5 minutes via gws CLI, classifies message
 | Status | active |
 | AAuth sub | turdus@ateles-swarm |
 | Agent grant | service |
+| Observation source | sensor |
 | Allowed tools | neotoma_read, neotoma_write, gws_gmail |
+| Context entity types | email_message, contact, task, calendar_event, transaction |
+| Operational entity types | email_message, task, contact, daemon_report |
 | Harness | polling loop via asyncio.sleep |
 | Entity ID | ent_138a463654de2b1d46cec0db |
 

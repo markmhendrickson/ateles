@@ -10,18 +10,32 @@ genus: Sturnus
 status: active
 aauth_sub: sturnus@ateles-swarm
 agent_grant: service
+observation_source_default: llm_summary
 harness_preferences: "Hybrid: lib/daemon_runtime SSEClient for event-driven updates + scheduled weekly relationship-health sweep (launchd plist). Also user-invocable via /sturnus for ad-hoc relationship questions."
 user_invocable: true
 triggers:
   - sturnus
   - /sturnus
-allowed_tools:
+tool_allowlist:
   - mcp__mcpsrv_neotoma__store
   - mcp__mcpsrv_neotoma__correct
   - mcp__mcpsrv_neotoma__retrieve_entities
   - mcp__mcpsrv_neotoma__retrieve_entity_by_identifier
   - gws_gmail
   - gws_calendar
+context_entity_types:
+  - contact
+  - conversation
+  - calendar_event
+  - product_feedback
+  - interaction
+  - task
+  - rendered_page
+operational_entity_types:
+  - contact
+  - task
+  - interaction
+  - rendered_page
 ---
 
 # sturnus
@@ -37,8 +51,11 @@ Relationship management agent (CRM). Owns the full lifecycle of Mark's contacts 
 | Status | active |
 | AAuth sub | sturnus@ateles-swarm |
 | Agent grant | service |
+| Observation source | llm_summary |
 | Triggers | sturnus, /sturnus |
 | Allowed tools | mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_by_identifier, gws_gmail, gws_calendar |
+| Context entity types | contact, conversation, calendar_event, product_feedback, interaction, task, rendered_page |
+| Operational entity types | contact, task, interaction, rendered_page |
 | Harness | Hybrid: lib/daemon_runtime SSEClient for event-driven updates + scheduled weekly relationship-health sweep (launchd plist). Also user-invocable via /sturnus for ad-hoc relationship questions. |
 | Entity ID | ent_b373b3d9af9082c559e954a8 |
 

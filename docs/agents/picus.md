@@ -10,6 +10,7 @@ genus: Picus
 status: active
 aauth_sub: picus@ateles-swarm
 agent_grant: service
+observation_source_default: sensor
 harness_preferences: lib/daemon_runtime; dispatched by Apis via ASSIGNED_TO_ROUTES (assigned_to=picus) and finance_tax domain tag
 user_invocable: true
 triggers:
@@ -22,7 +23,7 @@ triggers:
   - tax strategy review
   - modelo 720
   - fbar
-allowed_tools:
+tool_allowlist:
   - mcp__mcpsrv_neotoma__retrieve_entities
   - mcp__mcpsrv_neotoma__retrieve_entity_by_identifier
   - mcp__mcpsrv_neotoma__retrieve_entity_snapshot
@@ -30,6 +31,17 @@ allowed_tools:
   - mcp__mcpsrv_neotoma__correct
   - mcp__mcpsrv_neotoma__create_relationship
   - gws_gmail_read
+context_entity_types:
+  - transaction
+  - financial_account
+  - payment_profile
+  - tax_document
+  - analysis
+  - contact
+operational_entity_types:
+  - analysis
+  - task
+  - tax_document
 ---
 
 # picus
@@ -45,8 +57,11 @@ Invoke Picus, the annual tax-preparation agent — owns end-to-end Spain (SeCod 
 | Status | active |
 | AAuth sub | picus@ateles-swarm |
 | Agent grant | service |
+| Observation source | sensor |
 | Triggers | picus, /picus, prepare my taxes, run tax prep, gather my renta data, estimate my taxes, tax strategy review, modelo 720, fbar |
 | Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_by_identifier, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, mcp__mcpsrv_neotoma__create_relationship, gws_gmail_read |
+| Context entity types | transaction, financial_account, payment_profile, tax_document, analysis, contact |
+| Operational entity types | analysis, task, tax_document |
 | Harness | lib/daemon_runtime; dispatched by Apis via ASSIGNED_TO_ROUTES (assigned_to=picus) and finance_tax domain tag |
 | Entity ID | ent_737438a02053d10d2b624ecf |
 

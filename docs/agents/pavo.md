@@ -9,11 +9,12 @@ tier: T4
 genus: Pavo
 status: planned
 agent_grant: service
+observation_source_default: llm_summary
 user_invocable: true
 triggers:
   - pavo
   - /pavo
-allowed_tools:
+tool_allowlist:
   - retrieve_entities
   - retrieve_entity_by_identifier
   - retrieve_entity_snapshot
@@ -29,14 +30,14 @@ allowed_tools:
   - WebFetch
   - Read
   - Grep
-  - "mcp:mcpsrv_neotoma:retrieve_entities"
-  - "mcp:mcpsrv_neotoma:retrieve_entity_by_identifier"
-  - "mcp:mcpsrv_neotoma:retrieve_related_entities"
-  - "mcp:mcpsrv_neotoma:list_observations"
-  - "mcp:mcpsrv_neotoma:list_recent_changes"
-  - "mcp:mcpsrv_neotoma:list_timeline_events"
-  - "mcp:mcpsrv_neotoma:store"
-  - "mcp:mcpsrv_neotoma:correct"
+  - mcp__mcpsrv_neotoma__retrieve_entities
+  - mcp__mcpsrv_neotoma__retrieve_entity_by_identifier
+  - mcp__mcpsrv_neotoma__retrieve_related_entities
+  - mcp__mcpsrv_neotoma__list_observations
+  - mcp__mcpsrv_neotoma__list_recent_changes
+  - mcp__mcpsrv_neotoma__list_timeline_events
+  - mcp__mcpsrv_neotoma__store
+  - mcp__mcpsrv_neotoma__correct
 context_entity_types:
   - workflow_definition
   - standing_rule
@@ -85,8 +86,9 @@ Invoke Pavo, the product manager agent — prioritisation synthesis, tradeoff an
 | Genus | Pavo |
 | Status | planned |
 | Agent grant | service |
+| Observation source | llm_summary |
 | Triggers | pavo, /pavo |
-| Allowed tools | retrieve_entities, retrieve_entity_by_identifier, retrieve_entity_snapshot, retrieve_related_entities, list_observations, list_recent_changes, list_timeline_events, store, correct, bash:gh issue list, bash:gh pr list, WebSearch, WebFetch, Read, Grep, mcp:mcpsrv_neotoma:retrieve_entities, mcp:mcpsrv_neotoma:retrieve_entity_by_identifier, mcp:mcpsrv_neotoma:retrieve_related_entities, mcp:mcpsrv_neotoma:list_observations, mcp:mcpsrv_neotoma:list_recent_changes, mcp:mcpsrv_neotoma:list_timeline_events, mcp:mcpsrv_neotoma:store, mcp:mcpsrv_neotoma:correct |
+| Allowed tools | retrieve_entities, retrieve_entity_by_identifier, retrieve_entity_snapshot, retrieve_related_entities, list_observations, list_recent_changes, list_timeline_events, store, correct, bash:gh issue list, bash:gh pr list, WebSearch, WebFetch, Read, Grep, mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_by_identifier, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__list_observations, mcp__mcpsrv_neotoma__list_recent_changes, mcp__mcpsrv_neotoma__list_timeline_events, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct |
 | Context entity types | workflow_definition, standing_rule, agent_grant, agent_definition, agent_policy, agent_strategy, customer_development_note, product_feedback, feedback_analysis, feedback_aggregate_analysis, competitive_analysis, strategic_analysis, strategy, decision_record, release_plan, release_objective, target_persona, priority_rubric, feature_request, ui_change_request, bug_report, analysis, business_strategy, domain_strategy, competitive_position |
 | Operational entity types | plan, decision_record, task, issue, analysis, analysis_finding, strategy_drift_signal |
 | Entity ID | ent_bf712273fe3ea48a505c6e81 |

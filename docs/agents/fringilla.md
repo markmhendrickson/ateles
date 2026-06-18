@@ -10,6 +10,7 @@ genus: Fringilla
 status: active
 aauth_sub: fringilla@ateles-swarm
 agent_grant: service
+observation_source_default: sensor
 user_invocable: true
 triggers:
   - fringilla
@@ -18,11 +19,23 @@ triggers:
   - reconcile my subscriptions
   - review fixed costs
   - how are my finances trending
-allowed_tools:
+tool_allowlist:
   - mcp__mcpsrv_neotoma__retrieve_entities
   - mcp__mcpsrv_neotoma__retrieve_entity_by_identifier
   - mcp__mcpsrv_neotoma__store
   - mcp__mcpsrv_neotoma__correct
+context_entity_types:
+  - transaction
+  - payment_event
+  - payment_profile
+  - financial_account
+  - subscription
+  - analysis
+  - portfolio_holding
+operational_entity_types:
+  - analysis
+  - analysis_finding
+  - task
 ---
 
 # fringilla
@@ -38,8 +51,11 @@ Invoke Fringilla, the financial analysis agent — quarterly financial reviews, 
 | Status | active |
 | AAuth sub | fringilla@ateles-swarm |
 | Agent grant | service |
+| Observation source | sensor |
 | Triggers | fringilla, /fringilla, run the quarterly financial review, reconcile my subscriptions, review fixed costs, how are my finances trending |
 | Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_by_identifier, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct |
+| Context entity types | transaction, payment_event, payment_profile, financial_account, subscription, analysis, portfolio_holding |
+| Operational entity types | analysis, analysis_finding, task |
 | Entity ID | ent_a6e9d4d4d684a7f3603b1fe3 |
 
 ## Prompt
