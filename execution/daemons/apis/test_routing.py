@@ -69,3 +69,35 @@ def test_multiple_domains_deduplicated_and_order_stable() -> None:
 
 def test_empty_changeset_returns_no_reviewers() -> None:
     assert resolve_reviewers([]) == []
+
+
+# ── Agent-metadata path exclusion (PR #107 regression guard) ─────────────────
+# docs/agents/<agent>.md and .claude/skills/<agent>/SKILL.md are generated
+# mirrors/documentation — they carry no domain-code signal. A PR that only
+# touches these files must not summon domain specialists; Loxia covers it.
+
+
+def test_agent_doc_paths_do_not_summon_specialist() -> None:
+    """Regression for PR #107 — mass agent-doc regeneration must not invite
+    Monedula, Gorilla, or Fringilla as reviewers."""
+    paths = [
+        "docs/agents/monedula.md",
+        "docs/agents/gorilla.md",
+        "docs/agents/fringilla.md",
+    ]
+    assert infer_domains_from_paths(paths) == []
+    assert resolve_reviewers(paths) == []
+
+
+def test_skill_mirror_paths_do_not_summon_specialist() -> None:
+    assert resolve_reviewers([".claude/skills/lanius/SKILL.md"]) == []
+
+
+def test_mixed_agent_doc_and_real_code_selects_specialist() -> None:
+    """When a PR touches both a doc mirror AND real domain code, the specialist
+    IS selected — because of the code file, not the doc file."""
+    paths = [
+        "docs/agents/monedula.md",   # agent metadata — must be ignored
+        "lib/payment_profile.py",     # real finance code — must select monedula
+    ]
+    assert resolve_reviewers(paths) == ["monedula"]

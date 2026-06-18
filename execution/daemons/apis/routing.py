@@ -93,6 +93,21 @@ DOMAIN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 # the routing table so the external contract tracks internal capability.
 SUPPORTED_DOMAINS: list[str] = list(DOMAIN_ROUTES.keys())
 
+# Paths that are agent METADATA (docs/skill mirrors), not domain work. A change
+# to docs/agents/monedula.md is a docs edit, not finance code — it must not
+# summon the finance specialist as a reviewer (Loxia covers it as baseline).
+# Similarly, .claude/skills/<agent>/SKILL.md files are generated mirrors of the
+# skill definition and carry no domain-work signal.
+#
+# Pattern matches repo-relative paths like:
+#   docs/agents/monedula.md
+#   docs/agents/README.md
+#   .claude/skills/lanius/SKILL.md
+# The (^|/) anchor handles paths with or without a leading slash.
+_AGENT_METADATA_PATH: re.Pattern[str] = re.compile(
+    r"(^|/)(docs/agents/|\.claude/skills/)", re.I
+)
+
 # File-path → domain patterns for PR-review routing (Loxia per-domain fan-out).
 # Distinct from DOMAIN_PATTERNS above, which classify a task's TITLE/BODY text:
 # these match the PATHS of files changed in a pull request. A single PR may
@@ -129,6 +144,12 @@ def infer_domains_from_paths(paths: Iterable[str]) -> list[str]:
     """
     domains: list[str] = []
     for path in paths:
+        # Skip agent-metadata paths (docs/agents/ and .claude/skills/). A PR
+        # that touches docs/agents/monedula.md is regenerating documentation,
+        # not changing finance code — it must not summon Monedula as a reviewer.
+        # Loxia covers these as the universal baseline reviewer.
+        if _AGENT_METADATA_PATH.search(path):
+            continue
         for pattern, domain in DOMAIN_PATH_PATTERNS:
             if pattern.search(path) and domain not in domains:
                 domains.append(domain)
