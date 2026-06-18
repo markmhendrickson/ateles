@@ -723,8 +723,9 @@ class TestNeotomaMcpConfigInjection:
     MCP tool allowlist syntax finding:
       The --allowed-tools flag accepts "mcp__<servername>__*" as a wildcard that
       permits all tools from the named MCP server. The server name must exactly
-      match the key in mcpServers (here: "neotoma"). So for a restricted tool
-      list, we append "mcp__neotoma__*" to allow all neotoma MCP tools.
+      match the key in mcpServers (here: "mcpsrv_neotoma" — the convention used
+      across all 31 agent SKILLs and 24 agent_definitions). So for a restricted
+      tool list, we append "mcp__mcpsrv_neotoma__*" to allow all neotoma MCP tools.
 
     Security:
       The bearer token is written to a mode-0600 temp file; the file path (not
@@ -870,7 +871,7 @@ class TestNeotomaMcpConfigInjection:
         assert "--mcp-config" in captured_cmd
         assert len(written_contents) == 1, "Expected MCP config to be read during communicate"
         cfg = written_contents[0]
-        neotoma_cfg = cfg["mcpServers"]["neotoma"]
+        neotoma_cfg = cfg["mcpServers"]["mcpsrv_neotoma"]
         assert neotoma_cfg["url"].endswith("/mcp"), (
             f"Expected url ending in /mcp, got {neotoma_cfg['url']!r}"
         )
@@ -947,7 +948,7 @@ class TestNeotomaMcpConfigInjection:
         assert result.ok
         assert len(written_contents) == 1, "Expected MCP config to be read during communicate"
         cfg = written_contents[0]
-        neotoma_cfg = cfg["mcpServers"]["neotoma"]
+        neotoma_cfg = cfg["mcpServers"]["mcpsrv_neotoma"]
         assert neotoma_cfg["url"] == "http://localhost:9180/mcp", (
             f"Expected url 'http://localhost:9180/mcp', got {neotoma_cfg['url']!r}"
         )
@@ -961,8 +962,8 @@ class TestNeotomaMcpConfigInjection:
         self, MockLoader, mock_write_harness, monkeypatch
     ) -> None:
         """When the role has a restricted tool allowlist (not ['*']), the neotoma
-        MCP wildcard 'mcp__neotoma__*' must be added to --allowed-tools so the
-        dispatched agent can call neotoma MCP tools."""
+        MCP wildcard 'mcp__mcpsrv_neotoma__*' must be added to --allowed-tools so
+        the dispatched agent can call neotoma MCP tools under the canonical name."""
         restricted_def = _make_def(
             prompt_markdown="Restricted agent.",
             tool_allowlist="Bash,Read,Write",
@@ -993,8 +994,8 @@ class TestNeotomaMcpConfigInjection:
         assert "--allowed-tools" in captured_cmd
         tools_idx = captured_cmd.index("--allowed-tools") + 1
         allowed_str = captured_cmd[tools_idx]
-        assert "mcp__neotoma__*" in allowed_str, (
-            f"Expected 'mcp__neotoma__*' in --allowed-tools, got: {allowed_str!r}"
+        assert "mcp__mcpsrv_neotoma__*" in allowed_str, (
+            f"Expected 'mcp__mcpsrv_neotoma__*' in --allowed-tools, got: {allowed_str!r}"
         )
         # Original tools must still be present.
         assert "Bash" in allowed_str
