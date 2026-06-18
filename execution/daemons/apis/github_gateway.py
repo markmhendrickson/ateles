@@ -7,6 +7,20 @@ verifies the HMAC signature, normalizes the payload into a SwarmTrigger, and
 hands it to the Apis dispatch pipelines (swarm_dispatch.py) that spawn the
 gate agents (Lanius → Pavo on issues; Lanius → review panel → Vanellus on PRs).
 
+Also handles `issue_comment` events (ateles#112): GitHub sends PR comments as
+`issue_comment` with an `issue.pull_request` field present. The dispatcher
+routes these to the operator-override command handler so `/confirm-gates-clear`
+can unblock a deadlocked PR pipeline.
+
+OPERATOR ACTION REQUIRED (ateles#112): the live GitHub webhooks on the
+markmhendrickson/ateles and markmhendrickson/neotoma repos must be updated to
+include the `issue_comment` event — code alone cannot do this. Use:
+  gh api -X PATCH repos/markmhendrickson/ateles/hooks/<hook_id> \\
+    -f "events[]=issues" -f "events[]=pull_request" -f "events[]=issue_comment"
+or add `issue_comment` via the repo Settings → Webhooks UI.  Without this
+change, GitHub will not deliver comment events and /confirm-gates-clear will
+never arrive.
+
 Apus remains the Neotoma→git mirror webhook daemon only; this gateway is
 mounted inside Apis because dispatching swarm work is Apis's job.
 
@@ -37,6 +51,8 @@ log = logging.getLogger("apis.github_gateway")
 # new pushes; `reopened` re-enters the pipeline after a close.
 PR_ACTIONS = {"opened", "reopened", "synchronize"}
 ISSUE_ACTIONS = {"opened"}
+# issue_comment events (ateles#112): any new comment on an issue or PR.
+ISSUE_COMMENT_ACTIONS = {"created"}
 
 
 @dataclass
@@ -44,6 +60,7 @@ class SwarmTrigger:
     """Normalized GitHub event handed to the dispatch pipelines."""
 
     kind: str  # "issue_opened" | "pr_opened" | "pr_reopened" | "pr_synchronize"
+              # | "issue_comment"
     repository: str  # "owner/name"
     number: int
     title: str
@@ -55,6 +72,14 @@ class SwarmTrigger:
     labels: list[str] = field(default_factory=list)
     head_ref: str = ""
     base_ref: str = ""
+    # issue_comment extras (ateles#112): populated when kind == "issue_comment"
+    comment_id: int = 0
+    comment_author: str = ""
+    comment_body: str = ""
+    comment_html_url: str = ""
+    # True when the comment is on a PR (GitHub sends PR comments as issue_comment
+    # with an `issue.pull_request` field; False for plain issue comments).
+    comment_on_pr: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -120,6 +145,31 @@ def parse_github_event(
             labels=[lbl.get("name", "") for lbl in pr.get("labels", [])],
             head_ref=(pr.get("head") or {}).get("ref", ""),
             base_ref=(pr.get("base") or {}).get("ref", ""),
+            raw=payload,
+        )
+
+    # issue_comment events (ateles#112): operator /confirm-gates-clear override.
+    # GitHub delivers PR comments as issue_comment with issue.pull_request present.
+    if event_type == "issue_comment" and action in ISSUE_COMMENT_ACTIONS:
+        issue = payload.get("issue") or {}
+        comment = payload.get("comment") or {}
+        is_pr_comment = "pull_request" in issue
+        return SwarmTrigger(
+            kind="issue_comment",
+            repository=repository,
+            number=issue.get("number", 0),
+            title=issue.get("title", ""),
+            body=issue.get("body") or "",
+            author=(issue.get("user") or {}).get("login", ""),
+            html_url=issue.get("html_url", ""),
+            delivery_id=delivery_id,
+            action=action,
+            labels=[lbl.get("name", "") for lbl in issue.get("labels", [])],
+            comment_id=comment.get("id", 0),
+            comment_author=(comment.get("user") or {}).get("login", ""),
+            comment_body=comment.get("body") or "",
+            comment_html_url=comment.get("html_url", ""),
+            comment_on_pr=is_pr_comment,
             raw=payload,
         )
 
