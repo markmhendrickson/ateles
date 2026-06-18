@@ -285,7 +285,9 @@ async def run_skill(
     #   that permits all tools from the named MCP server. The double-underscore
     #   separator matches the mcp__<server>__<tool> naming convention Claude uses
     #   internally. The server name must exactly match the key in mcpServers.
-    #   So for {"mcpServers": {"neotoma": ...}} the entry is "mcp__neotoma__*".
+    #   So for {"mcpServers": {"mcpsrv_neotoma": ...}} the entry is
+    #   "mcp__mcpsrv_neotoma__*" — matching the convention used across all 31 agent
+    #   SKILL.md files and 24 agent_definition tool_allowlists in this codebase.
     #
     # Security tradeoff:
     #   Passing the bearer token as an inline JSON string in --mcp-config would
@@ -297,14 +299,14 @@ async def run_skill(
     _neotoma_token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     _mcp_cfg: dict = {
         "mcpServers": {
-            "neotoma": {
+            "mcpsrv_neotoma": {
                 "type": "http",
                 "url": f"{_neotoma_base}/mcp",
             }
         }
     }
     if _neotoma_token:
-        _mcp_cfg["mcpServers"]["neotoma"]["headers"] = {
+        _mcp_cfg["mcpServers"]["mcpsrv_neotoma"]["headers"] = {
             "Authorization": f"Bearer {_neotoma_token}"
         }
 
@@ -315,7 +317,7 @@ async def run_skill(
         with os.fdopen(fd, "w") as _f:
             json.dump(_mcp_cfg, _f)
         cmd += ["--mcp-config", _mcp_tmp_path]
-        log.debug(f"[apis] Injected --mcp-config {_mcp_tmp_path} (neotoma HTTP MCP)")
+        log.debug(f"[apis] Injected --mcp-config {_mcp_tmp_path} (mcpsrv_neotoma HTTP MCP)")
     except Exception as exc:
         # Non-fatal: proceed without the MCP config injection rather than abort.
         log.warning(f"[apis] Could not write MCP config temp file (non-fatal): {exc}")
@@ -326,11 +328,12 @@ async def run_skill(
         # --allowed-tools is confirmed present in `claude --print --help`
         # (alias: --allowedTools). Accepts comma- or space-separated tool names.
         # MCP server tools use the "mcp__<servername>__*" wildcard form, where the
-        # server name matches the mcpServers key (here: "neotoma"). This allows all
-        # tools from that MCP server without enumerating them individually.
+        # server name matches the mcpServers key (here: "mcpsrv_neotoma" — the
+        # universal convention across all 31 agent SKILLs and 24 agent_definitions).
+        # This allows all tools from that MCP server without enumerating them individually.
         allowed_list = list(tools)
-        if "mcp__neotoma__*" not in allowed_list:
-            allowed_list.append("mcp__neotoma__*")
+        if "mcp__mcpsrv_neotoma__*" not in allowed_list:
+            allowed_list.append("mcp__mcpsrv_neotoma__*")
         allowed = ",".join(allowed_list)
         cmd += ["--allowed-tools", allowed]
         log.info(
