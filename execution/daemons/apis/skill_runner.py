@@ -31,6 +31,7 @@ import logging
 import os
 import shutil
 import sys
+import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -267,11 +268,70 @@ async def run_skill(
     # ── Build command (Stage 1: tool allowlist) ────────────────────────────────
     cmd = [CLAUDE_BIN, "--print", "--append-system-prompt", system_prompt]
 
+    # ── Stage 6: inject Neotoma MCP config so dispatched child can reach Neotoma ─
+    # Dispatched `claude --print` children inherit the ambient Claude MCP config,
+    # but in the daemon's context (ateles project scope) there is no neotoma MCP
+    # server entry. Without it, role agents (Lanius/Pavo) cannot load
+    # workflow_definition, init gate_status, or store plan_contribution — they
+    # exit rc=0 without completing their Neotoma-dependent protocols.
+    #
+    # We inject a --mcp-config pointing the child at the local Neotoma HTTP MCP
+    # endpoint (NEOTOMA_BASE_URL/mcp + bearer auth). We do NOT use
+    # --strict-mcp-config so any other MCP servers the agent legitimately has
+    # (from its own ambient config) are preserved; we only ADD neotoma.
+    #
+    # MCP tool allowlist syntax (ateles#1687 finding):
+    #   claude --print --allowed-tools accepts "mcp__<servername>__*" as a wildcard
+    #   that permits all tools from the named MCP server. The double-underscore
+    #   separator matches the mcp__<server>__<tool> naming convention Claude uses
+    #   internally. The server name must exactly match the key in mcpServers.
+    #   So for {"mcpServers": {"neotoma": ...}} the entry is "mcp__neotoma__*".
+    #
+    # Security tradeoff:
+    #   Passing the bearer token as an inline JSON string in --mcp-config would
+    #   expose it in the child's argv (visible via `ps aux`). Instead, we write
+    #   the config to a mode-0600 temp file and pass the file path to --mcp-config.
+    #   The temp file is cleaned up in a try/finally after the subprocess exits.
+    _mcp_tmp_path: str | None = None
+    _neotoma_base = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180").rstrip("/")
+    _neotoma_token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
+    _mcp_cfg: dict = {
+        "mcpServers": {
+            "neotoma": {
+                "type": "http",
+                "url": f"{_neotoma_base}/mcp",
+            }
+        }
+    }
+    if _neotoma_token:
+        _mcp_cfg["mcpServers"]["neotoma"]["headers"] = {
+            "Authorization": f"Bearer {_neotoma_token}"
+        }
+
+    # Write the MCP config to a mode-0600 temp file to avoid argv exposure.
+    try:
+        fd, _mcp_tmp_path = tempfile.mkstemp(suffix=".json", prefix="apis_mcp_")
+        os.chmod(_mcp_tmp_path, 0o600)
+        with os.fdopen(fd, "w") as _f:
+            json.dump(_mcp_cfg, _f)
+        cmd += ["--mcp-config", _mcp_tmp_path]
+        log.debug(f"[apis] Injected --mcp-config {_mcp_tmp_path} (neotoma HTTP MCP)")
+    except Exception as exc:
+        # Non-fatal: proceed without the MCP config injection rather than abort.
+        log.warning(f"[apis] Could not write MCP config temp file (non-fatal): {exc}")
+        _mcp_tmp_path = None
+
     tools = agent_def.tools  # property: list[str]; ['*'] means all
     if tools != ["*"]:
         # --allowed-tools is confirmed present in `claude --print --help`
         # (alias: --allowedTools). Accepts comma- or space-separated tool names.
-        allowed = ",".join(tools)
+        # MCP server tools use the "mcp__<servername>__*" wildcard form, where the
+        # server name matches the mcpServers key (here: "neotoma"). This allows all
+        # tools from that MCP server without enumerating them individually.
+        allowed_list = list(tools)
+        if "mcp__neotoma__*" not in allowed_list:
+            allowed_list.append("mcp__neotoma__*")
+        allowed = ",".join(allowed_list)
         cmd += ["--allowed-tools", allowed]
         log.info(
             f"[apis] Spawning: claude --print --append-system-prompt "
@@ -332,78 +392,87 @@ async def run_skill(
     )
 
     try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(input=prompt.encode()), timeout=timeout
-        )
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=prompt.encode()), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            duration_ms = int((time.monotonic_ns() - _start_ns) / 1_000_000)
+            msg = f"timed out after {timeout}s"
+            log.error(f"[apis] {skill} dispatch {msg}")
+
+            # Stage 2: harness_event on timeout (failure)
+            try:
+                await asyncio.to_thread(
+                    _write_harness_event,
+                    task_entity_id=task_entity_id,
+                    role=_role,
+                    agent_sub=agent_def.aauth_sub,
+                    event_type="subprocess",
+                    tool_name=skill,
+                    success="false",
+                    output_summary=f"timeout after {timeout}s",
+                    duration_ms=duration_ms,
+                )
+            except Exception as exc:
+                log.debug(f"[apis] timeout harness_event write failed: {exc}")
+
+            return SkillResult(skill, False, None, "", "", error=msg)
+
         duration_ms = int((time.monotonic_ns() - _start_ns) / 1_000_000)
-        msg = f"timed out after {timeout}s"
-        log.error(f"[apis] {skill} dispatch {msg}")
-
-        # Stage 2: harness_event on timeout (failure)
-        try:
-            await asyncio.to_thread(
-                _write_harness_event,
-                task_entity_id=task_entity_id,
-                role=_role,
-                agent_sub=agent_def.aauth_sub,
-                event_type="subprocess",
-                tool_name=skill,
-                success="false",
-                output_summary=f"timeout after {timeout}s",
-                duration_ms=duration_ms,
-            )
-        except Exception as exc:
-            log.debug(f"[apis] timeout harness_event write failed: {exc}")
-
-        return SkillResult(skill, False, None, "", "", error=msg)
-
-    duration_ms = int((time.monotonic_ns() - _start_ns) / 1_000_000)
-    result = SkillResult(
-        skill=skill,
-        ok=proc.returncode == 0,
-        returncode=proc.returncode,
-        stdout=stdout.decode("utf-8", errors="replace"),
-        stderr=stderr.decode("utf-8", errors="replace"),
-    )
-
-    # ── Stage 2: harness_event at completion ──────────────────────────────────
-    if result.ok:
-        log.info(f"[apis] {skill} dispatch ok ({len(result.stdout)}B stdout)")
-        try:
-            await asyncio.to_thread(
-                _write_harness_event,
-                task_entity_id=task_entity_id,
-                role=_role,
-                agent_sub=agent_def.aauth_sub,
-                event_type="subprocess",
-                tool_name=skill,
-                success="true",
-                output_summary=f"{len(result.stdout)}B stdout rc=0",
-                duration_ms=duration_ms,
-            )
-        except Exception as exc:
-            log.debug(f"[apis] success harness_event write failed: {exc}")
-    else:
-        log.error(
-            f"[apis] {skill} dispatch failed (rc={proc.returncode}): "
-            f"{result.stderr[:500]}"
+        result = SkillResult(
+            skill=skill,
+            ok=proc.returncode == 0,
+            returncode=proc.returncode,
+            stdout=stdout.decode("utf-8", errors="replace"),
+            stderr=stderr.decode("utf-8", errors="replace"),
         )
-        try:
-            await asyncio.to_thread(
-                _write_harness_event,
-                task_entity_id=task_entity_id,
-                role=_role,
-                agent_sub=agent_def.aauth_sub,
-                event_type="subprocess",
-                tool_name=skill,
-                success="false",
-                output_summary=f"rc={proc.returncode} {result.stderr[:200]}",
-                duration_ms=duration_ms,
-            )
-        except Exception as exc:
-            log.debug(f"[apis] failure harness_event write failed: {exc}")
 
-    return result
+        # ── Stage 2: harness_event at completion ──────────────────────────────────
+        if result.ok:
+            log.info(f"[apis] {skill} dispatch ok ({len(result.stdout)}B stdout)")
+            try:
+                await asyncio.to_thread(
+                    _write_harness_event,
+                    task_entity_id=task_entity_id,
+                    role=_role,
+                    agent_sub=agent_def.aauth_sub,
+                    event_type="subprocess",
+                    tool_name=skill,
+                    success="true",
+                    output_summary=f"{len(result.stdout)}B stdout rc=0",
+                    duration_ms=duration_ms,
+                )
+            except Exception as exc:
+                log.debug(f"[apis] success harness_event write failed: {exc}")
+        else:
+            log.error(
+                f"[apis] {skill} dispatch failed (rc={proc.returncode}): "
+                f"{result.stderr[:500]}"
+            )
+            try:
+                await asyncio.to_thread(
+                    _write_harness_event,
+                    task_entity_id=task_entity_id,
+                    role=_role,
+                    agent_sub=agent_def.aauth_sub,
+                    event_type="subprocess",
+                    tool_name=skill,
+                    success="false",
+                    output_summary=f"rc={proc.returncode} {result.stderr[:200]}",
+                    duration_ms=duration_ms,
+                )
+            except Exception as exc:
+                log.debug(f"[apis] failure harness_event write failed: {exc}")
+
+        return result
+
+    finally:
+        # Clean up the MCP config temp file (always, even on timeout/exception).
+        if _mcp_tmp_path is not None:
+            try:
+                os.unlink(_mcp_tmp_path)
+            except OSError:
+                pass
