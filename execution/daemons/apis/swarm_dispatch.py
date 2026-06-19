@@ -308,6 +308,7 @@ class SwarmDispatcher:
             "lanius",
             self._lanius_issue_prompt(trigger),
             github_token=_token_for_agent_on_repo("lanius", trigger.repository),
+            include_github_contract=True,
         )
         if not lanius.ok:
             self.notifier.send(
@@ -325,6 +326,7 @@ class SwarmDispatcher:
                 lens.agent,
                 self._expectation_prompt(trigger, lens),
                 github_token=_token_for_agent_on_repo(lens.agent, trigger.repository),
+                include_github_contract=True,
             )
 
         # 3. Pavo takes Phase 1 (pm scoping) — read-only gate, auto-runs.
@@ -332,6 +334,7 @@ class SwarmDispatcher:
             "pavo",
             self._pavo_prompt(trigger),
             github_token=_token_for_agent_on_repo("pavo", trigger.repository),
+            include_github_contract=True,
         )
 
         self.notifier.send(
@@ -354,6 +357,7 @@ class SwarmDispatcher:
             "lanius",
             self._lanius_pr_prompt(trigger, parent),
             github_token=_lanius_token,
+            include_github_contract=True,
         )
         verdict = parse_gate_verdict(lanius.stdout)
         if verdict is None and lanius.ok:
@@ -374,6 +378,7 @@ class SwarmDispatcher:
                     "proceeds and merge stays operator-gated regardless."
                 ),
                 github_token=_lanius_token,
+                include_github_contract=True,
             )
             verdict = parse_gate_verdict(lanius.stdout)
         if verdict == "blocked":
@@ -413,6 +418,7 @@ class SwarmDispatcher:
                     trigger, lens, expectations.get(lens.agent, ""), parent
                 ),
                 github_token=_token_for_agent_on_repo(lens.agent, trigger.repository),
+                include_github_contract=True,
             )
             if result.ok:
                 reviews.append((lens.lens, result.stdout))
@@ -452,6 +458,7 @@ class SwarmDispatcher:
             "vanellus",
             self._vanellus_prompt(trigger, parent, [p.lens for p in panel]),
             github_token=_token_for_agent_on_repo("vanellus", trigger.repository),
+            include_github_contract=True,
         )
 
         if not self.config.auto_merge:
@@ -599,6 +606,7 @@ class SwarmDispatcher:
             "lanius",
             prompt,
             github_token=_token_for_agent_on_repo("lanius", trigger.repository),
+            include_github_contract=True,
         )
         if not result.ok:
             log.error(

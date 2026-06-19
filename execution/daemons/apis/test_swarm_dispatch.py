@@ -861,3 +861,115 @@ def test_operator_login_defaults_to_repo_owner():
     # This is the env-based default; the actual value depends on env.
     # We verify the constant is non-empty (not blank).
     assert _OPERATOR_LOGIN, "_OPERATOR_LOGIN must not be empty"
+
+
+# ── Phase 1 / Layer A: include_github_contract=True at GitHub-trigger call sites
+
+
+def test_github_trigger_lanius_issue_passes_contract(monkeypatch):
+    """All run_skill calls in _handle_issue_opened must pass include_github_contract=True.
+
+    This is verified by capturing every keyword argument passed to run_skill and
+    asserting the flag is set on the Lanius dispatch (the first call in the pipeline).
+    """
+    captured_kwargs: list[dict] = []
+
+    async def spy_run_skill(skill, prompt, **kwargs):
+        captured_kwargs.append({"skill": skill, **kwargs})
+        return SkillResult(skill, True, 0, "ok", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", spy_run_skill)
+
+    # select_expectation_agents returns lenses; stub it to return empty so only
+    # lanius and pavo dispatches occur (simpler to assert on).
+    monkeypatch.setattr(swarm_dispatch, "select_expectation_agents", lambda *a, **kw: [])
+
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+    t = _trigger(kind="issue_opened", number=1, title="New issue", body="Body.")
+
+    asyncio.run(dispatcher._handle_issue_opened(t))
+
+    assert captured_kwargs, "run_skill must have been called at least once"
+    for call in captured_kwargs:
+        assert call.get("include_github_contract") is True, (
+            f"run_skill call for skill={call['skill']!r} in _handle_issue_opened "
+            "must pass include_github_contract=True"
+        )
+
+
+def test_github_trigger_pr_pipeline_passes_contract(monkeypatch):
+    """All run_skill calls in _handle_pr must pass include_github_contract=True."""
+    captured_kwargs: list[dict] = []
+
+    async def spy_run_skill(skill, prompt, **kwargs):
+        captured_kwargs.append({"skill": skill, **kwargs})
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        return SkillResult(skill, True, 0, "ok", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", spy_run_skill)
+
+    # Stub out the GitHub API helpers so the pipeline runs without network.
+    async def fake_changed_files(self, t):
+        return []
+
+    async def fake_preregistered(self, repo, number):
+        return {}
+
+    async def fake_store(self, entities, idempotency_key):
+        pass
+
+    async def fake_post_missing(self, t, reviews, agents_by_lens):
+        pass
+
+    async def fake_persist(self, t, reviews, agents_by_lens):
+        pass
+
+    async def fake_merge_checkpoint(self, t, parent, lenses):
+        pass
+
+    monkeypatch.setattr(SwarmDispatcher, "_changed_files", fake_changed_files)
+    monkeypatch.setattr(SwarmDispatcher, "_preregistered_expectations", fake_preregistered)
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_post_missing_panel_comments", fake_post_missing)
+    monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_persist)
+    monkeypatch.setattr(SwarmDispatcher, "_store_merge_checkpoint", fake_merge_checkpoint)
+
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+
+    asyncio.run(dispatcher._handle_pr(_trigger()))
+
+    assert captured_kwargs, "run_skill must have been called at least once in _handle_pr"
+    for call in captured_kwargs:
+        assert call.get("include_github_contract") is True, (
+            f"run_skill call for skill={call['skill']!r} in _handle_pr "
+            "must pass include_github_contract=True"
+        )
+
+
+def test_github_trigger_gate_waive_passes_contract(monkeypatch):
+    """_lanius_waive_gates (called from _handle_issue_comment) must pass
+    include_github_contract=True to its run_skill call."""
+    captured_kwargs: list[dict] = []
+
+    async def spy_run_skill(skill, prompt, **kwargs):
+        captured_kwargs.append({"skill": skill, **kwargs})
+        return SkillResult(skill, True, 0, "Gates waived.", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", spy_run_skill)
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+
+    asyncio.run(dispatcher._handle_issue_comment(_comment_trigger()))
+
+    lanius_calls = [c for c in captured_kwargs if c["skill"] == "lanius"]
+    assert lanius_calls, "Lanius must be called in _lanius_waive_gates"
+    for call in lanius_calls:
+        assert call.get("include_github_contract") is True, (
+            "Lanius run_skill call in _lanius_waive_gates must pass "
+            "include_github_contract=True"
+        )
+
+

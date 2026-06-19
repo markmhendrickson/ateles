@@ -1212,3 +1212,253 @@ class TestGithubTokenInjection:
         assert env.get("GITHUB_TOKEN") == "ghp_ambient_daemon_token", (
             "Empty github_token must not clobber a valid ambient GITHUB_TOKEN"
         )
+
+
+# ── Phase 1 / Layer A: SWARM_GITHUB_CONTRACT injection ───────────────────────
+
+
+class TestSwarmGithubContractInjection:
+    """Phase 1 / Layer A (docs/swarm_github_interaction_design.md).
+
+    build_system_prompt gains include_github_contract: bool = False.
+    When True, SWARM_GITHUB_CONTRACT is injected between agent_def and skill_md.
+    When False (default), prompt is byte-identical to pre-contract behaviour.
+
+    run_skill threads the flag through to build_system_prompt.
+    """
+
+    def setup_method(self) -> None:
+        skill_runner._agent_def_cache.clear()
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    # ── build_system_prompt unit tests ─────────────────────────────────────────
+
+    def test_contract_not_in_prompt_by_default(self) -> None:
+        """Default (include_github_contract=False) must produce a prompt that
+        does NOT contain SWARM_GITHUB_CONTRACT — byte-identical to pre-contract."""
+        agent_def = _make_def(prompt_markdown="Agent identity.")
+        skill_md = "Do the task."
+        prompt, degraded = skill_runner.build_system_prompt(agent_def, skill_md)
+        assert not degraded
+        assert skill_runner.SWARM_GITHUB_CONTRACT not in prompt
+
+    def test_contract_absent_when_false_explicit(self) -> None:
+        """Explicit include_github_contract=False: contract must be absent."""
+        agent_def = _make_def(prompt_markdown="Agent identity.")
+        skill_md = "Do the task."
+        prompt, _ = skill_runner.build_system_prompt(
+            agent_def, skill_md, include_github_contract=False
+        )
+        assert skill_runner.SWARM_GITHUB_CONTRACT not in prompt
+
+    def test_contract_present_when_true_with_definition(self) -> None:
+        """include_github_contract=True with a real agent_def: SWARM_GITHUB_CONTRACT
+        must appear in the prompt, along with both definition and skill_md."""
+        agent_def = _make_def(prompt_markdown="Agent identity.")
+        skill_md = "Do the task."
+        prompt, degraded = skill_runner.build_system_prompt(
+            agent_def, skill_md, include_github_contract=True
+        )
+        assert not degraded
+        assert skill_runner.SWARM_GITHUB_CONTRACT in prompt
+        assert "Agent identity." in prompt
+        assert "Do the task." in prompt
+
+    def test_contract_order_definition_then_contract_then_skill(self) -> None:
+        """Order must be: definition → contract → skill_md (contract is a bridge layer)."""
+        agent_def = _make_def(prompt_markdown="DEFINITION_ANCHOR")
+        skill_md = "SKILL_ANCHOR"
+        prompt, _ = skill_runner.build_system_prompt(
+            agent_def, skill_md, include_github_contract=True
+        )
+        def_pos = prompt.index("DEFINITION_ANCHOR")
+        contract_pos = prompt.index(skill_runner.SWARM_GITHUB_CONTRACT)
+        skill_pos = prompt.index("SKILL_ANCHOR")
+        assert def_pos < contract_pos < skill_pos, (
+            "Order must be: definition → SWARM_GITHUB_CONTRACT → skill_md"
+        )
+
+    def test_contract_present_when_true_degraded(self) -> None:
+        """Degraded (empty prompt_markdown) + contract=True: contract + skill_md
+        both present; degraded=True still returned."""
+        agent_def = _stub_def()
+        skill_md = "Fallback instructions."
+        prompt, degraded = skill_runner.build_system_prompt(
+            agent_def, skill_md, include_github_contract=True
+        )
+        assert degraded, "Degraded flag must still be True when prompt_markdown is empty"
+        assert skill_runner.SWARM_GITHUB_CONTRACT in prompt
+        assert "Fallback instructions." in prompt
+
+    def test_degraded_no_contract_returns_skill_md_only(self) -> None:
+        """Degraded + contract=False: prompt is exactly skill_md (original behaviour)."""
+        agent_def = _stub_def()
+        skill_md = "Fallback instructions."
+        prompt, degraded = skill_runner.build_system_prompt(
+            agent_def, skill_md, include_github_contract=False
+        )
+        assert degraded
+        assert prompt == skill_md
+        assert skill_runner.SWARM_GITHUB_CONTRACT not in prompt
+
+    # ── run_skill threads the flag ──────────────────────────────────────────────
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_run_skill_threads_contract_flag_true(
+        self, MockLoader, mock_write_harness
+    ) -> None:
+        """When run_skill is called with include_github_contract=True, the
+        spawned system prompt arg must contain SWARM_GITHUB_CONTRACT."""
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        captured_cmd: list = []
+
+        async def fake_exec(*cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        skill_md_content = "GitHub task skill."
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value=skill_md_content),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "work prompt",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                    include_github_contract=True,
+                )
+            )
+
+        assert result.ok
+        sys_prompt_idx = captured_cmd.index("--append-system-prompt") + 1
+        system_prompt_arg = captured_cmd[sys_prompt_idx]
+        assert skill_runner.SWARM_GITHUB_CONTRACT in system_prompt_arg, (
+            "SWARM_GITHUB_CONTRACT must appear in system prompt when include_github_contract=True"
+        )
+        assert "Role: Gryllus." in system_prompt_arg
+        assert skill_md_content in system_prompt_arg
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_run_skill_contract_absent_by_default(
+        self, MockLoader, mock_write_harness
+    ) -> None:
+        """Default run_skill call (no include_github_contract): SWARM_GITHUB_CONTRACT
+        must NOT appear — preserves byte-identical pre-contract behaviour."""
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        captured_cmd: list = []
+
+        async def fake_exec(*cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        skill_md_content = "SSE task skill."
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value=skill_md_content),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "work prompt",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                    # include_github_contract intentionally not passed (default False)
+                )
+            )
+
+        assert result.ok
+        sys_prompt_idx = captured_cmd.index("--append-system-prompt") + 1
+        system_prompt_arg = captured_cmd[sys_prompt_idx]
+        assert skill_runner.SWARM_GITHUB_CONTRACT not in system_prompt_arg, (
+            "SWARM_GITHUB_CONTRACT must NOT appear when include_github_contract=False (default)"
+        )
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_run_skill_degraded_with_contract(
+        self, MockLoader, mock_write_harness
+    ) -> None:
+        """Degraded + include_github_contract=True: contract + skill_md in prompt,
+        dispatch still proceeds (degraded=True returned by build_system_prompt)."""
+        stub = _stub_def()
+        instance = MagicMock()
+        instance.load.return_value = stub
+        MockLoader.return_value = instance
+
+        captured_cmd: list = []
+
+        async def fake_exec(*cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        skill_md_content = "Fallback skill content."
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value=skill_md_content),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "work prompt",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                    include_github_contract=True,
+                )
+            )
+
+        # Dispatch still succeeds despite degraded.
+        assert result.ok
+        sys_prompt_idx = captured_cmd.index("--append-system-prompt") + 1
+        system_prompt_arg = captured_cmd[sys_prompt_idx]
+        assert skill_runner.SWARM_GITHUB_CONTRACT in system_prompt_arg, (
+            "Contract must still be injected even in degraded mode"
+        )
+        assert skill_md_content in system_prompt_arg
+        # The degraded harness_event is also emitted (the degraded branch ran).
+        degraded_calls = [
+            call
+            for call in mock_write_harness.call_args_list
+            if "degraded_generic_subagent" in (call.kwargs.get("output_summary") or "")
+        ]
+        assert len(degraded_calls) >= 1
