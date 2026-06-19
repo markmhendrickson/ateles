@@ -81,19 +81,36 @@ def parse_gate_verdict(stdout: str) -> str | None:
 
 # ── Per-agent GitHub account registry (#109) ─────────────────────────────────
 # Canonical login for each of the 8 GitHub-facing agents.  Accounts are named
-# `ateles-<agent>` by convention.  This map is only consulted when the agent's
-# PAT exists (is_provisioned returns True); until then, the per-repo shared
-# identity (#95) is used and native assignment is skipped.
+# `<APIS_OPERATOR_LOGIN>-ateles-<agent>` so that each fork of this public repo
+# produces unique GitHub namespaces.  Ateles is forkable — hardcoding
+# `ateles-<agent>` would collide for any other operator who forks the project.
+# This map is only consulted when the agent's PAT exists (is_provisioned
+# returns True); until then, the per-repo shared identity (#95) is used and
+# native assignment is skipped.
+GITHUB_FACING_AGENTS: frozenset[str] = frozenset({
+    "lanius", "pavo", "vanellus", "bombycilla",
+    "accipiter", "buteo", "phoenicurus", "corvus",
+})
+
+# Built at module load from the operator handle so it stays consistent
+# throughout a process lifetime.
 AGENT_GITHUB_LOGIN: dict[str, str] = {
-    "lanius": "ateles-lanius",
-    "pavo": "ateles-pavo",
-    "vanellus": "ateles-vanellus",
-    "bombycilla": "ateles-bombycilla",
-    "accipiter": "ateles-accipiter",
-    "buteo": "ateles-buteo",
-    "phoenicurus": "ateles-phoenicurus",
-    "corvus": "ateles-corvus",
+    a: f"{_OPERATOR_LOGIN}-ateles-{a}" for a in GITHUB_FACING_AGENTS
 }
+
+
+def agent_github_login(agent: str) -> str:
+    """Canonical GitHub login for *agent*, scoped to the current operator.
+
+    Returns ``<APIS_OPERATOR_LOGIN>-ateles-<agent>`` so that each operator's
+    fork of Ateles produces globally unique machine-account names (e.g.
+    ``markmhendrickson-ateles-pavo``).  The operator handle is read once from
+    ``APIS_OPERATOR_LOGIN`` at module load (``_OPERATOR_LOGIN``).
+
+    Args:
+        agent: lowercase agent genus name (e.g. "pavo", "lanius").
+    """
+    return f"{_OPERATOR_LOGIN}-ateles-{agent}"
 
 
 def is_provisioned(agent: str) -> bool:
@@ -153,7 +170,7 @@ def _agent_prompt_instruction(agent: str, role: str) -> str:
     if is_provisioned(agent):
         return (
             f"You are posting as your own GitHub account "
-            f"(`{AGENT_GITHUB_LOGIN.get(agent, f'ateles-{agent}')}`). "
+            f"(`{agent_github_login(agent)}`). "
             "Do NOT add an attribution header — your avatar and account name "
             "already identify you."
         )
@@ -602,7 +619,7 @@ class SwarmDispatcher:
             "/ account does not exist; never fail triage).".format(
                 n=t.number,
                 repo=t.repository,
-                login=AGENT_GITHUB_LOGIN.get("pavo", "ateles-pavo"),
+                login=agent_github_login("pavo"),
             )
             if is_provisioned("pavo")
             else ""

@@ -16,6 +16,7 @@ from skill_runner import SkillResult
 from swarm_dispatch import (
     AGENT_GITHUB_LOGIN,
     EXPECTATION_MARKER,
+    GITHUB_FACING_AGENTS,
     PRE_IMPL_GATES,
     _CONFIRM_GATES_CLEAR_CMD,
     _OPERATOR_LOGIN,
@@ -24,6 +25,7 @@ from swarm_dispatch import (
     _agent_prompt_instruction,
     _token_for_agent_on_repo,
     _token_for_repo,
+    agent_github_login,
     attribution_header,
     compose_fallback_comment,
     content_digest,
@@ -463,10 +465,11 @@ def test_agent_prompt_instruction_own_account_when_provisioned(monkeypatch):
 
 
 def test_agent_prompt_instruction_provisioned_login_uses_convention(monkeypatch):
-    """When provisioned, the instruction cites the ateles-<agent> login."""
+    """When provisioned, the instruction cites the operator-scoped login."""
     monkeypatch.setenv("PAVO_AGENT_PAT", "ghp_pavo_pat")
     instruction = _agent_prompt_instruction("pavo", "pm gate owner")
-    assert AGENT_GITHUB_LOGIN["pavo"] in instruction  # "ateles-pavo"
+    # AGENT_GITHUB_LOGIN["pavo"] is now e.g. "markmhendrickson-ateles-pavo"
+    assert AGENT_GITHUB_LOGIN["pavo"] in instruction
 
 
 # ── Prompt-level no-op assertions ─────────────────────────────────────────────
@@ -562,20 +565,52 @@ def test_panelist_prompt_own_account_when_provisioned(monkeypatch):
     assert "account is shared" not in prompt
 
 
-# ── AGENT_GITHUB_LOGIN convention ─────────────────────────────────────────────
+# ── AGENT_GITHUB_LOGIN / agent_github_login convention ───────────────────────
 
 
 def test_agent_github_login_follows_convention():
-    """All 8 GitHub-facing agents map to ateles-<agent> logins."""
+    """All 8 GitHub-facing agents map to <operator>-ateles-<agent> logins."""
     expected_agents = {
         "lanius", "pavo", "vanellus", "bombycilla",
         "accipiter", "buteo", "phoenicurus", "corvus",
     }
     assert set(AGENT_GITHUB_LOGIN.keys()) == expected_agents
     for agent, login in AGENT_GITHUB_LOGIN.items():
-        assert login == f"ateles-{agent}", (
-            f"Expected login 'ateles-{agent}', got {login!r}"
+        assert login == f"{_OPERATOR_LOGIN}-ateles-{agent}", (
+            f"Expected login '{_OPERATOR_LOGIN}-ateles-{agent}', got {login!r}"
         )
+
+
+def test_agent_github_login_default_operator():
+    """agent_github_login returns <APIS_OPERATOR_LOGIN>-ateles-<agent> for all 8 agents."""
+    for agent in GITHUB_FACING_AGENTS:
+        expected = f"{_OPERATOR_LOGIN}-ateles-{agent}"
+        assert agent_github_login(agent) == expected, (
+            f"Expected '{expected}', got {agent_github_login(agent)!r}"
+        )
+
+
+def test_agent_github_login_operator_override(monkeypatch):
+    """agent_github_login honours a forked operator handle, proving fork-uniqueness.
+
+    This is the key forkability test: a different operator who sets
+    APIS_OPERATOR_LOGIN=someoneelse gets 'someoneelse-ateles-pavo', not
+    'markmhendrickson-ateles-pavo', ensuring no GitHub namespace collision.
+
+    We monkeypatch the module-level ``_OPERATOR_LOGIN`` variable directly
+    (rather than reloading the module) to avoid polluting subsequent tests with
+    a stale module-level state.
+    """
+    monkeypatch.setattr(swarm_dispatch, "_OPERATOR_LOGIN", "someoneelse")
+    assert swarm_dispatch.agent_github_login("pavo") == "someoneelse-ateles-pavo"
+
+
+def test_github_facing_agents_set():
+    """GITHUB_FACING_AGENTS contains exactly the 8 expected agent names."""
+    assert GITHUB_FACING_AGENTS == {
+        "lanius", "pavo", "vanellus", "bombycilla",
+        "accipiter", "buteo", "phoenicurus", "corvus",
+    }
 
 
 # ── ateles#112 — /confirm-gates-clear handler ──────────────────────────────
