@@ -1462,3 +1462,78 @@ class TestSwarmGithubContractInjection:
             if "degraded_generic_subagent" in (call.kwargs.get("output_summary") or "")
         ]
         assert len(degraded_calls) >= 1
+
+
+# ── Phase 1 / Layer A: tightened attribution spec (neotoma#1686 follow-up) ───
+
+
+class TestSwarmGithubContractAttributionSpec:
+    """Verify SWARM_GITHUB_CONTRACT contains the tightened attribution spec.
+
+    Live test on neotoma#1686 showed Pavo posting two different header forms in
+    one thread — the old loose skeleton (`🤖 <Agent> — <role> · <repo>#<n>`)
+    allowed agents to improvise capitalization, role wording, and repo suffixes.
+
+    These tests assert the contract now contains an exact reproduce-verbatim spec,
+    a worked example, and no longer instructs appending repo#<n> to the header.
+    """
+
+    def test_contract_contains_exact_ateles_swarm_em_dash_form(self) -> None:
+        """The attribution header spec must contain '— Ateles swarm,' (em-dash + literal prefix)."""
+        assert "— Ateles swarm," in skill_runner.SWARM_GITHUB_CONTRACT, (
+            "Contract must specify '— Ateles swarm,' as the exact attribution prefix"
+        )
+
+    def test_contract_contains_verbatim_reproduction_instruction(self) -> None:
+        """The contract must instruct agents to reproduce the header format verbatim."""
+        contract = skill_runner.SWARM_GITHUB_CONTRACT
+        # The key instruction phrase must be present.
+        assert "Reproduce this header format EXACTLY" in contract, (
+            "Contract must contain a 'Reproduce this header format EXACTLY' instruction"
+        )
+
+    def test_contract_contains_worked_example(self) -> None:
+        """A worked example must be present so agents have a concrete target to mimic."""
+        contract = skill_runner.SWARM_GITHUB_CONTRACT
+        # The worked example section heading must appear.
+        assert "Worked example" in contract, (
+            "Contract must contain a 'Worked example' section"
+        )
+        # The example must show a real compliant header.
+        assert "**🤖 Pavo — Ateles swarm, pm gate owner**" in contract, (
+            "Contract must contain a concrete worked-example header in the exact format"
+        )
+
+    def test_contract_does_not_instruct_repo_issue_suffix_in_header(self) -> None:
+        """The old prescriptive skeleton '🤖 <Agent> — <role> · <repo>#<n>' must be gone.
+
+        The old form presented '· <repo>#<n>' as a template to follow, which caused
+        inconsistency (neotoma#1686). The new contract prohibits it instead. We verify
+        that the old prescriptive skeleton line is not present — i.e. the header template
+        no longer includes '<role> · <repo>#<n>' as something to reproduce.
+        """
+        contract = skill_runner.SWARM_GITHUB_CONTRACT
+        # The old skeleton line combined '<role>' with '· <repo>#<n>' in a way that
+        # told agents to append the repo suffix. Check the combined prescriptive form is absent.
+        assert "<role> · <repo>#<n>" not in contract, (
+            "Contract must not present '<role> · <repo>#<n>' as a header template — "
+            "the old loose skeleton suffix that caused header inconsistency (neotoma#1686)"
+        )
+        # Additionally, the contract must actively forbid appending the suffix.
+        assert "Do NOT append" in contract, (
+            "Contract must explicitly forbid appending the repo/issue suffix to the header"
+        )
+
+    def test_contract_specifies_title_case_agent_name(self) -> None:
+        """The spec must require agent name in Title Case (not lowercase)."""
+        contract = skill_runner.SWARM_GITHUB_CONTRACT
+        assert "Title Case" in contract, (
+            "Contract must specify agent name in Title Case"
+        )
+
+    def test_contract_specifies_em_dash_not_hyphen(self) -> None:
+        """The spec must call out the em-dash requirement (U+2014)."""
+        contract = skill_runner.SWARM_GITHUB_CONTRACT
+        assert "em-dash" in contract, (
+            "Contract must specify em-dash (—, U+2014), not a hyphen"
+        )
