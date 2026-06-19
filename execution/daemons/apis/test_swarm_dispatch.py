@@ -571,7 +571,7 @@ def test_panelist_prompt_own_account_when_provisioned(monkeypatch):
 def test_agent_github_login_follows_convention():
     """All 8 GitHub-facing agents map to <operator>-ateles-<agent> logins."""
     expected_agents = {
-        "lanius", "pavo", "vanellus", "bombycilla",
+        "lanius", "pavo", "vanellus", "waxwing",
         "accipiter", "buteo", "phoenicurus", "corvus",
     }
     assert set(AGENT_GITHUB_LOGIN.keys()) == expected_agents
@@ -608,7 +608,7 @@ def test_agent_github_login_operator_override(monkeypatch):
 def test_github_facing_agents_set():
     """GITHUB_FACING_AGENTS contains exactly the 8 expected agent names."""
     assert GITHUB_FACING_AGENTS == {
-        "lanius", "pavo", "vanellus", "bombycilla",
+        "lanius", "pavo", "vanellus", "waxwing",
         "accipiter", "buteo", "phoenicurus", "corvus",
     }
 
@@ -832,10 +832,10 @@ def test_lanius_pr_prompt_blocked_comment_names_gates():
 
 
 def test_lanius_pr_prompt_blocked_comment_names_gate_owners():
-    """Blocked comment must indicate who owns each gate (Pavo, Bombycilla)."""
+    """Blocked comment must indicate who owns each gate (Pavo, Waxwing)."""
     prompt = SwarmDispatcher._lanius_pr_prompt(_trigger(), parent=80)
     assert "Pavo" in prompt or "pavo" in prompt
-    assert "Bombycilla" in prompt or "bombycilla" in prompt
+    assert "Waxwing" in prompt or "waxwing" in prompt
 
 
 def test_lanius_pr_prompt_blocked_comment_includes_confirm_command():

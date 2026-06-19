@@ -24,7 +24,7 @@ def test_gate_contributor_joins_panel():
 
 def test_diff_surface_pulls_in_arch_lens():
     panel = select_panel(set(), ["server/openapi.yaml", "src/handler.py"])
-    assert "bombycilla" in _agents(panel)
+    assert "waxwing" in _agents(panel)
 
 
 def test_dependency_manifest_pulls_in_legal_lens():
@@ -77,7 +77,7 @@ def test_api_issue_triggers_arch_expectations():
     lenses = select_expectation_agents(
         "Add new MCP tool endpoint", "expose a new API for retrieval", []
     )
-    assert "bombycilla" in [l.agent for l in lenses]
+    assert "waxwing" in [l.agent for l in lenses]
 
 
 def test_auth_issue_triggers_legal_expectations():
