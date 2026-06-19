@@ -55,7 +55,7 @@ LENSES: tuple[Lens, ...] = (
         always=True,
     ),
     Lens(
-        agent="bombycilla",
+        agent="waxwing",
         lens="arch",
         gate="arch",
         checks=(

@@ -88,7 +88,7 @@ def parse_gate_verdict(stdout: str) -> str | None:
 # returns True); until then, the per-repo shared identity (#95) is used and
 # native assignment is skipped.
 GITHUB_FACING_AGENTS: frozenset[str] = frozenset({
-    "lanius", "pavo", "vanellus", "bombycilla",
+    "lanius", "pavo", "vanellus", "waxwing",
     "accipiter", "buteo", "phoenicurus", "corvus",
 })
 
@@ -729,7 +729,7 @@ class SwarmDispatcher:
             "BLOCKED COMMENT REQUIREMENTS (ateles#112): when you post a "
             "blocking comment, it MUST include:\n"
             "  1. A list of WHICH pre-impl gates are unsigned and who owns "
-            "each (e.g. `pm` owned by Pavo, `arch` owned by Bombycilla).\n"
+            "each (e.g. `pm` owned by Pavo, `arch` owned by Waxwing).\n"
             "  2. The exact operator-override command: "
             f"`/confirm-gates-clear` — only @{operator_login} may issue this "
             "command; it waives all unsigned pre-impl gates and re-triggers "
