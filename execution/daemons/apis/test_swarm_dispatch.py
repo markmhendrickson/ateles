@@ -38,9 +38,11 @@ from swarm_dispatch import (
     compose_fallback_comment,
     compose_vanellus_fallback_comment,
     content_digest,
+    cleanup_pr_worktree,
     is_provisioned,
     lenses_missing_comments,
     parse_gate_verdict,
+    prepare_pr_worktree,
     vanellus_comment_missing,
 )
 
@@ -2283,4 +2285,87 @@ def test_handle_pr_calls_vanellus_fallback_after_run(monkeypatch):
     pr_number, captured_stdout = fallback_calls[0]
     assert pr_number == 87
     assert captured_stdout == "VERDICT: all clear."
+
+
+# ── QE3: eval-authoring affordance — PR-branch worktree ───────────────────────
+
+
+def test_prepare_pr_worktree_returns_none_for_non_neotoma_repo():
+    # The eval harness lives only in neotoma; ateles PRs get no worktree.
+    result = asyncio.run(
+        prepare_pr_worktree("markmhendrickson/ateles", 42, "phoenicurus")
+    )
+    assert result is None
+
+
+def test_prepare_pr_worktree_returns_none_when_base_checkout_absent(monkeypatch):
+    # Best-effort: a missing local neotoma clone → diff-only fallback, no raise.
+    monkeypatch.setattr(
+        swarm_dispatch, "NEOTOMA_LOCAL_CHECKOUT", "/nonexistent/neotoma-checkout"
+    )
+    result = asyncio.run(
+        prepare_pr_worktree("markmhendrickson/neotoma", 42, "phoenicurus")
+    )
+    assert result is None
+
+
+def test_cleanup_pr_worktree_none_is_safe_noop():
+    # Cleanup of a never-prepared worktree must never raise.
+    asyncio.run(cleanup_pr_worktree(None))
+
+
+def test_cleanup_pr_worktree_removes_stray_dir(monkeypatch, tmp_path):
+    # When the base clone is absent, cleanup still rmtree's the stray dir.
+    monkeypatch.setattr(
+        swarm_dispatch, "NEOTOMA_LOCAL_CHECKOUT", "/nonexistent/neotoma-checkout"
+    )
+    stray = tmp_path / "qa_eval_pr1_xxxx"
+    stray.mkdir()
+    asyncio.run(cleanup_pr_worktree(str(stray)))
+    assert not stray.exists()
+
+
+def test_only_qa_lens_gets_a_worktree(monkeypatch):
+    # In the panel loop, prepare_pr_worktree is invoked ONLY for phoenicurus;
+    # every other lens runs diff-only (cwd=None).
+    prep_calls = []
+    cwd_seen = {}
+
+    async def fake_prepare(repo, number, agent):
+        prep_calls.append(agent)
+        return f"/tmp/wt-{agent}" if agent == "phoenicurus" else None
+
+    async def fake_cleanup(wt):
+        return None
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        cwd_seen[skill] = kwargs.get("cwd")
+        # Lanius gate-inheritance must return a clear verdict so the panel runs.
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        return SkillResult(skill, True, 0, "VERDICT: COMMENT", "")
+
+    monkeypatch.setattr(swarm_dispatch, "prepare_pr_worktree", fake_prepare)
+    monkeypatch.setattr(swarm_dispatch, "cleanup_pr_worktree", fake_cleanup)
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+
+    # Force a panel that includes phoenicurus + at least one other lens.
+    monkeypatch.setattr(
+        swarm_dispatch,
+        "select_panel",
+        lambda **kw: [
+            Lens(agent="phoenicurus", lens="qa", gate="qa", checks="evals"),
+            Lens(agent="pavo", lens="pm", gate="pm", checks="scope"),
+        ],
+    )
+
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+    asyncio.run(dispatcher._handle_pr(_trigger(repository="markmhendrickson/neotoma")))
+
+    # Worktree prep attempted only for the qa lens.
+    assert prep_calls == ["phoenicurus"], prep_calls
+    # qa child got the worktree as cwd; other panelists got None.
+    assert cwd_seen.get("phoenicurus") == "/tmp/wt-phoenicurus"
+    assert cwd_seen.get("pavo") is None
 
