@@ -51,7 +51,7 @@ Each agent's `agent_definition.prompt_markdown` gains a **"GitHub deliverable"**
 |---|---|---|---|
 | **lanius** | triage/gate | **Triage + gate-status board** | gate_status table, owner, next phase, labels applied |
 | **pavo** | pm | **Scope & acceptance spec** | problem, in/out of scope, acceptance criteria (checkboxes), priority, sign-off verdict |
-| **bombycilla** | arch | **ADR (Architecture Decision Record)** | decision, options + tradeoffs, chosen approach, schema/contract impact, reversibility, sign-off |
+| **waxwing** | arch | **ADR (Architecture Decision Record)** | decision, options + tradeoffs, chosen approach, schema/contract impact, reversibility, sign-off |
 | **accipiter** | ux | **Design spec** | user-facing surface, interaction/flow, discoverability, naming, error/empty states, a11y, accept-checklist |
 | **buteo** | legal | **Compliance checklist** | deps/licensing, secrets/PII surface, data-handling, ToS, each as a checkbox verdict |
 | **phoenicurus** | qa | **Test plan** | what to test, unit/integration coverage, edge cases, regression risks, repro steps, pass/fail gates |
@@ -74,7 +74,7 @@ Each contract reuses the shared skeleton (Layer A) so the chrome is consistent; 
 ## Build phases (proposed)
 
 - **Phase 1 — Layer A (shared convention).** Add `SWARM_GITHUB_CONTRACT` to `build_system_prompt`; generalize verdict vocabulary + blocking markers. One code PR. Immediately makes all 8 consistent.
-- **Phase 2 — Layer B (per-role contracts).** `correct()` each of the 8 `agent_definition.prompt_markdown` to add its GitHub-deliverable section. 8 Neotoma corrections + SKILL regen. (Entity IDs: phoenicurus ent_42843b65…, buteo ent_6f90952e…, accipiter ent_7079893d…, corvus ent_b95bf915…, pavo ent_bf712273…, lanius ent_f9c2c573…, vanellus ent_fedc0fba…, bombycilla TBD.)
+- **Phase 2 — Layer B (per-role contracts).** `correct()` each of the 8 `agent_definition.prompt_markdown` to add its GitHub-deliverable section. 8 Neotoma corrections + SKILL regen. (Entity IDs: phoenicurus ent_42843b65…, buteo ent_6f90952e…, accipiter ent_7079893d…, corvus ent_b95bf915…, pavo ent_bf712273…, lanius ent_f9c2c573…, vanellus ent_fedc0fba…, waxwing ent_3425a79b4c39f08cdb0c62f8.)
 - **Phase 3 — Layer C primitives.** (3a) formal PR Reviews in the dispatcher/Vanellus; (3b) inline/suggested changes; (3c) issue/PR templates (cheap, do early); (3d) status-label taxonomy.
 
 Each phase is independently shippable + verifiable on a live PR (the swarm reviews its own PRs).
