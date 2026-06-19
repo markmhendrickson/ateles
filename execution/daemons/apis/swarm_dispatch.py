@@ -21,11 +21,14 @@ blocking checkpoint_brief plus an operator_decision notification instead.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import os
 import re
+import shutil
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -223,6 +226,137 @@ def _token_for_agent_on_repo(agent: str, repo: str) -> str:
         return agent_pat
     # Tier 2 → 3 already implemented by _token_for_repo.
     return _token_for_repo(repo)
+
+
+# ── QE3: eval-authoring affordance — PR-branch worktree for the qa lens ───────
+#
+# The qa lens (Phoenicurus) must AUTHOR an eval fixture, run it, commit, and push
+# to the PR branch (the eval-backed qa gate, QE2). That needs a writable checkout
+# of the PR branch — which a diff-only review child does not have. These helpers
+# prepare a throwaway `git worktree` off the local neotoma clone, set its push
+# URL to authenticate as the agent's own account (#109), and clean it up after.
+#
+# Scope: neotoma PRs only (the eval harness lives there). Best-effort: any failure
+# returns None and the qa child falls back to diff-only + records the harness as
+# unavailable — the gate never stalls on worktree prep.
+
+# Local clone the worktree is based on. neotoma-rc-src is the prod-server's
+# checkout; we add a SEPARATE worktree off it (never mutate it in place — the
+# shared-checkout/daemon-fragility hazard).
+NEOTOMA_LOCAL_CHECKOUT = os.path.expanduser(
+    os.environ.get("NEOTOMA_LOCAL_CHECKOUT", "~/neotoma-rc-src")
+)
+
+
+async def _git(args: list[str], cwd: str, timeout: int = 60) -> tuple[int, str, str]:
+    """Run a git command, returning (rc, stdout, stderr). Never raises."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            *args,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        return 1, "", str(exc)
+
+
+async def prepare_pr_worktree(repo: str, pr_number: int, agent: str) -> str | None:
+    """Prepare a writable worktree of a PR branch for the qa eval-authoring child.
+
+    Returns the worktree path, or None on any failure (best-effort).
+
+    Steps:
+      1. Verify the local base clone exists (NEOTOMA_LOCAL_CHECKOUT).
+      2. ``git fetch origin pull/<n>/head`` into a temp ref.
+      3. ``git worktree add --detach <tmp> FETCH_HEAD`` — isolated from the base.
+      4. Point the worktree's ``origin`` push URL at
+         ``https://x-access-token:<token>@github.com/<repo>.git`` so the child's
+         ``git push`` authenticates as the agent (#109), independent of the base
+         clone's SSH remote.
+
+    Only neotoma is supported (the eval harness lives there); other repos -> None.
+    """
+    if not repo.endswith("/neotoma"):
+        return None
+    base = NEOTOMA_LOCAL_CHECKOUT
+    if not os.path.isdir(os.path.join(base, ".git")):
+        log.warning(
+            f"[{DAEMON_NAME}] QE3: local neotoma checkout absent at {base} — "
+            "qa child falls back to diff-only (no eval authoring)"
+        )
+        return None
+
+    # Fetch the PR head into FETCH_HEAD on the base clone (shared object store).
+    rc, _, err = await _git(
+        ["fetch", "origin", f"pull/{pr_number}/head"], cwd=base, timeout=120
+    )
+    if rc != 0:
+        log.warning(
+            f"[{DAEMON_NAME}] QE3: fetch pull/{pr_number}/head failed: {err.strip()}"
+        )
+        return None
+
+    wt = tempfile.mkdtemp(prefix=f"qa_eval_pr{pr_number}_")
+    rc, _, err = await _git(
+        ["worktree", "add", "--detach", wt, "FETCH_HEAD"], cwd=base
+    )
+    if rc != 0:
+        log.warning(f"[{DAEMON_NAME}] QE3: worktree add failed: {err.strip()}")
+        shutil.rmtree(wt, ignore_errors=True)
+        return None
+
+    # Authenticate pushes as the agent's own account WITHOUT writing any token to
+    # disk or into a remote URL.
+    #
+    # SECURITY (Loxia #134): embedding the token in remote.origin.url
+    # (https://x-access-token:<token>@...) leaks it two ways — it persists in the
+    # worktree's .git config on disk, AND git echoes the full remote URL (token
+    # included) in error output when a push fails, which could surface in the
+    # child's stderr → harness_event / GitHub comment / daemon log. Instead:
+    #   1. set origin to a CLEAN HTTPS URL (no token) — push failures echo only
+    #      https://github.com/<repo>.git, never a secret;
+    #   2. configure `gh` as the credential helper for this worktree, which
+    #      supplies the token from the child's GH_TOKEN/GITHUB_TOKEN env (injected
+    #      by run_skill from the per-agent token) at push time. The token lives
+    #      only in process env, never on disk.
+    # extensions.worktreeConfig keeps both settings scoped to this throwaway
+    # worktree, never the shared base-clone config (the prod-server's checkout).
+    token = _token_for_agent_on_repo(agent, repo)
+    if token:
+        await _git(["config", "extensions.worktreeConfig", "true"], cwd=wt)
+        await _git(
+            ["config", "--worktree", "remote.origin.url",
+             f"https://github.com/{repo}.git"],
+            cwd=wt,
+        )
+        await _git(
+            ["config", "--worktree",
+             "credential.https://github.com.helper", "!gh auth git-credential"],
+            cwd=wt,
+        )
+    else:
+        log.info(
+            f"[{DAEMON_NAME}] QE3: no token for {agent} on {repo} — qa child can "
+            "write+run the eval locally for the QA report but cannot push "
+            "(degraded-but-functional)"
+        )
+
+    log.info(f"[{DAEMON_NAME}] QE3: prepared PR worktree {wt} for {agent} on {repo}#{pr_number}")
+    return wt
+
+
+async def cleanup_pr_worktree(worktree: str | None) -> None:
+    """Remove a worktree prepared by prepare_pr_worktree. Best-effort/idempotent."""
+    if not worktree:
+        return
+    base = NEOTOMA_LOCAL_CHECKOUT
+    if os.path.isdir(os.path.join(base, ".git")):
+        await _git(["worktree", "remove", "--force", worktree], cwd=base)
+    shutil.rmtree(worktree, ignore_errors=True)
 
 
 def _agent_prompt_instruction(agent: str, role: str) -> str:
@@ -516,14 +650,28 @@ class SwarmDispatcher:
 
         reviews: list[tuple[str, str]] = []
         for lens in panel:
-            result = await run_skill(
-                lens.agent,
-                self._panelist_prompt(
-                    trigger, lens, expectations.get(lens.agent, ""), parent
-                ),
-                github_token=_token_for_agent_on_repo(lens.agent, trigger.repository),
-                include_github_contract=True,
-            )
+            # QE3: the qa lens (Phoenicurus) authors + runs an eval, so it needs a
+            # writable PR-branch checkout as its cwd. Other lenses stay diff-only
+            # (cwd=None). Best-effort: prep failure → diff-only fallback, no stall.
+            qa_worktree: str | None = None
+            if lens.agent == "phoenicurus":
+                qa_worktree = await prepare_pr_worktree(
+                    trigger.repository, trigger.number, lens.agent
+                )
+            try:
+                result = await run_skill(
+                    lens.agent,
+                    self._panelist_prompt(
+                        trigger, lens, expectations.get(lens.agent, ""), parent
+                    ),
+                    github_token=_token_for_agent_on_repo(
+                        lens.agent, trigger.repository
+                    ),
+                    include_github_contract=True,
+                    cwd=qa_worktree,
+                )
+            finally:
+                await cleanup_pr_worktree(qa_worktree)
             if result.ok:
                 reviews.append((lens.lens, result.stdout))
 

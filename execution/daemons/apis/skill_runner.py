@@ -344,6 +344,7 @@ async def run_skill(
     notifier=None,  # lib.notify.Notifier | None — kept optional to avoid hard dep
     github_token: str | None = None,
     include_github_contract: bool = False,
+    cwd: str | None = None,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
@@ -374,6 +375,13 @@ async def run_skill(
 
     `claude --print` tool-allowlist flag: --allowed-tools (confirmed present;
     accepts comma- or space-separated tool names, e.g. "Bash,Edit,Read").
+
+    ``cwd`` (QE3 — eval-authoring affordance): when supplied, the dispatched
+    child subprocess runs with this working directory instead of inheriting the
+    daemon's. This is how the qa lens (Phoenicurus) is given a writable checkout
+    of a PR branch so it can author an eval fixture, run ``eval:tier1``, commit,
+    and push. When None (every call site that predates QE3), the child inherits
+    the daemon's directory unchanged — exact current behaviour, no regression.
     """
     _role = (role or skill).lower()
     timeout = timeout or DISPATCH_TIMEOUT_SECONDS
@@ -571,6 +579,7 @@ async def run_skill(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=subprocess_env,
+        cwd=cwd,  # QE3: qa lens runs in a PR-branch worktree; None = inherit daemon dir
     )
 
     try:
