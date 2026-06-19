@@ -309,21 +309,34 @@ async def prepare_pr_worktree(repo: str, pr_number: int, agent: str) -> str | No
         shutil.rmtree(wt, ignore_errors=True)
         return None
 
-    # Authenticate pushes as the agent's own account via an HTTPS-token remote.
+    # Authenticate pushes as the agent's own account WITHOUT writing any token to
+    # disk or into a remote URL.
     #
-    # SECURITY: a plain `git remote set-url` would write the token into the
-    # SHARED base-clone config (worktrees share remote config unless
-    # extensions.worktreeConfig is on), leaking the secret into the prod-server's
-    # neotoma-rc-src/.git/config. Instead we (a) enable extensions.worktreeConfig
-    # so per-worktree config is honoured, then (b) set the token push URL with
-    # `git config --worktree`, scoping it to THIS throwaway worktree only. The
-    # config dies with the worktree on cleanup.
+    # SECURITY (Loxia #134): embedding the token in remote.origin.url
+    # (https://x-access-token:<token>@...) leaks it two ways — it persists in the
+    # worktree's .git config on disk, AND git echoes the full remote URL (token
+    # included) in error output when a push fails, which could surface in the
+    # child's stderr → harness_event / GitHub comment / daemon log. Instead:
+    #   1. set origin to a CLEAN HTTPS URL (no token) — push failures echo only
+    #      https://github.com/<repo>.git, never a secret;
+    #   2. configure `gh` as the credential helper for this worktree, which
+    #      supplies the token from the child's GH_TOKEN/GITHUB_TOKEN env (injected
+    #      by run_skill from the per-agent token) at push time. The token lives
+    #      only in process env, never on disk.
+    # extensions.worktreeConfig keeps both settings scoped to this throwaway
+    # worktree, never the shared base-clone config (the prod-server's checkout).
     token = _token_for_agent_on_repo(agent, repo)
     if token:
-        push_url = f"https://x-access-token:{token}@github.com/{repo}.git"
         await _git(["config", "extensions.worktreeConfig", "true"], cwd=wt)
         await _git(
-            ["config", "--worktree", "remote.origin.url", push_url], cwd=wt
+            ["config", "--worktree", "remote.origin.url",
+             f"https://github.com/{repo}.git"],
+            cwd=wt,
+        )
+        await _git(
+            ["config", "--worktree",
+             "credential.https://github.com.helper", "!gh auth git-credential"],
+            cwd=wt,
         )
     else:
         log.info(
