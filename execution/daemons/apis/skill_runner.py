@@ -69,10 +69,105 @@ def _load_agent_def(role: str) -> AgentDefinition:
     return _agent_def_cache[role]
 
 
+# ── Shared GitHub-interaction convention (Phase 1 / Layer A) ──────────────────
+# Injected into every GitHub-dispatched agent's system prompt by build_system_prompt
+# when include_github_contract=True.  Lives in ONE place — not duplicated across
+# agent_definitions.  Complements (never contradicts) per-prompt format instructions
+# already present in swarm_dispatch.py prompts.
+#
+# See docs/swarm_github_interaction_design.md — Layer A.
+
+SWARM_GITHUB_CONTRACT = """\
+## Swarm GitHub interaction contract (Layer A)
+
+Every GitHub comment you post as part of the Ateles swarm MUST follow this convention.
+
+### Comment skeleton
+
+```
+🤖 <Agent> — <role> · <repo>#<n>      ← attribution header (omit when posting as your own account per #109)
+**<VERDICT>**                          ← one-line machine-readable status
+
+<role-specific body>                   ← your expertise (structured, not essay)
+
+---
+📎 Neotoma: <label> · <label>          ← footer: Neotoma backlinks (when applicable)
+```
+
+### Verdict vocabulary
+
+Use exactly ONE of these tokens as the bold status line — one per comment, always present:
+
+- `**APPROVE**` — all checks pass, no blockers.
+- `**REQUEST_CHANGES**` — one or more [BLOCKING] findings; the author must address them.
+- `**COMMENT**` — observations only; nothing blocks merge.
+- `**BLOCKED**` — cannot proceed (missing information, open pre-impl gate, etc.).
+- `**SIGNED_OFF**` — your gate/phase is signed off.
+
+### Checklists
+
+All definition-of-done checklists use GitHub task-list syntax:
+
+```
+- [ ] Not yet verified
+- [x] Confirmed satisfied
+```
+
+### Blocking markers
+
+Prefix each finding with its severity so the aggregator and humans can parse uniformly:
+
+```
+[BLOCKING] <category>: <summary>
+[NON-BLOCKING] <category>: <summary>
+```
+
+### Cite standing rules
+
+When a finding rests on a guardrail, decision, or doc, say so explicitly — that marks \
+it as systemic, not opinion. Link the Neotoma record when it is publicly readable (see \
+Neotoma backlinks below).
+
+### Edit, don't duplicate
+
+Update your prior comment in place rather than posting a new one when you are revisiting \
+the same issue or PR. Use `gh api -X PATCH repos/<owner>/<repo>/issues/comments/<id> \
+-f body='...'` to edit.
+
+### Neotoma backlinks
+
+Every comment that references or is sourced by canonical Neotoma data MUST link the \
+relevant record(s) in a footer line:
+
+```
+📎 Neotoma: <label> · <label>
+```
+
+Using the URL form: `https://neotoma.markmhendrickson.com/entities/<id>`
+
+**Visibility rule**: link only entity records whose schema allows public read \
+(`guest_access_policy: read_only`). Until the Phase 3a-0 policy change ships, only \
+`issue` entities are known to be guest-readable; link those. For all other entity types \
+(harness_event, plan_contribution, gate_status, etc.) that are not yet public, reference \
+the entity id in prose — e.g. "see harness_event `ent_abc123`" — WITHOUT a bare URL \
+that would 401 for public readers. Once Phase 3a-0 sets `read_only` on the \
+public-orchestration types, the full link form applies to all of them.
+
+### Brevity
+
+Keep comments checklist/structured. Avoid essay-style prose. The implementer and \
+aggregator (Vanellus) parse these; treat them as structured data with a human-readable \
+summary, not a narrative.\
+"""
+
 # ── System-prompt assembly ─────────────────────────────────────────────────────
 
 
-def build_system_prompt(agent_def: AgentDefinition, skill_md: str) -> tuple[str, bool]:
+def build_system_prompt(
+    agent_def: AgentDefinition,
+    skill_md: str,
+    include_github_contract: bool = False,
+) -> tuple[str, bool]:
     """
     Build the composite system prompt for a role dispatch.
 
@@ -83,15 +178,34 @@ def build_system_prompt(agent_def: AgentDefinition, skill_md: str) -> tuple[str,
     The agent_definition's canonical instructions come FIRST so they establish
     identity, permissions, and behavioral constraints before the per-task skill
     instructions. Separated by a clear boundary so the model can parse both layers.
+
+    When include_github_contract=True, SWARM_GITHUB_CONTRACT is inserted between
+    the definition prompt and the skill_md so all GitHub-dispatched agents receive
+    the shared comment convention in ONE place.  The contract is injected even in
+    degraded mode (no definition_prompt) because it is useful guidance regardless.
+    When include_github_contract=False (the default), behaviour is byte-identical
+    to the pre-contract implementation — the SSE/non-GitHub task path is unchanged.
     """
     definition_prompt = (agent_def.prompt_markdown or "").strip()
     if definition_prompt:
+        if include_github_contract:
+            return (
+                f"{definition_prompt}\n\n"
+                "---\n\n"
+                f"{SWARM_GITHUB_CONTRACT}\n\n"
+                "---\n\n"
+                f"{skill_md}",
+                False,
+            )
         return (
             f"{definition_prompt}\n\n"
             "---\n\n"
             f"{skill_md}",
             False,
         )
+    # Degraded: no definition_prompt.
+    if include_github_contract:
+        return f"{SWARM_GITHUB_CONTRACT}\n\n---\n\n{skill_md}", True
     return skill_md, True
 
 
@@ -192,6 +306,7 @@ async def run_skill(
     env_extra: dict[str, str] | None = None,
     notifier=None,  # lib.notify.Notifier | None — kept optional to avoid hard dep
     github_token: str | None = None,
+    include_github_contract: bool = False,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
@@ -213,6 +328,12 @@ async def run_skill(
     not supplied, the child inherits the daemon's ambient env unchanged (current
     behaviour for all callers that predate #109).  Only GitHub-triggered pipeline
     call sites pass this; SSE task-path dispatches leave it unset.
+
+    ``include_github_contract`` (Phase 1 / Layer A): when True, SWARM_GITHUB_CONTRACT
+    is injected into the system prompt between the agent_definition and the SKILL.md.
+    Pass True ONLY from GitHub-trigger call sites in swarm_dispatch.py; leave as
+    False (the default) for all SSE/non-GitHub task dispatches so the contract never
+    appears in payment, health, finance, or other non-GitHub work.
 
     `claude --print` tool-allowlist flag: --allowed-tools (confirmed present;
     accepts comma- or space-separated tool names, e.g. "Bash,Edit,Read").
@@ -240,7 +361,9 @@ async def run_skill(
         return SkillResult(skill, False, None, "", "", error=f"read failed: {exc}")
 
     # ── Build system prompt (Stage 1 + Stage 5) ────────────────────────────────
-    system_prompt, degraded = build_system_prompt(agent_def, skill_md)
+    system_prompt, degraded = build_system_prompt(
+        agent_def, skill_md, include_github_contract=include_github_contract
+    )
 
     if degraded:
         _title_hint = prompt[:80].replace("\n", " ")
