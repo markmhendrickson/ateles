@@ -70,6 +70,46 @@ PRE_IMPL_GATES = ("pm", "arch")
 # command.  Defaults to the repo owner; override with APIS_OPERATOR_LOGIN.
 _OPERATOR_LOGIN = os.environ.get("APIS_OPERATOR_LOGIN", "markmhendrickson")
 
+# Bot/machine-account identities whose comments must NEVER trigger swarm
+# commands, regardless of comment content.  This is the structural guard
+# against self-trigger feedback loops (neotoma#1686): a swarm confirmation
+# comment that contains a command token (e.g. "swarm-run") would re-fire the
+# handler via its own webhook if only the operator-login positive check were
+# present.  Known bot patterns:
+#   • Exact machine-account names (lowercase comparison)
+#   • The <operator>-ateles-<agent> naming convention for per-agent accounts
+#   • GitHub Apps / Actions suffixes
+_BOT_EXACT_LOGINS: frozenset[str] = frozenset({
+    "ateles-agent",
+    "neotoma-agent",
+    "github-actions",
+})
+_BOT_SUFFIX = "[bot]"
+_BOT_INFIX_RE = re.compile(r"-ateles-")
+
+
+def _is_bot_author(login: str) -> bool:
+    """Return True when *login* is a known swarm/machine identity.
+
+    Used to short-circuit command dispatch before any positive-allowlist check:
+    a bot-authored comment must never trigger swarm commands even when it
+    happens to contain a command token (neotoma#1686 self-trigger defence).
+
+    Pattern coverage:
+      - Exact known machine accounts (ateles-agent, neotoma-agent, github-actions)
+      - Per-agent accounts: any login containing "-ateles-" (operator-fork-safe)
+      - GitHub App/Actions suffix: any login ending in "[bot]"
+    """
+    lower = login.lower()
+    if lower in _BOT_EXACT_LOGINS:
+        return True
+    if lower.endswith(_BOT_SUFFIX):
+        return True
+    if _BOT_INFIX_RE.search(lower):
+        return True
+    return False
+
+
 # Marker the pre-registration pass embeds in issue comments so the PR
 # pipeline can recover which agents pre-registered (and what they promised
 # to check) straight from GitHub — no Neotoma query in the hot path.
@@ -508,6 +548,21 @@ class SwarmDispatcher:
         comment_body = (trigger.comment_body or "").strip()
         ref = f"{trigger.repository}#{trigger.number}"
 
+        # Guard 0: bot/machine-account self-trigger prevention (neotoma#1686).
+        # A swarm confirmation comment containing the command token would re-fire
+        # the handler via its own issue_comment webhook.  Return immediately for
+        # ANY known bot identity — before even checking for command tokens — so
+        # no swarm-authored comment can ever reach the dispatch path.  This is
+        # stronger than the operator-login positive check (Guard 2) and must
+        # come first so it cannot be bypassed by a comment_author that happens to
+        # match the operator login (defence-in-depth).
+        if _is_bot_author(comment_author):
+            log.debug(
+                f"[{DAEMON_NAME}] issue_comment on {ref} from bot/machine "
+                f"account {comment_author!r} — ignored (self-trigger prevention)"
+            )
+            return
+
         has_gates_clear = _CONFIRM_GATES_CLEAR_CMD in comment_body
         has_swarm_run = _SWARM_RUN_CMD in comment_body
 
@@ -676,36 +731,96 @@ class SwarmDispatcher:
         await self._handle_issue_opened(issue_trigger)
 
     async def _post_swarm_run_comment(self, trigger: SwarmTrigger) -> None:
-        """Post a brief confirming comment for the /swarm-run command.
+        """Post (or edit) a confirming comment for the operator swarm-run command.
+
+        Fix 1 — no command token in the body: the confirmation text deliberately
+        does NOT contain the literal "/swarm-run" or "/confirm-gates-clear"
+        strings.  This removes the self-trigger loop at the source: a comment
+        that does not contain a command token cannot match the command detector
+        in _handle_issue_comment, even if the webhook fires for the bot's own
+        comment (neotoma#1686).
+
+        Fix 3 — edit-not-duplicate (SWARM_GITHUB_CONTRACT): before posting a new
+        comment, scan the issue's existing comments for one that contains the
+        stable HTML marker ``<!-- swarm-run-confirmation -->``.  If found, PATCH
+        it in place instead of creating a second confirmation.  This prevents
+        stacked duplicates when the operator issues the command more than once in
+        rapid succession.
 
         Uses the shared GitHub token for the repo.  Best-effort: caller catches
         exceptions and logs a warning rather than propagating.
         """
+        # Stable marker that identifies THIS dispatcher's confirmation comment.
+        # Must NOT contain a command token (that would re-trigger the handler).
+        _CONFIRMATION_MARKER = "<!-- swarm-run-confirmation -->"
+
         repo_token = _token_for_repo(trigger.repository)
         if not repo_token:
             log.warning(
-                f"[{DAEMON_NAME}] no GitHub token — /swarm-run confirmation "
+                f"[{DAEMON_NAME}] no GitHub token — swarm-run confirmation "
                 f"comment skipped for {trigger.repository}#{trigger.number}"
             )
             return
-        url = (
+
+        # Fix 1: body text uses "swarm-run" without the leading slash so it
+        # does NOT match the _SWARM_RUN_CMD ("/swarm-run") token detector.
+        body = (
+            f"{_CONFIRMATION_MARKER}\n"
+            f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+            "\U0001f501 Operator **swarm-run** command received — re-running "
+            "the issue pipeline (Lanius triage + review expectations + Pavo "
+            "scoping). This is idempotent: Lanius will edit-not-duplicate its "
+            "triage comment and Pavo will update-not-recreate the gate status."
+        )
+
+        list_url = (
             f"https://api.github.com/repos/{trigger.repository}/issues/"
             f"{trigger.number}/comments"
         )
-        body = (
-            f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
-            f"\U0001f501 Operator `{_SWARM_RUN_CMD}` — re-running the issue "
-            "pipeline (Lanius triage + review expectations + Pavo scoping). "
-            "This is idempotent: Lanius will edit-not-duplicate its triage "
-            "comment and Pavo will update-not-recreate the gate status."
-        )
+        headers = self._github_headers(trigger.repository)
+
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                url,
-                json={"body": body},
-                headers=self._github_headers(trigger.repository),
-            )
-            resp.raise_for_status()
+            # Fix 3: look for an existing confirmation comment to edit.
+            existing_id: int | None = None
+            try:
+                resp = await client.get(
+                    list_url, params={"per_page": 100}, headers=headers
+                )
+                resp.raise_for_status()
+                for comment in resp.json():
+                    if _CONFIRMATION_MARKER in comment.get("body", ""):
+                        existing_id = comment["id"]
+                        break
+            except Exception as exc:
+                log.warning(
+                    f"[{DAEMON_NAME}] could not list comments for dedup check "
+                    f"on {trigger.repository}#{trigger.number}: {exc} — "
+                    "will post new"
+                )
+
+            if existing_id is not None:
+                # PATCH the existing comment instead of creating a duplicate.
+                patch_url = (
+                    f"https://api.github.com/repos/{trigger.repository}/"
+                    f"issues/comments/{existing_id}"
+                )
+                resp = await client.patch(
+                    patch_url, json={"body": body}, headers=headers
+                )
+                resp.raise_for_status()
+                log.info(
+                    f"[{DAEMON_NAME}] edited existing swarm-run confirmation "
+                    f"comment #{existing_id} on {trigger.repository}#{trigger.number}"
+                )
+            else:
+                resp = await client.post(
+                    list_url, json={"body": body}, headers=headers
+                )
+                resp.raise_for_status()
+                log.info(
+                    f"[{DAEMON_NAME}] posted new swarm-run confirmation comment "
+                    f"on {trigger.repository}#{trigger.number}"
+                )
 
     async def _fetch_issue_fields(
         self, repository: str, issue_number: int
