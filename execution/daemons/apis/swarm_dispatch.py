@@ -282,6 +282,37 @@ def compose_fallback_comment(lens: str, agent: str, text: str) -> str:
     )
 
 
+# Stable marker embedded in every Vanellus aggregation comment so the
+# dispatcher can detect whether the comment landed (dedup / missing-check).
+_VANELLUS_COMMENT_MARKER = "<!-- vanellus-aggregation -->"
+
+
+def vanellus_comment_missing(comment_bodies: list[str]) -> bool:
+    """Return True when no Vanellus aggregation comment has landed on the PR.
+
+    Detects the stable HTML marker ``_VANELLUS_COMMENT_MARKER`` that the
+    dispatcher prefixes to every fallback comment it posts on Vanellus's
+    behalf, and that the _vanellus_prompt instructs Vanellus to include when
+    it posts its own comment directly.  A missing comment means neither
+    Vanellus nor a prior fallback post succeeded."""
+    return not any(_VANELLUS_COMMENT_MARKER in body for body in comment_bodies)
+
+
+def compose_vanellus_fallback_comment(text: str) -> str:
+    """Body for a dispatcher-posted Vanellus aggregation comment.
+
+    Prefixed with the stable marker so future dedup checks can find it, and
+    with the Vanellus attribution header so readers know which agent authored
+    the verdict."""
+    return (
+        f"{_VANELLUS_COMMENT_MARKER}\n"
+        f"{attribution_header('vanellus', 'PR steward')}\n\n"
+        f"{text}\n\n"
+        "_Posted by the Apis dispatcher on behalf of Vanellus — "
+        "Vanellus could not post its aggregation comment directly._"
+    )
+
+
 def lenses_missing_comments(
     comment_bodies: list[str], lenses: list[str]
 ) -> list[str]:
@@ -527,12 +558,17 @@ class SwarmDispatcher:
 
         # 4. Vanellus aggregates panel verdicts. Merge is operator-gated
         #    unless APIS_AUTONOMY_AUTO_MERGE=1 (ateles#80 guardrail).
-        await run_skill(
+        vanellus_result = await run_skill(
             "vanellus",
             self._vanellus_prompt(trigger, parent, [p.lens for p in panel]),
             github_token=_token_for_agent_on_repo("vanellus", trigger.repository),
             include_github_contract=True,
         )
+
+        # 4b. Dispatcher fallback: if Vanellus's own gh comment did not land
+        #     on the PR, post the captured stdout ourselves (mirrors
+        #     _post_missing_panel_comments for the aggregation step).
+        await self._post_missing_vanellus_comment(trigger, vanellus_result)
 
         if not self.config.auto_merge:
             await self._store_merge_checkpoint(trigger, parent, [p.lens for p in panel])
@@ -1490,6 +1526,12 @@ class SwarmDispatcher:
             "summary comment. All clear ⇒ approve and advance pr_review to "
             "signed_off on the parent issue entity.\n\n"
             f"{_agent_prompt_instruction('vanellus', 'PR steward')}\n\n"
+            "POST YOUR AGGREGATED VERDICT AS A PR COMMENT using the gh CLI. "
+            f"The comment MUST begin with the line `{_VANELLUS_COMMENT_MARKER}` "
+            "so the dispatcher can detect whether it landed. "
+            "Repeat the full aggregated verdict text in your reply here (the "
+            "dispatcher parses it and posts the comment for you if your gh "
+            "call fails).\n\n"
             "AUTONOMY GUARDRAIL — DO NOT MERGE. Merge is operator-gated: a "
             "blocking checkpoint_brief is filed at the merge boundary; the "
             "operator merges or instructs you to. This overrides any merge "
@@ -1687,6 +1729,74 @@ class SwarmDispatcher:
         except Exception as exc:
             log.error(
                 f"[{DAEMON_NAME}] fallback review comments failed for "
+                f"{t.repository}#{t.number}: {exc}"
+            )
+
+    async def _post_missing_vanellus_comment(
+        self,
+        t: SwarmTrigger,
+        result: SkillResult,
+    ) -> None:
+        """Post Vanellus's aggregated verdict as a PR comment when its own gh
+        call failed to land it (mirrors _post_missing_panel_comments for the
+        aggregation step, ateles#127).
+
+        Checks whether the PR already has a Vanellus aggregation comment (by
+        looking for ``_VANELLUS_COMMENT_MARKER`` in existing comment bodies).
+        If missing AND the skill run produced stdout, the dispatcher posts the
+        captured text as a fallback comment.  Best-effort — never raises.
+
+        Dedup: if Vanellus's own comment DID land (marker present), this
+        method returns without posting, so no duplicate is ever created.
+        """
+        if not result.stdout:
+            log.debug(
+                f"[{DAEMON_NAME}] Vanellus produced no stdout for "
+                f"{t.repository}#{t.number} — fallback skipped"
+            )
+            return
+
+        repo_token = _token_for_repo(t.repository)
+        if not repo_token:
+            log.warning(
+                f"[{DAEMON_NAME}] no GitHub token — Vanellus fallback comment "
+                f"skipped for {t.repository}#{t.number}"
+            )
+            return
+
+        url = (
+            f"https://api.github.com/repos/{t.repository}/issues/"
+            f"{t.number}/comments"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    url,
+                    params={"per_page": 100},
+                    headers=self._github_headers(t.repository),
+                )
+                resp.raise_for_status()
+                bodies = [c.get("body", "") for c in resp.json()]
+                if not vanellus_comment_missing(bodies):
+                    log.debug(
+                        f"[{DAEMON_NAME}] Vanellus aggregation comment already "
+                        f"present on {t.repository}#{t.number} — no fallback needed"
+                    )
+                    return
+                body = compose_vanellus_fallback_comment(result.stdout)
+                post = await client.post(
+                    url,
+                    json={"body": body},
+                    headers=self._github_headers(t.repository),
+                )
+                post.raise_for_status()
+                log.info(
+                    f"[{DAEMON_NAME}] posted fallback Vanellus aggregation "
+                    f"comment on {t.repository}#{t.number}"
+                )
+        except Exception as exc:
+            log.error(
+                f"[{DAEMON_NAME}] Vanellus fallback comment failed for "
                 f"{t.repository}#{t.number}: {exc}"
             )
 
