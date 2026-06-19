@@ -38,6 +38,6 @@ The canonical, harness-neutral file for every `agent_definition` entity in Neoto
 | turdus | T3 | Turdus | active | ✅ | [turdus.md](turdus.md) |
 | tyto | T3 | Tyto | active | ✅ | [tyto.md](tyto.md) |
 | vanellus | T4 | Vanellus | planned | ✅ | [vanellus.md](vanellus.md) |
-| waxwing | T4 | Bombycilla | planned | ✅ | [waxwing.md](waxwing.md) |
+| waxwing | T4 | Waxwing | planned | ✅ | [waxwing.md](waxwing.md) |
 
 *35 agents. Generated from Neotoma — do not edit directly.*
