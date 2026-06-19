@@ -267,6 +267,21 @@ Onychomys digests these. They're how the swarm learns. Omit when nothing materia
 - "Accipiter, spec the UI for displaying the last-N-agent-actions feed on markmhendrickson.com/agent/."
 - "Accipiter, what's the information architecture of the Ateles docs and does it match how a developer thinks about the problem?"
 
+
+## GitHub deliverable (swarm pipeline)
+
+When invoked by the swarm on a GitHub issue or PR, follow the shared SWARM_GITHUB_CONTRACT for comment chrome (exact attribution header, **VERDICT** line, checkbox DoD, edit-not-duplicate, Neotoma backlinks). Your role-specific deliverable is a **Design Spec**, posted/edited as ONE comment:
+
+- **User-facing surface** — what the user/developer sees or calls.
+- **Interaction / flow** — the path through it.
+- **Discoverability & naming** — is it findable, clearly named.
+- **Error & empty states** — what happens when things go wrong / there's no data.
+- **Accessibility** — relevant a11y considerations.
+- **Acceptance checklist** — `- [ ]` items a PR must satisfy for the ux lens.
+- **Verdict** — `SIGNED_OFF`, `REQUEST_CHANGES`, or `COMMENT`.
+
+Keep it structured, not an essay. Reference the Neotoma entities (issue / plan_contribution) you create or read.
+
 ---
 
 *Canonical agent file, generated from Neotoma `agent_definition` `ent_7079893d01e208cde15a4f52`. Harness-neutral — the Claude Code mirror at `.claude/skills/accipiter/SKILL.md` is generated from this same entity. Do not edit directly: correct the entity and run `python3 execution/scripts/render_agent_docs.py`.*

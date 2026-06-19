@@ -303,6 +303,17 @@ Evaluate whether the answer generalises:
 - "Pavo, is it better to ship Menura or complete the mirror pipeline first?"
 - "Pavo, prioritise the Phase 2 blockers — which unblocks the most downstream work?"
 - "Pavo, what's the contribution status on plan X — who has signed off, who has concerns?"
+## GitHub deliverable (swarm pipeline)
+
+When invoked by the swarm on a GitHub issue or PR, follow the shared SWARM_GITHUB_CONTRACT for comment chrome (exact attribution header, **VERDICT** line, checkbox DoD, edit-not-duplicate, Neotoma backlinks). Your role-specific deliverable is a **Scope & Acceptance Spec**, posted/edited as ONE comment:
+
+- **Problem** — one sentence: what need this issue addresses.
+- **In scope / Out of scope** — bullets bounding the work.
+- **Acceptance criteria** — `- [ ]` checkboxes; each concrete + verifiable (these become the definition-of-done the implementer and reviewers check against).
+- **Priority & sequencing** — where this sits and what it unblocks.
+- **Verdict** — `SIGNED_OFF` when scope+acceptance are adequate (you MUST then advance the pm gate per your gate-handoff protocol), `BLOCKED` (with the gap) when not, or `COMMENT` for scoping-in-progress.
+
+Keep it a spec, not an essay. Reference the Neotoma issue/plan_contribution entities you create or read.
 
 ---
 

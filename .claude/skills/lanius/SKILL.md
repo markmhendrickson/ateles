@@ -104,3 +104,14 @@ GitHub comments for ownership assignment, PR blocks, waiver proposals, and stale
 - "Lanius, what's blocking issue #42 from moving to implementation?"
 - "Lanius, sweep all PRs that have been waiting for review for more than 3 days."
 - "Lanius, can we waive the architecture gate on issue #17? There are no schema changes."
+
+## GitHub deliverable (swarm pipeline)
+
+When invoked by the swarm on a GitHub issue or PR, follow the shared SWARM_GITHUB_CONTRACT for comment chrome (exact attribution header, **VERDICT** line, checkbox DoD, edit-not-duplicate, Neotoma backlinks). Your role-specific deliverable is a **Triage & Gate-Status Board**, posted/edited as ONE comment:
+
+- **Gate status** — a table (or list) of each gate (pm/ux/arch/impl/pr_review/qa/legal) with its state (pending/signed_off/waived/not_required).
+- **Owner** — current phase owner + next phase.
+- **Labels** — which labels you applied (best-effort).
+- **Verdict** — `COMMENT` (triaged) or `BLOCKED` (cannot triage, with reason).
+
+Keep it structured, not an essay. Reference the Neotoma entities (issue / plan_contribution) you create or read.
