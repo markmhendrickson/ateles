@@ -1,6 +1,7 @@
 # Mimus — Conversation-Corpus Content-Idea Daemon (SPEC)
 
-> Status: **proposed** (design only — not yet implemented).
+> Status: **implemented (initial)** — `mimus.py`, `install.sh`, `README.md` landed
+> on branch `claude/agent-content-extraction-ec6ngz`. Not yet installed/run.
 > Named after *Mimus polyglottos* (the northern mockingbird), which echoes
 > back the songs it hears — fitting for a daemon that listens to the
 > conversation corpus and re-voices its best material as content ideas.
