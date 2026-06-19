@@ -62,6 +62,27 @@ _CONFIRM_GATES_CLEAR_CMD = "/confirm-gates-clear"
 # (not idempotent) — acceptable for iteration testing.
 _SWARM_RUN_CMD = "/swarm-run"
 
+# Phase H1 — HITL checkpoint verdict commands (docs/swarm_hitl_checkpoints_design.md).
+# These are the uniform operator confirm/reject/hold verbs for any blocking checkpoint.
+# For the pre-merge checkpoint specifically:
+#   /approve — the operator approves the pending merge checkpoint.  The dispatcher
+#              resolves the checkpoint_brief, posts a confirmation, removes the
+#              operator from the PR reviewer list, and hands back to Vanellus.
+#              Note: the dispatcher does NOT auto-merge (conservative choice — see
+#              _handle_approve docstring).  The operator may then merge on GitHub.
+#   /reject  — reject the pending checkpoint; record the reason (everything after
+#              "/reject "); resolve the checkpoint_brief as rejected; remove the
+#              operator from reviewers.  Does NOT proceed with the held action.
+#   /hold    — acknowledge (parked); leave the checkpoint blocking and the operator
+#              still requested as reviewer.  No state change beyond the ack.
+#
+# Priority among all commands: /confirm-gates-clear wins if also present (it is
+# the gate-inheritance unblock, more time-sensitive than a merge verdict).
+# Among H1 commands alone: /approve > /reject > /hold (first match dispatched).
+_APPROVE_CMD = "/approve"
+_REJECT_CMD = "/reject"
+_HOLD_CMD = "/hold"
+
 # Pre-impl gates that must be signed off before the PR review panel runs.
 # These are the gates Lanius checks for GATE_INHERITANCE.
 PRE_IMPL_GATES = ("pm", "arch")
@@ -528,20 +549,31 @@ class SwarmDispatcher:
     async def _handle_issue_comment(self, trigger: SwarmTrigger) -> None:
         """Handle an issue_comment webhook event.
 
-        Reacts to two operator commands (only _OPERATOR_LOGIN may invoke either):
+        Reacts to operator commands (only _OPERATOR_LOGIN may invoke any of them):
           /confirm-gates-clear  — waive unsigned pre-impl gates + re-trigger PR pipeline.
           /swarm-run            — re-run the full issue pipeline (Lanius triage +
                                   expectation pre-registration + Pavo scoping) on the
                                   existing issue.  Useful for iteration testing after a
                                   design increment without closing/re-opening the issue.
+          /approve              — (Phase H1) approve the pending pre-merge checkpoint:
+                                  resolve the checkpoint_brief, post a confirmation,
+                                  remove the operator from PR reviewers, hand back to
+                                  Vanellus.  Does NOT auto-merge (conservative; operator
+                                  may then merge directly on GitHub).
+          /reject <reason>      — (Phase H1) reject the pending checkpoint; record the
+                                  reason (text after "/reject "); resolve as rejected;
+                                  remove operator from reviewers.  Does NOT proceed.
+          /hold                 — (Phase H1) park: ack only, leave checkpoint blocking
+                                  and operator still requested as reviewer.
 
-        When both commands appear in a single comment, /confirm-gates-clear takes
-        priority (gate clearance is the more time-sensitive action).
+        Priority: /confirm-gates-clear wins if present alongside any other command
+        (gate clearance is the most time-sensitive action).  Among H1 commands:
+        /approve > /reject > /hold (first match dispatched).
 
         All other comments are silently ignored — this is the best-effort,
         never-crash path.
 
-        Security guardrail: only _OPERATOR_LOGIN may invoke either command.  Any
+        Security guardrail: only _OPERATOR_LOGIN may invoke any command.  Any
         other commenter — including swarm agents — is silently ignored.
         """
         comment_author = trigger.comment_author
@@ -565,30 +597,56 @@ class SwarmDispatcher:
 
         has_gates_clear = _CONFIRM_GATES_CLEAR_CMD in comment_body
         has_swarm_run = _SWARM_RUN_CMD in comment_body
+        # Phase H1 commands — check with word-boundary awareness: "/approve" must
+        # not match "/approve-something-else".  Simple startswith/split check:
+        # a command is present when the token appears as a standalone word (i.e.
+        # followed by whitespace, end-of-string, or a space-delimited argument).
+        has_approve = bool(
+            re.search(r"(?:^|\s)/approve(?:\s|$)", comment_body)
+        )
+        has_reject = bool(
+            re.search(r"(?:^|\s)/reject(?:\s|$)", comment_body)
+        )
+        has_hold = bool(
+            re.search(r"(?:^|\s)/hold(?:\s|$)", comment_body)
+        )
 
         # Guard 1: only react when a known command is present.
-        if not has_gates_clear and not has_swarm_run:
+        if not any([has_gates_clear, has_swarm_run, has_approve, has_reject, has_hold]):
             log.debug(
                 f"[{DAEMON_NAME}] issue_comment on {ref} has no recognised "
-                f"command ({_CONFIRM_GATES_CLEAR_CMD!r} or {_SWARM_RUN_CMD!r}) "
-                "— ignored"
+                f"command — ignored"
             )
             return
 
-        # Guard 2: operator-only guardrail (applies to both commands).
+        # Guard 2: operator-only guardrail (applies to all commands).
         if comment_author.lower() != _OPERATOR_LOGIN.lower():
-            cmd = _CONFIRM_GATES_CLEAR_CMD if has_gates_clear else _SWARM_RUN_CMD
+            # Pick whichever command was detected for the log message.
+            cmd = (
+                _CONFIRM_GATES_CLEAR_CMD if has_gates_clear
+                else _SWARM_RUN_CMD if has_swarm_run
+                else _APPROVE_CMD if has_approve
+                else _REJECT_CMD if has_reject
+                else _HOLD_CMD
+            )
             log.warning(
                 f"[{DAEMON_NAME}] {cmd} from non-operator {comment_author!r} "
                 f"on {ref} — ignored (operator login: {_OPERATOR_LOGIN!r})"
             )
             return
 
-        # Dispatch: /confirm-gates-clear takes priority when both appear.
+        # Dispatch: /confirm-gates-clear wins over everything when present.
+        # Among H1 commands: /approve > /reject > /hold.
         if has_gates_clear:
             await self._handle_confirm_gates_clear(trigger)
-        else:
+        elif has_swarm_run:
             await self._handle_swarm_run(trigger)
+        elif has_approve:
+            await self._handle_approve(trigger)
+        elif has_reject:
+            await self._handle_reject(trigger)
+        else:
+            await self._handle_hold(trigger)
 
     async def _handle_confirm_gates_clear(self, trigger: SwarmTrigger) -> None:
         """Execute the /confirm-gates-clear operator command.
@@ -729,6 +787,312 @@ class SwarmDispatcher:
             f"via {_SWARM_RUN_CMD}"
         )
         await self._handle_issue_opened(issue_trigger)
+
+    # ── Phase H1: /approve /reject /hold — pre-merge checkpoint verdicts ──────
+
+    async def _handle_approve(self, trigger: SwarmTrigger) -> None:
+        """Execute the /approve operator command (Phase H1 HITL checkpoint).
+
+        Approves the pending pre-merge checkpoint on this PR/issue.
+
+        Conservative merge choice: the dispatcher does NOT auto-merge the PR.
+        Performing the merge programmatically (gh pr merge) is a side-effecting,
+        hard-to-reverse action.  The checkpoint_brief was filed specifically
+        because APIS_AUTONOMY_AUTO_MERGE=0 — the operator's intent is to control
+        the merge gate themselves.  Auto-merging on /approve would bypass that
+        intent.  Instead, the dispatcher:
+          1. Resolves/closes the checkpoint_brief entity (approved).
+          2. Posts a GitHub confirmation comment (without command tokens).
+          3. Removes the operator's review request (un-assign on resolve rule).
+          4. Re-assigns Vanellus as PR steward and hands back via notification.
+        The operator then merges directly on GitHub or signals Vanellus.
+
+        The release path for the merge checkpoint is this command.  Without
+        /approve being wired, the checkpoint would be a deadlock.  See
+        docs/swarm_hitl_checkpoints_design.md §"No-deadlock self-consistency".
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
+        log.info(
+            f"[{DAEMON_NAME}] operator {_APPROVE_CMD} received on {ref} "
+            f"(comment #{trigger.comment_id})"
+        )
+
+        # 1. Resolve the checkpoint_brief: file an approved resolution.
+        #    We store a new checkpoint_brief entity with status=approved so the
+        #    Neotoma trail is clear.  (The original open brief stays; resolution
+        #    is an additive correction pattern.)
+        await self._store_checkpoint_resolution(trigger, verdict="approved", reason="")
+
+        # 2. Post a GitHub confirmation comment.  Body deliberately contains no
+        #    command tokens so it cannot re-trigger the handler (neotoma#1686).
+        await self._post_checkpoint_verdict_comment(
+            trigger,
+            body=(
+                f"<!-- h1-checkpoint-approve -->\n"
+                f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+                f"Operator **approved** the pre-merge checkpoint on {ref}. "
+                "Checkpoint resolved. The PR is ready to merge — proceed on "
+                "GitHub or instruct Vanellus. Vanellus retains PR stewardship."
+            ),
+        )
+
+        # 3. Remove operator from reviewer list (best-effort, non-fatal).
+        await self._remove_operator_reviewer(trigger)
+
+        # 4. Notify Vanellus handback.
+        self.notifier.send(
+            f"Operator approved merge checkpoint on {ref} — checkpoint resolved, "
+            f"operator reviewer removed. PR ready to merge; Vanellus is PR steward.",
+            priority=Priority.OPERATOR_DECISION,
+            handler=DAEMON_NAME,
+        )
+
+    async def _handle_reject(self, trigger: SwarmTrigger) -> None:
+        """Execute the /reject <reason> operator command (Phase H1 HITL checkpoint).
+
+        Rejects the pending pre-merge checkpoint.  Records the reason (everything
+        after "/reject " in the comment), resolves the checkpoint_brief as rejected,
+        removes the operator from the PR reviewer list, and notifies.
+
+        Does NOT proceed with the merge or any other held action.
+
+        The rejection reason is a training signal for review_learning.  Full
+        wiring of that signal is a future TODO (review_learning.propose_skill_updates
+        currently takes a list of (lens, text) tuples from panel reviews; rejection
+        reasons need a separate entry point).  For now the reason is stored in the
+        checkpoint_brief resolution entity so it is available for offline analysis.
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
+        comment_body = (trigger.comment_body or "").strip()
+
+        # Extract the reason: everything after "/reject " (case-sensitive token).
+        reason = ""
+        reject_match = re.search(r"(?:^|\s)/reject\s+(.*?)(?:\s*$)", comment_body, re.DOTALL)
+        if reject_match:
+            reason = reject_match.group(1).strip()
+
+        log.info(
+            f"[{DAEMON_NAME}] operator {_REJECT_CMD} received on {ref} "
+            f"(comment #{trigger.comment_id}): reason={reason!r}"
+        )
+
+        # 1. Resolve the checkpoint_brief as rejected.
+        await self._store_checkpoint_resolution(trigger, verdict="rejected", reason=reason)
+
+        # 2. Post a GitHub confirmation comment (no command tokens in body).
+        reason_line = f"\n\nRejection reason: {reason}" if reason else ""
+        await self._post_checkpoint_verdict_comment(
+            trigger,
+            body=(
+                f"<!-- h1-checkpoint-reject -->\n"
+                f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+                f"Operator **rejected** the pre-merge checkpoint on {ref}. "
+                "The PR will NOT be merged. Checkpoint resolved as rejected."
+                f"{reason_line}\n\n"
+                "The rejection reason has been stored for review-learning. "
+                "Route back to the implementer if changes are needed."
+            ),
+        )
+
+        # 3. Remove operator from reviewer list (best-effort, non-fatal).
+        await self._remove_operator_reviewer(trigger)
+
+        # 4. Notify.
+        self.notifier.send(
+            f"Operator rejected merge checkpoint on {ref}"
+            + (f": {reason}" if reason else "")
+            + " — PR NOT merged; operator reviewer removed.",
+            priority=Priority.OPERATOR_DECISION,
+            handler=DAEMON_NAME,
+        )
+
+    async def _handle_hold(self, trigger: SwarmTrigger) -> None:
+        """Execute the /hold operator command (Phase H1 HITL checkpoint).
+
+        Parks the checkpoint: acknowledges the command, leaves the checkpoint
+        blocking, and leaves the operator still requested as PR reviewer.
+        No state change to the checkpoint_brief — it remains open.
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
+        log.info(
+            f"[{DAEMON_NAME}] operator {_HOLD_CMD} received on {ref} "
+            f"(comment #{trigger.comment_id}) — checkpoint parked"
+        )
+
+        # Post a GitHub ack comment (no command tokens in body).
+        await self._post_checkpoint_verdict_comment(
+            trigger,
+            body=(
+                f"<!-- h1-checkpoint-hold -->\n"
+                f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+                f"Checkpoint on {ref} **parked** by operator. "
+                "No action taken — the merge checkpoint remains blocking and "
+                "your review request is still open. "
+                "Use the approve or reject commands when ready."
+            ),
+        )
+
+        self.notifier.send(
+            f"Operator parked merge checkpoint on {ref} — checkpoint still blocking.",
+            priority=Priority.INFO,
+            handler=DAEMON_NAME,
+        )
+
+    # ── Phase H1 helpers ─────────────────────────────────────────────────────
+
+    async def _store_checkpoint_resolution(
+        self, trigger: SwarmTrigger, verdict: str, reason: str
+    ) -> None:
+        """Store a checkpoint_brief resolution entity for the given PR/issue.
+
+        Files a new checkpoint_brief entity with status=<verdict> so the Neotoma
+        trail records the resolution.  Best-effort: logs on failure, never raises.
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
+        entities = [
+            {
+                "entity_type": "checkpoint_brief",
+                "title": f"Merge checkpoint resolved ({verdict}): {ref}",
+                "checkpoint_kind": "pr_merge",
+                "blocking": False,
+                "subject_ref": ref,
+                "body": (
+                    f"Operator {verdict} the pre-merge checkpoint on {ref} "
+                    f"via {_APPROVE_CMD if verdict == 'approved' else _REJECT_CMD} "
+                    f"(comment #{trigger.comment_id})."
+                    + (f"  Rejection reason: {reason}" if reason else "")
+                ),
+                "status": verdict,
+            }
+        ]
+        ts = datetime.now(timezone.utc).isoformat()
+        await self._store_entities(
+            entities,
+            idempotency_key=(
+                f"merge-checkpoint-{verdict}-{trigger.repository}-"
+                f"{trigger.number}-{trigger.comment_id}-{ts[:16]}"
+            ),
+        )
+
+    async def _post_checkpoint_verdict_comment(
+        self, trigger: SwarmTrigger, body: str
+    ) -> None:
+        """Post a verdict comment on the PR/issue.  Best-effort, never raises."""
+        repo_token = _token_for_repo(trigger.repository)
+        if not repo_token:
+            log.warning(
+                f"[{DAEMON_NAME}] no GitHub token — verdict comment skipped for "
+                f"{trigger.repository}#{trigger.number}"
+            )
+            return
+        url = (
+            f"https://api.github.com/repos/{trigger.repository}/issues/"
+            f"{trigger.number}/comments"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    url, json={"body": body},
+                    headers=self._github_headers(trigger.repository)
+                )
+                resp.raise_for_status()
+                log.info(
+                    f"[{DAEMON_NAME}] posted checkpoint verdict comment on "
+                    f"{trigger.repository}#{trigger.number}"
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] failed to post verdict comment on "
+                f"{trigger.repository}#{trigger.number}: {exc}"
+            )
+
+    async def _request_operator_reviewer(self, trigger: SwarmTrigger) -> None:
+        """Request the operator as a PR reviewer (best-effort, non-fatal).
+
+        Called when the merge checkpoint blocks so the pending merge shows up
+        in the operator's "Review requested" GitHub queue.  Assignment is
+        SURFACING; the checkpoint_brief + block is ENFORCEMENT.
+
+        If the request fails (permissions, not-a-collaborator, already-requested),
+        the checkpoint still blocks and still notifies — this is best-effort.
+        """
+        repo_token = _token_for_repo(trigger.repository)
+        if not repo_token:
+            log.warning(
+                f"[{DAEMON_NAME}] no GitHub token — operator reviewer request "
+                f"skipped for {trigger.repository}#{trigger.number}"
+            )
+            return
+        url = (
+            f"https://api.github.com/repos/{trigger.repository}/pulls/"
+            f"{trigger.number}/requested_reviewers"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    url,
+                    json={"reviewers": [_OPERATOR_LOGIN]},
+                    headers=self._github_headers(trigger.repository),
+                )
+                # 422 means the reviewer is already requested or is not a
+                # collaborator — not an error for our purposes.
+                if resp.status_code not in (200, 201, 422):
+                    resp.raise_for_status()
+                log.info(
+                    f"[{DAEMON_NAME}] requested {_OPERATOR_LOGIN!r} as PR reviewer "
+                    f"on {trigger.repository}#{trigger.number} "
+                    f"(status={resp.status_code})"
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] failed to request operator as PR reviewer on "
+                f"{trigger.repository}#{trigger.number}: {exc} — "
+                "checkpoint still blocking (reviewer request is surfacing only)"
+            )
+
+    async def _remove_operator_reviewer(self, trigger: SwarmTrigger) -> None:
+        """Remove the operator from the PR reviewer list (best-effort, non-fatal).
+
+        Called on /approve and /reject so the operator's "Review requested" queue
+        only shows live checkpoints.  /hold leaves the reviewer in place.
+
+        Uses the DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers
+        endpoint.  Non-fatal: if it fails (already removed, permissions), the
+        checkpoint resolution still stands.
+        """
+        repo_token = _token_for_repo(trigger.repository)
+        if not repo_token:
+            log.warning(
+                f"[{DAEMON_NAME}] no GitHub token — operator reviewer removal "
+                f"skipped for {trigger.repository}#{trigger.number}"
+            )
+            return
+        url = (
+            f"https://api.github.com/repos/{trigger.repository}/pulls/"
+            f"{trigger.number}/requested_reviewers"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.request(
+                    "DELETE",
+                    url,
+                    json={"reviewers": [_OPERATOR_LOGIN]},
+                    headers=self._github_headers(trigger.repository),
+                )
+                # 200 = removed; 422 = was not requested — both are fine.
+                if resp.status_code not in (200, 422):
+                    resp.raise_for_status()
+                log.info(
+                    f"[{DAEMON_NAME}] removed {_OPERATOR_LOGIN!r} from PR reviewer "
+                    f"list on {trigger.repository}#{trigger.number} "
+                    f"(status={resp.status_code})"
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] failed to remove operator reviewer on "
+                f"{trigger.repository}#{trigger.number}: {exc} — "
+                "checkpoint resolution still stands"
+            )
 
     async def _post_swarm_run_comment(self, trigger: SwarmTrigger) -> None:
         """Post (or edit) a confirming comment for the operator swarm-run command.
@@ -1329,7 +1693,19 @@ class SwarmDispatcher:
     async def _store_merge_checkpoint(
         self, t: SwarmTrigger, parent: int | None, lenses: list[str]
     ) -> None:
-        """Blocking checkpoint at the pr_review→merge boundary (ateles#80)."""
+        """Blocking checkpoint at the pr_review→merge boundary (ateles#80).
+
+        Phase H1 note: this checkpoint is the pre_merge boundary defined in
+        docs/swarm_hitl_checkpoints_design.md.  The release path (no-deadlock
+        requirement per the design) is the /approve operator command handled by
+        _handle_approve — it resolves the checkpoint_brief and hands back to
+        Vanellus.  /reject stops the held action; /hold parks without resolving.
+
+        After filing the checkpoint_brief, the operator is also requested as a
+        PR reviewer (best-effort, non-fatal) so the pending merge surfaces in
+        their "Review requested" GitHub queue.  Assignment is SURFACING;
+        checkpoint_brief + block is ENFORCEMENT.
+        """
         entities = [
             {
                 "entity_type": "checkpoint_brief",
@@ -1342,9 +1718,10 @@ class SwarmDispatcher:
                     f"PR {t.html_url} has completed panel review "
                     f"(lenses: {', '.join(lenses) or 'GHA baseline only'}). "
                     "Vanellus aggregated verdicts but merge is operator-"
-                    "gated (APIS_AUTONOMY_AUTO_MERGE=0). Approve by "
-                    "merging on GitHub or instructing Vanellus to merge; "
-                    "reject by closing the PR or routing back to Gryllus."
+                    "gated (APIS_AUTONOMY_AUTO_MERGE=0). "
+                    f"Release this checkpoint with {_APPROVE_CMD} (resolves + "
+                    f"hands back to Vanellus) or {_REJECT_CMD} <reason> (stops). "
+                    f"{_HOLD_CMD} parks without resolving."
                 ),
                 "status": "open",
             }
@@ -1356,3 +1733,8 @@ class SwarmDispatcher:
                 f"{content_digest(entities)}"
             ),
         )
+
+        # Request the operator as PR reviewer so the pending merge surfaces in
+        # their "Review requested" queue (Phase H1, design §"Native GitHub operator
+        # assignment").  Best-effort: if this fails the checkpoint still blocks.
+        await self._request_operator_reviewer(t)
