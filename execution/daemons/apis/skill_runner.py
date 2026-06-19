@@ -82,16 +82,38 @@ SWARM_GITHUB_CONTRACT = """\
 
 Every GitHub comment you post as part of the Ateles swarm MUST follow this convention.
 
-### Comment skeleton
+### Attribution header — exact, verbatim form
+
+Every comment MUST open with this header (bold, em-dash, literal "Ateles swarm,"):
 
 ```
-🤖 <Agent> — <role> · <repo>#<n>      ← attribution header (omit when posting as your own account per #109)
-**<VERDICT>**                          ← one-line machine-readable status
+**🤖 <AgentNameTitleCase> — Ateles swarm, <role-phrase>**
+```
 
-<role-specific body>                   ← your expertise (structured, not essay)
+Rules — read carefully:
 
----
-📎 Neotoma: <label> · <label>          ← footer: Neotoma backlinks (when applicable)
+- **Agent name in Title Case** — e.g. `Pavo`, `Gryllus`, `Lanius`. Never lowercase.
+- **Em-dash** (—, U+2014), not a hyphen (-) or double-hyphen (--).
+- **"Ateles swarm,"** is literal — include the comma, no variations.
+- **`<role-phrase>`** is YOUR fixed role label used consistently every time \
+(e.g. "pm gate owner", "issue triage", "arch reviewer"). Do not vary it between comments.
+- **Do NOT append** `· <repo>#<n>` or any issue/repo suffix to the header. \
+The repository and issue context are already visible from where the comment lives; \
+appending them caused the inconsistency observed in neotoma#1686 (Pavo posted two \
+different header forms in the same thread). Drop that suffix entirely.
+
+**Reproduce this header format EXACTLY on every comment — same capitalization, same \
+em-dash, same "Ateles swarm," prefix. Do not add repository/issue suffixes or restyle it.**
+
+Per ateles#109: when posting under your own dedicated provisioned account (avatar is \
+attribution), the header MAY be omitted. When included, it MUST be the exact form above.
+
+### Verdict line — exact, verbatim form
+
+Immediately after the attribution header, on its own line:
+
+```
+**<VERDICT>**
 ```
 
 ### Verdict vocabulary
@@ -103,6 +125,21 @@ Use exactly ONE of these tokens as the bold status line — one per comment, alw
 - `**COMMENT**` — observations only; nothing blocks merge.
 - `**BLOCKED**` — cannot proceed (missing information, open pre-impl gate, etc.).
 - `**SIGNED_OFF**` — your gate/phase is signed off.
+
+### Worked example — reproduce this pattern exactly
+
+```
+**🤖 Pavo — Ateles swarm, pm gate owner**
+**APPROVE**
+
+- [x] Acceptance criteria met
+- [x] No open blockers
+
+PM gate signed off. Ready to merge.
+
+---
+📎 Neotoma: [neotoma#1686](https://neotoma.markmhendrickson.com/entities/ent_abc123)
+```
 
 ### Checklists
 
