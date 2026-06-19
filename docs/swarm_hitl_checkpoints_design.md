@@ -80,6 +80,23 @@ Every command is **operator-login-guarded** and **bot-author-guarded** (reuse `_
 
 ---
 
+## Native GitHub operator assignment (a blocking checkpoint is a first-class to-do)
+
+A `block_until_approve` checkpoint MUST make the operator the **native GitHub owner** of the pending artifact — not just a comment + Telegram ping (which is easy to miss and doesn't surface in GitHub's "assigned to me" / "review requested" views). The canonical-anchor principle applied to the operator's own attention: a pending checkpoint shows up in the operator's GitHub dashboard, filters, and notifications.
+
+Assignment is **per artifact type**:
+- **Issue checkpoint** (e.g. `pre_impl`, `issue.triaged`) → `gh issue edit <n> --add-assignee <operator>` so it lands in the operator's assigned-issues queue.
+- **PR checkpoint** (`pre_merge`, `pr.opened`) → `gh pr edit <n> --add-reviewer <operator>` (request review) so it lands in the operator's "Review requested" queue — and under branch protection, the operator's review can be the literal merge gate.
+- **Release / non-GitHub boundaries** (`pre_release`, `pre_comms`, `pre_payment`, `pre_skill_change`) → no GitHub artifact, so Telegram + the `checkpoint_brief` entity only.
+
+**On resolution (`/approve` or `/reject`): un-assign + hand ownership back to the swarm.** Remove the operator's assignee / dismiss the review request, and re-assign the relevant agent (e.g. Pavo for the pm gate, Vanellus as PR steward). This keeps the operator's "assigned to me" / "review requested" views equal to *only the live checkpoints awaiting them* — no accumulation of resolved checkpoints.
+
+- The operator login comes from `_OPERATOR_LOGIN` (env `APIS_OPERATOR_LOGIN`, default the repo owner) — the same identity the confirm commands are guarded against.
+- Best-effort + non-fatal (like the existing label/assignee steps): if assignment fails (permissions, not-a-collaborator), the checkpoint still blocks and still notifies — assignment is the *surfacing*, the `checkpoint_brief` + block is the *enforcement*.
+- This composes with per-agent identities (#109): once agents post as themselves, "assigned to you / review requested from you" cleanly means *your* checkpoint, distinct from an agent's own assignment.
+
+---
+
 ## Configuration: per-repo default + per-item override
 
 1. **Repo-level default** — one `execution_policy` per repo (linked to the repo, not a plan) sets the default checkpoints. Sensible starting defaults:
@@ -94,8 +111,8 @@ Every command is **operator-login-guarded** and **bot-author-guarded** (reuse `_
 
 ## Build phases
 
-- **Phase H1 — `pre_merge` formalized.** Convert today's hardcoded operator-gated-merge into a configured `pre_merge` checkpoint + the `/approve` `/reject` `/hold` commands (generalizing `/confirm-gates-clear`). Lowest-risk: it's already the default behavior; this just makes it explicit + adds the verdict verbs. Test on a real PR.
-- **Phase H2 — `pre_impl` checkpoint.** The core ask: pause before the swarm writes code on a non-trivial issue (condition: `blast>=high | diff>200 | labels:checkpoint:strict`). File the brief, block, release on `/approve`. (Note: today the swarm doesn't auto-*implement* from an issue — it reviews; so `pre_impl` becomes load-bearing when/if auto-implementation is wired. Until then it gates the issue→expectations→scoping handoff for flagged issues.)
+- **Phase H1 — `pre_merge` formalized.** Convert today's hardcoded operator-gated-merge into a configured `pre_merge` checkpoint + the `/approve` `/reject` `/hold` commands (generalizing `/confirm-gates-clear`). Lowest-risk: it's already the default behavior; this just makes it explicit + adds the verdict verbs, AND requests the operator as PR reviewer (`--add-reviewer`) on block, dismissing on resolve. Test on a real PR.
+- **Phase H2 — `pre_impl` checkpoint.** The core ask: pause before the swarm writes code on a non-trivial issue (condition: `blast>=high | diff>200 | labels:checkpoint:strict`). File the brief, block, assign the operator (`--add-assignee`) on the issue, release + un-assign on `/approve`. (Note: today the swarm doesn't auto-*implement* from an issue — it reviews; so `pre_impl` becomes load-bearing when/if auto-implementation is wired. Until then it gates the issue→expectations→scoping handoff for flagged issues.)
 - **Phase H3 — `pre_release`.** Block before any release/publish (already high-blast in the policy vocabulary).
 - **Phase H4 — condition DSL + per-repo execution_policy + label overrides.** The configurability layer.
 - **Phase H5 (later) — extend to non-GitHub boundaries** (`pre_comms`, `pre_payment`, `pre_skill_change`) using the same model.
