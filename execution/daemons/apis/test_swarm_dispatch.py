@@ -26,6 +26,7 @@ from swarm_dispatch import (
     _OPERATOR_LOGIN,
     _REJECT_CMD,
     _SWARM_RUN_CMD,
+    _VANELLUS_COMMENT_MARKER,
     DispatchConfig,
     SwarmDispatcher,
     _agent_prompt_instruction,
@@ -35,10 +36,12 @@ from swarm_dispatch import (
     agent_github_login,
     attribution_header,
     compose_fallback_comment,
+    compose_vanellus_fallback_comment,
     content_digest,
     is_provisioned,
     lenses_missing_comments,
     parse_gate_verdict,
+    vanellus_comment_missing,
 )
 
 
@@ -2039,4 +2042,245 @@ def test_reject_constant_value():
 def test_hold_constant_value():
     """_HOLD_CMD must be exactly '/hold'."""
     assert _HOLD_CMD == "/hold"
+
+
+# ── ateles#127 — Vanellus aggregation comment fallback ───────────────────────
+# Mirrors the panelist _post_missing_panel_comments safety-net for the
+# Vanellus aggregation step: if Vanellus's own gh comment does not land the
+# dispatcher posts the captured stdout.
+
+
+# ── vanellus_comment_missing helper ─────────────────────────────────────────
+
+
+def test_vanellus_comment_missing_when_no_comments():
+    """vanellus_comment_missing returns True when the comment list is empty."""
+    assert vanellus_comment_missing([]) is True
+
+
+def test_vanellus_comment_missing_when_marker_absent():
+    """vanellus_comment_missing returns True when no body contains the marker."""
+    bodies = ["review:pm\nLooks good.", "Some other comment."]
+    assert vanellus_comment_missing(bodies) is True
+
+
+def test_vanellus_comment_missing_false_when_marker_present():
+    """vanellus_comment_missing returns False when any body contains the marker."""
+    bodies = [
+        "Some review comment.",
+        f"{_VANELLUS_COMMENT_MARKER}\nVanellus verdict here.",
+    ]
+    assert vanellus_comment_missing(bodies) is False
+
+
+def test_vanellus_comment_missing_marker_substring_match():
+    """Marker detection works even when surrounded by more text."""
+    body = f"Preamble\n{_VANELLUS_COMMENT_MARKER}\nVerdict body."
+    assert vanellus_comment_missing([body]) is False
+
+
+# ── compose_vanellus_fallback_comment ─────────────────────────────────────────
+
+
+def test_compose_vanellus_fallback_comment_starts_with_marker():
+    """The fallback body must begin with the stable marker."""
+    body = compose_vanellus_fallback_comment("All clear.")
+    assert body.startswith(_VANELLUS_COMMENT_MARKER)
+
+
+def test_compose_vanellus_fallback_comment_contains_attribution():
+    """The fallback body must include the Vanellus attribution header."""
+    body = compose_vanellus_fallback_comment("BLOCKED: missing tests.")
+    assert attribution_header("vanellus", "PR steward") in body
+
+
+def test_compose_vanellus_fallback_comment_contains_verdict_text():
+    """The fallback body must reproduce the captured verdict text."""
+    verdict = "VERDICT: changes_requested — 2 BLOCKING findings."
+    body = compose_vanellus_fallback_comment(verdict)
+    assert verdict in body
+
+
+def test_compose_vanellus_fallback_comment_is_detectable():
+    """A fallback comment posted by the dispatcher must NOT appear missing."""
+    body = compose_vanellus_fallback_comment("signed_off.")
+    assert vanellus_comment_missing([body]) is False
+
+
+# ── _vanellus_prompt — explicit post instruction + repeat-for-fallback ─────────
+
+
+def test_vanellus_prompt_instructs_post_via_gh_cli():
+    """_vanellus_prompt must tell Vanellus to post via the gh CLI."""
+    t = _trigger()
+    prompt = SwarmDispatcher._vanellus_prompt(t, parent=80, lenses=["pm", "qa"])
+    # The exact marker must appear so Vanellus uses it in its comment.
+    assert _VANELLUS_COMMENT_MARKER in prompt
+
+
+def test_vanellus_prompt_instructs_repeat_for_fallback():
+    """_vanellus_prompt must ask Vanellus to repeat the verdict in its reply."""
+    t = _trigger()
+    prompt = SwarmDispatcher._vanellus_prompt(t, parent=80, lenses=[])
+    assert "Repeat" in prompt or "repeat" in prompt
+
+
+# ── _post_missing_vanellus_comment — dispatcher fallback ──────────────────────
+
+
+class _FakeHttpxClientForVanellus:
+    """httpx.AsyncClient stub that controls GET comment bodies and captures POSTs."""
+
+    def __init__(self, existing_bodies: list[str]):
+        self.existing_bodies = existing_bodies
+        self.post_calls: list[dict] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        pass
+
+    async def get(self, url, **kwargs):
+        class _Resp:
+            def raise_for_status(self): pass
+            def json(inner_self):
+                return [{"body": b} for b in self.existing_bodies]
+        return _Resp()
+
+    async def post(self, url, **kwargs):
+        self.post_calls.append({"url": url, "json": kwargs.get("json", {})})
+        class _Resp:
+            def raise_for_status(self): pass
+        return _Resp()
+
+
+def test_vanellus_fallback_posts_when_comment_missing(monkeypatch):
+    """When Vanellus's comment is absent, the dispatcher posts the captured stdout."""
+    client = _FakeHttpxClientForVanellus(existing_bodies=[])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    t = _trigger()
+    verdict_text = "VERDICT: All clear. PR approved."
+    result = SkillResult("vanellus", True, 0, verdict_text, "")
+
+    asyncio.run(dispatcher._post_missing_vanellus_comment(t, result))
+
+    assert len(client.post_calls) == 1, (
+        f"Expected 1 fallback POST; got {len(client.post_calls)}"
+    )
+    posted_body = client.post_calls[0]["json"].get("body", "")
+    assert _VANELLUS_COMMENT_MARKER in posted_body, (
+        "Fallback comment must contain the Vanellus marker for future dedup"
+    )
+    assert verdict_text in posted_body, (
+        "Fallback comment must reproduce the captured verdict text"
+    )
+
+
+def test_vanellus_fallback_skips_when_comment_already_present(monkeypatch):
+    """When Vanellus's comment IS present, no duplicate is posted."""
+    existing_body = f"{_VANELLUS_COMMENT_MARKER}\nVanellus already posted this."
+    client = _FakeHttpxClientForVanellus(existing_bodies=[existing_body])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    t = _trigger()
+    result = SkillResult("vanellus", True, 0, "VERDICT: all clear.", "")
+
+    asyncio.run(dispatcher._post_missing_vanellus_comment(t, result))
+
+    assert client.post_calls == [], (
+        "No fallback POST when Vanellus's own comment is already present"
+    )
+
+
+def test_vanellus_fallback_skips_when_stdout_empty(monkeypatch):
+    """When Vanellus produced no stdout, the fallback skips posting."""
+    client = _FakeHttpxClientForVanellus(existing_bodies=[])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    t = _trigger()
+    result = SkillResult("vanellus", True, 0, "", "")  # empty stdout
+
+    asyncio.run(dispatcher._post_missing_vanellus_comment(t, result))
+
+    assert client.post_calls == [], (
+        "No fallback POST when Vanellus produced no captured text"
+    )
+
+
+def test_vanellus_fallback_non_fatal_when_post_raises(monkeypatch):
+    """A failing fallback POST must not crash the pipeline."""
+    class _FailingClient:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def get(self, url, **kwargs):
+            class _Resp:
+                def raise_for_status(self): pass
+                def json(self): return []  # no existing comments
+            return _Resp()
+        async def post(self, url, **kwargs):
+            raise RuntimeError("GitHub API unavailable")
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _FailingClient())
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    t = _trigger()
+    result = SkillResult("vanellus", True, 0, "VERDICT: all clear.", "")
+
+    # Must not raise even when the POST fails.
+    asyncio.run(dispatcher._post_missing_vanellus_comment(t, result))
+
+
+def test_handle_pr_calls_vanellus_fallback_after_run(monkeypatch):
+    """_handle_pr must call _post_missing_vanellus_comment after the Vanellus run."""
+    fallback_calls: list[tuple] = []
+    skill_calls: list[str] = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        skill_calls.append(skill)
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "vanellus":
+            return SkillResult(skill, True, 0, "VERDICT: all clear.", "")
+        return SkillResult(skill, True, 0, "ok", "")
+
+    async def fake_vanellus_fallback(self, t, result):
+        fallback_calls.append((t.number, result.stdout))
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_post_missing_vanellus_comment", fake_vanellus_fallback
+    )
+
+    async def fake_changed_files(self, t): return []
+    async def fake_preregistered(self, repo, number): return {}
+    async def fake_store(self, entities, idempotency_key): pass
+    async def fake_post_missing(self, t, reviews, agents_by_lens): pass
+    async def fake_persist(self, t, reviews, agents_by_lens): pass
+    async def fake_merge_checkpoint(self, t, parent, lenses): pass
+
+    monkeypatch.setattr(SwarmDispatcher, "_changed_files", fake_changed_files)
+    monkeypatch.setattr(SwarmDispatcher, "_preregistered_expectations", fake_preregistered)
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_post_missing_panel_comments", fake_post_missing)
+    monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_persist)
+    monkeypatch.setattr(SwarmDispatcher, "_store_merge_checkpoint", fake_merge_checkpoint)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_pr(_trigger()))
+
+    assert len(fallback_calls) == 1, (
+        f"_post_missing_vanellus_comment must be called exactly once; got {fallback_calls}"
+    )
+    pr_number, captured_stdout = fallback_calls[0]
+    assert pr_number == 87
+    assert captured_stdout == "VERDICT: all clear."
 
