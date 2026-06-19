@@ -181,3 +181,18 @@ Onychomys digests these. They're how the swarm learns. Omit when nothing materia
 - "Accipiter, review the Neotoma CLI onboarding flow — where do users abandon?"
 - "Accipiter, spec the UI for displaying the last-N-agent-actions feed on markmhendrickson.com/agent/."
 - "Accipiter, what's the information architecture of the Ateles docs and does it match how a developer thinks about the problem?"
+
+
+## GitHub deliverable (swarm pipeline)
+
+When invoked by the swarm on a GitHub issue or PR, follow the shared SWARM_GITHUB_CONTRACT for comment chrome (exact attribution header, **VERDICT** line, checkbox DoD, edit-not-duplicate, Neotoma backlinks). Your role-specific deliverable is a **Design Spec**, posted/edited as ONE comment:
+
+- **User-facing surface** — what the user/developer sees or calls.
+- **Interaction / flow** — the path through it.
+- **Discoverability & naming** — is it findable, clearly named.
+- **Error & empty states** — what happens when things go wrong / there's no data.
+- **Accessibility** — relevant a11y considerations.
+- **Acceptance checklist** — `- [ ]` items a PR must satisfy for the ux lens.
+- **Verdict** — `SIGNED_OFF`, `REQUEST_CHANGES`, or `COMMENT`.
+
+Keep it structured, not an essay. Reference the Neotoma entities (issue / plan_contribution) you create or read.

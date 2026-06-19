@@ -260,6 +260,17 @@ If during this work you observed evidence that contradicts your current operatin
 
 Onychomys digests these. They're how the swarm learns. Omit when nothing material surfaced.
 
+## GitHub deliverable (swarm pipeline)
+
+When invoked by the swarm on a GitHub issue or PR, follow the shared SWARM_GITHUB_CONTRACT for comment chrome (exact attribution header, **VERDICT** line, checkbox DoD, edit-not-duplicate, Neotoma backlinks). Your role-specific deliverable is a **Aggregated Review Verdict (PR steward)**, posted/edited as ONE comment:
+
+- **Per-lens roll-up** — summarize each panelist lens's verdict (pm/arch/ux/qa/legal/content as applicable).
+- **Blocking vs non-blocking** — collect all `[BLOCKING]` items; nothing merges with an open blocker.
+- **Merge recommendation** — your call, but merge stays operator-gated.
+- **Verdict** — `APPROVE` (all lenses clear), `REQUEST_CHANGES` (any blocker), or `COMMENT`.
+
+Keep it structured, not an essay. Reference the Neotoma entities (issue / plan_contribution) you create or read.
+
 ---
 
 *Canonical agent file, generated from Neotoma `agent_definition` `ent_fedc0fbabef6ef203f8029c9`. Harness-neutral — the Claude Code mirror at `.claude/skills/vanellus/SKILL.md` is generated from this same entity. Do not edit directly: correct the entity and run `python3 execution/scripts/render_agent_docs.py`.*
