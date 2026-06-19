@@ -20,6 +20,7 @@ from swarm_dispatch import (
     PRE_IMPL_GATES,
     _CONFIRM_GATES_CLEAR_CMD,
     _OPERATOR_LOGIN,
+    _SWARM_RUN_CMD,
     DispatchConfig,
     SwarmDispatcher,
     _agent_prompt_instruction,
@@ -972,4 +973,265 @@ def test_github_trigger_gate_waive_passes_contract(monkeypatch):
             "include_github_contract=True"
         )
 
+
+# ── /swarm-run operator command (new) ─────────────────────────────────────────
+
+
+def _swarm_run_trigger(**overrides):
+    """Build an issue_comment SwarmTrigger for /swarm-run tests."""
+    base = dict(
+        kind="issue_comment",
+        repository="owner/repo",
+        number=42,
+        title="An existing issue",
+        body="Some issue description.",
+        author="contributor",
+        html_url="https://github.com/owner/repo/issues/42",
+        delivery_id="swarm-run-delivery",
+        action="created",
+        comment_id=99,
+        comment_author=_OPERATOR_LOGIN,
+        comment_body="/swarm-run",
+        comment_html_url="https://github.com/owner/repo/issues/42#issuecomment-99",
+        comment_on_pr=False,
+        labels=["bug"],
+    )
+    base.update(overrides)
+    return SwarmTrigger(**base)
+
+
+def test_swarm_run_from_operator_calls_handle_issue_opened(monkeypatch):
+    """/swarm-run from the operator must call _handle_issue_opened for the right issue."""
+    opened_calls = []
+
+    async def fake_handle_issue_opened(self, trigger):
+        opened_calls.append(trigger)
+
+    # Stub _post_swarm_run_comment so it doesn't need a real HTTP connection.
+    async def fake_post_swarm_run_comment(self, trigger):
+        pass
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle_issue_opened)
+    monkeypatch.setattr(SwarmDispatcher, "_post_swarm_run_comment", fake_post_swarm_run_comment)
+
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+    trigger = _swarm_run_trigger()
+
+    asyncio.run(dispatcher._handle_issue_comment(trigger))
+
+    assert len(opened_calls) == 1, (
+        f"_handle_issue_opened must be called exactly once; got {len(opened_calls)}"
+    )
+    called_trigger = opened_calls[0]
+    assert called_trigger.number == 42
+    assert called_trigger.repository == "owner/repo"
+    assert called_trigger.kind == "issue_opened"
+    # Notifier must record the /swarm-run event.
+    assert any(_SWARM_RUN_CMD in m or "swarm-run" in m.lower() for m in notifier.sent)
+
+
+def test_swarm_run_passes_issue_fields_from_trigger(monkeypatch):
+    """/swarm-run must forward the issue's title, body, labels from the trigger."""
+    opened_calls = []
+
+    async def fake_handle_issue_opened(self, trigger):
+        opened_calls.append(trigger)
+
+    async def fake_post_swarm_run_comment(self, trigger):
+        pass
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle_issue_opened)
+    monkeypatch.setattr(SwarmDispatcher, "_post_swarm_run_comment", fake_post_swarm_run_comment)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    trigger = _swarm_run_trigger(
+        title="My precise issue title",
+        body="Detailed body text.",
+        labels=["enhancement", "needs-triage"],
+    )
+
+    asyncio.run(dispatcher._handle_issue_comment(trigger))
+
+    assert len(opened_calls) == 1
+    t = opened_calls[0]
+    assert t.title == "My precise issue title"
+    assert t.body == "Detailed body text."
+    assert "enhancement" in t.labels
+    assert "needs-triage" in t.labels
+
+
+def test_swarm_run_from_non_operator_is_ignored(monkeypatch):
+    """/swarm-run from a non-operator must be silently ignored."""
+    opened_calls = []
+
+    async def fake_handle_issue_opened(self, trigger):
+        opened_calls.append(trigger)
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle_issue_opened)
+
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _swarm_run_trigger(comment_author="some-random-user")
+        )
+    )
+
+    assert opened_calls == [], (
+        f"_handle_issue_opened must not be called for non-operator; got {opened_calls}"
+    )
+    # No operator notification about the swarm run.
+    assert not any("swarm-run" in m.lower() for m in notifier.sent)
+
+
+def test_comment_with_neither_command_is_no_op(monkeypatch):
+    """A comment with neither /confirm-gates-clear nor /swarm-run is completely ignored."""
+    opened_calls = []
+    skill_calls = []
+
+    async def fake_handle_issue_opened(self, trigger):
+        opened_calls.append(trigger)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        skill_calls.append(skill)
+        return SkillResult(skill, True, 0, "", "")
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle_issue_opened)
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _swarm_run_trigger(comment_body="Great issue, thanks!")
+        )
+    )
+
+    assert opened_calls == []
+    assert skill_calls == []
+    assert notifier.sent == []
+
+
+def test_confirm_gates_clear_still_works_after_swarm_run_added(monkeypatch):
+    """/confirm-gates-clear must still invoke Lanius gate-waive after the refactor."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        calls.append((skill, prompt))
+        return SkillResult(skill, True, 0, "Gates waived.", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+
+    asyncio.run(dispatcher._handle_issue_comment(_comment_trigger()))
+
+    assert any(c[0] == "lanius" for c in calls), "Lanius must still be called for /confirm-gates-clear"
+    lanius_prompt = next(c[1] for c in calls if c[0] == "lanius")
+    assert _CONFIRM_GATES_CLEAR_CMD in lanius_prompt
+    assert any("cleared" in m or "waiv" in m for m in notifier.sent)
+
+
+def test_both_commands_prefers_confirm_gates_clear(monkeypatch):
+    """When both /confirm-gates-clear and /swarm-run are in a comment, gates-clear wins."""
+    opened_calls = []
+    skill_calls = []
+
+    async def fake_handle_issue_opened(self, trigger):
+        opened_calls.append(trigger)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        skill_calls.append(skill)
+        return SkillResult(skill, True, 0, "Gates waived.", "")
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle_issue_opened)
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _comment_trigger(
+                comment_body=f"{_CONFIRM_GATES_CLEAR_CMD} {_SWARM_RUN_CMD}"
+            )
+        )
+    )
+
+    # /confirm-gates-clear path: Lanius must be called, issue pipeline must NOT.
+    assert any(c == "lanius" for c in skill_calls), (
+        "Lanius must be called when /confirm-gates-clear is present"
+    )
+    assert opened_calls == [], (
+        "_handle_issue_opened must NOT be called when /confirm-gates-clear takes priority"
+    )
+
+
+def test_swarm_run_fetches_issue_fields_when_title_empty(monkeypatch):
+    """/swarm-run fetches title/body/labels from the API when trigger.title is empty."""
+    opened_calls = []
+    fetch_calls = []
+
+    async def fake_handle_issue_opened(self, trigger):
+        opened_calls.append(trigger)
+
+    async def fake_post_swarm_run_comment(self, trigger):
+        pass
+
+    async def fake_fetch_issue_fields(self, repository, issue_number):
+        fetch_calls.append((repository, issue_number))
+        return {
+            "title": "Fetched title",
+            "body": "Fetched body",
+            "labels": [{"name": "fetched-label"}],
+        }
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle_issue_opened)
+    monkeypatch.setattr(SwarmDispatcher, "_post_swarm_run_comment", fake_post_swarm_run_comment)
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_issue_fields", fake_fetch_issue_fields)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    trigger = _swarm_run_trigger(title="", body="", labels=[])
+
+    asyncio.run(dispatcher._handle_issue_comment(trigger))
+
+    assert fetch_calls == [("owner/repo", 42)], (
+        "_fetch_issue_fields must be called when trigger.title is empty"
+    )
+    assert len(opened_calls) == 1
+    t = opened_calls[0]
+    assert t.title == "Fetched title"
+    assert t.body == "Fetched body"
+    assert "fetched-label" in t.labels
+
+
+def test_swarm_run_proceeds_even_if_confirmation_comment_fails(monkeypatch):
+    """/swarm-run must call _handle_issue_opened even if the confirmation comment errors."""
+    opened_calls = []
+
+    async def fake_handle_issue_opened(self, trigger):
+        opened_calls.append(trigger)
+
+    async def failing_post_swarm_run_comment(self, trigger):
+        raise RuntimeError("GitHub API unavailable")
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle_issue_opened)
+    monkeypatch.setattr(SwarmDispatcher, "_post_swarm_run_comment", failing_post_swarm_run_comment)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    asyncio.run(dispatcher._handle_issue_comment(_swarm_run_trigger()))
+
+    # Despite the confirmation comment failure, the pipeline must still run.
+    assert len(opened_calls) == 1, (
+        "_handle_issue_opened must still run when the confirmation comment fails"
+    )
+
+
+def test_swarm_run_constant_value():
+    """_SWARM_RUN_CMD must be exactly '/swarm-run'."""
+    assert _SWARM_RUN_CMD == "/swarm-run"
 
