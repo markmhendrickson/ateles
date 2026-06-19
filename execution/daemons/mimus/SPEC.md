@@ -48,7 +48,9 @@ the date; same-day re-invocations exit immediately.
 ### Phase 1 — sweep & extract (fast)
 
 1. **Watermark.** Read `.mimus_watermark` (ISO timestamp of the last swept
-   `updated_at`). On first run, process the backlog in batches.
+   `updated_at`). **First run sweeps the full backlog** (~5,701 conversations)
+   in batches (operator decision, 2026-06-19); the watermark is only advanced
+   once the backlog is drained, after which runs are incremental.
 2. **Retrieve.** `retrieve_entities(entity_type="analysis", updated_since=…)`
    first (already-distilled signal, cheapest), then `conversation` /
    `agent_message` for sessions without an `analysis`. Page with
@@ -116,12 +118,15 @@ execution/daemons/mimus/
 | `TELEGRAM_TOPIC_CONTENT` | Thread ID for the content topic (new) |
 | `ANTHROPIC_API_KEY` | Extraction pass via `claude --print` |
 
+## Decisions
+
+- **Backlog vs. forward-only** — *resolved 2026-06-19:* first run sweeps the
+  full ~5,701-conversation backlog in batches, then runs incrementally off the
+  watermark.
+
 ## Open questions for the operator
 
-1. **Backlog vs. forward-only.** Sweep all ~5,701 conversations on first run
-   (batched over several days), or start from a recent watermark and only
-   process new sessions going forward?
-2. **Cadence & volume.** Daily, or weekly? Cap of N ideas per digest to avoid
+1. **Cadence & volume.** Daily, or weekly? Cap of N ideas per digest to avoid
    flooding (proposed: top 5 by confidence).
-3. **Scope.** All conversations, or only those linked to the plan / tagged
+2. **Scope.** All conversations, or only those linked to the plan / tagged
    topics worth writing about publicly?
