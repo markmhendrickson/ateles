@@ -50,6 +50,18 @@ _GATE_VERDICT = re.compile(r"GATE_INHERITANCE:\s*(clear|blocked)", re.I)
 # issue this command (ateles#112 guardrail).
 _CONFIRM_GATES_CLEAR_CMD = "/confirm-gates-clear"
 
+# Operator command that re-runs the issue pipeline (Lanius triage + expectation
+# pre-registration + Pavo scoping) on an EXISTING issue.  Useful for the
+# operator's iteration-test rhythm: after each design increment, comment
+# /swarm-run on the issue to re-drive the pipeline without having to close and
+# re-open the issue.  Only _OPERATOR_LOGIN may invoke this command.
+#
+# Re-runs rely on Lanius's idempotent triage and Pavo's idempotent scoping:
+# they edit-not-duplicate their own comments and correct-not-recreate the
+# Neotoma gate entities.  Review expectations are re-posted as new comments
+# (not idempotent) — acceptable for iteration testing.
+_SWARM_RUN_CMD = "/swarm-run"
+
 # Pre-impl gates that must be signed off before the PR review panel runs.
 # These are the gates Lanius checks for GATE_INHERITANCE.
 PRE_IMPL_GATES = ("pm", "arch")
@@ -476,38 +488,61 @@ class SwarmDispatcher:
     async def _handle_issue_comment(self, trigger: SwarmTrigger) -> None:
         """Handle an issue_comment webhook event.
 
-        Only reacts to `/confirm-gates-clear` from the operator login.
+        Reacts to two operator commands (only _OPERATOR_LOGIN may invoke either):
+          /confirm-gates-clear  — waive unsigned pre-impl gates + re-trigger PR pipeline.
+          /swarm-run            — re-run the full issue pipeline (Lanius triage +
+                                  expectation pre-registration + Pavo scoping) on the
+                                  existing issue.  Useful for iteration testing after a
+                                  design increment without closing/re-opening the issue.
+
+        When both commands appear in a single comment, /confirm-gates-clear takes
+        priority (gate clearance is the more time-sensitive action).
+
         All other comments are silently ignored — this is the best-effort,
         never-crash path.
 
-        When the command is valid:
-          1. Look up the issue entity in Neotoma to find unsigned pre-impl gates.
-          2. Waive each unsigned gate (gate_status.<gate> → "waived") via Lanius.
-          3. Re-trigger the PR pipeline for any open PR that references the issue.
-
-        Security guardrail: only _OPERATOR_LOGIN may clear gates.  Any other
-        commenter — including swarm agents — is silently ignored.
+        Security guardrail: only _OPERATOR_LOGIN may invoke either command.  Any
+        other commenter — including swarm agents — is silently ignored.
         """
         comment_author = trigger.comment_author
         comment_body = (trigger.comment_body or "").strip()
         ref = f"{trigger.repository}#{trigger.number}"
 
-        # Guard 1: only react to the /confirm-gates-clear command.
-        if _CONFIRM_GATES_CLEAR_CMD not in comment_body:
+        has_gates_clear = _CONFIRM_GATES_CLEAR_CMD in comment_body
+        has_swarm_run = _SWARM_RUN_CMD in comment_body
+
+        # Guard 1: only react when a known command is present.
+        if not has_gates_clear and not has_swarm_run:
             log.debug(
-                f"[{DAEMON_NAME}] issue_comment on {ref} has no "
-                f"{_CONFIRM_GATES_CLEAR_CMD!r} command — ignored"
+                f"[{DAEMON_NAME}] issue_comment on {ref} has no recognised "
+                f"command ({_CONFIRM_GATES_CLEAR_CMD!r} or {_SWARM_RUN_CMD!r}) "
+                "— ignored"
             )
             return
 
-        # Guard 2: operator-only guardrail.
+        # Guard 2: operator-only guardrail (applies to both commands).
         if comment_author.lower() != _OPERATOR_LOGIN.lower():
+            cmd = _CONFIRM_GATES_CLEAR_CMD if has_gates_clear else _SWARM_RUN_CMD
             log.warning(
-                f"[{DAEMON_NAME}] {_CONFIRM_GATES_CLEAR_CMD} from "
-                f"non-operator {comment_author!r} on {ref} — ignored "
-                f"(operator login: {_OPERATOR_LOGIN!r})"
+                f"[{DAEMON_NAME}] {cmd} from non-operator {comment_author!r} "
+                f"on {ref} — ignored (operator login: {_OPERATOR_LOGIN!r})"
             )
             return
+
+        # Dispatch: /confirm-gates-clear takes priority when both appear.
+        if has_gates_clear:
+            await self._handle_confirm_gates_clear(trigger)
+        else:
+            await self._handle_swarm_run(trigger)
+
+    async def _handle_confirm_gates_clear(self, trigger: SwarmTrigger) -> None:
+        """Execute the /confirm-gates-clear operator command.
+
+        Waives all unsigned pre-impl gates on the issue and re-triggers the PR
+        pipeline if the comment is on a PR.  Internal helper called from
+        _handle_issue_comment after all guards pass.
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
 
         log.info(
             f"[{DAEMON_NAME}] operator {_CONFIRM_GATES_CLEAR_CMD} received "
@@ -560,6 +595,140 @@ class SwarmDispatcher:
                 priority=Priority.INFO,
                 handler=DAEMON_NAME,
             )
+
+    async def _handle_swarm_run(self, trigger: SwarmTrigger) -> None:
+        """Execute the /swarm-run operator command.
+
+        Re-runs the full issue pipeline (Lanius triage + expectation
+        pre-registration + Pavo scoping) for the issue referenced by this
+        issue_comment trigger.
+
+        The issue_comment SwarmTrigger is already populated with the issue's
+        title, body, and labels by github_gateway.parse_github_event (from the
+        `issue` object in the comment event payload) — no additional gh fetch
+        is needed in the normal case.  If any of those fields are empty (e.g.
+        a legacy delivery with a sparse payload) we fetch them from the GitHub
+        API before calling _handle_issue_opened.
+
+        Best-effort: posts a confirming comment before starting, then calls
+        _handle_issue_opened.  Never raises.
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
+
+        log.info(
+            f"[{DAEMON_NAME}] operator {_SWARM_RUN_CMD} received on {ref} "
+            f"(comment #{trigger.comment_id})"
+        )
+        self.notifier.send(
+            f"Operator /swarm-run on {ref} — re-running the issue pipeline",
+            priority=Priority.INFO,
+            handler=DAEMON_NAME,
+        )
+
+        # Post a confirming comment so the re-run is visible on GitHub.
+        # Best-effort: failures here must not block the pipeline.
+        try:
+            await self._post_swarm_run_comment(trigger)
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] failed to post /swarm-run confirmation "
+                f"comment on {ref}: {exc}"
+            )
+
+        # Build an issue-shaped trigger from the comment event fields.
+        # parse_github_event populates title/body/labels from the issue object
+        # in the issue_comment payload, so these are available on trigger
+        # without a separate API call.  If they're empty (sparse payload),
+        # fetch them.
+        issue_title = trigger.title
+        issue_body = trigger.body
+        issue_labels = trigger.labels
+
+        if not issue_title:
+            fetched = await self._fetch_issue_fields(
+                trigger.repository, trigger.number
+            )
+            if fetched:
+                issue_title = fetched.get("title", "")
+                issue_body = fetched.get("body", "")
+                issue_labels = [
+                    lbl.get("name", "") for lbl in fetched.get("labels", [])
+                ]
+
+        issue_trigger = SwarmTrigger(
+            kind="issue_opened",
+            repository=trigger.repository,
+            number=trigger.number,
+            title=issue_title,
+            body=issue_body,
+            author=trigger.author,
+            html_url=trigger.html_url,
+            delivery_id=trigger.delivery_id,
+            action="reopened",
+            labels=issue_labels,
+            raw=trigger.raw,
+        )
+
+        log.info(
+            f"[{DAEMON_NAME}] re-running issue pipeline for {ref} "
+            f"via {_SWARM_RUN_CMD}"
+        )
+        await self._handle_issue_opened(issue_trigger)
+
+    async def _post_swarm_run_comment(self, trigger: SwarmTrigger) -> None:
+        """Post a brief confirming comment for the /swarm-run command.
+
+        Uses the shared GitHub token for the repo.  Best-effort: caller catches
+        exceptions and logs a warning rather than propagating.
+        """
+        repo_token = _token_for_repo(trigger.repository)
+        if not repo_token:
+            log.warning(
+                f"[{DAEMON_NAME}] no GitHub token — /swarm-run confirmation "
+                f"comment skipped for {trigger.repository}#{trigger.number}"
+            )
+            return
+        url = (
+            f"https://api.github.com/repos/{trigger.repository}/issues/"
+            f"{trigger.number}/comments"
+        )
+        body = (
+            f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+            f"\U0001f501 Operator `{_SWARM_RUN_CMD}` — re-running the issue "
+            "pipeline (Lanius triage + review expectations + Pavo scoping). "
+            "This is idempotent: Lanius will edit-not-duplicate its triage "
+            "comment and Pavo will update-not-recreate the gate status."
+        )
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                url,
+                json={"body": body},
+                headers=self._github_headers(trigger.repository),
+            )
+            resp.raise_for_status()
+
+    async def _fetch_issue_fields(
+        self, repository: str, issue_number: int
+    ) -> dict | None:
+        """Fetch title, body, and labels for an issue via the GitHub API.
+
+        Used as a fallback when the issue_comment trigger payload carries an
+        empty title (sparse webhook delivery).  Returns None on any error.
+        """
+        url = f"https://api.github.com/repos/{repository}/issues/{issue_number}"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    url, headers=self._github_headers(repository)
+                )
+                resp.raise_for_status()
+                return resp.json()
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] failed to fetch issue fields for "
+                f"{repository}#{issue_number}: {exc}"
+            )
+            return None
 
     async def _lanius_waive_gates(self, trigger: SwarmTrigger) -> None:
         """Ask Lanius to waive all unsigned pre-impl gates on the issue entity.
