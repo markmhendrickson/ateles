@@ -1,6 +1,6 @@
 # Swarm GitHub Interaction & Artifact Design
 
-**Status:** design (2026-06-18) · **Scope:** the 8 GitHub-facing swarm agents (lanius, pavo, vanellus, bombycilla, accipiter, buteo, phoenicurus, corvus)
+**Status:** design (2026-06-18) · **Scope:** the 8 GitHub-facing swarm agents (lanius, pavo, vanellus, waxwing, accipiter, buteo, phoenicurus, corvus)
 
 **Goal:** make swarm agents (1) interact on GitHub **consistently** (shared comment chrome + conventions), (2) produce **role-specific artifacts** that match their expertise (designer → design spec, arch → ADR, etc.), and (3) use GitHub's **richer review primitives** (formal Reviews, inline/suggested changes, templates, status labels) instead of only plain comments.
 
@@ -65,7 +65,7 @@ Each contract reuses the shared skeleton (Layer A) so the chrome is consistent; 
 ## Layer C — GitHub primitives beyond plain comments (all four adopted)
 
 1. **Formal PR Reviews** (`gh pr review --approve` / `--request-changes` / `--comment`). Vanellus + lenses emit real GitHub Review verdicts so outcomes show in GitHub's review state + branch protection, not just prose. Map the shared verdict vocabulary → the review event. (Best-effort + operator-gated for merge, per current policy.)
-2. **Inline + suggested changes.** Findings anchor to specific lines (`gh api .../comments` with `path`+`line`), and code fixes use ```suggestion blocks the author one-clicks to apply. Turns "line 218 should…" into an actionable diff. (Primarily bombycilla/phoenicurus/buteo.)
+2. **Inline + suggested changes.** Findings anchor to specific lines (`gh api .../comments` with `path`+`line`), and code fixes use ```suggestion blocks the author one-clicks to apply. Turns "line 218 should…" into an actionable diff. (Primarily waxwing/phoenicurus/buteo.)
 3. **Issue/PR templates** (`.github/ISSUE_TEMPLATE/*.yml` + `PULL_REQUEST_TEMPLATE.md`) in ateles + neotoma. Scaffolds the fields agents depend on at the SOURCE: acceptance criteria, parent issue (so PR gate-inheritance works), workflow type, gate info. Reduces "PR has no parent issue" failure modes.
 4. **Labels / Projects / Milestones as status.** Extend the `lanius-triage` label into a consistent **gate/phase taxonomy** (`gate:pm-signed`, `phase:arch`, `blocked:gates`, …) so the swarm's gate state projects natively onto GitHub (filters, boards). Optionally a Projects board per repo. (Lanius owns label application.)
 
