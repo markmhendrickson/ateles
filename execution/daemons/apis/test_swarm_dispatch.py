@@ -20,8 +20,11 @@ from swarm_dispatch import (
     EXPECTATION_MARKER,
     GITHUB_FACING_AGENTS,
     PRE_IMPL_GATES,
+    _APPROVE_CMD,
     _CONFIRM_GATES_CLEAR_CMD,
+    _HOLD_CMD,
     _OPERATOR_LOGIN,
+    _REJECT_CMD,
     _SWARM_RUN_CMD,
     DispatchConfig,
     SwarmDispatcher,
@@ -1528,4 +1531,512 @@ def test_post_swarm_run_comment_posts_new_when_no_existing(monkeypatch):
     posted_body = post_calls[0]["json"].get("body", "")
     assert "<!-- swarm-run-confirmation -->" in posted_body
     assert _SWARM_RUN_CMD not in posted_body
+
+
+# ── Phase H1: /approve /reject /hold + operator reviewer ─────────────────────
+
+
+def _checkpoint_trigger(**overrides):
+    """Build an issue_comment SwarmTrigger simulating a PR checkpoint comment."""
+    base = dict(
+        kind="issue_comment",
+        repository="owner/repo",
+        number=87,
+        title="A pull request",
+        body="Closes #80.",
+        author="contributor",
+        html_url="https://github.com/owner/repo/pull/87",
+        delivery_id="h1-test-delivery",
+        action="created",
+        comment_id=200,
+        comment_author=_OPERATOR_LOGIN,
+        comment_body="/approve",
+        comment_html_url="https://github.com/owner/repo/pull/87#issuecomment-200",
+        comment_on_pr=True,
+    )
+    base.update(overrides)
+    return SwarmTrigger(**base)
+
+
+class _FakeHttpxClient:
+    """Minimal httpx.AsyncClient stub that records POST/DELETE calls."""
+
+    def __init__(self, **kwargs):
+        self.post_calls: list[dict] = []
+        self.delete_calls: list[dict] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        pass
+
+    async def post(self, url, **kwargs):
+        self.post_calls.append({"url": url, "json": kwargs.get("json", {})})
+        return _FakeResp(201)
+
+    async def request(self, method, url, **kwargs):
+        if method == "DELETE":
+            self.delete_calls.append({"url": url, "json": kwargs.get("json", {})})
+        return _FakeResp(200)
+
+
+class _FakeResp:
+    def __init__(self, status_code=200):
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                "error", request=None, response=self  # type: ignore[arg-type]
+            )
+
+    def json(self):
+        return {}
+
+
+# ── /approve command ─────────────────────────────────────────────────────────
+
+
+def test_approve_from_operator_resolves_checkpoint_and_removes_reviewer(monkeypatch):
+    """/approve from the operator resolves checkpoint + removes operator reviewer."""
+    stored: list[dict] = []
+    http_client = _FakeHttpxClient()
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: http_client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+    asyncio.run(dispatcher._handle_issue_comment(_checkpoint_trigger()))
+
+    # Checkpoint resolution entity must be stored with status=approved.
+    assert any(
+        e.get("entity_type") == "checkpoint_brief" and e.get("status") == "approved"
+        for e in stored
+    ), f"Expected approved checkpoint_brief in stored: {stored}"
+
+    # Comment posted (POST to issues/<n>/comments).
+    assert any("comments" in c["url"] for c in http_client.post_calls), (
+        f"Expected a comment POST; got {http_client.post_calls}"
+    )
+
+    # Operator removed from reviewer list (DELETE to requested_reviewers).
+    assert any(
+        "requested_reviewers" in c["url"] for c in http_client.delete_calls
+    ), f"Expected reviewer DELETE; got {http_client.delete_calls}"
+    delete_body = next(
+        c for c in http_client.delete_calls if "requested_reviewers" in c["url"]
+    )
+    assert _OPERATOR_LOGIN in delete_body["json"].get("reviewers", []), (
+        f"DELETE body must remove _OPERATOR_LOGIN; got {delete_body}"
+    )
+
+    # Notifier called with an approval/handback message.
+    assert any("approved" in m.lower() or "approve" in m.lower() for m in notifier.sent), (
+        f"Notifier must mention approval; got {notifier.sent}"
+    )
+
+
+def test_approve_comment_body_has_no_command_tokens(monkeypatch):
+    """/approve confirmation comment must not contain command tokens (self-trigger guard)."""
+    comment_bodies: list[str] = []
+
+    async def fake_store(self, entities, idempotency_key):
+        pass
+
+    class _CapturingClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def post(self, url, **kwargs):
+            comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+            return _FakeResp(201)
+        async def request(self, method, url, **kwargs):
+            return _FakeResp(200)
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._handle_issue_comment(
+            _checkpoint_trigger()
+        )
+    )
+
+    for body in comment_bodies:
+        assert _APPROVE_CMD not in body, (
+            f"Approve comment must not contain {_APPROVE_CMD!r}: {body!r}"
+        )
+        assert _REJECT_CMD not in body
+        assert _HOLD_CMD not in body
+        assert _SWARM_RUN_CMD not in body
+        assert _CONFIRM_GATES_CLEAR_CMD not in body
+
+
+def test_approve_from_non_operator_is_ignored(monkeypatch):
+    """/approve from a non-operator must be silently ignored."""
+    stored: list = []
+    http_calls: list = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _checkpoint_trigger(comment_author="some-random-user")
+        )
+    )
+
+    assert stored == [], f"No Neotoma store should happen for non-operator: {stored}"
+    assert notifier.sent == [], f"No notifications for non-operator: {notifier.sent}"
+
+
+def test_approve_from_bot_is_ignored(monkeypatch):
+    """/approve from a bot identity must be silently ignored (self-trigger guard)."""
+    stored: list = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+    for bot_login in ["ateles-agent", "neotoma-agent", "github-actions[bot]"]:
+        asyncio.run(
+            dispatcher._handle_issue_comment(
+                _checkpoint_trigger(comment_author=bot_login)
+            )
+        )
+
+    assert stored == [], f"No store for bot authors: {stored}"
+    assert notifier.sent == [], f"No notifications for bot authors: {notifier.sent}"
+
+
+# ── /reject command ──────────────────────────────────────────────────────────
+
+
+def test_reject_from_operator_records_reason_and_removes_reviewer(monkeypatch):
+    """/reject <reason> records reason, resolves as rejected, removes reviewer."""
+    stored: list[dict] = []
+    http_client = _FakeHttpxClient()
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: http_client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _checkpoint_trigger(comment_body="/reject needs more tests")
+        )
+    )
+
+    # Checkpoint stored with status=rejected.
+    rejected = [
+        e for e in stored
+        if e.get("entity_type") == "checkpoint_brief" and e.get("status") == "rejected"
+    ]
+    assert rejected, f"Expected rejected checkpoint_brief; got {stored}"
+    # Reason appears in the stored entity body.
+    assert "needs more tests" in rejected[0].get("body", ""), (
+        f"Rejection reason must appear in stored entity body: {rejected[0]}"
+    )
+
+    # Operator reviewer removed.
+    assert any(
+        "requested_reviewers" in c["url"] for c in http_client.delete_calls
+    ), f"Expected reviewer DELETE; got {http_client.delete_calls}"
+
+    # Notifier mentions rejection.
+    assert any("reject" in m.lower() for m in notifier.sent), (
+        f"Notifier must mention rejection; got {notifier.sent}"
+    )
+
+
+def test_reject_does_not_proceed_with_merge(monkeypatch):
+    """/reject must NOT trigger a merge or PR pipeline action."""
+    skill_calls: list = []
+    stored: list = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        skill_calls.append(skill)
+        return SkillResult(skill, True, 0, "", "")
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _FakeHttpxClient())
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._handle_issue_comment(
+            _checkpoint_trigger(comment_body="/reject bad diff")
+        )
+    )
+
+    # No skill (merge, vanellus, etc.) must be called.
+    assert skill_calls == [], f"/reject must not trigger any skill calls: {skill_calls}"
+
+
+def test_reject_from_non_operator_is_ignored(monkeypatch):
+    """/reject from a non-operator is silently ignored."""
+    stored: list = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+
+    notifier = _StubNotifier()
+    asyncio.run(
+        SwarmDispatcher(notifier, _config())._handle_issue_comment(
+            _checkpoint_trigger(comment_author="stranger", comment_body="/reject bad")
+        )
+    )
+
+    assert stored == []
+    assert notifier.sent == []
+
+
+# ── /hold command ─────────────────────────────────────────────────────────────
+
+
+def test_hold_acks_and_leaves_reviewer_in_place(monkeypatch):
+    """/hold posts an ack comment but does NOT remove the operator from reviewers."""
+    stored: list = []
+    http_client = _FakeHttpxClient()
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: http_client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _checkpoint_trigger(comment_body="/hold")
+        )
+    )
+
+    # Ack comment posted.
+    assert any("comments" in c["url"] for c in http_client.post_calls), (
+        f"Expected ack POST; got {http_client.post_calls}"
+    )
+
+    # No DELETE to requested_reviewers — /hold leaves the reviewer in place.
+    assert http_client.delete_calls == [], (
+        f"/hold must NOT remove operator reviewer; got {http_client.delete_calls}"
+    )
+
+    # No checkpoint_brief stored (no resolution — still open).
+    assert stored == [], f"/hold must not store any entity; got {stored}"
+
+    # Notifier acks the hold.
+    assert any("park" in m.lower() or "hold" in m.lower() for m in notifier.sent), (
+        f"Notifier must mention park/hold; got {notifier.sent}"
+    )
+
+
+def test_hold_from_non_operator_is_ignored(monkeypatch):
+    """/hold from a non-operator is silently ignored."""
+    stored: list = []
+    http_client = _FakeHttpxClient()
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: http_client)
+
+    notifier = _StubNotifier()
+    asyncio.run(
+        SwarmDispatcher(notifier, _config())._handle_issue_comment(
+            _checkpoint_trigger(comment_author="stranger", comment_body="/hold")
+        )
+    )
+
+    assert http_client.post_calls == []
+    assert stored == []
+    assert notifier.sent == []
+
+
+# ── Merge boundary requests operator as reviewer ──────────────────────────────
+
+
+def test_merge_checkpoint_requests_operator_as_reviewer(monkeypatch):
+    """_store_merge_checkpoint must POST to requested_reviewers with the operator."""
+    post_calls: list[dict] = []
+    http_client = _FakeHttpxClient()
+    # Capture POST calls so we can distinguish reviewer requests from comments.
+    original_post = http_client.post
+
+    async def recording_post(url, **kwargs):
+        post_calls.append({"url": url, "json": kwargs.get("json", {})})
+        return _FakeResp(201)
+
+    http_client.post = recording_post
+
+    async def fake_store(self, entities, idempotency_key):
+        pass
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: http_client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    t = _trigger()  # PR trigger for owner/repo#87
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._store_merge_checkpoint(t, parent=80, lenses=["pm", "qa"]))
+
+    # Must POST to the requested_reviewers endpoint.
+    reviewer_posts = [c for c in post_calls if "requested_reviewers" in c["url"]]
+    assert reviewer_posts, (
+        f"Expected a POST to requested_reviewers; got all posts: {post_calls}"
+    )
+    # Must include the operator login.
+    assert any(
+        _OPERATOR_LOGIN in c["json"].get("reviewers", []) for c in reviewer_posts
+    ), f"Reviewer request must include _OPERATOR_LOGIN; got {reviewer_posts}"
+
+
+def test_merge_checkpoint_reviewer_request_failure_is_non_fatal(monkeypatch):
+    """A failing reviewer request must not prevent the checkpoint from being stored."""
+    stored: list = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    class _FailingClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def post(self, url, **kwargs):
+            raise RuntimeError("GitHub API unavailable")
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(httpx, "AsyncClient", _FailingClient)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    t = _trigger()
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    # Must not raise even when the reviewer request fails.
+    asyncio.run(dispatcher._store_merge_checkpoint(t, parent=80, lenses=[]))
+
+    # Checkpoint entity must still be stored despite the HTTP failure.
+    assert any(e.get("entity_type") == "checkpoint_brief" for e in stored), (
+        f"checkpoint_brief must be stored even when reviewer request fails: {stored}"
+    )
+
+
+# ── Existing commands still work after H1 additions ──────────────────────────
+
+
+def test_confirm_gates_clear_still_dispatches_after_h1_commands_added(monkeypatch):
+    """/confirm-gates-clear must still work with H1 commands present in codebase."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        calls.append(skill)
+        return SkillResult(skill, True, 0, "Gates waived.", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._handle_issue_comment(
+            _comment_trigger()
+        )
+    )
+
+    assert "lanius" in calls, f"Lanius must still be called for /confirm-gates-clear: {calls}"
+
+
+def test_swarm_run_still_dispatches_after_h1_commands_added(monkeypatch):
+    """/swarm-run must still work with H1 commands present in codebase."""
+    opened_calls = []
+
+    async def fake_handle_issue_opened(self, trigger):
+        opened_calls.append(trigger)
+
+    async def fake_post_swarm_run_comment(self, trigger):
+        pass
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle_issue_opened)
+    monkeypatch.setattr(SwarmDispatcher, "_post_swarm_run_comment", fake_post_swarm_run_comment)
+    asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._handle_issue_comment(
+            _swarm_run_trigger()
+        )
+    )
+
+    assert len(opened_calls) == 1, (
+        f"/swarm-run must still dispatch _handle_issue_opened: {opened_calls}"
+    )
+
+
+def test_confirm_gates_clear_wins_over_approve_when_both_present(monkeypatch):
+    """When /confirm-gates-clear and /approve both appear, gates-clear wins."""
+    calls = []
+    stored: list = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        calls.append(skill)
+        return SkillResult(skill, True, 0, "Gates waived.", "")
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+
+    asyncio.run(
+        SwarmDispatcher(_StubNotifier(), _config())._handle_issue_comment(
+            _comment_trigger(
+                comment_body=f"{_CONFIRM_GATES_CLEAR_CMD} {_APPROVE_CMD}"
+            )
+        )
+    )
+
+    # gates-clear wins: Lanius called, no checkpoint_brief stored.
+    assert "lanius" in calls, "Lanius must be called when /confirm-gates-clear is present"
+    approved_entities = [
+        e for e in stored
+        if e.get("entity_type") == "checkpoint_brief" and e.get("status") == "approved"
+    ]
+    assert approved_entities == [], (
+        "No approved checkpoint_brief when /confirm-gates-clear takes priority"
+    )
+
+
+def test_approve_constant_value():
+    """_APPROVE_CMD must be exactly '/approve'."""
+    assert _APPROVE_CMD == "/approve"
+
+
+def test_reject_constant_value():
+    """_REJECT_CMD must be exactly '/reject'."""
+    assert _REJECT_CMD == "/reject"
+
+
+def test_hold_constant_value():
+    """_HOLD_CMD must be exactly '/hold'."""
+    assert _HOLD_CMD == "/hold"
 
