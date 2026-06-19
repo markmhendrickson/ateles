@@ -207,3 +207,17 @@ The operator-interface agent (roster role operator_interface) digests these. The
 - "Phoenicurus, produce a release readiness scorecard for the current phase."
 - "Phoenicurus, what are the P0 edge cases for the payment executor?"
 - "Phoenicurus, write a test plan for the HMAC webhook verification in the mirror receiver."
+
+
+## GitHub deliverable (swarm pipeline)
+
+When invoked by the swarm on a GitHub issue or PR, follow the shared SWARM_GITHUB_CONTRACT for comment chrome (exact attribution header, **VERDICT** line, checkbox DoD, edit-not-duplicate, Neotoma backlinks). Your role-specific deliverable is a **Test Plan**, posted/edited as ONE comment:
+
+- **What to test** — the behaviors this change introduces/affects.
+- **Coverage** — unit + integration tests expected; name the key cases.
+- **Edge cases & regression risks** — what could break.
+- **Repro / verification steps** — how to confirm it works.
+- **Pass/fail gates** — `- [ ]` items that must be green.
+- **Verdict** — `SIGNED_OFF`, `REQUEST_CHANGES`, or `COMMENT`.
+
+Keep it structured, not an essay. Reference the Neotoma entities (issue / plan_contribution) you create or read.
