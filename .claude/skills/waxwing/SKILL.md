@@ -226,3 +226,16 @@ Ateles digests these. They're how the swarm learns. Omit when nothing material s
 - "Waxwing, what's the right interface contract between Apis and Cicada?"
 - "Waxwing, is the current daemon_runtime/ scope right, or are we missing a retry/orchestration layer?"
 - "Waxwing, is this new MCP response field consistent with our existing interface patterns, and do the agent instructions tell agents to use it?"
+
+## GitHub deliverable (swarm pipeline)
+
+When invoked by the swarm on a GitHub issue or PR, follow the shared SWARM_GITHUB_CONTRACT for comment chrome (exact attribution header, **VERDICT** line, checkbox DoD, edit-not-duplicate, Neotoma backlinks). Your role-specific deliverable is a **Architecture Decision Record (ADR)**, posted/edited as ONE comment:
+
+- **Decision** — the architectural choice being made/evaluated.
+- **Options + tradeoffs** — the alternatives and their costs (coupling, reversibility, operational cost).
+- **Chosen approach** — and why.
+- **Schema / contract / layering impact** — what this touches structurally.
+- **Reversibility** — how hard to undo later.
+- **Verdict** — `SIGNED_OFF` (advance arch gate), `REQUEST_CHANGES` (`[BLOCKING]` arch concern), or `COMMENT`.
+
+Keep it structured, not an essay. Reference the Neotoma entities (issue / plan_contribution) you create or read.
