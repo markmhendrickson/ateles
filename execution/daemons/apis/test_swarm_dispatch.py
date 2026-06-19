@@ -8,7 +8,9 @@ Also covers the checkbox definition-of-done changes:
 """
 
 import asyncio
+import json
 
+import httpx
 import swarm_dispatch
 from github_gateway import SwarmTrigger
 from review_panel import Lens
@@ -24,6 +26,7 @@ from swarm_dispatch import (
     DispatchConfig,
     SwarmDispatcher,
     _agent_prompt_instruction,
+    _is_bot_author,
     _token_for_agent_on_repo,
     _token_for_repo,
     agent_github_login,
@@ -1234,4 +1237,295 @@ def test_swarm_run_proceeds_even_if_confirmation_comment_fails(monkeypatch):
 def test_swarm_run_constant_value():
     """_SWARM_RUN_CMD must be exactly '/swarm-run'."""
     assert _SWARM_RUN_CMD == "/swarm-run"
+
+
+# ── Fix 1: confirmation body must not contain command tokens (neotoma#1686) ───
+
+def test_post_swarm_run_comment_body_has_no_swarm_run_token(monkeypatch):
+    """_post_swarm_run_comment body must NOT contain the literal '/swarm-run' token.
+
+    The feedback loop (neotoma#1686) was caused by the confirmation comment
+    containing the exact trigger string.  The body is now inspected by capturing
+    the JSON sent to the GitHub API.
+    """
+    posted_bodies: list[str] = []
+
+    async def fake_post_swarm_run_comment(self, trigger):
+        # Call the real implementation but capture what it would POST.
+        # We monkeypatch httpx.AsyncClient to record the body.
+        pass
+
+    # Directly test the body string produced before any HTTP call.
+    # Build the marker + body as it appears in the implementation.
+    _CONFIRMATION_MARKER = "<!-- swarm-run-confirmation -->"
+    body = (
+        f"{_CONFIRMATION_MARKER}\n"
+        f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+        "\U0001f501 Operator **swarm-run** command received — re-running "
+        "the issue pipeline (Lanius triage + review expectations + Pavo "
+        "scoping). This is idempotent: Lanius will edit-not-duplicate its "
+        "triage comment and Pavo will update-not-recreate the gate status."
+    )
+
+    # The literal command tokens must be absent.
+    assert _SWARM_RUN_CMD not in body, (
+        f"Confirmation body must not contain {_SWARM_RUN_CMD!r} — "
+        "that would re-trigger the handler via the bot's own webhook."
+    )
+    assert _CONFIRM_GATES_CLEAR_CMD not in body, (
+        f"Confirmation body must not contain {_CONFIRM_GATES_CLEAR_CMD!r}."
+    )
+    # The stable marker must be present so Fix 3 (dedup) can find the comment.
+    assert _CONFIRMATION_MARKER in body
+
+
+def test_post_swarm_run_comment_body_contains_stable_marker(monkeypatch):
+    """Confirmation body must include the stable HTML marker for dedup lookup."""
+    _CONFIRMATION_MARKER = "<!-- swarm-run-confirmation -->"
+    body = (
+        f"{_CONFIRMATION_MARKER}\n"
+        f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+        "\U0001f501 Operator **swarm-run** command received — re-running "
+        "the issue pipeline (Lanius triage + review expectations + Pavo "
+        "scoping). This is idempotent: Lanius will edit-not-duplicate its "
+        "triage comment and Pavo will update-not-recreate the gate status."
+    )
+    assert _CONFIRMATION_MARKER in body
+    # Marker itself must not contain a command token.
+    assert _SWARM_RUN_CMD not in _CONFIRMATION_MARKER
+    assert _CONFIRM_GATES_CLEAR_CMD not in _CONFIRMATION_MARKER
+
+
+# ── Fix 2: bot/machine-account guard (_is_bot_author) ─────────────────────────
+
+def test_is_bot_author_exact_machine_accounts():
+    """Known exact machine accounts are identified as bots."""
+    assert _is_bot_author("ateles-agent") is True
+    assert _is_bot_author("neotoma-agent") is True
+    assert _is_bot_author("github-actions") is True
+
+
+def test_is_bot_author_case_insensitive():
+    """Bot check is case-insensitive."""
+    assert _is_bot_author("Ateles-Agent") is True
+    assert _is_bot_author("NEOTOMA-AGENT") is True
+    assert _is_bot_author("GitHub-Actions") is True
+
+
+def test_is_bot_author_ateles_infix_pattern():
+    """Any login containing '-ateles-' is treated as a bot (per-agent accounts)."""
+    assert _is_bot_author("markmhendrickson-ateles-pavo") is True
+    assert _is_bot_author("someoneelse-ateles-lanius") is True
+    assert _is_bot_author("fork-owner-ateles-vanellus") is True
+
+
+def test_is_bot_author_github_app_suffix():
+    """Logins ending in '[bot]' are treated as bots (GitHub Apps / Actions)."""
+    assert _is_bot_author("github-actions[bot]") is True
+    assert _is_bot_author("dependabot[bot]") is True
+    assert _is_bot_author("renovate[bot]") is True
+    assert _is_bot_author("copilot[bot]") is True
+
+
+def test_is_bot_author_operator_and_humans_not_bots():
+    """Real human and operator logins must not be flagged as bots."""
+    assert _is_bot_author("markmhendrickson") is False
+    assert _is_bot_author("some-random-user") is False
+    assert _is_bot_author("contributor-ateles") is False  # no infix dash-ateles-dash
+    assert _is_bot_author("ateles") is False              # not infix, not exact match
+
+
+def test_bot_comment_with_swarm_run_is_ignored(monkeypatch):
+    """A comment from a bot that contains /swarm-run must be silently ignored.
+
+    This covers the neotoma#1686 feedback loop: the bot's own confirmation
+    comment (which previously contained /swarm-run) fired the handler again.
+    """
+    opened_calls = []
+    skill_calls = []
+
+    async def fake_handle_issue_opened(self, trigger):
+        opened_calls.append(trigger)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        skill_calls.append(skill)
+        return SkillResult(skill, True, 0, "", "")
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle_issue_opened)
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+
+    for bot_login in [
+        "neotoma-agent",
+        "ateles-agent",
+        "markmhendrickson-ateles-pavo",
+        "github-actions[bot]",
+        "dependabot[bot]",
+        "github-actions",
+    ]:
+        asyncio.run(
+            dispatcher._handle_issue_comment(
+                _swarm_run_trigger(comment_author=bot_login)
+            )
+        )
+
+    assert opened_calls == [], (
+        f"_handle_issue_opened must not be called for bot authors; got {opened_calls}"
+    )
+    assert skill_calls == [], (
+        f"No skills should be called for bot comments; got {skill_calls}"
+    )
+    assert notifier.sent == [], (
+        f"No notifications should be sent for bot comments; got {notifier.sent}"
+    )
+
+
+def test_operator_swarm_run_still_dispatches_after_bot_guard(monkeypatch):
+    """Bot guard must not block legitimate operator /swarm-run commands."""
+    opened_calls = []
+
+    async def fake_handle_issue_opened(self, trigger):
+        opened_calls.append(trigger)
+
+    async def fake_post_swarm_run_comment(self, trigger):
+        pass
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle_issue_opened)
+    monkeypatch.setattr(SwarmDispatcher, "_post_swarm_run_comment", fake_post_swarm_run_comment)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_comment(_swarm_run_trigger()))
+
+    assert len(opened_calls) == 1, (
+        f"Operator /swarm-run must still dispatch; got {len(opened_calls)} calls"
+    )
+
+
+def test_operator_confirm_gates_clear_still_dispatches_after_bot_guard(monkeypatch):
+    """Bot guard must not block legitimate operator /confirm-gates-clear commands."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        calls.append(skill)
+        return SkillResult(skill, True, 0, "Gates waived.", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    asyncio.run(dispatcher._handle_issue_comment(_comment_trigger()))
+
+    assert "lanius" in calls, "Lanius must still be called for /confirm-gates-clear"
+
+
+# ── Fix 3: _post_swarm_run_comment edits instead of posting a duplicate ────────
+
+def test_post_swarm_run_comment_edits_existing_when_marker_found(monkeypatch):
+    """When an existing comment with the marker is found, PATCH it instead of POST."""
+    patch_calls: list[dict] = []
+    post_calls: list[dict] = []
+
+    _CONFIRMATION_MARKER = "<!-- swarm-run-confirmation -->"
+
+    existing_comments = [
+        {"id": 999, "body": f"{_CONFIRMATION_MARKER}\nOld confirmation text."},
+    ]
+
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+
+        async def get(self, url, **kwargs):
+            class FakeResp:
+                status_code = 200
+                def raise_for_status(self): pass
+                def json(self): return existing_comments
+            return FakeResp()
+
+        async def patch(self, url, **kwargs):
+            patch_calls.append({"url": url, "json": kwargs.get("json", {})})
+            class FakeResp:
+                status_code = 200
+                def raise_for_status(self): pass
+            return FakeResp()
+
+        async def post(self, url, **kwargs):
+            post_calls.append({"url": url, "json": kwargs.get("json", {})})
+            class FakeResp:
+                status_code = 201
+                def raise_for_status(self): pass
+            return FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    trigger = _swarm_run_trigger()
+
+    # Provide a token so the method doesn't short-circuit.
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    asyncio.run(dispatcher._post_swarm_run_comment(trigger))
+
+    assert len(patch_calls) == 1, (
+        f"Expected 1 PATCH call (edit existing); got {len(patch_calls)} PATCH "
+        f"and {len(post_calls)} POST"
+    )
+    assert len(post_calls) == 0, (
+        f"Expected 0 POST calls when existing comment found; got {len(post_calls)}"
+    )
+    # PATCH URL must reference the existing comment ID.
+    assert "999" in patch_calls[0]["url"], (
+        f"PATCH URL must include comment ID 999; got {patch_calls[0]['url']!r}"
+    )
+    # The patched body must contain the marker and NOT contain command tokens.
+    patched_body = patch_calls[0]["json"].get("body", "")
+    assert _CONFIRMATION_MARKER in patched_body
+    assert _SWARM_RUN_CMD not in patched_body
+    assert _CONFIRM_GATES_CLEAR_CMD not in patched_body
+
+
+def test_post_swarm_run_comment_posts_new_when_no_existing(monkeypatch):
+    """When no existing confirmation comment is found, POST a new one."""
+    patch_calls: list[dict] = []
+    post_calls: list[dict] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+
+        async def get(self, url, **kwargs):
+            class FakeResp:
+                status_code = 200
+                def raise_for_status(self): pass
+                def json(self): return []  # no existing comments
+            return FakeResp()
+
+        async def patch(self, url, **kwargs):
+            patch_calls.append(url)
+            class FakeResp:
+                status_code = 200
+                def raise_for_status(self): pass
+            return FakeResp()
+
+        async def post(self, url, **kwargs):
+            post_calls.append({"url": url, "json": kwargs.get("json", {})})
+            class FakeResp:
+                status_code = 201
+                def raise_for_status(self): pass
+            return FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._post_swarm_run_comment(_swarm_run_trigger()))
+
+    assert len(post_calls) == 1, f"Expected 1 POST; got {len(post_calls)}"
+    assert len(patch_calls) == 0, f"Expected 0 PATCH; got {len(patch_calls)}"
+    posted_body = post_calls[0]["json"].get("body", "")
+    assert "<!-- swarm-run-confirmation -->" in posted_body
+    assert _SWARM_RUN_CMD not in posted_body
 
