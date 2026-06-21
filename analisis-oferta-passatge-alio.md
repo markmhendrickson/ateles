@@ -76,6 +76,59 @@ Al tratarse de una **rehabilitación**, hay que confirmar con el agente cómo tr
 
 ---
 
+## Coste real de la compra a día de hoy (valor presente, 25 años)
+
+Aunque al vender se recupere el valor de la vivienda, la compra tiene un coste económico real. Suponiendo una **hipoteca a 25 años totalmente amortizada** y la venta de la vivienda al cabo de 25 años:
+
+**Supuestos:**
+
+- Precio de compra: 455.000 € (cierre previsto)
+- Entrada (20 %): 91.000 € · Hipoteca: 364.000 € a 25 años, tipo fijo 3 %
+- Impuestos y gastos de compra: 13 % = 59.150 €
+- Gastos de propiedad: ~5.000 €/año (IBI, comunidad, seguro, mantenimiento)
+- Gastos de venta: ~4 % · Inflación: 2 % · Descuento real: 2 %
+
+**Si se vende al mismo valor real (sin revalorización):**
+
+| Concepto | Valor presente |
+|---|---|
+| Entrada | +91.000 € |
+| Impuestos y gastos de compra | +59.150 € |
+| Cuotas de hipoteca (VP) | +323.600 € |
+| Gastos de propiedad, 25 años (VP) | +97.600 € |
+| Gastos de venta (VP) | +11.200 € |
+| (–) Venta a mismo valor real (VP) | −278.000 € |
+| **Coste presente neto** | **≈ 305.000 €** |
+
+El coste no es "cero" pese a recuperar el valor real, por tres motivos: los **impuestos de compra** (~59.000 €), los **gastos de propiedad** de 25 años (~98.000 €) y el **coste de oportunidad del capital** inmovilizado.
+
+---
+
+## Coste real considerando la revalorización histórica
+
+La clave: la revalorización se aplica sobre **toda la vivienda** (455.000 €), mientras que ella solo aporta 91.000 € de capital y financia el resto al 3 %. El apalancamiento juega a su favor.
+
+**Datos históricos de Barcelona:** en la última década los precios subieron **+61,5 % nominal** (~4,9 %/año, ~3 % real), más del doble que la inflación. A largo plazo, atravesando ciclos completos (incluida la crisis de 2008–2014, ~−40 %), un escenario central prudente es **~4 % nominal (~2 % real)**.
+
+| Revalorización (nominal / real) | Precio venta en 25 años | Coste presente neto |
+|---|---|---|
+| 2 % / 0 % — valor real constante | 747.000 € | ≈ 305.000 € (coste) |
+| 3 % / ~1 % — conservador | 953.000 € | ≈ 228.000 € (coste) |
+| **4 % / ~2 % — central** | **1,21 M€** | **≈ 135.000 € (coste)** |
+| 5 % / ~3 % — ritmo histórico de Barcelona | 1,54 M€ | ≈ 15.000 € (equilibrio) |
+| 6 % / ~4 % — optimista | 1,95 M€ | ≈ −132.000 € (ganancia neta) |
+
+**Lectura:** al ritmo histórico real de Barcelona (~5 % nominal), 25 años de propiedad salen prácticamente **gratis** en valor presente —la revalorización cubre impuestos, intereses y gastos—. A un 4 % más prudente, el coste real ronda los 135.000 € (frente a 305.000 € sin revalorización).
+
+**Dos factores que pueden cambiarlo:**
+
+1. **Riesgo de ciclo.** El ~5 % es una media que incluye una caída del ~40 % (2008–2014). Comprar caro y vender en un mínimo daría mucho menos; 25 años suavizan el riesgo pero no lo eliminan.
+2. **Impuesto sobre la plusvalía (IRPF).** Las tablas suponen **exención por vivienda habitual** (venta a partir de los 65 años o reinversión en otra vivienda habitual → 0 €). Si **no** hay exención, la plusvalía nominal tributa al ~26–28 %: en el caso central añadiría ~65.000 € de coste; en el de ritmo Barcelona, ~90.000–100.000 €. **Conviene confirmar el plan de salida** (vivir en ella a largo plazo / reinvertir): vale 60.000–100.000 €.
+
+**Conclusión:** sin revalorización, el coste real ronda los 300.000 €; con la revalorización histórica de Barcelona, la operación se acerca al equilibrio o genera ganancia. La hipoteca barata y apalancada hace que incluso una revalorización moderada mejore mucho el resultado frente al "coste" aparente.
+
+---
+
 ## Borrador de mensaje para el agente (español)
 
 **Asunto:** Oferta vivienda Passatge d'Alió (ref. ONB2602004)
