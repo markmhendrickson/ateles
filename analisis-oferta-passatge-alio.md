@@ -129,6 +129,33 @@ La clave: la revalorización se aplica sobre **toda la vivienda** (455.000 €),
 
 ---
 
+## Comprar vs. alquilar (25 años, valor presente)
+
+**Alquilar** es un coste 100 % perdido, pero evita los impuestos de compra, el IBI, la comunidad y el mantenimiento. Para un piso equivalente de 54 m², amueblado y de calidad, con terraza, en la Dreta de l'Eixample (~1.300–1.900 €/mes):
+
+| Alquiler equivalente | VP de 25 años (real, descuento 2 %) |
+|---|---|
+| 1.300 €/mes (bajo) | ≈ 305.000 € |
+| 1.600 €/mes (central) | ≈ 375.000 € |
+| 1.900 €/mes (alto) | ≈ 445.000 € |
+
+**Comprar** (del análisis anterior): sin revalorización ≈ 305.000 € de coste; caso central (2 % real, exención plusvalía) ≈ 135.000 € de coste.
+
+| | Alquiler bajo 305 k€ | Alquiler central 375 k€ | Alquiler alto 445 k€ |
+|---|---|---|---|
+| **Comprar, sin revalorización (305 k€)** | equilibrio | compra ahorra ~70 k€ | compra ahorra ~140 k€ |
+| **Comprar, revalorización central (135 k€)** | compra ahorra ~170 k€ | compra ahorra ~240 k€ | compra ahorra ~310 k€ |
+
+**Lectura:** comprar gana en casi todos los casos, y de forma clara en cuanto se asume cualquier revalorización. Solo el peor escenario para comprar —ninguna revalorización y alquiler barato— queda en empate.
+
+**Matices importantes:**
+
+- **Horizonte.** Los ~13 % de impuestos de compra solo se amortizan en plazos largos. Por debajo de ~6–7 años, alquilar gana. Este análisis supone permanencia (o alquiler del inmueble) a largo plazo.
+- **Rentabilidad del capital liberado.** Alquilar libera ~150.000 € (entrada + impuestos). A un 2 % real ya está recogido en el descuento; si ese capital rindiera más (p. ej. bolsa ~5 % real), el alquiler reduce la diferencia, aunque la vivienda apalancada suele seguir ganando.
+- **No financiero.** Alquilar da flexibilidad y liquidez; comprar concentra el patrimonio en un único activo y una sola ciudad.
+
+---
+
 ## Borrador de mensaje para el agente (español)
 
 **Asunto:** Oferta vivienda Passatge d'Alió (ref. ONB2602004)
