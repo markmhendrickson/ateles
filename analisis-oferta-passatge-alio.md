@@ -206,3 +206,46 @@ Aprovecho para confirmar un punto fiscal relevante para el cálculo del coste to
 Quedo a su disposición para concretar los detalles. Agradezco de antemano su respuesta.
 
 Un cordial saludo,
+
+---
+
+## Guion de contraoferta (según respuesta del agente)
+
+**Principios:** mantener la calma, no subir rápido, usar el tiempo a favor (última unidad, dos meses en mercado). Techo absoluto: **470.000 €** de precio. Si no se rompe 475.000 €, retirarse.
+
+### Escenario A — Contraofertan cerca del precio (485.000–495.000 €)
+
+> Entiendo su posición, pero el precio de salida está por encima de los cierres reales de la zona y se trata de la última unidad tras dos meses en mercado. Mantengo mi oferta en **435.000 €**. Si les ayuda a cerrar, puedo subir ligeramente a cambio de que el promotor **asuma los impuestos de la compraventa**. Quedo a la espera de una contraoferta que refleje la situación real de la promoción.
+
+*(No nombrar todavía un segundo número. Dejar que respondan.)*
+
+### Escenario B — Contraofertan en zona media (465.000–475.000 €)
+
+> Agradezco el acercamiento. Puedo llegar a **450.000 €** para cerrar de inmediato, con financiación ya aprobada. Si prefieren mantener el precio algo más alto, necesitaría entonces que **asuman los impuestos (AJD/ITP)** y que se incluya plaza/trastero si lo hubiera.
+
+*(Objetivo de cierre: 455.000–460.000 €. Subir en tramos pequeños de 5.000–8.000 €.)*
+
+### Escenario C — Aceptan o se acercan mucho (≤ 460.000 €)
+
+> Perfecto. Confirmo la oferta en firme de **[precio]** €, sujeta a contrato de arras y a la verificación de la documentación de la vivienda y de la rehabilitación. Procedamos con las arras.
+
+*(Pedir siempre arras penitenciales y revisar licencias / certificado final de obra antes de firmar.)*
+
+### Respuesta sobre el régimen fiscal
+
+- **Si tributa por IVA + AJD:** coste total ≈ precio × 1,115.
+- **Si tributa por ITP:** coste total ≈ precio × 1,10–1,13 según tramo en Cataluña.
+- En una unidad de cierre, plantear que **el promotor asuma ese impuesto** como forma de ceder sin bajar el precio anunciado.
+
+### Si no hay recorrido en el precio
+
+Negociar valor por otras vías, en este orden:
+1. Que el promotor **asuma los gastos e impuestos** de la compraventa.
+2. **Plaza de aparcamiento o trastero** incluidos, si los hubiera.
+3. Mejoras o mobiliario adicional (el mobiliario base ya está incluido).
+
+### Frase de cierre / retirada (si superan 475.000 €)
+
+> Lo entiendo, pero por encima de ese precio la operación deja de tener sentido para mí dados los precios reales de la zona. Les dejo mi oferta sobre la mesa por si reconsideran en las próximas semanas. Gracias por su tiempo.
+
+*(Dejar la puerta abierta: en una última unidad, el tiempo juega a favor del comprador.)*
