@@ -156,6 +156,34 @@ La clave: la revalorización se aplica sobre **toda la vivienda** (455.000 €),
 
 ---
 
+## Sensibilidad: ¿cómo afectan 10.000 € más o menos en el precio final?
+
+Una variación de 10.000 € en el precio **no** cambia el coste real en 10.000 €, porque la mayor parte es **principal que se recupera al vender**. Solo se pierde de forma irrecuperable la fricción fiscal sobre esa cantidad. El impacto depende casi por completo del supuesto de revalorización:
+
+| Escenario | Δ coste presente real por cada ±10.000 € de precio |
+|---|---|
+| Sin revalorización (valor real constante) | ±~4.500 € |
+| Central (2 % real) | ±~800 € |
+| Ritmo histórico de Barcelona (~3 % real) | ≈ 0 € (incluso ligeramente favorable) |
+
+**Por qué es tan pequeño en los casos realistas** — descomponiendo los 10.000 €:
+
+- **Impuestos de compra: 13 % × 10.000 € = 1.300 €** → perdidos para siempre.
+- **~400 € de gastos de venta adicionales** (VP).
+- **Los 10.000 € de principal** se recuperan al vender: íntegros en términos reales si el valor se mantiene o sube; solo descontados en el tiempo si el valor queda plano (recuperar 10.000 € dentro de 25 años equivale a ~6.000 € de hoy, por eso el caso sin revalorización penaliza más).
+
+El **coste garantizado e irrecuperable de pagar 10.000 € más es de ~1.300–1.700 €** (impuestos + fricción de venta). El resto se recupera si el mercado acompaña.
+
+**Conclusión para la negociación:**
+
+- Si se cree en la revalorización de Barcelona, 10.000 € en el precio final valen **menos de 1.000 €** de coste real → no conviene romper la operación por esa diferencia.
+- Si se es escéptico con la revalorización, cada 10.000 € valen **~4.000–5.000 €** de coste real → conviene negociar con más fuerza.
+- Matiz fiscal: si la plusvalía tributa (sin exención), un precio de compra mayor **eleva el valor de adquisición** y reduce la ganancia futura tributable, recuperando ~26–28 % de esos 10.000 € al vender.
+
+*Cautela:* el resultado "≈ 0 / favorable" supone que la revalorización futura es independiente del precio pagado hoy. Pagar de más no **garantiza** el mismo precio de salida; el número de planificación honesto es el central (~800 €).
+
+---
+
 ## Borrador de mensaje para el agente (español)
 
 **Asunto:** Oferta vivienda Passatge d'Alió (ref. ONB2602004)
