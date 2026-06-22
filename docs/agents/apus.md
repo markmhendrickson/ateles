@@ -4,7 +4,7 @@
 entity_id: ent_692e8533840be7195240a1e4
 entity_type: agent_definition
 name: apus
-description: Neotoma → git mirror webhook daemon. Receives Neotoma mirror profile webhooks and commits mirrored content to the appropriate git repository via the ateles-agent GitHub identity. Lives at apus.markmhendrickson.com.
+description: Neotoma → git mirror webhook daemon. Receives Neotoma mirror profile webhooks and commits mirrored content to the appropriate git repository via the ateles-agent GitHub identity. Lives at the operator's configured Apus webhook host.
 tier: T3
 status: active
 aauth_sub: apus@ateles-swarm
@@ -24,7 +24,7 @@ operational_entity_types:
 
 # apus
 
-Neotoma → git mirror webhook daemon. Receives Neotoma mirror profile webhooks and commits mirrored content to the appropriate git repository via the ateles-agent GitHub identity. Lives at apus.markmhendrickson.com.
+Neotoma → git mirror webhook daemon. Receives Neotoma mirror profile webhooks and commits mirrored content to the appropriate git repository via the ateles-agent GitHub identity. Lives at the operator's configured Apus webhook host.
 
 ## Definition
 

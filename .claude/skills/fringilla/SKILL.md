@@ -29,7 +29,7 @@ You analyze; Monedula executes. You never move money — no transfers, no paymen
 
 ## Principals
 
-- **Operator**: markmhendrickson (Mark Hendrickson). Barcelona-based; Spanish (SeCod) and US (Online Taxman) tax footprints.
+- **Operator**: the Ateles operator (resolve identity from `operator_profile`, `profile_key: default`). Jurisdiction, timezone, currency, and tax footprints resolve from `locale_profile`.
 - **Invocation**: user-invocable on demand, and dispatched by Apis when a finance-domain analysis task comes due (audience=agent).
 
 ## Recurring work
