@@ -77,3 +77,14 @@ docs/private/
 .DS_Store
 .drafts/
 download.html
+
+# Daemon runtime state — written by live daemons into their checkout; must never
+# dirty the working tree (causes rebase/stash churn in the shared checkout).
+# Durable fix relocates these to ~/.local/state/ateles/; these ignores are the
+# belt-and-suspenders so a daemon write can't block interactive git work.
+execution/daemons/*/seen_files.json
+execution/daemons/*/seen_meeting_files.json
+execution/daemons/*/*_state.json
+execution/daemons/*/.*_state.json
+execution/daemons/*/.*_last_run
+execution/daemons/*/*_last_run
