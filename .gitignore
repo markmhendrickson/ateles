@@ -7,6 +7,17 @@
 .env.backups/
 execution/.env.backups/
 !.env.example
+
+# SOPS: encrypted snapshots (secrets/*.sops.env) and the env-map ARE committed;
+# any plaintext staging next to them is NOT.
+secrets/*.plain.env
+secrets/*.decrypted
+secrets/*.plaintext
+!secrets/*.sops.env
+
+# age private keys must never be committed (canonical copy lives in 1Password)
+*.agekey
+keys.txt
 .creds/
 credentials.json
 *.pem
