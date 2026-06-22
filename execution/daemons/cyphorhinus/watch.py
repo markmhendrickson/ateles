@@ -91,12 +91,13 @@ if _NEOTOMA_ENV_FILE.exists():
 
 # 2. Refresh NEOTOMA_BEARER_TOKEN — prefer an OFFLINE SOPS decrypt (no live
 #    1Password session needed), falling back to live `op read` during migration.
-#    The canonical value lives in 1Password; secrets/neotoma.sops.env is its
-#    age-encrypted snapshot, decryptable with the machine-local age key.
+#    The canonical value lives in 1Password; the age-encrypted snapshot lives in
+#    the PRIVATE ateles-private repo (ateles is public), decryptable with the
+#    machine-local age key.
 _OP_REF = "op://Private/Neotoma local bearer token/bearer_token"
 _SOPS_CANDIDATES = [
-    Path(__file__).resolve().parents[3] / "secrets" / "neotoma.sops.env",
-    Path.home() / ".config" / "neotoma" / "secrets" / "neotoma.sops.env",
+    Path.home() / "repos" / "ateles-private" / "secrets" / "neotoma.sops.enc",
+    Path.home() / ".config" / "neotoma" / "secrets" / "neotoma.sops.enc",
 ]
 
 

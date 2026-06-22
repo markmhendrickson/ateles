@@ -1,8 +1,10 @@
 """Shared helpers for the SOPS-backed secrets flow (Design B).
 
-Canonical secret values live in 1Password. This repo holds an encrypted
-snapshot (secrets/<name>.sops.env) produced by `secrets_publish.py` and consumed
-offline by `secrets_materialize.py` and the daemons.
+Canonical secret values live in 1Password. The age-encrypted snapshots and
+manifest live in the PRIVATE `ateles-private` repo (NOT here — ateles is public),
+produced by `secrets_publish.py` and consumed offline by `secrets_materialize.py`
+and the daemons. Even in a private repo the snapshots stay age-encrypted for
+defense-in-depth (a leaked token or an accidental public flip never exposes them).
 
 Stdlib-only by design — these run in minimal daemon/CI environments.
 Security: secret VALUES are never logged or printed by anything in this module.
@@ -15,9 +17,12 @@ import os
 import subprocess
 from pathlib import Path
 
-# Repo root = three levels up from execution/scripts/secrets_lib.py
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SECRETS_DIR = REPO_ROOT / "secrets"
+# The private secrets repo holds the .sops.yaml, manifest, and encrypted
+# snapshots. Override with ATELES_SECRETS_DIR; default to the conventional clone.
+SECRETS_BASE = Path(
+    os.environ.get("ATELES_SECRETS_DIR", str(Path.home() / "repos" / "ateles-private"))
+).expanduser()
+SECRETS_DIR = SECRETS_BASE / "secrets"
 MANIFEST_PATH = SECRETS_DIR / "manifest.env-map.json"
 
 # sops' default age-key location is OS-specific (on macOS it's under
@@ -45,7 +50,7 @@ def op_path() -> str:
 
 def enc_file(name: str) -> Path:
     """Path to the encrypted snapshot for a manifest file block."""
-    return SECRETS_DIR / f"{name}.sops.env"
+    return SECRETS_DIR / f"{name}.sops.enc"
 
 
 # ---------------------------------------------------------------------------
@@ -163,12 +168,18 @@ def sops_encrypt_dotenv(plaintext: str, dest: Path) -> None:
         os.chmod(tmp, 0o600)
         with os.fdopen(fd, "w") as fh:
             fh.write(plaintext)
-        # --filename-override makes sops match .sops.yaml creation rules against
-        # the DEST name, so the temp file can keep its gitignored *.plain.env name.
+        # --config pins the rules to ateles-private's .sops.yaml (else sops
+        # discovers whatever .sops.yaml sits above the cwd). --filename-override
+        # matches the rule against the DEST name, so the temp file can keep its
+        # gitignored *.plain.env name.
+        cmd = [sops_path(), "--encrypt", "--input-type", "dotenv",
+               "--output-type", "dotenv", "--filename-override", str(dest)]
+        config = SECRETS_BASE / ".sops.yaml"
+        if config.exists():
+            cmd += ["--config", str(config)]
+        cmd.append(str(tmp))
         result = subprocess.run(
-            [sops_path(), "--encrypt", "--input-type", "dotenv",
-             "--output-type", "dotenv", "--filename-override", str(dest), str(tmp)],
-            capture_output=True, text=True, timeout=30, env=_sops_env(),
+            cmd, capture_output=True, text=True, timeout=30, env=_sops_env(),
         )
         if result.returncode != 0:
             raise RuntimeError(f"sops encrypt failed: {result.stderr.strip()}")

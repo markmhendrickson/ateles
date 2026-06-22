@@ -24,27 +24,34 @@ DEFAULT_ENV_FILE = Path.home() / ".config" / "neotoma" / ".env"
 
 
 def main(argv: list[str]) -> int:
-    env_file = DEFAULT_ENV_FILE
+    override_env_file: Path | None = None
     names: list[str] = []
     i = 0
     while i < len(argv):
         if argv[i] == "--env-file":
-            env_file = Path(argv[i + 1]).expanduser()
+            override_env_file = Path(argv[i + 1]).expanduser()
             i += 2
         else:
             names.append(argv[i])
             i += 1
 
     manifest = sl.load_manifest()
+    files = manifest.get("files", {})
     if not names:
-        names = list(manifest.get("files", {}).keys())
+        names = list(files.keys())
 
-    all_changed: list[str] = []
     rc = 0
     for name in names:
+        # Destination precedence: --env-file override > manifest block `target`
+        # > DEFAULT_ENV_FILE. Lets one run materialize each consumer to its own
+        # .env (e.g. neotoma → ~/.config/neotoma/.env, openclaw → repo .env).
+        target = files.get(name, {}).get("target")
+        env_file = override_env_file or (
+            Path(target).expanduser() if target else DEFAULT_ENV_FILE
+        )
         src = sl.enc_file(name)
         if not src.exists():
-            print(f"[{name}] no snapshot at {src.relative_to(sl.REPO_ROOT)} — skipped")
+            print(f"[{name}] no snapshot at {src.relative_to(sl.SECRETS_BASE)} — skipped")
             continue
         try:
             values = sl.sops_decrypt_dotenv(src)
@@ -53,13 +60,9 @@ def main(argv: list[str]) -> int:
             rc = 1
             continue
         changed = sl.merge_into_env_file(env_file, values)
-        all_changed += changed
-        print(f"[{name}] materialized {len(values)} var(s); {len(changed)} changed")
+        print(f"[{name}] → {env_file}: materialized {len(values)} var(s); "
+              f"{len(changed)} changed")
 
-    if all_changed:
-        print(f"Updated {env_file}: {', '.join(sorted(set(all_changed)))}")
-    else:
-        print(f"{env_file} already current.")
     return rc
 
 
