@@ -89,32 +89,75 @@ if _NEOTOMA_ENV_FILE.exists():
             _k, _, _v = _line.partition("=")
             os.environ[_k.strip()] = _v.strip().strip('"').strip("'")
 
-# 2. Refresh NEOTOMA_BEARER_TOKEN from 1Password (best-effort).
-#    Requires `op` CLI installed and an active 1Password session.
+# 2. Refresh NEOTOMA_BEARER_TOKEN — prefer an OFFLINE SOPS decrypt (no live
+#    1Password session needed), falling back to live `op read` during migration.
+#    The canonical value lives in 1Password; secrets/neotoma.sops.env is its
+#    age-encrypted snapshot, decryptable with the machine-local age key.
 _OP_REF = "op://Private/Neotoma local bearer token/bearer_token"
-try:
-    _op_result = subprocess.run(
-        ["op", "read", _OP_REF],
-        capture_output=True, text=True, timeout=10,
-    )
-    if _op_result.returncode == 0:
-        _token = _op_result.stdout.strip()
-        if _token:
-            os.environ["NEOTOMA_BEARER_TOKEN"] = _token
-            if _NEOTOMA_ENV_FILE.exists():
-                import re as _re
-                _env_text = _NEOTOMA_ENV_FILE.read_text()
-                _new_line = f'NEOTOMA_BEARER_TOKEN="{_token}"'
-                if "NEOTOMA_BEARER_TOKEN" in _env_text:
-                    _env_text = _re.sub(
-                        r'^NEOTOMA_BEARER_TOKEN=.*$', _new_line,
-                        _env_text, flags=_re.MULTILINE,
-                    )
-                else:
-                    _env_text += f"\n{_new_line}\n"
-                _NEOTOMA_ENV_FILE.write_text(_env_text)
-except Exception:
-    pass  # op not available or session expired — proceed with existing token
+_SOPS_CANDIDATES = [
+    Path(__file__).resolve().parents[3] / "secrets" / "neotoma.sops.env",
+    Path.home() / ".config" / "neotoma" / "secrets" / "neotoma.sops.env",
+]
+
+
+def _persist_bearer_token(_token: str) -> None:
+    """Set the token in-process and write it back to .env (best-effort)."""
+    if not _token:
+        return
+    os.environ["NEOTOMA_BEARER_TOKEN"] = _token
+    if _NEOTOMA_ENV_FILE.exists():
+        import re as _re
+        _env_text = _NEOTOMA_ENV_FILE.read_text()
+        _new_line = f'NEOTOMA_BEARER_TOKEN="{_token}"'
+        if "NEOTOMA_BEARER_TOKEN" in _env_text:
+            _env_text = _re.sub(
+                r'^NEOTOMA_BEARER_TOKEN=.*$', _new_line,
+                _env_text, flags=_re.MULTILINE,
+            )
+        else:
+            _env_text += f"\n{_new_line}\n"
+        _NEOTOMA_ENV_FILE.write_text(_env_text)
+
+
+_bearer = ""
+# sops' default age-key path is OS-specific; point it at the standard location
+# explicitly so launchd daemons (minimal env) can decrypt.
+_AGE_KEY_FILE = Path.home() / ".config" / "sops" / "age" / "keys.txt"
+if (not os.environ.get("SOPS_AGE_KEY_FILE") and not os.environ.get("SOPS_AGE_KEY")
+        and _AGE_KEY_FILE.exists()):
+    os.environ["SOPS_AGE_KEY_FILE"] = str(_AGE_KEY_FILE)
+# (a) Offline: decrypt the SOPS snapshot with the local age key.
+for _snap in _SOPS_CANDIDATES:
+    if not _snap.exists():
+        continue
+    try:
+        _r = subprocess.run(
+            ["sops", "--decrypt", "--input-type", "dotenv",
+             "--output-type", "dotenv", str(_snap)],
+            capture_output=True, text=True, timeout=15,
+        )
+        if _r.returncode == 0:
+            for _l in _r.stdout.splitlines():
+                _l = _l.strip()
+                if _l.startswith("NEOTOMA_BEARER_TOKEN="):
+                    _bearer = _l.partition("=")[2].strip().strip('"').strip("'")
+                    break
+        if _bearer:
+            break
+    except Exception:
+        pass  # sops/age not available — fall through to op read
+# (b) Fallback: live `op read` (requires an active 1Password session).
+if not _bearer:
+    try:
+        _r = subprocess.run(
+            ["op", "read", _OP_REF],
+            capture_output=True, text=True, timeout=10,
+        )
+        if _r.returncode == 0:
+            _bearer = _r.stdout.strip()
+    except Exception:
+        pass  # op not available or session expired — keep existing token
+_persist_bearer_token(_bearer)
 
 # ---------------------------------------------------------------------------
 # lib/notify integration
