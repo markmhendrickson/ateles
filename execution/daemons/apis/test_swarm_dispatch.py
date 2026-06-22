@@ -2369,3 +2369,22 @@ def test_only_qa_lens_gets_a_worktree(monkeypatch):
     assert cwd_seen.get("phoenicurus") == "/tmp/wt-phoenicurus"
     assert cwd_seen.get("pavo") is None
 
+
+
+def test_detect_auth_failure_signatures():
+    """The auth-failure detector catches the real 401 text + common variants."""
+    assert swarm_dispatch.detect_auth_failure("Failed to authenticate. API Error: 401 Invalid authentication credentials")
+    assert swarm_dispatch.detect_auth_failure("", "OAuth token has expired")
+    assert swarm_dispatch.detect_auth_failure("authentication_error: invalid api key")
+    # A normal verdict must NOT trip it.
+    assert not swarm_dispatch.detect_auth_failure("APPROVE — all blockers resolved", "")
+    assert not swarm_dispatch.detect_auth_failure("BLOCKED: missing fallback", "")
+    assert not swarm_dispatch.detect_auth_failure("", "")
+
+
+def test_compose_auth_failure_comment_is_reframed_not_a_verdict():
+    body = swarm_dispatch.compose_auth_failure_comment("vanellus")
+    assert swarm_dispatch._VANELLUS_COMMENT_MARKER in body  # dedup marker preserved
+    assert "credential failure" in body.lower()
+    assert "ANTHROPIC_API_KEY" in body
+    assert "not** a review verdict" in body or "not a review verdict" in body.lower()
