@@ -2,6 +2,12 @@
 
 This repository uses 1Password CLI for secure credential management, eliminating the need for manual `.env` file management. Credentials are retrieved on-demand from 1Password vaults without storing secrets in the repository.
 
+> **Multi-machine / unattended / CI?** See [secrets_management.md](secrets_management.md)
+> for the SOPS+age flow: 1Password stays the canonical store, but secrets are
+> distributed via an encrypted git snapshot that daemons and CI decrypt **offline**
+> (no live `op signin` session). The on-demand `op read` flow below remains the
+> interactive, single-machine path.
+
 ## Setup
 
 ### 1. Install 1Password CLI

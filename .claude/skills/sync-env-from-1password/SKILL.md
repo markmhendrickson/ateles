@@ -13,6 +13,16 @@ entity_id: ent_86573f752c9e63db776636ae
 
 Sync environment variables from 1Password to local `.env` file using environment variable mappings stored in Neotoma as `env_var_mapping` entities.
 
+> **Multi-machine / offline / daemons / CI → use the SOPS flow instead.**
+> This op-direct sync needs a live 1Password session and only updates the
+> machine it runs on. For unattended daemons, CI, and propagation across
+> machines, use the SOPS-backed flow (1Password stays canonical; secrets ride an
+> encrypted git snapshot that decrypts offline):
+> `python execution/scripts/secrets_publish.py` then
+> `python execution/scripts/secrets_materialize.py`.
+> See [docs/secrets_management.md](../../../docs/secrets_management.md).
+> Treat this op-direct sync as the interactive, single-machine convenience path.
+
 ## Command
 
 ```
