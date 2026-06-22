@@ -13,8 +13,8 @@
 #   bash execution/scripts/isolate_daemons_to_rc_src.sh --apply    # rewrite + reload
 set -euo pipefail
 
-SHARED="/Users/markmhendrickson/repos/ateles"
-RC="/Users/markmhendrickson/ateles-rc-src"
+SHARED="${ATELES_SHARED_CHECKOUT:-$HOME/repos/ateles}"
+RC="${ATELES_REPO_PATH:-$HOME/ateles-rc-src}"
 LA="$HOME/Library/LaunchAgents"
 APPLY="${1:-}"
 BACKUP="$HOME/.config/ateles/plist-backups/$(date +%Y%m%d-%H%M%S 2>/dev/null || echo manual)"
