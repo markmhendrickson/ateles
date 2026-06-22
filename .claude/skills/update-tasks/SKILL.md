@@ -16,7 +16,7 @@ Create or update Neotoma task entities that represent actionable work items, lin
 
 ## Inputs
 
-- `plan_entity_id`: the Neotoma entity ID of the plan (default: `ent_99ace4dd6673aa36ed08b1fe` for the Ateles plan)
+- `plan_entity_id`: the Neotoma entity ID of the plan **matching this session's workstream** (the same plan `/update-plan` bound to). There is no global default — resolve it by workstream; only use `ent_99ace4dd6673aa36ed08b1fe` for swarm-architecture work itself.
 - Updated todos list (from `/update-plan` output or plan snapshot)
 
 ## Steps
