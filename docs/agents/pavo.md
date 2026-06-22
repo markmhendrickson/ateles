@@ -72,6 +72,8 @@ operational_entity_types:
   - analysis
   - analysis_finding
   - strategy_drift_signal
+canonical_context_entities:
+  - operator_profile
 ---
 
 # pavo

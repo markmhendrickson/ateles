@@ -26,6 +26,11 @@ tool_allowlist:
   - Read
   - Grep
   - "Bash(gh:*)"
+canonical_context_entities:
+  - operator_profile
+  - product_profile
+  - swarm_roster
+  - constitution
 ---
 
 # hirundo
