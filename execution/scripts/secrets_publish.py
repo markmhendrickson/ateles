@@ -47,7 +47,7 @@ def publish_file(manifest: dict, name: str, environment: str | None) -> int:
 
     dest = sl.enc_file(name)
     sl.sops_encrypt_dotenv(sl.to_dotenv(pairs), dest)
-    print(f"[{name}] encrypted {len(pairs)} var(s) → {dest.relative_to(sl.REPO_ROOT)}")
+    print(f"[{name}] encrypted {len(pairs)} var(s) → {dest.relative_to(sl.SECRETS_BASE)}")
     print(f"[{name}] vars: {', '.join(sorted(pairs))}")
     return 0
 
