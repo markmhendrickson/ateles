@@ -3,27 +3,35 @@
 Ateles runs across multiple machines and unattended daemons. This is how secrets
 reach all of them **without a live 1Password session** at runtime.
 
+> **The encrypted snapshots live in the PRIVATE `ateles-private` repo, NOT here.**
+> This `ateles` repo is public, so it holds only the no-secret tooling
+> (`execution/scripts/secrets_*.py`). The `.sops.yaml`, manifest, and
+> `secrets/*.sops.enc` snapshots live in `ateles-private` (cloned to
+> `~/repos/ateles-private`; override with `ATELES_SECRETS_DIR`). Snapshots stay
+> age-encrypted even in the private repo for defense-in-depth.
+
 ## Design (Design B — 1Password canonical)
 
 ```
 1Password (CANONICAL values)
         │  publish  (you, when a secret changes; needs `op signin`)
         ▼
-secrets/<name>.sops.env   ── age-encrypted snapshot, committed to git ──┐
-        │  git pull                                                     │
-        ▼                                                               │
-every machine / CI                                                      │
-        │  materialize  (offline; uses machine-local age key)          │
-        ▼                                                               │
-~/.config/neotoma/.env  ──▶  daemons read it (no 1Password session) ◀──┘
+ateles-private/secrets/<name>.sops.enc  ── age-encrypted, committed to PRIVATE git ──┐
+        │  git pull                                                                  │
+        ▼                                                                            │
+every machine / CI                                                                   │
+        │  materialize  (offline; uses machine-local age key)                        │
+        ▼                                                                            │
+<block target, e.g. ~/.config/neotoma/.env>  ──▶  daemons read it (no 1P session) ◀──┘
 ```
 
 - **1Password** is the source of truth and stores **one extra item**: the age
   **private key**. 1Password Family sync puts that item on every machine.
-- **git** carries the encrypted snapshots (`secrets/*.sops.env`). Values are
-  encrypted; keys stay readable. Safe to commit.
-- **age** does the crypto. The **public** key (in `.sops.yaml`) only encrypts;
-  only the **private** key (in 1Password) decrypts.
+- **git** carries the encrypted snapshots (`ateles-private/secrets/*.sops.enc`).
+  Values are encrypted; keys stay readable. The private repo + encryption are
+  belt-and-suspenders.
+- **age** does the crypto. The **public** key (in `ateles-private/.sops.yaml`)
+  only encrypts; only the **private** key (in 1Password) decrypts.
 
 Why not a 1Password service account? Those require a Business/Teams plan. This
 keeps everything on a Family plan: 1Password stores + syncs one root key; git
@@ -54,7 +62,15 @@ brew install sops age          # macOS; see getsops.io / age docs for others
 
 ## Per-machine bootstrap (once per machine, ~10s)
 
-1Password Family already synced the key item to this machine, so:
+**a. Clone the private secrets repo** (where the snapshots live):
+
+```bash
+git clone git@github.com:markmhendrickson/ateles-private.git ~/repos/ateles-private
+```
+
+**b. Place the age key.** 1Password Family already synced the key item to this
+machine (or, if `op` isn't installed here, `scp` `~/.config/sops/age/keys.txt`
+from a machine that has it):
 
 ```bash
 mkdir -p ~/.config/sops/age
