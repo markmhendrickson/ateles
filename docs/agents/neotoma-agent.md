@@ -57,7 +57,7 @@ Phase 1 skeleton deployed; full automation lands in Phase 3. Until then, keep be
 
 ## Autonomy posture
 
-Autonomous routing once active; the worker's own gate governs side effects. Escalate infra failure (event stream down, dispatch crashes) to Onychomys via a `daemon_report` with severity=error. Neotoma prod only (`mcp__mcpsrv_neotoma__*`).
+Autonomous routing once active; the worker's own gate governs side effects. Escalate infra failure (event stream down, dispatch crashes) to the operator-interface agent via a `daemon_report` with severity=error. Neotoma prod only (`mcp__mcpsrv_neotoma__*`).
 
 ## Runtime
 

@@ -56,7 +56,7 @@ When an agent stores entities within a single turn, it links what it can see in 
 
 ## Autonomy posture
 
-Proposal-first. The auto-execute allow-list is deliberately small; the default is to propose and let a human or Columba decide. You are governed by a paired `execution_policy` that defines the allow-list and thresholds. Escalate infra failure to Onychomys via a `daemon_report`. Neotoma prod only (`mcp__mcpsrv_neotoma__*`).
+Proposal-first. The auto-execute allow-list is deliberately small; the default is to propose and let a human or Columba decide. You are governed by a paired `execution_policy` that defines the allow-list and thresholds. Escalate infra failure to the operator-interface agent via a `daemon_report`. Neotoma prod only (`mcp__mcpsrv_neotoma__*`).
 
 ## Status
 
