@@ -58,6 +58,31 @@ Validates workflow files are in correct locations.
 python scripts/linters/check_workflow_compliance.py [file1.md] [file2.md] ...
 ```
 
+### `check_hardcoded_config.py`
+
+Enforces the Ateles "Neotoma-canonical / env-sourced" config rule in daemon and
+runtime code.
+
+**Purpose:** Flags operator-specific config (operator/personal email literals,
+Google Calendar resource IDs, IBANs, Bitcoin addresses) hardcoded in `lib/`,
+`execution/daemons/`, and `execution/scripts/` Python — including in docstring
+examples, since this is a public repo. Per `docs/architecture.md` and `CLAUDE.md`,
+these must be read from env / parquet / Neotoma at runtime — never baked in so
+the swarm stays portable and operator-agnostic.
+
+**Not redundant with the gitleaks PII scan:** `.gitleaks.toml` guards against
+*third-party* PII leaking into the public repo, so it deliberately allowlists
+the operator's own email and calendar IDs. This linter enforces the *separate*
+sourcing rule that gitleaks does not.
+
+**Usage:**
+```bash
+python scripts/linters/check_hardcoded_config.py [file1.py ...]   # or no args → scans runtime dirs
+```
+
+**Suppression:** append `# config-source-ok: <reason>` to a line with a
+reviewed, intentional literal (e.g. an explicit env-default fallback).
+
 ### `check_protected_paths.sh`
 
 Prevents commits to protected directories.

@@ -20,23 +20,24 @@ Each profile is identified by a PREFIX (e.g. "THERAPY", "YOGA") and reads:
 Profile list is driven by MONEDULA_PROFILES env var:
   MONEDULA_PROFILES=THERAPY,YOGA
 
-Example .env additions:
+Example .env additions (placeholder values — real config lives in the
+operator's private .env, never in this public file):
   MONEDULA_PROFILES=THERAPY,YOGA
   THERAPY_LABEL=Therapy
   THERAPY_CALENDAR_KEYWORDS=therapy,terapia
   THERAPY_PAYMENT_TYPE=wise
-  THERAPY_CONTACT_ID=578f6ce3-f9a4-4f
+  THERAPY_CONTACT_ID=<neotoma-contact-id-prefix>
   THERAPY_CONTACT_CATEGORY=health
   THERAPY_CONTACT_PLATFORM=wise
   THERAPY_AMOUNT_EUR=60
   THERAPY_WISE_REFERENCE=Pago terapia
   THERAPY_NEOTOMA_TASK_ID=
   YOGA_LABEL=Yoga
-  YOGA_CALENDAR_KEYWORDS=manel
+  YOGA_CALENDAR_KEYWORDS=yoga,ioga
   YOGA_PAYMENT_TYPE=btc
-  YOGA_BTC_ADDRESS=bc1q7ce96cl9zmtwhgl9stsfvsv6fj8zdtrvta9raf
+  YOGA_BTC_ADDRESS=<destination-btc-address>
   YOGA_AMOUNT_EUR=60
-  YOGA_NEOTOMA_TASK_ID=ent_4927189254ac1cd0232bf359
+  YOGA_NEOTOMA_TASK_ID=<ent_...>
 """
 
 from __future__ import annotations

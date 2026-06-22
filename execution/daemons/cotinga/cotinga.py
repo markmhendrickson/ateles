@@ -91,6 +91,28 @@ TELEGRAM_TOPIC_COTINGA = os.environ.get("TELEGRAM_TOPIC_COTINGA", "")
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com")
 
+# ─── Operator identity & calendars (operator-specific — never hardcode) ──────
+# Per Ateles architecture, operator contact details and calendar IDs are read
+# from env (or parquet), never baked into code. See docs/architecture.md
+# "Operator-specific config" and CLAUDE.md standing constraints.
+OPERATOR_NAME = os.environ.get("OPERATOR_NAME", "")
+OPERATOR_EMAIL = os.environ.get("OPERATOR_EMAIL", "")
+OPERATOR_FIRST_NAME = OPERATOR_NAME.split()[0] if OPERATOR_NAME else "the operator"
+
+# Comma-separated Google Calendar IDs to include in the daily brief (primary +
+# any shared/family calendars). Defaults to the operator's primary calendar
+# (OPERATOR_EMAIL) when COTINGA_CALENDAR_IDS is unset.
+_COTINGA_CAL_RAW = os.environ.get("COTINGA_CALENDAR_IDS", "")
+CALENDAR_IDS: list[str] = [c.strip() for c in _COTINGA_CAL_RAW.split(",") if c.strip()]
+if not CALENDAR_IDS and OPERATOR_EMAIL:
+    CALENDAR_IDS = [OPERATOR_EMAIL]
+
+# Ateles plan entity, referenced in the deep-prep prompt for live-convergence
+# lookups. Overridable so forks / tests don't pin the operator's plan ID.
+ATELES_PLAN_ENTITY_ID = os.environ.get(
+    "ATELES_PLAN_ENTITY_ID", "ent_99ace4dd6673aa36ed08b1fe"
+)
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -170,18 +192,21 @@ def fetch_upcoming_events() -> list[dict]:
         log.error("gws CLI not found in PATH")
         return []
 
+    if not CALENDAR_IDS:
+        log.error(
+            "No calendars configured — set OPERATOR_EMAIL or COTINGA_CALENDAR_IDS "
+            "in ~/.config/neotoma/.env (see .env.example)"
+        )
+        return []
+
     now = datetime.now(tz=MADRID_TZ)
     start_of_day = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=MADRID_TZ)
     end_of_day = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=MADRID_TZ)
     time_min = start_of_day.isoformat()
     time_max = end_of_day.isoformat()
 
-    # All personal/family calendars to include; exclude birthday and holiday feeds
-    CALENDAR_IDS = [
-        "markmhendrickson@gmail.com",                          # primary
-        "kce7ml7l9bjtbj9ndsatnaf87o@group.calendar.google.com",  # Tontitos
-        "family01227972405407168266@group.calendar.google.com",   # Family
-    ]
+    # Personal/family calendars to include come from env (CALENDAR_IDS); birthday
+    # and holiday feeds are intentionally excluded as noise in a daily brief.
 
     def _fetch_one(cal_id: str) -> list[dict]:
         params = {
@@ -599,7 +624,7 @@ def spawn_deep_prep_agent(event: dict, attendees: list[dict], event_dt: datetime
         f"--topic {TELEGRAM_TOPIC_COTINGA}" if TELEGRAM_TOPIC_COTINGA else ""
     )
 
-    prompt = f"""You are Cotinga, the daily event-prep agent for Mark Hendrickson (markmhendrickson@gmail.com).
+    prompt = f"""You are Cotinga, the daily event-prep agent for {OPERATOR_NAME} ({OPERATOR_EMAIL}).
 
 Your job is to prepare a deep briefing for this upcoming meeting and send it via Telegram.
 
@@ -609,7 +634,7 @@ Your job is to prepare a deep briefing for this upcoming meeting and send it via
 - Location: {location or '(none)'}
 - Description: {description or '(none)'}
 
-## Attendees (excluding Mark)
+## Attendees (excluding {OPERATOR_FIRST_NAME})
 {attendee_list or '(no external attendees — this is a solo event)'}
 
 ## Your tasks (complete all, then send Telegram summary)
@@ -620,8 +645,8 @@ Your job is to prepare a deep briefing for this upcoming meeting and send it via
    - "business_neotoma": a Neotoma/Ateles BD, partnership, investor, customer, or hiring
      meeting where Neotoma/Ateles positioning is genuinely relevant.
    - "personal_or_legal": a personal, family, legal, financial, medical, or life-admin
-     meeting (e.g. estate planning for Mark's family, a lawyer about personal matters,
-     a doctor). Neotoma/Ateles BD framing is NOT relevant here.
+     meeting (e.g. estate planning for {OPERATOR_FIRST_NAME}'s family, a lawyer about
+     personal matters, a doctor). Neotoma/Ateles BD framing is NOT relevant here.
    - "other": social, advisory, or ambiguous; relevant only if Neotoma/Ateles genuinely
      comes up.
    How to decide:
@@ -632,12 +657,13 @@ Your job is to prepare a deep briefing for this upcoming meeting and send it via
       for the person/company and any prior interaction notes.
    c. Use the event title/description as a hint, but the email thread is the source of truth.
    STATE the classification explicitly at the top of the brief as a "🧭 Meeting nature" line
-   with one sentence on WHY (e.g. "Personal estate-planning intro for Mark's family's
-   Spain-US structuring, via Austin Desautels — not a Neotoma BD meeting.").
+   with one sentence on WHY (e.g. "Personal estate-planning intro for {OPERATOR_FIRST_NAME}'s
+   family's cross-border structuring, via a mutual introducer — not a Neotoma BD meeting.").
    If nature is "personal_or_legal" or "other-with-no-Neotoma-angle", you MUST OMIT the
    "🔍 Overlap with Neotoma/Ateles" and "⚡ Live convergence" sections entirely and instead
-   produce a brief appropriate to the meeting's real purpose (who they are, what Mark wants
-   from the meeting, what to prepare/ask). Do not shoehorn Neotoma/Ateles in.
+   produce a brief appropriate to the meeting's real purpose (who they are, what
+   {OPERATOR_FIRST_NAME} wants from the meeting, what to prepare/ask). Do not shoehorn
+   Neotoma/Ateles in.
 
 1. **Participant research** — for each attendee:
    a. Search Neotoma (retrieve_entity_by_identifier with their email, then name) for any
@@ -659,7 +685,7 @@ Your job is to prepare a deep briefing for this upcoming meeting and send it via
    a. Overlap with Neotoma/Ateles — 1-3 concrete, specific bullets (competitive,
       complementary, or strategic). If no meaningful overlap, omit the section.
    b. Live convergence — query `mcp__mcpsrv_neotoma__list_recent_changes` (14 days), open
-      tasks/issues, and the Ateles plan (ent_99ace4dd6673aa36ed08b1fe); surface 1-3 things
+      tasks/issues, and the Ateles plan ({ATELES_PLAN_ENTITY_ID}); surface 1-3 things
       actively being built right now that speak to this attendee. Omit if not applicable.
    For "personal_or_legal" / "other" meetings, SKIP this entire step.
 
@@ -669,10 +695,10 @@ Your job is to prepare a deep briefing for this upcoming meeting and send it via
    in the task description if another agent could do it.
 
 5. **Meeting brief** — compose, fitted to the meeting's nature:
-   a. Goals: 2-3 concrete outcomes Mark should aim for in THIS meeting (not generic BD goals).
+   a. Goals: 2-3 concrete outcomes {OPERATOR_FIRST_NAME} should aim for in THIS meeting (not generic BD goals).
    b. Agenda: ordered talking points (5-8 max), appropriate to the real purpose.
    c. Context: 1-2 sentences per attendee — who they are, relevant history.
-   d. Open questions: anything Mark should clarify or resolve.
+   d. Open questions: anything {OPERATOR_FIRST_NAME} should clarify or resolve.
 
 6. **Store the brief** — store a `meeting_prep` entity in Neotoma (the purpose-built schema
    for meeting briefs; do NOT use checkpoint_brief). Set these TOP-LEVEL fields (flat):
