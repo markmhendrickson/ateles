@@ -99,3 +99,4 @@ execution/daemons/*/*_state.json
 execution/daemons/*/.*_state.json
 execution/daemons/*/.*_last_run
 execution/daemons/*/*_last_run
+.claude/skills/prepare-taxes/

@@ -38,7 +38,52 @@ def main() -> int:
         "A write-bearing session that ends with no plan link or no stored "
         "turns will be flagged at Stop."
     )
+
+    _emit_skill_drift_notice()
     return 0
+
+
+def _emit_skill_drift_notice() -> None:
+    """Surface drifted/missing skill mirrors so the operator can resync.
+
+    Runs sync_skills.py --check (read-only) with a hard timeout. Never blocks,
+    never writes — a Neotoma outage or slow query is swallowed silently.
+    """
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[2]
+    script = repo_root / "execution" / "scripts" / "sync_skills.py"
+    if not script.exists():
+        return
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(script), "--check"],
+            capture_output=True, text=True, timeout=20,
+        )
+    except Exception:
+        return  # fail open: never let skill-sync delay or break session start
+    if proc.returncode == 0:
+        return
+    rows = [r for r in proc.stdout.splitlines() if r.startswith(("MISSING", "DRIFTED"))]
+    if not rows:
+        return
+    missing = [r.split()[1] for r in rows if r.startswith("MISSING")]
+    drifted = [r.split()[1] for r in rows if r.startswith("DRIFTED")]
+    parts = []
+    if missing:
+        parts.append(f"{len(missing)} entity-only skill(s) not installed on disk "
+                     f"(won't load): {', '.join(missing[:8])}")
+    if drifted:
+        parts.append(f"{len(drifted)} skill mirror(s) drifted from Neotoma: "
+                     f"{', '.join(drifted[:8])}")
+    print(
+        "[skill-sync] " + "; ".join(parts) + ". "
+        "Canonical content lives in Neotoma; run "
+        "`python3 execution/scripts/sync_skills.py` to write drifted mirrors, "
+        "or `--install <slug>` to materialize a missing one (then it loads next "
+        "session). Review before applying — an on-disk body may intentionally "
+        "lead Neotoma."
+    )
 
 
 if __name__ == "__main__":
