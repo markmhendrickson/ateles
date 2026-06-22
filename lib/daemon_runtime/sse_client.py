@@ -179,12 +179,13 @@ class SSEClient:
 
     async def _connect_and_stream(self, handler: EventHandler) -> None:
         if not self._token:
-            log.warning(
+            # Open-mode Neotoma instances (no NEOTOMA_BEARER_TOKEN configured
+            # server-side) accept unauthenticated requests and reject any bearer
+            # token. Connect without an Authorization header rather than skipping.
+            log.info(
                 f"[{self.handler_name}] NEOTOMA_BEARER_TOKEN not set — "
-                "SSE subscription skipped"
+                "connecting to SSE stream without auth (open-mode Neotoma)"
             )
-            self._running = False
-            return
 
         if not self._subscription_id:
             log.warning(
@@ -202,10 +203,11 @@ class SSEClient:
             params["entity_types"] = ",".join(self.entity_types)
 
         headers = {
-            "Authorization": f"Bearer {self._token}",
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
         }
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
 
         log.info(
             f"[{self.handler_name}] Connecting to SSE stream "
