@@ -58,12 +58,46 @@ This is the proactive complement to the reactive `detect_auth_failure` path alre
 
 A lightweight probe folded into an existing scheduled daemon (the morning-brief run, or Anthus) rather than a new always-on daemon — credential checks are periodic, not event-driven. One probe pass per scheduled tick; results to `credential_health` entities; pages only on state change to `degraded`/`expired` (no daily nag while healthy).
 
+## Secret delivery: SOPS, not interactive 1Password
+
+Remediation depends on how the credential reaches a daemon, and the swarm runs
+**remote/headless** — the operator drives Mac Studio over SSH, where the
+1Password desktop-app integration cannot unlock (no GUI to approve), so `op`
+cannot fetch secrets non-interactively at runtime. The chosen mechanism is
+therefore the **SOPS + age pipeline** (`docs/secrets_management.md`, Design B),
+not an interactive `op` session and not a 1Password service account (which
+needs a Business plan):
+
+```
+1Password (canonical) ──publish (op, when a value changes)──▶ secrets/*.sops.env (age-encrypted, in git)
+                                                                      │ git pull
+                                                                      ▼
+                              materialize (OFFLINE, machine-local age key) ──▶ ~/.config/neotoma/.env ──▶ daemons
+```
+
+This splits `reauth_action` into two distinct remediations, and the monitor
+must say which one applies:
+
+- **Key-backed credentials** (e.g. `anthropic_claude` via `ANTHROPIC_API_KEY`):
+  the value is long-lived; lapse means it was rotated or never delivered. Fix =
+  **re-publish + materialize**: `secrets_publish.py neotoma` (op-gated, once) →
+  commit → on each host `secrets_materialize.py neotoma` (offline) → reload the
+  daemon. No live OAuth involved. This is now the Apis 401 fix.
+- **Genuinely interactive credentials** (browser sessions: Substack, X) that
+  have no headless equivalent: fix = a real re-auth flow the operator completes
+  in a GUI; the monitor hands them the URL.
+
+So the registry's `reauth_action` is a SOPS publish/materialize command for
+key-backed credentials, and a re-auth URL only for the irreducibly-interactive
+ones.
+
 ## Non-goals / principles
 
-- **Never auto-re-auth.** Surface + hand off; the human completes the flow.
+- **Never auto-re-auth.** Surface + hand off; the human completes the flow (or runs publish/materialize).
 - **Never store secret values** in `credential_health` — only status + the action to fix.
-- **Probe the real environment.** An Anthropic probe must run in the daemon's env (where the panel runs), or it will report healthy while the daemon is 401ing — the exact trap that hid the Vanellus lapse.
+- **Probe the real environment.** An Anthropic probe must run in the daemon's env (where the panel runs, after materialize), or it will report healthy while the daemon is 401ing — the exact trap that hid the Vanellus lapse.
 - **Registry-driven, not hardcoded.** Adding a credential = storing a `credential_health` entity with a `check_method` + `reauth_action`, not editing probe code per service.
+- **Headless-first.** Probes and remediations must work over SSH/cron; if a fix needs a GUI, that's a property of the credential (interactive browser session), not the default.
 
 ## Build plan (deferred)
 
@@ -71,4 +105,4 @@ A lightweight probe folded into an existing scheduled daemon (the morning-brief 
 2. Seed the four in-scope credentials with `check_method` + `reauth_action`.
 3. Implement the probe pass (one function per `kind`) + wire into a scheduled daemon.
 4. Page on state-change to degraded/expired with the `reauth_action`.
-5. Backfill: the Anthropic entry's `reauth_action` is the host-side `ANTHROPIC_API_KEY` fix already documented for the Apis daemon.
+5. Backfill: the Anthropic entry's `reauth_action` is the SOPS publish/materialize flow (manifest maps `ANTHROPIC_API_KEY`; `secrets_publish.py neotoma` → `secrets_materialize.py neotoma` → reload Apis), per the *Secret delivery* section.
