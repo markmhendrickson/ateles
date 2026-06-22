@@ -419,6 +419,13 @@ class NeotomaUnavailableError(Exception):
 # so this will always resolve to prod (3180), never auto-detect dev (3080).
 _NEOTOMA_BASE_URL: str = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180")
 
+# Canonical "Neotoma, Inc." company entity, referenced in the extraction prompt
+# so product mentions get related to it. Env-overridable so a different graph /
+# fork can point at its own company entity instead of a baked-in literal.
+NEOTOMA_COMPANY_ENTITY_ID: str = os.environ.get(
+    "NEOTOMA_COMPANY_ENTITY_ID", "ent_44835c5b0047ce26ffbe40bc"
+)
+
 
 def _neotoma_query(
     entity_type: str,
@@ -663,7 +670,7 @@ For each of these transcriptions, perform the following steps using the Neotoma 
 3. Relate each transcription to every entity it produced/updated via REFERS_TO (predicate: mentions).
 
 4. Relate all created/updated entities to relevant existing Neotoma entities:
-   - Anything about Neotoma the product: relate to ent_44835c5b0047ce26ffbe40bc (Neotoma, Inc.)
+   - Anything about Neotoma the product: relate to {NEOTOMA_COMPANY_ENTITY_ID} (Neotoma, Inc.)
    - People to companies they work at, topics to related plans, etc.
    - Be thorough — check for any existing entities that are clearly connected.
 
