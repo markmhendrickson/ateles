@@ -327,6 +327,35 @@ def _targets(agents: list[dict]) -> dict[Path, str]:
     return out
 
 
+def _orphans(agents: list[dict]) -> list[Path]:
+    """Stale agent-mirror files on disk with no matching current agent.
+
+    When an agent is renamed (e.g. gryllus -> cicada) or removed, its old
+    docs/agents/<old>.md and .claude/skills/<old>/SKILL.md linger. We only
+    treat a file as an orphan if it is unambiguously an agent_definition
+    mirror (carries the `entity_type: agent_definition` marker), so authored
+    non-agent skills (commit, analyze, …) are never touched.
+    """
+    current = {s["name"] for s in agents}
+    orphans: list[Path] = []
+    # docs/agents/<name>.md
+    if AGENTS_DOC_DIR.exists():
+        for p in AGENTS_DOC_DIR.glob("*.md"):
+            if p.name == "README.md" or p.stem in current:
+                continue
+            if "entity_type: agent_definition" in p.read_text():
+                orphans.append(p)
+    # .claude/skills/<name>/SKILL.md
+    if SKILLS_DIR.exists():
+        for d in SKILLS_DIR.iterdir():
+            if not d.is_dir() or d.name in current:
+                continue
+            f = d / "SKILL.md"
+            if f.exists() and "entity_type: agent_definition" in f.read_text():
+                orphans.append(f)
+    return sorted(orphans)
+
+
 def render(agents: list[dict]) -> int:
     targets = _targets(agents)
     for path, content in targets.items():
@@ -336,6 +365,13 @@ def render(agents: list[dict]) -> int:
     print(f"rendered {len(targets)} files for {len(agents)} agents:")
     for r in rel:
         print(f"  {r}")
+    orphans = _orphans(agents)
+    for p in orphans:
+        p.unlink()
+        # remove a now-empty skill dir
+        if p.parent != SKILLS_DIR and p.parent != AGENTS_DOC_DIR and not any(p.parent.iterdir()):
+            p.parent.rmdir()
+        print(f"  pruned orphan {p.relative_to(REPO_ROOT)}")
     return 0
 
 
@@ -347,10 +383,16 @@ def check(agents: list[dict]) -> int:
         on_disk = path.read_text() if path.exists() else ""
         if on_disk != canonical:
             failures.append(str(path.relative_to(REPO_ROOT)))
-    if failures:
-        print("AGENT MIRROR CHECK FAILED — disk differs from Neotoma:")
-        for f in failures:
-            print(f"  {f}")
+    orphans = [str(p.relative_to(REPO_ROOT)) for p in _orphans(agents)]
+    if failures or orphans:
+        if failures:
+            print("AGENT MIRROR CHECK FAILED — disk differs from Neotoma:")
+            for f in failures:
+                print(f"  {f}")
+        if orphans:
+            print("AGENT MIRROR CHECK FAILED — stale orphan files (renamed/removed agents):")
+            for o in orphans:
+                print(f"  {o}")
         return 1
     print(f"agent mirror check OK — {len(targets)} files match Neotoma ({len(agents)} agents)")
     return 0

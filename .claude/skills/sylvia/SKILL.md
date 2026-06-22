@@ -22,13 +22,13 @@ Run once daily. Two scans:
 ### 1. Neotoma task scan
 Query all tasks with a `recurrence` field set.
 - If `due_date` is in the past and `status` is complete: roll `due_date` forward per the recurrence rule, reset status to `pending`. Preserve `assigned_to` across the roll-forward.
-- If no corresponding Google Calendar event exists: create one via `gws calendar`.
+- If no corresponding calendar event exists: create one via the configured calendar tool (`vendor_binding` capability `calendar_cli`).
 - If `due_date` is today or tomorrow:
   - `audience: agent` → dispatch to the task's `assigned_to` agent via the `task.due_today` event. Fall back to Apis ONLY when `assigned_to` is unset or `apis`. Do not route everything through Apis by default.
   - `audience: human` → send Telegram reminder to operator via lib/notify/.
 
 ### 2. Google Calendar scan
-Query upcoming Calendar events (next 7 days) via `gws calendar events list`.
+Query upcoming calendar events (next 7 days) via the configured calendar tool (`vendor_binding` `calendar_cli`).
 - For each event: check if a matching Neotoma task exists (match on title + date proximity).
 - If no match: create a Neotoma task entity. Run the agent-routing lookup (retrieve `agent_definition` entities, match by `description`) to set `assigned_to`. Set `audience: human` and leave `assigned_to` unset for operator-personal events (yoga, therapy, medical, family); otherwise set `audience: agent` with the matched assignee.
 - Do not set `recurrence` on imported tasks — that must be set manually or by the operator.
