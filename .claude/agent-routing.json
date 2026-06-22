@@ -1,0 +1,103 @@
+{
+  "$comment": "Topic-based auto-invocation routing for Ateles T4 panel agents. Read by .claude/hooks/agent_auto_invocation.py on every UserPromptSubmit. This file is hand-authored and is NOT part of the Apus SKILL.md mirror, so edits here are durable. Keep agent roles in sync with .claude/skills/<name>/SKILL.md descriptions when they change.",
+  "config": {
+    "enabled": true,
+    "min_score": 2,
+    "max_agents": 3,
+    "signal_weight": 1,
+    "strong_signal_weight": 2
+  },
+  "agents": [
+    {
+      "name": "pavo",
+      "command": "/pavo",
+      "role": "product manager — prioritisation, tradeoff analysis, scoping, sequencing",
+      "signals": ["backlog", "scope", "roadmap", "priority", "prioritize", "prioritise", "tradeoff", "trade-off", "sequencing", "what should we build", "product decision", "cut scope", "milestone"],
+      "strong_signals": ["product manager", "prioritise the", "prioritize the", "product roadmap"]
+    },
+    {
+      "name": "accipiter",
+      "command": "/accipiter",
+      "role": "UX & product design — user flows, information architecture, UI specs",
+      "signals": ["ux", "user experience", "user flow", "wireframe", "mockup", "usability", "information architecture", "navigation", "ui spec", "interaction design", "layout"],
+      "strong_signals": ["design the interface", "user flow", "ux design", "information architecture"]
+    },
+    {
+      "name": "bombycilla",
+      "command": "/bombycilla",
+      "role": "technical architect — architecture reviews, schema design, ADRs, API design",
+      "signals": ["architecture", "architect", "schema design", "data model", "adr", "system design", "technical design", "scalability", "api design", "design doc", "refactor strategy"],
+      "strong_signals": ["technical architecture", "schema design", "system design", "architecture review"]
+    },
+    {
+      "name": "gryllus",
+      "command": "/gryllus",
+      "role": "issue worker — implements GitHub issues, opens PRs, signs the impl gate",
+      "signals": ["implement", "build the feature", "write the code", "fix the bug", "open a pr", "open a pull request", "code this", "ship the implementation", "wire up"],
+      "strong_signals": ["implement the issue", "implement issue", "open a pull request", "open a pr"]
+    },
+    {
+      "name": "vanellus",
+      "command": "/vanellus",
+      "role": "PR steward — reviews PRs, enforces gate inheritance, squash-merges",
+      "signals": ["review the pr", "pr review", "review pull request", "merge", "squash", "approve the pr", "gate inheritance"],
+      "strong_signals": ["review the pr", "pr steward", "squash merge", "review the pull request"]
+    },
+    {
+      "name": "lanius",
+      "command": "/lanius",
+      "role": "GitHub workflow coordinator — routes work through the gate pipeline",
+      "signals": ["workflow", "gate pipeline", "route the issue", "coordinate the", "gate", "advance the issue", "dispatch"],
+      "strong_signals": ["workflow coordinator", "gate pipeline", "route the issue"]
+    },
+    {
+      "name": "phoenicurus",
+      "command": "/phoenicurus",
+      "role": "QA — test coverage audits, regression checks, release readiness",
+      "signals": ["qa", "test coverage", "quality assurance", "release readiness", "regression", "test plan", "edge cases", "acceptance test"],
+      "strong_signals": ["test coverage", "release readiness", "quality assurance"]
+    },
+    {
+      "name": "struthio",
+      "command": "/struthio",
+      "role": "autonomous release agent — executes releases when criteria are met",
+      "signals": ["cut a release", "ship version", "publish release", "tag version", "version bump", "release notes", "changelog for release"],
+      "strong_signals": ["cut a release", "publish the release", "ship the release"]
+    },
+    {
+      "name": "buteo",
+      "command": "/buteo",
+      "role": "legal — contract review, compliance, IP and license audit",
+      "signals": ["legal", "contract", "license", "licence", "compliance", "terms of service", "privacy policy", "gdpr", "intellectual property", "liability", "trademark"],
+      "strong_signals": ["contract review", "legal review", "ip audit", "compliance review"]
+    },
+    {
+      "name": "hirundo",
+      "command": "/hirundo",
+      "role": "customer intelligence — ICP synthesis, competitive & market analysis",
+      "signals": ["icp", "ideal customer", "competitive analysis", "competitor", "market research", "customer intelligence", "persona", "segment", "positioning research"],
+      "strong_signals": ["competitive analysis", "ideal customer profile", "customer intelligence"]
+    },
+    {
+      "name": "paradisaea",
+      "command": "/paradisaea",
+      "role": "copy & positioning — UI copy, marketing copy, messaging, value props",
+      "signals": ["copy", "positioning", "messaging", "tagline", "headline", "microcopy", "value proposition", "marketing copy", "wording"],
+      "strong_signals": ["ui copy", "value proposition", "marketing copy", "positioning statement"]
+    },
+    {
+      "name": "corvus",
+      "command": "/corvus",
+      "role": "content writer — long-form posts, social voice, changelog narrative",
+      "signals": ["blog post", "write content", "long-form", "article", "draft a post", "newsletter", "narrative", "content piece"],
+      "strong_signals": ["blog post", "write a post", "long-form content"]
+    },
+    {
+      "name": "regulus",
+      "command": "/regulus",
+      "role": "developer relations — docs quality, onboarding, API ergonomics",
+      "signals": ["developer relations", "devrel", "documentation quality", "onboarding", "api ergonomics", "getting started", "dev docs", "quickstart"],
+      "strong_signals": ["developer relations", "api ergonomics", "onboarding docs"]
+    }
+  ]
+}
