@@ -36,6 +36,9 @@ operational_entity_types:
   - analysis
   - analysis_finding
   - task
+canonical_context_entities:
+  - operator_profile
+  - locale_profile
 ---
 
 # fringilla

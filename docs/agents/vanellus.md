@@ -60,6 +60,8 @@ operational_entity_types:
   - decision_note
   - feedback_artifact
   - strategy_drift_signal
+canonical_context_entities:
+  - operator_profile
 ---
 
 # vanellus

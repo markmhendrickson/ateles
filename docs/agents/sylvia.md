@@ -26,6 +26,8 @@ operational_entity_types:
   - task
   - calendar_event
   - daemon_report
+canonical_context_entities:
+  - vendor_binding
 ---
 
 # sylvia

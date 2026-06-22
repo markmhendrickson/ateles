@@ -32,6 +32,13 @@ operational_entity_types:
   - task
   - calendar_event
   - contact
+canonical_context_entities:
+  - operator_profile
+  - product_profile
+  - locale_profile
+  - channel_config
+  - vendor_binding
+  - calendar_routing_config
 ---
 
 # cotinga

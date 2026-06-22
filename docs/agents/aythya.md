@@ -18,6 +18,8 @@ tool_allowlist:
   - mcp__mcpsrv_neotoma__correct
   - WebSearch
   - WebFetch
+canonical_context_entities:
+  - operator_profile
 ---
 
 # aythya

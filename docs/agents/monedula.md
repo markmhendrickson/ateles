@@ -33,6 +33,14 @@ operational_entity_types:
   - task
   - daemon_report
   - checkpoint_brief
+canonical_context_entities:
+  - operator_profile
+  - locale_profile
+  - swarm_roster
+  - channel_config
+  - vendor_binding
+  - task_policy
+  - payment_profile
 ---
 
 # monedula

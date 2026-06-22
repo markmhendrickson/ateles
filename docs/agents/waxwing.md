@@ -66,6 +66,9 @@ operational_entity_types:
   - plan
   - api_reference
   - strategy_drift_signal
+canonical_context_entities:
+  - operator_profile
+  - payment_profile
 ---
 
 # waxwing

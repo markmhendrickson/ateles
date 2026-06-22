@@ -185,6 +185,25 @@ def _yaml_scalar(v) -> str:
     return sv
 
 
+# Context entity types an agent prompt may resolve at runtime (the
+# genericization model — see agent_policy on describing roles generically).
+# Surfaced as `canonical_context_entities` frontmatter so a reader can see,
+# without parsing prose, which operator/locale/vendor/swarm config an agent
+# depends on.
+KNOWN_CONTEXT_ENTITIES = [
+    "operator_profile", "product_profile", "locale_profile", "swarm_roster",
+    "channel_config", "vendor_binding", "tax_profile", "tax_preparer",
+    "task_policy", "constitution", "payment_profile", "brand_voice",
+    "calendar_routing_config",
+]
+
+
+def _context_entities_referenced(s: dict) -> list[str]:
+    """Which context entity types this agent's prompt references."""
+    body = s.get("prompt_markdown") or ""
+    return [t for t in KNOWN_CONTEXT_ENTITIES if t in body]
+
+
 def _canonical_frontmatter(s: dict) -> list[str]:
     """Rich, harness-neutral frontmatter — every structured field of the entity."""
     fm = ["---", "entity_id: " + _yaml_scalar(s.get("_entity_id", "")), "entity_type: agent_definition"]
@@ -205,6 +224,10 @@ def _canonical_frontmatter(s: dict) -> list[str]:
         if vals:
             fm.append(f"{key}:")
             fm += [f"  - {_yaml_scalar(v)}" for v in vals]
+    ctx_refs = _context_entities_referenced(s)
+    if ctx_refs:
+        fm.append("canonical_context_entities:")
+        fm += [f"  - {v}" for v in ctx_refs]
     fm.append("---")
     return fm
 

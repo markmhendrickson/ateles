@@ -70,6 +70,8 @@ operational_entity_types:
   - git_commit
   - rollback_plan
   - strategy_drift_signal
+canonical_context_entities:
+  - operator_profile
 ---
 
 # struthio

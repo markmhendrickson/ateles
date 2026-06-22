@@ -75,6 +75,8 @@ operational_entity_types:
   - design_system_element
   - visual_concept
   - strategy_drift_signal
+canonical_context_entities:
+  - operator_profile
 ---
 
 # accipiter
