@@ -27,6 +27,8 @@ operational_entity_types:
   - task
   - contact
   - daemon_report
+canonical_context_entities:
+  - vendor_binding
 ---
 
 # turdus

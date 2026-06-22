@@ -32,6 +32,10 @@ operational_entity_types:
   - plan
   - checkpoint_brief
   - release_result
+canonical_context_entities:
+  - operator_profile
+  - swarm_roster
+  - channel_config
 ---
 
 # ateles

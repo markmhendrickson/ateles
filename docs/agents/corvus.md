@@ -71,6 +71,13 @@ operational_entity_types:
   - outreach_activity
   - post
   - strategy_drift_signal
+canonical_context_entities:
+  - operator_profile
+  - product_profile
+  - swarm_roster
+  - vendor_binding
+  - constitution
+  - brand_voice
 ---
 
 # corvus

@@ -24,6 +24,8 @@ tool_allowlist:
   - mcp__mcpsrv_neotoma__list_observations
   - mcp__mcpsrv_neotoma__submit_issue
   - Bash
+canonical_context_entities:
+  - operator_profile
 ---
 
 # lanius

@@ -75,6 +75,8 @@ operational_entity_types:
   - release_gate
   - audit_run
   - strategy_drift_signal
+canonical_context_entities:
+  - operator_profile
 ---
 
 # phoenicurus

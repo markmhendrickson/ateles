@@ -35,6 +35,8 @@ operational_entity_types:
   - workout_session
   - task
   - daemon_report
+canonical_context_entities:
+  - vendor_binding
 ---
 
 # gorilla

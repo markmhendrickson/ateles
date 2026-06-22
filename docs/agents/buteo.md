@@ -57,6 +57,13 @@ operational_entity_types:
   - claim
   - regulation_note
   - strategy_drift_signal
+canonical_context_entities:
+  - operator_profile
+  - product_profile
+  - locale_profile
+  - swarm_roster
+  - vendor_binding
+  - constitution
 ---
 
 # buteo

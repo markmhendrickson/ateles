@@ -42,6 +42,11 @@ operational_entity_types:
   - analysis
   - task
   - tax_document
+canonical_context_entities:
+  - locale_profile
+  - vendor_binding
+  - tax_profile
+  - tax_preparer
 ---
 
 # picus

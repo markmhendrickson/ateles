@@ -61,6 +61,8 @@ operational_entity_types:
   - reference
   - query_example
   - strategy_drift_signal
+canonical_context_entities:
+  - operator_profile
 ---
 
 # regulus

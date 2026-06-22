@@ -19,6 +19,11 @@ tool_allowlist:
   - mcp__mcpsrv_neotoma__list_observations
   - mcp__mcpsrv_neotoma__list_recent_changes
   - mcp__mcpsrv_neotoma__list_timeline_events
+canonical_context_entities:
+  - operator_profile
+  - product_profile
+  - swarm_roster
+  - constitution
 ---
 
 # columba
