@@ -447,6 +447,53 @@ def compose_vanellus_fallback_comment(text: str) -> str:
     )
 
 
+# Signatures of a credential/auth failure in a spawned `claude --print` panelist
+# (expired Anthropic OAuth session or missing/invalid ANTHROPIC_API_KEY). When a
+# panelist hits this, its "verdict" is just the auth error — posting it as a
+# review is misleading, and the real fix is operator re-auth. See
+# detect_auth_failure + the credential-expiry resilience pattern.
+_AUTH_FAILURE_SIGNATURES = (
+    "401 invalid authentication credentials",
+    "invalid authentication credentials",
+    "could not resolve authentication",
+    "oauth token has expired",
+    "authentication_error",
+    "please run /login",
+    "invalid api key",
+    "x-api-key header is required",
+)
+
+
+def detect_auth_failure(*texts: str) -> bool:
+    """True when any text carries a Claude/Anthropic auth-failure signature.
+
+    Checked against a panelist's stdout+stderr so the dispatcher can reframe an
+    auth failure as an infra problem (and page the operator to re-auth) instead
+    of posting the raw 401 as a review verdict."""
+    blob = " ".join(t for t in texts if t).lower()
+    return any(sig in blob for sig in _AUTH_FAILURE_SIGNATURES)
+
+
+def compose_auth_failure_comment(agent: str) -> str:
+    """Body for the comment posted when a panel agent's Claude call fails auth.
+
+    Reframes the 401 as an operational issue with a clear remediation, rather
+    than a bare 'could not post' that reads like the agent's verdict."""
+    return (
+        f"{_VANELLUS_COMMENT_MARKER}\n"
+        f"{attribution_header('vanellus', 'PR steward')}\n\n"
+        f"⚠️ **Panel review unavailable — agent credential failure.** The `{agent}` "
+        "panel agent (spawned as `claude --print` by the Apis dispatcher) could "
+        "not authenticate to the Anthropic API (401). This is an infrastructure "
+        "issue, **not** a review verdict — the PR has not been assessed by the panel.\n\n"
+        "**Fix (host-side):** set a long-lived `ANTHROPIC_API_KEY` in the Apis "
+        "daemon environment (`com.ateles.apis` plist or `ateles-private/.env`) and "
+        "reload, or re-authenticate the Claude CLI for the daemon user. Daemons "
+        "should use an API key, not an interactive OAuth session that expires.\n\n"
+        "_Posted by the Apis dispatcher; the operator has been paged to re-auth._"
+    )
+
+
 def lenses_missing_comments(
     comment_bodies: list[str], lenses: list[str]
 ) -> list[str]:
@@ -713,10 +760,17 @@ class SwarmDispatcher:
             include_github_contract=True,
         )
 
-        # 4b. Dispatcher fallback: if Vanellus's own gh comment did not land
-        #     on the PR, post the captured stdout ourselves (mirrors
-        #     _post_missing_panel_comments for the aggregation step).
-        await self._post_missing_vanellus_comment(trigger, vanellus_result)
+        # 4a. Credential-expiry guard: if the aggregation's claude call failed
+        #     auth (expired OAuth / missing ANTHROPIC_API_KEY), its "verdict" is
+        #     just the 401. Reframe it as an infra failure and page the operator
+        #     to re-auth, rather than posting the raw error as a review.
+        if detect_auth_failure(vanellus_result.stdout, vanellus_result.stderr):
+            await self._handle_panel_auth_failure(trigger, "vanellus")
+        else:
+            # 4b. Dispatcher fallback: if Vanellus's own gh comment did not land
+            #     on the PR, post the captured stdout ourselves (mirrors
+            #     _post_missing_panel_comments for the aggregation step).
+            await self._post_missing_vanellus_comment(trigger, vanellus_result)
 
         if not self.config.auto_merge:
             await self._store_merge_checkpoint(trigger, parent, [p.lens for p in panel])
@@ -1877,6 +1931,62 @@ class SwarmDispatcher:
         except Exception as exc:
             log.error(
                 f"[{DAEMON_NAME}] fallback review comments failed for "
+                f"{t.repository}#{t.number}: {exc}"
+            )
+
+    async def _handle_panel_auth_failure(self, t: SwarmTrigger, agent: str) -> None:
+        """A panel agent's Claude call failed auth — surface it as infra, page operator.
+
+        Posts a reframed PR comment (so the 401 isn't mistaken for a verdict) and
+        sends a BLOCKER notification with the re-auth remediation. Idempotent on
+        the comment via the Vanellus marker; best-effort, never raises.
+        """
+        log.error(
+            f"[{DAEMON_NAME}] panel agent '{agent}' auth failure on "
+            f"{t.repository}#{t.number} — Claude credential expired/invalid"
+        )
+        # Page the operator with the actionable fix.
+        try:
+            self.notifier.send(
+                f"⚠️ Swarm review degraded: the {agent} panel agent can't "
+                f"authenticate to Anthropic (401) on {t.repository}#{t.number}. "
+                "PRs aren't being review-aggregated. Fix: set a long-lived "
+                "ANTHROPIC_API_KEY in the Apis daemon env (com.ateles.apis plist "
+                "or ateles-private/.env) and reload com.ateles.apis.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+        except Exception as exc:  # notifier must never crash the pipeline
+            log.error(f"[{DAEMON_NAME}] re-auth notification failed: {exc}")
+        # Post the reframed comment (dedup on the marker), best-effort.
+        repo_token = _token_for_repo(t.repository)
+        if not repo_token:
+            return
+        url = (
+            f"https://api.github.com/repos/{t.repository}/issues/"
+            f"{t.number}/comments"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    url, params={"per_page": 100},
+                    headers=self._github_headers(t.repository),
+                )
+                resp.raise_for_status()
+                if not vanellus_comment_missing([c.get("body", "") for c in resp.json()]):
+                    return  # an aggregation comment already landed
+                post = await client.post(
+                    url, json={"body": compose_auth_failure_comment(agent)},
+                    headers=self._github_headers(t.repository),
+                )
+                post.raise_for_status()
+                log.info(
+                    f"[{DAEMON_NAME}] posted auth-failure notice on "
+                    f"{t.repository}#{t.number}"
+                )
+        except Exception as exc:
+            log.error(
+                f"[{DAEMON_NAME}] auth-failure comment failed for "
                 f"{t.repository}#{t.number}: {exc}"
             )
 
