@@ -16,7 +16,7 @@ Update a Neotoma plan entity to accurately reflect what was built and decided th
 
 ## Inputs
 
-- `plan_entity_id`: the Neotoma entity ID of the plan (default: `ent_99ace4dd6673aa36ed08b1fe` for the Ateles plan)
+- `plan_entity_id`: the Neotoma entity ID of the plan **matching this session's workstream**. There is no global default — resolve it by `retrieve_entities(entity_type=plan, search=<workstream>)` and pick the closest match, or create a new plan if none fits. Only use `ent_99ace4dd6673aa36ed08b1fe` ("Ateles Agent Swarm Architecture") when the session's work is swarm-architecture itself; never funnel unrelated workstreams (tax, release engineering, website, cloud hosting) into it.
 - Session context: what was built, what was decided, what is now blocked or unblocked
 
 ## Steps
@@ -38,7 +38,7 @@ For each item in the `todos` array:
 
 ### Step 3: Update decisions map
 
-Add or correct entries for any decisions settled this session. Each entry is a key (snake_case decision name) → single-sentence value capturing the *what* and *why*. Never delete existing entries — only add or correct.
+Add or correct entries for any decisions settled this session. Each entry is a key (snake_case decision name) → single-sentence value capturing the *what* and *why*. `correct` replaces the *entire* `decisions` map, so RE-READ the current map from Step 1, then write back the full map with only your keys added/updated and every pre-existing key preserved. Never delete existing entries, and never rebuild the map from a stale in-memory copy — that silently drops other sessions' decisions. The same re-read-and-merge rule applies to the `todos` array.
 
 Key decisions to always capture if settled:
 - Tool/library choices and why alternatives were rejected
