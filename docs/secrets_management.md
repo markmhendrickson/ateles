@@ -98,7 +98,7 @@ After this, decryption is fully offline — no `op signin` needed again on this 
 python execution/scripts/secrets_publish.py            # all files in the manifest
 python execution/scripts/secrets_publish.py neotoma    # one file
 ENVIRONMENT=production python execution/scripts/secrets_publish.py
-git add secrets/*.sops.env && git commit -m "chore(secrets): rotate <var>"
+git add secrets/*.sops.enc && git commit -m "chore(secrets): rotate <var>"
 ```
 
 **Materialize** — on any machine, to refresh its local `.env` (offline):
@@ -119,16 +119,16 @@ Daemons also self-materialize at startup (see below), so often a restart is enou
 `execution/daemons/{cyphorhinus,piculet}/watch.py` refresh
 `NEOTOMA_BEARER_TOKEN` at startup by, in order:
 
-1. **Offline SOPS decrypt** of `secrets/neotoma.sops.env` (repo-relative) or
-   `~/.config/neotoma/secrets/neotoma.sops.env` — no 1Password session.
+1. **Offline SOPS decrypt** of `secrets/neotoma.sops.enc` (repo-relative) or
+   `~/.config/neotoma/secrets/neotoma.sops.enc` — no 1Password session.
 2. **Fallback: live `op read`** — only if SOPS/age is unavailable or the snapshot
    is missing (kept for migration; remove once every machine is bootstrapped).
 
 If neither yields a token, the daemon proceeds with whatever is already in
 `.env`. This makes the migration safe: nothing breaks before bootstrap.
 
-> Deployment note: isolated daemon checkouts must include `secrets/*.sops.env`,
-> **or** you place the snapshot at `~/.config/neotoma/secrets/neotoma.sops.env`
+> Deployment note: isolated daemon checkouts must include `secrets/*.sops.enc`,
+> **or** you place the snapshot at `~/.config/neotoma/secrets/neotoma.sops.enc`
 > (the second candidate path). Otherwise daemons silently fall back to `op read`.
 
 ## CI (GitHub Actions)
@@ -150,7 +150,7 @@ No 1Password in CI at all.
   commit → materialize everywhere.
 - **Rotate the age key:** `age-keygen` a new key, update the private item in
   1Password and the public key in `.sops.yaml`, run
-  `sops updatekeys secrets/*.sops.env`, commit, then re-run the per-machine
+  `sops updatekeys secrets/*.sops.enc`, commit, then re-run the per-machine
   bootstrap (step above) on each box. To revoke a machine, rotate the age key so
   its old `keys.txt` can no longer decrypt new snapshots.
 
