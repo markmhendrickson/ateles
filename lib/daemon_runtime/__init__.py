@@ -77,7 +77,11 @@ from .grant_checker import (
     suspend_grant,
 )
 from .session_finalize import (
+    append_turn,
     build_finalize_payload,
+    build_run_conversation_payload,
+    build_turn_payload,
+    create_run_conversation,
     finalize_session,
     load_end_skill,
 )
@@ -130,4 +134,9 @@ __all__ = [
     "build_finalize_payload",
     "finalize_session",
     "load_end_skill",
+    # conversation-per-execution-run (E1)
+    "build_run_conversation_payload",
+    "build_turn_payload",
+    "create_run_conversation",
+    "append_turn",
 ]
