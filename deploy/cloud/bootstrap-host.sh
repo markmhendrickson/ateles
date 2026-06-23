@@ -9,7 +9,7 @@
 # with instructions rather than guess.
 #
 # Usage (on the VM, as a sudo-capable user):
-#   ATELES_PRIVATE_REMOTE=git@github.com:markmhendrickson/ateles-private.git \
+#   ATELES_PRIVATE_REMOTE=https://github.com/markmhendrickson/ateles-private.git \
 #   TS_AUTHKEY=tskey-... \
 #   bash bootstrap-host.sh
 set -euo pipefail
