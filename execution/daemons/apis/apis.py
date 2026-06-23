@@ -67,14 +67,59 @@ if _NEOTOMA_ENV_FILE.exists():
 # ~/.config/neotoma/.env carries a LOCAL-scoped NEOTOMA_BEARER_TOKEN (the local
 # server runs open / accepts that token), but the apis launchd plist overrides
 # NEOTOMA_BASE_URL to prod — and the local token 401s against prod entity reads.
-# When the effective base URL is a remote (prod) host and a prod-scoped token is
-# materialized, promote it to NEOTOMA_BEARER_TOKEN so every downstream module
-# (which reads NEOTOMA_BEARER_TOKEN directly) authenticates against prod.
+# When the effective base URL is a remote (non-local) host and a prod-scoped
+# token is materialized, promote it to NEOTOMA_BEARER_TOKEN so every downstream
+# module (which reads NEOTOMA_BEARER_TOKEN directly) authenticates against prod.
+#
+# Host classification fails SAFE: only a host we can positively identify as
+# remote triggers promotion. Anything local, loopback, link-local, *.local, an
+# unparseable URL, or an empty base URL is treated as local and left untouched —
+# so the failure mode is "don't promote" rather than "promote a prod token at
+# the wrong instance".
+def _looks_local(base_url: str) -> bool:
+    from urllib.parse import urlparse
+
+    if not base_url:
+        return True
+    host = (urlparse(base_url).hostname or "").lower()
+    if not host:
+        return True  # unparseable → fail safe
+    if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
+        return True
+    if host.endswith(".local") or host.endswith(".localhost"):
+        return True
+    # RFC1918 / link-local private ranges
+    if host.startswith(("10.", "192.168.", "169.254.")):
+        return True
+    if host.startswith("172."):
+        try:
+            second = int(host.split(".")[1])
+            if 16 <= second <= 31:
+                return True
+        except (IndexError, ValueError):
+            pass
+    return False
+
+
 _base_url = os.environ.get("NEOTOMA_BASE_URL", "")
-_is_local = ("localhost" in _base_url) or ("127.0.0.1" in _base_url) or not _base_url
 _prod_token = os.environ.get("NEOTOMA_BEARER_TOKEN_PROD", "").strip()
-if not _is_local and _prod_token:
-    os.environ["NEOTOMA_BEARER_TOKEN"] = _prod_token
+if not _looks_local(_base_url):
+    if _prod_token:
+        os.environ["NEOTOMA_BEARER_TOKEN"] = _prod_token
+        # NB: logging is configured below; emit via print to stderr so the
+        # promotion is visible even at import time (redacted — name only).
+        print(
+            f"[apis] promoting NEOTOMA_BEARER_TOKEN_PROD for remote base URL "
+            f"{_base_url}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[apis] WARNING: NEOTOMA_BASE_URL={_base_url} is remote but "
+            f"NEOTOMA_BEARER_TOKEN_PROD is unset — using local-scoped token, "
+            f"which will likely 401 against prod entity reads",
+            file=sys.stderr,
+        )
 
 # ── Path bootstrap ────────────────────────────────────────────────────────────
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
