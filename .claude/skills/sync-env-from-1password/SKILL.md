@@ -13,15 +13,16 @@ entity_id: ent_86573f752c9e63db776636ae
 
 Sync environment variables from 1Password to local `.env` file using environment variable mappings stored in Neotoma as `env_var_mapping` entities.
 
-> **Multi-machine / offline / daemons / CI → use the SOPS flow instead.**
-> This op-direct sync needs a live 1Password session and only updates the
-> machine it runs on. For unattended daemons, CI, and propagation across
-> machines, use the SOPS-backed flow (1Password stays canonical; secrets ride an
-> encrypted git snapshot that decrypts offline):
-> `python execution/scripts/secrets_publish.py` then
-> `python execution/scripts/secrets_materialize.py`.
-> See [docs/secrets_management.md](../../../docs/secrets_management.md).
-> Treat this op-direct sync as the interactive, single-machine convenience path.
+## Auto-cache on retrieve (record-once contract)
+
+**Whenever any agent successfully fetches a secret from 1Password — `op item get`, `op read`, or the onepassword MCP — it MUST, in the same turn, persist it so no future agent re-prompts 1Password for the same value:**
+
+1. **Cache the resolved value** to `../ateles-private/.env` (gitignored, its own repo — never committed, never echoed). Add or update `ENV_VAR=<value>` if not already present. This file is what agents read going forward; no further `op` call is needed once cached.
+2. **Persist the `op://` reference mapping** (the reference, NOT the secret value) to Neotoma as an `env_var_mapping` entity (`env_var`, `op_reference`, `item_name`, `field_label`), so this sync skill can re-resolve it on any machine. Resolve the `op://` path with `op item get <id-or-name> --format=json` (shows vault + field labels).
+
+**Never store the secret VALUE in Neotoma** — only the `op://` reference. Resolved values live solely in the local gitignored `.env`. Never print secret values; reference variables by name only.
+
+This is the loop that makes re-prompting unnecessary: retrieve once → cache to `.env` + map in Neotoma → every later agent reads `.env` (or runs this sync) instead of re-fetching.
 
 ## Command
 
