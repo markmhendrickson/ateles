@@ -76,7 +76,20 @@ from .grant_checker import (
     revoke_grant,
     suspend_grant,
 )
+from .session_finalize import (
+    build_finalize_payload,
+    finalize_session,
+    load_end_skill,
+)
 from .sse_client import NeotomaEvent, SSEClient, hydrate_snapshot
+from .task_lifecycle import (
+    MAX_ATTEMPTS,
+    TaskStatus,
+    attempts_exhausted,
+    backoff_seconds,
+    can_transition,
+    set_task_status,
+)
 
 __all__ = [
     "AgentLoader",
@@ -106,4 +119,15 @@ __all__ = [
     "parse_drift_signals",
     "parse_comments",
     "cluster_signals",
+    # task lifecycle (state machine)
+    "TaskStatus",
+    "set_task_status",
+    "can_transition",
+    "backoff_seconds",
+    "attempts_exhausted",
+    "MAX_ATTEMPTS",
+    # session finalize (/end convergence)
+    "build_finalize_payload",
+    "finalize_session",
+    "load_end_skill",
 ]
