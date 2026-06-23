@@ -16,6 +16,11 @@ from dataclasses import dataclass, field
 
 import httpx
 
+try:  # package import (normal daemon runtime) with script-import fallback
+    from . import neotoma_signed as ns
+except ImportError:  # pragma: no cover
+    import neotoma_signed as ns  # type: ignore
+
 log = logging.getLogger(__name__)
 
 NEOTOMA_BASE_URL = os.environ.get(
@@ -124,16 +129,38 @@ class AgentLoader:
         # Fall back to name search
         return self._load_by_name()
 
+    def _neotoma(self, method: str, url: str, body: "dict | None" = None) -> dict:
+        """Fetch JSON from Neotoma, returning the parsed body.
+
+        Per-agent AAuth-signed when ``NEOTOMA_AAUTH_VIA_CLI`` is on and this agent
+        has a key; otherwise the unsigned/bearer httpx path (behavior unchanged).
+        Falls back to bearer on any signing failure or non-2xx, so enabling
+        signing can never reduce availability. Raises on transport error — callers
+        already handle that.
+        """
+        if ns.via_cli_enabled() and ns.agent_identity(self.agent_name):
+            try:
+                status, data = ns.signed_request(method, url, body, agent_name=self.agent_name)
+                if 200 <= status < 300:
+                    return data
+                log.warning(
+                    f"[{self.agent_name}] signed {method} {url} -> {status}; falling back to bearer"
+                )
+            except Exception as exc:
+                log.warning(
+                    f"[{self.agent_name}] signed request failed ({exc}); falling back to bearer"
+                )
+        if method.upper() == "GET":
+            resp = httpx.get(url, headers=_auth_headers(), timeout=10)
+        else:
+            resp = httpx.post(url, json=body, headers=_auth_headers(), timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
     def _load_by_id(self, entity_id: str) -> AgentDefinition:
         url = f"{NEOTOMA_BASE_URL}/entities/{entity_id}"
         try:
-            resp = httpx.get(
-                url,
-                headers=_auth_headers(),
-                timeout=10,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            data = self._neotoma("GET", url)
             return self._parse(entity_id, data)
         except Exception as exc:
             log.warning(
@@ -156,14 +183,7 @@ class AgentLoader:
             "include_snapshots": True,
         }
         try:
-            resp = httpx.post(
-                url,
-                json=body,
-                headers=_auth_headers(),
-                timeout=10,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            data = self._neotoma("POST", url, body)
             entities = data.get("entities", [])
             for ent in entities:
                 # Unwrap the doubly-nested snapshot to the flat field dict.
@@ -231,22 +251,22 @@ class AgentLoader:
         exactly what matures them. Their effect remains agent-local and
         reversible (a contradicting drift signal suspends them).
         """
-        if not NEOTOMA_BEARER_TOKEN:
+        # Need either a bearer token or per-agent signing to authenticate.
+        if not NEOTOMA_BEARER_TOKEN and not (
+            ns.via_cli_enabled() and ns.agent_identity(self.agent_name)
+        ):
             return []
         agent_sub = f"{self.agent_name}@ateles-swarm"
         try:
-            resp = httpx.post(
+            data = self._neotoma(
+                "POST",
                 f"{NEOTOMA_BASE_URL}/retrieve_entities",
-                headers=_auth_headers(),
-                json={
+                {
                     "entity_type": "agent_policy",
                     "limit": 200,
                     "include_snapshots": True,
                 },
-                timeout=10,
             )
-            resp.raise_for_status()
-            data = resp.json()
         except Exception as exc:
             log.warning(f"[{self.agent_name}] could not load agent_policy: {exc}")
             return []
