@@ -136,6 +136,7 @@ if str(_DAEMON_DIR) not in sys.path:
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
     AgentLoader,
+    create_run_conversation,
     GateAction,
     NeotomaEvent,
     SSEClient,
@@ -226,6 +227,10 @@ ATELES_REPO = Path(
 
 DRY_RUN = os.environ.get("APIS_DRY_RUN", "0") == "1"
 AUTO_EXECUTE = os.environ.get("APIS_AUTO_EXECUTE", "0") == "1"
+# E1 (docs/task_execution_loop.md): open one conversation per execution run and
+# tell the spawned agent to thread its turns into it. Default off — flag-gated so
+# the live dispatch path is byte-identical until the child side (E2) lands.
+RUN_CONVERSATIONS = os.environ.get("APIS_RUN_CONVERSATIONS", "0") == "1"
 
 # Path to the Claude CLI binary used to spawn T4 agents. Set by env var or
 # auto-detected from PATH. If absent, dispatch falls back to log-only.
@@ -271,6 +276,7 @@ async def _spawn_claude_skill(
     notifier: Notifier,
     *,
     role: str | None = None,
+    run_conversation_id: str | None = None,
 ) -> "object":
     """
     Spawn a T4 agent for a task event. The subprocess mechanics live in
@@ -292,6 +298,15 @@ async def _spawn_claude_skill(
         f"Task {entity_id} (trigger={trigger}): {title}\n\n"
         f"{body}".strip()
     )
+    if run_conversation_id:
+        # E1: bind this run's turns to the conversation Apis opened at dispatch,
+        # so progress + finalize append to one task-linked thread (not a new one).
+        prompt += (
+            f"\n\nThis execution is tracked as Neotoma conversation "
+            f"{run_conversation_id} (PART_OF task {entity_id}). When you finalize "
+            f"via /end, store your turns PART_OF this conversation "
+            f"(conversation_id={run_conversation_id}) rather than creating a new one."
+        )
 
     result = await run_skill(
         skill,
@@ -457,9 +472,30 @@ async def dispatch_task(
         entity_id, TaskStatus.EXECUTING, handler=DAEMON_NAME,
         from_status=TaskStatus.ROUTED.value, key_suffix=trigger,
     )
+
+    # E1: open one conversation for this execution run (flag-gated, fail-open).
+    # run_key keys the conversation to the attempt so SSE replays reuse it while a
+    # genuine retry opens a fresh run. Anchored PART_OF the task (+ plan if known).
+    run_conversation_id: str | None = None
+    if RUN_CONVERSATIONS:
+        run_key = f"{trigger}-{snapshot.get('attempt', snapshot.get('attempt_count', 0))}"
+        run_conversation_id = create_run_conversation(
+            task_id=entity_id,
+            plan_id=snapshot.get("plan_id") or None,
+            agent=skill,
+            run_key=run_key,
+            title=f"{skill} run · {title[:60]}",
+        )
+        if run_conversation_id:
+            log.info(
+                f"[{DAEMON_NAME}] run conversation {run_conversation_id} opened "
+                f"for task {entity_id} (run={run_key})"
+            )
+
     try:
         result = await _spawn_claude_skill(
-            skill, entity_id, snapshot, trigger, notifier, role=role
+            skill, entity_id, snapshot, trigger, notifier, role=role,
+            run_conversation_id=run_conversation_id,
         )
     except Exception as exc:
         # Unexpected crash in the spawn machinery itself → record as a failed run.

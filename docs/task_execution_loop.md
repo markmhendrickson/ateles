@@ -96,7 +96,7 @@ Inbound replies serve double duty: they answer readiness requests (`awaiting_inp
 
 ## Primitive 3 — Conversation per execution run
 
-Each run gets exactly one `conversation` entity, `REFERS_TO` the task and `PART_OF` the plan, created at **dispatch** (not at finalize). Everything in the run appends `agent_message` rows to it: kickoff, progress, the readiness request, operator replies, checkpoint briefs, the outcome.
+Each run gets exactly one `conversation` entity, anchored `PART_OF` the task (and `PART_OF` the plan when known), created at **dispatch** (not at finalize). This matches the anchoring `session_finalize` already uses and satisfies the session-integrity invariant (a conversation must be `PART_OF` a plan **or** a task) — so a later `finalize_session(conversation_id=…)` appends to it rather than opening a second conversation. Everything in the run appends `agent_message` rows to it: kickoff, progress, the readiness request, operator replies, checkpoint briefs, the outcome.
 
 - A retry/reopen opens a **new** conversation (new run) — runs never share a thread, so history stays legible.
 - The Gmail thread maps **1:1** to the conversation: thread ↔ conversation ↔ run.
