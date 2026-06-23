@@ -35,6 +35,7 @@ The swarm leader's session-intake protocol. Goal: from the operator's opening re
 - Produce the COMPLETE task breakdown up front — every anticipated follow-up, not a turn-by-turn 'what's next'.
 - For each task: title, owner (T3 daemon / T4 agent / inline), and the artifact it produces.
 - Create each as a `task` entity `PART_OF` the bound plan (use `update-tasks` for field/priority mapping). Do not dispatch yet.
+- Stamp each task with its **owner** (who executes: `owner`/`assigned_to`) and **beneficiary** (for whom it is done — the operator and/or a specific customer `contact`: `beneficiary_entity_id` / `beneficiary_name` / `beneficiary_kind`). Infer the beneficiary from the request; default to the operator.
 
 ## Phase 3 — One gate (the only required HITL)
 Show the full batch once. In the SAME `AskUserQuestion`, capture:
@@ -56,6 +57,7 @@ Write ONE report as markdown, then:
   2. `publish_rendered_page(html_body=<page.html contents>, title="<title>")` → hosted guest URL (posterity).
   3. `python3 execution/scripts/dispatch_report.py --markdown <report.md> --title "<title>" --link <url> --to <operator_email> --eml /tmp/report.eml --send` → emails the SAME rendered HTML inline with a 'View online' banner to the link. Recipient from `operator_profile` / `$OPERATOR_EMAIL`; send command from `$ATELES_GMAIL_SEND_CMD` (gws gmail). If no send command is configured, the `.eml` is preserved and the gws command is printed — finish the send with `gws gmail`.
   4. Note the hosted link and `.eml` path in the report record.
+- **BENEFICIARY mode** (report a completed task to the customer it served — operator-approved): render as in EMAIL mode, then `dispatch_report.py ... --to <beneficiary_email> --beneficiary "<name>" --send --approved`. `--approved` is REQUIRED for any non-operator recipient — the tool refuses to auto-send to a third party without it (draft-don't-send). Resolve the recipient from the task's `beneficiary_entity_id` (a `contact`). The operator approves each beneficiary delivery.
 
 ## Record (always — per CLAUDE.md plan-maintenance contract)
 - Update the bound plan: `todos` / `decisions` / `next_steps`; mark tasks `done` only with an artifact ref (commit / PR / file / entity) that actually resolves.
@@ -65,5 +67,5 @@ Write ONE report as markdown, then:
 - One clarification batch, one approval gate — resist turn-by-turn drip.
 - Prefer refining an existing plan/task over creating a duplicate.
 - Email reports are PULL only — operator-requested session output, NOT a paging channel. Autonomous or unsolicited operator paging still routes through the sole pager (Onychomys) via daemon_report / escalation entities; /intake must never become a second push channel.
-- Email reports go to the operator (self). Third-party outbound still follows draft-don't-send agent boundaries.
+- Email reports go to the operator (self) automatically; reports to a **beneficiary/customer** require per-delivery operator approval (enforced by dispatch_report.py's `--approved` gate). Third-party outbound still follows draft-don't-send agent boundaries.
 - PII-free: operator identity, recipient, locale, and roster are resolved from context entities at runtime — never inlined here.
