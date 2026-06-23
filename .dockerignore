@@ -1,0 +1,14 @@
+# Keep the cloud daemon image (deploy/cloud/Dockerfile) lean and secret-free.
+.git
+**/.venv
+**/venv
+**/node_modules
+**/__pycache__
+**/*.pyc
+.claude/worktrees
+.claude/.session_state
+# Never ship secrets into the image — they are mounted at runtime (SOPS+age).
+**/*.sops.enc
+**/keys.txt
+.env
+**/.env
