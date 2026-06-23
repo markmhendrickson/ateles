@@ -197,6 +197,7 @@ from routing import (  # noqa: E402
 import github_gateway  # noqa: E402
 from skill_runner import run_skill  # noqa: E402
 from swarm_dispatch import SwarmDispatcher  # noqa: E402
+from task_watchdog import TaskWatchdog  # noqa: E402
 
 
 # ── T4 dispatch ────────────────────────────────────────────────────────────────
@@ -291,10 +292,25 @@ async def dispatch_task(
     role = _resolve_role(existing_tags, assigned_to=assigned_to)
 
     if skill is None:
+        # No inferable owner. Previously this was a silent log-and-skip — the task
+        # fell on the floor. Now it escalates: mark BLOCKED (so the watchdog leaves
+        # it for the operator rather than retrying a fundamentally unroutable task)
+        # and page for routing/assignment.
         log.info(
             f"[{DAEMON_NAME}] No route for task {entity_id!r} "
             f"(trigger={trigger}, tags={existing_tags}, assigned_to={assigned_to}) "
-            "— skipping dispatch"
+            "— escalating (no owner)"
+        )
+        set_task_status(
+            entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
+            from_status=current_status,
+            reason=f"no route/owner (tags={existing_tags}, assigned_to={assigned_to})",
+            key_suffix=trigger,
+        )
+        notifier.send(
+            f"Task has no owner — needs routing or assignment: {title[:70]}\n  {entity_id}",
+            priority=Priority.BLOCKER,
+            handler=DAEMON_NAME,
         )
         return
 
@@ -635,10 +651,19 @@ async def main() -> None:
     async def dispatch(event: NeotomaEvent) -> None:
         await handle_event(event, notifier)
 
+    # 6. Stall watchdog (task #2): out-of-band sweeper that retries FAILED tasks
+    #    with backoff, resumes tasks left mid-flight by a restart, and escalates
+    #    once attempts are exhausted — without blocking the SSE loop.
+    watchdog = TaskWatchdog()
+
+    async def watchdog_dispatch(task_id: str, snapshot: dict, trigger: str) -> None:
+        await dispatch_task(task_id, snapshot, trigger, notifier=notifier)
+
     log.info(f"[{DAEMON_NAME}] Subscribing to SSE: {SUBSCRIBE_ENTITY_TYPES}")
     await asyncio.gather(
         sse.stream(dispatch),
         github_gateway.serve(gateway_app, GITHUB_WEBHOOK_PORT),
+        watchdog.run(notifier, watchdog_dispatch),
     )
 
 
