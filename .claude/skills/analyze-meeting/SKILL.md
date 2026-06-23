@@ -11,381 +11,68 @@ user_invocable: true
 entity_id: ent_c6077840664ee87ae30b7922
 ---
 
-# Analyze Meeting
-
-Produce a structured, actionable analysis of a meeting transcript and stage all follow-ups (Neotoma tasks, drafted recap emails, proposed public issues). Complement to [`analyze-neotoma-feedback`](../analyze-neotoma-feedback/SKILL.md): that skill is Neotoma-customer-development-specific; this one handles any meeting type and focuses on follow-through rather than positioning analysis.
-
-When both skills fire on the same transcript (typical for a Neotoma evaluator call), this skill produces the operational follow-up; `analyze-neotoma-feedback` produces the customer-development analysis. They do not duplicate each other — they are linked via shared `transcription` and `contact` entities.
-
-## When to use
-
-- Auto-invoked by [`record-meeting`](../record_meeting/SKILL.md) after a successful stop+transcribe.
-- Invoked manually with `/analyze-meeting <source>` for an existing transcript on disk or a Neotoma `transcription` entity id.
-- Skip silently when the transcript is empty, was clearly not a meeting (e.g. solo voice memo without action content), or when `RECORD_MEETING_AUTO_ANALYZE_MEETING=0` is set in env.
-
-## Invocation
-
-```
-/analyze-meeting <source>
-/analyze-meeting <source> --open-issues          # open real GH issues instead of staging drafts
-/analyze-meeting <source> --no-email             # skip Gmail draft staging
-/analyze-meeting <source> --participants "Alice <alice@x>, Bob <bob@y>"
-```
-
-`<source>` is auto-detected:
-- **Absolute file path** (exists on disk) — read the file. Handles transcripts produced by `transcribe_audio.py`, including `last_meeting_transcription.txt`.
-- **Neotoma entity reference** — a `transcription` entity id, or a name / canonical identifier resolvable to a transcription via `retrieve_entity_by_identifier`.
-- **Raw pasted text** — anything that doesn't match the above.
-
-Flags:
-- `--open-issues` — actually open public issues in relevant repos via the GitHub MCP. Default is **off**: issues are staged as `proposed_github_issue` entities in Neotoma and written to the local report only. Same effect as setting `MEETING_ANALYSIS_OPEN_GH_ISSUES=1` in env.
-- `--no-recap` — skip all recap drafting (neither email nor generic message). `recap_message` entities still go to Neotoma.
-- `--participants` — comma-separated `Name <email>` overrides when speaker labels in the transcript are unreliable (diarization missed names, etc.).
-
-## Step 1: Resolve source + identify participants
-
-1. Resolve the source per the input modes above. Capture raw transcript text.
-2. Resolve associated `transcription` entity (when the source is a file produced by `transcribe_audio.py`, search Neotoma by `audio_file_path` per `is_already_transcribed` in `execution/scripts/transcribe_audio.py`). Reuse if present; otherwise note that no `transcription` entity is linked (skill still proceeds — meeting_analysis stands alone).
-3. **Identify participants:**
-   - Speaker labels in diarized transcripts (`[Speaker 1]`, `[Mark]`, `[System]`/`[Mic]`).
-   - Name mentions in transcript ("Thanks, Alice"), salutations, sign-offs.
-   - Honor `--participants` flag overrides.
-   - For each non-`Mark` participant, resolve via `retrieve_entity_by_identifier` against `contact` / `person`. Capture `entity_id` and `email` when present.
-4. **Resolve missing emails via Google Calendar** (run after step 3, before moving on):
-   - Determine the recording timestamp from the transcript source file's mtime or filename (format `YYYY-MM-DD-HHMMSS`).
-   - Use `gws calendar events list --timezone Europe/Madrid` to fetch events within a ±90-minute window around that timestamp. Pick the best-matching event (title overlap with transcript topics, attendee names matching identified participants, or timing overlap).
-   - If a match is found:
-     - Extract attendee names and emails from the calendar event.
-     - Cross-reference with participants identified in step 3: update any participant whose email was previously unknown.
-     - Store a `calendar_event` entity in Neotoma (fields: `title`, `start_time`, `end_time`, `attendees` as array of `{ name, email }`; `calendar_event_id` from the API). Link it to the `meeting_analysis` via `REFERS_TO` in the Step 7 store.
-     - Record `calendar_event_entity_id` on the `meeting_analysis`.
-   - If no calendar match is found: note `_Calendar: no matching event found._` in the report and proceed without it.
-5. **Classify meeting type** based on participants + content. Pick one:
-   - `customer_call` — external customer/evaluator/prospect call (Neotoma or other product feedback).
-   - `partner_call` — external partner or vendor.
-   - `1_on_1` — peer / advisor / mentor / friend conversation.
-   - `internal` — multi-party Mark-internal meeting (rare; flag explicitly).
-   - `interview` — Mark interviewing or being interviewed.
-   - `other` — anything else; explain.
+Auto-invoked by Tyto daemon after transcription completes (or manually via /analyze-meeting). Full pipeline:
 
-If classification is ambiguous, pick the most defensible and explain in the report. Do not refuse.
-
-## Step 2: Extract structured analysis
+STEP 0 — IDEMPOTENCY GUARD (run before any extraction, persistence, or task spawning):
+Resolve the canonical `source_reference` first — the transcription entity ID (preferred), or a stable hash/path of the source transcript if no entity. Then query Neotoma for existing `meeting_analysis` entities whose `source_reference` matches (use retrieve_entities entity_type=meeting_analysis and filter by source_reference, or retrieve_entity_by_identifier on the source_reference). 
+- If one or more analyses already exist for this exact source_reference: DO NOT create a new meeting_analysis and DO NOT spawn a fresh task set. Instead, treat this as a RE-RUN: correct/supersede the existing analysis in place (use mcp__mcpsrv_neotoma__correct on the existing entity's fields, or add a superseding observation), and reconcile tasks by matching on (description-normalized + source_reference) — correct existing task entities rather than creating parallel duplicates. Record `data_source` noting "re-run, superseded prior analysis ent_…". 
+- Only if NO analysis exists for this source_reference do you proceed to create new entities.
+- This guard is MANDATORY and exists because Tyto (or manual re-invocation) can fire the skill multiple times on the same recording; without it, each run emits a duplicate analysis + a full duplicate task set (observed: 8 near-identical analyses + ~7× duplicate tasks for one meeting). When splitting a recording into N segments (STEP 0b), key idempotency on (source_reference + segment_index), not just source_reference, so legitimate per-segment analyses are not collapsed into one.
 
-Read the full transcript. Extract the following with verbatim quotes from the transcript where possible (never invent quotes — paraphrase is labeled `paraphrase: …`):
+STEP 0b — Back-to-back meeting detection (after the idempotency guard, before extraction):
+Scan the full transcript for session boundaries: greetings ("hi", "hello", "good morning", "nice to meet you", "thanks for joining"), farewells ("bye", "talk soon", "thanks everyone", "take care", "have a good one", "see you later"), and significant topic/participant discontinuities. If two or more distinct sessions are detected (farewell + new greeting, distinct participant sets), treat each as a separate meeting and run the full pipeline independently for each, producing one meeting_analysis entity per segment numbered "Meeting N of M". Record segment_start_approx / segment_end_approx from transcript word timestamps. Each segment gets a distinct (source_reference + segment_index) idempotency key. When in doubt, prefer splitting.
 
-1. **Summary** — 3–5 bullets capturing why the meeting happened, what was discussed, and the outcome.
-2. **Decisions made** — short list. Each decision: what was decided + who decided + verbatim quote when present.
-3. **Action items**, split three ways:
-   - **Mine** — things Mark committed to. Each item: description, target date if mentioned, related repo / project if relevant.
-   - **Theirs** — things a participant committed to. Each item: who, description, target date if mentioned.
-   - **Joint / TBD** — items raised but unowned.
-4. **Open questions** — questions left unresolved that need a future answer (mine, theirs, or shared).
-5. **Topics + key threads** — short list of topics with one-line synthesis each. Useful for searching and clustering across meetings.
-6. **Risks / blockers raised** — anything either party flagged as a concern or blocker.
-7. **Repo / project signal** — extracted mentions of repos, products, or projects (e.g. `neotoma`, `ateles`, `markmhendrickson.com`, named features). For each: which action items or open questions relate to it; whether the related work belongs in a public issue (see Step 4).
-8. **PII inventory** — names, emails, phone numbers, employer references, internal project names, customer names, or anything else that should be scrubbed before going public. Build this list explicitly — it drives Step 3.
+STEP 1 — Resolve source + participants + calendar:
+- Resolve transcript from entity ID, file path, or pasted text.
+- Identify participants from diarized speaker labels ([You], [Speaker_0], etc.), name mentions, salutations, --participants overrides.
+- Resolve each participant against Neotoma contact/person entities. ALWAYS call retrieve_entity_by_identifier for each participant name and write the resolved entity IDs into `participant_contact_entity_ids` — never leave it as an empty array when names were extracted.
+- Google Calendar lookup: use recording_timestamp (passed by Tyto as YYYY-MM-DDTHH:MM UTC, or inferred from filename/mtime) to query `gws calendar events list --timezone Europe/Madrid` within ±90min. For each segment, use that segment's approximate start time. Cross-reference attendees with speaker labels to resolve real names for [Speaker_N] labels. Store calendar_event entity and link to meeting_analysis. If no match: note _Calendar: no matching event found._ and proceed.
+- Classify meeting type: customer_call | partner_call | 1_on_1 | internal | interview | other.
 
-If a section has no signal, render it as an explicit `_None._` marker rather than omitting it, so the report shape stays stable across meetings.
+DATA MINIMIZATION (RGPD legitimate-interest discipline — see CLAUDE.md "People-data processing"): Neotoma's storage of meeting participants and transcripts runs under RGPD Art. 6(1)(f) legitimate interest, not the household exemption, because the data drives professional action. When extracting people into durable contact profiles: keep relationship-relevant facts (role, context, commitments, follow-ups); do NOT persist incidental Art. 9 sensitive disclosures (health, finances, family situations, political/religious views) into contact profiles unless directly relevant to a stored task — summarize rather than store verbatim when a sensitive detail is incidental. This is in addition to the existing PII-scrub-before-public-issues rule (which governs the outbound direction); minimization governs what enters the graph in the first place.
 
-### Data minimization (RGPD legitimate-interest discipline)
+STEPS 2–11 — Standard flow: structured analysis (summary, decisions, action items mine/theirs/joint, open questions, topics, risks, repo signal, PII inventory), PII scrubbing, proposed GitHub issues, recap messages (email via gws gmail draft when address known, generic message otherwise)
 
-See CLAUDE.md "People-data processing". Neotoma's storage of meeting participants and transcripts runs under RGPD Art. 6(1)(f) legitimate interest, **not** the household exemption, because the data drives professional action. When extracting people into durable `contact`/`person` profiles:
+EMAIL DRAFTS MUST BE HTML (multipart/alternative) — not plain text:
+When drafting a recap/follow-up email via gws gmail drafts, build a **multipart/alternative** message with BOTH a text/plain AND a text/html part — never a single text/plain part. Plain-text drafts render URLs as bare unclickable strings and look bare next to any artifact they reference. Build it with Python's email.mime (MIMEMultipart("alternative") + two MIMEText parts), base64url-encode the full message, and pass as {message:{raw:...}}. In the HTML part: real <a href> links (named, not raw URLs), <ul> for next-steps/highlights, simple inline styles. Verify after creating: the draft's payload mimeType is multipart/alternative with a text/html part containing <a href> links. This has regressed twice — the printf|base64 shortcut only ever produces text/plain; do not use it for emails., report written to disk, persist to Neotoma (meeting_analysis + task + recap_message + proposed_github_issue + calendar_event entities), deliver recap drafts, optionally open GH issues (--open-issues only), surface to user.
 
-- Keep relationship-relevant facts (role, context, commitments, follow-ups).
-- Do NOT persist incidental Art. 9 sensitive disclosures (health, finances, family situations, political/religious views) into contact profiles unless directly relevant to a stored task — summarize rather than store verbatim when a sensitive detail is incidental.
+STEP 11.5 — COMMUNICATION SELF-REVIEW (run on EVERY meeting where Mark is a speaker; the operator uses this to practice incrementally):
+Purpose: turn each call into one data point in a longitudinal coaching loop so Mark can flag concrete things to practice and watch them trend. Produces exactly one `communication_review` entity per (source_reference + segment_index), linked REFERS_TO → the meeting_analysis and the transcription. Idempotent: on re-run, correct the existing review, don't duplicate.
 
-This governs what **enters** the graph (inbound). It is in addition to Step 3's PII scrubbing, which governs what **leaves** for public issues (outbound). The two are complementary, not duplicative.
+Skip only when Mark is not a participant, or the transcript is rapport-only with <150 of Mark's words (too little signal). Family/personal calls ARE reviewed but flagged context=personal so they don't pollute the professional trend.
 
-## Step 3: PII scrubbing rules (for public issue drafts only)
+A) OBJECTIVE TIC METRICS — compute from MARK'S LINES ONLY ([Mic] in dual-channel, [You] in diarized). All rates per 100 words of Mark's speech:
+- hedge_rate: como/like/sort of/kind of/just/maybe/probably/I think/I guess/creo que/quizás/digamos/básicamente/un poco
+- filler_rate: eh/em/ehm/mmm/um/uh/you know/well/so/bueno/o sea
+- restart_rate: mid-word self-corrections (regex word-fragment hyphenations, e.g. "fon-fondo", "pla-place")
+- click_rate: tongue-clicks — match ALL variants: [chasquido de lengua], [lip smack(s)], [lips smack], [smacks lips], [clicks tongue], [tsk(s/ing)], [tongue click]
+- word_count, language (es|en), and stakes_context (rapport|peer|prospect|partner|investor|interview|family)
 
-Any text destined for a public GitHub issue MUST be scrubbed:
+B) ENGINE TAG — MANDATORY, because cross-engine disfluency comparison is INVALID (proven 2026-06-16: Gemini strips fillers/clicks, ElevenLabs captures all; same speaker looked 2.5× more disfluent purely by transcriber). Record transcription_engine (elevenlabs|gemini|whisper|other), inferred from the transcript header/source. Gemini/cleaned transcripts: set click_rate and filler_rate to null (not 0) — they are not measured, not absent. ONLY trend a metric against priors from the SAME engine.
 
-- **Names → roles.** Replace participant names with role labels (`an evaluator`, `a partner`, `a customer at a Series-B fintech`). Never use a real name in a public issue body unless the participant is a public-facing collaborator on that repo AND has clearly consented in the conversation (e.g. an OSS contributor offering to file the issue themselves).
-- **Emails / phone numbers → removed.** Strip entirely; do not replace with `[redacted]` mid-sentence — rewrite the sentence.
-- **Employer / customer names → generalized.** "Acme Corp asked …" → "An evaluator asked …".
-- **Internal product / project names → check carefully.** If a name appears in the public site (`../neotoma/frontend/src/site/site_data.ts`, `../personal/websites/*`) or has been published in a blog post / tweet, it's public; otherwise generalize.
-- **Verbatim quotes → reframed.** Quotes from non-public participants are reframed as observations ("Users on the evaluator track report friction around X") rather than quoted with attribution.
-- **Internal URLs / paths → removed.** Strip absolute paths, internal dashboard links, prod URLs that aren't public.
+C) BASELINE-RELATIVE SCORING — never score against absolutes; score against Mark's established baselines:
+- English hedge baseline ~4.8/100w; Spanish hedge baseline ~5/100w (hedging is a STABLE TRAIT, inverse to stakes — higher with friends/family, lower in sales/prospect calls; do NOT flag normal hedging as a problem).
+- English click baseline ~0.2/100w (negligible); Spanish click baseline ~2/100w (the Spanish-vocabulary-load tell — expected, not alarming, in unrehearsed Spanish).
+- restart_rate is a real-time-composition-load meter; peaks in fast dense technical talk (EN as much as ES). High restart = was composing hard live, not a language problem.
+Retrieve the most recent prior communication_review of the SAME (language + engine) and report delta_vs_last for each metric (improving / steady / worse).
 
-If a proposed issue cannot be cleanly scrubbed (e.g. the bug is fundamentally a story about one named user's setup), demote it from `proposed_github_issue` to a Mark-internal `task` and note why in the report.
+D) QUALITATIVE READS (the patterns that matter more than raw counts):
+- pitch_landed: did Mark's core/differentiation explanation land? Evidence FOR = listener reflects it back accurately, supplies their own corroborating pain, or asks implementation/"how does it scale" questions. Evidence AGAINST = listener re-asks the same question, or re-frames Mark's point more simply than he did. Record verdict + the verbatim listener line that proves it. (Do NOT overclaim "landed/reframed" without a quote — this has been a recurring overstatement; require transcript evidence.)
+- listener_type: builder (hands-on, has personally felt the problem — your abstraction lands because they bridge it) vs sampler (evaluating, no current pain — burden is fully on your crispness). This determines whether a rambly answer was survivable. Record which, with evidence.
+- pitch_vs_listener_fit: did Mark calibrate? Builder→deep/discursive is fine; sampler→needs crisp+concrete fast. Flag mismatch (e.g. "gave the builder-mode answer to a sampler" = the Ivan failure mode).
+- reciprocity: did the other side SPEND anything costly (market insight, intros, real engagement, structuring advice) or only cheap warmth? "Generous in tone, stingy in substance" is the watch-flag. (Especially for investors: this is the real interest signal, not friendliness.)
+- frame_control: did Mark run the call (set agenda, asked questions back, set the next step himself) or absorb the other side's default (answered-only, let them close)? Note specifically whether Mark asked at least one real question back, and whether he set the next concrete step.
 
-## Step 4: Derive proposed public issues
+E) CARRY-OUT ARTIFACT CHECK — Mark maintains standing communication artifacts (the canonical crisp differentiation pitch [ES + EN], and the builder-vs-sampler calibration habit). Check whether Mark APPLIED them this call (e.g. did he deliver a tight ≤30s differentiation answer, or revert to the ~250-word hedge-heavy version?). Record applied: yes/partial/no per artifact.
 
-Public issues are not generated by default for every action item — they are generated only when:
-1. The action item maps to a specific repo (from Step 2 #7).
-2. The work makes sense to track in public (bug, feature request, doc gap, comparison page idea, etc.).
-3. After PII scrubbing, the issue body still conveys the actual problem.
+F) PRACTICE FOCUS — emit AT MOST 1–2 concrete, single-behavior focuses for the NEXT call (incremental, never a long list — overwhelming kills practice). Each focus = one observable behavior Mark can consciously attempt next time (e.g. "lead the differentiation answer with the one-line claim before any context", "ask one question back before finishing their question", "name the next step yourself at the close"). Carry an unmet focus forward to the next review until it shows as applied.
 
-For each proposed issue capture:
-- **Repo**: `<owner>/<repo>` — must match the allowlist below. Skip if no confident repo match.
-- **Title**: short, problem-statement-first ("FAQ entry: difference between Neotoma and Mem0", not "Alice asked about Mem0").
-- **Labels**: best-guess based on issue kind (`bug`, `enhancement`, `docs`, `discussion`).
-- **Body**: scrubbed per Step 3. Must include:
-   - One-paragraph context (why this matters).
-   - Specific ask or expected behavior.
-   - Acceptance criteria when concrete.
-   - Source attribution: `Surfaced in a meeting on YYYY-MM-DD; participants and direct quotes recorded privately.` — never link the recording or transcript publicly.
-- **Backed by**: which action item / open question / decision; verbatim transcript quote (kept in Neotoma entity, NOT in the issue body).
-- **Confidence**: `high` (concrete bug or explicit feature ask), `medium` (implied), `low` (speculative — usually demote to task instead).
+G) PERSIST: store a `communication_review` entity with fields: meeting_analysis_entity_id, transcription_entity_id, meeting_date, language, transcription_engine, stakes_context, word_count, hedge_rate, filler_rate (null if engine-stripped), restart_rate, click_rate (null if engine-stripped), delta_vs_last (object), pitch_landed (verdict+quote), listener_type (+evidence), pitch_vs_listener_fit, reciprocity, frame_control, carry_out_artifacts_applied (object), practice_focus (array, max 2), notes, data_source. Link REFERS_TO → meeting_analysis, transcription, and each participant contact. Idempotency key: comm-review-<source_reference>-<segment_index>.
 
-**Repo routing** (default — override via `MEETING_ANALYSIS_ALLOWED_REPOS` env, comma-separated `owner/repo`):
-- **`markmhendrickson/ateles`** — default repo for all issues unless a more specific match applies. Use for swarm tooling, skills, daemon work, and anything that doesn't clearly belong elsewhere.
-- **`markmhendrickson/neotoma`** — use when the issue is specifically about Neotoma: its MCP, schema, API, product behaviour, data model, or SDK.
+H) SURFACE: in the user-facing reply, add a compact "🗣 Communication" block: the metrics with same-engine deltas (↑/↓/→), pitch_landed verdict, listener_type, reciprocity flag, and the 1–2 practice focuses for next time. Keep it short — this is a coaching nudge, not a re-derivation of the framework.
 
-When the signal from Step 2 #7 points clearly to Neotoma, route there; otherwise default to `ateles`. Do not create issues for repos outside this list — note them in the report as `_Out-of-scope repo mentioned: <name> — no issue staged._`.
+When persisting tasks: give each spawned task a stable idempotency_key derived from (source_reference + segment_index + normalized-description) so re-runs update rather than duplicate. Before creating a task, check whether a task with that key already exists for this source_reference and correct it instead of creating a new one.
 
-## Step 5: Draft recap messages
+When meeting is Neotoma-oriented (customer_call or partner_call where primary topic is Neotoma schema/API/MCP/product): ALSO run /analyze-neotoma-feedback in the same turn, producing a feedback_analysis entity linked to the same transcription and contact entities.
 
-For each external participant, produce one recap. The format depends on whether their email address is known:
-
-**When email is known** (resolved from Neotoma `contact`, transcript, or Google Calendar in Step 1):
-- Draft a **recap email** with:
-  - **Subject**: `Recap: <short meeting topic>` or `Following up on <topic>`.
-  - **Greeting**: first name.
-  - **Recap paragraph**: 2–4 sentences capturing the gist of the conversation.
-  - **Decisions / next steps** (when any): short bulleted list.
-  - **My action items**: short bulleted list, with target dates when committed.
-  - **Their action items**: short bulleted list, framed as `Just to capture what you mentioned: …`. Soft — never demanding.
-  - **Issue links**: only when issues were actually opened (`--open-issues` mode). Omit when still drafts.
-  - **Sign-off**: `Mark` (or `Best, Mark`).
-- Stage in Gmail: use `gws gmail draft create` (per the `Always use GWS CLI for Gmail` rule). On failure, record the reason in `recap_message.delivery_status` and continue.
-
-**When email is not known**:
-- Draft a **generic recap message** — same content structure as above, but without subject line or email greeting formality. Format it as plain conversational text suitable for sending via Messages, WhatsApp, or any other channel.
-- Do **not** attempt Gmail staging. Set `recap_message.delivery_channel` to `message` and `delivery_status` to `pending_manual_send`.
-
-In both cases, group participants from the same organization into a single recap when natural; otherwise one per participant.
-
-Tone matches the meeting tone: warm and direct, no corporate filler. Never invent commitments. Frame tentative items as `Happy to look at X next week if useful`.
-
-Each recap is stored in Neotoma as a `recap_message` entity (not `email_draft`) with fields: `to_name`, `to_email` (or null), `format` (`email` | `message`), `subject` (email only), `body`, `participant_contact_entity_id`, `delivery_channel` (`gmail` | `message`), `delivery_status` (`staged` | `failed:<reason>` | `pending_manual_send`), `gmail_draft_id` (when staged).
-
-Skip all recap drafting when `--no-recap` is passed or `MEETING_ANALYSIS_RECAP=0` is set.
-
-## Step 6: Write the report
-
-Output location: alongside the transcript when the source is a file, otherwise under `data/imports/audio/`:
-
-- File source: `<transcript_dir>/<transcript_stem>_meeting_analysis.md`
-- Entity / paste source: `data/imports/audio/<YYYY-MM-DD-HHMMSS>_meeting_analysis.md`
-
-Template:
-
-```markdown
-# Meeting Analysis: <short title>
-
-**Date:** YYYY-MM-DD
-**Meeting type:** customer_call | partner_call | 1_on_1 | internal | interview | other
-**Source:** <transcript file path or transcription entity_id>
-**Transcription entity:** ent_… (or `_not linked_`)
-**Calendar event:** <title> @ <start_time> (ent_… or `_not found_`)
-**Participants:** Name <email or _unknown_>, …
-**Analyst turn:** <conversation_id>:<turn_id>
-
-## Summary
-
-- bullet
-- bullet
-
-## Decisions
-
-- <what was decided> — <who> — "<verbatim quote when present>"
-- _None._  (when no decisions made)
-
-## Action items
-
-### Mine
-- <description> — due: YYYY-MM-DD (or `unspecified`) — repo: <owner/repo> (or `none`)
-
-### Theirs
-- <person>: <description> — due: YYYY-MM-DD (or `unspecified`)
-
-### Joint / TBD
-- <description>
-
-## Open questions
-
-- <question> — owner: mine | theirs | shared
-
-## Topics
-
-- <topic> — <one-line synthesis>
-
-## Risks / blockers
-
-- <risk> — raised by: <person> — "<quote>"
-
-## Repo / project signal
-
-- <repo or project> — related items: <bullet refs above> — public-issue candidate: yes | no | demoted (<reason>)
-
-## Proposed public issues
-
-One entry per proposed issue. If none warranted, render `_None._`.
-
-- **<owner/repo>** — `<labels>` — confidence: <high|medium|low>
-  - Title: <title>
-  - Body:
-    > <scrubbed body, multi-line>
-  - Backed by: action item / open question reference + verbatim quote (private, kept in Neotoma entity not in this rendered body)
-
-## Recap messages
-
-One block per participant (or participant group).
-
-- **To:** Name <email or _no email — send via message_> — format: email | message
-  - Subject: <subject> (email only)
-  - Body:
-    > <full recap body>
-  - Delivery: <gmail:<draft_id> | pending_manual_send | failed:<reason>>
-
-## PII inventory (private)
-
-- Names: <list>
-- Emails: <list>
-- Other sensitive: <list>
-
-## Follow-up tasks (Mark-internal)
-
-- <task> — due: YYYY-MM-DD (or `unspecified`) — links to: <repo, contact, etc.>
-```
-
-Sections with no content render as `_None._` rather than being omitted.
-
-## Step 7: Persist to Neotoma (same turn)
-
-Follow Neotoma MCP turn lifecycle and `[PROVENANCE]` rules.
-
-### Entity-type reuse check (before first store in a fresh session)
-
-Before storing, call `list_entity_types` with keywords `meeting`, `task`, `recap`, `issue`, `calendar` to check whether the following types already exist. Reuse exact strings when present; introduce only when missing:
-
-- `meeting_analysis` (this skill's primary output)
-- `task` (Mark-internal action items)
-- `recap_message` (drafted recap messages — email or generic)
-- `proposed_github_issue` (drafted public issues)
-- `calendar_event` (matched Google Calendar event)
-- `contact` (participants — reuse existing only; create stubs only when no match)
-
-### Retrieve first
-
-- `transcription` by audio_file_path (when source is a file produced by `transcribe_audio.py`).
-- `contact` / `person` for each participant by name and email.
-- `calendar_event` by `calendar_event_id` (when a match was found in Step 1) — reuse if already stored.
-- Existing open `task` entities for the same repo/topic — to avoid duplicates.
-
-### Store
-
-Single `store` (combined entities + relationships) call when batchable. Entities (typical order):
-
-1. `conversation` — current chat conversation (turn lifecycle).
-2. `agent_message` — current user message, `turn_key: "{conversation_id}:{turn_id}"`.
-3. `meeting_analysis` with fields:
-   - `title`, `meeting_date`, `meeting_type`
-   - `source_type` (file | entity | text)
-   - `source_reference` (path or entity_id)
-   - `report_path` (absolute path to written markdown)
-   - `participant_names` (array), `participant_contact_entity_ids` (array)
-   - `calendar_event_entity_id` (when matched; otherwise null)
-   - `summary_bullets` (array)
-   - `decisions` (array of `{ what, who, quote? }`)
-   - `action_items_mine` (array of `{ description, due_date?, repo? }`)
-   - `action_items_theirs` (array of `{ person, description, due_date? }`)
-   - `action_items_joint` (array of strings)
-   - `open_questions` (array of `{ question, owner }`)
-   - `topics` (array of `{ topic, synthesis }`)
-   - `risks_or_blockers` (array of `{ risk, raised_by, quote? }`)
-   - `repo_signal` (array of `{ repo_or_project, related_item_refs, public_issue_candidate }`)
-   - `pii_inventory` (object with `names`, `emails`, `other`)
-   - `data_source` (e.g. `analyze-meeting.skill {timestamp} source=<path>`)
-4. One `task` per Mark action item, with `description`, `due_date`, `status: open`, `source: meeting_analysis`, and a `REFERS_TO` edge to the `meeting_analysis`.
-5. One `recap_message` per participant (or group), with `to_name`, `to_email` (or null), `format` (`email` | `message`), `subject` (email only), `body`, `participant_contact_entity_id`, `delivery_channel` (`gmail` | `message`), `delivery_status` (`staged` | `failed:<reason>` | `pending_manual_send`), `gmail_draft_id` (when staged).
-6. One `proposed_github_issue` per drafted issue, with `repo`, `title`, `labels` (array), `body_scrubbed`, `confidence`, `backed_by_quote` (verbatim — private), `opened_url` (null until Step 9 runs).
-7. `calendar_event` — store when a match was found (fields: `title`, `start_time`, `end_time`, `attendees`, `calendar_event_id`). Skip if already retrieved.
-8. `contact` — create stubs only for participants with no existing match; reuse retrieved entity_ids otherwise.
-
-Attach the transcript as a `file_path` on the combined store (if the source is a file) so the raw artifact is preserved per `[PROVENANCE]`.
-
-### Relationships
-
-Batch via `relationships` in the same `store` call where possible:
-
-- `PART_OF`: `agent_message` → `conversation`.
-- `REFERS_TO`: `agent_message` → `meeting_analysis`.
-- `REFERS_TO`: `meeting_analysis` → `transcription` (when linked).
-- `REFERS_TO`: `meeting_analysis` → `calendar_event` (when matched).
-- `REFERS_TO`: `meeting_analysis` → each participant `contact`.
-- `REFERS_TO`: each `task` → `meeting_analysis` (and to the relevant `contact` when the task is owed to a specific person).
-- `REFERS_TO`: each `recap_message` → `meeting_analysis` + the recipient `contact` + the `transcription`.
-- `REFERS_TO`: each `proposed_github_issue` → `meeting_analysis` (NOT to `contact` directly, to keep public-issue → person attribution one hop away).
-
-### Idempotency
-
-- Turn idempotency key: `conversation-{conversation_id}-{turn_id}-analyze-meeting-{timestamp_ms}`.
-- Per-meeting idempotency key for `meeting_analysis`: `meeting-<sha256(transcript_path or transcription_entity_id)[:12]>` — prevents duplicate analyses when re-run on the same transcript.
-
-## Step 8: Deliver recap messages
-
-For each `recap_message` not suppressed by `--no-recap`:
-
-**Email format** (`delivery_channel: gmail` — participant email is known):
-- Run `gws gmail draft create --to "<name> <email>" --subject "<subject>" --body "<body>"` (per the `Always use GWS CLI for Gmail` rule — never use the Gmail MCP directly).
-- On success: set `delivery_status: staged`, `gmail_draft_id` to the returned id. Update the stored entity via a narrow `store` call.
-- On failure: set `delivery_status: failed:<reason>`. Do not retry within the same turn. Continue with remaining recaps.
-- Do not auto-send. Drafts wait in Gmail for explicit user review.
-
-**Message format** (`delivery_channel: message` — no email address):
-- No automated delivery. Set `delivery_status: pending_manual_send`.
-- Surface the full message body in the report under `## Recap messages` so it can be copied and sent manually (via Messages, WhatsApp, etc.).
-
-## Step 9: Open GitHub issues (opt-in)
-
-Default is **off**. Issues are opened only when:
-- `--open-issues` flag is passed, OR
-- `MEETING_ANALYSIS_OPEN_GH_ISSUES=1` is set in env.
-
-When opt-in is active, for each `proposed_github_issue`:
-
-- Verify the target repo is in the allowlist (Step 4). Skip silently otherwise.
-- Re-verify the body has been scrubbed (no participant names, no emails, no internal URLs). If the body fails the scrub check, demote to task and log a warning.
-- Call the GitHub MCP `issue_write` (create) with `owner`, `repo`, `title`, `body`, `labels`. Capture the issue URL.
-- Update the `proposed_github_issue` entity's `opened_url` field and append the URL to the recap email body's `Issue links` section when the recipient is connected to that work item.
-- On failure: leave `opened_url` null and record the error in `open_error`.
-
-When opt-in is **off**: issues stay as drafts. The recap email omits issue links (do not promise links that don't exist).
-
-## Step 10: Close the turn
-
-After producing the user-visible reply, store the assistant `agent_message` per the closing-store step of the Neotoma MCP turn lifecycle and link `PART_OF` to the same conversation entity.
-
-## Step 11: Surface to the user
-
-Reply with:
-- One-line headline (e.g. `Meeting with Alice and Bob — 3 decisions, 4 of my action items, 2 issue drafts.`).
-- **My action items** as a short numbered list (max 5) with due dates.
-- **Recap messages** — one line per message: `→ <Name> — email: <staged|failed> | message: pending_manual_send`.
-- **Proposed issues** — one line per issue: `<owner/repo>: <title> — <opened-URL | draft>`.
-- Absolute report path.
-- `meeting_analysis` entity id and a list of created `task` / `email_draft` / `proposed_github_issue` entity ids.
-
-Render the `Neotoma` section per the `[COMMUNICATION & DISPLAY]` display rule, listing created and retrieved entities.
-
-## Behavior rules
-
-- **No invented commitments.** Every action item, decision, and quote MUST trace to specific transcript text. Paraphrase is labeled `paraphrase: …`. Never put words in a participant's mouth in the recap email or in a quoted block in the report.
-- **PII scrubbing is non-negotiable for public issues.** A `proposed_github_issue` body that still contains a participant name, email, internal URL, or unverbalized internal project name is a bug — demote to task. Better to demote than to leak.
-- **Recap messages are never auto-sent.** Email recaps wait in Gmail Drafts for explicit user review. Generic message recaps are surfaced as copy-paste text only.
-- **Email only when address is known.** If a participant's email cannot be resolved from Neotoma, the transcript, or Google Calendar, always fall back to generic message format — never guess an address.
-- **Public issues opt-in.** Default is staging, not opening. The skill writes drafts and waits.
-- **Reuse contacts.** Never create duplicate `contact` entities for participants who already exist in Neotoma. Use `retrieve_entity_by_identifier` first.
-- **Stable shape.** Empty sections render as `_None._` in the report AND as empty arrays in the entity, so cross-meeting queries are reliable.
-- **Skip silently on empty / non-meeting transcripts.** Short solo voice memos and accidental recordings do not get analysis treatment. The auto-invoke from `/record_meeting` checks for at least one of: ≥2 distinct speakers (when diarization present), ≥200 words, or at least one second-person pronoun followed by a verb of commitment. Otherwise: silent skip.
-- **No claims about side effects you didn't perform.** If Gmail staging failed, say so. If issues were not opened (default), say `drafted` not `opened`. The summary line matches reality.
-
-## Out of scope
-
-- Sending the recap emails — handled by the user via Gmail review.
-- Closing the loop on action items — handled by other workflows (task completion, follow-up meetings).
-- Producing the customer-development analysis when the meeting is Neotoma feedback — handled by [`analyze-neotoma-feedback`](../analyze-neotoma-feedback/SKILL.md). Both skills run in parallel when the Neotoma heuristic in [`record_meeting`](../record_meeting/SKILL.md) fires; the two analyses cross-link via the shared `transcription` and `contact` entities.
-- Speaker name correction when diarization mislabels — the user can pass `--participants` to override; deeper diarization-repair lives in `transcribe_audio.py`.
+Default issue repos: markmhendrickson/ateles (non-Neotoma) or markmhendrickson/neotoma (Neotoma-specific). Skip silently on non-meeting transcripts (heuristic: ≥2 speakers OR ≥200 words + commitment verb).
