@@ -136,6 +136,7 @@ if str(_DAEMON_DIR) not in sys.path:
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
     AgentLoader,
+    append_turn,
     create_run_conversation,
     GateAction,
     NeotomaEvent,
@@ -492,6 +493,27 @@ async def dispatch_task(
                 f"for task {entity_id} (run={run_key})"
             )
 
+    def _run_turn(role: str, content: str, key: str) -> None:
+        """Append a turn to the run conversation if one is open. Fail-open.
+
+        Apis OWNS the run-thread record: the orchestrator writes the kickoff and
+        outcome turns directly so the conversation is provably populated even if
+        the spawned agent never finalizes into it. The spawned agent's own /end
+        (advised via prompt) layers on top, it is not relied upon for binding.
+        """
+        if not run_conversation_id:
+            return
+        append_turn(
+            conversation_id=run_conversation_id,
+            role=role,
+            content=content,
+            sender_kind="orchestrator",
+            idempotency_key=f"runturn-{entity_id}-{key}",
+        )
+
+    _run_turn("user", f"Dispatched {skill} for task {entity_id} (trigger={trigger}): {title}",
+               key=f"kickoff-{trigger}")
+
     try:
         result = await _spawn_claude_skill(
             skill, entity_id, snapshot, trigger, notifier, role=role,
@@ -499,6 +521,8 @@ async def dispatch_task(
         )
     except Exception as exc:
         # Unexpected crash in the spawn machinery itself → record as a failed run.
+        _run_turn("assistant", f"{skill} dispatch crashed: {type(exc).__name__}: {exc}",
+                   key=f"crash-{trigger}")
         set_task_status(
             entity_id, TaskStatus.FAILED, handler=DAEMON_NAME,
             from_status=TaskStatus.EXECUTING.value,
@@ -509,6 +533,8 @@ async def dispatch_task(
         raise
 
     if result.ok:
+        _run_turn("assistant", f"{skill} completed (trigger={trigger}).",
+                   key=f"done-{trigger}")
         set_task_status(
             entity_id, TaskStatus.DONE, handler=DAEMON_NAME,
             from_status=TaskStatus.EXECUTING.value,
@@ -518,6 +544,8 @@ async def dispatch_task(
         job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
     else:
         reason = result.error or f"rc={result.returncode}"
+        _run_turn("assistant", f"{skill} failed (trigger={trigger}): {reason}",
+                   key=f"failed-{trigger}")
         # FAILED (not BLOCKED): the stall watchdog (plan task ent_3cdd75…) owns
         # retry-with-backoff and escalation-on-exhaustion out-of-band, so the SSE
         # loop is never blocked by an inline sleep. Notify now so failures are not
