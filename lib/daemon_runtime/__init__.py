@@ -76,6 +76,11 @@ from .grant_checker import (
     revoke_grant,
     suspend_grant,
 )
+from .session_finalize import (
+    build_finalize_payload,
+    finalize_session,
+    load_end_skill,
+)
 from .sse_client import NeotomaEvent, SSEClient, hydrate_snapshot
 from .task_lifecycle import (
     MAX_ATTEMPTS,
@@ -121,4 +126,8 @@ __all__ = [
     "backoff_seconds",
     "attempts_exhausted",
     "MAX_ATTEMPTS",
+    # session finalize (/end convergence)
+    "build_finalize_payload",
+    "finalize_session",
+    "load_end_skill",
 ]
