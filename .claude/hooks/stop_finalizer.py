@@ -56,29 +56,45 @@ def main() -> int:
     # plan-link check could never fire. state["bound_plan_id"] is only the
     # *intended* default and is deliberately NOT treated as proof of binding.
     bound_plan = bool(summary.get("bound_plan"))
+    bound_task = bool(summary.get("bound_task"))
+    # Plan-optionality (task-spine plan): a session is anchored if bound to a
+    # plan OR a task. A single self-contained task is a valid binding target.
+    bound = bound_plan or bound_task
+    captured_learning = bool(summary.get("captured_learning"))
 
     if not wrote_domain:
         status = "exempt"  # grace path: pure read/no-op session
-    elif bound_plan and turns > 0:
+    elif bound and turns > 0:
         status = "integral"
     else:
         status = "violated"
 
     emit_harness_event(session_id, summary, status)
 
+    # /end convergence (task-spine plan, task #3): a substantive session that
+    # stored no learning artifact is nudged to run /end (which captures turns +
+    # learnings and finalizes the plan). Soft by design — encouraged, not blocked,
+    # so it applies uniformly to HITL and spawned autonomous agents (both hit this
+    # same Stop hook) without forcing /end on every trivial write.
     if status != "violated":
+        if wrote_domain and not captured_learning:
+            log(
+                "reminder: this session captured no learning artifact — consider "
+                "running /end to record learnings and finalize the plan."
+            )
         return 0
 
     reasons = []
-    if not bound_plan:
-        reasons.append("no plan link (conversation not PART_OF any plan)")
+    if not bound:
+        reasons.append("no plan OR task link (conversation not PART_OF any plan or task)")
     if turns == 0:
         reasons.append("no stored turns (conversation_message/agent_message rows missing)")
     detail = (
         "Session integrity violation: this session made domain writes but has "
         + " and ".join(reasons)
         + ". Per docs/session_integrity.md, bind the conversation to a plan "
-        "(default ent_99ace4dd6673aa36ed08b1fe) and store the turns before stopping."
+        "(default ent_99ace4dd6673aa36ed08b1fe) OR a task, store the turns, and "
+        "run /end to finalize before stopping."
     )
 
     if not ENFORCE:
