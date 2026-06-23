@@ -219,6 +219,26 @@ def build_eml(md: str, title: str, to_addr: str, subject: str,
     return bytes(msg)
 
 
+def is_third_party(recipient: str, operator_email: str) -> bool:
+    """True when the recipient is someone other than the operator (a beneficiary
+    / customer). Case-insensitive; empty operator_email is treated as 'unknown'
+    → third-party (fail safe toward requiring approval)."""
+    r = (recipient or "").strip().lower()
+    o = (operator_email or "").strip().lower()
+    if not r:
+        return False
+    if not o:
+        return True
+    return r != o
+
+
+def send_allowed(recipient: str, operator_email: str, approved: bool) -> bool:
+    """Beneficiary (third-party) delivery requires explicit operator approval;
+    operator self-delivery is always allowed. This encodes the draft-don't-send
+    guardrail at the tool boundary so a beneficiary report can never auto-send."""
+    return (not is_third_party(recipient, operator_email)) or bool(approved)
+
+
 def deliver(eml_path: Path, to_addr: str, subject: str) -> int:
     """Send the .eml via the operator-configured Gmail command, else explain.
 
@@ -267,6 +287,12 @@ def _selftest() -> int:
                     from_addr="me@test")
     checks["eml-html"] = b"text/html" in eml and b"<strong>bold</strong>" in eml
     checks["eml-text"] = b"text/plain" in eml
+    # beneficiary approval guard
+    checks["operator_self_allowed"] = send_allowed("ops@test", "ops@test", approved=False)
+    checks["third_party_blocked"] = not send_allowed("cust@x", "ops@test", approved=False)
+    checks["third_party_approved_ok"] = send_allowed("cust@x", "ops@test", approved=True)
+    checks["unknown_operator_needs_approval"] = not send_allowed("cust@x", "", approved=False)
+    checks["is_third_party"] = is_third_party("cust@x", "ops@test") and not is_third_party("OPS@test", "ops@test")
     ok = all(checks.values())
     for k, v in checks.items():
         print(f"[{'PASS' if v else 'FAIL'}] {k}")
@@ -285,6 +311,10 @@ def main() -> int:
     ap.add_argument("--from", dest="from_addr", default=os.environ.get("OPERATOR_EMAIL", ""))
     ap.add_argument("--subject", default="")
     ap.add_argument("--send", action="store_true", help="deliver via $ATELES_GMAIL_SEND_CMD")
+    ap.add_argument("--beneficiary", default="",
+                    help="label for a beneficiary/customer report (delivery to a non-operator recipient)")
+    ap.add_argument("--approved", action="store_true",
+                    help="operator approval for sending a beneficiary (third-party) report")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
@@ -308,6 +338,16 @@ def main() -> int:
         eml_path.write_text(eml_bytes.decode("utf-8", "replace"), encoding="utf-8")
         print(f"[dispatch_report] email → {eml_path}")
         if args.send:
+            operator_email = args.from_addr or os.environ.get("OPERATOR_EMAIL", "")
+            if not send_allowed(args.to, operator_email, args.approved):
+                label = args.beneficiary or "beneficiary"
+                print(
+                    f"[dispatch_report] {args.to} is not the operator ({label} report) — "
+                    f"third-party delivery requires operator approval. Re-run with --approved "
+                    f"once approved. Email preserved at {eml_path}.",
+                    file=sys.stderr,
+                )
+                return 0  # fail-safe: never auto-send to a beneficiary unapproved
             return deliver(eml_path, args.to, subject)
 
     if not (args.page_html or args.eml or args.send):
