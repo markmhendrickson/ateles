@@ -1,6 +1,14 @@
 # Cloud Hosting for the Ateles Swarm
 
-**Status: Design** (task #5 of plan `ent_aff87747b49e338790568af6` — "Task-spine loop + cloud-hosted swarm")
+**Status: Decisions accepted; scaffolding landed** (task #5 of plan `ent_aff87747b49e338790568af6` — "Task-spine loop + cloud-hosted swarm")
+
+> **2026-06-23 — operator accepted the recommendations.** Host: Hetzner EU `CAX11`;
+> network: Tailscale; per-host age key; `ANTHROPIC_API_KEY` via SOPS; Google
+> daemons B-thin (device-side) first. The executable artifacts (Dockerfile,
+> compose, entrypoint, host bootstrap) and the step-by-step runbook now live in
+> [`deploy/cloud/`](../deploy/cloud/README.md). What remains is operator
+> *provisioning* (create the VM, generate the per-host age key, supply the
+> Tailscale auth key + `ateles-private` read access) — not decisions.
 
 Decision under execution: `cloud_hosted_device_agnostic_swarm` — move the swarm's
 loop bodies to always-on cloud/self-hosting so the swarm is device-agnostic. The
@@ -350,8 +358,14 @@ device-side agents. Reuse the existing RC scripts at every step.
 
 ## 6. Open decisions (operator-required)
 
-These are the genuinely-blocked items. Each needs an operator answer before the
-corresponding migration phase can proceed.
+**ACCEPTED 2026-06-23** (see [`deploy/cloud/README.md`](../deploy/cloud/README.md)):
+provider/region = **Hetzner EU CAX11**; network = **Tailscale**; age key =
+**per-host**; `claude` auth = **`ANTHROPIC_API_KEY` via SOPS**; Google =
+**B-thin first**. The items below are now operator *provisioning actions*, not
+open decisions — the only one still needing a number is the budget ceiling
+(estimate ~€4–8/mo VM + GHA minutes).
+
+These were the genuinely-blocked items; each maps to a migration phase.
 
 - [ ] **Hosting provider & region.** Which cloud VM / container host (provider,
       region, instance size)? Region affects latency to Neotoma and any data-
