@@ -22,7 +22,9 @@ Startup sequence (T3 daemon pattern):
   5. Subscribe to Neotoma SSE and dispatch events
 
 Environment variables:
-  NEOTOMA_BEARER_TOKEN        Neotoma API auth token
+  NEOTOMA_BEARER_TOKEN        Neotoma API auth token (local-scoped)
+  NEOTOMA_BEARER_TOKEN_PROD   Prod-scoped token; auto-promoted to
+                              NEOTOMA_BEARER_TOKEN when NEOTOMA_BASE_URL is remote
   NEOTOMA_BASE_URL            Neotoma API base URL
   TELEGRAM_BOT_TOKEN          Telegram bot token
   TELEGRAM_CHAT_ID            Telegram chat ID
@@ -60,6 +62,19 @@ if _NEOTOMA_ENV_FILE.exists():
         if _line and not _line.startswith("#") and "=" in _line:
             _k, _, _v = _line.partition("=")
             os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
+
+# Pick the bearer token that matches the instance we actually target. The shared
+# ~/.config/neotoma/.env carries a LOCAL-scoped NEOTOMA_BEARER_TOKEN (the local
+# server runs open / accepts that token), but the apis launchd plist overrides
+# NEOTOMA_BASE_URL to prod — and the local token 401s against prod entity reads.
+# When the effective base URL is a remote (prod) host and a prod-scoped token is
+# materialized, promote it to NEOTOMA_BEARER_TOKEN so every downstream module
+# (which reads NEOTOMA_BEARER_TOKEN directly) authenticates against prod.
+_base_url = os.environ.get("NEOTOMA_BASE_URL", "")
+_is_local = ("localhost" in _base_url) or ("127.0.0.1" in _base_url) or not _base_url
+_prod_token = os.environ.get("NEOTOMA_BEARER_TOKEN_PROD", "").strip()
+if not _is_local and _prod_token:
+    os.environ["NEOTOMA_BEARER_TOKEN"] = _prod_token
 
 # ── Path bootstrap ────────────────────────────────────────────────────────────
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
