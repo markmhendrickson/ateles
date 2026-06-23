@@ -1537,3 +1537,61 @@ class TestSwarmGithubContractAttributionSpec:
         assert "em-dash" in contract, (
             "Contract must specify em-dash (—, U+2014), not a hyphen"
         )
+
+
+class TestAnthropicAuthPrecedence:
+    """The spawned `claude --print` must prefer the operator's Claude
+    subscription (CLAUDE_CODE_OAUTH_TOKEN) over metered ANTHROPIC_API_KEY."""
+
+    def setup_method(self) -> None:
+        skill_runner._agent_def_cache.clear()
+
+    def _spawn_and_capture_env(self, env_overrides: dict) -> dict:
+        instance = MagicMock()
+        instance.load.return_value = _stub_def()
+        captured: dict = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            captured.update(kwargs.get("env") or {})
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.AgentLoader", return_value=instance),
+            patch("skill_runner._write_harness_event"),
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="Fallback skill."),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch.dict("os.environ", env_overrides, clear=False),
+        ):
+            asyncio.run(
+                skill_runner.run_skill(
+                    "gryllus", "p", role="gryllus", task_entity_id="ent_x"
+                )
+            )
+        return captured
+
+    def test_oauth_token_present_drops_api_key(self) -> None:
+        env = self._spawn_and_capture_env(
+            {"CLAUDE_CODE_OAUTH_TOKEN": "sk-oauth-xyz", "ANTHROPIC_API_KEY": "sk-ant-metered"}
+        )
+        assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-oauth-xyz"
+        assert "ANTHROPIC_API_KEY" not in env, (
+            "ANTHROPIC_API_KEY must be removed when the subscription token is present, "
+            "else claude bills metered credits instead of the Max plan"
+        )
+
+    def test_no_oauth_token_keeps_api_key(self) -> None:
+        env = self._spawn_and_capture_env(
+            {"ANTHROPIC_API_KEY": "sk-ant-metered", "CLAUDE_CODE_OAUTH_TOKEN": ""}
+        )
+        assert env.get("ANTHROPIC_API_KEY") == "sk-ant-metered", (
+            "Without a subscription token, fall back to ANTHROPIC_API_KEY (no regression)"
+        )

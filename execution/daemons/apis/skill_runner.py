@@ -541,6 +541,18 @@ async def run_skill(
 
     subprocess_env = {**os.environ, **(env_extra or {})}
 
+    # Anthropic auth for the spawned `claude --print`: prefer the operator's
+    # Claude subscription (Max plan) over metered pay-as-you-go API credits.
+    # `claude setup-token` mints a long-lived subscription token exposed as
+    # CLAUDE_CODE_OAUTH_TOKEN; when it is present we hand it to the child and
+    # REMOVE ANTHROPIC_API_KEY from the child's env — if both are set the API
+    # key wins and the child bills metered credits (the exact failure that
+    # exhausted the panel's balance). When the OAuth token is absent we leave
+    # ANTHROPIC_API_KEY in place (graceful fallback — child still authenticates,
+    # just on metered credits), so this is a no-op until the token is provisioned.
+    if subprocess_env.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
+        subprocess_env.pop("ANTHROPIC_API_KEY", None)
+
     # ateles#109 — per-agent GitHub identity: when the caller resolved a
     # per-agent token (e.g. via _token_for_agent_on_repo in swarm_dispatch),
     # override both GITHUB_TOKEN and GH_TOKEN so the child's `gh` calls
