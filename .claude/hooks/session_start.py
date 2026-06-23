@@ -39,6 +39,21 @@ def main() -> int:
         "turns will be flagged at Stop."
     )
 
+    # Intake protocol — auto-engage the fast intake→dispatch→report flow on the
+    # first substantive request, collapsing HITL to one clarification batch + one
+    # approval gate (.claude/skills/intake/SKILL.md, invocable as /intake).
+    print(
+        "[intake] On the first SUBSTANTIVE request of this session (a task/goal, "
+        "not a quick lookup), auto-engage the `intake` skill: (1) cross-check the "
+        "ask against existing Neotoma plans/tasks and reuse/refine the best fit "
+        "rather than duplicating; (2) ask ALL clarifying forks in ONE batch; "
+        "(3) lay out the COMPLETE task breakdown with all follow-up anticipated "
+        "up front — no turn-by-turn 'what's next'; (4) take one approval gate that "
+        "also captures the delivery choice — wait for an inline report, or have a "
+        "rendered-page report emailed to the operator and linked for posterity. "
+        "Skip for trivial one-step asks; invoke explicitly with /intake."
+    )
+
     _emit_skill_drift_notice()
     return 0
 

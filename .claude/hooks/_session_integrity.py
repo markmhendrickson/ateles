@@ -35,6 +35,12 @@ from pathlib import Path
 
 DEFAULT_PLAN_ID = "ent_99ace4dd6673aa36ed08b1fe"  # Ateles Agent Swarm Architecture plan
 BOOKKEEPING_TYPES = {"conversation", "conversation_message", "agent_message"}
+# Durable insight artifacts whose presence means the session captured a learning
+# (used by the Stop hook's /end nudge — task #3 of the task-spine plan).
+LEARNING_TYPES = {
+    "learning", "note", "standing_rule", "architectural_decision",
+    "strategy_drift_signal", "lesson", "recap_message",
+}
 NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com")
 BEARER_ENV = "NEOTOMA_BEARER_TOKEN"  # gitleaks:allow
 
@@ -94,7 +100,10 @@ def scan_transcript(transcript_path: str | None) -> dict:
     Fail-open: an unreadable transcript yields a conservative no-op summary
     (turns=0, wrote_domain=False) so the finalizer does not block on it.
     """
-    summary = {"turns": 0, "wrote_domain": False, "bound_plan": False, "write_types": set()}
+    summary = {
+        "turns": 0, "wrote_domain": False, "bound_plan": False,
+        "bound_task": False, "captured_learning": False, "write_types": set(),
+    }
     if not transcript_path or not os.path.exists(transcript_path):
         return summary
     try:
@@ -136,6 +145,12 @@ def _inspect_event(ev: dict, summary: dict) -> None:
         domain_types = etypes - BOOKKEEPING_TYPES
         if "plan" in etypes or _mentions_plan(payload):
             summary["bound_plan"] = True
+        # Plan-optionality (task-spine plan): a session may anchor to a TASK
+        # instead of a plan. A PART_OF link alongside a task entity counts.
+        if _mentions_task_binding(payload):
+            summary["bound_task"] = True
+        if etypes & LEARNING_TYPES:
+            summary["captured_learning"] = True
         if domain_types or "correct" in name or "submit_" in name or "create_relationship" in name:
             # create_relationship between two bookkeeping msgs is itself
             # bookkeeping; only count it as domain if a non-bookkeeping id appears.
@@ -173,6 +188,23 @@ def _mentions_plan(payload: dict) -> bool:
     return '"plan"' in blob or "plan_id" in blob or DEFAULT_PLAN_ID in blob
 
 
+def _mentions_task_binding(payload: dict) -> bool:
+    """True when a write anchors the session to a task: a PART_OF relationship
+    alongside a task entity in the same payload (the 'self-contained task stands
+    alone' case). Loose by design, mirroring _mentions_plan — the goal is not to
+    flag a session that legitimately anchored its work to a task instead of a
+    plan. Linking to a pre-existing task by id alone is not detected here."""
+    if not isinstance(payload, dict):
+        return False
+    rels = payload.get("relationships") or []
+    has_part_of = any(
+        "part_of" in str(r.get("relationship_type", "")).lower()
+        for r in rels
+        if isinstance(r, dict)
+    )
+    return has_part_of and "task" in _entity_types_in(payload)
+
+
 # ---------------------------------------------------------------------------
 # harness_event audit emission (best-effort, fail-open)
 # ---------------------------------------------------------------------------
@@ -199,6 +231,8 @@ def emit_harness_event(session_id: str, summary: dict, integrity_status: str) ->
             "turns": summary.get("turns", 0),
             "wrote_domain": summary.get("wrote_domain", False),
             "bound_plan": summary.get("bound_plan", False),
+            "bound_task": summary.get("bound_task", False),
+            "captured_learning": summary.get("captured_learning", False),
             "write_types": sorted(summary.get("write_types", []) or []),
         }],
     }

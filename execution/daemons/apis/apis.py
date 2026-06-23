@@ -91,6 +91,10 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     read_checkpoint_resolution,
     stamp_checkpoint_dispatched,
 )
+from lib.daemon_runtime.task_lifecycle import (  # noqa: E402
+    TaskStatus,
+    set_task_status,
+)
 from lib.notify import Notifier, Priority  # noqa: E402
 from lib.activity import ActivityLogger  # noqa: E402
 
@@ -193,6 +197,7 @@ from routing import (  # noqa: E402
 import github_gateway  # noqa: E402
 from skill_runner import run_skill  # noqa: E402
 from swarm_dispatch import SwarmDispatcher  # noqa: E402
+from task_watchdog import TaskWatchdog  # noqa: E402
 
 
 # ── T4 dispatch ────────────────────────────────────────────────────────────────
@@ -206,7 +211,7 @@ async def _spawn_claude_skill(
     notifier: Notifier,
     *,
     role: str | None = None,
-) -> None:
+) -> "object":
     """
     Spawn a T4 agent for a task event. The subprocess mechanics live in
     skill_runner.run_skill (shared with the GitHub trigger pipelines).
@@ -216,8 +221,9 @@ async def _spawn_claude_skill(
     caller's routing decision traceable and lets skill_runner load the correct
     definition even if skill/role names ever diverge.
 
-    Failures are reported via lib/notify and logged but never crash Apis —
-    one bad task must not take down the dispatcher.
+    Returns the run result (ok / error / returncode); the caller records the
+    task's lifecycle status and escalates. Never crashes Apis — one bad task
+    must not take down the dispatcher.
     """
     title = snapshot.get("title", "(untitled)")
     body = snapshot.get("body", "") or snapshot.get("description", "")
@@ -234,13 +240,7 @@ async def _spawn_claude_skill(
         task_entity_id=entity_id,
         notifier=notifier,
     )
-    if not result.ok:
-        reason = result.error or f"rc={result.returncode}"
-        notifier.send(
-            f"{skill} failed on {entity_id} ({reason})",
-            priority=Priority.BLOCKER,
-            handler=DAEMON_NAME,
-        )
+    return result
 
 
 async def dispatch_task(
@@ -266,6 +266,7 @@ async def dispatch_task(
         gate_override: When True, bypass the gate (operator already approved)
     """
     title = snapshot.get("title", "(untitled)")
+    current_status = snapshot.get("status")
 
     # Prefer tags already in snapshot (set by neotoma-agent hygiene)
     existing_tags: list[str] = snapshot.get("tags", []) or []
@@ -291,14 +292,36 @@ async def dispatch_task(
     role = _resolve_role(existing_tags, assigned_to=assigned_to)
 
     if skill is None:
+        # No inferable owner. Previously this was a silent log-and-skip — the task
+        # fell on the floor. Now it escalates: mark BLOCKED (so the watchdog leaves
+        # it for the operator rather than retrying a fundamentally unroutable task)
+        # and page for routing/assignment.
         log.info(
             f"[{DAEMON_NAME}] No route for task {entity_id!r} "
             f"(trigger={trigger}, tags={existing_tags}, assigned_to={assigned_to}) "
-            "— skipping dispatch"
+            "— escalating (no owner)"
+        )
+        set_task_status(
+            entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
+            from_status=current_status,
+            reason=f"no route/owner (tags={existing_tags}, assigned_to={assigned_to})",
+            key_suffix=trigger,
+        )
+        notifier.send(
+            f"Task has no owner — needs routing or assignment: {title[:70]}\n  {entity_id}",
+            priority=Priority.BLOCKER,
+            handler=DAEMON_NAME,
         )
         return
 
     job = _activity.started(f"routing task {entity_id} → {skill}: {title[:60]}")
+
+    # Lifecycle: the dispatcher resolved an owner — record ROUTED so the task can
+    # never read "pending" while it is actually in flight.
+    set_task_status(
+        entity_id, TaskStatus.ROUTED, handler=DAEMON_NAME,
+        from_status=current_status, key_suffix=trigger,
+    )
 
     # ── Execution gate ──────────────────────────────────────────────────────
     # Skipped when re-dispatching an operator-approved checkpoint.
@@ -346,6 +369,11 @@ async def dispatch_task(
                 f"[{DAEMON_NAME}] HELD task {entity_id} for operator approval "
                 f"(checkpoint_brief={brief_id})"
             )
+            set_task_status(
+                entity_id, TaskStatus.AWAITING_APPROVAL, handler=DAEMON_NAME,
+                from_status=TaskStatus.ROUTED.value, reason=decision.reason,
+                key_suffix=trigger,
+            )
             job.escalated(
                 f"task {entity_id} → {skill} held for operator "
                 f"(blast={decision.blast_radius.value}, conf={confidence:.2f})"
@@ -364,12 +392,51 @@ async def dispatch_task(
         job.finished(f"task {entity_id} → {skill} routed (dry-run, gate: {_gate_label})")
         return
 
+    # Lifecycle: about to spawn the T4 agent.
+    set_task_status(
+        entity_id, TaskStatus.EXECUTING, handler=DAEMON_NAME,
+        from_status=TaskStatus.ROUTED.value, key_suffix=trigger,
+    )
     try:
-        await _spawn_claude_skill(skill, entity_id, snapshot, trigger, notifier, role=role)
-        job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
+        result = await _spawn_claude_skill(
+            skill, entity_id, snapshot, trigger, notifier, role=role
+        )
     except Exception as exc:
+        # Unexpected crash in the spawn machinery itself → record as a failed run.
+        set_task_status(
+            entity_id, TaskStatus.FAILED, handler=DAEMON_NAME,
+            from_status=TaskStatus.EXECUTING.value,
+            reason=f"dispatch raised {type(exc).__name__}: {exc}",
+            key_suffix=trigger,
+        )
         job.failed(f"task {entity_id} → {skill} dispatch failed: {type(exc).__name__}")
         raise
+
+    if result.ok:
+        set_task_status(
+            entity_id, TaskStatus.DONE, handler=DAEMON_NAME,
+            from_status=TaskStatus.EXECUTING.value,
+            result=f"{skill} completed (trigger={trigger})",
+            key_suffix=trigger,
+        )
+        job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
+    else:
+        reason = result.error or f"rc={result.returncode}"
+        # FAILED (not BLOCKED): the stall watchdog (plan task ent_3cdd75…) owns
+        # retry-with-backoff and escalation-on-exhaustion out-of-band, so the SSE
+        # loop is never blocked by an inline sleep. Notify now so failures are not
+        # silent in the interim before the watchdog ships.
+        set_task_status(
+            entity_id, TaskStatus.FAILED, handler=DAEMON_NAME,
+            from_status=TaskStatus.EXECUTING.value, reason=reason,
+            key_suffix=trigger,
+        )
+        notifier.send(
+            f"{skill} failed on {entity_id} ({reason}) — task marked FAILED",
+            priority=Priority.BLOCKER,
+            handler=DAEMON_NAME,
+        )
+        job.failed(f"task {entity_id} → {skill} failed: {reason[:60]}")
 
 
 # ── Checkpoint resolution ───────────────────────────────────────────────────
@@ -584,10 +651,19 @@ async def main() -> None:
     async def dispatch(event: NeotomaEvent) -> None:
         await handle_event(event, notifier)
 
+    # 6. Stall watchdog (task #2): out-of-band sweeper that retries FAILED tasks
+    #    with backoff, resumes tasks left mid-flight by a restart, and escalates
+    #    once attempts are exhausted — without blocking the SSE loop.
+    watchdog = TaskWatchdog()
+
+    async def watchdog_dispatch(task_id: str, snapshot: dict, trigger: str) -> None:
+        await dispatch_task(task_id, snapshot, trigger, notifier=notifier)
+
     log.info(f"[{DAEMON_NAME}] Subscribing to SSE: {SUBSCRIBE_ENTITY_TYPES}")
     await asyncio.gather(
         sse.stream(dispatch),
         github_gateway.serve(gateway_app, GITHUB_WEBHOOK_PORT),
+        watchdog.run(notifier, watchdog_dispatch),
     )
 
 
