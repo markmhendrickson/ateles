@@ -88,13 +88,13 @@ When Accipiter completes a UX review on a GitHub issue, sign off the `ux` gate. 
 # 1. Sign off ux gate on the issue entity
 correct(entity_id=<issue_entity_id>, fields={
   "gate_status": {**existing_gate_status, "ux": "signed_off"},
-  # Only advance current_owner to "gryllus" if arch is ALSO signed_off
+  # Only advance current_owner to "cicada" if arch is ALSO signed_off
   "owner_history": [*existing_history, {"agent": "accipiter", "gate": "ux", "at": "<ISO timestamp>", "action": "signed_off"}]
 }, observation_source="workflow_state")
 
 # 2. Check join condition: if arch is also signed_off, advance to Phase 3
 if existing_gate_status.get("arch") in ("signed_off", "waived", "not_required"):
-    correct(entity_id=<issue_entity_id>, fields={"current_owner": "gryllus"}, observation_source="workflow_state")
+    correct(entity_id=<issue_entity_id>, fields={"current_owner": "cicada"}, observation_source="workflow_state")
 
 # 3. Store a plan_contribution entity
 store(entities=[{
