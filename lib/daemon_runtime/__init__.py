@@ -76,6 +76,13 @@ from .grant_checker import (
     revoke_grant,
     suspend_grant,
 )
+from .run_email import (
+    build_run_eml,
+    parse_task_id,
+    run_subject,
+    send_run_email,
+    thread_ids,
+)
 from .session_finalize import (
     append_turn,
     build_finalize_payload,
@@ -139,4 +146,10 @@ __all__ = [
     "build_turn_payload",
     "create_run_conversation",
     "append_turn",
+    # run-thread email (E2)
+    "run_subject",
+    "parse_task_id",
+    "thread_ids",
+    "build_run_eml",
+    "send_run_email",
 ]

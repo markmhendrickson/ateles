@@ -138,6 +138,7 @@ from lib.daemon_runtime import (  # noqa: E402
     AgentLoader,
     append_turn,
     create_run_conversation,
+    send_run_email,
     GateAction,
     NeotomaEvent,
     SSEClient,
@@ -232,6 +233,10 @@ AUTO_EXECUTE = os.environ.get("APIS_AUTO_EXECUTE", "0") == "1"
 # tell the spawned agent to thread its turns into it. Default off — flag-gated so
 # the live dispatch path is byte-identical until the child side (E2) lands.
 RUN_CONVERSATIONS = os.environ.get("APIS_RUN_CONVERSATIONS", "0") == "1"
+# E2 (docs/task_execution_loop.md): send run kickoff/outcome on a Gmail thread via
+# the dedicated swarm address. Default off; needs the swarm mailbox provisioned
+# (ATELES_SWARM_EMAIL + OPERATOR_EMAIL + ATELES_GMAIL_SEND_CMD). Fail-open.
+RUN_EMAIL = os.environ.get("APIS_RUN_EMAIL", "0") == "1"
 
 # Path to the Claude CLI binary used to spawn T4 agents. Set by env var or
 # auto-detected from PATH. If absent, dispatch falls back to log-only.
@@ -474,12 +479,13 @@ async def dispatch_task(
         from_status=TaskStatus.ROUTED.value, key_suffix=trigger,
     )
 
+    # E1/E2: this run's thread. run_key keys it to the attempt so SSE replays reuse
+    # it while a genuine retry opens a fresh run.
+    run_key = f"{trigger}-{snapshot.get('attempt', snapshot.get('attempt_count', 0))}"
+
     # E1: open one conversation for this execution run (flag-gated, fail-open).
-    # run_key keys the conversation to the attempt so SSE replays reuse it while a
-    # genuine retry opens a fresh run. Anchored PART_OF the task (+ plan if known).
     run_conversation_id: str | None = None
     if RUN_CONVERSATIONS:
-        run_key = f"{trigger}-{snapshot.get('attempt', snapshot.get('attempt_count', 0))}"
         run_conversation_id = create_run_conversation(
             task_id=entity_id,
             plan_id=snapshot.get("plan_id") or None,
@@ -493,26 +499,28 @@ async def dispatch_task(
                 f"for task {entity_id} (run={run_key})"
             )
 
-    def _run_turn(role: str, content: str, key: str) -> None:
-        """Append a turn to the run conversation if one is open. Fail-open.
-
-        Apis OWNS the run-thread record: the orchestrator writes the kickoff and
-        outcome turns directly so the conversation is provably populated even if
-        the spawned agent never finalizes into it. The spawned agent's own /end
-        (advised via prompt) layers on top, it is not relied upon for binding.
+    def _run_stage(role: str, content: str, stage: str) -> None:
+        """Record one run-thread event: append to the run conversation (E1) AND
+        send it on the run's Gmail thread (E2). Both flag-gated + fail-open. Apis
+        OWNS the run thread, so it is populated regardless of whether the spawned
+        agent finalizes into it; the agent's own /end (advised via prompt) layers
+        on top and is not relied upon for binding.
         """
-        if not run_conversation_id:
-            return
-        append_turn(
-            conversation_id=run_conversation_id,
-            role=role,
-            content=content,
-            sender_kind="orchestrator",
-            idempotency_key=f"runturn-{entity_id}-{key}",
-        )
+        if run_conversation_id:
+            append_turn(
+                conversation_id=run_conversation_id, role=role, content=content,
+                sender_kind="orchestrator",
+                idempotency_key=f"runturn-{entity_id}-{stage}-{trigger}",
+            )
+        if RUN_EMAIL:
+            send_run_email(
+                task_id=entity_id, run_key=run_key, stage=stage, title=title,
+                body=content,
+            )
 
-    _run_turn("user", f"Dispatched {skill} for task {entity_id} (trigger={trigger}): {title}",
-               key=f"kickoff-{trigger}")
+    _run_stage("user",
+               f"Dispatched {skill} for task {entity_id} (trigger={trigger}): {title}",
+               stage="kickoff")
 
     try:
         result = await _spawn_claude_skill(
@@ -521,8 +529,8 @@ async def dispatch_task(
         )
     except Exception as exc:
         # Unexpected crash in the spawn machinery itself → record as a failed run.
-        _run_turn("assistant", f"{skill} dispatch crashed: {type(exc).__name__}: {exc}",
-                   key=f"crash-{trigger}")
+        _run_stage("assistant", f"{skill} dispatch crashed: {type(exc).__name__}: {exc}",
+                   stage="crash")
         set_task_status(
             entity_id, TaskStatus.FAILED, handler=DAEMON_NAME,
             from_status=TaskStatus.EXECUTING.value,
@@ -533,8 +541,8 @@ async def dispatch_task(
         raise
 
     if result.ok:
-        _run_turn("assistant", f"{skill} completed (trigger={trigger}).",
-                   key=f"done-{trigger}")
+        _run_stage("assistant", f"{skill} completed (trigger={trigger}).",
+                   stage="done")
         set_task_status(
             entity_id, TaskStatus.DONE, handler=DAEMON_NAME,
             from_status=TaskStatus.EXECUTING.value,
@@ -544,8 +552,8 @@ async def dispatch_task(
         job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
     else:
         reason = result.error or f"rc={result.returncode}"
-        _run_turn("assistant", f"{skill} failed (trigger={trigger}): {reason}",
-                   key=f"failed-{trigger}")
+        _run_stage("assistant", f"{skill} failed (trigger={trigger}): {reason}",
+                   stage="failed")
         # FAILED (not BLOCKED): the stall watchdog (plan task ent_3cdd75…) owns
         # retry-with-backoff and escalation-on-exhaustion out-of-band, so the SSE
         # loop is never blocked by an inline sleep. Notify now so failures are not
