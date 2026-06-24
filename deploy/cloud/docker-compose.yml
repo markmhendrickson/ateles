@@ -1,0 +1,74 @@
+# Ateles Bucket-A (device-agnostic) daemons — one container per daemon, shared
+# image. Task #5 of plan ent_aff87747b49e338790568af6. Runbook: deploy/cloud/README.md.
+#
+# Secrets are mounted read-only and decrypted at container start by entrypoint.sh:
+#   ATELES_AGE_KEY      -> path to the host's age private key file
+#   ATELES_PRIVATE_DIR  -> path to the read-only ateles-private clone
+# Set them in deploy/cloud/.env (see README) or the shell environment.
+#
+# SAFETY: APIS_DRY_RUN defaults to 1 (Phase M0/M3 — observe, don't dispatch).
+# Flip to 0 only when cutting a daemon over AND after stopping its Studio copy
+# (single-consumer rule — never run the same daemon in two places).
+
+x-daemon: &daemon
+  image: ateles-swarm:latest
+  build:
+    context: ../..
+    dockerfile: deploy/cloud/Dockerfile
+  restart: unless-stopped
+  stop_grace_period: 20s
+  volumes:
+    - ${ATELES_AGE_KEY:?set ATELES_AGE_KEY to the host age key file}:/secrets/age/keys.txt:ro
+    - ${ATELES_PRIVATE_DIR:?set ATELES_PRIVATE_DIR to the ateles-private clone}:/secrets/ateles-private:ro
+
+services:
+  # ── dispatch core ──────────────────────────────────────────────────────────
+  apis:
+    <<: *daemon
+    container_name: ateles-apis
+    command: ["python", "execution/daemons/apis/apis.py"]
+    environment:
+      APIS_DRY_RUN: "${APIS_DRY_RUN:-1}"        # M0/M3: dry-run until cutover
+      APIS_AUTONOMY_AUTO_MERGE: "0"
+    ports:
+      - "8742:8742"                              # GitHub webhook gateway
+
+  anthus:
+    <<: *daemon
+    container_name: ateles-anthus
+    command: ["python", "execution/daemons/anthus/anthus.py"]
+
+  # ── network-shaped, safe first movers ──────────────────────────────────────
+  apus:
+    <<: *daemon
+    container_name: ateles-apus
+    command: ["python", "execution/daemons/apus/apus.py"]
+    ports:
+      - "8741:8741"                              # Neotoma->git mirror webhook
+
+  # ── GitHub automation (code-touching dispatch -> Bucket C / GHA, see README) ─
+  formica:
+    <<: *daemon
+    container_name: ateles-formica
+    command: ["python", "execution/daemons/formica/formica.py"]
+
+  neotoma-agent:
+    <<: *daemon
+    container_name: ateles-neotoma-agent
+    command: ["python", "execution/daemons/neotoma-agent/neotoma_agent.py"]
+
+  # ── low-risk, no device dependency ─────────────────────────────────────────
+  gorilla:
+    <<: *daemon
+    container_name: ateles-gorilla
+    command: ["python", "execution/daemons/gorilla/gorilla.py"]
+
+  morning-brief:
+    <<: *daemon
+    container_name: ateles-morning-brief
+    command: ["python", "execution/daemons/morning-brief/morning-brief.py"]
+
+  # ── DEFERRED to the gws/Google decision (B-thin first) — keep on-device ──────
+  # monedula / sylvia / cotinga read Google Calendar via local `gws`; they move
+  # to the cloud only after the A-svc (Google service account) step. Until then
+  # they stay as launchd agents on the operator's device. See README §Google.
