@@ -40,9 +40,12 @@ from email.utils import formatdate
 
 log = logging.getLogger("daemon_runtime.run_email")
 
-# Subject token that carries the task id even when the References chain is lost
-# (forwarding, client quirks). Shape: [#ent_abc123]
-_TOKEN_RE = re.compile(r"\[#(ent_[0-9a-f]+)\]")
+# Subject token that carries the task id. This is the PRIMARY inbound matcher:
+# Gmail rewrites the Message-ID on send (confirmed 2026-06-24 — a sent
+# <run-…@gmail.com> came back as <CANB…@mail.gmail.com>), so a reply's References
+# chain usually won't carry our synthetic root; the subject token (preserved as
+# "Re: [#ent_…]") is what reliably survives. Shape: [#ent_abc123].
+_TOKEN_RE = re.compile(r"\[#(ent_[0-9a-z]+)\]")
 
 
 def _domain() -> str:
@@ -68,8 +71,9 @@ def parse_task_id(text: str) -> str | None:
     m = _TOKEN_RE.search(text)
     if m:
         return m.group(1)
-    # References / Message-ID form: <run-ent_abc-created-0@domain>
-    m = re.search(r"run-(ent_[0-9a-f]+)-", text)
+    # References / Message-ID form: <run-ent_abc-created-0@domain> (best-effort;
+    # often Gmail-rewritten — see _TOKEN_RE note).
+    m = re.search(r"run-(ent_[0-9a-z]+)-", text)
     return m.group(1) if m else None
 
 
@@ -149,13 +153,27 @@ def send_run_email(
         )
         return False
 
+    # gws `--upload` is sandboxed to the current directory (a /tmp path is
+    # rejected), so write the .eml under cwd. The daemon runs with the repo root
+    # as its WorkingDirectory; override with ATELES_RUN_EMAIL_DIR if needed.
+    out_dir = os.environ.get("ATELES_RUN_EMAIL_DIR") or os.path.join(
+        os.getcwd(), ".run_email_outbox"
+    )
+    eml_path: str | None = None
     try:
-        with tempfile.NamedTemporaryFile(
-            "wb", suffix=".eml", prefix=f"run-{task_id}-{stage}-", delete=False
-        ) as fh:
+        os.makedirs(out_dir, exist_ok=True)
+        fd, eml_path = tempfile.mkstemp(
+            suffix=".eml", prefix=f"run-{task_id}-{stage}-", dir=out_dir
+        )
+        with os.fdopen(fd, "wb") as fh:
             fh.write(eml)
-            eml_path = fh.name
-        cmd = send_tmpl.format(eml=eml_path, to=to_addr, subject=subject)
+        # Explicit .replace, NOT str.format — the send template carries literal JSON
+        # braces (e.g. --params '{"userId":"me"}') that str.format would misparse.
+        cmd = (
+            send_tmpl.replace("{eml}", eml_path)
+            .replace("{to}", to_addr)
+            .replace("{subject}", subject)
+        )
         proc = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
         if proc.returncode != 0:
             log.warning(
@@ -169,6 +187,12 @@ def send_run_email(
     except Exception as exc:  # noqa: BLE001 — never crash the caller
         log.warning("[run_email] send error for task %s stage %s: %s", task_id, stage, exc)
         return False
+    finally:
+        if eml_path:
+            try:
+                os.unlink(eml_path)
+            except OSError:
+                pass
 
 
 # ── self-test (pure builders) ────────────────────────────────────────────────
