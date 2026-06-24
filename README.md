@@ -2,7 +2,7 @@
 
 Personal agent swarm infrastructure — one operator's email, payments, calendar, health, meetings, content, and software work, run by a fleet of background agents over a single shared memory, with every agent action attributed, scoped, and logged.
 
-Built around [Neotoma](https://github.com/markmhendrickson/neotoma) as the canonical memory and state layer. ~18 background daemons and 30+ invocable agents — all defined as Neotoma entities, dispatched through AAuth-signed identities, and audited through the same observation log they write to. Open source. Local-first. MIT licensed.
+Built around [Neotoma](https://github.com/markmhendrickson/neotoma) as the canonical memory and state layer. ~18 background daemons and 20+ invocable agents — all defined as Neotoma entities, dispatched through AAuth-signed identities, and audited through the same observation log they write to. Open source. Local-first. MIT licensed.
 
 **Architecture:** [docs/architecture.md](docs/architecture.md) · **Taxonomy:** [docs/taxonomy.md](docs/taxonomy.md) · **Phases:** [docs/phases.md](docs/phases.md)
 
@@ -37,7 +37,7 @@ Ateles runs a single operator's day. Background daemons handle the recurring wor
 - **Release** — Phoenicurus prepares and publishes Neotoma releases behind an operator gate.
 - **Mirror** — Apus regenerates the on-disk agent definitions from Neotoma on every change.
 
-Beyond the daemons, ~30 invocable agents and 50+ Claude Code skills cover one-off work — code, PR review, content and blog drafting, deep research, financial scorecards, meeting analysis, interview admin, and more.
+Beyond the daemons, 20+ invocable agents and 50+ Claude Code skills cover one-off work — code, PR review, content and blog drafting, deep research, financial scorecards, meeting analysis, interview admin, and more.
 
 **The substrate underneath all of it:**
 
@@ -334,7 +334,7 @@ Ateles is single-operator infrastructure. Defaults assume the operator owns the 
 
 ## Development
 
-Daemons run from disk under launchd; the IDE reads SKILL.md mirrors from disk. Both are runtime conveniences. The only artifact that defines swarm behaviour is an entity in Neotoma — every workflow below reflects that.
+Daemons run from disk (under launchd locally, as containers in the cloud); the IDE reads SKILL.md mirrors from disk. Both are runtime conveniences. The only artifact that defines swarm behaviour is an entity in Neotoma — every workflow below reflects that.
 
 **Daemon iteration:**
 
