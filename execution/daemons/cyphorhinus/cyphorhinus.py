@@ -2,6 +2,13 @@
 """
 Cyphorhinus — Activity-log reply-routing daemon.
 
+DEPRECATED (E6, 2026-06-24): email REPLACES Telegram as the operator transport
+(decision:email_replaces_telegram_as_transport). Riparia
+(execution/daemons/riparia/) is the email successor for inbound operator replies,
+and the Notifier email backend (lib/notify, ATELES_NOTIFY_EMAIL) supersedes the
+outbound Telegram path. Keep Cyphorhinus only as an optional break-glass channel;
+stand it down (launchctl unload com.ateles.cyphorhinus.plist) once email is live.
+
 Cyphorhinus genus: wrens, known for exceptionally complex song. This daemon is
 the *transport* for the swarm's passive observation channel:
 
