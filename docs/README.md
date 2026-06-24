@@ -43,7 +43,7 @@ highest rung your environment currently reaches.
 *Adopter — the fork-and-run path.*
 
 - 🟡 [`setup.md`](setup.md) — setup walkthrough *(being realigned to the rungs above)*
-- ⬜ Configuration reference — every `.env` var: meaning, default, consuming daemon (*highest-priority gap; see [`../.env.example`](../.env.example)*)
+- ✅ [`configuration.md`](configuration.md) — every `.env` var: meaning, default, consuming daemon, and the minimum set per onboarding rung
 - ✅ [`aauth.md`](aauth.md) · [`aauth/`](aauth/) — AAuth keypairs, JWKS, identity provisioning
 - ✅ [`secrets_management.md`](secrets_management.md) · [`credential_management.md`](credential_management.md) — SOPS+age, the `ateles-private` boundary
 - 🟡 [`cloud_hosting.md`](cloud_hosting.md) · [`daemon_rc_autodeploy.md`](daemon_rc_autodeploy.md) — the 3-bucket deployment (Hetzner compose · macOS launchd · GitHub Actions)

@@ -6,6 +6,8 @@ Built around [Neotoma](https://github.com/markmhendrickson/neotoma) as the canon
 
 **Architecture:** [docs/architecture.md](docs/architecture.md) · **Taxonomy:** [docs/taxonomy.md](docs/taxonomy.md) · **Phases:** [docs/phases.md](docs/phases.md)
 
+**For you if** you're a single technical operator running many agents across both your software projects and your personal operations (email, payments, calendar, health, meetings, content) and you want them sharing one memory, self-dispatching, and signed/scoped/logged. **Not for you if** you want a packaged install, a team / multi-operator tool, or a hosted-agent provider — Ateles is adopt-by-fork reference infrastructure for one operator.
+
 ## Why this exists
 
 You run AI agents across tools and tasks. Without a swarm infrastructure layer, you become the swarm:
@@ -124,17 +126,21 @@ Full agent table with AAuth identities, grants, and status: [docs/taxonomy.md](d
 
 ## Quick start
 
-Ateles is not an installable package — it's a reference architecture. The fastest way to evaluate whether to adopt the pattern is to read the architecture doc and inspect a working daemon.
+Ateles is adopt-by-fork reference infrastructure, not an installable package. But the cheapest way to *feel* it takes one dependency — the `claude` CLI — and no Neotoma, no keys: invoke a single agent from its generated prompt.
 
 ```bash
 git clone https://github.com/markmhendrickson/ateles.git
 cd ateles
-less docs/architecture.md
-less execution/daemons/anthus/anthus.py
-less execution/daemons/apus/apus.py
+
+# Rung 1 — run one agent in stub mode (Claude CLI only):
+claude --print --append-system-prompt "$(cat .claude/skills/pavo/SKILL.md)" \
+  "Invoke pavo. Decide feature A vs B for the next release and explain why."
+
+# See how far your environment can go up the onboarding ladder:
+python3 execution/scripts/ateles_doctor.py
 ```
 
-To run any daemon locally requires Neotoma running (see [neotoma installation](https://github.com/markmhendrickson/neotoma#quick-start)), AAuth keypairs provisioned, and `agent_grant` entities for each daemon. The full setup walkthrough lives in [docs/setup.md](docs/setup.md).
+From there the [onboarding ladder](docs/README.md#start-here--the-onboarding-ladder) walks you rung by rung: connect Neotoma → run one daemon → mint an AAuth identity → schedule + deploy. Each rung is independently runnable. Full walkthrough: [docs/setup.md](docs/setup.md); per-variable config: [docs/configuration.md](docs/configuration.md).
 
 ### Open architecture issues to track
 
