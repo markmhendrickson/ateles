@@ -87,7 +87,9 @@ def _load_env() -> tuple[str, str]:
             elif key == "NEOTOMA_BEARER_TOKEN" and not token:
                 token = value
     if not base_url:
-        sys.exit("NEOTOMA_BASE_URL not set (env or ~/.config/neotoma/.env)")
+        # Final fallback to the apis daemons' default rather than failing hard;
+        # the env var and ~/.config/neotoma/.env still take precedence above.
+        base_url = "https://neotoma.markmhendrickson.com"
     return base_url.rstrip("/"), token
 
 
@@ -96,6 +98,8 @@ def _request(url: str, token: str, payload: dict | None = None, retries: int = 5
     for _ in range(retries):
         try:
             req = urllib.request.Request(url)
+            # Prod WAF returns 403 for requests with no User-Agent.
+            req.add_header("User-Agent", "ateles-mirror-tools/1.0")
             if token:
                 req.add_header("Authorization", f"Bearer {token}")
             if payload is not None:
