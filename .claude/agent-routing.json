@@ -30,9 +30,9 @@
       "strong_signals": ["technical architecture", "schema design", "system design", "architecture review"]
     },
     {
-      "name": "gryllus",
-      "command": "/gryllus",
-      "role": "issue worker — implements GitHub issues, opens PRs, signs the impl gate",
+      "name": "cicada",
+      "command": "/cicada",
+      "role": "issue worker — implements GitHub issues, opens PRs, signs the impl gate (formerly Gryllus)",
       "signals": ["implement", "build the feature", "write the code", "fix the bug", "open a pr", "open a pull request", "code this", "ship the implementation", "wire up"],
       "strong_signals": ["implement the issue", "implement issue", "open a pull request", "open a pr"]
     },
@@ -74,9 +74,9 @@
     {
       "name": "hirundo",
       "command": "/hirundo",
-      "role": "customer intelligence — ICP synthesis, competitive & market analysis",
-      "signals": ["icp", "ideal customer", "competitive analysis", "competitor", "market research", "customer intelligence", "persona", "segment", "positioning research"],
-      "strong_signals": ["competitive analysis", "ideal customer profile", "customer intelligence"]
+      "role": "customer intelligence — ICP synthesis, competitive & market analysis, partner/customer technical due-diligence",
+      "signals": ["icp", "ideal customer", "competitive analysis", "competitor", "market research", "customer intelligence", "persona", "segment", "positioning research", "feedback report", "customer feedback", "partner feedback", "user feedback", "tested our", "tested neotoma", "evaluated neotoma", "installed and tested", "verify the claims", "verify against", "due diligence", "technical due-diligence", "process this feedback", "triage this feedback", "reply to the customer"],
+      "strong_signals": ["competitive analysis", "ideal customer profile", "customer intelligence", "feedback report", "technical due-diligence", "verify the claims"]
     },
     {
       "name": "paradisaea",
