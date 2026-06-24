@@ -147,6 +147,7 @@ def call_claude(prompt: str) -> str:
     }
 
     req = urllib.request.Request(
+    req.add_header("User-Agent", "ateles-neotoma-sync/1.0")
         CLAUDE_API_URL,
         data=json.dumps(payload).encode(),
         headers={
@@ -196,6 +197,7 @@ def find_existing_review_comment(marker: str) -> int | None:
         "?per_page=100"
     )
     req = urllib.request.Request(url, headers=_github_headers(), method="GET")
+    req.add_header("User-Agent", "ateles-neotoma-sync/1.0")
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             comments = json.loads(resp.read())
@@ -223,6 +225,7 @@ def post_github_comment(body: str, marker: str | None = None) -> None:
         method, action = "POST", "posted"
 
     req = urllib.request.Request(
+    req.add_header("User-Agent", "ateles-neotoma-sync/1.0")
         url,
         data=json.dumps({"body": body}).encode(),
         headers=_github_headers(),
@@ -264,6 +267,7 @@ def file_neotoma_issue(title: str, body: str, agent: str = "loxia") -> None:
     }
 
     req = urllib.request.Request(
+    req.add_header("User-Agent", "ateles-neotoma-sync/1.0")
         f"{NEOTOMA_BASE_URL}/observations",
         data=json.dumps(payload).encode(),
         headers={
