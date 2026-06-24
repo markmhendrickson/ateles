@@ -104,6 +104,9 @@ regexes = [
   # operator's own identity + own domain (the repo owner & their agents —
   # not third-party PII). e.g. mark@/cursor@/ateles-agent@markmhendrickson.com
   '''(?i)\bmarkmhendrickson(?:\+[a-z0-9._-]+)?@gmail\.com\b''',
+  # swarm transport identity (the swarm's own address / doc placeholder, e.g. the
+  # `<operator>+swarm@gmail.com` example) — not a third-party contact.
+  '''(?i)\bswarm@gmail\.com\b''',
   '''(?i)@markmhendrickson\.com\b''',
   '''(?i)@users\.noreply\.github\.com\b''',
   # tooling / vendor automation addresses (not personal contacts)
