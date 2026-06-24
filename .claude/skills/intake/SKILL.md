@@ -26,7 +26,7 @@ The swarm leader's session-intake protocol. Goal: from the operator's opening re
 - Skip entirely for trivial single-step work — do it directly.
 
 ## Phase 1 — Settle the work (ONE clarification pass)
-1. **Bounded retrieval.** `retrieve_entities` over `plan` and `task` matching the request (lexical + semantic).
+1. **Bounded retrieval.** `retrieve_entities` over `plan` and `task` matching the request (lexical + semantic). Search by CONCEPT and architecture terms, not only the product/feature noun — run several phrasings (the capability or "spine/loop/lifecycle/pipeline" name, the owning role, the core verb), because the best-matching plan is frequently named for the concept rather than the product. A single product-noun query is how a concept-named plan gets missed and a duplicate, competing plan gets created (the cross-workstream-collision failure mode).
 2. **Cross-check, don't duplicate.** Decide whether an existing plan/task already fulfills the request — fully, or *better* than asked. If so, propose executing/refining THAT (cite entity IDs) instead of creating something new.
 3. **Bind the plan.** Pick the closest existing plan as the session's bound plan; if none fits, create one (`/update-plan`). Never write one workstream's items into another workstream's plan.
 4. **Ask all forks at once.** Put every genuine decision fork into a SINGLE `AskUserQuestion` batch; infer sensible defaults for everything else. Do not drip questions across turns.

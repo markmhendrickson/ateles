@@ -92,6 +92,7 @@ def _request(url: str, token: str, payload: dict | None = None, retries: int = 5
     for attempt in range(retries):
         try:
             req = urllib.request.Request(url)
+            req.add_header("User-Agent", "ateles-neotoma-sync/1.0")
             if token:
                 req.add_header("Authorization", f"Bearer {token}")
             if payload is not None:
