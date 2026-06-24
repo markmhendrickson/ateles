@@ -1,8 +1,8 @@
 # Ateles
 
-Personal agent swarm infrastructure. Every agent action attributed, versioned, and queryable.
+Personal agent swarm infrastructure — one operator's email, payments, calendar, health, meetings, content, and software work, run by a fleet of background agents over a single shared memory, with every agent action attributed, scoped, and logged.
 
-Built around [Neotoma](https://github.com/markmhendrickson/neotoma) as the canonical memory and state layer. T1 hosts, T2 resident agents, T3 daemons, and T4 invocable agents — all defined as Neotoma entities, dispatched through AAuth-signed identities, and audited through the same observation log they write to. Open source. Local-first. MIT licensed.
+Built around [Neotoma](https://github.com/markmhendrickson/neotoma) as the canonical memory and state layer. ~18 background daemons and 30+ invocable agents — all defined as Neotoma entities, dispatched through AAuth-signed identities, and audited through the same observation log they write to. Open source. Local-first. MIT licensed.
 
 **Architecture:** [docs/architecture.md](docs/architecture.md) · **Taxonomy:** [docs/taxonomy.md](docs/taxonomy.md) · **Phases:** [docs/phases.md](docs/phases.md)
 
@@ -19,14 +19,34 @@ These are not hypothetical. They are what happens when a single operator runs mo
 
 ## What Ateles does
 
-Ateles is a reference architecture for a single-operator agent swarm where:
+Ateles runs a single operator's day. Background daemons handle the recurring work; invocable agents handle the one-off work; Neotoma holds the shared memory; and a governance layer keeps every action attributed and in scope.
+
+**Personal operations** (recurring daemons):
+
+- **Email** — Turdus triages Gmail every 5 minutes into tasks; Riparia routes the operator's email replies back onto the originating task threads.
+- **Payments** — Monedula executes recurring Wise and BTC transfers from calendar-driven obligations, behind a Telegram approval gate.
+- **Calendar & briefings** — Cotinga prepares each day's events at 05:30; Morning-brief sends the operator digest; Sylvia keeps recurring tasks and Google Calendar in sync.
+- **Health** — Gorilla summarizes workouts and nudges on inactivity.
+- **Meetings & capture** — Strix, Tyto, Piculet, and Cyphorhinus capture meeting audio, voice memos, and screenshots, then transcribe and analyze them.
+- **Strategy** — Aquila files a monthly adversarial "cofounder" report.
+
+**Software operations** (dev daemons):
+
+- **Task & issue routing** — Apis dispatches tasks (and inbound GitHub / A2A events) to the right agent; Formica and neotoma-agent triage issues and PRs to code (Cicada) and review (Vanellus) agents.
+- **Coordination** — Anthus tracks work in flight and pages the operator only on real blockers.
+- **Release** — Phoenicurus prepares and publishes Neotoma releases behind an operator gate.
+- **Mirror** — Apus regenerates the on-disk agent definitions from Neotoma on every change.
+
+Beyond the daemons, ~30 invocable agents and 50+ Claude Code skills cover one-off work — code, PR review, content and blog drafting, deep research, financial scorecards, meeting analysis, interview admin, and more.
+
+**The substrate underneath all of it:**
 
 - **Agents are entities, not files.** Each agent_definition lives in Neotoma. Updating an agent's behaviour is a `correct()` call, not a code commit. SKILL.md files on disk are generated mirror artifacts.
 - **Every action is attributed.** Agents authenticate via AAuth-signed JWTs. The `github_harness` MCP server records every tool call as an `agent_action_observation` with both the AAuth subject (who claimed to act) and the PAT attribution (who actually acted on GitHub).
 - **Workflows are typed.** A `workflow_definition` entity declares phases, gates, owner agents, and skip conditions. Anthus (the swarm coordinator) reads workflows from Neotoma and dispatches gates in order.
 - **State is canonical.** Participation records, release criteria, agent grants, and policies are all Neotoma entities. The swarm has no other source of truth.
 
-Not a framework. Not a toy. A working production blueprint that runs daily under launchd.
+Not a framework. Not a toy. A working production blueprint in daily use.
 
 ## Architecture
 
@@ -95,7 +115,7 @@ Four tiers. Twelve product-panel agents plus daemons plus 20+ domain T4s. Naming
 
 | Tier   | Role                                  | Examples                                                                                  |
 | ------ | ------------------------------------- | ----------------------------------------------------------------------------------------- |
-| **T1** | Hosts (process that owns a channel)   | OpenClaw (Telegram), launchd (daemon scheduling), raw aiohttp Bot API                     |
+| **T1** | Hosts (process that owns a channel)   | OpenClaw (Telegram), launchd + docker-compose / Hetzner (daemon scheduling), raw aiohttp Bot API |
 | **T2** | Resident agents (always-on, conversational) | Ateles (primary operator interface), Menura (public-facing personal representative)  |
 | **T3** | Daemons (event-driven, persona-less)  | Anthus · Apis · Apus · Cotinga · Cyphorhinus · Formica · Gorilla · Monedula · Morning-brief · neotoma-agent · Strix · Sylvia · Turdus · Tyto |
 | **T4** | Invocable agents (stateless, spawned per task) | Pavo · Waxwing · Phoenicurus · Buteo · Robin · Struthio · Accipiter · Corvus · Regulus · Cicada · Vanellus · Manucode · and 20+ domain agents |
@@ -170,13 +190,17 @@ ateles/
 │   │   ├── anthus/             # swarm coordinator — workflow dispatch
 │   │   ├── apis/               # universal task dispatcher — confidence × blast-radius gating
 │   │   ├── apus/               # mirror webhook receiver — Neotoma → git pipeline
+│   │   ├── aquila/             # monthly cofounder / strategic-adversary report
 │   │   ├── cotinga/            # daily event-prep briefings (calendar + Neotoma contacts)
-│   │   ├── cyphorhinus/        # audio-import watcher (Voice Memos + meeting recordings)
+│   │   ├── cyphorhinus/        # Telegram reply-routing for operator approvals (legacy)
 │   │   ├── formica/            # GitHub issue/PR triage
 │   │   ├── gorilla/            # health & fitness summaries + nudges
 │   │   ├── monedula/           # recurring payment daemon (Wise + BTC)
 │   │   ├── morning-brief/      # 05:30 operator digest (Ateles voice)
 │   │   ├── neotoma-agent/      # neotoma-repo automation
+│   │   ├── phoenicurus-release/ # Neotoma release prepare + publish (operator-gated)
+│   │   ├── piculet/            # audio-import watcher (Voice Memos + meeting recordings)
+│   │   ├── riparia/            # email reply-routing onto task run threads
 │   │   ├── strix/              # meeting/ambient audio recorder (menu bar toggle)
 │   │   ├── sylvia/             # recurring-task lifecycle + calendar sync
 │   │   ├── turdus/             # email triage daemon
@@ -262,7 +286,7 @@ Full type catalog: [docs/data_types.md](docs/data_types.md).
 
 ## Current status
 
-**Phase:** Reference architecture in daily autonomous + operator-driven use. **Operator:** one (Mark Hendrickson). **Daemons running under launchd:** Anthus, Apis, Apus, Cotinga, Formica, Monedula, Morning-brief, neotoma-agent, Strix, Sylvia, Turdus, Tyto — auto-deployed from `origin/main` to a stable release-candidate checkout ([#79](https://github.com/markmhendrickson/ateles/pull/79)). **License:** MIT.
+**Phase:** Reference architecture in daily autonomous + operator-driven use. **Operator:** one (Mark Hendrickson). **Daemons running:** Anthus, Apis, Apus, Cotinga, Formica, Monedula, Morning-brief, neotoma-agent, Strix, Sylvia, Turdus, Tyto — device-agnostic ones as docker-compose containers on a Hetzner VM, device-bound ones (calendar / capture) under launchd on the operator's Mac, both auto-deployed from `origin/main` to a stable release-candidate checkout ([#79](https://github.com/markmhendrickson/ateles/pull/79)). **License:** MIT.
 
 ### What works
 
@@ -381,11 +405,11 @@ A single-operator agent swarm is too tightly coupled to the operator's specific 
 **How does this compare to LangGraph / CrewAI / AutoGen?**
 Those frameworks orchestrate multi-step LLM calls inside one process. Ateles orchestrates long-running background daemons that spawn `claude` subprocesses, each with its own AAuth identity, and that write to a canonical state store. Different problem — agent fleets across days, not chains across seconds.
 
-**Why launchd instead of Docker / k8s?**
-Single operator, one machine. launchd is the lowest-overhead scheduler that survives reboots. The architecture would work the same way under systemd or supervisord; the daemons don't care.
+**Where do the daemons run?**
+Three places, split by where each daemon's inputs live. Device-agnostic daemons (Apis, Anthus, Apus, Formica, neotoma-agent, Gorilla, morning-brief) run as containers under docker-compose on a small Hetzner VM, secrets decrypted offline via SOPS+age. Device-bound daemons that need local CLIs or capture hardware (Monedula, Sylvia, Cotinga, Tyto, Strix) stay on the operator's Mac under launchd. Code-touching review runs in GitHub Actions (Loxia PR review, Lanius stale-issue sweep). The daemons themselves are scheduler-agnostic — they'd run the same under systemd or supervisord.
 
 **Is this production-ready?**
-Tier 1 (single-agent gate satisfaction) passes, and the swarm routes, gates, and executes low-blast tasks end-to-end unattended; high-blast actions checkpoint for operator approval. Tier 5 (full autonomous Anthus dispatch) is still in validation. Daily real use: a dozen-plus T3 daemons run under launchd from an auto-deployed release-candidate checkout. See [docs/swarm_smoke_test_plan.md](docs/swarm_smoke_test_plan.md) for the gating tiers.
+Tier 1 (single-agent gate satisfaction) passes, and the swarm routes, gates, and executes low-blast tasks end-to-end unattended; high-blast actions checkpoint for operator approval. Tier 5 (full autonomous Anthus dispatch) is still in validation. Daily real use: a dozen-plus T3 daemons run across cloud containers and launchd from an auto-deployed release-candidate checkout. See [docs/swarm_smoke_test_plan.md](docs/swarm_smoke_test_plan.md) for the gating tiers.
 
 **What if I want to add a new agent?**
 File an `agent_definition` entity in Neotoma. Mint an AAuth keypair. File an `agent_grant` with the capabilities it needs. Apus mirrors the SKILL.md to disk. Anthus picks it up on next workflow that references its trigger. The whole loop is documented in [docs/swarm_orchestration.md](docs/swarm_orchestration.md).
