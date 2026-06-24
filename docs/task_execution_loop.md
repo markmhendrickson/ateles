@@ -96,7 +96,12 @@ Inbound replies serve double duty: they answer readiness requests (`awaiting_inp
 
 ### Provisioning note (the operator's mail account)
 
-A *truly dedicated* mailbox requires a Google Workspace **domain** the operator administers — on a **consumer `@gmail.com` account you cannot create sub-mailboxes**, and a brand-new Google account can't be created headlessly. So on a consumer account the practical "dedicated address" is a **plus-alias** (`<operator>+swarm@gmail.com`): it needs zero provisioning, the existing `gws` auth already covers it, and Riparia filters inbound on `to:<operator>+swarm`. `ATELES_SWARM_EMAIL` holds whichever address is chosen; everything downstream is identical. Set `ATELES_GMAIL_SEND_CMD` to a `gws gmail +send` invocation (the CLI exposes `+send` / `+reply` / `+read` helpers that handle threading).
+A *truly dedicated* mailbox requires a Google Workspace **domain** the operator administers — on a **consumer `@gmail.com` account you cannot create sub-mailboxes**, and a brand-new Google account can't be created headlessly. So on a consumer account the practical "dedicated address" is a **plus-alias** (`<operator>+swarm@gmail.com`): it needs zero provisioning, the existing `gws` auth already covers it, and Riparia filters inbound on `to:<operator>+swarm`. `ATELES_SWARM_EMAIL` holds whichever address is chosen; everything downstream is identical.
+
+**Confirmed config (live-validated against gws 0.22.5, 2026-06-24):**
+- `ATELES_GMAIL_SEND_CMD='gws gmail users messages send --params '"'"'{"userId":"me"}'"'"' --upload {eml} --upload-content-type message/rfc822'` — the raw RFC822 path. The `+send` helper can't set `Message-ID`/`In-Reply-To`/`References`, so it can't thread; only `users messages send` with an uploaded `.eml` preserves headers. (`gws --upload` is cwd-sandboxed, so `run_email` stages the `.eml` under cwd.)
+- Inbound body via `gws gmail +read --id <id> --format json` → `body_text`; poll via `gws gmail +triage` (returns `labels`).
+- **Gmail rewrites the `Message-ID` on send**, so a reply's `References` chain usually won't carry our synthetic root — the **subject `[#ent_…]` token is the load-bearing inbound matcher**; References parsing is best-effort fallback.
 
 ## Primitive 3 — Conversation per execution run
 
