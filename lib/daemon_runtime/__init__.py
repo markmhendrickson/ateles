@@ -76,8 +76,26 @@ from .grant_checker import (
     revoke_grant,
     suspend_grant,
 )
+from .readiness import (
+    ReadinessAssessment,
+    assess_readiness,
+    build_assessment_entity,
+    missing_request,
+    write_assessment,
+)
+from .run_email import (
+    build_run_eml,
+    parse_task_id,
+    run_subject,
+    send_run_email,
+    thread_ids,
+)
 from .session_finalize import (
+    append_turn,
     build_finalize_payload,
+    build_run_conversation_payload,
+    build_turn_payload,
+    create_run_conversation,
     finalize_session,
     load_end_skill,
 )
@@ -130,4 +148,21 @@ __all__ = [
     "build_finalize_payload",
     "finalize_session",
     "load_end_skill",
+    # conversation-per-execution-run (E1)
+    "build_run_conversation_payload",
+    "build_turn_payload",
+    "create_run_conversation",
+    "append_turn",
+    # run-thread email (E2)
+    "run_subject",
+    "parse_task_id",
+    "thread_ids",
+    "build_run_eml",
+    "send_run_email",
+    # readiness gate (E4)
+    "ReadinessAssessment",
+    "assess_readiness",
+    "missing_request",
+    "build_assessment_entity",
+    "write_assessment",
 ]

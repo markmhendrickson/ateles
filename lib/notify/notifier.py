@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 from datetime import datetime, time
 from enum import Enum
 from typing import Any
@@ -93,6 +94,15 @@ class Notifier:
         self._topic_id = telegram_topic_id or os.environ.get(
             "TELEGRAM_TOPIC_MONEDULA", ""
         )
+        # E6 (docs/task_execution_loop.md): email is the preferred operator
+        # transport; Telegram becomes break-glass. Flag-gated (ATELES_NOTIFY_EMAIL,
+        # default off) so live behaviour is unchanged until enabled. Sends via the
+        # dedicated swarm address using gws +send (the same address as the run-thread
+        # emails); system notifications don't need threading, so the simple helper
+        # suffices.
+        self._email_primary = os.environ.get("ATELES_NOTIFY_EMAIL", "0") == "1"
+        self._operator_email = os.environ.get("OPERATOR_EMAIL", "").strip()
+        self._swarm_email = os.environ.get("ATELES_SWARM_EMAIL", "").strip()
         self._digest_queue: list[str] = []
         self._apprise: Any = None
         if HAS_APPRISE:
@@ -194,7 +204,39 @@ class Notifier:
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
+    def _deliver_email(self, message: str) -> bool:
+        """Deliver one notification via the swarm address (gws +send). Fail-open.
+
+        Subject = a short prefix + the message's first line; body = the full
+        message. Uses an argv list (no shell) so arbitrary notification text can't
+        be misinterpreted. Returns False on any failure so the caller can fall
+        back to Telegram."""
+        if not self._operator_email:
+            return False
+        first = (message.strip().splitlines() or ["notification"])[0]
+        subject = f"[Ateles] {first[:80]}"
+        cmd = ["gws", "gmail", "+send", "--to", self._operator_email,
+               "--subject", subject, "--body", message]
+        if self._swarm_email:
+            cmd += ["--from", self._swarm_email]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                log.warning("[notify] gws +send failed (rc=%s): %s",
+                            r.returncode, (r.stderr or "").strip()[:200])
+                return False
+            return True
+        except Exception as exc:  # noqa: BLE001 — never crash the caller
+            log.warning("[notify] email send error: %s", exc)
+            return False
+
     def _deliver(self, message: str, force: bool = False) -> bool:
+        # E6: try email first when it's the configured primary transport; only
+        # fall through to Telegram (break-glass) if email delivery fails.
+        if self._email_primary:
+            if self._deliver_email(message):
+                return True
+            log.warning("[notify] email delivery failed — falling back to Telegram")
         if not self._apprise:
             log.info(f"[notify] (no apprise) Would send: {message!r}")
             return False

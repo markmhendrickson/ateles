@@ -123,6 +123,131 @@ def build_finalize_payload(
     return body
 
 
+# ── E1: conversation-per-execution-run ───────────────────────────────────────
+# A task execution RUN gets exactly ONE conversation, opened at dispatch and
+# anchored PART_OF the task (and plan when known) — the SAME anchoring
+# build_finalize_payload uses, so the session-integrity invariant (conversation
+# PART_OF plan OR task) holds and a later finalize_session(conversation_id=…)
+# APPENDS to it rather than creating a second conversation. A retry/reopen passes
+# a fresh run_key and therefore opens a new run conversation.
+
+
+def build_run_conversation_payload(
+    *,
+    task_id: str,
+    plan_id: str | None = None,
+    agent: str,
+    run_key: str,
+    title: str | None = None,
+    summary: str | None = None,
+) -> dict:
+    """Build the /store body that OPENS the conversation for one execution run.
+
+    The conversation is linked PART_OF the task and (when given) the plan. The
+    idempotency key embeds run_key so SSE replays of the same run reuse the
+    conversation while a genuine retry (new run_key) opens a fresh one. Pure.
+    """
+    entities = [{
+        "entity_type": "conversation",
+        "name": title or f"{agent} run · task {task_id}",
+        "summary": summary
+        or f"Execution run for task {task_id} (agent {agent}, run {run_key}).",
+    }]
+    relationships = [
+        {"source_index": 0, "target_entity_id": anchor, "relationship_type": "PART_OF"}
+        for anchor in (task_id, plan_id)
+        if anchor
+    ]
+    return {
+        "entities": entities,
+        "relationships": relationships,
+        "observation_source": "workflow_state",
+        "idempotency_key": f"run-conv-{task_id}-{run_key}",
+    }
+
+
+def build_turn_payload(
+    *,
+    conversation_id: str,
+    role: str,
+    content: str,
+    sender_kind: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict:
+    """Build the /store body that APPENDS one agent_message turn to a run
+    conversation (a progress update, an emailed operator reply, …). Pure."""
+    msg: dict = {"entity_type": "agent_message", "role": role, "content": content}
+    if sender_kind:
+        msg["sender_kind"] = sender_kind
+    return {
+        "entities": [msg],
+        "relationships": [{
+            "source_index": 0,
+            "target_entity_id": conversation_id,
+            "relationship_type": "PART_OF",
+        }],
+        "observation_source": "workflow_state",
+        "idempotency_key": idempotency_key
+        or f"turn-{conversation_id}-{abs(hash(content)) % (10**10)}",
+    }
+
+
+def _post_store(body: dict) -> dict | None:
+    """POST a /store body. Returns the parsed JSON, or None. Fail-open."""
+    if not NEOTOMA_BEARER_TOKEN:
+        log.warning("[finalize] no bearer token — store skipped")
+        return None
+    try:
+        resp = httpx.post(
+            f"{NEOTOMA_BASE_URL}/store",
+            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+            json=body,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:  # noqa: BLE001 — never crash the caller
+        log.warning("[finalize] store failed: %s", exc)
+        return None
+
+
+def create_run_conversation(
+    *,
+    task_id: str,
+    plan_id: str | None = None,
+    agent: str,
+    run_key: str,
+    title: str | None = None,
+    summary: str | None = None,
+) -> str | None:
+    """Open (idempotently) the run conversation; return its entity_id. Fail-open."""
+    data = _post_store(build_run_conversation_payload(
+        task_id=task_id, plan_id=plan_id, agent=agent,
+        run_key=run_key, title=title, summary=summary,
+    ))
+    if not data:
+        return None
+    for e in data.get("entities", []):
+        if e.get("entity_type") == "conversation":
+            return e.get("entity_id")
+    return None
+
+
+def append_turn(
+    *,
+    conversation_id: str,
+    role: str,
+    content: str,
+    sender_kind: str | None = None,
+    idempotency_key: str | None = None,
+) -> bool:
+    """Append one turn to a run conversation. Fail-open."""
+    return _post_store(build_turn_payload(
+        conversation_id=conversation_id, role=role, content=content,
+        sender_kind=sender_kind, idempotency_key=idempotency_key,
+    )) is not None
+
+
 def finalize_session(**kwargs) -> bool:
     """Store the finalize payload (see build_finalize_payload). Fail-open."""
     if not NEOTOMA_BEARER_TOKEN:
@@ -206,6 +331,33 @@ def _selftest() -> int:
     ]
     checks["messages_link_existing_conv"] = len(msg_part_of) == 2
     checks["no_learning_when_absent"] = "learning" not in types2
+
+    # Run conversation: one conversation, anchored PART_OF task + plan, run_key in key
+    rc = build_run_conversation_payload(
+        task_id="ent_task", plan_id="ent_plan", agent="cicada", run_key="created-0",
+    )
+    rc_types = [e["entity_type"] for e in rc["entities"]]
+    checks["run_conv_single_conversation"] = rc_types == ["conversation"]
+    rc_anchor_targets = {
+        r["target_entity_id"] for r in rc["relationships"]
+        if r["relationship_type"] == "PART_OF" and r.get("source_index") == 0
+    }
+    checks["run_conv_part_of_task"] = "ent_task" in rc_anchor_targets
+    checks["run_conv_part_of_plan"] = "ent_plan" in rc_anchor_targets
+    checks["run_conv_key_has_run"] = rc["idempotency_key"] == "run-conv-ent_task-created-0"
+    # No plan: still PART_OF the task, no stray relationship
+    rc2 = build_run_conversation_payload(task_id="ent_task", agent="cicada", run_key="r1")
+    checks["run_conv_task_only"] = len(rc2["relationships"]) == 1
+
+    # Turn append: one agent_message PART_OF the conversation
+    tp = build_turn_payload(conversation_id="ent_conv", role="user", content="reply",
+                            sender_kind="operator")
+    checks["turn_single_message"] = [e["entity_type"] for e in tp["entities"]] == ["agent_message"]
+    checks["turn_part_of_conv"] = (
+        tp["relationships"][0]["target_entity_id"] == "ent_conv"
+        and tp["relationships"][0]["relationship_type"] == "PART_OF"
+    )
+    checks["turn_sender_kind"] = tp["entities"][0].get("sender_kind") == "operator"
 
     ok = all(checks.values())
     for k, v in checks.items():

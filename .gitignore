@@ -100,3 +100,6 @@ execution/daemons/*/.*_state.json
 execution/daemons/*/.*_last_run
 execution/daemons/*/*_last_run
 .claude/skills/prepare-taxes/
+
+# Transient outbound .eml staging for run_email (gws --upload is cwd-sandboxed)
+.run_email_outbox/

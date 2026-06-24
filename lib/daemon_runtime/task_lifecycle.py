@@ -64,6 +64,7 @@ class TaskStatus(str, Enum):
     FAILED = "failed"                 # transient failure; watchdog may retry
     BLOCKED = "blocked"               # needs operator (retries exhausted / blocker)
     AWAITING_APPROVAL = "awaiting_approval"  # held at a gate checkpoint
+    AWAITING_INPUT = "awaiting_input"  # parked: under-specified, needs operator context (readiness gate)
     DECLINED = "declined"             # operator rejected
     SUPERSEDED = "superseded"         # replaced by another task
 
@@ -84,6 +85,7 @@ ACTIVE: frozenset[str] = frozenset(
         TaskStatus.FAILED.value,
         TaskStatus.BLOCKED.value,
         TaskStatus.AWAITING_APPROVAL.value,
+        TaskStatus.AWAITING_INPUT.value,
     }
 )
 
@@ -93,6 +95,7 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
         {
             TaskStatus.ROUTED.value,
             TaskStatus.AWAITING_APPROVAL.value,
+            TaskStatus.AWAITING_INPUT.value,
             TaskStatus.BLOCKED.value,
             TaskStatus.DECLINED.value,
             TaskStatus.SUPERSEDED.value,
@@ -102,6 +105,7 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
         {
             TaskStatus.EXECUTING.value,
             TaskStatus.AWAITING_APPROVAL.value,
+            TaskStatus.AWAITING_INPUT.value,
             TaskStatus.BLOCKED.value,
             TaskStatus.DECLINED.value,
         }
@@ -121,6 +125,10 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
         {TaskStatus.ROUTED.value, TaskStatus.BLOCKED.value, TaskStatus.DECLINED.value}
     ),
     TaskStatus.AWAITING_APPROVAL.value: frozenset(
+        {TaskStatus.ROUTED.value, TaskStatus.DECLINED.value, TaskStatus.BLOCKED.value}
+    ),
+    # Operator supplies the missing context → re-route; or decline/block.
+    TaskStatus.AWAITING_INPUT.value: frozenset(
         {TaskStatus.ROUTED.value, TaskStatus.DECLINED.value, TaskStatus.BLOCKED.value}
     ),
     # Operator remediation reopens a blocked task for re-dispatch.
@@ -284,6 +292,11 @@ def _selftest() -> int:
     # Gate
     checks["pending_to_awaiting"] = can_transition("pending", "awaiting_approval")
     checks["awaiting_to_declined"] = can_transition("awaiting_approval", "declined")
+
+    # Readiness gate (awaiting_input)
+    checks["routed_to_awaiting_input"] = can_transition("routed", "awaiting_input")
+    checks["awaiting_input_to_routed"] = can_transition("awaiting_input", "routed")
+    checks["awaiting_input_active"] = TaskStatus.AWAITING_INPUT.value in ACTIVE
 
     # Illegal / guards
     checks["done_is_terminal_move"] = not can_transition("done", "executing")
