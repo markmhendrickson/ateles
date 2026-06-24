@@ -181,3 +181,11 @@ Never emit unquoted numeric SVG attributes like `<circle cx=12 cy=12 r=9/>` or `
 ## Mobile stacking: stack only the cards that need the width (REFINEMENT)
 
 When collapsing card grids on mobile, do not force every grid to one column. Stack to a single column only the cards whose content needs the horizontal room (full-sentence step cards); let short-label card grids (icon + 1-3 word name) keep their natural 2-up auto-fit wrap, and size content-driven pills/tags to their content (never `flex-basis:100%`, which stretches a `~15 min` tag to a full-width bar). Verify the actual rendered width equals the viewport (no horizontal overflow) at ~375-390px.
+
+## Canonical machine-readable policy — one definition, two consumers (REQUIRED)
+
+The theming, toggle, host-override, and tokenized-link rules above are ALSO expressed as machine-readable DATA on a `conformance_policy` entity (`ent_edd087ca6482f7d93162f9a2`, "Ateles rendered_page house style"). That entity is the single source of truth driving BOTH the proactive path (this skill, at authoring time) and the reactive path (Neotoma `publish_rendered_page`, at share time) — so the two cannot drift. Discipline:
+
+- **Read the policy at the start of a rendered_page task** (retrieve `ent_edd087ca6482f7d93162f9a2`) and satisfy every rule by construction; the prose here is the human-readable companion, the entity is canonical.
+- **On every `publish_rendered_page` call, inspect the returned `conformance_warnings`.** Each carries a stable `code` + `severity`. Treat a non-empty list as MUST-FIX before surfacing the page; re-author and re-publish until it is empty. The universal `RENDERED_PAGE_TOKENLESS_LINK` invariant is enforced for every tenant in core regardless of policy.
+- **To change the standard, edit the policy entity's `rules`** (each: `code`, `pattern` regex, `mode` require_present|require_absent, `target` html|css|both, `severity` warn|block, `message`) — not this prose and not Neotoma core. Tenant taste lives in the policy; only universal correctness lives in core.
