@@ -94,6 +94,10 @@ Inbound replies serve double duty: they answer readiness requests (`awaiting_inp
 
 ---
 
+### Provisioning note (the operator's mail account)
+
+A *truly dedicated* mailbox requires a Google Workspace **domain** the operator administers — on a **consumer `@gmail.com` account you cannot create sub-mailboxes**, and a brand-new Google account can't be created headlessly. So on a consumer account the practical "dedicated address" is a **plus-alias** (`<operator>+swarm@gmail.com`): it needs zero provisioning, the existing `gws` auth already covers it, and Riparia filters inbound on `to:<operator>+swarm`. `ATELES_SWARM_EMAIL` holds whichever address is chosen; everything downstream is identical. Set `ATELES_GMAIL_SEND_CMD` to a `gws gmail +send` invocation (the CLI exposes `+send` / `+reply` / `+read` helpers that handle threading).
+
 ## Primitive 3 — Conversation per execution run
 
 Each run gets exactly one `conversation` entity, anchored `PART_OF` the task (and `PART_OF` the plan when known), created at **dispatch** (not at finalize). This matches the anchoring `session_finalize` already uses and satisfies the session-integrity invariant (a conversation must be `PART_OF` a plan **or** a task) — so a later `finalize_session(conversation_id=…)` appends to it rather than opening a second conversation. Everything in the run appends `agent_message` rows to it: kickoff, progress, the readiness request, operator replies, checkpoint briefs, the outcome.
