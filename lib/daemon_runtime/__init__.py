@@ -76,6 +76,13 @@ from .grant_checker import (
     revoke_grant,
     suspend_grant,
 )
+from .readiness import (
+    ReadinessAssessment,
+    assess_readiness,
+    build_assessment_entity,
+    missing_request,
+    write_assessment,
+)
 from .run_email import (
     build_run_eml,
     parse_task_id,
@@ -152,4 +159,10 @@ __all__ = [
     "thread_ids",
     "build_run_eml",
     "send_run_email",
+    # readiness gate (E4)
+    "ReadinessAssessment",
+    "assess_readiness",
+    "missing_request",
+    "build_assessment_entity",
+    "write_assessment",
 ]
