@@ -179,22 +179,25 @@ def _poll_unread(max_count: int) -> list[dict]:
 
 
 def _get_message_body(message_id: str) -> str:
-    """Fetch the plain-text body of a message. Best-effort → '' on failure.
+    """Fetch the plain-text body via `gws gmail +read`. Best-effort → '' on failure.
 
-    NOTE: confirm the exact `gws gmail` get subcommand/flags against the live CLI
-    when the swarm mailbox is provisioned; +triage does not expose the body, so the
-    routed reply text depends on this. Falls back to '' (caller uses the subject).
+    Confirmed against gws 0.22.5 (2026-06-24): `+read --id <id> --format json`
+    returns body_text / body_html. +triage does not expose the body, so the routed
+    reply text comes from here; on failure the caller falls back to the subject.
     """
     try:
         result = subprocess.run(
-            ["gws", "gmail", "messages", "get", message_id, "--format", "json"],
+            ["gws", "gmail", "+read", "--id", message_id, "--format", "json"],
             capture_output=True, text=True, timeout=20,
         )
         if result.returncode != 0:
             return ""
-        data = json.loads(result.stdout)
+        # gws prefixes a keyring line on stderr but stdout is clean JSON; be lenient.
+        out = result.stdout
+        start = out.find("{")
+        data = json.loads(out[start:]) if start >= 0 else {}
         if isinstance(data, dict):
-            return (data.get("body") or data.get("text") or data.get("snippet") or "").strip()
+            return (data.get("body_text") or data.get("body_html") or "").strip()
     except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
         pass
     return ""
