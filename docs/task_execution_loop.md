@@ -132,7 +132,7 @@ No swarm-wide email-driven autonomous execution until a **single real, low-blast
 - **E3 — Inbound daemon (Riparia).** Stand up the Gmail reply-router; match replies to the run conversation; write operator `agent_message` rows. **Do not retire Telegram until E3 is proven** (don't deadlock — every channel that asks for input must have a working return path).
 - **E4 — Readiness gate.** Register `task_readiness_assessment`; score before execution; park `not_ready` tasks in `awaiting_input` with a targeted email; re-score on reply.
 - **E5 — Canary.** Run one real task through E1–E4 end-to-end, observed. Capture learnings, adjust.
-- **E6 — Retire Telegram + widen.** Flip email to sole transport, decommission the Cyphorhinus Telegram path, and graduate from one-at-a-time to broader autonomy per domain as each earns trust.
+- **E6 — Retire Telegram + widen.** Two halves. (a) *Retire Telegram* (demote to break-glass, not delete): the run-thread emails (E2) cover per-task I/O, but **system** notifications (pipeline failures, `checkpoint_brief` pages, operator-decision alerts, digests) ran Telegram-only through the Apprise Notifier — so the Notifier gains an email backend (`_deliver_email` via `gws gmail +send`, flag-gated `ATELES_NOTIFY_EMAIL`, email-primary with Telegram fallback); Cyphorhinus stands down (Riparia owns inbound). (b) *Widen*: after repeated clean live-daemon canaries, enable the three flags persistently and graduate autonomy per domain (low-blast first), riding the existing `gating.py` graduation (`auto_execute_after_n_successful_recurrences`, `block_until_approve → notify_and_proceed → auto`).
 
 ---
 
