@@ -94,10 +94,19 @@ description = "Env var names and common words in code (not real secrets); PII fa
 regexes = [
   # placeholder / documentation emails
   '''(?i)\b[a-z0-9._%+-]+@(?:example\.(?:com|org|net)|test\.com|email\.com|domain\.(?:com|tld)|company\.com|yourdomain\.com)\b''',
+  # RFC 6761 reserved TLDs — synthetic test fixtures + synthetic Message-IDs
+  # (e.g. swarm@d.test, op@x.test, <run-ent_abc-created-0@d.test>). These TLDs
+  # can never resolve to a real address, so they are never real PII. The trailing
+  # [^a-z0-9.-]/$ anchors the reserved label as the FINAL one (so a real address
+  # like x@test.company.com is NOT allowlisted) — RE2-safe, no lookahead.
+  '''(?i)\b[a-z0-9._%+-]+@(?:[a-z0-9-]+\.)*(?:test|example|invalid|localhost)(?:[^a-z0-9.-]|$)''',
   '''(?i)\b(?:your|user|name|email|me|someone|admin|test|foo|bar|john\.doe|jane\.doe|noreply|no-reply|donotreply)@''',
   # operator's own identity + own domain (the repo owner & their agents —
   # not third-party PII). e.g. mark@/cursor@/ateles-agent@markmhendrickson.com
-  '''(?i)\bmarkmhendrickson@gmail\.com\b''',
+  '''(?i)\bmarkmhendrickson(?:\+[a-z0-9._-]+)?@gmail\.com\b''',
+  # swarm transport identity (the swarm's own address / doc placeholder, e.g. the
+  # `<operator>+swarm@gmail.com` example) — not a third-party contact.
+  '''(?i)\bswarm@gmail\.com\b''',
   '''(?i)@markmhendrickson\.com\b''',
   '''(?i)@users\.noreply\.github\.com\b''',
   # tooling / vendor automation addresses (not personal contacts)

@@ -140,6 +140,12 @@ if str(_DAEMON_DIR) not in sys.path:
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
     AgentLoader,
+    append_turn,
+    assess_readiness,
+    create_run_conversation,
+    missing_request,
+    send_run_email,
+    write_assessment,
     GateAction,
     NeotomaEvent,
     SSEClient,
@@ -230,6 +236,18 @@ ATELES_REPO = Path(
 
 DRY_RUN = os.environ.get("APIS_DRY_RUN", "0") == "1"
 AUTO_EXECUTE = os.environ.get("APIS_AUTO_EXECUTE", "0") == "1"
+# E1 (docs/task_execution_loop.md): open one conversation per execution run and
+# tell the spawned agent to thread its turns into it. Default off — flag-gated so
+# the live dispatch path is byte-identical until the child side (E2) lands.
+RUN_CONVERSATIONS = os.environ.get("APIS_RUN_CONVERSATIONS", "0") == "1"
+# E2 (docs/task_execution_loop.md): send run kickoff/outcome on a Gmail thread via
+# the dedicated swarm address. Default off; needs the swarm mailbox provisioned
+# (ATELES_SWARM_EMAIL + OPERATOR_EMAIL + ATELES_GMAIL_SEND_CMD). Fail-open.
+RUN_EMAIL = os.environ.get("APIS_RUN_EMAIL", "0") == "1"
+# E4 (docs/task_execution_loop.md): pre-execution readiness gate. When a task is
+# under-specified (no clear goal/constraints/tooling), park it in awaiting_input
+# and email the operator the specific gaps instead of executing. Default off.
+READINESS_GATE = os.environ.get("APIS_READINESS_GATE", "0") == "1"
 
 # Path to the Claude CLI binary used to spawn T4 agents. Set by env var or
 # auto-detected from PATH. If absent, dispatch falls back to log-only.
@@ -275,6 +293,7 @@ async def _spawn_claude_skill(
     notifier: Notifier,
     *,
     role: str | None = None,
+    run_conversation_id: str | None = None,
 ) -> "object":
     """
     Spawn a T4 agent for a task event. The subprocess mechanics live in
@@ -296,6 +315,15 @@ async def _spawn_claude_skill(
         f"Task {entity_id} (trigger={trigger}): {title}\n\n"
         f"{body}".strip()
     )
+    if run_conversation_id:
+        # E1: bind this run's turns to the conversation Apis opened at dispatch,
+        # so progress + finalize append to one task-linked thread (not a new one).
+        prompt += (
+            f"\n\nThis execution is tracked as Neotoma conversation "
+            f"{run_conversation_id} (PART_OF task {entity_id}). When you finalize "
+            f"via /end, store your turns PART_OF this conversation "
+            f"(conversation_id={run_conversation_id}) rather than creating a new one."
+        )
 
     result = await run_skill(
         skill,
@@ -387,6 +415,47 @@ async def dispatch_task(
         from_status=current_status, key_suffix=trigger,
     )
 
+    # ── Readiness gate (E4) ───────────────────────────────────────────────────
+    # Runs BEFORE the execution gate: is the task well-specified enough to start?
+    # Under-specified → park in awaiting_input, record the assessment, and ask the
+    # operator for the SPECIFIC missing context. Skipped on operator-approved
+    # re-dispatch (gate_override) — the operator already willed it forward.
+    if READINESS_GATE and not gate_override:
+        assessment = assess_readiness(
+            snapshot,
+            has_owner=bool(assigned_to) or skill is not None,
+            relationship_count=int(snapshot.get("relationship_count", 0) or 0),
+        )
+        if not assessment.ready:
+            write_assessment(entity_id, assessment)
+            ask = missing_request(assessment, title)
+            set_task_status(
+                entity_id, TaskStatus.AWAITING_INPUT, handler=DAEMON_NAME,
+                from_status=TaskStatus.ROUTED.value,
+                reason=f"readiness {assessment.score:.2f}<{assessment.threshold:.2f}: "
+                       f"missing {', '.join(assessment.missing)}",
+                key_suffix=trigger,
+            )
+            if RUN_EMAIL:
+                send_run_email(
+                    task_id=entity_id, run_key=f"{trigger}-readiness",
+                    stage="kickoff", title=title, body=ask,
+                )
+            notifier.send(
+                f"NOT READY — needs input: {title[:70]}\n{ask}\n  task={entity_id}",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+            )
+            job.escalated(
+                f"task {entity_id} → {skill} parked awaiting_input "
+                f"(readiness={assessment.score:.2f}, missing={','.join(assessment.missing)})"
+            )
+            return
+        log.info(
+            f"[{DAEMON_NAME}] readiness: task={entity_id} ready "
+            f"({assessment.score:.2f}/{assessment.threshold:.2f})"
+        )
+
     # ── Execution gate ──────────────────────────────────────────────────────
     # Skipped when re-dispatching an operator-approved checkpoint.
     if not gate_override:
@@ -461,12 +530,59 @@ async def dispatch_task(
         entity_id, TaskStatus.EXECUTING, handler=DAEMON_NAME,
         from_status=TaskStatus.ROUTED.value, key_suffix=trigger,
     )
+
+    # E1/E2: this run's thread. run_key keys it to the attempt so SSE replays reuse
+    # it while a genuine retry opens a fresh run.
+    run_key = f"{trigger}-{snapshot.get('attempt', snapshot.get('attempt_count', 0))}"
+
+    # E1: open one conversation for this execution run (flag-gated, fail-open).
+    run_conversation_id: str | None = None
+    if RUN_CONVERSATIONS:
+        run_conversation_id = create_run_conversation(
+            task_id=entity_id,
+            plan_id=snapshot.get("plan_id") or None,
+            agent=skill,
+            run_key=run_key,
+            title=f"{skill} run · {title[:60]}",
+        )
+        if run_conversation_id:
+            log.info(
+                f"[{DAEMON_NAME}] run conversation {run_conversation_id} opened "
+                f"for task {entity_id} (run={run_key})"
+            )
+
+    def _run_stage(role: str, content: str, stage: str) -> None:
+        """Record one run-thread event: append to the run conversation (E1) AND
+        send it on the run's Gmail thread (E2). Both flag-gated + fail-open. Apis
+        OWNS the run thread, so it is populated regardless of whether the spawned
+        agent finalizes into it; the agent's own /end (advised via prompt) layers
+        on top and is not relied upon for binding.
+        """
+        if run_conversation_id:
+            append_turn(
+                conversation_id=run_conversation_id, role=role, content=content,
+                sender_kind="orchestrator",
+                idempotency_key=f"runturn-{entity_id}-{stage}-{trigger}",
+            )
+        if RUN_EMAIL:
+            send_run_email(
+                task_id=entity_id, run_key=run_key, stage=stage, title=title,
+                body=content,
+            )
+
+    _run_stage("user",
+               f"Dispatched {skill} for task {entity_id} (trigger={trigger}): {title}",
+               stage="kickoff")
+
     try:
         result = await _spawn_claude_skill(
-            skill, entity_id, snapshot, trigger, notifier, role=role
+            skill, entity_id, snapshot, trigger, notifier, role=role,
+            run_conversation_id=run_conversation_id,
         )
     except Exception as exc:
         # Unexpected crash in the spawn machinery itself → record as a failed run.
+        _run_stage("assistant", f"{skill} dispatch crashed: {type(exc).__name__}: {exc}",
+                   stage="crash")
         set_task_status(
             entity_id, TaskStatus.FAILED, handler=DAEMON_NAME,
             from_status=TaskStatus.EXECUTING.value,
@@ -477,6 +593,8 @@ async def dispatch_task(
         raise
 
     if result.ok:
+        _run_stage("assistant", f"{skill} completed (trigger={trigger}).",
+                   stage="done")
         set_task_status(
             entity_id, TaskStatus.DONE, handler=DAEMON_NAME,
             from_status=TaskStatus.EXECUTING.value,
@@ -486,6 +604,8 @@ async def dispatch_task(
         job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
     else:
         reason = result.error or f"rc={result.returncode}"
+        _run_stage("assistant", f"{skill} failed (trigger={trigger}): {reason}",
+                   stage="failed")
         # FAILED (not BLOCKED): the stall watchdog (plan task ent_3cdd75…) owns
         # retry-with-backoff and escalation-on-exhaustion out-of-band, so the SSE
         # loop is never blocked by an inline sleep. Notify now so failures are not

@@ -50,3 +50,61 @@ def test_all_daemon_used_priorities_route():
     n = Notifier(rubric=NO_SILENCE)
     for prio in Priority:
         n.send(f"smoke {prio.value}", priority=prio, handler="test")
+
+
+# ── E6: email-primary transport (flag-gated) ─────────────────────────────────
+
+
+def test_email_primary_off_by_default():
+    n = Notifier(rubric=NO_SILENCE)
+    assert n._email_primary is False
+
+
+def test_email_primary_delivers_via_gws(monkeypatch):
+    n = Notifier(rubric=NO_SILENCE)
+    n._email_primary = True
+    n._operator_email = "op@test"
+    n._swarm_email = "swarm@test"
+    calls = {}
+
+    class _P:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(cmd, **k):
+        calls["cmd"] = cmd
+        return _P()
+
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", fake_run)
+    ok = n.send("blocker happened", priority=Priority.BLOCKER, handler="apis")
+    assert ok is True
+    assert calls["cmd"][:3] == ["gws", "gmail", "+send"]
+    assert "op@test" in calls["cmd"] and "swarm@test" in calls["cmd"]
+
+
+def test_email_failure_falls_back_to_telegram(monkeypatch):
+    n = Notifier(rubric=NO_SILENCE)  # apprise unconfigured → Telegram returns False
+    n._email_primary = True
+    n._operator_email = "op@test"
+
+    class _P:
+        returncode = 1
+        stderr = "boom"
+
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", lambda cmd, **k: _P())
+    # Must not raise; email fails → falls through to (unconfigured) Telegram → False.
+    assert n.send("blocker", priority=Priority.BLOCKER, handler="apis") is False
+
+
+def test_email_skipped_when_no_operator_address(monkeypatch):
+    n = Notifier(rubric=NO_SILENCE)
+    n._email_primary = True
+    n._operator_email = ""  # unset → email helper returns False immediately
+    called = {"n": 0}
+
+    def fake_run(cmd, **k):
+        called["n"] += 1
+
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", fake_run)
+    n.send("blocker", priority=Priority.BLOCKER, handler="apis")
+    assert called["n"] == 0  # never shelled out without a recipient
