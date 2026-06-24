@@ -33,6 +33,10 @@ Environment variables:
   APIS_DRY_RUN                Set to "1" to log events without dispatching agents
   APIS_AUTO_EXECUTE           Set to "1" to auto-execute due tasks (default: notify only)
   APIS_CLAUDE_BIN             Path to the claude CLI (default: autodetect on PATH)
+  CLAUDE_CODE_OAUTH_TOKEN     Claude subscription token (claude setup-token).
+                              When set, spawned `claude --print` children bill the
+                              operator's Max plan and ANTHROPIC_API_KEY is dropped
+                              from the child env; absent, falls back to API key.
   APIS_DISPATCH_TIMEOUT       Per-dispatch timeout in seconds (default: 1800)
   ATELES_REPO_PATH            Local path to ateles clone (default: ~/repos/ateles)
 
