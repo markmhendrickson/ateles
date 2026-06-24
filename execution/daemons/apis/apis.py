@@ -137,8 +137,11 @@ from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
     AgentLoader,
     append_turn,
+    assess_readiness,
     create_run_conversation,
+    missing_request,
     send_run_email,
+    write_assessment,
     GateAction,
     NeotomaEvent,
     SSEClient,
@@ -237,6 +240,10 @@ RUN_CONVERSATIONS = os.environ.get("APIS_RUN_CONVERSATIONS", "0") == "1"
 # the dedicated swarm address. Default off; needs the swarm mailbox provisioned
 # (ATELES_SWARM_EMAIL + OPERATOR_EMAIL + ATELES_GMAIL_SEND_CMD). Fail-open.
 RUN_EMAIL = os.environ.get("APIS_RUN_EMAIL", "0") == "1"
+# E4 (docs/task_execution_loop.md): pre-execution readiness gate. When a task is
+# under-specified (no clear goal/constraints/tooling), park it in awaiting_input
+# and email the operator the specific gaps instead of executing. Default off.
+READINESS_GATE = os.environ.get("APIS_READINESS_GATE", "0") == "1"
 
 # Path to the Claude CLI binary used to spawn T4 agents. Set by env var or
 # auto-detected from PATH. If absent, dispatch falls back to log-only.
@@ -403,6 +410,47 @@ async def dispatch_task(
         entity_id, TaskStatus.ROUTED, handler=DAEMON_NAME,
         from_status=current_status, key_suffix=trigger,
     )
+
+    # ── Readiness gate (E4) ───────────────────────────────────────────────────
+    # Runs BEFORE the execution gate: is the task well-specified enough to start?
+    # Under-specified → park in awaiting_input, record the assessment, and ask the
+    # operator for the SPECIFIC missing context. Skipped on operator-approved
+    # re-dispatch (gate_override) — the operator already willed it forward.
+    if READINESS_GATE and not gate_override:
+        assessment = assess_readiness(
+            snapshot,
+            has_owner=bool(assigned_to) or skill is not None,
+            relationship_count=int(snapshot.get("relationship_count", 0) or 0),
+        )
+        if not assessment.ready:
+            write_assessment(entity_id, assessment)
+            ask = missing_request(assessment, title)
+            set_task_status(
+                entity_id, TaskStatus.AWAITING_INPUT, handler=DAEMON_NAME,
+                from_status=TaskStatus.ROUTED.value,
+                reason=f"readiness {assessment.score:.2f}<{assessment.threshold:.2f}: "
+                       f"missing {', '.join(assessment.missing)}",
+                key_suffix=trigger,
+            )
+            if RUN_EMAIL:
+                send_run_email(
+                    task_id=entity_id, run_key=f"{trigger}-readiness",
+                    stage="kickoff", title=title, body=ask,
+                )
+            notifier.send(
+                f"NOT READY — needs input: {title[:70]}\n{ask}\n  task={entity_id}",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+            )
+            job.escalated(
+                f"task {entity_id} → {skill} parked awaiting_input "
+                f"(readiness={assessment.score:.2f}, missing={','.join(assessment.missing)})"
+            )
+            return
+        log.info(
+            f"[{DAEMON_NAME}] readiness: task={entity_id} ready "
+            f"({assessment.score:.2f}/{assessment.threshold:.2f})"
+        )
 
     # ── Execution gate ──────────────────────────────────────────────────────
     # Skipped when re-dispatching an operator-approved checkpoint.
