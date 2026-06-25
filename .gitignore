@@ -103,3 +103,9 @@ execution/daemons/*/*_last_run
 
 # Transient outbound .eml staging for run_email (gws --upload is cwd-sandboxed)
 .run_email_outbox/
+
+# PII / operator-personal content — never track in this PUBLIC repo. Keep in
+# ateles-private or Neotoma. (docs/outreach held a third-party LinkedIn list;
+# docs/health held personal health notes — both removed + history-scrub pending.)
+docs/outreach/
+docs/health/
