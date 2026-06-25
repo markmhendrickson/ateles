@@ -110,7 +110,7 @@ python scripts/linters/check_documentation.py path/to/file.md
 - Exceptions: MCP server code, import scripts
 - Config: `scripts/linters/ast_parquet_linter.py`
 - Auto-fixes: No (prevents commit)
-- See: `/shared/docs/agent-mcp-access-policy.md`
+- See: `docs/policies/agent-mcp-access-policy.md`
 
 ### Documentation
 
@@ -293,6 +293,6 @@ The `pyproject.toml` is configured to discover tests in:
 
 - `/reports/foundation-agent-instructions-linter-analysis.md` - Complete analysis
 - `/foundation-config.yaml` - Foundation configuration
-- `/shared/docs/agent-mcp-access-policy.md` - MCP access policy
-- `/shared/docs/agent-workflow-requirements.md` - Workflow requirements
+- `docs/policies/agent-mcp-access-policy.md` - MCP access policy
+- `docs/policies/agent-workflow-requirements.md` - Workflow requirements
 
