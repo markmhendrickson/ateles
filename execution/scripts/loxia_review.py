@@ -147,7 +147,6 @@ def call_claude(prompt: str) -> str:
     }
 
     req = urllib.request.Request(
-    req.add_header("User-Agent", "ateles-neotoma-sync/1.0")
         CLAUDE_API_URL,
         data=json.dumps(payload).encode(),
         headers={
@@ -157,6 +156,7 @@ def call_claude(prompt: str) -> str:
         },
         method="POST",
     )
+    req.add_header("User-Agent", "ateles-neotoma-sync/1.0")
 
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
@@ -225,12 +225,12 @@ def post_github_comment(body: str, marker: str | None = None) -> None:
         method, action = "POST", "posted"
 
     req = urllib.request.Request(
-    req.add_header("User-Agent", "ateles-neotoma-sync/1.0")
         url,
         data=json.dumps({"body": body}).encode(),
         headers=_github_headers(),
         method=method,
     )
+    req.add_header("User-Agent", "ateles-neotoma-sync/1.0")
 
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -267,7 +267,6 @@ def file_neotoma_issue(title: str, body: str, agent: str = "loxia") -> None:
     }
 
     req = urllib.request.Request(
-    req.add_header("User-Agent", "ateles-neotoma-sync/1.0")
         f"{NEOTOMA_BASE_URL}/observations",
         data=json.dumps(payload).encode(),
         headers={
@@ -276,6 +275,7 @@ def file_neotoma_issue(title: str, body: str, agent: str = "loxia") -> None:
         },
         method="POST",
     )
+    req.add_header("User-Agent", "ateles-neotoma-sync/1.0")
 
     try:
         with urllib.request.urlopen(req, timeout=15):
