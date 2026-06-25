@@ -2,6 +2,16 @@
 
 This repository uses automated linters to enforce foundation agent instructions and code conventions.
 
+## Purpose
+
+Document the repository's lint suite — what each linter checks, how to install and run them, and how to fix or
+suppress findings.
+
+## Scope
+
+Covers the repository's linters, their pre-commit / git-hook wiring, and the policy docs they cite
+(`docs/policies/`). Not a prose style guide.
+
 ## Quick Start
 
 ### Installation
