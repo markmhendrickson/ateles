@@ -10,6 +10,10 @@
 
 This document defines mandatory requirements for agents when executing workflows, including scorecard execution, quarterly reviews, and file naming conventions.
 
+## Scope
+
+Applies to all agents executing repository workflows — covers file-location requirements, scorecard saving, quarterly reviews, and the workflow rules below.
+
 ---
 
 ## Scorecard Execution & Saving

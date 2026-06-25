@@ -10,6 +10,10 @@
 
 This policy defines mandatory requirements for AI agents accessing normalized parquet data. All data access must go through the MCP (Model Context Protocol) server to ensure consistency, auditability, and automatic snapshot creation.
 
+## Scope
+
+Applies to all agents reading normalized operator data — mandates MCP-server access (never direct parquet/file reads) and the server-configuration and policy rules below.
+
 ---
 
 ## MANDATORY: MCP-Only Data Access
