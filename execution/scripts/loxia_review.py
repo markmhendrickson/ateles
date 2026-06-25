@@ -162,6 +162,15 @@ def call_claude(prompt: str) -> str:
         with urllib.request.urlopen(req, timeout=60) as resp:
             data = json.loads(resp.read())
             return data["content"][0]["text"]
+    except urllib.error.HTTPError as exc:
+        # Surface the API error body. A bare "HTTP Error 400: Bad Request" hides
+        # the actual cause (e.g. the invalid_request_error message), which made
+        # an earlier 400 undiagnosable from the posted review comment alone.
+        try:
+            detail = exc.read().decode("utf-8", "replace").strip()
+        except Exception:
+            detail = ""
+        return f"(Claude API error: HTTP {exc.code} — {detail or exc.reason})"
     except (urllib.error.URLError, KeyError, json.JSONDecodeError) as exc:
         return f"(Claude API error: {exc})"
 
