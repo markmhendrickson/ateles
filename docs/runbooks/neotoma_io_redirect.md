@@ -1,5 +1,15 @@
 # Temporary redirect: neotoma.io → Neotoma repo
 
+## Purpose
+
+Point `neotoma.io` (and `www.neotoma.io`) at the Neotoma GitHub repo as a temporary landing target until a
+real site exists.
+
+## Scope
+
+Operator runbook for adding/removing the redirect via the Cloudflare API, using
+`execution/scripts/configure_cloudflare_neotoma_redirect.py`.
+
 **Goal:** Have neotoma.io (and www.neotoma.io) temporarily redirect to the Neotoma GitHub repo: https://github.com/markmhendrickson/neotoma
 
 **Current DNS:** neotoma.io nameservers point to **Cloudflare**, so the redirect is configured via the Cloudflare API (script below).

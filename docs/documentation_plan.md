@@ -187,15 +187,25 @@ operator-facing context the SKILL.md omits; otherwise link to the skill from a s
   PII is unreachable in a fresh clone, and the PR-ref + cache purge is requested from GitHub Support. See
   [runbooks/pii-history-scrub.md](runbooks/pii-history-scrub.md).
 - ✅ **Moved off-topic docs** out of the doc set — HomeKit/home-automation (7) + the PDF-form-filler guide
-  relocated under [runbooks/](runbooks/) (`runbooks/home-automation/`); the SXSW transcript and the
-  Neotoma-product GTM essays archived under [archive/](archive/) (to be re-homed to the neotoma repo /
-  Neotoma).
+  relocated under [runbooks/](runbooks/) (`runbooks/home-automation/`); the SXSW transcript, the
+  agent-discovery essay, and the 2 Neotoma developer-release GTM docs archived under [archive/](archive/) (to
+  be re-homed to the neotoma repo / Neotoma). The 2 Neotoma *ops* runbooks (`neotoma_io_redirect`,
+  `neotoma_post_lookup`) were kept as operator runbooks under [runbooks/](runbooks/) — `io_redirect` drives a
+  live script in this repo.
 - ✅ **Folded the command-docs (Part 2.F)** — the 5 SKILL.md-duplicating command docs archived under
   [archive/](archive/); the `.claude/skills/<name>/SKILL.md` mirror is the source of truth.
+- ✅ **Archived the dead Cursor-era docs (Part 2.B, partial)** — `foundation-vs-ateles-rules`,
+  `skills-and-hooks-{before-after,guide}`, `legacy_data_types_inventory`, `cursor_directory`, `cursor_rules/`
+  → [archive/](archive/) (gitleaks allowlist paths updated). `docs/shared/**` was **left in place**: 3 of its
+  files (`agent-workflow-requirements`, `agent-mcp-access-policy`, `agent-data-rules`) are cited as live
+  policy by the linters + `.gitleaks.toml`.
 
 **Still pending (larger / operator-judgment moves):**
 - **Relocate `docs/mcp/**` (145 code files)** out of `docs/` to a top-level `mcp-servers/`.
-- **Archive the stale `docs/shared/**` and Cursor/foundation-era docs** under `docs/archive/`.
+- **`docs/shared/**` (the legacy three-layer foundation)** — relocate the 3 live policy docs
+  (`agent-workflow-requirements`, `agent-mcp-access-policy`, `agent-data-rules`) to an active home and update
+  their ~7 linter / `.gitleaks.toml` / `linting-guide.md` citations, then archive the rest. Deferred because
+  it edits linter code (option 2 from the B discussion).
 - *(nicety)* Build a single consolidated skills reference if the archived command-docs' context is still
   wanted.
 
