@@ -79,6 +79,14 @@ def test_doctor_runs_read_only_and_returns_status(capsys):
     assert "python" in capsys.readouterr().out
 
 
+def test_provision_runs_read_only_and_returns_status(capsys):
+    # provision (dry-run) writes nothing; in an unconfigured environment it
+    # reports incomplete config and returns 1, but must never raise.
+    rc = main(["provision"])
+    assert rc in (0, 1)
+    assert capsys.readouterr().out  # produced some output
+
+
 def test_init_subcommand_accepts_non_interactive_flag():
     # Parse only — running init would write a config file (exercised against a
     # tmp path in test_initialize.py).
@@ -95,7 +103,8 @@ def test_cli_import_graph_is_stdlib_only():
     probe = (
         "import sys, json\n"
         "import ateles, ateles.cli, ateles.__main__, "
-        "ateles.config, ateles.doctor, ateles.initialize\n"
+        "ateles.config, ateles.doctor, ateles.initialize, "
+        "ateles.provision, ateles.secrets\n"
         "third = ['httpx','apprise','cryptography','jwt','uvicorn','a2a',"
         "'watchdog','pandas','numpy','pyarrow','openai','asana','requests',"
         "'dotenv','websockets']\n"

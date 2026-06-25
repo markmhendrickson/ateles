@@ -51,8 +51,9 @@ VERBS: dict[str, tuple[str, str]] = {
     ),
 }
 
-#: Verbs with real behaviour (W1). The rest are stubs.
-IMPLEMENTED = frozenset({"init", "doctor"})
+#: Verbs with real behaviour. `provision` is a dry-run planner (W2); the rest
+#: of its execution (and run/deploy/mirror) land in later workstreams.
+IMPLEMENTED = frozenset({"init", "doctor", "provision"})
 
 #: Exit code for a not-yet-implemented verb — distinct from argparse's usage
 #: error (2) so callers can tell "unknown flag" from "not built yet".
@@ -98,6 +99,13 @@ def build_parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="don't prompt; seed config from env/existing values",
             )
+        elif verb == "provision":
+            sub.add_argument(
+                "--commit",
+                action="store_true",
+                help="execute the plan (gated — needs W3/W4 + a live Neotoma; "
+                "dry-run by default)",
+            )
     return parser
 
 
@@ -116,6 +124,12 @@ def _run_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_provision(args: argparse.Namespace) -> int:
+    from .provision import run_provision
+
+    return run_provision(commit=args.commit)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -126,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_doctor(args)
     if args.command == "init":
         return _run_init(args)
+    if args.command == "provision":
+        return _run_provision(args)
     return _stub(args.command)
 
 
