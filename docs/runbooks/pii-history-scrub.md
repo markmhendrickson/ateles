@@ -21,7 +21,11 @@ already-done steps (removal from `main`'s tip, gitignore guards) are noted under
   `docs/health/*` are gone from the default branch, so **GitHub code search and the browsable tree no longer
   surface them.** This already closes the realistic discovery vectors.
 - ✅ **Gitignore guards** on `main`: `docs/outreach/` and `docs/health/` cannot be re-committed.
-- ⏳ **Pending (this runbook):** the data still exists in older commits anchored by other branches + PR refs.
+- ✅ **History rewrite executed (2026-06-25):** all **45** affected branches (incl. `main`) rewritten with
+  filter-repo + force-pushed; a fresh clone has **0** PII and `94aa438` is unreachable. (Scope was 45, not the
+  21 first estimated — the data predates `94aa438`, back to the May 29 migration.)
+- ⏳ **Pending — the linchpin:** **96 of 101 PR refs** + GitHub's by-SHA cache still hold the old commits;
+  only the GitHub Support request (Step 2) can purge them.
 
 ## The facts that shape this remediation
 
@@ -114,7 +118,7 @@ After the rewrite, open a private request at https://support.github.com/contact:
 > these still reference the removed content and cannot be rewritten by push. One of the rewritten commits is
 > `94aa438`. Thank you.
 
-Give Support the **specific 45 PR numbers** from the [Appendix](#appendix--affected-refs-snapshot-at-233f65a)
+Give Support the **specific 96 PR numbers** from the [Appendix](#appendix--affected-refs-executed-2026-06-25)
 so they can target the exact `refs/pull/*` refs. Reference: GitHub Docs → "Removing sensitive data from a
 repository."
 
@@ -153,36 +157,29 @@ separately from the PII remediation.
 
 ---
 
-## Appendix — affected refs (snapshot at 233f65a)
+## Appendix — affected refs (executed 2026-06-25)
 
-Computed from a full mirror. Commit `94aa438` is contained by these **21 branches** — all rewritten in one
-pass by Step 1's `git push --force --all` (the 25 other branches are untouched):
+The rewrite was run over a full mirror and force-pushed. filter-repo rewrote **45 branches** — more than the
+21 first estimated from `--contains 94aa438`, because the data was introduced earlier (the **May 29** Phase-3
+migration), so every branch that forked after May 29 carries it. All 45 were updated in one
+`git push --force --all`; branches with no PII in history were left untouched.
 
-```
-chore/secrets-pipeline-live-doc          claude/cloud-hosting-scaffolding
-claude/determined-bhabha-618850          claude/epic-mccarthy-0mkhw8
-claude/fix-gitleaks-pii-email            claude/home-market-value-ot1mk7
-claude/magical-johnson-t8vnhw            claude/neotoma-cofounder-agent-xm1ebo
-claude/nostalgic-hertz-64ce81            claude/relaxed-almeida-7f6fcd
-claude/repo-audit-readme-oag9ly          claude/taskspine-integration-tests
-claude/youthful-chebyshev-7b51e1         feat/aauth-per-agent-signed-requests
-feat/anthropic-key-via-sops              feat/chatgpt-workout-parser
-feat/skill-sync-mirror                   fix/daemon-open-mode-auth
-fix/intake-relationship-pii              main
-secrets/relocate-to-private
-```
+> ⚠️ Before firing, every branch with same-day activity was confirmed quiesced — `main` (#161),
+> `epic-mccarthy`, `fix-loxia-review-syntax`, `gifted-bohr`, plus this branch. No work was lost: filter-repo
+> strips only the 3 PII paths and preserves every other file byte-for-byte; only commit SHAs change.
 
-> ⚠️ 19 of these are other sessions'/agents' branches — quiesce them before the rewrite (see Step 1).
+Post-push verification (fresh clone): **0** PII references across all branches, and `94aa438` unreachable.
 
-…and it anchors **45 of 99 PR refs** that **only GitHub Support can drop** (Step 2):
+**96 of 101 PR refs** still anchor the data via `refs/pull/<n>/head` and can be dropped **only by GitHub
+Support** (Step 2). The full list to give Support:
 
 ```
-68 73 111 113 114 115 116 117 118 119 121 122 123 124 125 126 129 131 132 133 134
-135 138 139 140 141 142 143 144 145 146 147 148 149 150 151 152 153 154 155 156
-157 158 159 160
+41 42 46 53 54 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 83 84 85 86 87
+88 89 90 91 92 93 96 97 100 101 102 103 105 106 107 108 110 111 113 114 115 116 117 118 119 120 121
+122 123 124 125 126 129 131 132 133 134 135 136 137 138 139 140 141 142 143 144 145 146 147 148 149
+150 151 152 153 154 155 156 157 158 159 161
 ```
 
-A guarded one-shot script (`pii-scrub-kit.sh`) that runs Step 1 end-to-end — quiesce confirmation, mirror
-clone, `filter-repo`, `push --force --all`, then prints the Step 2 Support text — is provided out-of-band. It
-is deliberately **not committed to this public repo** (a runnable force-push-all script shouldn't live in
-history). Review it before running.
+Step 1 was executed from a fresh `--mirror` clone (`filter-repo --invert-paths` on the 3 paths →
+`push --force --all`); the same flow is packaged as the out-of-band `pii-scrub-kit.sh` (deliberately not
+committed — a runnable force-push-all script shouldn't live in this public repo).
