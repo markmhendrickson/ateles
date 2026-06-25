@@ -2,6 +2,16 @@
 
 Universal solution for filling any static PDF form automatically. Works with any static PDF form (forms without fillable fields). Uses OCR and image processing to detect fields, then fills them using text overlay.
 
+## Purpose
+
+Fill any static PDF form (one without fillable AcroForm fields) programmatically — detect field locations via
+OCR / image processing and write values as a text overlay.
+
+## Scope
+
+A standalone operator how-to: dependencies, field detection, and overlay-based filling for static PDFs. Not
+part of the Ateles swarm runtime — kept as a general operator runbook.
+
 ## Installation
 
 ```bash

@@ -18,6 +18,14 @@ REQUIRED_SECTIONS = {
     "strategy/": ["Purpose"],  # Strategy docs typically need Purpose
 }
 
+# Paths intentionally exempt from active-doc structure requirements: archived /
+# superseded material and imported operator notes that are deliberately not part
+# of the Ateles reference-architecture doc set (see docs/documentation_plan.md).
+EXCLUDED_PREFIXES = (
+    "docs/archive/",
+    "docs/runbooks/home-automation/",
+)
+
 # RFC 2119 keywords
 RFC_2119_KEYWORDS = [
     "MUST",
@@ -50,6 +58,10 @@ def check_required_sections(filepath: str, content: str) -> list[str]:
     """Check if required sections are present."""
     violations = []
     path = Path(filepath)
+
+    # Archived / imported material is intentionally exempt from active-doc structure.
+    if any(str(path).startswith(p) for p in EXCLUDED_PREFIXES):
+        return []
 
     # Determine which sections are required for this file
     required = []

@@ -106,6 +106,6 @@ execution/daemons/*/*_last_run
 
 # PII / operator-personal content — never track in this PUBLIC repo. Keep in
 # ateles-private or Neotoma. (docs/outreach held a third-party LinkedIn list;
-# docs/health held personal health notes — both removed + history-scrub pending.)
+# docs/health held personal health notes — both removed + history-scrubbed 2026-06-25.)
 docs/outreach/
 docs/health/
