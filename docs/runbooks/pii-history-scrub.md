@@ -114,7 +114,9 @@ After the rewrite, open a private request at https://support.github.com/contact:
 > these still reference the removed content and cannot be rewritten by push. One of the rewritten commits is
 > `94aa438`. Thank you.
 
-Reference: GitHub Docs → "Removing sensitive data from a repository."
+Give Support the **specific 45 PR numbers** from the [Appendix](#appendix--affected-refs-snapshot-at-233f65a)
+so they can target the exact `refs/pull/*` refs. Reference: GitHub Docs → "Removing sensitive data from a
+repository."
 
 ## Step 3 — Forks and existing clones
 
@@ -148,3 +150,39 @@ separately from the PII remediation.
 - ✅ `docs/outreach/` + `docs/health/` gitignored on `main`.
 - ➕ A `gitleaks` rule flags bulk `linkedin.com/in/` profile URLs (see `.gitleaks.toml`), so a contact dump
   trips the PII scan before commit. Keep person-data in Neotoma context entities per [forking.md](../forking.md).
+
+---
+
+## Appendix — affected refs (snapshot at 233f65a)
+
+Computed from a full mirror. Commit `94aa438` is contained by these **21 branches** — all rewritten in one
+pass by Step 1's `git push --force --all` (the 25 other branches are untouched):
+
+```
+chore/secrets-pipeline-live-doc          claude/cloud-hosting-scaffolding
+claude/determined-bhabha-618850          claude/epic-mccarthy-0mkhw8
+claude/fix-gitleaks-pii-email            claude/home-market-value-ot1mk7
+claude/magical-johnson-t8vnhw            claude/neotoma-cofounder-agent-xm1ebo
+claude/nostalgic-hertz-64ce81            claude/relaxed-almeida-7f6fcd
+claude/repo-audit-readme-oag9ly          claude/taskspine-integration-tests
+claude/youthful-chebyshev-7b51e1         feat/aauth-per-agent-signed-requests
+feat/anthropic-key-via-sops              feat/chatgpt-workout-parser
+feat/skill-sync-mirror                   fix/daemon-open-mode-auth
+fix/intake-relationship-pii              main
+secrets/relocate-to-private
+```
+
+> ⚠️ 19 of these are other sessions'/agents' branches — quiesce them before the rewrite (see Step 1).
+
+…and it anchors **45 of 99 PR refs** that **only GitHub Support can drop** (Step 2):
+
+```
+68 73 111 113 114 115 116 117 118 119 121 122 123 124 125 126 129 131 132 133 134
+135 138 139 140 141 142 143 144 145 146 147 148 149 150 151 152 153 154 155 156
+157 158 159 160
+```
+
+A guarded one-shot script (`pii-scrub-kit.sh`) that runs Step 1 end-to-end — quiesce confirmation, mirror
+clone, `filter-repo`, `push --force --all`, then prints the Step 2 Support text — is provided out-of-band. It
+is deliberately **not committed to this public repo** (a runnable force-push-all script shouldn't live in
+history). Review it before running.
