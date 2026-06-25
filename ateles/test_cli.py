@@ -44,13 +44,26 @@ def test_help_lists_every_verb_with_its_workstream(capsys):
         assert workstream in out
 
 
+def test_help_discloses_setup_sequence_and_exit_codes(capsys):
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    out = capsys.readouterr().out
+    assert "Setup sequence" in out
+    assert "ateles doctor" in out       # entry point named
+    assert "Exit codes" in out
+    assert "3 verb not yet implemented" in out
+
+
 @pytest.mark.parametrize("verb", STUB_VERBS)
 def test_each_unimplemented_verb_is_a_stub_exiting_three(verb, capsys):
     assert main([verb]) == NOT_IMPLEMENTED_EXIT
     out = capsys.readouterr().out
     assert f"ateles {verb}" in out
-    assert VERBS[verb][0] in out          # workstream label is surfaced
-    assert "docs/installability.md" in out  # roadmap pointer is surfaced
+    assert VERBS[verb][0] in out             # workstream label is surfaced
+    assert "docs/installability.md" in out   # roadmap pointer is surfaced
+    # surfaces the blocking setup sequence, not just the verb's own workstream
+    assert "ateles doctor" in out
+    assert "ateles provision" in out
 
 
 def test_invalid_verb_is_an_argparse_usage_error():

@@ -64,11 +64,31 @@ ROADMAP = (
     "tracking: github.com/markmhendrickson/ateles/issues/18"
 )
 
+# Shown in --help (epilog) and echoed by stubs, so the setup order and exit-code
+# contract are discoverable from the CLI alone — not only from the docs.
+SETUP_SEQUENCE = """\
+Setup sequence (first time — start with `ateles doctor`):
+  1. ateles doctor      check prerequisites (Neotoma, Python, external CLIs); reports the next rung
+  2. ateles init        interactive config wizard (operator domain, identity, locale)
+  3. ateles provision   register schemas + seed Neotoma entities + mint keypairs (keystone; dry-run by default)
+
+Then (W6–W7, pending):
+  4. ateles run         run a daemon in the foreground
+  5. ateles deploy      install scheduler units (launchd / systemd / compose)
+  6. ateles mirror      regenerate SKILL.md from Neotoma
+
+Exit codes: 0 success · 1 runtime error (e.g. incomplete config) · 2 usage error · 3 verb not yet implemented
+Full details: docs/installability.md"""
+
 
 def _stub(verb: str) -> int:
     workstream, intent = VERBS[verb]
     print(f"ateles {verb}: planned under workstream {workstream} — not yet implemented.")
     print(f"  intent: {intent}")
+    print("  next: complete the setup sequence first —")
+    print("    1. ateles doctor     (check setup, diagnose missing pieces)")
+    print("    2. ateles init       (collect operator config)")
+    print("    3. ateles provision  (seed Neotoma entities — the keystone)")
     print(f"  {ROADMAP}")
     return NOT_IMPLEMENTED_EXIT
 
@@ -80,6 +100,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Install-by-package CLI for the Ateles agent swarm. Verbs are "
             "implemented across workstreams W1–W7 (see docs/installability.md)."
         ),
+        epilog=SETUP_SEQUENCE,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "-V", "--version", action="version", version=f"ateles {__version__}"
