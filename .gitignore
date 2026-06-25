@@ -1,5 +1,7 @@
 # Sensitive credentials and configuration
 .mcp.json
+# Operator-specific ateles CLI config (W1) — never commit; like .env it is per-operator
+ateles.config.json
 .env
 .env.local
 .env.*.local
