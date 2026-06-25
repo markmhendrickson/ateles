@@ -1,0 +1,28 @@
+name: ateles package tests
+
+# Enforces the W0/W1+ package test suite on every PR that touches it — the
+# regression lane the QA gate asked for. Scoped to the ateles/ package so it is
+# fast and independent of the daemon test surface.
+
+on:
+  pull_request:
+    paths:
+      - "ateles/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/ateles-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Run ateles package tests
+        run: uv run --extra dev python -m pytest ateles/ -q
