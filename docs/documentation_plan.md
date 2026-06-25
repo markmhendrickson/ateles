@@ -180,15 +180,24 @@ operator-facing context the SKILL.md omits; otherwise link to the skill from a s
    to prevent recurrence, and wrote the [history-scrub runbook](runbooks/pii-history-scrub.md) for the
    operator to finish the job on `main`.
 
-### Recommended operator follow-ups (not auto-executed)
+### Reconciliation follow-ups
 
-- **Run the [history-scrub runbook](runbooks/pii-history-scrub.md)** to purge the removed PII from `main`'s
-  history and GitHub's cache. *(highest urgency — the file is still in old commits until this runs)*
-- **Relocate `docs/mcp/**` (145 code files)** out of `docs/` to `mcp-servers/`.
+**Done (2026-06-25):**
+- ✅ **Ran the history scrub** — `main` + 45 branches rewritten with `git filter-repo` and force-pushed; the
+  PII is unreachable in a fresh clone, and the PR-ref + cache purge is requested from GitHub Support. See
+  [runbooks/pii-history-scrub.md](runbooks/pii-history-scrub.md).
+- ✅ **Moved off-topic docs** out of the doc set — HomeKit/home-automation (7) + the PDF-form-filler guide
+  relocated under [runbooks/](runbooks/) (`runbooks/home-automation/`); the SXSW transcript and the
+  Neotoma-product GTM essays archived under [archive/](archive/) (to be re-homed to the neotoma repo /
+  Neotoma).
+- ✅ **Folded the command-docs (Part 2.F)** — the 5 SKILL.md-duplicating command docs archived under
+  [archive/](archive/); the `.claude/skills/<name>/SKILL.md` mirror is the source of truth.
+
+**Still pending (larger / operator-judgment moves):**
+- **Relocate `docs/mcp/**` (145 code files)** out of `docs/` to a top-level `mcp-servers/`.
 - **Archive the stale `docs/shared/**` and Cursor/foundation-era docs** under `docs/archive/`.
-- **Move off-topic docs** (SXSW transcript, HomeKit/home-automation, PDF-form-filler, Neotoma-product GTM) to
-  `docs/runbooks/`, the neotoma repo, or out of the repo.
-- **Fold the command-docs (Part 2.F)** into a single skills reference or link to the SKILL.md mirrors.
+- *(nicety)* Build a single consolidated skills reference if the archived command-docs' context is still
+  wanted.
 
-Executing the relocations/deletions is deliberately left to the operator because several touch personal data
-or large code trees where a wrong move is hard to reverse.
+The remaining relocations touch a large code tree (`docs/mcp/`) or need a reference sweep (`docs/shared/`)
+where a wrong move is hard to reverse — sequence them with a grep-for-references check before each move.
