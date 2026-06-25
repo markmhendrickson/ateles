@@ -77,6 +77,12 @@ description = "PII: US Social Security Number"
 regex = '''\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b'''
 tags = ["pii", "national-id", "us"]
 
+[[rules]]
+id = "pii-linkedin-profile"
+description = "PII: third-party LinkedIn profile URL. A file full of these is a contact-list dump (RGPD) — keep person-data in Neotoma context entities, not this PUBLIC repo. Genuine single/example links go in the allowlist below."
+regex = '''(?i)\bhttps?://(?:[a-z0-9-]+\.)?linkedin\.com/in/[a-z0-9._%-]{2,}'''
+tags = ["pii", "linkedin", "contact"]
+
 # NOTE: a bare "13-19 digit" credit-card rule was evaluated and removed — it
 # cannot do Luhn validation in RE2 and matched timestamps/date-IDs/order
 # numbers with ~210 false positives. Structured financial PII is covered by
@@ -126,6 +132,9 @@ regexes = [
   '''\bES[0-9]{2}(?:[ ]?(?:X{4}|0{4}|1234))''',
   '''\b(?:0000[ -]?){3,}''',
   '''\bXXX[X-]''',
+  # pii-linkedin-profile: placeholder/example slugs (not real people) — e.g. the
+  # `linkedin.com/in/XXX` normalization comment in linkedin_icp_priority_list.py.
+  '''(?i)linkedin\.com/in/(?:xxx+|your-?[a-z]*|<[^>]+>|example|username|profile|handle|slug)\b''',
 ]
 paths = [
   "execution/scripts/ga_last_7_days_report.py",
@@ -194,6 +203,11 @@ paths = [
   # ateles public repo files (env var names and placeholder words — not actual secrets)
   ".gitignore",
   ".env.example",
+  # TEMPORARY (remove after the git-history scrub — docs/runbooks/pii-history-scrub.md):
+  # the LinkedIn list is gone from main's tip (233f65a) but still in older commits that
+  # CI scans with fetch-depth:0. Allowlist the historical path so CI stays green until
+  # history is rewritten; pii-linkedin-profile still guards NEW paths/files.
+  '''docs/outreach/LINKEDIN_ICP_PRIORITY_LIST\.md''',
   "scripts/linters/security_audit.py",
   "lib/notify/notifier.py",
   "lib/daemon_runtime/agent_loader.py",
