@@ -199,9 +199,10 @@ operator-facing context the SKILL.md omits; otherwise link to the skill from a s
   → [archive/](archive/) (gitleaks allowlist paths updated). `docs/shared/**` was **left in place**: 3 of its
   files (`agent-workflow-requirements`, `agent-mcp-access-policy`, `agent-data-rules`) are cited as live
   policy by the linters + `.gitleaks.toml`.
+- ✅ **Relocated `docs/mcp/**` (145 files, Part 2.C)** → top-level `mcp-servers/` — gitleaks allowlist + index
+  note updated; no submodules / imports / CI affected. Side effect: doc-lint failures 160 → 101.
 
-**Still pending (larger / operator-judgment moves):**
-- **Relocate `docs/mcp/**` (145 code files)** out of `docs/` to a top-level `mcp-servers/`.
+**Still pending:**
 - **`docs/shared/**` (the legacy three-layer foundation)** — relocate the 3 live policy docs
   (`agent-workflow-requirements`, `agent-mcp-access-policy`, `agent-data-rules`) to an active home and update
   their ~7 linter / `.gitleaks.toml` / `linting-guide.md` citations, then archive the rest. Deferred because

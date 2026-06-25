@@ -95,11 +95,12 @@ stale, misplaced, or operator-personal files, see the [documentation plan](docum
 - [**Documentation plan & reconciliation**](documentation_plan.md) — the prioritized outline this index
   follows, plus an audit of the current docs (current / stale / misplaced / off-topic / operator-personal)
   and the reconciliation actions. **Note:** the PII audit found and **removed** a third-party LinkedIn list
-  (`docs/outreach/`) and personal health notes (`docs/health/`) from the tree — a history scrub on `main` is
-  pending via the [PII history-scrub runbook](runbooks/pii-history-scrub.md). A large tree of MCP server
-  *code* miscategorized under `docs/mcp/` is flagged for relocation.
+  (`docs/outreach/`) and personal health notes (`docs/health/`); the history scrub on `main` has been
+  **executed** (see the [PII history-scrub runbook](runbooks/pii-history-scrub.md)). The large tree of MCP
+  server *code* formerly under `docs/mcp/` has been **relocated** to top-level `mcp-servers/`.
 
-> **A note on what lives here.** Not everything currently under `docs/` is documentation. `docs/mcp/` holds
-> vendored MCP server *code*; `docs/shared/` holds a superseded foundation layer; and a handful of files are
-> operator-personal or off-topic. See the [documentation plan](documentation_plan.md) for the disposition of
-> each. New documentation should follow the P0–P5 structure above.
+> **A note on what lives here.** Not everything under `docs/` is documentation. The vendored MCP server *code*
+> was relocated to top-level `mcp-servers/`; `docs/shared/` still holds a superseded foundation layer (kept
+> because parts are cited as live policy); off-topic and superseded material is under `docs/archive/`. See the
+> [documentation plan](documentation_plan.md) for the disposition of each. New documentation should follow the
+> P0–P5 structure above.
