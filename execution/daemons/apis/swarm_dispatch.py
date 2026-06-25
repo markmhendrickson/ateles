@@ -755,7 +755,7 @@ class SwarmDispatcher:
         #    unless APIS_AUTONOMY_AUTO_MERGE=1 (ateles#80 guardrail).
         vanellus_result = await run_skill(
             "vanellus",
-            self._vanellus_prompt(trigger, parent, [p.lens for p in panel]),
+            self._vanellus_prompt(trigger, parent, [p.lens for p in panel], reviews),
             github_token=_token_for_agent_on_repo("vanellus", trigger.repository),
             include_github_contract=True,
         )
@@ -1715,20 +1715,44 @@ class SwarmDispatcher:
         )
 
     @staticmethod
-    def _vanellus_prompt(t: SwarmTrigger, parent: int | None, lenses: list[str]) -> str:
+    def _vanellus_prompt(
+        t: SwarmTrigger,
+        parent: int | None,
+        lenses: list[str],
+        reviews: list[tuple[str, str]] | None = None,
+    ) -> str:
+        # The captured lens reviews are embedded INLINE below so the aggregator
+        # never has to re-fetch them via `gh`. Vanellus runs diff-only
+        # (cwd=None) with no git-repo context, so a `gh pr view --comments` read
+        # fails with "requires being in a repository context" — which is exactly
+        # how aggregations silently stalled (the dispatcher then posts Vanellus's
+        # non-verdict "please give me the data" message via its fallback).
+        if reviews:
+            panel_block = "\n\n".join(
+                f"### review:{lens}\n{(text or '').strip()}" for lens, text in reviews
+            )
+        else:
+            panel_block = "(no panel lens reviews captured — GHA baseline only)"
         return (
             "Invoke the vanellus agent per your appended system prompt.\n\n"
             f"Aggregate the review panel for PR {t.repository}#{t.number}: "
             f"{t.title}\n{t.html_url}\n"
             f"Parent issue: #{parent if parent else 'unknown'}. "
             f"Panel lenses that reviewed: {', '.join(lenses) or '(none — GHA baseline only)'}.\n\n"
-            "Collect the `review:<lens>` comments on the PR plus the Claude "
-            "GHA baseline review. Any [BLOCKING] finding ⇒ set the pr_review "
-            "gate to changes_requested and route back to Gryllus with a "
-            "summary comment. All clear ⇒ approve and advance pr_review to "
+            "The panel lens reviews are provided INLINE below — aggregate them "
+            "directly. Do NOT fetch them via gh; you run without a repo checkout "
+            "and that read fails. (Optionally read the Claude GHA baseline with "
+            f"`gh pr view {t.number} --repo {t.repository} --comments`, but the "
+            "inline reviews are authoritative.) Any [BLOCKING] finding ⇒ set the "
+            "pr_review gate to changes_requested and route back to Gryllus with "
+            "a summary comment. All clear ⇒ approve and advance pr_review to "
             "signed_off on the parent issue entity.\n\n"
+            "----- PANEL LENS REVIEWS (inline) -----\n"
+            f"{panel_block}\n"
+            "----- END PANEL LENS REVIEWS -----\n\n"
             f"{_agent_prompt_instruction('vanellus', 'PR steward')}\n\n"
-            "POST YOUR AGGREGATED VERDICT AS A PR COMMENT using the gh CLI. "
+            "POST YOUR AGGREGATED VERDICT AS A PR COMMENT using the gh CLI "
+            f"(`gh pr comment {t.number} --repo {t.repository} --body ...`). "
             f"The comment MUST begin with the line `{_VANELLUS_COMMENT_MARKER}` "
             "so the dispatcher can detect whether it landed. "
             "Repeat the full aggregated verdict text in your reply here (the "

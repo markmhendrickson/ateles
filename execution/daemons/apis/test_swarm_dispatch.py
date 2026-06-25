@@ -2127,6 +2127,38 @@ def test_vanellus_prompt_instructs_repeat_for_fallback():
     assert "Repeat" in prompt or "repeat" in prompt
 
 
+def test_vanellus_prompt_embeds_inline_reviews_and_forbids_gh_fetch():
+    """Aggregation must run from inline review text, not a gh fetch.
+
+    Regression: the aggregator runs diff-only with no repo checkout (cwd=None),
+    so a `gh pr view --comments` read fails ("requires being in a repository
+    context") and the aggregation silently stalls — the dispatcher then posts
+    Vanellus's non-verdict "please give me the data" message via its fallback.
+    The captured panel reviews must be embedded in the prompt instead.
+    """
+    t = _trigger()
+    reviews = [
+        ("pm", "APPROVE - scope matches the issue."),
+        ("qa", "REQUEST_CHANGES - [BLOCKING] missing error-recovery tests."),
+    ]
+    prompt = SwarmDispatcher._vanellus_prompt(
+        t, parent=80, lenses=["pm", "qa"], reviews=reviews
+    )
+    # Each lens's captured text is embedded inline.
+    assert "APPROVE - scope matches the issue." in prompt
+    assert "[BLOCKING] missing error-recovery tests." in prompt
+    assert "### review:pm" in prompt and "### review:qa" in prompt
+    # And Vanellus is told NOT to re-fetch them via gh.
+    assert "Do NOT fetch them via gh" in prompt
+
+
+def test_vanellus_prompt_handles_no_reviews():
+    """No captured reviews => explicit placeholder; no gh-fetch requirement."""
+    t = _trigger()
+    prompt = SwarmDispatcher._vanellus_prompt(t, parent=80, lenses=[], reviews=None)
+    assert "no panel lens reviews captured" in prompt
+
+
 # ── _post_missing_vanellus_comment — dispatcher fallback ──────────────────────
 
 
