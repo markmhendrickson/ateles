@@ -1,13 +1,14 @@
 """The ``ateles`` command-line interface.
 
 Spine of the install-by-package epic (issue #18 / ``docs/installability.md``).
-Each verb maps to a workstream; this module is the W0 skeleton, so the verbs are
-stubs that announce their workstream and exit non-zero until that workstream
-lands. Keeping the surface stable now means later workstreams fill in behaviour
-without changing the operator-facing contract.
+Each verb maps to a workstream. ``init`` and ``doctor`` are implemented (W1);
+the remaining verbs are stubs that announce their workstream and exit 3 until
+their workstream lands. Keeping the surface stable means later workstreams fill
+in behaviour without changing the operator-facing contract.
 
-Deliberately stdlib-only (argparse) so ``python -m ateles`` runs before any
-third-party dependency is installed.
+The top-level import graph is deliberately stdlib-only (argparse) so
+``python -m ateles`` runs before any third-party dependency is installed;
+implemented verbs import their (also stdlib-only) modules lazily.
 """
 
 from __future__ import annotations
@@ -22,13 +23,13 @@ from . import __version__
 VERBS: dict[str, tuple[str, str]] = {
     "init": (
         "W1",
-        "interactive wizard: collect operator domain/channels/locale, write a "
-        "validated config + .env",
+        "interactive wizard: collect operator domain/identity/locale, write a "
+        "validated config",
     ),
     "doctor": (
         "W1",
-        "preflight: Neotoma reachable, keys valid, CLIs present, schemas "
-        "registered, context entities seeded",
+        "diagnose missing setup steps (config, keys, CLIs, Neotoma) and report "
+        "the next rung",
     ),
     "provision": (
         "W2",
@@ -50,8 +51,11 @@ VERBS: dict[str, tuple[str, str]] = {
     ),
 }
 
-#: exit code for a not-yet-implemented verb (distinct from argparse's usage error 2...
-#: argparse uses 2 for usage errors, so use 3 here to disambiguate).
+#: Verbs with real behaviour (W1). The rest are stubs.
+IMPLEMENTED = frozenset({"init", "doctor"})
+
+#: Exit code for a not-yet-implemented verb — distinct from argparse's usage
+#: error (2) so callers can tell "unknown flag" from "not built yet".
 NOT_IMPLEMENTED_EXIT = 3
 
 ROADMAP = (
@@ -81,8 +85,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
     for verb, (workstream, intent) in VERBS.items():
-        subparsers.add_parser(verb, help=f"[{workstream}] {intent}")
+        sub = subparsers.add_parser(verb, help=f"[{workstream}] {intent}")
+        if verb == "doctor":
+            sub.add_argument(
+                "--no-network",
+                action="store_true",
+                help="skip the Neotoma reachability probe",
+            )
+        elif verb == "init":
+            sub.add_argument(
+                "--non-interactive",
+                action="store_true",
+                help="don't prompt; seed config from env/existing values",
+            )
     return parser
+
+
+def _run_doctor(args: argparse.Namespace) -> int:
+    from .doctor import next_rung, render, run_checks
+
+    checks = run_checks(check_network=not args.no_network)
+    print(render(checks))
+    return 0 if next_rung(checks) is None else 1
+
+
+def _run_init(args: argparse.Namespace) -> int:
+    from .initialize import run_init
+
+    run_init(non_interactive=args.non_interactive)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -91,6 +122,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.command:
         parser.print_help()
         return 0
+    if args.command == "doctor":
+        return _run_doctor(args)
+    if args.command == "init":
+        return _run_init(args)
     return _stub(args.command)
 
 
