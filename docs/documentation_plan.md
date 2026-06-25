@@ -134,19 +134,25 @@ Architecture/operating docs that match the audited reality:
 | `transcript_peter_thiel_sxsw_2013_*.md` | A 2013 conference transcript — not repo documentation | **Remove** from `docs/` (belongs in Neotoma as a `transcription`/source entity, not the public doc set) |
 | `homekit_*.md` (4), `docker_vs_native_homeassistant.md`, `why_mdns_reflector_may_not_work.md`, `tunnel_processes_cleanup.md` | Home-automation troubleshooting notes — operator's smart-home, unrelated to the swarm | **Move** to `docs/runbooks/home-automation/` or out of the repo |
 | `generic_pdf_form_filler_guide.md` | A standalone how-to unrelated to the swarm core | **Move** to `docs/runbooks/` |
-| `neotoma_developer_release_tester_*` (2), `neotoma_io_redirect.md`, `neotoma_post_lookup.md`, `agent_dependency_discovery_signal_loss.md` | Neotoma-product GTM / essay artifacts, not Ateles architecture | **Move** to the neotoma repo or `docs/outreach/` |
+| `neotoma_developer_release_tester_*` (2), `neotoma_io_redirect.md`, `neotoma_post_lookup.md`, `agent_dependency_discovery_signal_loss.md` | Neotoma-product GTM / essay artifacts, not Ateles architecture | **Move** to the neotoma repo |
 
-### E. Operator-personal / PII risk in a PUBLIC repo — operator review required ⚠️
+### E. Operator-personal / PII in a PUBLIC repo — REMOVED, history scrub pending ✅⚠️
 
-| Item | Concern | Disposition |
+A first-principles PII audit of the working tree and all 51 commits found the third-party exposure was
+**bounded and shallow**: one file, in one commit (`94aa438`), plus operator-own health notes. No secrets,
+IBANs, national IDs, or real third-party emails/phones anywhere; the 2 Bitcoin matches are a public
+"onboarding buddy" tip address in `loop-start`, not operator PII.
+
+| Item | Concern | Action taken |
 | --- | --- | --- |
-| `docs/outreach/LINKEDIN_ICP_PRIORITY_LIST.md` (845 lines) | Very likely contains **third-party names/profiles** in a public repo → RGPD Art. 6(1)(f) / public-publication concern per `CLAUDE.md` | **Operator must review.** Recommend moving to `ateles-private` or Neotoma; do not auto-delete | 
-| `docs/health/lean_bulk_8_week_plan_2026.md`, `docs/health/facial_puffiness_mitigation_checklist.md` | Operator's personal health data; off-topic and sensitive for a public reference repo | **Operator review.** Recommend moving to `ateles-private`/Neotoma |
-| `docs/developer/neotoma_finances_dashboard_neotoma_side_diagnostics.md` | May reference financial specifics | **Operator review** before keeping public |
+| `docs/outreach/LINKEDIN_ICP_PRIORITY_LIST.md` (814 people) | **Third-party names + LinkedIn profiles** in a public repo → RGPD Art. 6(1)(f) | **Removed** from the working tree; `docs/outreach/` gitignored. History scrub pending — see [runbooks/pii-history-scrub.md](runbooks/pii-history-scrub.md) |
+| `docs/health/lean_bulk_8_week_plan_2026.md`, `docs/health/facial_puffiness_mitigation_checklist.md` | Operator's personal health data | **Removed** from the working tree; `docs/health/` gitignored. History scrub pending (same runbook) |
+| `docs/developer/neotoma_finances_dashboard_neotoma_side_diagnostics.md` | Suspected financial specifics | **Re-assessed: not PII.** It is a technical API-diagnostics runbook (HTTP checks, endpoint contracts) — kept |
 
-> These are flagged, **not** acted on automatically: relocating or deleting operator content (and anything
-> possibly containing other people's data) is the operator's call. The PII items are the highest-urgency
-> follow-up in this plan.
+> **Why the working-tree removal isn't enough.** On a public repo the file remains fully browsable in the
+> old commit until `main`'s history is rewritten and force-pushed, and GitHub purges its cached views. That
+> irreversible step is the operator's to run — the [history-scrub runbook](runbooks/pii-history-scrub.md) has
+> the exact commands, a GitHub Support request template, and a PR/fork checklist.
 
 ### F. Command docs that duplicate skills — consider folding
 
@@ -170,10 +176,14 @@ operator-facing context the SKILL.md omits; otherwise link to the skill from a s
 5. **Created `docs/forking.md`** — the adopt-by-forking guide: what's operator-specific vs. portable.
 6. **Created this plan** (`docs/documentation_plan.md`).
 7. **Added `LICENSE`** (MIT) to match the README's repeated license claim.
+8. **Removed the PII files** (Part 2.E) from the working tree, gitignored `docs/outreach/` and `docs/health/`
+   to prevent recurrence, and wrote the [history-scrub runbook](runbooks/pii-history-scrub.md) for the
+   operator to finish the job on `main`.
 
 ### Recommended operator follow-ups (not auto-executed)
 
-- **Review the PII-risk files in Part 2.E** and relocate to `ateles-private`/Neotoma. *(highest urgency)*
+- **Run the [history-scrub runbook](runbooks/pii-history-scrub.md)** to purge the removed PII from `main`'s
+  history and GitHub's cache. *(highest urgency — the file is still in old commits until this runs)*
 - **Relocate `docs/mcp/**` (145 code files)** out of `docs/` to `mcp-servers/`.
 - **Archive the stale `docs/shared/**` and Cursor/foundation-era docs** under `docs/archive/`.
 - **Move off-topic docs** (SXSW transcript, HomeKit/home-automation, PDF-form-filler, Neotoma-product GTM) to
