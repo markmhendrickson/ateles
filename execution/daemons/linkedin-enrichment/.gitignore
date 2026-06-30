@@ -1,0 +1,5 @@
+# Persisted runtime state — daily counter, dedupe markers, pacing timestamp.
+# Operator-local, must never be committed (contains enriched contact entity_ids).
+.linkedin_enrichment_state.json
+.tmp_state_*
+__pycache__/
