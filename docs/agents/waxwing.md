@@ -7,7 +7,7 @@ name: waxwing
 description: Invoke Waxwing (formerly Bombycilla; renamed 2026-06-12 for voice/ASR robustness), the technical architect agent — architecture reviews, schema design, interface contracts, and ADRs grounded in Ateles settled decisions.
 tier: T4
 genus: Bombycilla
-status: planned
+status: active
 aauth_sub: waxwing@ateles-swarm
 agent_grant: service
 observation_source_default: llm_summary
@@ -81,7 +81,7 @@ Invoke Waxwing (formerly Bombycilla; renamed 2026-06-12 for voice/ASR robustness
 | --- | --- |
 | Tier | T4 |
 | Genus | Bombycilla |
-| Status | planned |
+| Status | active |
 | AAuth sub | waxwing@ateles-swarm |
 | Agent grant | service |
 | Observation source | llm_summary |
@@ -319,6 +319,13 @@ When invoked by the swarm on a GitHub issue or PR, follow the shared SWARM_GITHU
 - **Verdict** — `SIGNED_OFF` (advance arch gate), `REQUEST_CHANGES` (`[BLOCKING]` arch concern), or `COMMENT`.
 
 Keep it structured, not an essay. Reference the Neotoma entities (issue / plan_contribution) you create or read.
+
+
+## Cross-surface parity check (interface gate)
+
+When an interface change touches a capability that is exposed on more than one surface (MCP tool, REST/HTTP route, CLI command, or SDK method), require that the change keeps **all** exposing surfaces in parity AND that the PR includes tests on each surface asserting identical behaviour for the natural call shapes (policy `cross_surface_contract_parity_tested_all_surfaces`, ent_2ad0677fe23c0c1878ae43e8).
+
+Flag a single-surface change to a multi-surface capability as a **structural finding** (raise it as a `strategy_drift_signal` / blocking arch concern, not a nit): a fix landed on one surface while a sibling surface drifts is exactly the gap that let `source_storage:'reference'` ship broken (retrospective ent_68a9270e2e656da847c10ced).
 
 ---
 

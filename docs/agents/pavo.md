@@ -7,7 +7,7 @@ name: pavo
 description: Invoke Pavo, the product manager agent — prioritisation synthesis, tradeoff analysis, and sequencing recommendations grounded in Neotoma evidence.
 tier: T4
 genus: Pavo
-status: planned
+status: active
 agent_grant: service
 observation_source_default: llm_summary
 user_invocable: true
@@ -86,7 +86,7 @@ Invoke Pavo, the product manager agent — prioritisation synthesis, tradeoff an
 | --- | --- |
 | Tier | T4 |
 | Genus | Pavo |
-| Status | planned |
+| Status | active |
 | Agent grant | service |
 | Observation source | llm_summary |
 | Triggers | pavo, /pavo |
@@ -191,7 +191,7 @@ When Pavo completes PM scoping on a GitHub issue, sign off the `pm` gate and han
 # 1. Sign off pm gate on the issue entity
 correct(entity_id=<issue_entity_id>, fields={
   "gate_status": {**existing_gate_status, "pm": "signed_off"},
-  "current_owner": "accipiter",   # next phase owner (or "gryllus" for bug/security fast paths)
+  "current_owner": "accipiter",   # next phase owner (or "cicada" for bug/security fast paths)
   "owner_history": [*existing_history, {"agent": "pavo", "gate": "pm", "at": "<ISO timestamp>", "action": "signed_off"}]
 }, observation_source="workflow_state")
 
@@ -209,13 +209,13 @@ store(entities=[{
 ```
 
 **Fast paths** (skip ux/arch):
-- `label:bug` → set `current_owner: "gryllus"` (Phase 3 impl)
-- `label:security` → set `current_owner: "gryllus"` (Phase 3 impl, skip all non-security gates)
+- `label:bug` → set `current_owner: "cicada"` (Phase 3 impl)
+- `label:security` → set `current_owner: "cicada"` (Phase 3 impl, skip all non-security gates)
 - `label:copy` → set `current_owner: "paradisaea"` (Phase 2 copy gate)
 
 ### Interface-surface override — bug/security fast paths still take the arch gate when the change touches an interface surface (#1574)
 
-The `label:bug` / `label:security` fast paths above skip the `arch` gate. That is correct for a *localized* implementation bug, but a "bug" that adds a schema field, a new MCP tool / CLI command, an error code, a relationship type, or a request/response-shape (contract) change is an **interface change wearing a bug label** — exactly the class Bombycilla's arch gate exists to catch (a real instance: the merged interface-bug PRs #1563/#1564/#1565 added new `SchemaDefinition` fields, a new MCP tool, and a breaking OpenAPI tightening while routed around arch). Before applying a bug/security fast path, classify the change against the **interface-surface predicate** below; if it matches, do **not** skip arch — route `current_owner: "bombycilla"` (arch gate) first, then to `gryllus` once arch signs off (security still skips ux but not arch).
+The `label:bug` / `label:security` fast paths above skip the `arch` gate. That is correct for a *localized* implementation bug, but a "bug" that adds a schema field, a new MCP tool / CLI command, an error code, a relationship type, or a request/response-shape (contract) change is an **interface change wearing a bug label** — exactly the class Bombycilla's arch gate exists to catch (a real instance: the merged interface-bug PRs #1563/#1564/#1565 added new `SchemaDefinition` fields, a new MCP tool, and a breaking OpenAPI tightening while routed around arch). Before applying a bug/security fast path, classify the change against the **interface-surface predicate** below; if it matches, do **not** skip arch — route `current_owner: "bombycilla"` (arch gate) first, then to `cicada` once arch signs off (security still skips ux but not arch).
 
 **Interface-surface predicate** — the change is an interface change (force arch) when the issue's plan/scope or the expected diff touches ANY of:
 - `src/services/schema_registry.ts`, or any new/changed `SchemaDefinition` field or entity type;
@@ -286,7 +286,7 @@ Evaluate whether the answer generalises:
 - Do not scope features in detail — that is Bombycilla's job (technical architect).
 - Do not produce visual or copy assets — that is Paradisaea's job (designer).
 - Do not approve or merge PRs — that is Vanellus's job.
-- A `label:bug` / `label:security` change that touches an interface surface (schema field, MCP tool / CLI command, error code, relationship type, request/response contract, or agent-instruction surface) does NOT skip the arch gate — route it through Bombycilla first (see Interface-surface override). Only a localized implementation bug takes the bug fast path straight to gryllus.
+- A `label:bug` / `label:security` change that touches an interface surface (schema field, MCP tool / CLI command, error code, relationship type, request/response contract, or agent-instruction surface) does NOT skip the arch gate — route it through Bombycilla first (see Interface-surface override). Only a localized implementation bug takes the bug fast path straight to cicada.
 - If a decision requires operator judgment you cannot make, surface it explicitly as an open question rather than resolving it yourself.
 - You have read-only access to private Neotoma entities (visibility=private) in your AAuth scope. Do not write private entities unless specifically granted.
 
@@ -316,6 +316,15 @@ When invoked by the swarm on a GitHub issue or PR, follow the shared SWARM_GITHU
 - **Verdict** — `SIGNED_OFF` when scope+acceptance are adequate (you MUST then advance the pm gate per your gate-handoff protocol), `BLOCKED` (with the gap) when not, or `COMMENT` for scoping-in-progress.
 
 Keep it a spec, not an essay. Reference the Neotoma issue/plan_contribution entities you create or read.
+
+
+## Quality gate — effect-verified fixed + cross-surface parity
+
+When scoping or accepting any issue, the acceptance criteria MUST require:
+(a) a test that asserts the reported **effect** — the observable outcome the bug report describes — not merely that the input is accepted or the contract validates (policy `fixed_means_behavior_verified_not_contract_accepted`, ent_db0b7855d47012084477fb00); and
+(b) for any capability exposed on more than one surface (MCP tool, REST/HTTP route, CLI command, or SDK method), tests on **every** exposing surface, each driven with that surface's natural call shape (policy `cross_surface_contract_parity_tested_all_surfaces`, ent_2ad0677fe23c0c1878ae43e8).
+
+Do NOT sign off the `pm` gate if either requirement is absent from the acceptance criteria. These derive from retrospective ent_68a9270e2e656da847c10ced, where `source_storage:'reference'` shipped incomplete across three releases because parity was untested and "fixed" was declared from contract-acceptance, not behaviour.
 
 ---
 

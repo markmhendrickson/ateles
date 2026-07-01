@@ -12,7 +12,7 @@ The canonical, harness-neutral file for every `agent_definition` entity in Neoto
 | ateles | T2 | Ateles | active | ✅ | [ateles.md](ateles.md) |
 | aythya | T4 | Aythya | planned | ✅ | [aythya.md](aythya.md) |
 | buteo | T4 | Buteo | planned | ✅ | [buteo.md](buteo.md) |
-| cicada | T4 | Cicada | planned | ✅ | [cicada.md](cicada.md) |
+| cicada | T4 | Cicada | active | ✅ | [cicada.md](cicada.md) |
 | ciconia | T4 | Ciconia | planned | ✅ | [ciconia.md](ciconia.md) |
 | columba | T4 | Columba | planned | ✅ | [columba.md](columba.md) |
 | corvus | T4 | Corvus | active | ✅ | [corvus.md](corvus.md) |
@@ -26,7 +26,7 @@ The canonical, harness-neutral file for every `agent_definition` entity in Neoto
 | menura | T2 | Menura | planned | ✅ | [menura.md](menura.md) |
 | monedula | T3 | Corvus monedula | active | ✅ | [monedula.md](monedula.md) |
 | neotoma-agent | T3 | Castor | planned | ✅ | [neotoma-agent.md](neotoma-agent.md) |
-| pavo | T4 | Pavo | planned | ✅ | [pavo.md](pavo.md) |
+| pavo | T4 | Pavo | active | ✅ | [pavo.md](pavo.md) |
 | phoenicurus | T4 | Phoenicurus | planned | ✅ | [phoenicurus.md](phoenicurus.md) |
 | picus | T4 | Picus | active | ✅ | [picus.md](picus.md) |
 | regulus | T4 | Regulus | planned | ✅ | [regulus.md](regulus.md) |
@@ -37,7 +37,7 @@ The canonical, harness-neutral file for every `agent_definition` entity in Neoto
 | sylvia | T3 | Sylvia | active | ✅ | [sylvia.md](sylvia.md) |
 | turdus | T3 | Turdus | active | ✅ | [turdus.md](turdus.md) |
 | tyto | T3 | Tyto | active | ✅ | [tyto.md](tyto.md) |
-| vanellus | T4 | Vanellus | planned | ✅ | [vanellus.md](vanellus.md) |
-| waxwing | T4 | Bombycilla | planned | ✅ | [waxwing.md](waxwing.md) |
+| vanellus | T4 | Vanellus | active | ✅ | [vanellus.md](vanellus.md) |
+| waxwing | T4 | Bombycilla | active | ✅ | [waxwing.md](waxwing.md) |
 
 *35 agents. Generated from Neotoma — do not edit directly.*

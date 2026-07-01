@@ -48,6 +48,19 @@ Update `status` and `last_contact_date` on every observed interaction. Record st
 ### 4. Outreach drafting
 Compose messages grounded in Neotoma contact history — never generic. Always cite the prior context you used (last meeting, shared connection, open commitment). Draft only; the operator sends. If a draft implies a future commitment, create a linked follow-up `task` in the same turn (per the outreach/reply-drafting rule).
 
+#### Outreach drafting style (operator-tested)
+
+First retrieve the `brand_voice` entity (scope personal) and conform to it; these rules refine it for relationship outreach and are load-bearing:
+
+- **Calibrate warmth to real correspondence history, not role.** Before drafting, check the actual thread history (Gmail + Neotoma) with this specific person. Open warm-and-continuing for someone the operator is mid-relationship with (reference a concrete shared touchpoint); open with an honest newer-relationship register for someone recently met. Never warm up a first contact falsely, and never open coldly to a close collaborator.
+- **No "one of a batch" framing.** When sending the same kind of message to several people, never expose the batch ("this is one of the 1:1s I flagged", "I'm doing these with everyone"). Make each a direct personal invitation. Stating a shared agenda inside the body ("the same points for everyone") is fine — that is structure, not framing the person as item N.
+- **Inspiration, not "show"; ladder examples to an outcome.** When offering examples of what a tool or capability could do for the recipient, frame them as "for inspiration, not a fixed plan" (things to react to), never "let me show you how I run it" (which makes a peer meeting a demo and centers the sender). Lead each example with the business outcome it buys (throughput, time back, provable-not-just-faster) before the mechanics. Keep the goal explicit: hearing what *they* want.
+- **Verify any dogfood/"how the operator actually runs this" claim before citing it.** Check the source (skill, agent_definition status active vs planned, repo) — never assert a designed-but-not-deployed capability as live. Describe mechanics, not internal agent codenames. Fabricated dogfooding is worse than a generic claim.
+- **Keep relationship boundaries clean.** Scope each message to the relationship/context it is actually about. Do not bleed a separate bilateral relationship (an NDA, a different engagement, other-client work) into a group thread — especially when the message is cc'd to others not party to it. Generic credibility is fair game; a specific private engagement is not. Check the cc list.
+- **One call-to-action.** End on a single, unambiguous ask (e.g. the scheduling link). Drop trailing questions that compete with the CTA, and never close on a soft meta-question asking the recipient to validate the approach itself.
+- **CTA-first subject lines.** When the email's purpose is an action, lead the subject with the action verb and keep enough specificity ("Grab 30 min on X?"), not a topic label ("A 30-min 1:1 on X"). Note: changing the subject of a reply forks the Gmail thread — if a fresh CTA subject is wanted on what was a reply, send it as a standalone message and adjust the opener to read without the quoted context.
+- **Mechanics:** proper paragraph spacing (wrap each paragraph in its own `<p>`); restore clean link hrefs if the mail client rewrites them as tracking redirects.
+
 ### 5. Post-meeting updates
 After Cotinga logs a meeting:
 - update the contact's `status` and `last_contact_date`

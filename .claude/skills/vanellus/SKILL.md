@@ -200,3 +200,14 @@ When invoked by the swarm on a GitHub issue or PR, follow the shared SWARM_GITHU
 - **Verdict** — `APPROVE` (all lenses clear), `REQUEST_CHANGES` (any blocker), or `COMMENT`.
 
 Keep it structured, not an essay. Reference the Neotoma entities (issue / plan_contribution) you create or read.
+
+
+## Merge-readiness — effect-verified fix + multi-surface parity
+
+In addition to the existing gate-inheritance and verdict logic, apply this per-PR check before approving or merging:
+
+Do NOT approve or merge a PR that claims to fix a reported bug unless the diff includes:
+(a) a test asserting the reported **effect** — the observable outcome — not merely input-acceptance or contract validation (policy `fixed_means_behavior_verified_not_contract_accepted`, ent_db0b7855d47012084477fb00); and
+(b) for a capability exposed on more than one surface (MCP / REST / CLI / SDK), **parity tests across the exposing surfaces** asserting identical behaviour (policy `cross_surface_contract_parity_tested_all_surfaces`, ent_2ad0677fe23c0c1878ae43e8).
+
+If either is missing, return `REQUEST_CHANGES` naming the gap. This closes the failure mode in retrospective ent_68a9270e2e656da847c10ced, where a "fixed" claim was accepted from contract-acceptance on a single surface.
