@@ -16,10 +16,13 @@ It is invoked AFTER operator approval (e.g. by Ateles when Mark replies
 "approve vX.Y.Z" on Telegram, or manually with --version). It never publishes
 without an approved (or explicitly forced) release record.
 
-The npm publish uses a granular automation token (NPM_TOKEN, bypass-2FA) read
-from ~/.config/neotoma/.env, written to a temporary npmrc for the publish and
-removed afterwards. A `npm whoami` preflight makes a missing/expired token fail
-LOUD (Telegram alert) rather than silently producing an unpublished release.
+The npm publish uses a granular automation token (bypass-2FA) read from
+~/.config/neotoma/.env under either NPM_TOKEN or NODE_AUTH_TOKEN, written to a
+temporary npmrc for the publish and removed afterwards. That .env is populated
+OFFLINE by secrets_materialize.py from the age-encrypted SOPS snapshot in
+ateles-private — no live 1Password session at publish time. A `npm whoami`
+preflight makes a missing/expired token fail LOUD (Telegram alert) rather than
+silently producing an unpublished release.
 
 Usage:
   python3 publish.py --version v0.16.0          # publish a specific approved release
@@ -80,7 +83,13 @@ TELEGRAM_TOPIC = os.environ.get("TELEGRAM_TOPIC_PHOENICURUS", "") or os.environ.
 
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180")
-NPM_TOKEN = os.environ.get("NPM_TOKEN", "")
+# The npm automation token. Accept either conventional name so the release
+# works from whatever the SOPS snapshot materialized: NPM_TOKEN (Ateles'
+# manifest name) OR NODE_AUTH_TOKEN (npm's own env var, also what the neotoma
+# GHA release workflow uses). Reading either avoids the June-2026 failure where
+# the snapshot carried NODE_AUTH_TOKEN but publish only looked for NPM_TOKEN and
+# fell back to a live `op` session that had expired.
+NPM_TOKEN = os.environ.get("NPM_TOKEN", "") or os.environ.get("NODE_AUTH_TOKEN", "")
 
 SANDBOX_URL = os.environ.get(
     "NEOTOMA_SANDBOX_URL", "https://neotoma-sandbox.fly.dev"
@@ -317,7 +326,11 @@ def _npm_env_with_token() -> tuple[dict, Path]:
     runs non-interactively. Caller MUST unlink the returned path.
     """
     if not NPM_TOKEN:
-        raise StepError("NPM_TOKEN not set in ~/.config/neotoma/.env — cannot publish")
+        raise StepError(
+            "Neither NPM_TOKEN nor NODE_AUTH_TOKEN set in ~/.config/neotoma/.env "
+            "— cannot publish. Run secrets_materialize.py to refresh the .env from "
+            "the offline SOPS snapshot (no live 1Password session required)."
+        )
     fd, path = tempfile.mkstemp(prefix=".npmrc-phoenicurus-", text=True)
     with os.fdopen(fd, "w") as fh:
         fh.write(f"//registry.npmjs.org/:_authToken={NPM_TOKEN}\n")
@@ -332,8 +345,10 @@ def npm_whoami_preflight(npm_env: dict) -> str:
     who = (proc.stdout or "").strip()
     if proc.returncode != 0 or not who:
         raise StepError(
-            "npm whoami failed — NPM_TOKEN missing/expired. Regenerate the "
-            "granular automation token and update ~/.config/neotoma/.env."
+            "npm whoami failed — npm token (NPM_TOKEN / NODE_AUTH_TOKEN) "
+            "missing/expired. Regenerate the granular automation token in "
+            "1Password, then secrets_publish.py + secrets_materialize.py so the "
+            "offline SOPS snapshot and ~/.config/neotoma/.env carry the new value."
         )
     log.info(f"npm authenticated as: {who}")
     return who
