@@ -169,7 +169,7 @@ paths = [
   "execution/scripts/daily_tasks_email.py",
   "execution/scripts/run_daily_tasks_email.sh",
   "execution/scripts/run-daily-tasks-email.sh",
-  "shared/docs/agent-data-rules.md",
+  "docs/policies/agent-data-rules.md",
   "execution/scripts/extract_meeting_frames.py",
   "execution/scripts/transcribe_audio.py",
   ".cursor/skills/record_meeting/SKILL.md",

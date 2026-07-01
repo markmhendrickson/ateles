@@ -196,19 +196,20 @@ operator-facing context the SKILL.md omits; otherwise link to the skill from a s
   [archive/](archive/); the `.claude/skills/<name>/SKILL.md` mirror is the source of truth.
 - ✅ **Archived the dead Cursor-era docs (Part 2.B, partial)** — `foundation-vs-ateles-rules`,
   `skills-and-hooks-{before-after,guide}`, `legacy_data_types_inventory`, `cursor_directory`, `cursor_rules/`
-  → [archive/](archive/) (gitleaks allowlist paths updated). `docs/shared/**` was **left in place**: 3 of its
-  files (`agent-workflow-requirements`, `agent-mcp-access-policy`, `agent-data-rules`) are cited as live
-  policy by the linters + `.gitleaks.toml`.
+  → [archive/](archive/) (gitleaks allowlist paths updated). (`docs/shared/**` itself was handled
+  separately — see the next bullet.)
 - ✅ **Relocated `docs/mcp/**` (145 files, Part 2.C)** → top-level `mcp-servers/` — gitleaks allowlist + index
   note updated; no submodules / imports / CI affected. Side effect: doc-lint failures 160 → 101.
+- ✅ **Reconciled `docs/shared/**` (Part 2.B, option 2)** — relocated the 3 live policy docs to
+  [policies/](policies/) (`agent-workflow-requirements`, `agent-mcp-access-policy`, `agent-data-rules`, now with
+  `Purpose`/`Scope` headers) and repointed their 9 citations across 3 linters, `.gitleaks.toml`, and
+  `linting-guide.md`; archived the other 28 files → [archive/shared/](archive/shared/). Doc-lint failures
+  101 → 70.
 
 **Still pending:**
-- **`docs/shared/**` (the legacy three-layer foundation)** — relocate the 3 live policy docs
-  (`agent-workflow-requirements`, `agent-mcp-access-policy`, `agent-data-rules`) to an active home and update
-  their ~7 linter / `.gitleaks.toml` / `linting-guide.md` citations, then archive the rest. Deferred because
-  it edits linter code (option 2 from the B discussion).
 - *(nicety)* Build a single consolidated skills reference if the archived command-docs' context is still
   wanted.
 
-The remaining relocations touch a large code tree (`docs/mcp/`) or need a reference sweep (`docs/shared/`)
-where a wrong move is hard to reverse — sequence them with a grep-for-references check before each move.
+All the planned relocations (Parts 2.B–2.F) are now done; only the optional consolidated skills reference
+remains. The residual doc-lint debt (70 files) is mostly pre-existing top-level docs that predate the
+`Purpose`/`Scope` requirement — a separate, lower-priority cleanup.

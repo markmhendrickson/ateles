@@ -3,7 +3,7 @@
 Workflow file compliance checker.
 
 Checks that workflow files (reports, reviews) are in correct locations
-as specified in /shared/docs/agent-workflow-requirements.md.
+as specified in docs/policies/agent-workflow-requirements.md.
 """
 
 import re
@@ -76,7 +76,7 @@ def main():
         for violation in all_violations:
             print(f"  {violation}", file=sys.stderr)
         print(
-            "\nSee /shared/docs/agent-workflow-requirements.md for file location requirements.",
+            "\nSee docs/policies/agent-workflow-requirements.md for file location requirements.",
             file=sys.stderr,
         )
         sys.exit(1)
