@@ -111,3 +111,6 @@ execution/daemons/*/*_last_run
 # docs/health held personal health notes — both removed + history-scrubbed 2026-06-25.)
 docs/outreach/
 docs/health/
+
+# Customer-shared debug artifacts (HARs, proxy code) — kept locally + in Neotoma as reference sources, never committed to the public repo
+execution/embed-design/
