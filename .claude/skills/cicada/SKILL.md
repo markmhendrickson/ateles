@@ -101,3 +101,13 @@ If during this work you observed evidence that contradicts your current operatin
 `[cicada] strategy_drift_signal: <one-line observation>`
 
 Ateles digests these. They're how the swarm learns. Omit when nothing material surfaced.
+
+
+## Impl sign-off checklist — effect test + surface parity
+
+Before signing off the impl gate, ensure the PR contains:
+(a) a test asserting the reported **effect** — the observable outcome the issue describes — not just that the input is accepted or the contract validates (policy `fixed_means_behavior_verified_not_contract_accepted`, ent_db0b7855d47012084477fb00); and
+(b) for any capability you touched that is exposed on multiple surfaces (MCP tool, REST/HTTP route, CLI command, or SDK method), tests on **each** exposing surface driven with the natural call shape (e.g. for `store`: the file-only shape AND the combined file+entities shape) (policy `cross_surface_contract_parity_tested_all_surfaces`, ent_2ad0677fe23c0c1878ae43e8); and
+(c) regenerate every generated/derived file whose SOURCE you touched, and commit it in the SAME PR, as the LAST step before `gh pr create` (policy `regenerate_generated_files_before_opening_pr`, ent_3c83d2c570d8c79e2865b988). The recurring miss is the automated test catalog: any added/moved test file needs `npm run generate:test-catalog`, or the baseline lane fails on 'Validate automated test catalog' (this happened on PRs #1846, #1849, #1861). Others with the same contract: openapi_types, contract_mappings, capability manifest, mcp-docs. Run the matching `validate:*` check locally to confirm green so the baseline lane is not what discovers the drift.
+
+These derive from retrospective ent_68a9270e2e656da847c10ced, where `source_storage:'reference'` shipped incomplete because it was verified on one surface and declared fixed without an effect-level test.
