@@ -38,6 +38,7 @@ highest rung your environment currently reaches.
 - ✅ [`taxonomy.md`](taxonomy.md) · [`agents/`](agents/) — the agent roster by tier (T1–T4)
 - ⬜ Concepts & glossary — Neotoma entity, AAuth, agent_grant, gate, daemon, tier, mirror, blast-radius (*to write*)
 - 🟡 [`multi_tenant.md`](multi_tenant.md) — single-operator assumptions and the multi-operator path
+- ✅ [`installability.md`](installability.md) — the concrete changes to make Ateles installable & multi-tenant (roadmap; complements ateles#18/#19)
 
 ## P1 · Stand it up
 *Adopter — the fork-and-run path.*
