@@ -781,6 +781,113 @@ Work through all steps, then stop.
 
 
 # ---------------------------------------------------------------------------
+# Recording-consent posture (jurisdiction-aware, best-effort)
+# ---------------------------------------------------------------------------
+
+# US all-party (two-party) consent states: recording requires informing every
+# party. The rest of the US (and federal law) is one-party — the operator, being
+# a party, satisfies it. See record_meeting SKILL.md "Recording disclosure".
+_US_ALL_PARTY_STATES = {
+    "CA": "California", "CT": "Connecticut", "FL": "Florida", "IL": "Illinois",
+    "MD": "Maryland", "MA": "Massachusetts", "MI": "Michigan", "MT": "Montana",
+    "NV": "Nevada", "NH": "New Hampshire", "OR": "Oregon", "PA": "Pennsylvania",
+    "WA": "Washington",
+}
+
+# Lowercase substrings that signal an EU/EEA location (RGPD transparency duty;
+# Spain adds Art. 197 CP — satisfied because the operator is a party).
+_EU_HINTS = (
+    "spain", "espana", "madrid", "barcelona", "germany", "france", "italy",
+    "netherlands", "ireland", "portugal", "belgium", "austria", "sweden",
+    "denmark", "finland", "poland", "europe",
+)
+
+
+def _infer_jurisdiction(
+    attendees: list[dict], attendee_lookup: dict[str, dict | None], event: dict
+) -> tuple[str, str, bool]:
+    """Best-effort jurisdiction inference for the non-self attendees of a meeting.
+
+    Returns (bucket, label, confident):
+      bucket in {"us_all_party", "eu", "us_one_party", "unknown"}
+      confident is False when the inference rests on weak signal (event tz /
+      email only, no explicit contact location) so the brief can self-label it.
+
+    Signal, strongest first: the contact's stored location/country/timezone in
+    Neotoma, then the calendar event location. Free-mail domains carry no
+    reliable jurisdiction signal and are ignored on purpose.
+    """
+    blobs: list[str] = []
+    weak_only = True
+
+    for a in attendees:
+        if a.get("self"):
+            continue
+        known = attendee_lookup.get(a.get("email", "")) or {}
+        for field in ("location", "country", "city", "region", "state", "address"):
+            val = (known.get(field) or "").strip()
+            if val:
+                blobs.append(val.lower())
+                weak_only = False
+        tz = (known.get("timezone") or known.get("time_zone") or "").strip()
+        if tz:
+            blobs.append(tz.lower())
+
+    ev_loc = (event.get("location") or "").strip()
+    if ev_loc:
+        blobs.append(ev_loc.lower())
+
+    blob = " " + " ".join(blobs) + " "
+
+    if any(h in blob for h in _EU_HINTS):
+        return ("eu", "EU/EEA", not weak_only)
+
+    for code, full in _US_ALL_PARTY_STATES.items():
+        if full.lower() in blob:
+            return ("us_all_party", full, not weak_only)
+    for code, full in _US_ALL_PARTY_STATES.items():
+        # Standalone uppercase state code (e.g. " CA ") — weaker signal.
+        if f" {code.lower()} " in blob or f",{code.lower()} " in blob:
+            return ("us_all_party", full, False)
+
+    if "america/" in blob or "united states" in blob or " usa " in blob or " us " in blob:
+        return ("us_one_party", "US (one-party)", not weak_only)
+
+    return ("unknown", "unknown", False)
+
+
+def _consent_recommendation(bucket: str, label: str, confident: bool) -> str:
+    """Map an inferred jurisdiction to a one-line recording-consent recommendation.
+
+    Conservative: when unknown or weakly inferred, fall back to the universally
+    safe advice (announce regardless). The operator is always a party, so federal
+    one-party / Spain Art. 197 are already met; the open question is all-party
+    disclosure + EU transparency.
+    """
+    caveat = "" if confident else " (guess, verify if unsure)"
+    if bucket == "us_all_party":
+        return (
+            f"Recording consent: {label} is all-party-consent{caveat}. Use the "
+            "platform's native Record (auto-discloses to all, incl. dial-ins) or "
+            'say "I\'m recording for notes" before substance.'
+        )
+    if bucket == "eu":
+        return (
+            f"Recording consent: {label}{caveat}. RGPD transparency — disclose "
+            "you're recording (native Record or a verbal note covers it)."
+        )
+    if bucket == "us_one_party":
+        return (
+            f"Recording consent: {label}{caveat}. One-party — covered as a party, "
+            "but a quick verbal note is good practice."
+        )
+    return (
+        "Recording consent: jurisdiction unknown. Safest is to announce recording "
+        "regardless (covers every US state + EU)."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Phase 1: shallow briefing
 # ---------------------------------------------------------------------------
 
@@ -843,6 +950,13 @@ def build_shallow_briefing(
                 body.append(f"    👤 {esc(a['name'])}{tail}")
             else:
                 body.append(f"    👤 {esc(a['name'])} — first meeting (deep prep running)")
+
+        # Recording-consent posture: only for real meetings with an external
+        # party (a solo/internal block needs no disclosure brief). Best-effort
+        # jurisdiction inference; the line self-labels its confidence.
+        if is_meeting and others:
+            _bucket, _label, _conf = _infer_jurisdiction(attendees, attendee_lookup, event)
+            body.append(f"    🎙️ {esc(_consent_recommendation(_bucket, _label, _conf))}")
 
         events_shown += 1
 
