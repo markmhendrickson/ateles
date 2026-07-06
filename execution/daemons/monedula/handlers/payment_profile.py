@@ -7,10 +7,24 @@ No business-specific values are hardcoded here.
 Each profile is identified by a PREFIX (e.g. "THERAPY", "YOGA") and reads:
   <PREFIX>_LABEL          Human-readable label for Telegram messages
   <PREFIX>_CALENDAR_KEYWORDS  Comma-separated keywords to match against calendar event titles
+  <PREFIX>_CALENDAR_RECURRING_EVENT_ID  (optional) Stable Google Calendar
+                          recurringEventId. When set, matches() selects ONLY
+                          events whose recurringEventId (or id, for the
+                          defining instance) equals this value — title
+                          keywords are ignored entirely for this profile.
+                          Falls back to keyword matching when unset.
+  <PREFIX>_CALENDAR_EVENT_IDS  (optional) Comma-separated explicit calendar
+                          event id allowlist, for payment obligations that
+                          are NOT a recurring series (e.g. a one-off event
+                          re-created weekly with a new id each time — in
+                          that case leave this unset and use keyword
+                          fallback instead; do not guess ids into this list).
   <PREFIX>_PAYMENT_TYPE   "wise" | "btc"
-  <PREFIX>_CONTACT_ID     (wise only) Neotoma contact_id prefix for IBAN lookup
-  <PREFIX>_CONTACT_CATEGORY  (wise only) Fallback category for contact lookup
-  <PREFIX>_CONTACT_PLATFORM  (wise only) Fallback platform for contact lookup
+  <PREFIX>_CONTACT_ID     Neotoma contact entity id (ent_...) — preferred —
+                          or legacy contacts.parquet contact_id prefix used
+                          only when Neotoma resolution yields nothing.
+  <PREFIX>_CONTACT_CATEGORY  Legacy parquet-fallback category for contact lookup
+  <PREFIX>_CONTACT_PLATFORM  Legacy parquet-fallback platform for contact lookup
   <PREFIX>_AMOUNT_EUR     Transfer amount in EUR (integer)
   <PREFIX>_WISE_REFERENCE (wise only) Wise transfer reference string
   <PREFIX>_BTC_ADDRESS    (btc only) Destination BTC address
@@ -54,12 +68,33 @@ log = logging.getLogger(__name__)
 class PaymentProfile:
     prefix: str  # env var prefix, e.g. "THERAPY"
     label: str  # human label, e.g. "Therapy"
-    calendar_keywords: list[str]  # event title match keywords
+    calendar_keywords: list[str]  # event title match keywords (fallback only)
     payment_type: Literal["wise", "btc"]
     amount_eur: int
 
-    # Wise-specific
-    contact_id: str = ""  # Neotoma contact_id prefix for IBAN lookup
+    # Stable calendar-event matching (preferred over keyword matching — see
+    # handlers' matches()). calendar_recurring_event_id is for a true
+    # recurring series (event.recurringEventId is stable across instances).
+    # calendar_event_ids is an explicit allowlist for non-recurring events
+    # whose id is otherwise stable (e.g. imported once and never recreated).
+    # Both are optional; when neither is set, matches() falls back to
+    # calendar_keywords substring matching against the event title.
+    calendar_recurring_event_id: str = ""
+    calendar_event_ids: list[str] = field(default_factory=list)
+
+    # Keyword-fallback match mode: "substring" (default — keyword may appear
+    # anywhere in the title) or "prefix" (title must START WITH the keyword).
+    # Prefix mode separates a payable session from an incidental event that
+    # merely mentions the keyword (e.g. therapy: "Therapy in-person" matches
+    # the "therapy" prefix, "Walk to therapy" does not). Ignored when a stable
+    # calendar id is configured.
+    keyword_match_mode: str = "substring"
+
+    # Wise-specific: contact_id is preferably a Neotoma contact entity id
+    # (ent_...) resolved first; contact_category/contact_platform are
+    # legacy contacts.parquet fallback matchers used only if Neotoma
+    # resolution yields nothing (see handlers/wise_transfer.py:_load_contact).
+    contact_id: str = ""
     contact_category: str = ""  # fallback: contacts.parquet category
     contact_platform: str = ""  # fallback: contacts.parquet platform
     wise_reference: str = ""  # Wise transfer reference
@@ -196,6 +231,14 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
             str(k).strip().lower() for k in task_kw_raw if k
         ] or calendar_keywords
 
+        event_ids_raw: list | str = snap.get("calendar_event_ids", [])
+        if isinstance(event_ids_raw, str):
+            try:
+                event_ids_raw = json.loads(event_ids_raw)
+            except (ValueError, TypeError):
+                event_ids_raw = [k.strip() for k in event_ids_raw.split(",") if k.strip()]
+        calendar_event_ids = [str(e).strip() for e in event_ids_raw if e]
+
         profiles.append(
             PaymentProfile(
                 prefix=prefix,
@@ -203,6 +246,14 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
                 calendar_keywords=calendar_keywords,
                 payment_type=payment_type,
                 amount_eur=amount_eur,
+                calendar_recurring_event_id=str(
+                    snap.get("calendar_recurring_event_id", "")
+                ).strip(),
+                calendar_event_ids=calendar_event_ids,
+                keyword_match_mode=str(
+                    snap.get("keyword_match_mode", "substring")
+                ).strip().lower()
+                or "substring",
                 contact_id=snap.get("contact_id", ""),
                 contact_category=snap.get("contact_category", ""),
                 contact_platform=snap.get("contact_platform", ""),
@@ -302,12 +353,18 @@ def _load_profile(prefix: str) -> PaymentProfile | None:
     task_kw_raw = env("TASK_KEYWORDS", keywords_raw)
     task_keywords = [k.strip().lower() for k in task_kw_raw.split(",") if k.strip()]
 
+    event_ids_raw = env("CALENDAR_EVENT_IDS")
+    calendar_event_ids = [e.strip() for e in event_ids_raw.split(",") if e.strip()]
+
     return PaymentProfile(
         prefix=prefix,
         label=label,
         calendar_keywords=calendar_keywords,
         payment_type=payment_type,
         amount_eur=amount_eur,
+        calendar_recurring_event_id=env("CALENDAR_RECURRING_EVENT_ID"),
+        calendar_event_ids=calendar_event_ids,
+        keyword_match_mode=(env("KEYWORD_MATCH_MODE") or "substring").lower(),
         # wise
         contact_id=env("CONTACT_ID"),
         contact_category=env("CONTACT_CATEGORY"),

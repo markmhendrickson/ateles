@@ -1,12 +1,27 @@
 #!/usr/bin/env python3
 """
-Monedula — Daily Payments Daemon
+Monedula — Recurring Payments Daemon
 Named after Corvus monedula (jackdaw — moneta = money).
 
-Runs once per day via launchd StartCalendarInterval.
-Checks Google Calendar for yesterday's sessions that trigger payment obligations,
-sends a Telegram preview, waits for operator approval, executes payments, and
-sends a Telegram confirmation.
+Runs on a ~15-minute poll via launchd StartInterval. Each tick:
+
+  1. Fetches calendar events covering roughly the last 26 hours (today plus
+     the tail of yesterday, to catch a late session across midnight).
+  2. Selects sessions whose END time has already passed, that match an
+     active payment profile's calendar_keywords, and that have no
+     notified-marker yet ("event-end detection" — replaces the old
+     scan-yesterday-at-8am model).
+  3. Sends ONE email per newly-ended session (the attendance-confirmation
+     + payment preview) and records a pending-approval marker.
+  4. Sweeps every marker still awaiting approval: reads the Gmail thread
+     for an operator reply, executes the payment on approval, rolls the
+     linked task's due_date either way, and never re-notifies or
+     double-pays a session already marked paid/skipped.
+
+Email (via `gws gmail`, see gmail_channel.py) is the ONLY operator-facing
+channel for payment previews, approvals, and confirmations. Telegram has
+been removed from this path entirely — lib/notify + activity-log calls may
+remain for daemon-health/error pings only.
 
 Usage:
   python3 monedula.py
@@ -19,12 +34,10 @@ import logging
 import os
 import subprocess
 import sys
-import time
-import urllib.error
-import urllib.parse
-import urllib.request
-from datetime import date, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Bootstrap: load env from ~/.config/neotoma/.env before anything else.
@@ -40,23 +53,34 @@ if _NEOTOMA_ENV_FILE.exists():
             os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
 
 # ---------------------------------------------------------------------------
-# lib/notify integration (path bootstrap required before import)
+# Local package imports (path bootstrap required before import)
 # ---------------------------------------------------------------------------
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+_DAEMON_DIR = Path(__file__).resolve().parent
+if str(_DAEMON_DIR) not in sys.path:
+    sys.path.insert(0, str(_DAEMON_DIR))
+
+import gmail_channel  # noqa: E402
+import markers  # noqa: E402
 
 try:
     from lib.notify import Notifier  # noqa: E402
 
-    _notifier: Notifier | None = Notifier.from_neotoma()
+    _notifier: "Notifier | None" = Notifier.from_neotoma()
 except Exception:  # lib unavailable or Neotoma unreachable at import time
     _notifier = None
 
 
 def _notify(message: str, priority: str = "info") -> None:
-    """Send via lib/notify if available; silently skip if not."""
+    """
+    Send via lib/notify if available; silently skip if not.
+
+    Daemon-health/error pings ONLY — no payment preview, approval, or
+    confirmation content may go through this path (see module docstring).
+    """
     if _notifier is None:
         return
     try:
@@ -68,7 +92,7 @@ def _notify(message: str, priority: str = "info") -> None:
         pass
 
 
-# Activity-log channel (CyphorhinusBot observation feed).
+# Activity-log channel (CyphorhinusBot observation feed) — health/error only.
 try:
     from lib.activity import ActivityLogger  # noqa: E402
 
@@ -84,18 +108,34 @@ except Exception:
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent  # ateles repo root
 LOG_DIR = Path.home() / "Library" / "Logs" / "ateles"
 LOG_FILE = LOG_DIR / "monedula.log"
-STATE_FILE = Path(__file__).parent / ".monedula_last_run"
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-TELEGRAM_ALLOWED_USER_ID = os.environ.get("TELEGRAM_ALLOWED_USER_ID", "")
-# TELEGRAM_TOPIC_MONEDULA is the thread ID for Monedula notifications.
-# Legacy alias: TELEGRAM_TOPIC_PAYMENTS is also accepted for backwards compatibility.
-TELEGRAM_TOPIC_MONEDULA = os.environ.get(
-    "TELEGRAM_TOPIC_MONEDULA", ""
-) or os.environ.get("TELEGRAM_TOPIC_PAYMENTS", "")
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "")
+
+# Madrid is UTC+1 (winter) / UTC+2 (summer). We don't have a tz database
+# dependency here, so use a fixed UTC+2 offset for query windows only (the
+# window is deliberately generous — see fetch_recent_events — so a 1-hour
+# DST mismatch does not cause a session to be missed).
+_MADRID_OFFSET = timezone(timedelta(hours=2))
+
+# Operator address for approval emails. Env-sourced (swarm convention: same
+# OPERATOR_EMAIL var as riparia/cotinga/apis), never a hardcoded literal — per
+# CLAUDE.md "Operator identity (name, email) ... read from env ... not literals
+# in daemon code." MONEDULA_OPERATOR_EMAIL overrides for a payment-specific inbox.
+OPERATOR_EMAIL = (
+    os.environ.get("MONEDULA_OPERATOR_EMAIL", "").strip()
+    or os.environ.get("OPERATOR_EMAIL", "").strip()
+)
+
+# Calendar lookback window for ended-session detection. Default is one week
+# (168h) so a run is forgiving of many missed 15-min ticks (e.g. laptop asleep
+# over a weekend) and still catches a session that ended days ago. Override via
+# MONEDULA_LOOKBACK_HOURS. NOTE: a wide window relies on the notified-marker
+# file to avoid re-emailing already-handled sessions; MONEDULA_MAX_NOTIFY_PER_RUN
+# is a hard backstop that caps how many notify emails a single tick may send, so
+# an empty/reset marker file can never trigger an unbounded email burst.
+LOOKBACK_HOURS = int(os.environ.get("MONEDULA_LOOKBACK_HOURS", "168"))
+MAX_NOTIFY_PER_RUN = int(os.environ.get("MONEDULA_MAX_NOTIFY_PER_RUN", "6"))
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -120,43 +160,17 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Idempotency guard
-# ---------------------------------------------------------------------------
-
-
-def _check_already_ran_today() -> bool:
-    """Return True if this daemon already ran today (idempotency guard)."""
-    if STATE_FILE.exists():
-        contents = STATE_FILE.read_text().strip()
-        if contents == date.today().isoformat():
-            return True
-    return False
-
-
-def _mark_ran_today() -> None:
-    STATE_FILE.write_text(date.today().isoformat())
-
-
-def _clear_run_state() -> None:
-    if STATE_FILE.exists():
-        STATE_FILE.unlink()
-
 
 # ---------------------------------------------------------------------------
-# Calendar: fetch yesterday's events
+# Calendar: fetch recent events + event-end detection
 # ---------------------------------------------------------------------------
 
 
-def _yesterday() -> date:
-    return date.today() - timedelta(days=1)
-
-
-def fetch_yesterday_events() -> list[dict]:
+def fetch_recent_events(now: datetime | None = None, lookback_hours: int = LOOKBACK_HOURS) -> list[dict]:
     """
-    Use gws CLI to fetch all calendar events for yesterday.
-    Returns list of event dicts (each with at least 'summary').
-    Returns empty list on any failure.
+    Use gws CLI to fetch calendar events covering [now - lookback_hours, now
+    + a small forward margin] in Europe/Madrid. Returns list of event dicts.
+    Returns empty list on any failure (fail-safe).
     """
     import shutil
 
@@ -165,9 +179,13 @@ def fetch_yesterday_events() -> list[dict]:
         log.error("gws CLI not found in PATH — cannot check calendar")
         return []
 
-    yest = _yesterday()
-    time_min = yest.strftime("%Y-%m-%dT00:00:00+02:00")
-    time_max = yest.strftime("%Y-%m-%dT23:59:59+02:00")
+    now = now or datetime.now(_MADRID_OFFSET)
+    time_min = (now - timedelta(hours=lookback_hours)).isoformat()
+    # Small forward margin so an event ending in the next few minutes isn't
+    # missed by clock skew between this host and the calendar; it will only
+    # be selected once its end time is actually in the past (see
+    # select_newly_ended_sessions).
+    time_max = (now + timedelta(hours=1)).isoformat()
 
     params = {
         "calendarId": "primary",
@@ -191,9 +209,7 @@ def fetch_yesterday_events() -> list[dict]:
 
         data = json.loads(result.stdout)
         items = data.get("items") or []
-        log.info(f"Fetched {len(items)} calendar event(s) for {yest.isoformat()}")
-        for item in items:
-            log.debug(f"  Event: {item.get('summary', '(no title)')!r}")
+        log.info(f"Fetched {len(items)} calendar event(s) in lookback window")
         return items
 
     except json.JSONDecodeError as exc:
@@ -204,310 +220,521 @@ def fetch_yesterday_events() -> list[dict]:
         return []
 
 
-# ---------------------------------------------------------------------------
-# Neotoma: fetch due payment tasks
-# ---------------------------------------------------------------------------
+def _event_id(event: dict) -> str:
+    return str(event.get("id") or event.get("iCalUID") or "")
 
 
-def _fetch_entity_by_id(entity_id: str) -> dict | None:
-    """Fetch a single entity (with snapshot) by ID from Neotoma. None on error."""
-    base_url = (NEOTOMA_BASE_URL or "http://localhost:3180").rstrip("/")
-    is_loopback = "localhost" in base_url or "127.0.0.1" in base_url
+def _event_end_dt(event: dict) -> datetime | None:
+    """
+    Return the timezone-aware end datetime for a TIMED event, or None for
+    all-day events (no precise end) or malformed events.
+    """
+    end = event.get("end") or {}
+    end_dt_str = end.get("dateTime")
+    if not end_dt_str:
+        # All-day event (end.date only) — no precise end time, ignored for
+        # event-end detection per spec.
+        return None
     try:
-        url = f"{base_url}/entities/{entity_id}"
-        headers = {"Accept": "application/json"}
-        if NEOTOMA_BEARER_TOKEN and not is_loopback:
-            headers["Authorization"] = f"Bearer {NEOTOMA_BEARER_TOKEN}"
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read())
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-        log.warning(f"Neotoma entity fetch failed for {entity_id}: {exc}")
+        return datetime.fromisoformat(end_dt_str)
+    except ValueError:
+        log.warning(f"Unparseable event end.dateTime: {end_dt_str!r}")
         return None
 
 
-def fetch_due_payment_tasks(handlers: list | None = None) -> list[dict]:
+def _event_end_date_iso(event: dict) -> str:
+    """ISO date (YYYY-MM-DD) of the event's end, used as the marker key date."""
+    end_dt = _event_end_dt(event)
+    if end_dt:
+        return end_dt.date().isoformat()
+    # Fallback for events we otherwise ignore — keeps marker keys well-formed
+    # if ever called on an all-day event.
+    end = event.get("end") or {}
+    return str(end.get("date") or "")
+
+
+@dataclass
+class EndedSessionMatch:
+    handler: Any
+    match: dict
+    event: dict
+    event_id: str
+    session_date: str
+    end_dt: datetime
+
+
+def select_newly_ended_sessions(
+    events: list[dict], handlers: list, now: datetime | None = None
+) -> list[EndedSessionMatch]:
     """
-    Return the payment tasks that are due today or overdue, scoped STRICTLY to
-    the tasks explicitly linked to active payment profiles via
-    `profile.neotoma_task_id`.
+    Select events that:
+      (a) have a precise END time that is now in the past (timed events
+          only — all-day events are ignored, they have no precise end),
+      (b) match an active payment profile's calendar_keywords via
+          handler.matches(), AND
+      (c) have no marker yet (not already notified/awaiting/paid/skipped).
 
-    This is deliberately NOT a keyword/domain scan of the whole task corpus —
-    that produced false positives (any finance-domain or BTC-mentioning task).
-    Only tasks a payment profile actually points at are payment tasks.
-
-    Returns a list of task dicts (each the raw entity with a 'snapshot').
-    Falls back to empty list on any error or if no handlers/links exist.
+    Returns one EndedSessionMatch per (handler, matched event) pair.
     """
-    if not NEOTOMA_BASE_URL:
-        log.warning("NEOTOMA_BASE_URL not set — skipping task scan")
-        return []
+    now = now or datetime.now(_MADRID_OFFSET)
+    out: list[EndedSessionMatch] = []
 
-    if not handlers:
-        log.info("No payment handlers — skipping linked-task scan.")
-        return []
-
-    today = date.today().isoformat()
-
-    # Collect the canonical task IDs declared by active payment profiles.
-    task_ids: list[str] = []
-    for h in handlers:
-        tid = getattr(getattr(h, "profile", None), "neotoma_task_id", "") or ""
-        tid = tid.strip()
-        if tid and tid not in task_ids:
-            task_ids.append(tid)
-
-    if not task_ids:
-        log.info("No payment profiles declare a neotoma_task_id — no linked tasks.")
-        return []
-
-    def _fields(task: dict) -> dict:
-        return task.get("snapshot") or task.get("fields") or task
-
-    due_tasks: list[dict] = []
-    for tid in task_ids:
-        entity = _fetch_entity_by_id(tid)
-        if not entity:
+    for handler in handlers:
+        try:
+            handler_matches = handler.matches(events)
+        except Exception as exc:
+            log.error(
+                f"[{getattr(handler, 'name', '?')}] matches() raised: {exc} — "
+                f"skipping handler this tick"
+            )
             continue
-        fields = _fields(entity)
-        due = str(fields.get("due_date") or "")
-        if due and due[:10] <= today:
-            due_tasks.append(entity)
 
-    log.info(
-        f"Neotoma linked-task scan: {len(task_ids)} profile task(s) checked, "
-        f"{len(due_tasks)} due today or overdue"
+        for match in handler_matches:
+            event = match.get("event") or {}
+            end_dt = _event_end_dt(event)
+            if end_dt is None:
+                continue  # all-day event or malformed — ignore for end-detection
+
+            if end_dt > now:
+                continue  # session hasn't ended yet — future end, skip
+
+            event_id = _event_id(event)
+            if not event_id:
+                log.warning(f"[{handler.name}] Matched event has no id — cannot mark, skipping")
+                continue
+
+            session_date = _event_end_date_iso(event)
+            if markers.exists(event_id, session_date):
+                continue  # already notified (or later) for this session
+
+            out.append(
+                EndedSessionMatch(
+                    handler=handler,
+                    match=match,
+                    event=event,
+                    event_id=event_id,
+                    session_date=session_date,
+                    end_dt=end_dt,
+                )
+            )
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Email templates
+# ---------------------------------------------------------------------------
+
+
+def _html_escape(text: str) -> str:
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
     )
-    for t in due_tasks:
-        fields = _fields(t)
-        log.debug(
-            f"  Task: {fields.get('title') or fields.get('name')!r} due={fields.get('due_date')!r}"
+
+
+def _rail_details_html(profile) -> str:
+    if profile.payment_type == "btc":
+        addr = profile.btc_address or "(not configured)"
+        addr_preview = (addr[:10] + "…" + addr[-6:]) if len(addr) > 20 else addr
+        return f"<li><b>Rail:</b> Bitcoin &mdash; {_html_escape(addr_preview)}</li>"
+    else:
+        ref = profile.wise_reference or "(no reference)"
+        return (
+            f"<li><b>Rail:</b> Wise transfer &mdash; reference "
+            f"{_html_escape(ref)}</li>"
         )
 
-    return due_tasks
+
+def build_notify_email(ended: EndedSessionMatch) -> tuple[str, str]:
+    """Build (subject, html_body) for a per-session payment-approval email."""
+    profile = ended.handler.profile
+    summary = ended.match.get("summary", profile.label)
+    end_local = ended.end_dt.astimezone(_MADRID_OFFSET).strftime("%Y-%m-%d %H:%M")
+
+    subject = f"Monedula: approve {profile.label} payment ({ended.session_date})"
+
+    # Reuse handler.preview() text as a fallback detail line so
+    # handler-specific preview logic (masked IBAN/address, task id) is not
+    # duplicated here.
+    try:
+        preview_text = ended.handler.preview(ended.match)
+    except Exception as exc:
+        log.warning(f"[{profile.name}] preview() raised while building email: {exc}")
+        preview_text = ""
+
+    body = f"""
+<div style="font-family: -apple-system, sans-serif; font-size: 14px; color: #1a1a1a;">
+  <p><b>{_html_escape(profile.label)} session ended.</b></p>
+  <ul>
+    <li><b>Amount:</b> &euro;{profile.amount_eur}</li>
+    {_rail_details_html(profile)}
+    <li><b>Session:</b> {_html_escape(summary)}</li>
+    <li><b>Ended:</b> {_html_escape(end_local)} (Europe/Madrid)</li>
+    <li><b>Neotoma task:</b> {_html_escape(profile.neotoma_task_id or '(unlinked)')}</li>
+  </ul>
+  <pre style="background:#f5f5f5; padding:8px; white-space:pre-wrap;">{_html_escape(preview_text)}</pre>
+  <p><b>Reply YES to approve payment (this confirms you attended), or NO to skip
+  (no payment, due date rolls forward).</b></p>
+  <p style="color:#666; font-size:12px;">
+    This email is the attendance confirmation for this session — a calendar
+    entry alone is not proof of attendance. Only an explicit YES triggers
+    payment.
+  </p>
+</div>
+""".strip()
+
+    return subject, body
 
 
-def _task_to_preview_item(task: dict) -> dict:
-    """
-    Convert a Neotoma task entity into a generic preview item dict
-    compatible with the preview builder.
-    """
-    fields = task.get("snapshot") or task.get("fields") or task
-    name = str(fields.get("title") or fields.get("name") or "(unnamed task)")
-    due = str(fields.get("due_date") or "")
-    description = str(fields.get("description") or "")
-    entity_id = task.get("entity_id") or task.get("id") or ""
-    return {
-        "source": "task",
-        "name": name,
-        "due_date": due,
-        "description": description,
-        "entity_id": entity_id,
-    }
+def build_confirmation_email(profile, result: dict, confirmation_text: str = "") -> tuple[str, str]:
+    """Build (subject, html_body) for a post-payment confirmation email."""
+    subject = f"Monedula: {profile.label} payment confirmation"
+
+    status = result.get("status")
+    if status == "sent":
+        detail = "<p style=\"color:#0a7a2f;\"><b>Payment sent.</b></p>"
+    elif status == "manual_required":
+        detail = "<p style=\"color:#b36b00;\"><b>Manual action required.</b></p>"
+    else:
+        detail = "<p style=\"color:#b00020;\"><b>Payment failed.</b></p>"
+
+    extra_block = ""
+    if confirmation_text:
+        extra_block = (
+            f'<pre style="background:#f5f5f5; padding:8px; white-space:pre-wrap;">'
+            f"{_html_escape(confirmation_text)}</pre>"
+        )
+
+    body = f"""
+<div style="font-family: -apple-system, sans-serif; font-size: 14px; color: #1a1a1a;">
+  {detail}
+  <p>{_html_escape(profile.label)} &mdash; &euro;{profile.amount_eur}</p>
+  {extra_block}
+  <pre style="background:#f5f5f5; padding:8px; white-space:pre-wrap;">{_html_escape(json.dumps(result, indent=2, default=str))}</pre>
+</div>
+""".strip()
+
+    return subject, body
+
+
+def build_skip_email(profile, session_date: str) -> tuple[str, str]:
+    subject = f"Monedula: {profile.label} skipped for {session_date}"
+    body = f"""
+<div style="font-family: -apple-system, sans-serif; font-size: 14px; color: #1a1a1a;">
+  <p>No payment made for {_html_escape(profile.label)} ({session_date}) — marked skipped.</p>
+  <p>Due date has been rolled forward to the next session.</p>
+</div>
+""".strip()
+    return subject, body
 
 
 # ---------------------------------------------------------------------------
-# Telegram helpers
+# Neotoma task update helpers (roll due_date only — never mark complete)
 # ---------------------------------------------------------------------------
 
 
-def telegram_send(text: str) -> None:
+def _find_next_session_due_date(profile) -> str | None:
     """
-    Send a Telegram message via the shared Node.js send.mjs helper,
-    falling back to telegram-send CLI.
+    Search Google Calendar for the next event matching this profile's
+    keywords, returning (next event date + 1 day) as an ISO date string.
+    Mirrors the existing per-handler helper so due_date rolls consistently
+    whether execute() already rolled it (Wise/BTC handlers do this
+    internally on send) or monedula.py needs to roll it itself (skip path).
     """
     import shutil
 
-    node = shutil.which("node")
-    send_script = PROJECT_ROOT / "execution" / "lib" / "telegram" / "send.mjs"
-    if node and send_script.exists():
-        try:
-            args = [node, str(send_script), "--text", text]
-            if TELEGRAM_TOPIC_MONEDULA:
-                args += ["--thread-id", TELEGRAM_TOPIC_MONEDULA]
-            subprocess.run(args, timeout=15, capture_output=True, env=os.environ)
-            return
-        except Exception as exc:
-            log.warning(f"send.mjs failed: {exc}, trying fallback")
-
-    telegram_cmd = shutil.which("telegram-send")
-    if telegram_cmd:
-        try:
-            subprocess.run(
-                [telegram_cmd, text], timeout=15, capture_output=True, env=os.environ
-            )
-        except Exception as exc:
-            log.warning(f"telegram-send fallback failed: {exc}")
-
-
-def telegram_long_poll_once(timeout_sec: int = 120) -> str | None:
-    """
-    Long-poll Telegram getUpdates for one incoming message from the allowed user
-    in the correct chat.
-
-    Returns the message text (stripped) if a matching message arrives within
-    timeout_sec, or None on timeout.
-
-    Uses a file-based offset tracker to avoid reprocessing old messages.
-    """
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log.error("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — cannot poll")
+    gws = shutil.which("gws")
+    if not gws:
+        log.warning(f"[{profile.name}] gws CLI not found — cannot look up next event date")
         return None
 
-    offset_file = Path(__file__).parent / ".monedula_tg_offset"
-    offset = 0
-    if offset_file.exists():
+    today = date.today()
+    time_min = today.strftime("%Y-%m-%dT00:00:00+02:00")
+    time_max = (today + timedelta(days=92)).strftime("%Y-%m-%dT23:59:59+02:00")
+
+    for query in profile.calendar_keywords:
+        params = {
+            "calendarId": "primary",
+            "singleEvents": True,
+            "orderBy": "startTime",
+            "q": query,
+            "timeMin": time_min,
+            "timeMax": time_max,
+        }
         try:
-            offset = int(offset_file.read_text().strip())
-        except ValueError:
-            offset = 0
-
-    deadline = time.monotonic() + timeout_sec
-    allowed_user_id = (
-        int(TELEGRAM_ALLOWED_USER_ID) if TELEGRAM_ALLOWED_USER_ID else None
-    )
-    chat_id = int(TELEGRAM_CHAT_ID)
-
-    log.info(f"Polling Telegram for reply (timeout={timeout_sec}s, offset={offset})...")
-
-    while time.monotonic() < deadline:
-        remaining = int(deadline - time.monotonic())
-        if remaining <= 0:
-            break
-
-        poll_timeout = min(remaining, 30)  # max 30s per request
-        url = (
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-            f"?offset={offset}&timeout={poll_timeout}&allowed_updates=message"
-        )
-
-        try:
-            with urllib.request.urlopen(url, timeout=poll_timeout + 5) as resp:
-                data = json.loads(resp.read())
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            log.warning(f"Telegram getUpdates request failed: {exc} — retrying")
-            time.sleep(2)
-            continue
-        except json.JSONDecodeError as exc:
-            log.warning(f"Telegram getUpdates JSON parse error: {exc}")
-            time.sleep(2)
-            continue
-
-        updates = data.get("result") or []
-        for update in updates:
-            update_id = update.get("update_id", 0)
-            offset = max(offset, update_id + 1)
-            offset_file.write_text(str(offset))
-
-            msg = update.get("message") or {}
-            from_user = msg.get("from") or {}
-            msg_chat = msg.get("chat") or {}
-            user_id = from_user.get("id")
-            msg_chat_id = msg_chat.get("id")
-
-            # Filter to correct chat and allowed user
-            if msg_chat_id != chat_id:
+            result = subprocess.run(
+                [gws, "calendar", "events", "list", "--params", json.dumps(params)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=os.environ,
+            )
+            if result.returncode != 0:
                 continue
-            if allowed_user_id and user_id != allowed_user_id:
-                continue
+            data = json.loads(result.stdout)
+            for item in data.get("items") or []:
+                summary_low = (item.get("summary") or "").lower()
+                if any(kw in summary_low for kw in profile.calendar_keywords):
+                    start = item.get("start", {})
+                    event_date_str = start.get("date") or start.get("dateTime", "")[:10]
+                    if event_date_str:
+                        event_date = date.fromisoformat(event_date_str)
+                        due = event_date + timedelta(days=1)
+                        return due.isoformat()
+        except Exception as exc:
+            log.warning(f"[{profile.name}] Calendar search error (query={query!r}): {exc}")
 
-            text = (msg.get("text") or "").strip()
-            if text:
-                log.info(f"Received Telegram reply: {text!r}")
-                return text
-
-    log.info("Telegram poll timed out — no reply received")
     return None
 
 
-# ---------------------------------------------------------------------------
-# Payment dispatch logic
-# ---------------------------------------------------------------------------
-
-
-def _parse_reply(reply: str | None, handler_names: list[str]) -> set[str]:
+def roll_due_date(profile, reason: str) -> None:
     """
-    Parse the operator's Telegram reply and return the set of handler names
-    to execute.
-
-    "yes all"      → all handlers
-    "yes yoga"     → {"yoga"}
-    "yes therapy"  → {"therapy"}
-    "no"           → empty set (skip all)
-    None/timeout   → empty set (skip all)
+    Roll the linked Neotoma task's due_date to the next matching session.
+    NEVER sets status to done/completed — yoga/therapy tasks are recurring
+    obligations, not one-off tasks (see project CLAUDE.md standing rule).
     """
-    if not reply:
-        return set()
+    import shutil
 
-    low = reply.lower().strip()
+    task_id = profile.neotoma_task_id
+    if not task_id:
+        log.warning(f"[{profile.name}] No neotoma_task_id configured — cannot roll due_date")
+        return
 
-    if low in ("no", "no all", "skip", "skip all", "n"):
-        return set()
+    neotoma = shutil.which("neotoma")
+    if not neotoma:
+        log.warning(f"[{profile.name}] neotoma CLI not found — cannot roll due_date")
+        return
 
-    if low in ("yes", "yes all", "y", "y all"):
-        return set(handler_names)
+    next_due = _find_next_session_due_date(profile)
+    if not next_due:
+        log.warning(
+            f"[{profile.name}] Could not find next event date — due_date not rolled ({reason})"
+        )
+        return
 
-    # "yes yoga", "yes therapy", "y yoga", etc.
-    for name in handler_names:
-        if low in (f"yes {name}", f"y {name}", name):
-            return {name}
+    try:
+        res = subprocess.run(
+            [neotoma, "--api-only", "entities", "update", task_id, "--due-date", next_due],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=os.environ,
+        )
+        if res.returncode != 0:
+            log.warning(f"[{profile.name}] due_date roll failed: {res.stderr.strip()[:200]}")
+        else:
+            log.info(f"[{profile.name}] due_date rolled to {next_due} ({reason})")
+    except Exception as exc:
+        log.warning(f"[{profile.name}] due_date roll error: {exc}")
 
-    log.warning(f"Unrecognised reply: {reply!r} — treating as skip all")
-    return set()
+
+# ---------------------------------------------------------------------------
+# Pass 1: notify newly-ended sessions
+# ---------------------------------------------------------------------------
 
 
-def _build_preview_message(
-    triggered: list[tuple],
-    yesterday_str: str,
-    due_tasks: list[dict] | None = None,
-) -> str:
-    """Build the Telegram preview message for all triggered payments."""
-    lines = [f"💸 Monedula — payment check for {yesterday_str}", ""]
+def notify_ended_sessions(ended_sessions: list[EndedSessionMatch]) -> None:
+    # Hard backstop: with a wide LOOKBACK_HOURS, an empty/reset marker file
+    # could otherwise queue a large burst of emails in one tick. Cap it and
+    # log loudly if we hit the cap so the operator notices rather than the
+    # daemon silently spamming or silently dropping.
+    if len(ended_sessions) > MAX_NOTIFY_PER_RUN:
+        log.warning(
+            f"{len(ended_sessions)} ended sessions to notify exceeds "
+            f"MAX_NOTIFY_PER_RUN={MAX_NOTIFY_PER_RUN}; sending the first "
+            f"{MAX_NOTIFY_PER_RUN} this tick, the rest next tick. If this is "
+            f"unexpected, the marker file may have been reset."
+        )
+        _notify(
+            f"monedula: {len(ended_sessions)} sessions pending notify — capped "
+            f"at {MAX_NOTIFY_PER_RUN}/tick; check marker state",
+            priority="blocker",
+        )
+        ended_sessions = ended_sessions[:MAX_NOTIFY_PER_RUN]
 
-    # Calendar-triggered payments
-    if triggered:
-        lines.append("📅 *Calendar-triggered payments*")
-        lines.append("")
-        for handler, matches in triggered:
-            for match in matches:
-                lines.append(handler.preview(match))
-                lines.append("")
+    for ended in ended_sessions:
+        profile = ended.handler.profile
+        subject, body = build_notify_email(ended)
 
-    # Neotoma task-based reminders
-    if due_tasks:
-        lines.append("📋 *Due payment tasks (Neotoma)*")
-        lines.append("")
-        for task in due_tasks:
-            fields = task.get("snapshot") or task.get("fields") or task
-            name = str(fields.get("title") or fields.get("name") or "(unnamed)")
-            due = str(fields.get("due_date") or "")
-            description = str(fields.get("description") or "")
-            overdue = due and due < yesterday_str
-            due_label = f"⚠️ overdue since {due}" if overdue else f"due {due}"
-            lines.append(f"  • {name} ({due_label})")
-            if description:
-                # Show first 120 chars of description as context
-                short_desc = description[:120].rstrip()
-                if len(description) > 120:
-                    short_desc += "…"
-                lines.append(f"    {short_desc}")
-        lines.append("")
+        log.info(f"[{profile.name}] Sending notify email for session {ended.session_date}...")
+        send_result = gmail_channel.send_email(OPERATOR_EMAIL, subject, body)
 
-    # Reply instructions
-    handler_names = list(dict.fromkeys([h.name for h, _ in triggered]))
-    lines += [
-        "Reply:",
-        "  yes all     — pay all calendar payments",
-    ]
-    for name in handler_names:
-        lines.append(f"  yes {name:<10} — pay {name} only")
-    lines.append("  no          — skip all")
-    if due_tasks:
-        lines.append(
-            "  (task reminders above are FYI — reply to approve calendar payments)"
+        # Require BOTH ids: the sweep needs a thread id AND a message id to
+        # find the operator's reply. A marker written without a thread id is
+        # skipped by every future sweep → the session sits awaiting_approval
+        # forever (never paid, never re-notified since the marker exists).
+        # Treat a missing thread id like a send failure: no marker, retry next
+        # tick.
+        if not send_result or not send_result.get("id") or not send_result.get("threadId"):
+            log.error(
+                f"[{profile.name}] Notify email for session {ended.session_date} "
+                f"returned incomplete ids (id={bool(send_result and send_result.get('id'))}, "
+                f"threadId={bool(send_result and send_result.get('threadId'))}) — "
+                f"will retry next tick (no marker written)."
+            )
+            continue
+
+        marker = markers.Marker(
+            event_id=ended.event_id,
+            date=ended.session_date,
+            profile_name=profile.name,
+            gmail_thread_id=send_result.get("threadId", ""),
+            gmail_message_id=send_result.get("id", ""),
+            notified_at=datetime.now(timezone.utc).isoformat(),
+            status="awaiting_approval",
+            # Persist the match dict (incl. raw calendar event) so the
+            # reply sweep — which runs on a LATER tick, after this tick's
+            # `events` list is gone — can still call handler.execute(match)
+            # without re-deriving it from a fresh (possibly different)
+            # calendar fetch.
+            extra={"match": ended.match},
+        )
+        markers.save(marker)
+        markers.mirror_to_neotoma(marker)
+        log.info(
+            f"[{profile.name}] Notified + marker written for session "
+            f"{ended.session_date} (thread={marker.gmail_thread_id})"
         )
 
-    return "\n".join(lines)
+
+# ---------------------------------------------------------------------------
+# Pass 2: reply sweep (approve/skip pending markers)
+# ---------------------------------------------------------------------------
+
+
+def _handler_by_profile_name(handlers: list, profile_name: str):
+    for h in handlers:
+        if h.name == profile_name:
+            return h
+    return None
+
+
+def sweep_pending_approvals(handlers: list) -> None:
+    pending = markers.pending_awaiting_approval()
+    if not pending:
+        return
+
+    for marker in pending:
+        handler = _handler_by_profile_name(handlers, marker.profile_name)
+        if handler is None:
+            log.warning(
+                f"No active handler for profile {marker.profile_name!r} "
+                f"(marker {marker.key}) — leaving pending."
+            )
+            continue
+
+        if not marker.gmail_thread_id or not marker.gmail_message_id:
+            log.warning(f"Marker {marker.key} missing Gmail ids — cannot sweep, leaving pending.")
+            continue
+
+        try:
+            reply_text = gmail_channel.find_operator_reply(
+                marker.gmail_thread_id, marker.gmail_message_id
+            )
+        except Exception as exc:
+            # Fail-safe: any error in fetch/parse must NOT execute a payment.
+            log.error(
+                f"[{marker.profile_name}] Reply fetch error for {marker.key}: {exc} "
+                f"— leaving pending."
+            )
+            continue
+
+        if reply_text is None:
+            continue  # no reply yet — leave awaiting_approval
+
+        decision = gmail_channel.parse_approval_reply(reply_text)
+        if decision is None:
+            log.info(
+                f"[{marker.profile_name}] Reply for {marker.key} not recognised as "
+                f"yes/no — leaving pending."
+            )
+            continue
+
+        if decision == "skip":
+            _handle_skip(handler, marker)
+        elif decision == "approve":
+            _handle_approve(handler, marker)
+
+
+def _handle_skip(handler, marker: "markers.Marker") -> None:
+    profile = handler.profile
+    log.info(f"[{profile.name}] Reply=skip for {marker.key} — rolling due_date, no payment.")
+    markers.update_status(marker.event_id, marker.date, "skipped")
+    roll_due_date(profile, reason=f"skipped session {marker.date}")
+
+    subject, body = build_skip_email(profile, marker.date)
+    gmail_channel.send_email(OPERATOR_EMAIL, subject, body)
+
+
+def _handle_approve(handler, marker: "markers.Marker") -> None:
+    profile = handler.profile
+
+    # Idempotency: never double-pay. Re-read the marker fresh and confirm
+    # it is still awaiting_approval immediately before executing — guards
+    # against a race with another tick/process.
+    current = markers.get(marker.event_id, marker.date)
+    if current is None or current.status != "awaiting_approval":
+        log.warning(
+            f"[{profile.name}] Marker {marker.key} status is "
+            f"{getattr(current, 'status', 'MISSING')!r}, not awaiting_approval "
+            f"— refusing to execute (idempotency guard)."
+        )
+        return
+
+    log.info(f"[{profile.name}] Reply=approve for {marker.key} — executing payment.")
+    # Mark 'approved' before execute() so a crash mid-execute does not leave
+    # the marker looking re-approvable; execute() itself may still fail, in
+    # which case we do not advance to 'paid'.
+    markers.update_status(marker.event_id, marker.date, "approved")
+
+    match = marker.extra.get("match") or {"event": {}, "summary": profile.label}
+
+    _job = _activity.started(f"executing {profile.name} payment") if _activity else None
+    try:
+        result = handler.execute(match)
+    except Exception as exc:
+        log.error(f"[{profile.name}] execute() raised for {marker.key}: {exc}")
+        if _job:
+            _job.failed(f"{profile.name} payment error: {type(exc).__name__}")
+        # Fail-safe: leave marker at 'approved' (not paid) — a human must
+        # review; do NOT roll back to awaiting_approval (that could invite
+        # a second, possibly divergent, execute() on the next tick).
+        _notify(
+            f"monedula: {profile.name} payment execute() failed — needs manual review",
+            priority="blocker",
+        )
+        return
+
+    if _job:
+        _job.finished(f"{profile.name} payment executed")
+
+    status = result.get("status")
+    markers.update_status(
+        marker.event_id,
+        marker.date,
+        "paid" if status == "sent" else "approved",
+        result_status=status,
+    )
+
+    if hasattr(handler, "format_confirmation"):
+        try:
+            confirmation_text = handler.format_confirmation(result)
+        except Exception:
+            confirmation_text = json.dumps(result, default=str)
+    else:
+        confirmation_text = json.dumps(result, default=str)
+
+    subject, body = build_confirmation_email(profile, result, confirmation_text=confirmation_text)
+    gmail_channel.send_email(OPERATOR_EMAIL, subject, body)
+
+    # Wise/BTC handlers already roll due_date internally on a successful
+    # send (see handlers/*.py _update_task). Only roll here if execute()
+    # did NOT report success, to avoid a double-roll on the happy path.
+    if status != "sent":
+        roll_due_date(profile, reason=f"payment not confirmed sent ({status}) for {marker.date}")
 
 
 # ---------------------------------------------------------------------------
@@ -515,131 +742,58 @@ def _build_preview_message(
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
-    log.info("Monedula starting.")
+def run() -> None:
+    log.info("Monedula tick starting.")
 
-    # Idempotency: exit immediately if already ran today
-    if _check_already_ran_today():
-        log.info("Already ran today — exiting.")
-        return
-
-    # Mark as started immediately to prevent concurrent launchd re-launches.
-    # We clear this at the very end if something goes wrong before completion,
-    # but keep it on successful runs to prevent double-payment.
-    _mark_ran_today()
-
-    yesterday = _yesterday()
-    yesterday_str = yesterday.isoformat()
-    log.info(f"Checking calendar for yesterday: {yesterday_str}")
-
-    # Load handlers from env-var-defined payment profiles.
-    # Set MONEDULA_PROFILES=THERAPY,YOGA (and corresponding profile env vars).
     from handlers import load_handlers
 
     all_handlers = load_handlers()
+    if not all_handlers:
+        log.info("No active payment handlers — nothing to do this tick.")
+        return
 
-    # Fetch yesterday's events
-    events = fetch_yesterday_events()
-
-    # Find triggered handlers from calendar
-    triggered: list[tuple] = []  # [(handler, [match, ...]), ...]
-    for handler in all_handlers:
-        matches = handler.matches(events)
-        if matches:
-            triggered.append((handler, matches))
-
-    if triggered:
-        log.info(f"Triggered handlers: {[h.name for h, _ in triggered]}")
-
-    # Fetch due payment tasks from Neotoma, scoped to profile-linked task IDs only.
-    due_tasks = fetch_due_payment_tasks(all_handlers)
-
-    # Abort early only if there's truly nothing to show
-    if not triggered and not due_tasks:
-        log.info(
-            "No payment handlers triggered and no due payment tasks — nothing to do."
+    # Fail safe if the operator address is unconfigured: without it, notify
+    # would send approval emails to an empty recipient (or a reply sweep would
+    # have nothing to watch). Skip and page rather than mis-send.
+    if not OPERATOR_EMAIL:
+        log.error(
+            "OPERATOR_EMAIL / MONEDULA_OPERATOR_EMAIL not set — cannot send "
+            "approval emails; skipping tick."
+        )
+        _notify(
+            "monedula: OPERATOR_EMAIL unset — approval emails cannot be sent",
+            priority="blocker",
         )
         return
 
-    if not triggered:
+    now = datetime.now(_MADRID_OFFSET)
+    events = fetch_recent_events(now=now)
+
+    ended_sessions = select_newly_ended_sessions(events, all_handlers, now=now)
+    if ended_sessions:
         log.info(
-            "No calendar-triggered payments, but due payment tasks found — sending reminder only."
+            f"Newly-ended sessions this tick: "
+            f"{[(e.handler.name, e.session_date) for e in ended_sessions]}"
         )
+        notify_ended_sessions(ended_sessions)
+    else:
+        log.info("No newly-ended matched sessions this tick.")
 
-    # Build and send preview
-    preview_msg = _build_preview_message(triggered, yesterday_str, due_tasks=due_tasks)
-    log.info("Sending payment preview to Telegram...")
-    telegram_send(preview_msg)
+    sweep_pending_approvals(all_handlers)
 
-    # If there are only task reminders (no actionable calendar payments), don't wait for approval.
-    if not triggered:
-        log.info("Task reminders sent — no calendar payments to approve. Done.")
-        return
+    log.info("Monedula tick complete.")
 
-    # Wait for operator reply (2 minutes)
-    reply = telegram_long_poll_once(timeout_sec=120)
 
-    handler_names = list(dict.fromkeys([h.name for h, _ in triggered]))
-    approved = _parse_reply(reply, handler_names)
-
-    if not approved:
-        log.info(f"No payments approved (reply={reply!r}) — skipping all.")
-        telegram_send(f"⏭️ Monedula: skipped all payments for {yesterday_str}.")
-        return
-
-    log.info(f"Approved handlers: {approved}")
-
-    # Execute approved payments
-    all_results = []
-    for handler, matches in triggered:
-        if handler.name not in approved:
-            log.info(f"Skipping {handler.name} (not approved).")
-            continue
-        for match in matches:
-            log.info(f"Executing {handler.name} payment...")
-            _job = _activity.started(f"executing {handler.name} payment") if _activity else None
-            try:
-                result = handler.execute(match)
-                all_results.append((handler, result))
-                log.info(f"{handler.name} result: {result}")
-                if _job:
-                    # Keep summary generic — no amounts, IBANs, or memos.
-                    _job.finished(f"{handler.name} payment executed")
-            except Exception as _exc:
-                if _job:
-                    _job.failed(f"{handler.name} payment error: {type(_exc).__name__}")
-                raise
-
-    # Send confirmation
-    if not all_results:
-        telegram_send(f"⚠️ Monedula: no payments executed for {yesterday_str}.")
-        return
-
-    confirmation_lines = [f"📋 Monedula results for {yesterday_str}:", ""]
-    for handler, result in all_results:
-        if hasattr(handler, "format_confirmation"):
-            conf = handler.format_confirmation(result)
-        else:
-            conf = json.dumps(result, indent=2)
-        confirmation_lines.append(conf)
-        confirmation_lines.append("")
-
-    confirmation_msg = "\n".join(confirmation_lines).rstrip()
-    log.info("Sending confirmation to Telegram...")
-    telegram_send(confirmation_msg)
-    log.info("Monedula run complete.")
+def main() -> None:
+    run()
 
 
 if __name__ == "__main__":
-    _notify("monedula started", priority="info")
+    _notify("monedula tick started", priority="info")
     try:
         main()
-        _notify("monedula run complete", priority="info")
+        _notify("monedula tick complete", priority="info")
     except Exception as exc:
         log.exception(f"Monedula fatal error: {exc}")
         _notify(f"monedula fatal error: {exc}", priority="blocker")
-        try:
-            telegram_send(f"🔴 Monedula fatal error: {exc}")
-        except Exception:
-            pass
         sys.exit(1)

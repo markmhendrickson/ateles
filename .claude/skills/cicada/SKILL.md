@@ -31,8 +31,9 @@ When invoked with an issue number:
 1. **Load the issue entity** — `retrieve_entity_by_identifier(entity_type='issue', identifier=<issue_number>)`. Verify all pre-impl gates are signed off (pm, ux if required, arch if required). Hard stop if any gate is pending.
 2. **Read the issue context** — Load the GitHub issue body, any linked plan entities, and any `plan_contribution` entities filed by Pavo, Accipiter, and Waxwing. Understand the exact scope.
 3. **Implement** — Make the code changes. Follow existing patterns. Run tests. Ensure pre-commit hooks pass.
-4. **Open a PR** — `gh pr create` using the `ateles-agent` identity. Reference the issue in the PR body (`closes #N`). Title matches the issue title.
-5. **Sign off the impl gate** — Write a workflow_state observation to the issue entity and advance ownership to Vanellus.
+4. **Self-review your own diff before opening the PR** — run the harness `code-review` built-in (or `/code-review`) on your working diff and address its findings (fix, or note why deferred), BEFORE `gh pr create`. This is a pre-PR self-check you OWN as the author; it does not replace and is distinct from Vanellus's formal PR-review gate, which reviews your opened PR independently (author ≠ gate reviewer). Call the built-in as a tool — do not reimplement review logic here. If the built-in surfaces a blocking correctness issue you cannot resolve within scope, raise a checkpoint rather than opening a PR that fails its own review. Skip only for trivial/no-logic diffs (pure docs, generated-file regen), and say so.
+5. **Open a PR** — `gh pr create` using the `ateles-agent` identity. Reference the issue in the PR body (`closes #N`). Title matches the issue title.
+6. **Sign off the impl gate** — Write a workflow_state observation to the issue entity and advance ownership to Vanellus.
 
 ## Gate handoff — impl gate
 
@@ -62,6 +63,7 @@ store(entities=[{
 ## Constraints
 
 - Always verify pre-impl gates before starting — hard stop if any gate is pending.
+- Self-review your own diff (harness `code-review`) before opening a PR — call the built-in as a tool, never reimplement it; it is your author-side check, separate from Vanellus's independent gate.
 - Never push directly to main/master — always via PR.
 - Uses `ateles-agent` GitHub identity.
 - Neotoma prod only (`mcp__mcpsrv_neotoma__*`).
