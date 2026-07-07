@@ -165,7 +165,7 @@ class _StubStore(IssueSpecStore):
                 if rec["entity_id"] == payload["entity_id"]:
                     rec["snapshot"][payload["field"]] = payload["value"]
             return {}
-        if path == "retrieve_entities":
+        if path in ("entities/query", "retrieve_entities"):
             return {
                 "entities": [
                     {"entity_id": r["entity_id"], "snapshot": r["snapshot"]}
