@@ -42,6 +42,13 @@ from pathlib import Path
 # ── Config ────────────────────────────────────────────────────────────────────
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+# Preferred: bill the operator's Anthropic Max subscription via an OAuth token
+# (CLAUDE_CODE_OAUTH_TOKEN), same account the swarm's `claude --print` panelists
+# use — no per-request metered spend. Falls back to the metered ANTHROPIC_API_KEY
+# when no subscription token is present. NOTE: subscription OAuth tokens EXPIRE;
+# in headless CI a lapsed token surfaces as an auth error, which the review-failure
+# path below now makes VISIBLE (red check) rather than a silent false-green.
+CLAUDE_OAUTH_TOKEN = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 PR_NUMBER = os.environ.get("LOXIA_PR_NUMBER", "")
 REPO = os.environ.get("LOXIA_REPO", "")
@@ -135,10 +142,39 @@ def get_changed_files() -> list[str]:
 # ── Claude API ────────────────────────────────────────────────────────────────
 
 
+class ClaudeReviewError(RuntimeError):
+    """Raised when Claude could not produce a real review (auth/credit/network/
+    empty response). Callers must treat this as a FAILED review — never post it
+    as if it were a verdict and never let the job exit green on it."""
+
+
 def call_claude(prompt: str) -> str:
-    """Call the Claude API with a single user message; return the text response."""
-    if not ANTHROPIC_API_KEY:
-        return "(ANTHROPIC_API_KEY not set — skipping Claude review)"
+    """Call the Claude API with a single user message; return the text response.
+
+    Raises ClaudeReviewError on any failure to obtain a real review (missing
+    key, HTTP error such as credit-exhausted 400, network error, or an empty/
+    malformed response). This is deliberate: the previous behaviour returned the
+    error string as if it were the review, which let a failed review be posted
+    and the job exit 0 — a false "reviewed" green check on the PR.
+    """
+    # Prefer the Max subscription OAuth token; fall back to the metered key.
+    # NOTE (unverified): the exact header shape for a subscription OAuth token
+    # against the raw /v1/messages endpoint is not confirmed here — the swarm's
+    # other subscription callers use `claude --print`, which handles auth
+    # internally. If Bearer+beta auth 401s in CI, the alternative is to shell out
+    # to `claude --print` instead of calling the API directly. Either way the
+    # review-failure path makes a bad token a VISIBLE red check, not a false green.
+    if CLAUDE_OAUTH_TOKEN:
+        auth_headers = {
+            "authorization": f"Bearer {CLAUDE_OAUTH_TOKEN}",
+            "anthropic-beta": "oauth-2025-04-20",
+        }
+    elif ANTHROPIC_API_KEY:
+        auth_headers = {"x-api-key": ANTHROPIC_API_KEY}
+    else:
+        raise ClaudeReviewError(
+            "no Claude credential set (need CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY)"
+        )
 
     payload = {
         "model": CLAUDE_MODEL,
@@ -150,7 +186,7 @@ def call_claude(prompt: str) -> str:
         CLAUDE_API_URL,
         data=json.dumps(payload).encode(),
         headers={
-            "x-api-key": ANTHROPIC_API_KEY,
+            **auth_headers,
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         },
@@ -161,18 +197,30 @@ def call_claude(prompt: str) -> str:
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             data = json.loads(resp.read())
-            return data["content"][0]["text"]
     except urllib.error.HTTPError as exc:
         # Surface the API error body. A bare "HTTP Error 400: Bad Request" hides
-        # the actual cause (e.g. the invalid_request_error message), which made
-        # an earlier 400 undiagnosable from the posted review comment alone.
+        # the actual cause (e.g. the invalid_request_error / credit-exhausted
+        # message), which made an earlier 400 undiagnosable from the posted
+        # review comment alone.
         try:
             detail = exc.read().decode("utf-8", "replace").strip()
         except Exception:
             detail = ""
-        return f"(Claude API error: HTTP {exc.code} — {detail or exc.reason})"
-    except (urllib.error.URLError, KeyError, json.JSONDecodeError) as exc:
-        return f"(Claude API error: {exc})"
+        raise ClaudeReviewError(
+            f"Claude API HTTP {exc.code} — {detail or exc.reason}"
+        ) from exc
+    except (urllib.error.URLError, json.JSONDecodeError) as exc:
+        raise ClaudeReviewError(f"Claude API call failed: {exc}") from exc
+
+    try:
+        text = data["content"][0]["text"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ClaudeReviewError(
+            f"Claude response missing content: {json.dumps(data)[:300]}"
+        ) from exc
+    if not text or not text.strip():
+        raise ClaudeReviewError("Claude returned an empty review")
+    return text
 
 
 # ── GitHub comment ─────────────────────────────────────────────────────────────
@@ -477,12 +525,31 @@ def build_prompt(reviewer: Reviewer, diff: str, changed_files: list[str]) -> str
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
-def run_reviewer(reviewer: Reviewer, diff: str, changed_files: list[str]) -> None:
+def run_reviewer(reviewer: Reviewer, diff: str, changed_files: list[str]) -> bool:
     """Build the prompt, call Claude, and (unless dry-run) post the comment and
-    file a Neotoma issue on REQUEST_CHANGES — all attributed to this reviewer."""
+    file a Neotoma issue on REQUEST_CHANGES — all attributed to this reviewer.
+
+    Returns True if a real review was produced, False if it failed. A failure
+    posts a clearly-marked "review could not run" comment (so the PR shows the
+    reviewer is broken, not silently absent) and the caller exits non-zero.
+    """
     prompt = build_prompt(reviewer, diff, changed_files)
     print(f"[{reviewer.skill}] Calling Claude ({CLAUDE_MODEL})...")
-    review = call_claude(prompt)
+    try:
+        review = call_claude(prompt)
+    except ClaudeReviewError as exc:
+        print(f"[{reviewer.skill}] REVIEW FAILED: {exc}", file=sys.stderr)
+        if not DRY_RUN:
+            failure_body = (
+                f"{review_comment_marker(reviewer)}\n\n"
+                f"⚠️ **Review could not run** — {reviewer.display} did not "
+                f"produce a verdict for commit `{HEAD_SHA[:12] or 'unknown'}`.\n\n"
+                f"Reason: `{exc}`\n\n"
+                f"This is NOT an approval. The check fails so the missing review "
+                f"is visible; re-run once the cause is resolved."
+            )
+            post_github_comment(failure_body, marker=review_comment_marker(reviewer))
+        return False
 
     print("\n" + "=" * 60)
     print(review)
@@ -490,7 +557,7 @@ def run_reviewer(reviewer: Reviewer, diff: str, changed_files: list[str]) -> Non
 
     if DRY_RUN:
         print(f"[{reviewer.skill}] DRY RUN — not posting comment or filing issue")
-        return
+        return True
 
     post_github_comment(review, marker=review_comment_marker(reviewer))
 
@@ -504,6 +571,7 @@ def run_reviewer(reviewer: Reviewer, diff: str, changed_files: list[str]) -> Non
             ),
             agent=reviewer.skill,
         )
+    return True
 
 
 def main() -> None:
@@ -512,14 +580,16 @@ def main() -> None:
         sys.exit(1)
 
     # Fail loud, not silent: a review job that can't actually call Claude must
-    # not exit green — that gives a false "reviewed" signal on the PR. If the
-    # key is genuinely unavailable (e.g. forks without secret access), set
+    # not exit green — that gives a false "reviewed" signal on the PR. Accept
+    # EITHER the Max subscription OAuth token (preferred) or the metered key. If
+    # neither is available (e.g. forks without secret access), set
     # LOXIA_ALLOW_NO_KEY=true to downgrade to a skip that still exits 0.
-    if not ANTHROPIC_API_KEY:
+    if not CLAUDE_OAUTH_TOKEN and not ANTHROPIC_API_KEY:
         msg = (
-            "[loxia] ANTHROPIC_API_KEY not set — cannot perform a real review. "
-            "Set the ANTHROPIC_API_KEY repo secret (see docs). "
-            "Failing so the missing review is visible rather than a false green."
+            "[loxia] No Claude credential set — cannot perform a real review. "
+            "Set CLAUDE_CODE_OAUTH_TOKEN (Max subscription, preferred) or the "
+            "ANTHROPIC_API_KEY repo secret. Failing so the missing review is "
+            "visible rather than a false green."
         )
         if os.environ.get("LOXIA_ALLOW_NO_KEY", "false").lower() == "true":
             print(msg + " (LOXIA_ALLOW_NO_KEY=true — exiting 0)", file=sys.stderr)
@@ -538,8 +608,23 @@ def main() -> None:
         f"({len(changed_files)} changed files)"
     )
 
-    for reviewer in reviewers:
-        run_reviewer(reviewer, diff, changed_files)
+    # Track whether every selected reviewer produced a real review. If any
+    # failed to (auth/credit/network/empty response), exit non-zero so the
+    # GHA check is red/failed rather than a false green — a review that
+    # reviewed nothing must never look merge-ready.
+    failed = [
+        reviewer.display
+        for reviewer in reviewers
+        if not run_reviewer(reviewer, diff, changed_files)
+    ]
+
+    if failed:
+        print(
+            f"[loxia] {len(failed)} reviewer(s) failed to produce a review: "
+            f"{', '.join(failed)} — failing the job.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

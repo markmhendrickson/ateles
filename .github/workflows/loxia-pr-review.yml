@@ -67,6 +67,9 @@ jobs:
 
       - name: Run Loxia review
         env:
+          # Prefer the Max subscription OAuth token (no metered spend); the
+          # script falls back to ANTHROPIC_API_KEY when the token is absent.
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}
           NEOTOMA_BASE_URL: ${{ vars.NEOTOMA_BASE_URL || 'https://neotoma.markmhendrickson.com' }}
