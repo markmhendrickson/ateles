@@ -260,6 +260,103 @@ def test_route_findings_groups_by_lens_then_dispatches_cicada(monkeypatch):
     assert dispatched.count("cicada") == 1
 
 
+def _route_capture_cicada_guidance(monkeypatch, *, lens_result_for):
+    """Run _route_blocking_findings with a single-lens (ux) blocking finding,
+    driving each lens agent's SkillResult via `lens_result_for(agent)`, and
+    return the guidance text embedded in the Cicada dispatch prompt.
+
+    Exercises the per-lens guidance fallback (lens agent fails / empty stdout →
+    raw findings) that gates whether Cicada still receives the work."""
+    captured = {}
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "cicada":
+            captured["cicada_prompt"] = prompt
+            return SkillResult(skill, True, 0, "applied", "")
+        return lens_result_for(skill)
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    reviews = [("ux", "[BLOCKING] naming: the flag is undiscoverable\nraw-ux-detail")]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    return captured.get("cicada_prompt", ""), d
+
+
+def test_route_findings_lens_failure_falls_back_to_raw_findings(monkeypatch):
+    # Lens agent returns not-ok → Cicada still gets the raw findings.
+    def lens_result_for(agent):
+        return SkillResult(agent, False, 1, "", "boom")
+
+    prompt, _ = _route_capture_cicada_guidance(
+        monkeypatch, lens_result_for=lens_result_for
+    )
+    assert "guidance unavailable — raw findings" in prompt
+    assert "raw-ux-detail" in prompt  # Cicada still received the work
+
+
+def test_route_findings_empty_guidance_falls_back_to_raw_findings(monkeypatch):
+    # Lens agent returns ok but blank stdout → fallback triggers.
+    def lens_result_for(agent):
+        return SkillResult(agent, True, 0, "   ", "")
+
+    prompt, _ = _route_capture_cicada_guidance(
+        monkeypatch, lens_result_for=lens_result_for
+    )
+    assert "guidance unavailable — raw findings" in prompt
+    assert "raw-ux-detail" in prompt
+
+
+def test_route_findings_mixed_lens_outcomes_include_both_sections(monkeypatch):
+    # One lens succeeds with guidance, another fails → both appear in the
+    # consolidated guidance handed to Cicada.
+    captured = {}
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "cicada":
+            captured["prompt"] = prompt
+            return SkillResult(skill, True, 0, "applied", "")
+        if skill == _lens_agent("ux"):
+            return SkillResult(skill, True, 0, "concrete ux guidance", "")
+        # qa's owning agent fails → its section falls back to raw findings.
+        return SkillResult(skill, False, 1, "", "err")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    reviews = [
+        ("ux", "[BLOCKING] naming: unclear\nux-raw"),
+        ("qa", "[BLOCKING] coverage: none\nqa-raw"),
+    ]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    prompt = captured.get("prompt", "")
+    assert "concrete ux guidance" in prompt          # successful lens section
+    assert "guidance unavailable — raw findings" in prompt  # failed lens section
+    assert "qa-raw" in prompt                         # failed lens still forwards work
+
+
 def test_route_findings_escalates_at_retry_cap(monkeypatch):
     dispatched = []
 
