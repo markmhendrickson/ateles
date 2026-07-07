@@ -56,6 +56,17 @@ jobs:
       - name: Install dependencies
         run: pip install httpx
 
+      # Loxia authenticates via the operator's Max subscription by shelling out
+      # to `claude --print` (CLAUDE_CODE_OAUTH_TOKEN). Install the Claude Code
+      # CLI so that path is available; the script fails visibly if it's missing.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
       - name: Determine PR number
         id: pr
         run: |
@@ -67,6 +78,9 @@ jobs:
 
       - name: Run Loxia review
         env:
+          # Prefer the Max subscription OAuth token (no metered spend); the
+          # script falls back to ANTHROPIC_API_KEY when the token is absent.
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}
           NEOTOMA_BASE_URL: ${{ vars.NEOTOMA_BASE_URL || 'https://neotoma.markmhendrickson.com' }}
