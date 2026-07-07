@@ -354,19 +354,27 @@ async def _store_email_entity(message: dict) -> str | None:
         )
         return None
 
+    msg_id = message.get("id", "unknown")
     payload = {
-        "entity_type": "email_message",
-        "canonical_name": f"email_message:gmail:{message.get('id', 'unknown')}",
-        "snapshot": {
-            "message_id": message.get("id", ""),
-            "sender": message.get("sender", ""),
-            "subject": message.get("subject", ""),
-            "snippet": message.get("snippet", ""),
-            "date": message.get("date_iso", ""),
-            "labels": message.get("labels", []),
-            "classification": message.get("classification", "informational"),
-            "source": "gmail",
-        },
+        "entities": [
+            {
+                "entity_type": "email_message",
+                "canonical_name": f"email_message:gmail:{msg_id}",
+                "snapshot": {
+                    "message_id": message.get("id", ""),
+                    "sender": message.get("sender", ""),
+                    "subject": message.get("subject", ""),
+                    "snippet": message.get("snippet", ""),
+                    "date": message.get("date_iso", ""),
+                    "labels": message.get("labels", []),
+                    "classification": message.get(
+                        "classification", "informational"
+                    ),
+                    "source": "gmail",
+                },
+            }
+        ],
+        "idempotency_key": f"turdus-email-{msg_id}",
     }
 
     try:
@@ -377,7 +385,7 @@ async def _store_email_entity(message: dict) -> str | None:
             },
             timeout=15,
         ) as client:
-            resp = await client.post(f"{NEOTOMA_BASE_URL}/observations", json=payload)
+            resp = await client.post(f"{NEOTOMA_BASE_URL}/store", json=payload)
             resp.raise_for_status()
             data = resp.json()
             entity_id = data.get("entity_id") or (
@@ -448,10 +456,16 @@ async def _create_task_for_email(message: dict, email_entity_id: str | None) -> 
         )
         return
 
+    msg_id = message.get("id", "unknown")
     payload = {
-        "entity_type": "task",
-        "canonical_name": f"task:turdus:email:{message.get('id', 'unknown')}",
-        "snapshot": snapshot,
+        "entities": [
+            {
+                "entity_type": "task",
+                "canonical_name": f"task:turdus:email:{msg_id}",
+                "snapshot": snapshot,
+            }
+        ],
+        "idempotency_key": f"turdus-task-{msg_id}",
     }
 
     try:
@@ -462,7 +476,7 @@ async def _create_task_for_email(message: dict, email_entity_id: str | None) -> 
             },
             timeout=15,
         ) as client:
-            resp = await client.post(f"{NEOTOMA_BASE_URL}/observations", json=payload)
+            resp = await client.post(f"{NEOTOMA_BASE_URL}/store", json=payload)
             resp.raise_for_status()
             data = resp.json()
             task_id = data.get("entity_id") or (
