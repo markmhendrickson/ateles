@@ -386,6 +386,156 @@ def test_gate_readiness_ci_pending_holds_without_paging(monkeypatch):
     assert not any("READY TO MERGE" in m for m in d.notifier.sent)
 
 
+# ── _required_ci_state (CI detection — status API + check-runs precedence) ───
+
+
+class _FakeCIHttpxClient:
+    """Routes GET by URL to canned responses for _required_ci_state:
+    pulls/{n} → head sha; commits/{sha}/status → {state}; .../check-runs → {runs}.
+    Any endpoint may be set to raise to exercise the fail-open path."""
+
+    def __init__(self, *, head_sha="abc123", status_state="success",
+                 check_runs=None, raise_on=None):
+        self.head_sha = head_sha
+        self.status_state = status_state
+        self.check_runs = check_runs if check_runs is not None else []
+        self.raise_on = raise_on or set()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        pass
+
+    async def get(self, url, **kwargs):
+        parent = self
+
+        def _payload():
+            if "/pulls/" in url:
+                if "pulls" in parent.raise_on:
+                    raise httpx.HTTPError("boom")
+                return {"head": {"sha": parent.head_sha}}
+            if url.endswith("/status"):
+                if "status" in parent.raise_on:
+                    raise httpx.HTTPError("boom")
+                return {"state": parent.status_state}
+            if url.endswith("/check-runs"):
+                if "checks" in parent.raise_on:
+                    raise httpx.HTTPError("boom")
+                return {"check_runs": parent.check_runs}
+            return {}
+
+        payload = _payload()
+
+        class _Resp:
+            def raise_for_status(self_inner):
+                pass
+
+            def json(self_inner):
+                return payload
+
+        return _Resp()
+
+
+def _ci_state(monkeypatch, **kw):
+    client = _FakeCIHttpxClient(**kw)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    return asyncio.run(d._required_ci_state(_trigger()))
+
+
+def test_required_ci_state_green_when_status_success_no_checks(monkeypatch):
+    assert _ci_state(monkeypatch, status_state="success", check_runs=[]) == "green"
+
+
+def test_required_ci_state_green_when_all_checks_success(monkeypatch):
+    runs = [
+        {"status": "completed", "conclusion": "success"},
+        {"status": "completed", "conclusion": "success"},
+    ]
+    assert _ci_state(monkeypatch, status_state="", check_runs=runs) == "green"
+
+
+def test_required_ci_state_failing_when_status_failure(monkeypatch):
+    assert _ci_state(monkeypatch, status_state="failure", check_runs=[]) == "failing"
+
+
+def test_required_ci_state_failing_when_any_check_failed(monkeypatch):
+    runs = [
+        {"status": "completed", "conclusion": "success"},
+        {"status": "completed", "conclusion": "failure"},
+    ]
+    assert _ci_state(monkeypatch, status_state="success", check_runs=runs) == "failing"
+
+
+def test_required_ci_state_failing_takes_precedence_over_pending(monkeypatch):
+    # A still-running check AND a failed one → failing wins (don't call it pending).
+    runs = [
+        {"status": "in_progress", "conclusion": None},
+        {"status": "completed", "conclusion": "failure"},
+    ]
+    assert _ci_state(monkeypatch, status_state="pending", check_runs=runs) == "failing"
+
+
+def test_required_ci_state_pending_when_a_check_incomplete(monkeypatch):
+    runs = [
+        {"status": "completed", "conclusion": "success"},
+        {"status": "queued", "conclusion": None},
+    ]
+    assert _ci_state(monkeypatch, status_state="success", check_runs=runs) == "pending"
+
+
+def test_required_ci_state_failing_on_actionable_conclusions(monkeypatch):
+    for concl in ("timed_out", "cancelled", "action_required"):
+        runs = [{"status": "completed", "conclusion": concl}]
+        assert _ci_state(monkeypatch, status_state="", check_runs=runs) == "failing"
+
+
+def test_required_ci_state_unknown_on_missing_head_sha(monkeypatch):
+    assert _ci_state(monkeypatch, head_sha="") == "unknown"
+
+
+def test_required_ci_state_unknown_fails_open_on_api_error(monkeypatch):
+    # A transient API error must NEVER fabricate a green (which would page a merge).
+    assert _ci_state(monkeypatch, raise_on={"status"}) == "unknown"
+    assert _ci_state(monkeypatch, raise_on={"checks"}) == "unknown"
+    assert _ci_state(monkeypatch, raise_on={"pulls"}) == "unknown"
+
+
+# ── prompt generators — guardrails must survive refactors ────────────────────
+
+
+def test_fix_guidance_prompt_names_agent_and_forbids_writing_code():
+    p = SwarmDispatcher._fix_guidance_prompt(
+        _trigger(), lens="ux", agent="accipiter", findings="[naming] flag unclear"
+    )
+    assert "accipiter" in p
+    assert "ux" in p
+    # Reviewer proposes, does not implement (author≠reviewer separation).
+    assert "Do NOT" in p and "write the code" in p
+    assert "[naming] flag unclear" in p
+
+
+def test_cicada_fix_prompt_carries_no_merge_guardrail_and_pr_ref():
+    p = SwarmDispatcher._cicada_fix_prompt(
+        _trigger(), parent=80, round_n=2, guidance="### ux (accipiter)\nfix it"
+    )
+    assert "DO NOT MERGE" in p
+    assert "do NOT open a new PR" in p
+    assert "round 2" in p
+    assert "owner/repo#87" in p  # the PR ref from _trigger()
+    assert "fix it" in p  # the guidance is embedded
+
+
+def test_cicada_ci_fix_prompt_carries_no_merge_guardrail():
+    p = SwarmDispatcher._cicada_ci_fix_prompt(_trigger(), parent=80, round_n=1)
+    assert "DO NOT MERGE" in p
+    assert "do NOT open a new PR" in p
+    assert "CI is FAILING" in p or "required CI is FAILING" in p
+    assert "owner/repo#87" in p
+
+
 # ── lenses_missing_comments ─────────────────────────────────────────────────
 
 
