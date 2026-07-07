@@ -140,6 +140,61 @@ def test_pr_synchronize_parses():
     assert t.kind == "pr_synchronize"
 
 
+# ── pull_request_review parsing (approval loop) ─────────────────────────────
+
+
+def _review_payload(action="submitted", state="approved", reviewer="markmhendrickson"):
+    return {
+        "action": action,
+        "repository": {"full_name": "o/r"},
+        "review": {"state": state, "user": {"login": reviewer}},
+        "pull_request": {
+            "number": 12,
+            "title": "Fix the thing",
+            "body": "closes #80",
+            "html_url": "https://github.com/o/r/pull/12",
+            "user": {"login": "ateles-agent"},
+            "head": {"ref": "feat/x"},
+            "base": {"ref": "main"},
+        },
+    }
+
+
+def test_pr_review_approved_parses():
+    t = parse_github_event("pull_request_review", _review_payload(), "d-r1")
+    assert t is not None
+    assert t.kind == "pr_review"
+    assert t.number == 12
+    assert t.review_state == "approved"
+    assert t.review_author == "markmhendrickson"
+    # pr_review must NOT be treated as a pipeline-firing PR event.
+    assert t.is_pr is False
+
+
+def test_pr_review_state_lowercased():
+    # GitHub sends "APPROVED"/"CHANGES_REQUESTED" in some payloads.
+    t = parse_github_event("pull_request_review", _review_payload(state="APPROVED"))
+    assert t is not None
+    assert t.review_state == "approved"
+
+
+def test_pr_review_changes_requested_parses_but_not_approved():
+    t = parse_github_event(
+        "pull_request_review", _review_payload(state="changes_requested")
+    )
+    assert t is not None
+    assert t.kind == "pr_review"
+    assert t.review_state == "changes_requested"
+
+
+def test_pr_review_dismissed_action_ignored():
+    # Only "submitted" carries a fresh verdict; "dismissed"/"edited" are ignored.
+    assert (
+        parse_github_event("pull_request_review", _review_payload(action="dismissed"))
+        is None
+    )
+
+
 def test_pr_closed_ignored():
     assert parse_github_event("pull_request", _pr_payload(action="closed")) is None
 
@@ -239,3 +294,67 @@ def test_issue_comment_payload_does_not_set_is_pr():
     t = parse_github_event("issue_comment", _issue_comment_payload(), "d-7")
     assert t is not None
     assert not t.is_pr
+
+
+# ── /approve-email internal route (approval loop) ───────────────────────────
+
+
+def _post_approve_email(app_secret, header_secret, body_obj):
+    """POST to /approve-email; return (status, captured_trigger_or_None)."""
+    captured = {}
+
+    async def run():
+        async def handler(trigger):
+            captured["trigger"] = trigger
+
+        app = make_app(TEST_HMAC_KEY, handler, approve_email_secret=app_secret)
+        headers = {}
+        if header_secret is not None:
+            headers["X-Approve-Secret"] = header_secret
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/approve-email", data=json.dumps(body_obj), headers=headers
+            )
+            # Give the fire-and-forget handler task a tick to run.
+            await asyncio.sleep(0)
+            return resp.status
+
+    status = asyncio.run(run())
+    return status, captured.get("trigger")
+
+
+def test_approve_email_unset_secret_fails_closed():
+    status, trig = _post_approve_email(
+        "", "anything", {"repository": "o/r", "pr_number": 5}
+    )
+    assert status == 503
+    assert trig is None
+
+
+def test_approve_email_wrong_secret_rejected():
+    status, trig = _post_approve_email(
+        "right", "wrong", {"repository": "o/r", "pr_number": 5}
+    )
+    assert status == 401
+    assert trig is None
+
+
+def test_approve_email_missing_fields_rejected():
+    status, _ = _post_approve_email("s", "s", {"repository": "o/r"})
+    assert status == 400
+    status2, _ = _post_approve_email("s", "s", {"pr_number": 5})
+    assert status2 == 400
+
+
+def test_approve_email_accepted_builds_operator_trigger():
+    status, trig = _post_approve_email(
+        "s", "s", {"repository": "o/r", "pr_number": 5, "sender": "op@x"}
+    )
+    assert status == 200
+    assert trig is not None
+    assert trig.kind == "email_approve"
+    assert trig.repository == "o/r"
+    assert trig.number == 5
+    assert trig.review_state == "approved"
+    # Attributed to the operator login so the shared handler's guard passes.
+    assert trig.review_author == "markmhendrickson"

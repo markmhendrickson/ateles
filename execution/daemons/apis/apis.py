@@ -65,7 +65,14 @@ if _NEOTOMA_ENV_FILE.exists():
         _line = _line.strip()
         if _line and not _line.startswith("#") and "=" in _line:
             _k, _, _v = _line.partition("=")
-            os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
+            _v = _v.strip()
+            # Strip an inline ` # comment` from UNQUOTED values only. Without
+            # this, a line like `FLAG=1  # note` yields the value "1  # note",
+            # which silently breaks exact-match checks (e.g. `== "1"`). Quoted
+            # values keep any `#` verbatim (it may be part of a token/secret).
+            if _v[:1] not in ('"', "'") and " #" in _v:
+                _v = _v.split(" #", 1)[0].strip()
+            os.environ.setdefault(_k.strip(), _v.strip('"').strip("'"))
 
 # Pick the bearer token that matches the instance we actually target. The shared
 # ~/.config/neotoma/.env carries a LOCAL-scoped NEOTOMA_BEARER_TOKEN (the local
@@ -823,7 +830,9 @@ async def main() -> None:
     #    the SSE task loop.
     dispatcher = SwarmDispatcher(notifier)
     gateway_app = github_gateway.make_app(
-        GITHUB_WEBHOOK_SECRET, dispatcher.handle_trigger
+        GITHUB_WEBHOOK_SECRET,
+        dispatcher.handle_trigger,
+        approve_email_secret=os.environ.get("APIS_APPROVE_EMAIL_SECRET", ""),
     )
 
     # 5. Subscribe to SSE events

@@ -155,6 +155,35 @@ _APPROVE_CMD = "/approve"
 _REJECT_CMD = "/reject"
 _HOLD_CMD = "/hold"
 
+# Correlation token embedded in the "READY TO MERGE" notification email so an
+# operator email REPLY carrying "APPROVE" can be matched back to a specific PR
+# (approval loop). Turdus parses this token out of the reply and POSTs it to the
+# Apis gateway's /approve-email route. Format: `swarm-approve: <owner/repo>#<n>`.
+# NB: deliberately NOT a slash-command — it must never match the issue-comment
+# command guards, and it is inert if it ever appears in a GitHub comment.
+_APPROVE_EMAIL_TOKEN_PREFIX = "swarm-approve:"
+
+
+def format_approve_token(repository: str, pr_number: int) -> str:
+    """The correlation line placed in a merge-ready notification email."""
+    return f"{_APPROVE_EMAIL_TOKEN_PREFIX} {repository}#{pr_number}"
+
+
+def parse_approve_token(text: str) -> tuple[str, int] | None:
+    """Extract (repository, pr_number) from a `swarm-approve: owner/repo#N` line.
+
+    Returns None when no well-formed token is present. Tolerant of surrounding
+    quoting/whitespace an email client may add. Repo must be `owner/name` shape.
+    """
+    m = re.search(
+        rf"{re.escape(_APPROVE_EMAIL_TOKEN_PREFIX)}\s*"
+        r"([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)#(\d+)",
+        text,
+    )
+    if not m:
+        return None
+    return m.group(1), int(m.group(2))
+
 # Pre-impl gates that must be signed off before the PR review panel runs.
 # These are the gates Lanius checks for GATE_INHERITANCE.
 PRE_IMPL_GATES = ("pm", "arch")
@@ -803,6 +832,23 @@ class DispatchConfig:
     # for the operator's `build` approval.  Never auto-MERGES — that boundary
     # stays operator-gated via APIS_AUTONOMY_AUTO_MERGE regardless.
     auto_build: bool = os.environ.get("ATELES_SWARM_AUTO_BUILD", "0") == "1"
+    # Operator-approval-triggers-merge (approval loop). When ON, an explicit
+    # operator approval — via the /approve issue comment, a GitHub PR review
+    # "approved" event, or an email reply carrying APPROVE + the correlation
+    # token — performs the actual `gh pr merge --squash`. Default OFF preserves
+    # the conservative Phase-H1 behaviour (resolve the checkpoint, operator
+    # merges by hand). This is DISTINCT from APIS_AUTONOMY_AUTO_MERGE: that flag
+    # merges WITHOUT the operator once the panel is green; this flag merges ONLY
+    # on an explicit operator approval. The merge boundary still requires a human
+    # act — this just lets that act be the merge itself instead of a second click.
+    approval_triggers_merge: bool = (
+        os.environ.get("APIS_APPROVAL_TRIGGERS_MERGE", "0") == "1"
+    )
+    # Merge method used when approval_triggers_merge fires. Squash is the repo
+    # default for swarm build PRs (one clean commit per issue).
+    approval_merge_method: str = os.environ.get(
+        "APIS_APPROVAL_MERGE_METHOD", "squash"
+    ).strip().lower()
     # Concurrency cap for the ordered issue spec pipeline: a burst of many
     # issue.opened events must not stampede the daemon (each pipeline spawns a
     # chain of `claude --print` children).  Capped at 3 concurrent pipelines.
@@ -842,6 +888,10 @@ class SwarmDispatcher:
             await self._log_harness_event(trigger)
             if trigger.kind == "issue_opened":
                 await self._handle_issue_opened(trigger)
+            elif trigger.kind == "pr_review":
+                await self._handle_pr_review(trigger)
+            elif trigger.kind == "email_approve":
+                await self._handle_email_approve(trigger)
             elif trigger.is_pr:
                 await self._handle_pr(trigger)
             elif trigger.kind == "issue_comment":
@@ -1180,6 +1230,64 @@ class SwarmDispatcher:
                 f"{trigger.repository}#{n}: {exc}"
             )
         return None
+
+    async def _resolve_pr_number(self, trigger: SwarmTrigger) -> int | None:
+        """The PR number to act on for an approval trigger.
+
+        A ``pr_review`` trigger, an ``email_approve`` trigger, and a comment ON
+        a PR already carry the PR number in ``trigger.number`` (email_approve's
+        is set + validated ``> 0`` by the gateway's /approve-email route). A
+        ``/approve`` on the PARENT ISSUE carries the issue number, so we resolve
+        the open PR that references it. Returns None when no PR can be
+        identified (approval then merges nothing).
+        """
+        if (
+            trigger.kind in ("pr_review", "email_approve")
+            or getattr(trigger, "comment_on_pr", False)
+        ):
+            return trigger.number or None
+        # Comment on an issue → find the linked open PR and parse its number.
+        url = await self._find_open_pr_for_issue(trigger)
+        if not url:
+            return None
+        m = re.search(r"/pull/(\d+)", url)
+        return int(m.group(1)) if m else None
+
+    async def _merge_pr(
+        self, repo: str, pr_number: int, method: str = "squash"
+    ) -> tuple[bool, str]:
+        """Merge a PR via the GitHub REST API. Returns (merged, detail).
+
+        Uses ``PUT /repos/{repo}/pulls/{n}/merge`` rather than shelling out to
+        ``gh`` because the dispatcher runs with no git-repo cwd. Fail-safe: any
+        error returns ``(False, <reason>)`` so the caller reports honestly and
+        NEVER claims a merge that did not happen. GitHub returns 405 when the PR
+        is not mergeable (conflicts, failing required checks, already merged),
+        409 on a base-branch race — both surface as an honest "not merged".
+        """
+        method = method if method in ("squash", "merge", "rebase") else "squash"
+        api = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/merge"
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.put(
+                    api,
+                    headers=self._github_headers(repo),
+                    json={"merge_method": method},
+                )
+        except Exception as exc:  # noqa: BLE001 — never raise into the caller
+            return False, f"merge request error: {exc}"
+        if resp.status_code == 200:
+            body = resp.json() if resp.content else {}
+            if body.get("merged"):
+                return True, body.get("sha", "")
+            return False, f"GitHub reported not-merged: {body.get('message', '')}"
+        # 405 not-mergeable, 409 race, 404 missing, 403 perms — all honest fails.
+        detail = ""
+        try:
+            detail = (resp.json() or {}).get("message", "")
+        except Exception:  # noqa: BLE001
+            detail = (resp.text or "")[:200]
+        return False, f"HTTP {resp.status_code}: {detail}"
 
     # ── pull_request pipeline ────────────────────────────────────────────────
 
@@ -1577,10 +1685,16 @@ class SwarmDispatcher:
             return
 
         await self._store_merge_checkpoint(trigger, parent, [p.lens for p in panel])
+        # Approval channels (approval loop): the operator can (a) reply APPROVE to
+        # this email, (b) click Approve on the PR in GitHub, or (c) comment
+        # /approve — all converge on the same gated merge. The correlation token
+        # lets a plain email reply be matched back to THIS PR.
         self.notifier.send(
             f"PR {ref} is READY TO MERGE — panel review clear "
             f"({', '.join(p.lens for p in panel) or 'baseline only'}) and "
-            "required CI green. Approve to merge (checkpoint_brief filed).",
+            "required CI green. Reply APPROVE, approve on GitHub, or comment "
+            "/approve to merge (checkpoint_brief filed).\n\n"
+            f"{format_approve_token(trigger.repository, trigger.number)}",
             priority=Priority.OPERATOR_DECISION,
             handler=DAEMON_NAME,
         )
@@ -1998,59 +2112,172 @@ class SwarmDispatcher:
 
     # ── Phase H1: /approve /reject /hold — pre-merge checkpoint verdicts ──────
 
-    async def _handle_approve(self, trigger: SwarmTrigger) -> None:
-        """Execute the /approve operator command (Phase H1 HITL checkpoint).
+    async def _handle_pr_review(self, trigger: SwarmTrigger) -> None:
+        """Handle a GitHub pull_request_review "submitted" event (approval loop).
 
-        Approves the pending pre-merge checkpoint on this PR/issue.
+        The operator clicking "Approve" in the PR review UI is a second approval
+        entry point, equivalent to the /approve issue comment. Guards, in order:
 
-        Conservative merge choice: the dispatcher does NOT auto-merge the PR.
-        Performing the merge programmatically (gh pr merge) is a side-effecting,
-        hard-to-reverse action.  The checkpoint_brief was filed specifically
-        because APIS_AUTONOMY_AUTO_MERGE=0 — the operator's intent is to control
-        the merge gate themselves.  Auto-merging on /approve would bypass that
-        intent.  Instead, the dispatcher:
-          1. Resolves/closes the checkpoint_brief entity (approved).
-          2. Posts a GitHub confirmation comment (without command tokens).
-          3. Removes the operator's review request (un-assign on resolve rule).
-          4. Re-assigns Vanellus as PR steward and hands back via notification.
-        The operator then merges directly on GitHub or signals Vanellus.
+          - Bot/machine reviewers are ignored (defence-in-depth; a swarm agent
+            review must never drive a merge).
+          - Only the operator login may approve-to-merge (same guard as the
+            comment commands).
+          - Only state == "approved" acts. "changes_requested" / "commented" /
+            "dismissed" are acknowledged in the log and ignored — they are not
+            an approval.
 
-        The release path for the merge checkpoint is this command.  Without
-        /approve being wired, the checkpoint would be a deadlock.  See
-        docs/swarm_hitl_checkpoints_design.md §"No-deadlock self-consistency".
+        A qualifying approval routes to the SHARED _approve_and_maybe_merge path,
+        so the merge boundary (APIS_APPROVAL_TRIGGERS_MERGE) is honoured
+        identically to the other entry points.
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
+        reviewer = trigger.review_author or ""
+        state = trigger.review_state or ""
+
+        if _is_bot_author(reviewer):
+            log.debug(
+                f"[{DAEMON_NAME}] pr_review on {ref} from bot/machine "
+                f"{reviewer!r} — ignored (self-trigger prevention)"
+            )
+            return
+        if reviewer.lower() != _OPERATOR_LOGIN.lower():
+            log.debug(
+                f"[{DAEMON_NAME}] pr_review on {ref} from non-operator "
+                f"{reviewer!r} — ignored (operator login: {_OPERATOR_LOGIN!r})"
+            )
+            return
+        if state != "approved":
+            log.info(
+                f"[{DAEMON_NAME}] pr_review on {ref} by operator is "
+                f"{state!r}, not 'approved' — no merge action"
+            )
+            return
+
+        log.info(
+            f"[{DAEMON_NAME}] operator GitHub review APPROVED on {ref} — "
+            "routing to shared approval path"
+        )
+        await self._approve_and_maybe_merge(trigger, source="GitHub review")
+
+    async def _handle_email_approve(self, trigger: SwarmTrigger) -> None:
+        """Handle an operator email-reply approval (approval loop).
+
+        The Apis gateway's /approve-email route already authenticated the caller
+        (shared secret) and Turdus already verified the reply came from the
+        operator's own address and carried APPROVE + the correlation token. The
+        trigger arrives pre-attributed to the operator, so we route straight to
+        the shared approval path — the merge gate (APIS_APPROVAL_TRIGGERS_MERGE)
+        applies identically to every channel.
         """
         ref = f"{trigger.repository}#{trigger.number}"
         log.info(
-            f"[{DAEMON_NAME}] operator {_APPROVE_CMD} received on {ref} "
-            f"(comment #{trigger.comment_id})"
+            f"[{DAEMON_NAME}] operator email APPROVE on {ref} — "
+            "routing to shared approval path"
         )
+        await self._approve_and_maybe_merge(trigger, source="email reply")
 
-        # 1. Resolve the checkpoint_brief: file an approved resolution.
-        #    We store a new checkpoint_brief entity with status=approved so the
-        #    Neotoma trail is clear.  (The original open brief stays; resolution
-        #    is an additive correction pattern.)
+    async def _handle_approve(self, trigger: SwarmTrigger) -> None:
+        """Execute the /approve operator command (Phase H1 HITL checkpoint).
+
+        Thin entry point: the /approve issue-comment command shares one approval
+        path with the GitHub PR-review "approved" event and the email-reply
+        APPROVE path. All three converge on ``_approve_and_maybe_merge`` so the
+        checkpoint resolution, confirmation, reviewer cleanup, and (optional)
+        merge stay identical regardless of HOW the operator approved.
+        """
+        log.info(
+            f"[{DAEMON_NAME}] operator {_APPROVE_CMD} received on "
+            f"{trigger.repository}#{trigger.number} (comment #{trigger.comment_id})"
+        )
+        # NB: the source label is echoed into the GitHub confirmation comment, so
+        # it must NOT contain a command token (e.g. "/approve") — a comment body
+        # carrying the token would re-trigger this handler (neotoma#1686).
+        await self._approve_and_maybe_merge(trigger, source="approve comment")
+
+    async def _approve_and_maybe_merge(
+        self, trigger: SwarmTrigger, source: str
+    ) -> None:
+        """Shared operator-approval handler for all three approval entry points.
+
+        Always (regardless of the merge flag):
+          1. Resolves the checkpoint_brief as approved (additive Neotoma trail).
+          2. Posts a GitHub confirmation comment (no command tokens → no
+             self-retrigger, neotoma#1686).
+          3. Removes the operator's review request (un-assign on resolve).
+
+        Then the merge boundary:
+          - APIS_APPROVAL_TRIGGERS_MERGE=1 → perform the actual merge via
+            ``_merge_pr`` and report the REAL outcome honestly (merged with SHA,
+            or not-merged with the GitHub reason — never a merge claimed that did
+            not happen).
+          - flag OFF (default) → conservative Phase-H1 behaviour: PR is left
+            ready for the operator to merge on GitHub. Vanellus retains
+            stewardship.
+
+        ``source`` is a short human string ("/approve comment", "GitHub review",
+        "email reply") threaded into the notification + comment so the audit
+        trail records which channel the approval arrived on.
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
+
+        # 1. Resolve the checkpoint_brief (approved).
         await self._store_checkpoint_resolution(trigger, verdict="approved", reason="")
 
-        # 2. Post a GitHub confirmation comment.  Body deliberately contains no
-        #    command tokens so it cannot re-trigger the handler (neotoma#1686).
+        merge_line = (
+            "The PR is ready to merge — proceed on GitHub or instruct Vanellus. "
+            "Vanellus retains PR stewardship."
+        )
+        merged_ok = False
+        merge_detail = ""
+
+        # 2b. Optional merge (flag-gated). Resolve the PR number first; if none
+        #     can be identified we cannot merge and say so plainly.
+        if self.config.approval_triggers_merge:
+            pr_number = await self._resolve_pr_number(trigger)
+            if pr_number is None:
+                merge_line = (
+                    "APIS_APPROVAL_TRIGGERS_MERGE is ON, but no open PR could be "
+                    "resolved from this approval — nothing merged. Merge manually."
+                )
+            else:
+                merged_ok, merge_detail = await self._merge_pr(
+                    trigger.repository,
+                    pr_number,
+                    self.config.approval_merge_method,
+                )
+                if merged_ok:
+                    sha = (merge_detail or "")[:12]
+                    merge_line = (
+                        f"Merge approved via {source} — PR #{pr_number} MERGED "
+                        f"({self.config.approval_merge_method}"
+                        + (f", {sha}" if sha else "")
+                        + ")."
+                    )
+                else:
+                    merge_line = (
+                        f"Merge approved via {source}, but the merge did NOT "
+                        f"complete: {merge_detail}. The PR was left open — "
+                        "resolve the blocker and merge manually."
+                    )
+
+        # 2. Post the GitHub confirmation comment (no command tokens in body).
         await self._post_checkpoint_verdict_comment(
             trigger,
             body=(
                 f"<!-- h1-checkpoint-approve -->\n"
                 f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
-                f"Operator **approved** the pre-merge checkpoint on {ref}. "
-                "Checkpoint resolved. The PR is ready to merge — proceed on "
-                "GitHub or instruct Vanellus. Vanellus retains PR stewardship."
+                f"Operator **approved** the pre-merge checkpoint on {ref} "
+                f"(via {source}). Checkpoint resolved. {merge_line}"
             ),
         )
 
         # 3. Remove operator from reviewer list (best-effort, non-fatal).
         await self._remove_operator_reviewer(trigger)
 
-        # 4. Notify Vanellus handback.
+        # 4. Notify.
         self.notifier.send(
-            f"Operator approved merge checkpoint on {ref} — checkpoint resolved, "
-            f"operator reviewer removed. PR ready to merge; Vanellus is PR steward.",
+            f"Operator approved merge checkpoint on {ref} (via {source}) — "
+            f"checkpoint resolved, operator reviewer removed. {merge_line}",
             priority=Priority.OPERATOR_DECISION,
             handler=DAEMON_NAME,
         )

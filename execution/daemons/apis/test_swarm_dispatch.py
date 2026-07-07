@@ -2349,6 +2349,302 @@ def test_approve_from_bot_is_ignored(monkeypatch):
     assert notifier.sent == [], f"No notifications for bot authors: {notifier.sent}"
 
 
+# ── approval-triggers-merge + GitHub review approval path ────────────────────
+
+
+def _review_trigger(**overrides):
+    """Build a pr_review SwarmTrigger simulating a GitHub PR-review submission."""
+    base = dict(
+        kind="pr_review",
+        repository="owner/repo",
+        number=87,
+        title="A pull request",
+        body="Closes #80.",
+        author="ateles-agent",
+        html_url="https://github.com/owner/repo/pull/87",
+        delivery_id="review-test",
+        action="submitted",
+        review_state="approved",
+        review_author=_OPERATOR_LOGIN,
+    )
+    base.update(overrides)
+    return SwarmTrigger(**base)
+
+
+class _MergeAwareClient:
+    """httpx stub that answers the PR-merge PUT with a configurable outcome and
+    records every call, plus the comment POST and reviewer DELETE."""
+
+    def __init__(self, *, merge_status=200, merged=True, **kwargs):
+        self._merge_status = merge_status
+        self._merged = merged
+        self.put_calls: list[dict] = []
+        self.post_calls: list[dict] = []
+        self.delete_calls: list[dict] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        pass
+
+    async def put(self, url, **kwargs):
+        self.put_calls.append({"url": url, "json": kwargs.get("json", {})})
+        if self._merge_status == 200:
+            return _MergeResp(200, {"merged": self._merged, "sha": "abc123def456",
+                                    "message": "" if self._merged else "not mergeable"})
+        return _MergeResp(self._merge_status, {"message": "Pull Request is not mergeable"})
+
+    async def post(self, url, **kwargs):
+        self.post_calls.append({"url": url, "json": kwargs.get("json", {})})
+        return _MergeResp(201, {})
+
+    async def request(self, method, url, **kwargs):
+        if method == "DELETE":
+            self.delete_calls.append({"url": url, "json": kwargs.get("json", {})})
+        return _MergeResp(200, {})
+
+    async def get(self, url, **kwargs):
+        # _find_open_pr_for_issue path (unused when comment_on_pr/pr_review).
+        return _MergeResp(200, [])
+
+
+class _MergeResp:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+        self.content = b"x"
+        self.text = str(payload)
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError("error", request=None, response=self)  # type: ignore[arg-type]
+
+    def json(self):
+        return self._payload
+
+
+def _merge_flag_config(**over):
+    cfg = _config()
+    cfg.approval_triggers_merge = True
+    cfg.approval_merge_method = "squash"
+    for k, v in over.items():
+        setattr(cfg, k, v)
+    return cfg
+
+
+def test_github_review_approved_from_operator_merges_when_flag_on(monkeypatch):
+    """Operator 'Approve' review + flag ON → PR merged via the REST API."""
+    client = _MergeAwareClient(merge_status=200, merged=True)
+
+    async def fake_store(self, entities, idempotency_key):
+        pass
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _merge_flag_config())
+    asyncio.run(d._handle_pr_review(_review_trigger()))
+
+    # The merge PUT hit the right endpoint with squash.
+    assert any("/pulls/87/merge" in c["url"] for c in client.put_calls), (
+        f"Expected merge PUT; got {client.put_calls}"
+    )
+    merge_call = next(c for c in client.put_calls if "/merge" in c["url"])
+    assert merge_call["json"].get("merge_method") == "squash"
+    # Notification reports the merge honestly.
+    assert any("MERGED" in m for m in notifier.sent), (
+        f"Expected a MERGED notification; got {notifier.sent}"
+    )
+
+
+def test_github_review_approved_flag_off_does_not_merge(monkeypatch):
+    """Operator 'Approve' review + flag OFF → checkpoint resolved, NO merge."""
+    client = _MergeAwareClient()
+
+    async def fake_store(self, entities, idempotency_key):
+        pass
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())  # flag OFF by default
+    asyncio.run(d._handle_pr_review(_review_trigger()))
+
+    assert client.put_calls == [], f"Flag OFF must not merge; got {client.put_calls}"
+    assert not any("MERGED" in m for m in notifier.sent)
+
+
+def test_github_review_non_operator_ignored(monkeypatch):
+    """A non-operator approving review must never drive a merge."""
+    client = _MergeAwareClient()
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _merge_flag_config())
+    asyncio.run(d._handle_pr_review(_review_trigger(review_author="random-user")))
+
+    assert client.put_calls == []
+    assert notifier.sent == []
+
+
+def test_github_review_bot_ignored(monkeypatch):
+    """A bot/machine review must never drive a merge (defence-in-depth)."""
+    client = _MergeAwareClient()
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _merge_flag_config())
+    for bot in ["ateles-agent", "neotoma-agent", "github-actions[bot]"]:
+        asyncio.run(d._handle_pr_review(_review_trigger(review_author=bot)))
+
+    assert client.put_calls == []
+    assert notifier.sent == []
+
+
+def test_github_review_changes_requested_no_merge(monkeypatch):
+    """Operator review with state != approved must not merge."""
+    client = _MergeAwareClient()
+
+    async def fake_store(self, entities, idempotency_key):
+        pass
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _merge_flag_config())
+    asyncio.run(d._handle_pr_review(_review_trigger(review_state="changes_requested")))
+
+    assert client.put_calls == []
+
+
+def test_merge_failure_reported_honestly(monkeypatch):
+    """When GitHub refuses the merge (405), the swarm must NOT claim a merge."""
+    client = _MergeAwareClient(merge_status=405)
+
+    async def fake_store(self, entities, idempotency_key):
+        pass
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _merge_flag_config())
+    asyncio.run(d._handle_pr_review(_review_trigger()))
+
+    # A merge PUT was attempted, but the notification says NOT merged.
+    assert client.put_calls, "Merge should have been attempted"
+    assert any("did NOT complete" in m or "not merged" in m.lower()
+               for m in notifier.sent), (
+        f"Failure must be reported honestly; got {notifier.sent}"
+    )
+    assert not any("MERGED" in m for m in notifier.sent)
+
+
+def test_email_approve_merges_when_flag_on(monkeypatch):
+    """The email-reply channel (email_approve) merges when the flag is on.
+
+    Regression for the Loxia finding on ateles#189: _resolve_pr_number must
+    treat an email_approve trigger's number as a PR number directly, not fall
+    through to the issue→PR search (which would find nothing and never merge).
+    """
+    client = _MergeAwareClient(merge_status=200, merged=True)
+
+    async def fake_store(self, entities, idempotency_key):
+        pass
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _merge_flag_config())
+    trig = _review_trigger(kind="email_approve", action="approved")
+    asyncio.run(d._handle_email_approve(trig))
+
+    # The PR number (87) must have driven the merge PUT directly — NOT been
+    # treated as an issue number to search for.
+    assert any("/pulls/87/merge" in c["url"] for c in client.put_calls), (
+        f"email_approve must merge PR #87 directly; got {client.put_calls}"
+    )
+    assert any("MERGED" in m for m in notifier.sent)
+
+
+def test_resolve_pr_number_email_approve_uses_number_directly(monkeypatch):
+    """_resolve_pr_number returns the trigger number for email_approve without
+    hitting the issue→PR search path."""
+    called = {"find": False}
+
+    async def fake_find(self, trigger):
+        called["find"] = True
+        return None
+
+    monkeypatch.setattr(SwarmDispatcher, "_find_open_pr_for_issue", fake_find)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    n = asyncio.run(
+        d._resolve_pr_number(_review_trigger(kind="email_approve", number=42))
+    )
+    assert n == 42
+    assert called["find"] is False, "must not fall through to issue→PR search"
+
+
+def test_approve_comment_merges_when_flag_on(monkeypatch):
+    """The /approve issue comment shares the merge path (flag ON → merges)."""
+    client = _MergeAwareClient(merge_status=200, merged=True)
+
+    async def fake_store(self, entities, idempotency_key):
+        pass
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _merge_flag_config())
+    # comment_on_pr=True → _resolve_pr_number uses trigger.number directly.
+    asyncio.run(d._handle_issue_comment(_checkpoint_trigger()))
+
+    assert any("/pulls/87/merge" in c["url"] for c in client.put_calls), (
+        f"Expected merge PUT from /approve comment; got {client.put_calls}"
+    )
+    assert any("MERGED" in m for m in notifier.sent)
+
+
+def test_merge_pr_helper_success(monkeypatch):
+    """_merge_pr returns (True, sha) on a 200 merged response."""
+    client = _MergeAwareClient(merge_status=200, merged=True)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    ok, detail = asyncio.run(d._merge_pr("owner/repo", 87, "squash"))
+    assert ok is True
+    assert detail == "abc123def456"
+
+
+def test_merge_pr_helper_not_mergeable(monkeypatch):
+    """_merge_pr returns (False, reason) on a 405."""
+    client = _MergeAwareClient(merge_status=405)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    ok, detail = asyncio.run(d._merge_pr("owner/repo", 87, "squash"))
+    assert ok is False
+    assert "405" in detail
+
+
+def test_merge_pr_helper_bad_method_defaults_squash(monkeypatch):
+    """An unknown merge method falls back to squash (no arbitrary passthrough)."""
+    client = _MergeAwareClient(merge_status=200, merged=True)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(d._merge_pr("owner/repo", 87, "force-push-lol"))
+    assert client.put_calls[0]["json"]["merge_method"] == "squash"
+
+
 # ── /reject command ──────────────────────────────────────────────────────────
 
 
