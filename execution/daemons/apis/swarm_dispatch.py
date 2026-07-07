@@ -218,6 +218,98 @@ def content_digest(entities: list[dict]) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()[:12]
 
 
+# Phrases that mark a line as the agent narrating ABOUT its section rather than
+# being the section content. Matched case-insensitively at line start.
+_NARRATION_PREFIXES: tuple[str, ...] = (
+    "perfect.",
+    "perfect,",
+    "great.",
+    "done.",
+    "i have successfully",
+    "i've successfully",
+    "i have written",
+    "i've written",
+    "i have completed",
+    "i've completed",
+    "i have created",
+    "i have drafted",
+    "i have now",
+    "i have added",
+    "here is my",
+    "here's my",
+    "here is the",
+    "here's the",
+    "below is my",
+    "the following is",
+    "the section is ready",
+    "this section is ready",
+    "the section is complete",
+    "in summary,",
+    "to summarize",
+)
+_NARRATION_SUMMARY_HEADINGS: tuple[str, ...] = ("## summary", "### summary")
+
+
+def _is_narration_line(line: str) -> bool:
+    """True when a line is the agent narrating about its work, not spec content."""
+    low = line.strip().lower()
+    if not low:
+        return False
+    if low in _NARRATION_SUMMARY_HEADINGS:
+        return True
+    return any(low.startswith(p) for p in _NARRATION_PREFIXES)
+
+
+def _is_only_narration(text: str) -> bool:
+    """True when, after sanitizing, nothing but narration/meta remains.
+
+    Used by _extract_section_text to reject a section that is a DESCRIPTION of a
+    spec ("I have successfully completed the Engineering section…") rather than
+    an actual spec, so the section is flagged not-produced instead of storing
+    garbage the implementer can't build from (root cause of #1882's no-op build).
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    content_lines = [
+        ln.strip()
+        for ln in stripped.splitlines()
+        if ln.strip() and not _is_narration_line(ln.strip())
+    ]
+    if not content_lines:
+        return True
+    joined = " ".join(content_lines)
+    low = joined.lower()
+    # A bare "[agent] pull_request_link: BLOCKED …" status is not a usable spec.
+    if "pull_request_link" in low and len(content_lines) <= 2:
+        return True
+    # Minimum-substance floor: a real spec section is more than a stray fragment
+    # left over after narration is stripped (e.g. a single dangling list item
+    # "1. Specifies files to touch"). Require at least 2 content lines OR ~60
+    # chars of substance. This is what catches the #1882 Engineering remnant.
+    if len(content_lines) < 2 and len(joined) < 60:
+        return True
+    return False
+
+
+_PR_URL_RE = re.compile(
+    r"https://github\.com/([\w.\-]+/[\w.\-]+)/pull/(\d+)", re.IGNORECASE
+)
+
+
+def _extract_pr_url(stdout: str, repository: str) -> str | None:
+    """Return a github.com PR URL for ``repository`` found in ``stdout``, else None.
+
+    Cicada reports the PR it opened as a github.com/<repo>/pull/<n> link; we
+    only accept one whose <repo> matches the target so a stray link to another
+    repo isn't mistaken for the build PR.
+    """
+    for m in _PR_URL_RE.finditer(stdout or ""):
+        if m.group(1).lower() == repository.lower():
+            return m.group(0)
+    return None
+
+
 def _sanitize_section_body(text: str, section: SpecSection) -> str:
     """Clean an agent's raw section text before it is stored + mirrored.
 
@@ -261,6 +353,17 @@ def _sanitize_section_body(text: str, section: SpecSection) -> str:
                 cleaned_lines.pop(0)
                 while cleaned_lines and not cleaned_lines[0].strip():
                     cleaned_lines.pop(0)
+    # Drop leading conversational narration lines (the agent talking ABOUT its
+    # work rather than the work itself). Only strips from the top so real spec
+    # content and body sub-headings are preserved.
+    while cleaned_lines:
+        first = cleaned_lines[0].strip()
+        if first and _is_narration_line(first):
+            cleaned_lines.pop(0)
+            while cleaned_lines and not cleaned_lines[0].strip():
+                cleaned_lines.pop(0)
+            continue
+        break
     return "\n".join(cleaned_lines).strip()
 
 
@@ -863,16 +966,18 @@ class SwarmDispatcher:
         #    STOP and notify that the spec is ready awaiting `build` approval.
         gates_green = self._gates_green(lanius)
         if self.config.auto_build and gates_green:
-            opened = await self._open_implementation_pr(trigger, state)
+            pr_url = await self._open_implementation_pr(trigger, state)
             self.notifier.send(
                 f"Issue {ref}: additive spec assembled ("
                 f"{', '.join(completed) or 'none'}); "
                 + (
-                    "auto-build ON — implementation PR handoff invoked, PR gate "
-                    "pipeline now owns it (merge stays operator-gated)."
-                    if opened
-                    else "auto-build ON but PR handoff could not be invoked — "
-                    "spec is ready; open the build manually."
+                    f"auto-build ON — implementation PR opened ({pr_url}); the "
+                    "PR gate pipeline now owns it (merge stays operator-gated)."
+                    if pr_url
+                    else "auto-build ON, but the Cicada build handoff opened NO "
+                    "PR (spec may be incomplete or the build produced nothing). "
+                    "Spec is ready; open the build manually or re-run once the "
+                    "spec is implementable."
                 ),
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
@@ -915,19 +1020,31 @@ class SwarmDispatcher:
         fences are present we take exactly what is inside (the additive
         contract).  When absent (a terse agent), we fall back to the trimmed
         stdout so the section is never silently empty.
+
+        In BOTH paths the result is rejected (returns "") when it is only
+        conversational narration ("I have successfully completed the
+        Engineering section…") rather than an actual spec — the #1882 defect
+        where the fence-fallback stored the agent's summary-of-its-work as the
+        section, leaving the implementer nothing to build. Returning "" flags
+        the section as not-produced so the pipeline can surface it, rather than
+        mirroring garbage.
         """
         blob = stdout or ""
         start = blob.find("<<<SPEC_SECTION>>>")
         end = blob.find("<<<END_SPEC_SECTION>>>")
         if start != -1 and end != -1 and end > start:
             inner = blob[start + len("<<<SPEC_SECTION>>>"):end]
-            return _sanitize_section_body(inner, section)
+            cleaned = _sanitize_section_body(inner, section)
+            return "" if _is_only_narration(cleaned) else cleaned
         # Fallback: a terse/non-conforming agent emitted no fences. Sanitize
         # hard — its raw stdout may echo the managed markers and/or its own
         # section heading, which (once the assembler re-adds the heading and
         # the mirror re-wraps the markers) produced the duplicated-header +
-        # nested-marker corruption seen on the first live run (#180).
-        return _sanitize_section_body(blob, section)
+        # nested-marker corruption seen on the first live run (#180). And if the
+        # unfenced stdout is only narration, reject it (root cause of #1882's
+        # Engineering section being meta-commentary, not a spec).
+        cleaned = _sanitize_section_body(blob, section)
+        return "" if _is_only_narration(cleaned) else cleaned
 
     async def _mirror_spec_to_issue(
         self, trigger: SwarmTrigger, state: SpecState
@@ -985,7 +1102,7 @@ class SwarmDispatcher:
 
     async def _open_implementation_pr(
         self, trigger: SwarmTrigger, state: SpecState
-    ) -> bool:
+    ) -> str | None:
         """Chain into implementation: dispatch Cicada to open a build PR.
 
         Only reached when ``ATELES_SWARM_AUTO_BUILD`` is ON and gates are green.
@@ -994,8 +1111,13 @@ class SwarmDispatcher:
         issue (`Closes #<n>`) so the existing ``_handle_pr`` gate pipeline takes
         over.  This method NEVER merges anything.
 
-        Returns True when the Cicada dispatch ran ok, False otherwise.
-        Best-effort: any failure returns False and the caller notifies.
+        Returns the opened PR URL when a PR was ACTUALLY opened, else None.
+        A successful dispatch (exit 0) is NOT sufficient: on #1882 Cicada
+        returned ok in ~30s with no PR (it had a narration-only Engineering
+        section to build from). We therefore CONFIRM a real PR exists — first
+        from a URL in Cicada's stdout, then by querying GitHub for an open PR
+        referencing this issue — so the caller can notify honestly instead of a
+        false "PR gate pipeline now owns it".
         """
         result = await run_skill(
             "cicada",
@@ -1009,7 +1131,55 @@ class SwarmDispatcher:
                 f"{trigger.repository}#{trigger.number}: "
                 f"{result.error or f'rc={result.returncode}'}"
             )
-        return result.ok
+            return None
+
+        # 1. A PR URL in Cicada's stdout (the happy path — it reports the link).
+        url = _extract_pr_url(result.stdout or "", trigger.repository)
+        if url:
+            return url
+
+        # 2. No URL in stdout — confirm against GitHub. Query open PRs that
+        #    reference this issue (Closes #<n> in the body). If Cicada actually
+        #    opened one, this finds it; if it produced nothing (the #1882 case),
+        #    this returns None and the caller reports "handoff ran but no PR".
+        found = await self._find_open_pr_for_issue(trigger)
+        if not found:
+            log.warning(
+                f"[{DAEMON_NAME}] Cicada build handoff for "
+                f"{trigger.repository}#{trigger.number} returned ok but NO PR "
+                f"was opened ({len(result.stdout or '')}B stdout) — reporting "
+                "no-PR so the operator can build manually."
+            )
+        return found
+
+    async def _find_open_pr_for_issue(self, trigger: SwarmTrigger) -> str | None:
+        """Return the URL of an open PR referencing this issue, or None.
+
+        Matches a PR whose body references the issue number (``Closes #<n>`` /
+        ``#<n>``). Best-effort GitHub REST; never raises.
+        """
+        n = trigger.number
+        api = (
+            f"https://api.github.com/repos/{trigger.repository}/pulls"
+            "?state=open&per_page=30&sort=created&direction=desc"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    api, headers=self._github_headers(trigger.repository)
+                )
+                resp.raise_for_status()
+                for pr in resp.json() or []:
+                    body = pr.get("body") or ""
+                    ref = re.search(rf"#\b{n}\b", body)
+                    if ref:
+                        return pr.get("html_url")
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            log.warning(
+                f"[{DAEMON_NAME}] PR-confirmation query failed for "
+                f"{trigger.repository}#{n}: {exc}"
+            )
+        return None
 
     # ── pull_request pipeline ────────────────────────────────────────────────
 
