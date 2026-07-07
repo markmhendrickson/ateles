@@ -2547,6 +2547,53 @@ def test_merge_failure_reported_honestly(monkeypatch):
     assert not any("MERGED" in m for m in notifier.sent)
 
 
+def test_email_approve_merges_when_flag_on(monkeypatch):
+    """The email-reply channel (email_approve) merges when the flag is on.
+
+    Regression for the Loxia finding on ateles#189: _resolve_pr_number must
+    treat an email_approve trigger's number as a PR number directly, not fall
+    through to the issue→PR search (which would find nothing and never merge).
+    """
+    client = _MergeAwareClient(merge_status=200, merged=True)
+
+    async def fake_store(self, entities, idempotency_key):
+        pass
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _merge_flag_config())
+    trig = _review_trigger(kind="email_approve", action="approved")
+    asyncio.run(d._handle_email_approve(trig))
+
+    # The PR number (87) must have driven the merge PUT directly — NOT been
+    # treated as an issue number to search for.
+    assert any("/pulls/87/merge" in c["url"] for c in client.put_calls), (
+        f"email_approve must merge PR #87 directly; got {client.put_calls}"
+    )
+    assert any("MERGED" in m for m in notifier.sent)
+
+
+def test_resolve_pr_number_email_approve_uses_number_directly(monkeypatch):
+    """_resolve_pr_number returns the trigger number for email_approve without
+    hitting the issue→PR search path."""
+    called = {"find": False}
+
+    async def fake_find(self, trigger):
+        called["find"] = True
+        return None
+
+    monkeypatch.setattr(SwarmDispatcher, "_find_open_pr_for_issue", fake_find)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    n = asyncio.run(
+        d._resolve_pr_number(_review_trigger(kind="email_approve", number=42))
+    )
+    assert n == 42
+    assert called["find"] is False, "must not fall through to issue→PR search"
+
+
 def test_approve_comment_merges_when_flag_on(monkeypatch):
     """The /approve issue comment shares the merge path (flag ON → merges)."""
     client = _MergeAwareClient(merge_status=200, merged=True)

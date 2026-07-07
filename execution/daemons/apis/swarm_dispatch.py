@@ -1234,12 +1234,17 @@ class SwarmDispatcher:
     async def _resolve_pr_number(self, trigger: SwarmTrigger) -> int | None:
         """The PR number to act on for an approval trigger.
 
-        A ``pr_review`` trigger and a comment ON a PR already carry the PR
-        number in ``trigger.number``. A ``/approve`` on the PARENT ISSUE carries
-        the issue number, so we resolve the open PR that references it. Returns
-        None when no PR can be identified (approval then merges nothing).
+        A ``pr_review`` trigger, an ``email_approve`` trigger, and a comment ON
+        a PR already carry the PR number in ``trigger.number`` (email_approve's
+        is set + validated ``> 0`` by the gateway's /approve-email route). A
+        ``/approve`` on the PARENT ISSUE carries the issue number, so we resolve
+        the open PR that references it. Returns None when no PR can be
+        identified (approval then merges nothing).
         """
-        if trigger.kind == "pr_review" or getattr(trigger, "comment_on_pr", False):
+        if (
+            trigger.kind in ("pr_review", "email_approve")
+            or getattr(trigger, "comment_on_pr", False)
+        ):
             return trigger.number or None
         # Comment on an issue → find the linked open PR and parse its number.
         url = await self._find_open_pr_for_issue(trigger)
