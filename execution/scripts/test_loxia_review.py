@@ -121,9 +121,9 @@ def test_post_without_marker_always_creates(monkeypatch):
 # ── Review-failure handling (no false-green) ────────────────────────────────
 
 
-def test_call_claude_raises_on_http_error(monkeypatch):
-    # A credit-exhausted / auth 400 must raise ClaudeReviewError, NOT return the
-    # error text as if it were a review (the #174 false-green bug).
+def test_api_fallback_raises_on_http_error(monkeypatch):
+    # Metered-key fallback path: a credit-exhausted / auth 400 must raise
+    # ClaudeReviewError, NOT return the error text as a review (#174 false-green).
     monkeypatch.setattr(lx, "CLAUDE_OAUTH_TOKEN", "")
     monkeypatch.setattr(lx, "ANTHROPIC_API_KEY", "k")
 
@@ -137,13 +137,20 @@ def test_call_claude_raises_on_http_error(monkeypatch):
         lx.call_claude("prompt")
 
 
-def test_call_claude_raises_on_empty_response(monkeypatch):
+def test_api_fallback_raises_on_empty_response(monkeypatch):
     monkeypatch.setattr(lx, "CLAUDE_OAUTH_TOKEN", "")
     monkeypatch.setattr(lx, "ANTHROPIC_API_KEY", "k")
     monkeypatch.setattr(
         lx.urllib.request, "urlopen",
         lambda *a, **k: _resp({"content": [{"text": "   "}]}),
     )
+    with pytest.raises(lx.ClaudeReviewError):
+        lx.call_claude("prompt")
+
+
+def test_no_credential_raises(monkeypatch):
+    monkeypatch.setattr(lx, "CLAUDE_OAUTH_TOKEN", "")
+    monkeypatch.setattr(lx, "ANTHROPIC_API_KEY", "")
     with pytest.raises(lx.ClaudeReviewError):
         lx.call_claude("prompt")
 
@@ -176,19 +183,51 @@ def test_run_reviewer_returns_true_on_success(monkeypatch):
     assert lx.run_reviewer(lx.LOXIA, "diff", ["f.py"]) is True
 
 
-def test_oauth_token_preferred_over_api_key(monkeypatch):
-    # When both creds are present, the subscription OAuth token is used
-    # (Bearer auth), not the metered x-api-key.
-    captured = {}
+def test_oauth_token_routes_to_claude_cli(monkeypatch):
+    # When the subscription OAuth token is present, review goes via
+    # `claude --print` (subscription-native), NOT the raw metered API.
     monkeypatch.setattr(lx, "CLAUDE_OAUTH_TOKEN", "oauth-tok")
     monkeypatch.setattr(lx, "ANTHROPIC_API_KEY", "metered-key")
+    monkeypatch.setattr(lx.shutil, "which", lambda _bin: "/usr/bin/claude")
 
-    def fake_urlopen(req, *a, **k):
-        captured["auth"] = req.get_header("Authorization")
-        captured["xapikey"] = req.get_header("X-api-key")
-        return _resp({"content": [{"text": "ok review"}]})
+    called = {}
 
-    monkeypatch.setattr(lx.urllib.request, "urlopen", fake_urlopen)
-    lx.call_claude("prompt")
-    assert captured["auth"] == "Bearer oauth-tok"
-    assert captured["xapikey"] is None
+    class _Proc:
+        returncode = 0
+        stdout = "## Loxia Review 🪶\nVerdict: APPROVE"
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        called["cmd"] = cmd
+        called["input"] = kw.get("input")
+        return _Proc()
+
+    monkeypatch.setattr(lx.subprocess, "run", fake_run)
+    out = lx.call_claude("the prompt")
+    assert "claude" in called["cmd"][0]
+    assert "--print" in called["cmd"]
+    assert called["input"] == "the prompt"
+    assert "APPROVE" in out
+
+
+def test_claude_cli_missing_raises(monkeypatch):
+    # Told to use the subscription but the CLI isn't installed → fail visibly,
+    # do NOT silently fall back to the metered key the operator opted out of.
+    monkeypatch.setattr(lx, "CLAUDE_OAUTH_TOKEN", "oauth-tok")
+    monkeypatch.setattr(lx.shutil, "which", lambda _bin: None)
+    with pytest.raises(lx.ClaudeReviewError):
+        lx.call_claude("prompt")
+
+
+def test_claude_cli_nonzero_exit_raises(monkeypatch):
+    monkeypatch.setattr(lx, "CLAUDE_OAUTH_TOKEN", "oauth-tok")
+    monkeypatch.setattr(lx.shutil, "which", lambda _bin: "/usr/bin/claude")
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "auth expired"
+
+    monkeypatch.setattr(lx.subprocess, "run", lambda *a, **k: _Proc())
+    with pytest.raises(lx.ClaudeReviewError):
+        lx.call_claude("prompt")

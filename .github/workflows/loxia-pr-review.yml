@@ -56,6 +56,17 @@ jobs:
       - name: Install dependencies
         run: pip install httpx
 
+      # Loxia authenticates via the operator's Max subscription by shelling out
+      # to `claude --print` (CLAUDE_CODE_OAUTH_TOKEN). Install the Claude Code
+      # CLI so that path is available; the script fails visibly if it's missing.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
       - name: Determine PR number
         id: pr
         run: |

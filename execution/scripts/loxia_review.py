@@ -32,6 +32,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -149,33 +150,64 @@ class ClaudeReviewError(RuntimeError):
 
 
 def call_claude(prompt: str) -> str:
-    """Call the Claude API with a single user message; return the text response.
+    """Get a review from Claude for `prompt`; return the text response.
 
-    Raises ClaudeReviewError on any failure to obtain a real review (missing
-    key, HTTP error such as credit-exhausted 400, network error, or an empty/
-    malformed response). This is deliberate: the previous behaviour returned the
-    error string as if it were the review, which let a failed review be posted
-    and the job exit 0 — a false "reviewed" green check on the PR.
+    Prefers the operator's Max subscription via the `claude --print` CLI (same
+    path the swarm's panelists use — it manages auth and rate budgeting for the
+    subscription tier). Verified in CI: a raw /v1/messages call with the
+    subscription OAuth token authenticates but is persistently 429 rate-limited,
+    so the CLI is the correct transport. Falls back to a direct API call only
+    when the CLI is unavailable AND a metered ANTHROPIC_API_KEY is present.
+
+    Raises ClaudeReviewError on any failure to obtain a real review (no
+    credential, CLI/API error, timeout, or empty response). Deliberate: never
+    return an error string as if it were the review (that was the false-green
+    bug — a failed review must fail the check, not pass it).
     """
-    # Prefer the Max subscription OAuth token; fall back to the metered key.
-    # NOTE (unverified): the exact header shape for a subscription OAuth token
-    # against the raw /v1/messages endpoint is not confirmed here — the swarm's
-    # other subscription callers use `claude --print`, which handles auth
-    # internally. If Bearer+beta auth 401s in CI, the alternative is to shell out
-    # to `claude --print` instead of calling the API directly. Either way the
-    # review-failure path makes a bad token a VISIBLE red check, not a false green.
     if CLAUDE_OAUTH_TOKEN:
-        auth_headers = {
-            "authorization": f"Bearer {CLAUDE_OAUTH_TOKEN}",
-            "anthropic-beta": "oauth-2025-04-20",
-        }
-    elif ANTHROPIC_API_KEY:
-        auth_headers = {"x-api-key": ANTHROPIC_API_KEY}
-    else:
-        raise ClaudeReviewError(
-            "no Claude credential set (need CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY)"
-        )
+        return _call_claude_cli(prompt)
+    if ANTHROPIC_API_KEY:
+        return _call_claude_api(prompt)
+    raise ClaudeReviewError(
+        "no Claude credential set (need CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY)"
+    )
 
+
+def _call_claude_cli(prompt: str) -> str:
+    """Run `claude --print` with the prompt on stdin (subscription-authed via
+    CLAUDE_CODE_OAUTH_TOKEN in the env). Mirrors the daemon panelist pattern."""
+    claude_bin = os.environ.get("CLAUDE_BIN", "claude")
+    if shutil.which(claude_bin) is None:
+        # CLI missing but we were told to use the subscription — fail visibly
+        # rather than silently degrade to a metered key the operator opted out of.
+        raise ClaudeReviewError(
+            f"'{claude_bin}' CLI not found on PATH — cannot use the Max "
+            f"subscription; install the Claude Code CLI in the runner."
+        )
+    try:
+        proc = subprocess.run(
+            [claude_bin, "--print", "--model", CLAUDE_MODEL],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=os.environ,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ClaudeReviewError("claude --print timed out") from exc
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        raise ClaudeReviewError(
+            f"claude --print exited {proc.returncode}: {err[:400]}"
+        )
+    text = (proc.stdout or "").strip()
+    if not text:
+        raise ClaudeReviewError("claude --print returned an empty review")
+    return text
+
+
+def _call_claude_api(prompt: str) -> str:
+    """Direct /v1/messages call with the metered ANTHROPIC_API_KEY (fallback)."""
     payload = {
         "model": CLAUDE_MODEL,
         "max_tokens": 1024,
@@ -186,7 +218,7 @@ def call_claude(prompt: str) -> str:
         CLAUDE_API_URL,
         data=json.dumps(payload).encode(),
         headers={
-            **auth_headers,
+            "x-api-key": ANTHROPIC_API_KEY,
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         },
