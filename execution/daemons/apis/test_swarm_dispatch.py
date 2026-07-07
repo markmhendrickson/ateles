@@ -2420,3 +2420,397 @@ def test_compose_auth_failure_comment_is_reframed_not_a_verdict():
     assert "credential failure" in body.lower()
     assert "ANTHROPIC_API_KEY" in body
     assert "not** a review verdict" in body or "not a review verdict" in body.lower()
+
+
+# ── Ordered additive spec pipeline ────────────────────────────────────────────
+#
+# These cover the swarm-mechanics change: the parallel expectation pass is
+# replaced by an ORDERED, ADDITIVE sequence (PM → Design → Eng → QA → Security →
+# Legal), sections persist additively to an issue_spec entity, the spec mirrors
+# into the issue body between managed markers, and the auto-build handoff is
+# gated behind ATELES_SWARM_AUTO_BUILD.
+
+from issue_spec import SECTIONS, SpecState, SPEC_MARKER_START, SPEC_MARKER_END
+
+
+class _FakeSpecStore:
+    """In-memory stand-in for IssueSpecStore that records section order."""
+
+    instances = []
+
+    def __init__(self, base_url, token):
+        self.base_url = base_url
+        self.token = token
+        self.upserts = []  # (section.key, text) in call order
+        self.mirrored = False
+        _FakeSpecStore.instances.append(self)
+
+    async def load(self, repo, issue_number, title):
+        return SpecState(repo=repo, issue_number=issue_number, title=title)
+
+    async def upsert_section(self, state, section, text):
+        assert state.sections is not None and state.sequence_state is not None
+        state.sections[section.field] = text
+        if section.key not in state.sequence_state:
+            state.sequence_state.append(section.key)
+        state.entity_id = state.entity_id or "ent_fake"
+        self.upserts.append((section.key, text))
+        return state
+
+    async def mark_mirrored(self, state):
+        self.mirrored = True
+
+
+def _issue_trigger(**overrides):
+    base = dict(
+        kind="issue_opened",
+        repository="owner/repo",
+        number=100,
+        title="A new feature",
+        body="Please build a thing.",
+        author="reporter",
+        html_url="https://github.com/owner/repo/issues/100",
+        delivery_id="issue-delivery",
+        action="opened",
+        labels=[],
+    )
+    base.update(overrides)
+    return SwarmTrigger(**base)
+
+
+def _install_pipeline_stubs(monkeypatch, run_skill_impl, *, select_agents=None):
+    """Common monkeypatch harness for _handle_issue_opened tests."""
+    _FakeSpecStore.instances = []
+    monkeypatch.setattr(swarm_dispatch, "run_skill", run_skill_impl)
+    monkeypatch.setattr(swarm_dispatch, "IssueSpecStore", _FakeSpecStore)
+    if select_agents is not None:
+        monkeypatch.setattr(
+            swarm_dispatch, "select_expectation_agents", select_agents
+        )
+
+    # Neutralize the GitHub-body mirror (no network); we test it separately.
+    async def fake_mirror(self, trigger, state):
+        pass
+
+    monkeypatch.setattr(SwarmDispatcher, "_mirror_spec_to_issue", fake_mirror)
+
+
+def test_issue_pipeline_runs_sections_in_canonical_order(monkeypatch):
+    """PM → Eng → QA (always) run in canonical order; conditional lenses skipped
+    when select_expectation_agents does not pull them in."""
+    order = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        order.append(skill)
+        return SkillResult(skill, True, 0, "<<<SPEC_SECTION>>>text<<<END_SPEC_SECTION>>>", "")
+
+    # Empty selection → only always-on sections (pm, eng, qa) run.
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    # Lanius first, then the always-on section agents in canonical order.
+    assert order[0] == "lanius"
+    section_agents = order[1:]
+    assert section_agents == ["pavo", "cicada", "phoenicurus"]
+    # Conditional agents must NOT have run.
+    for skipped in ("accipiter", "waxwing", "buteo"):
+        assert skipped not in order
+
+
+def test_issue_pipeline_includes_conditional_lens_when_selected(monkeypatch):
+    """When select_expectation_agents pulls in a conditional lens (e.g. arch →
+    waxwing), that section runs in its canonical position."""
+    order = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        order.append(skill)
+        return SkillResult(skill, True, 0, "text", "")
+
+    # Selection includes waxwing (arch/security) and buteo (legal).
+    class _LensStub:
+        def __init__(self, agent):
+            self.agent = agent
+
+    _install_pipeline_stubs(
+        monkeypatch,
+        fake_run_skill,
+        select_agents=lambda *a, **kw: [_LensStub("waxwing"), _LensStub("buteo")],
+    )
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    section_agents = order[1:]  # drop lanius
+    # Canonical order: pm(pavo) → eng(cicada) → qa(phoenicurus) → security(waxwing)
+    # → legal(buteo). design(accipiter) NOT selected.
+    assert section_agents == ["pavo", "cicada", "phoenicurus", "waxwing", "buteo"]
+    assert "accipiter" not in order
+
+
+def test_issue_pipeline_sections_persist_additively(monkeypatch):
+    """Each agent's section is stored additively; planting PM then running Eng
+    preserves PM's section (the merge discipline)."""
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(
+            skill, True, 0,
+            f"<<<SPEC_SECTION>>>{skill}-section<<<END_SPEC_SECTION>>>", "",
+        )
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    store = _FakeSpecStore.instances[-1]
+    # Sections upserted in canonical order, each with its own agent's text.
+    assert [k for k, _ in store.upserts] == ["pm", "eng", "qa"]
+    texts = {k: v for k, v in store.upserts}
+    assert texts["pm"] == "pavo-section"
+    assert texts["eng"] == "cicada-section"
+    assert texts["qa"] == "phoenicurus-section"
+    assert store.mirrored is True
+
+
+def test_spec_section_prompt_is_additive_and_no_comment(monkeypatch):
+    """The section prompt must tell the agent to add ONLY its section, build on
+    prior sections, and NOT post spec as a comment."""
+    pm = next(s for s in SECTIONS if s.key == "pm")
+    prompt = SwarmDispatcher._spec_section_prompt(
+        _issue_trigger(), pm, "PRIOR SPEC CONTENT"
+    )
+    assert "SPEC SO FAR" in prompt
+    assert "PRIOR SPEC CONTENT" in prompt
+    assert "ONLY" in prompt
+    assert "<<<SPEC_SECTION>>>" in prompt
+    assert "Do NOT post your section as a" in prompt or "not** post" in prompt.lower()
+    # PM section still folds in the gate sign-off.
+    assert "gate_status.pm" in prompt
+
+
+def test_extract_section_text_prefers_fenced_content():
+    out = SwarmDispatcher._extract_section_text(
+        "chatter\n<<<SPEC_SECTION>>>\nreal section\n<<<END_SPEC_SECTION>>>\ntrailer",
+        next(s for s in SECTIONS if s.key == "pm"),
+    )
+    assert out == "real section"
+
+
+def test_extract_section_text_falls_back_to_stdout():
+    out = SwarmDispatcher._extract_section_text(
+        "just plain output", next(s for s in SECTIONS if s.key == "pm")
+    )
+    assert out == "just plain output"
+
+
+# ── Auto-build flag behaviour ─────────────────────────────────────────────────
+
+
+def test_flag_off_no_pr_opened_and_operator_notified(monkeypatch):
+    """With ATELES_SWARM_AUTO_BUILD off, no implementation PR is opened and the
+    operator is notified the spec awaits `build` approval."""
+    build_calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        # The build handoff is the ONLY cicada dispatch carrying the "DO NOT
+        # MERGE" build protocol (the eng-section cicada dispatch does not).
+        if skill == "cicada" and "DO NOT MERGE" in prompt:
+            build_calls.append(skill)
+        return SkillResult(skill, True, 0, "text", "")
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    notifier = _StubNotifier()
+    cfg = DispatchConfig(neotoma_token="", github_token="", auto_build=False)
+    dispatcher = SwarmDispatcher(notifier, cfg)
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert build_calls == [], "no Cicada build PR when auto-build is OFF"
+    assert any("awaiting `build` approval" in m for m in notifier.sent)
+    assert any("No PR opened" in m for m in notifier.sent)
+
+
+def test_flag_on_invokes_build_handoff(monkeypatch):
+    """With ATELES_SWARM_AUTO_BUILD on and gates green, the Cicada build handoff
+    is invoked (PR-open mocked)."""
+    build_calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "cicada" and "DO NOT MERGE" in prompt:
+            build_calls.append(prompt)
+        # Lanius returns a clear (non-blocked) verdict → gates green.
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        return SkillResult(skill, True, 0, "text", "")
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    notifier = _StubNotifier()
+    cfg = DispatchConfig(neotoma_token="", github_token="", auto_build=True)
+    dispatcher = SwarmDispatcher(notifier, cfg)
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert len(build_calls) == 1, "Cicada build handoff must be invoked once"
+    # The build prompt references the issue for gate inheritance and forbids merge.
+    assert "Closes #100" in build_calls[0]
+    assert "DO NOT MERGE" in build_calls[0]
+    assert any("auto-build ON" in m for m in notifier.sent)
+
+
+def test_flag_on_but_gates_blocked_does_not_build(monkeypatch):
+    """Auto-build ON but Lanius blocked → no build handoff, notify spec ready."""
+    build_calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "cicada" and "DO NOT MERGE" in prompt:
+            build_calls.append(skill)
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: blocked", "")
+        return SkillResult(skill, True, 0, "text", "")
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    notifier = _StubNotifier()
+    cfg = DispatchConfig(neotoma_token="", github_token="", auto_build=True)
+    dispatcher = SwarmDispatcher(notifier, cfg)
+    asyncio.run(dispatcher._handle_issue_opened(_issue_trigger()))
+
+    assert build_calls == [], "blocked gates must not trigger a build"
+    assert any("gates not green" in m for m in notifier.sent)
+
+
+def test_config_auto_build_default_is_off():
+    """Without the env flag set, auto_build defaults to False (spec-only)."""
+    # The default in the dataclass is evaluated at import time; in the test
+    # environment ATELES_SWARM_AUTO_BUILD is unset, so the default is False.
+    cfg = DispatchConfig()
+    assert cfg.auto_build is False
+
+
+def test_config_auto_build_reads_env_on_reimport(monkeypatch):
+    """auto_build is driven by ATELES_SWARM_AUTO_BUILD, read at class-def time.
+
+    Since the dataclass default is evaluated at import, re-import the module
+    with the env var set to prove the flag wiring is correct.
+    """
+    import importlib
+
+    monkeypatch.setenv("ATELES_SWARM_AUTO_BUILD", "1")
+    reloaded = importlib.reload(swarm_dispatch)
+    try:
+        cfg = reloaded.DispatchConfig()
+        assert cfg.auto_build is True
+    finally:
+        # Restore the module to the unset-env default for later tests.
+        monkeypatch.delenv("ATELES_SWARM_AUTO_BUILD", raising=False)
+        importlib.reload(swarm_dispatch)
+
+
+# ── Concurrency safety ────────────────────────────────────────────────────────
+
+
+def test_issue_pipeline_semaphore_caps_concurrency(monkeypatch):
+    """A burst of issue.opened events runs at most max_concurrent pipelines at
+    once; the semaphore bounds concurrency."""
+    active = 0
+    peak = 0
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        nonlocal active, peak
+        if skill == "lanius":
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+        return SkillResult(skill, True, 0, "text", "")
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    cfg = DispatchConfig(
+        neotoma_token="", github_token="", max_concurrent_issue_pipelines=2
+    )
+    dispatcher = SwarmDispatcher(_StubNotifier(), cfg)
+
+    async def burst():
+        await asyncio.gather(
+            *[
+                dispatcher._handle_issue_opened(_issue_trigger(number=200 + i))
+                for i in range(6)
+            ]
+        )
+
+    asyncio.run(burst())
+    assert peak <= 2, f"concurrency exceeded cap: peak={peak}"
+
+
+# ── Mirror splices only the managed region ────────────────────────────────────
+
+
+def test_mirror_preserves_human_body_and_replaces_only_managed_block(monkeypatch):
+    """_mirror_spec_to_issue reads the current issue body, splices the assembled
+    spec between the managed markers, and PATCHes it back — preserving the
+    reporter's original text above the markers."""
+    captured = {}
+
+    class _FakeResp:
+        def __init__(self, payload):
+            self._payload = payload
+            self.content = b"x"
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    class _FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None):
+            return _FakeResp({"body": "REPORTER ORIGINAL TEXT"})
+
+        async def patch(self, url, json=None, headers=None):  # noqa: F811
+            captured["body"] = json["body"]
+            return _FakeResp({})
+
+    monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", _FakeClient)
+
+    cfg = DispatchConfig(neotoma_token="", github_token="tok")
+    dispatcher = SwarmDispatcher(_StubNotifier(), cfg)
+    state = SpecState(
+        repo="owner/repo",
+        issue_number=100,
+        title="T",
+        sections={"pm_section": "PM SPEC HERE"},
+        sequence_state=["pm"],
+    )
+    asyncio.run(dispatcher._mirror_spec_to_issue(_issue_trigger(), state))
+
+    body = captured["body"]
+    assert "REPORTER ORIGINAL TEXT" in body
+    assert SPEC_MARKER_START in body
+    assert SPEC_MARKER_END in body
+    assert "PM SPEC HERE" in body
+    # Original text stays above the managed block.
+    assert body.index("REPORTER ORIGINAL TEXT") < body.index(SPEC_MARKER_START)
