@@ -192,6 +192,97 @@ def test_lanius_pr_prompt_carries_legacy_issue_rule():
     assert "trigger_swarm_pr.py issue" in prompt
 
 
+# ── pipeline-bypass guard (product PR with no parent issue) ──────────────────
+
+
+def test_touches_product_code_detects_source_and_schema():
+    assert swarm_dispatch.touches_product_code(["src/cli/mcp_config_scan.ts"])
+    assert swarm_dispatch.touches_product_code(["packages/core/index.ts"])
+    assert swarm_dispatch.touches_product_code(["openapi.yaml"])
+    assert swarm_dispatch.touches_product_code(["execution/daemons/apis/foo.py"])
+    assert swarm_dispatch.touches_product_code(["migrations/001_init.sql"])
+
+
+def test_touches_product_code_excludes_docs_tests_ci_config():
+    assert not swarm_dispatch.touches_product_code(["docs/guide.md", "README.md"])
+    assert not swarm_dispatch.touches_product_code(["tests/cli/foo.test.ts"])
+    assert not swarm_dispatch.touches_product_code(["src/cli/foo.test.ts"])
+    assert not swarm_dispatch.touches_product_code(["execution/daemons/apis/test_x.py"])
+    assert not swarm_dispatch.touches_product_code([".github/workflows/ci.yml"])
+    assert not swarm_dispatch.touches_product_code([".claude/settings.json"])
+    # Empty/unknown diff must fail open (do not cry bypass on a fetch failure).
+    assert not swarm_dispatch.touches_product_code([])
+
+
+def test_touches_product_code_mixed_diff_flags_when_any_product_file():
+    # A PR that mixes docs + one real source file still counts as product code.
+    assert swarm_dispatch.touches_product_code(
+        ["docs/guide.md", "tests/x.test.ts", "src/cli/index.ts"]
+    )
+
+
+def _stub_bypass_dispatcher(monkeypatch, *, changed_files, posted):
+    """Wire a dispatcher whose _handle_pr short-circuits after the bypass guard.
+
+    Lanius returns `blocked` so the panel never spawns (keeps the test focused on
+    the guard), _changed_files is stubbed, and _post_pipeline_bypass_comment is
+    replaced with a recorder so we assert the comment attempt without HTTP.
+    """
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "GATE_INHERITANCE: blocked", "")
+
+    async def fake_changed_files(self, trigger):
+        return changed_files
+
+    async def fake_post_bypass(self, trigger):
+        posted.append(trigger.number)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_changed_files", fake_changed_files)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_post_pipeline_bypass_comment", fake_post_bypass
+    )
+    notifier = _StubNotifier()
+    return SwarmDispatcher(notifier, _config()), notifier
+
+
+def test_pr_no_parent_product_code_surfaces_bypass_loudly(monkeypatch):
+    posted = []
+    dispatcher, notifier = _stub_bypass_dispatcher(
+        monkeypatch, changed_files=["src/cli/mcp_config_scan.ts"], posted=posted
+    )
+    # PR body with NO Closes/Fixes reference → parent is None.
+    asyncio.run(dispatcher._handle_pr(_trigger(body="A fix, no issue link.")))
+
+    # A visible PR comment was attempted and the operator was notified.
+    assert posted == [87]
+    assert any("bypassed the gated" in m for m in notifier.sent)
+
+
+def test_pr_with_parent_does_not_trigger_bypass(monkeypatch):
+    posted = []
+    dispatcher, notifier = _stub_bypass_dispatcher(
+        monkeypatch, changed_files=["src/cli/mcp_config_scan.ts"], posted=posted
+    )
+    # Body carries Closes #80 → parent resolves → no bypass path.
+    asyncio.run(dispatcher._handle_pr(_trigger(body="Closes #80.")))
+
+    assert posted == []
+    assert not any("bypassed the gated" in m for m in notifier.sent)
+
+
+def test_pr_no_parent_docs_only_does_not_trigger_bypass(monkeypatch):
+    posted = []
+    dispatcher, notifier = _stub_bypass_dispatcher(
+        monkeypatch, changed_files=["docs/guide.md", "README.md"], posted=posted
+    )
+    asyncio.run(dispatcher._handle_pr(_trigger(body="Docs tweak, no issue.")))
+
+    assert posted == []
+    assert not any("bypassed the gated" in m for m in notifier.sent)
+
+
 # ── _token_for_repo (#95) ────────────────────────────────────────────────────
 
 

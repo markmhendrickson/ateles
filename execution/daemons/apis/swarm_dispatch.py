@@ -48,6 +48,46 @@ DAEMON_NAME = "apis"
 _PARENT_ISSUE = re.compile(r"\b(?:closes|fixes|resolves)\s+#(\d+)", re.I)
 _GATE_VERDICT = re.compile(r"GATE_INHERITANCE:\s*(clear|blocked)", re.I)
 
+# Product-code path classifier (ateles: harden pipeline-bypass detection).
+# A PR that touches these paths is a product change that SHOULD originate from a
+# gated issue routed through Cicada. When such a PR has NO parent issue
+# (`Closes #N`), it bypassed the pm/arch pre-impl gates: Lanius still fails open
+# for review (merge stays operator-gated), but the bypass must be LOUD, not
+# silent. Matches source/API/schema/migration/CLI surfaces across repos; excludes
+# pure docs, tests, and config-only diffs (those are lower-stakes and legitimately
+# land without the full pipeline).
+_PRODUCT_CODE_RE = re.compile(
+    r"(?:^|/)(?:src|packages|app|server|lib|execution)/"
+    r"|(?:^|/)(?:schema|schemas|migrations)/"
+    r"|(?:^|/)openapi\.ya?ml$"
+    r"|\.(?:ts|tsx|js|jsx|py|go|rs)$",
+    re.I,
+)
+# Paths that, even if they match above, are not product code on their own.
+_NON_PRODUCT_CODE_RE = re.compile(
+    r"(?:^|/)(?:docs|tests?|__tests__|\.github|\.claude)/"
+    r"|\.(?:test|spec)\.(?:ts|tsx|js|jsx|py)$"
+    r"|(?:^|/)test_[^/]+\.py$",
+    re.I,
+)
+
+
+def touches_product_code(changed_files: list[str]) -> bool:
+    """True when the diff includes at least one product-code file.
+
+    A file counts as product code when it matches `_PRODUCT_CODE_RE` and is not
+    excluded by `_NON_PRODUCT_CODE_RE` (docs/tests/CI/config). Used to decide
+    whether a parent-issue-less PR is a pipeline bypass worth surfacing loudly.
+    An empty/unknown file list returns False (fail-open: don't cry bypass when we
+    could not even fetch the diff).
+    """
+    for path in changed_files:
+        if _NON_PRODUCT_CODE_RE.search(path):
+            continue
+        if _PRODUCT_CODE_RE.search(path):
+            return True
+    return False
+
 # Operator command that clears (waives) all unsigned pre-impl gates on a PR's
 # parent issue so the PR pipeline can proceed.  Only the operator login may
 # issue this command (ateles#112 guardrail).
@@ -635,6 +675,29 @@ class SwarmDispatcher:
     async def _handle_pr(self, trigger: SwarmTrigger) -> None:
         ref = f"{trigger.repository}#{trigger.number}"
         parent = self._parent_issue_number(trigger.body)
+
+        # 0. Pipeline-bypass guard (ateles): a product-code PR with NO parent
+        #    issue skipped the gated issue → pm/arch → Cicada path. Lanius still
+        #    fails open for review below (merge stays operator-gated), but the
+        #    bypass must be surfaced LOUDLY — a visible PR comment + an operator
+        #    notification — instead of being silently retro-initialized as a
+        #    "legacy independent fix". Best-effort; never blocks the pipeline.
+        if parent is None:
+            bypass_files = await self._changed_files(trigger)
+            if touches_product_code(bypass_files):
+                log.info(
+                    f"[{DAEMON_NAME}] {ref}: product-code PR with no parent "
+                    "issue — surfacing pipeline bypass (review still proceeds)"
+                )
+                await self._post_pipeline_bypass_comment(trigger)
+                self.notifier.send(
+                    f"PR {ref} touched product code with no parent issue — it "
+                    "bypassed the gated pm/arch → Cicada pipeline. Review "
+                    "proceeds; merge stays operator-gated. File the issue and "
+                    "add `Closes #N`, or accept the bypass.",
+                    priority=Priority.OPERATOR_DECISION,
+                    handler=DAEMON_NAME,
+                )
 
         # 1. Lanius: enforce PR gate inheritance against the parent issue.
         _lanius_token = _token_for_agent_on_repo("lanius", trigger.repository)
@@ -1423,6 +1486,99 @@ class SwarmDispatcher:
                     f"[{DAEMON_NAME}] posted new swarm-run confirmation comment "
                     f"on {trigger.repository}#{trigger.number}"
                 )
+
+    async def _post_pipeline_bypass_comment(self, trigger: SwarmTrigger) -> None:
+        """Post (or edit) a visible notice that a product-code PR has no parent issue.
+
+        This is the loud half of the pipeline-bypass guard: a product PR that
+        skipped the gated issue → pm/arch → Cicada path gets a plainly-worded
+        comment on the PR so the bypass is visible in the GitHub timeline, not
+        just in an operator ping. Review still proceeds and merge stays
+        operator-gated — this comment does NOT block anything.
+
+        Follows the SWARM_GITHUB_CONTRACT edit-not-duplicate rule via a stable
+        marker, and — like _post_swarm_run_comment — the body carries NO command
+        token (`/swarm-run`, `/confirm-gates-clear`, `Closes #`) so it cannot
+        self-trigger the comment handler or spoof an issue link. Best-effort:
+        exceptions are logged, never propagated.
+        """
+        _BYPASS_MARKER = "<!-- pipeline-bypass-notice -->"
+
+        repo_token = _token_for_repo(trigger.repository)
+        if not repo_token:
+            log.warning(
+                f"[{DAEMON_NAME}] no GitHub token — pipeline-bypass notice "
+                f"skipped for {trigger.repository}#{trigger.number}"
+            )
+            return
+
+        # Body deliberately writes "Closes" with a backtick-escaped hash so the
+        # instructional text does not itself parse as a parent-issue link.
+        body = (
+            f"{_BYPASS_MARKER}\n"
+            f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+            "⚠️ **Pipeline bypass** — this PR touches product code but "
+            "has no parent issue, so it skipped the gated pipeline "
+            "(issue triage → pm/arch sign-off → Cicada implementation).\n\n"
+            "The review panel still runs and **merge stays operator-gated**, so "
+            "nothing is blocked. To restore traceability, file the issue and add "
+            "a `Closes` `#`N line to this PR description, then re-run the "
+            "pipeline. Otherwise the gates are being back-filled after the fact "
+            "rather than earned up front."
+        )
+
+        list_url = (
+            f"https://api.github.com/repos/{trigger.repository}/issues/"
+            f"{trigger.number}/comments"
+        )
+        headers = self._github_headers(trigger.repository)
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                existing_id: int | None = None
+                try:
+                    resp = await client.get(
+                        list_url, params={"per_page": 100}, headers=headers
+                    )
+                    resp.raise_for_status()
+                    for comment in resp.json():
+                        if _BYPASS_MARKER in comment.get("body", ""):
+                            existing_id = comment["id"]
+                            break
+                except Exception as exc:
+                    log.warning(
+                        f"[{DAEMON_NAME}] could not list comments for bypass "
+                        f"dedup on {trigger.repository}#{trigger.number}: {exc} "
+                        "— will post new"
+                    )
+
+                if existing_id is not None:
+                    patch_url = (
+                        f"https://api.github.com/repos/{trigger.repository}/"
+                        f"issues/comments/{existing_id}"
+                    )
+                    resp = await client.patch(
+                        patch_url, json={"body": body}, headers=headers
+                    )
+                    resp.raise_for_status()
+                    log.info(
+                        f"[{DAEMON_NAME}] edited existing pipeline-bypass notice "
+                        f"#{existing_id} on {trigger.repository}#{trigger.number}"
+                    )
+                else:
+                    resp = await client.post(
+                        list_url, json={"body": body}, headers=headers
+                    )
+                    resp.raise_for_status()
+                    log.info(
+                        f"[{DAEMON_NAME}] posted pipeline-bypass notice on "
+                        f"{trigger.repository}#{trigger.number}"
+                    )
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] failed to post pipeline-bypass notice on "
+                f"{trigger.repository}#{trigger.number}: {exc}"
+            )
 
     async def _fetch_issue_fields(
         self, repository: str, issue_number: int

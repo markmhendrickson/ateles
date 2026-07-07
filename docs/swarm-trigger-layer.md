@@ -23,6 +23,10 @@ swarm_dispatch.SwarmDispatcher
         │                   └─► Pavo (Phase 1 pm scoping)
         │
         └─ pull_request.opened/reopened/synchronize
+                            ├─► pipeline-bypass guard: product-code PR with
+                            │     NO parent issue → visible PR comment +
+                            │     operator_decision ping (review still
+                            │     proceeds; merge stays gated)
                             ├─► Lanius (PR gate inheritance; emits
                             │     GATE_INHERITANCE: clear|blocked)
                             ├─► review panel (neotoma#1640): pre-registered
@@ -134,6 +138,21 @@ that introduced it — against itself. Fixes that came out of that run:
   parent issue (#80) predated the pipeline and was hard-blocked. To run the
   full issue pipeline on a legacy issue, backfill with
   `trigger_swarm_pr.py issue <n>`.
+- **Pipeline-bypass guard** — the legacy-issue rule above is fail-open by
+  design, which means a *hand-authored* product PR with **no parent issue**
+  (no `Closes #N`) would otherwise sail through with its gates silently
+  back-filled. The guard makes that case loud instead: on a
+  `pull_request.opened` whose diff `touches_product_code()` (source / API /
+  schema / migration / CLI surfaces, excluding docs, tests, CI, and config)
+  and whose body has no parent issue, the dispatcher posts a visible
+  `<!-- pipeline-bypass-notice -->` PR comment and sends an
+  `operator_decision` notification. It does **not** block: review still runs
+  and merge stays operator-gated. It only removes the silence, so a bypass is
+  a deliberate, visible choice rather than an accident. Recovery: file the
+  issue, add `Closes #N` to the PR, and re-run the pipeline. Added after an
+  operator/Ateles session hand-authored PR #1880 (global-install `.mcp.json`
+  fix) directly, bypassing issue → pm/arch → Cicada; the bypass was only
+  noticed because Lanius labelled it a "legacy independent fix" retroactively.
 
 ## Agent identity on GitHub
 
