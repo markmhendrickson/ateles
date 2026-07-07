@@ -46,6 +46,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -80,6 +81,22 @@ NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 POLL_INTERVAL = int(os.environ.get("TURDUS_POLL_INTERVAL", "300"))  # 5 minutes
 DRY_RUN = os.environ.get("TURDUS_DRY_RUN", "0") == "1"
 MAX_MESSAGES = int(os.environ.get("TURDUS_MAX_MESSAGES", "20"))
+
+# ── Swarm PR-approval-by-email (approval loop) ────────────────────────────────
+# When the operator replies APPROVE to a swarm "READY TO MERGE" notification,
+# Turdus resolves the PR from the correlation token and POSTs to the Apis
+# gateway's loopback /approve-email route, which routes to the same gated merge
+# path as a GitHub review or /approve comment. Env-gated: without the operator
+# address AND the shared secret, this path is inert.
+OPERATOR_EMAIL = os.environ.get("OPERATOR_EMAIL", "").strip().lower()
+APIS_APPROVE_URL = os.environ.get(
+    "APIS_APPROVE_EMAIL_URL", "http://127.0.0.1:8742/approve-email"
+)
+APIS_APPROVE_EMAIL_SECRET = os.environ.get("APIS_APPROVE_EMAIL_SECRET", "")
+# Marker identifying a swarm merge-ready notification (present in the subject
+# the operator is replying to). Kept in sync with the Apis notification text.
+_MERGE_READY_SUBJECT_MARKER = "READY TO MERGE"
+_APPROVE_TOKEN_PREFIX = "swarm-approve:"
 
 GWS_CREDENTIALS_PATH = Path(
     os.environ.get(
@@ -458,14 +475,189 @@ async def _create_task_for_email(message: dict, email_entity_id: str | None) -> 
             # Link task REFERS_TO email entity
             if email_entity_id and task_id:
                 rel_payload = {
-                    "from_entity_id": task_id,
-                    "to_entity_id": email_entity_id,
+                    "source_entity_id": task_id,
+                    "target_entity_id": email_entity_id,
                     "relationship_type": "REFERS_TO",
                 }
-                await client.post(f"{NEOTOMA_BASE_URL}/relationships", json=rel_payload)
+                await client.post(
+                    f"{NEOTOMA_BASE_URL}/create_relationship", json=rel_payload
+                )
 
     except Exception as exc:
         log.error(f"[{DAEMON_NAME}] Failed to create task for email: {exc}")
+
+
+# ── Swarm PR-approval-by-email (approval loop) ────────────────────────────────
+
+
+def _extract_sender_address(sender: str) -> str:
+    """Return the bare email address from a `Name <addr@x>` sender, lowered."""
+    m = re.search(r"<([^>]+)>", sender or "")
+    addr = (m.group(1) if m else (sender or "")).strip().lower()
+    return addr
+
+
+def _parse_approve_token(text: str) -> tuple[str, int] | None:
+    """Extract (repository, pr_number) from a `swarm-approve: owner/repo#N`
+    correlation line. Returns None if absent/malformed. Mirrors
+    swarm_dispatch.parse_approve_token so both ends agree on the format."""
+    m = re.search(
+        rf"{re.escape(_APPROVE_TOKEN_PREFIX)}\s*"
+        r"([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)#(\d+)",
+        text or "",
+    )
+    if not m:
+        return None
+    return m.group(1), int(m.group(2))
+
+
+def _reply_says_approve(body: str) -> bool:
+    """True when the operator's reply expresses approval.
+
+    Conservative: the word APPROVE must appear as the operator's OWN text, i.e.
+    on a line that is not a quoted line (Gmail prefixes quotes with '>'). This
+    avoids matching the word "APPROVE" inside the quoted original notification
+    ("Reply APPROVE ... to merge"). Case-insensitive on the word itself.
+    """
+    for line in (body or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(">"):
+            continue  # skip blank + quoted-original lines
+        if re.search(r"\bapprove\b", stripped, re.IGNORECASE):
+            return True
+    return False
+
+
+def _read_message_body(message_id: str) -> str:
+    """Fetch a message's plaintext body via `gws gmail +read`. "" on failure."""
+    if not message_id:
+        return ""
+    try:
+        result = subprocess.run(
+            ["gws", "gmail", "+read", "--id", message_id, "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            log.warning(
+                f"[{DAEMON_NAME}] gws +read failed (rc={result.returncode}) for "
+                f"{message_id}: {(result.stderr or '')[:160]}"
+            )
+            return ""
+        data = json.loads(_strip_keyring_preamble(result.stdout))
+        # gws returns the body under a few possible keys depending on version.
+        for key in ("body", "text", "plain", "snippet"):
+            val = data.get(key)
+            if isinstance(val, str) and val:
+                return val
+        return ""
+    except Exception as exc:  # noqa: BLE001 — best-effort, never crash the poll
+        log.warning(f"[{DAEMON_NAME}] +read error for {message_id}: {exc}")
+        return ""
+
+
+def _strip_keyring_preamble(stdout: str) -> str:
+    """gws sometimes prints a keyring line before the JSON. Return from the
+    first '{' so json.loads sees clean JSON."""
+    idx = stdout.find("{")
+    return stdout[idx:] if idx >= 0 else stdout
+
+
+async def _post_email_approval(repository: str, pr_number: int, sender: str) -> bool:
+    """POST an operator email approval to the Apis /approve-email route.
+
+    Returns True on a 2xx. Fail-open (returns False, never raises) so a
+    transient Apis outage never crashes the Turdus poll loop."""
+    if not APIS_APPROVE_EMAIL_SECRET:
+        log.warning(
+            f"[{DAEMON_NAME}] email-approve for {repository}#{pr_number} skipped — "
+            "APIS_APPROVE_EMAIL_SECRET unset (fail closed)"
+        )
+        return False
+    if DRY_RUN:
+        log.info(
+            f"[{DAEMON_NAME}] DRY_RUN — would POST email-approve for "
+            f"{repository}#{pr_number}"
+        )
+        return True
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                APIS_APPROVE_URL,
+                headers={"X-Approve-Secret": APIS_APPROVE_EMAIL_SECRET},
+                json={
+                    "repository": repository,
+                    "pr_number": pr_number,
+                    "sender": sender,
+                },
+            )
+            if 200 <= resp.status_code < 300:
+                return True
+            log.warning(
+                f"[{DAEMON_NAME}] email-approve POST returned {resp.status_code} "
+                f"for {repository}#{pr_number}: {(resp.text or '')[:160]}"
+            )
+            return False
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[{DAEMON_NAME}] email-approve POST error: {exc}")
+        return False
+
+
+async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
+    """If ``msg`` is an operator APPROVE reply to a swarm merge-ready email,
+    resolve the PR and POST the approval to Apis. Returns True when handled
+    (so the caller can skip normal task creation for this message).
+
+    Guards, in order — all must hold:
+      1. OPERATOR_EMAIL is configured AND the sender matches it (only the
+         operator may approve; a spoof-friendly display name is ignored — we
+         match the bare address).
+      2. The subject carries the merge-ready marker (cheap pre-filter before we
+         spend a +read body fetch).
+      3. The body (fetched via +read) contains the swarm-approve correlation
+         token (→ the exact PR) AND an unquoted APPROVE.
+    """
+    if not OPERATOR_EMAIL:
+        return False
+    sender_addr = _extract_sender_address(msg.get("sender", msg.get("from", "")))
+    if sender_addr != OPERATOR_EMAIL:
+        return False
+    subject = msg.get("subject", "") or ""
+    if _MERGE_READY_SUBJECT_MARKER not in subject:
+        return False
+
+    body = _read_message_body(msg.get("id", ""))
+    token = _parse_approve_token(body) or _parse_approve_token(subject)
+    if not token:
+        log.info(
+            f"[{DAEMON_NAME}] operator reply matched merge-ready subject but "
+            "carried no swarm-approve token — treating as a normal reply"
+        )
+        return False
+    if not _reply_says_approve(body):
+        log.info(
+            f"[{DAEMON_NAME}] operator reply to {token[0]}#{token[1]} did not say "
+            "APPROVE — not merging (may be a question or a hold)"
+        )
+        return False
+
+    repository, pr_number = token
+    ok = await _post_email_approval(repository, pr_number, sender_addr)
+    if ok:
+        _label_gmail_message(msg.get("id", ""), "Turdus/processed")
+        notifier.send(
+            f"{DAEMON_NAME}: operator emailed APPROVE for {repository}#{pr_number} "
+            "→ routed to Apis merge gate.",
+            priority=Priority.INFO,
+            handler=DAEMON_NAME,
+        )
+        log.info(
+            f"[{DAEMON_NAME}] email-approve routed for {repository}#{pr_number}"
+        )
+    return ok
 
 
 # ── Poll cycle ────────────────────────────────────────────────────────────────
@@ -502,7 +694,18 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
 
     actionable_count = 0
     invoice_count = 0
+    approval_count = 0
     for msg in new_messages:
+        # Swarm PR-approval reply takes precedence over normal classification:
+        # an operator "APPROVE" reply to a merge-ready email is routed to Apis
+        # and this message is then done (no task created for it).
+        try:
+            if await _maybe_handle_swarm_approval(msg, notifier):
+                approval_count += 1
+                continue
+        except Exception as exc:  # never let approval detection break the poll
+            log.error(f"[{DAEMON_NAME}] swarm-approval check failed: {exc}")
+
         sender = msg.get("sender", msg.get("from", ""))
         subject = msg.get("subject", "(no subject)")
         snippet = msg.get("snippet", "")

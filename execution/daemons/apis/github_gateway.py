@@ -12,14 +12,22 @@ Also handles `issue_comment` events (ateles#112): GitHub sends PR comments as
 routes these to the operator-override command handler so `/confirm-gates-clear`
 can unblock a deadlocked PR pipeline.
 
-OPERATOR ACTION REQUIRED (ateles#112): the live GitHub webhooks on the
-markmhendrickson/ateles and markmhendrickson/neotoma repos must be updated to
-include the `issue_comment` event — code alone cannot do this. Use:
+Also handles `pull_request_review` events (approval loop): the operator
+clicking "Approve" in the PR review UI submits a review with state "approved".
+The dispatcher routes an operator-authored approved review to the shared
+approval path so it can (flag-gated) trigger the merge — the same effect as a
+`/approve` comment, without leaving GitHub's review surface.
+
+OPERATOR ACTION REQUIRED (ateles#112, approval loop): the live GitHub webhooks
+on the markmhendrickson/ateles and markmhendrickson/neotoma repos must be
+updated to include the `issue_comment` AND `pull_request_review` events — code
+alone cannot do this. Use:
   gh api -X PATCH repos/markmhendrickson/ateles/hooks/<hook_id> \\
-    -f "events[]=issues" -f "events[]=pull_request" -f "events[]=issue_comment"
-or add `issue_comment` via the repo Settings → Webhooks UI.  Without this
-change, GitHub will not deliver comment events and /confirm-gates-clear will
-never arrive.
+    -f "events[]=issues" -f "events[]=pull_request" \\
+    -f "events[]=issue_comment" -f "events[]=pull_request_review"
+or add them via the repo Settings → Webhooks UI.  Without `issue_comment`,
+/confirm-gates-clear and /approve comments never arrive; without
+`pull_request_review`, the GitHub "Approve" → merge path never fires.
 
 Apus remains the Neotoma→git mirror webhook daemon only; this gateway is
 mounted inside Apis because dispatching swarm work is Apis's job.
@@ -40,6 +48,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -47,12 +56,20 @@ from aiohttp import web
 
 log = logging.getLogger("apis.github_gateway")
 
+# Operator GitHub login used to attribute an email-reply approval. Kept in sync
+# with swarm_dispatch._OPERATOR_LOGIN via the same env var (read here to avoid a
+# circular import — swarm_dispatch imports SwarmTrigger from this module).
+_OPERATOR_LOGIN = os.environ.get("APIS_OPERATOR_LOGIN", "markmhendrickson")
+
 # GitHub actions that fire the PR pipeline. `synchronize` re-runs review on
 # new pushes; `reopened` re-enters the pipeline after a close.
 PR_ACTIONS = {"opened", "reopened", "synchronize"}
 ISSUE_ACTIONS = {"opened"}
 # issue_comment events (ateles#112): any new comment on an issue or PR.
 ISSUE_COMMENT_ACTIONS = {"created"}
+# pull_request_review events (approval loop): the operator clicking "Approve"
+# in the GitHub PR review UI. Only "submitted" carries a fresh verdict.
+PR_REVIEW_ACTIONS = {"submitted"}
 
 
 @dataclass
@@ -80,11 +97,20 @@ class SwarmTrigger:
     # True when the comment is on a PR (GitHub sends PR comments as issue_comment
     # with an `issue.pull_request` field; False for plain issue comments).
     comment_on_pr: bool = False
+    # pull_request_review extras (approval loop): populated when kind ==
+    # "pr_review". `review_state` is GitHub's verdict ("approved",
+    # "changes_requested", "commented", "dismissed"); `review_author` is the
+    # reviewer's login.
+    review_state: str = ""
+    review_author: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_pr(self) -> bool:
-        return self.kind.startswith("pr_")
+        # pr_review is NOT a pipeline-firing PR event — it must route to the
+        # approval handler, not _handle_pr. Only the opened/reopened/synchronize
+        # kinds (pr_opened, pr_reopened, pr_synchronize) drive the review panel.
+        return self.kind.startswith("pr_") and self.kind != "pr_review"
 
 
 def verify_github_signature(secret: str, body: bytes, signature_header: str) -> bool:
@@ -173,18 +199,54 @@ def parse_github_event(
             raw=payload,
         )
 
+    # pull_request_review events (approval loop): the operator submitting a PR
+    # review with state "approved" in the GitHub UI. GitHub sends the review
+    # object + the PR it targets. We normalize to a pr_review trigger carrying
+    # the reviewer login and verdict; the dispatcher's operator-only guard +
+    # the approved-state check decide whether it drives a merge.
+    if event_type == "pull_request_review" and action in PR_REVIEW_ACTIONS:
+        pr = payload.get("pull_request") or {}
+        review = payload.get("review") or {}
+        return SwarmTrigger(
+            kind="pr_review",
+            repository=repository,
+            number=pr.get("number", 0),
+            title=pr.get("title", ""),
+            body=pr.get("body") or "",
+            author=(pr.get("user") or {}).get("login", ""),
+            html_url=pr.get("html_url", ""),
+            delivery_id=delivery_id,
+            action=action,
+            head_ref=(pr.get("head") or {}).get("ref", ""),
+            base_ref=(pr.get("base") or {}).get("ref", ""),
+            review_state=(review.get("state") or "").lower(),
+            review_author=(review.get("user") or {}).get("login", ""),
+            raw=payload,
+        )
+
     return None
 
 
 TriggerHandler = Callable[[SwarmTrigger], Awaitable[None]]
 
 
-def make_app(secret: str, handler: TriggerHandler) -> web.Application:
+def make_app(
+    secret: str,
+    handler: TriggerHandler,
+    approve_email_secret: str = "",
+) -> web.Application:
     """
     Build the aiohttp application for the GitHub webhook receiver.
 
     Dispatch runs as a background task so the webhook responds within
     GitHub's 10s delivery timeout even though agent runs take minutes.
+
+    ``approve_email_secret`` (approval loop): shared secret for the internal
+    ``/approve-email`` route that Turdus POSTs to when the operator replies
+    APPROVE to a merge-ready email. The route is loopback-only (the gateway
+    binds 127.0.0.1) AND secret-gated; when the secret is unset the route
+    fails closed (503) so an email reply can never drive a merge without the
+    shared secret configured on both daemons.
     """
 
     async def handle_webhook(request: web.Request) -> web.Response:
@@ -232,10 +294,69 @@ def make_app(secret: str, handler: TriggerHandler) -> web.Application:
             {"status": "ok", "daemon": "apis", "inflight": len(request.app["inflight"])}
         )
 
+    async def handle_approve_email(request: web.Request) -> web.Response:
+        """Internal route: Turdus POSTs an operator email-reply approval here.
+
+        Body JSON: {"repository": "owner/name", "pr_number": <int>,
+                    "sender": "<verified operator email>"}
+        Header: X-Approve-Secret: <shared secret>
+
+        Fails closed: unset secret → 503; wrong secret → 401. Turdus is the
+        authority that verified the reply came from the operator's address AND
+        carried APPROVE + the correlation token; this route trusts that only
+        because the shared secret authenticates the caller as our own Turdus.
+        The actual merge stays behind APIS_APPROVAL_TRIGGERS_MERGE in the
+        dispatcher, identical to the other approval channels.
+        """
+        if not approve_email_secret:
+            log.error("[apis] /approve-email hit but APPROVE secret unset — 503")
+            return web.Response(status=503, text="approve-email not configured")
+        if request.headers.get("X-Approve-Secret", "") != approve_email_secret:
+            log.warning("[apis] /approve-email secret mismatch — 401")
+            return web.Response(status=401, text="bad secret")
+        try:
+            payload = json.loads(await request.read())
+        except json.JSONDecodeError:
+            return web.Response(status=400, text="invalid JSON")
+        repository = str(payload.get("repository", "")).strip()
+        try:
+            pr_number = int(payload.get("pr_number", 0))
+        except (TypeError, ValueError):
+            pr_number = 0
+        if not repository or pr_number <= 0:
+            return web.Response(status=400, text="repository + pr_number required")
+
+        # Build a pr_review-shaped trigger attributed to the operator. Turdus
+        # already verified the sender, so we stamp _OPERATOR_LOGIN + approved
+        # and let the shared handler's merge gate apply. email_approve is a
+        # distinct kind so the dispatcher can label the source honestly.
+        trigger = SwarmTrigger(
+            kind="email_approve",
+            repository=repository,
+            number=pr_number,
+            title="",
+            body="",
+            author="",
+            html_url=f"https://github.com/{repository}/pull/{pr_number}",
+            delivery_id=f"email-approve-{repository}#{pr_number}",
+            action="approved",
+            review_state="approved",
+            review_author=_OPERATOR_LOGIN,
+        )
+        log.info(
+            f"[apis] email-approve accepted for {repository}#{pr_number} "
+            f"(sender={payload.get('sender', '?')})"
+        )
+        task = asyncio.create_task(handler(trigger))
+        request.app["inflight"].add(task)
+        task.add_done_callback(request.app["inflight"].discard)
+        return web.json_response({"status": "accepted", "kind": "email_approve"})
+
     app = web.Application()
     app["inflight"] = set()
     app.router.add_post("/github/webhook", handle_webhook)
     app.router.add_get("/health", handle_health)
+    app.router.add_post("/approve-email", handle_approve_email)
     return app
 
 
