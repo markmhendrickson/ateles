@@ -3178,7 +3178,9 @@ def test_issue_pipeline_sections_persist_additively(monkeypatch):
     async def fake_run_skill(skill, prompt, **kwargs):
         return SkillResult(
             skill, True, 0,
-            f"<<<SPEC_SECTION>>>{skill}-section<<<END_SPEC_SECTION>>>", "",
+            f"<<<SPEC_SECTION>>>**Scope:** {skill}-section body with real "
+            f"substance to pass the not-just-narration floor.<<<END_SPEC_SECTION>>>",
+            "",
         )
 
     _install_pipeline_stubs(
@@ -3192,9 +3194,9 @@ def test_issue_pipeline_sections_persist_additively(monkeypatch):
     # Sections upserted in canonical order, each with its own agent's text.
     assert [k for k, _ in store.upserts] == ["pm", "eng", "qa"]
     texts = {k: v for k, v in store.upserts}
-    assert texts["pm"] == "pavo-section"
-    assert texts["eng"] == "cicada-section"
-    assert texts["qa"] == "phoenicurus-section"
+    assert texts["pm"] == "**Scope:** pavo-section body with real substance to pass the not-just-narration floor."
+    assert texts["eng"] == "**Scope:** cicada-section body with real substance to pass the not-just-narration floor."
+    assert texts["qa"] == "**Scope:** phoenicurus-section body with real substance to pass the not-just-narration floor."
     assert store.mirrored is True
 
 
@@ -3216,17 +3218,26 @@ def test_spec_section_prompt_is_additive_and_no_comment(monkeypatch):
 
 def test_extract_section_text_prefers_fenced_content():
     out = SwarmDispatcher._extract_section_text(
-        "chatter\n<<<SPEC_SECTION>>>\nreal section\n<<<END_SPEC_SECTION>>>\ntrailer",
+        "chatter\n<<<SPEC_SECTION>>>\n**Scope:** real section body with enough "
+        "substance to be a spec, not a stray fragment.\n<<<END_SPEC_SECTION>>>\ntrailer",
         next(s for s in SECTIONS if s.key == "pm"),
     )
-    assert out == "real section"
+    assert out == (
+        "**Scope:** real section body with enough substance to be a spec, "
+        "not a stray fragment."
+    )
 
 
 def test_extract_section_text_falls_back_to_stdout():
     out = SwarmDispatcher._extract_section_text(
-        "just plain output", next(s for s in SECTIONS if s.key == "pm")
+        "**Scope:** just plain output, but with enough real substance to count "
+        "as a spec section and not narration.",
+        next(s for s in SECTIONS if s.key == "pm"),
     )
-    assert out == "just plain output"
+    assert out == (
+        "**Scope:** just plain output, but with enough real substance to count "
+        "as a spec section and not narration."
+    )
 
 
 # ── Auto-build flag behaviour ─────────────────────────────────────────────────
@@ -3468,3 +3479,89 @@ def test_sanitize_section_body_preserves_clean_content_and_subheadings():
     good = "**Approach:** edit X.\n\n#### Sub-detail\nkeep me"
     out = _sanitize_section_body(good, eng)
     assert out == good  # nothing to strip; sub-headings preserved
+
+
+# ── #1882 quality fixes: narration rejection + handoff PR verification ────────
+
+
+def test_extract_section_rejects_pure_narration():
+    """The #1882 Engineering defect: an agent's reply is a DESCRIPTION of a spec
+    ('I have successfully completed the Engineering section…'), not a spec.
+    _extract_section_text must return '' so the section is flagged not-produced."""
+    from swarm_dispatch import _is_only_narration, _sanitize_section_body
+
+    eng = next(s for s in SECTIONS if s.key == "eng")
+    narration = (
+        "Perfect. I have successfully completed the Engineering section of the "
+        "specification for GitHub issue markmhendrickson/neotoma#1882.\n\n"
+        "## Summary\n\nI have written a comprehensive Engineering section that:\n"
+        "1. Specifies files to touch"
+    )
+    out = SwarmDispatcher._extract_section_text(narration, eng)
+    assert out == ""
+    assert _is_only_narration(_sanitize_section_body(narration, eng)) is True
+
+
+def test_extract_section_keeps_real_multiline_spec():
+    real = (
+        "**Objective:** Trim the store tool description.\n\n"
+        "**Files & Modules:**\n- src/tool_definitions.ts\n"
+        "- src/shared/action_schemas.ts\n\n"
+        "**Build Steps:**\n1. Measure baseline\n2. Reduce description"
+    )
+    out = SwarmDispatcher._extract_section_text(real, next(s for s in SECTIONS if s.key == "eng"))
+    assert "Objective" in out and "Build Steps" in out
+
+
+def test_extract_section_rejects_blocked_pr_link_status():
+    from swarm_dispatch import _is_only_narration
+
+    status = "[cicada] pull_request_link: BLOCKED — awaiting pre-impl gate sign-off"
+    assert _is_only_narration(status) is True
+
+
+def test_extract_pr_url_matches_repo_only():
+    from swarm_dispatch import _extract_pr_url
+
+    good = "Opened https://github.com/markmhendrickson/neotoma/pull/1905 — done."
+    assert _extract_pr_url(good, "markmhendrickson/neotoma") == (
+        "https://github.com/markmhendrickson/neotoma/pull/1905"
+    )
+    wrong = "https://github.com/other/repo/pull/9"
+    assert _extract_pr_url(wrong, "markmhendrickson/neotoma") is None
+    assert _extract_pr_url("no url here", "markmhendrickson/neotoma") is None
+
+
+def test_open_implementation_pr_returns_url_from_cicada_stdout(monkeypatch):
+    """When Cicada reports a PR URL in stdout, the handoff returns it."""
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(
+            skill, True, 0,
+            "Built and opened https://github.com/owner/repo/pull/1910",
+            "",
+        )
+    monkeypatch.setattr("swarm_dispatch.run_skill", fake_run_skill)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    url = asyncio.run(d._open_implementation_pr(_issue_trigger(), _empty_spec_state()))
+    assert url == "https://github.com/owner/repo/pull/1910"
+
+
+def test_open_implementation_pr_returns_none_when_no_pr(monkeypatch):
+    """The #1882 false-green: Cicada exits 0 with no PR URL and no PR on GitHub;
+    the handoff must return None (so the caller notifies 'no PR opened')."""
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "I have completed the build.", "")
+    monkeypatch.setattr("swarm_dispatch.run_skill", fake_run_skill)
+
+    async def fake_find(self, trigger):
+        return None
+    monkeypatch.setattr(SwarmDispatcher, "_find_open_pr_for_issue", fake_find)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    url = asyncio.run(d._open_implementation_pr(_issue_trigger(), _empty_spec_state()))
+    assert url is None
+
+
+def _empty_spec_state():
+    from issue_spec import SpecState
+    return SpecState(repo="markmhendrickson/neotoma", issue_number=1882, title="t")
