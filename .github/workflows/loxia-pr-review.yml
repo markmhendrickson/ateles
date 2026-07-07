@@ -78,10 +78,13 @@ jobs:
 
       - name: Run Loxia review
         env:
-          # Prefer the Max subscription OAuth token (no metered spend); the
-          # script falls back to ANTHROPIC_API_KEY when the token is absent.
+          # Prefer the Max subscription OAuth token (no metered spend). CRITICAL:
+          # `claude --print` lets ANTHROPIC_API_KEY OVERRIDE CLAUDE_CODE_OAUTH_TOKEN,
+          # so when the OAuth token is present we must NOT pass ANTHROPIC_API_KEY —
+          # otherwise the CLI bills the (often out-of-credit) metered key instead of
+          # the subscription. Only pass the API key as a fallback when OAuth is absent.
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN == '' && secrets.ANTHROPIC_API_KEY || '' }}
           NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}
           NEOTOMA_BASE_URL: ${{ vars.NEOTOMA_BASE_URL || 'https://neotoma.markmhendrickson.com' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
