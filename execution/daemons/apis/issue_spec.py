@@ -22,7 +22,7 @@ PRESERVING the human-written body above the markers.
 This module holds:
   * the canonical section order + metadata (``SECTIONS``),
   * ``IssueSpecStore`` — retrieve / create / correct the Neotoma entity via
-    plain httpx against ``/retrieve_entities``, ``/store``, ``/correct``
+    plain httpx against ``/entities/query``, ``/store``, ``/correct``
     (same pattern as generalizer.py / participation.py),
   * ``assemble_spec_markdown`` — pure section→markdown assembler,
   * ``splice_managed_block`` — pure body-splice that only touches the managed
@@ -249,8 +249,15 @@ class IssueSpecStore:
         to a fresh empty ``SpecState`` so the caller can still create it.
         """
         state = SpecState(repo=repo, issue_number=issue_number, title=title)
+        # NOTE: the prod Neotoma REST surface exposes the read as POST
+        # /entities/query, NOT /retrieve_entities (which 404s). The 404 was
+        # silently degrading every load to an empty state, forcing a create on
+        # each section and (because the tail of the pipeline runs after load)
+        # could abort the completion/auto-build handoff. /entities/query
+        # returns the same {entities:[{snapshot:{...}}]} shape this parser
+        # expects.
         data = await self._post(
-            "retrieve_entities",
+            "entities/query",
             {
                 "entity_type": self.ENTITY_TYPE,
                 "limit": 200,
