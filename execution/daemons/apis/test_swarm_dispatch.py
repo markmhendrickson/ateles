@@ -42,7 +42,9 @@ from swarm_dispatch import (
     is_provisioned,
     lenses_missing_comments,
     parse_gate_verdict,
+    parse_review_verdict,
     prepare_pr_worktree,
+    review_verdict_is_clear,
     vanellus_comment_missing,
 )
 
@@ -102,6 +104,286 @@ def test_parse_gate_verdict_none_when_absent():
     assert parse_gate_verdict("I could not verify the gates.") is None
     assert parse_gate_verdict("") is None
     assert parse_gate_verdict(None) is None
+
+
+# ── parse_review_verdict / review_verdict_is_clear (loop closure) ────────────
+
+
+def test_parse_review_verdict_extracts_all_tokens():
+    assert parse_review_verdict("## Verdict\n**APPROVE**\nlgtm") == "approve"
+    assert parse_review_verdict("**REQUEST_CHANGES**\n1 blocking") == "request_changes"
+    assert parse_review_verdict("**COMMENT**\nnits only") == "comment"
+    assert parse_review_verdict("**BLOCKED** cannot proceed") == "blocked"
+
+
+def test_parse_review_verdict_none_when_absent():
+    assert parse_review_verdict("no verdict token here") is None
+    assert parse_review_verdict("") is None
+    assert parse_review_verdict(None) is None
+
+
+def test_review_verdict_is_clear_only_for_approve_or_comment():
+    assert review_verdict_is_clear("approve") is True
+    assert review_verdict_is_clear("comment") is True
+    assert review_verdict_is_clear("request_changes") is False
+    assert review_verdict_is_clear("blocked") is False
+    # Unparseable verdict is NOT clear — never silently proceed to merge-ready.
+    assert review_verdict_is_clear(None) is False
+
+
+# ── _handle_pr verdict branching ─────────────────────────────────────────────
+
+
+def _pr_dispatcher_with_stubs(monkeypatch, *, vanellus_stdout, calls):
+    """Dispatcher whose _handle_pr reaches the verdict branch, then records
+    which downstream path (_route_blocking_findings vs _gate_merge_readiness)
+    fired, without doing real work in either."""
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        # Lanius clears gate inheritance; panelists return trivial reviews;
+        # Vanellus returns the configured verdict stdout.
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "vanellus":
+            return SkillResult(skill, True, 0, vanellus_stdout, "")
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    async def fake_changed_files(self, trigger):
+        return ["src/x.ts"]
+
+    async def fake_route(self, trigger, parent, reviews, verdict):
+        calls.append(("route", verdict))
+
+    async def fake_gate(self, trigger, parent, panel):
+        calls.append(("gate", None))
+
+    async def fake_post_missing_vanellus(self, trigger, result):
+        return None
+
+    async def fake_persist(self, *a, **k):
+        return None
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_changed_files", fake_changed_files)
+    monkeypatch.setattr(SwarmDispatcher, "_route_blocking_findings", fake_route)
+    monkeypatch.setattr(SwarmDispatcher, "_gate_merge_readiness", fake_gate)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_post_missing_vanellus_comment", fake_post_missing_vanellus
+    )
+    monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_persist)
+    monkeypatch.setattr(SwarmDispatcher, "_post_missing_panel_comments", fake_persist)
+    monkeypatch.setattr(SwarmDispatcher, "_preregistered_expectations",
+                        lambda self, repo, parent: _async_return({}))
+    return SwarmDispatcher(_StubNotifier(), _config())
+
+
+def _async_return(value):
+    async def _coro():
+        return value
+    return _coro()
+
+
+def test_handle_pr_blocking_verdict_routes_findings(monkeypatch):
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**REQUEST_CHANGES**\n1 blocking", calls=calls
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("route", "request_changes") in calls
+    assert ("gate", None) not in calls
+
+
+def test_handle_pr_clear_verdict_gates_readiness(monkeypatch):
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("gate", None) in calls
+    assert not any(c[0] == "route" for c in calls)
+
+
+def test_handle_pr_unparseable_verdict_routes_not_gates(monkeypatch):
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="the panel had thoughts", calls=calls
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    # Unparseable → treated as not-clear → route (never silently gate ready).
+    assert any(c[0] == "route" for c in calls)
+    assert ("gate", None) not in calls
+
+
+# ── _route_blocking_findings (per-lens → Cicada, bounded) ────────────────────
+
+
+def _lens_agent(lens):
+    from swarm_dispatch import LENSES
+    for lp in LENSES:
+        if lp.lens == lens:
+            return lp.agent
+    return "gryllus"
+
+
+def test_route_findings_groups_by_lens_then_dispatches_cicada(monkeypatch):
+    dispatched = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        dispatched.append(skill)
+        return SkillResult(skill, True, 0, "guidance/fix applied", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    reviews = [
+        ("ux", "[BLOCKING] naming: the flag is undiscoverable\ndetail here"),
+        ("qa", "[BLOCKING] coverage: no regression test\nadd one"),
+        ("qa", "[NON-BLOCKING] style: minor"),
+    ]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    # Each lens with a blocking finding gets its owning agent invoked, then Cicada.
+    assert _lens_agent("ux") in dispatched
+    assert _lens_agent("qa") in dispatched
+    assert "cicada" in dispatched
+    # Cicada is invoked exactly once (after guidance), not per-lens.
+    assert dispatched.count("cicada") == 1
+
+
+def test_route_findings_escalates_at_retry_cap(monkeypatch):
+    dispatched = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        dispatched.append(skill)
+        return SkillResult(skill, True, 0, "x", "")
+
+    async def fake_count(self, trigger):
+        return 2  # == default max_fix_rounds
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    # At the cap: no agents dispatched; operator escalated instead.
+    assert dispatched == []
+    assert any("auto-fix rounds did not clear" in m for m in notifier.sent)
+
+
+def test_route_findings_cicada_auth_failure_pages_infra(monkeypatch):
+    seen = {}
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "cicada":
+            # Auth-expired claude calls exit 0 with the 401 text in stdout.
+            return SkillResult(
+                skill, True, 0,
+                "Your credit balance is too low to access the Anthropic API", ""
+            )
+        return SkillResult(skill, True, 0, "guidance", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    async def fake_auth_page(self, trigger, agent):
+        seen["auth_agent"] = agent
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_panel_auth_failure", fake_auth_page)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(
+        d._route_blocking_findings(
+            _trigger(), parent=80,
+            reviews=[("qa", "[BLOCKING] coverage: no test\nadd one")],
+            verdict="request_changes",
+        )
+    )
+    assert seen.get("auth_agent") == "cicada"
+
+
+def test_route_findings_no_parseable_blocking_escalates(monkeypatch):
+    async def fake_run_skill(skill, prompt, **kwargs):
+        raise AssertionError("should not dispatch when nothing parses")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    # BLOCKED verdict with no [BLOCKING] blocks → escalate, don't guess.
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80,
+                                   reviews=[("pm", "cannot proceed")],
+                                   verdict="blocked")
+    )
+    assert any("no blocking findings could be parsed" in m for m in notifier.sent)
+
+
+# ── _gate_merge_readiness (verdict-clear AND CI-green) ───────────────────────
+
+
+def _gate_dispatcher(monkeypatch, *, ci_state, checkpoints, routed):
+    async def fake_ci(self, trigger):
+        return ci_state
+
+    async def fake_checkpoint(self, trigger, parent, lenses):
+        checkpoints.append(trigger.number)
+
+    async def fake_route_ci(self, trigger, parent):
+        routed.append(trigger.number)
+
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_store_merge_checkpoint", fake_checkpoint)
+    monkeypatch.setattr(SwarmDispatcher, "_route_ci_failure", fake_route_ci)
+    return SwarmDispatcher(_StubNotifier(), _config())
+
+
+def test_gate_readiness_ci_green_files_checkpoint_and_pages(monkeypatch):
+    checkpoints, routed = [], []
+    d = _gate_dispatcher(monkeypatch, ci_state="green",
+                         checkpoints=checkpoints, routed=routed)
+    asyncio.run(d._gate_merge_readiness(_trigger(), parent=80, panel=[]))
+    assert checkpoints == [87]
+    assert any("READY TO MERGE" in m for m in d.notifier.sent)
+
+
+def test_gate_readiness_ci_failing_routes_no_checkpoint(monkeypatch):
+    checkpoints, routed = [], []
+    d = _gate_dispatcher(monkeypatch, ci_state="failing",
+                         checkpoints=checkpoints, routed=routed)
+    asyncio.run(d._gate_merge_readiness(_trigger(), parent=80, panel=[]))
+    assert checkpoints == []
+    assert routed == [87]
+
+
+def test_gate_readiness_ci_pending_holds_without_paging(monkeypatch):
+    checkpoints, routed = [], []
+    d = _gate_dispatcher(monkeypatch, ci_state="pending",
+                         checkpoints=checkpoints, routed=routed)
+    asyncio.run(d._gate_merge_readiness(_trigger(), parent=80, panel=[]))
+    assert checkpoints == []
+    assert routed == []
+    # Held as INFO (digest), not an OPERATOR_DECISION merge page.
+    assert not any("READY TO MERGE" in m for m in d.notifier.sent)
 
 
 # ── lenses_missing_comments ─────────────────────────────────────────────────

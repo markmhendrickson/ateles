@@ -37,8 +37,16 @@ swarm_dispatch.SwarmDispatcher
                             │     [BLOCKING] findings → operator-gated
                             │     proposed_skill_update entities
                             ├─► Vanellus (aggregate verdicts; NO merge)
-                            └─► blocking checkpoint_brief at the merge
-                                  boundary + operator_decision notification
+                            └─► verdict router (ateles#179):
+                                  • REQUEST_CHANGES/BLOCKED → per-lens agents
+                                    author fix guidance → Cicada implements +
+                                    pushes → synchronize re-runs the panel
+                                    (bounded by APIS_MAX_FIX_ROUNDS, default 2;
+                                    then escalate to operator)
+                                  • APPROVE/COMMENT → readiness gate: file the
+                                    merge checkpoint + operator_decision ping
+                                    ONLY when required CI is also green (else
+                                    hold quietly; red CI → route to Cicada)
 ```
 
 Apus stays the Neotoma→git mirror webhook daemon (port 8741) — it does not
@@ -153,6 +161,37 @@ that introduced it — against itself. Fixes that came out of that run:
   operator/Ateles session hand-authored PR #1880 (global-install `.mcp.json`
   fix) directly, bypassing issue → pm/arch → Cicada; the bypass was only
   noticed because Lanius labelled it a "legacy independent fix" retroactively.
+- **Verdict router — close the review→fix→ready loop (ateles#179).** Before
+  this, `_handle_pr` filed a merge checkpoint + operator ping
+  *unconditionally* after Vanellus aggregation — the verdict was never parsed,
+  so a REQUEST_CHANGES PR and an APPROVE PR produced the identical "held for
+  approval" signal, and blocking findings never routed anywhere despite the
+  Vanellus prompt saying "route back to Gryllus" (prompt-only, unwired). Now
+  `parse_review_verdict` reads the `**APPROVE|REQUEST_CHANGES|COMMENT|BLOCKED**`
+  token and branches:
+  - **not clear** (REQUEST_CHANGES/BLOCKED/unparseable) → `_route_blocking_findings`
+    groups blocking `[BLOCKING]` findings by the `review:<lens>` that raised
+    them, asks each lens's own reviewing agent (arch→Waxwing, ux→Accipiter,
+    qa→Phoenicurus, …) to author domain-specific fix guidance (model a:
+    reviewer proposes, Cicada implements — no agent grades its own fix), then
+    hands the consolidated guidance to Cicada to implement + push. Cicada's
+    push fires `synchronize`, re-running the whole panel. Bounded by
+    `APIS_MAX_FIX_ROUNDS` (default 2, counted via a hidden `apis-fix-round:N`
+    PR comment so it survives daemon restarts and is head-SHA-agnostic); at the
+    cap it escalates to the operator instead of looping.
+  - **clear** (APPROVE/COMMENT) → `_gate_merge_readiness` files the merge
+    checkpoint + `OPERATOR_DECISION` ping **only when required CI is also
+    green** (`_required_ci_state` polls the combined commit status + check-runs
+    for the head SHA; fail-open to "unknown" so a transient API error never
+    fabricates a green). Red CI → route back to Cicada (bounded, same counter);
+    pending/unknown → hold quietly (digest note, not a merge page). So the
+    operator's "READY TO MERGE" email is now a truthful signal.
+  Merge stays operator-gated throughout (`APIS_AUTONOMY_AUTO_MERGE=0`). An
+  auth/billing-expired Cicada or lens call is reframed as an infra page, not a
+  false "fix applied". *Not yet handled (Phase 4 / follow-up):* a check
+  completing does not itself re-invoke the readiness gate, and formal
+  `pull_request_review` / `check_suite` webhook events are not yet ingested — a
+  re-push is still what re-runs the panel.
 
 ## Agent identity on GitHub
 
