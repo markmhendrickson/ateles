@@ -2814,3 +2814,37 @@ def test_mirror_preserves_human_body_and_replaces_only_managed_block(monkeypatch
     assert "PM SPEC HERE" in body
     # Original text stays above the managed block.
     assert body.index("REPORTER ORIGINAL TEXT") < body.index(SPEC_MARKER_START)
+
+
+def test_sanitize_section_body_strips_echoed_markers_and_dup_heading():
+    """Regression for #180: agents echoed their own heading + the managed
+    markers; the sanitizer must return content only so assembler/mirror don't
+    duplicate headings or nest markers."""
+    from swarm_dispatch import _sanitize_section_body
+    from issue_spec import SECTIONS, SPEC_MARKER_START, SPEC_MARKER_END
+
+    pm = next(s for s in SECTIONS if s.key == "pm")
+    bad = (
+        "## Swarm specification\n\n"
+        f"### {pm.heading}\n\n"
+        "**Problem:** verify.\n"
+        f"{SPEC_MARKER_END}\n"
+        "tail content\n"
+    )
+    out = _sanitize_section_body(bad, pm)
+    assert SPEC_MARKER_START not in out
+    assert SPEC_MARKER_END not in out
+    assert pm.heading not in out  # the assembler will add exactly one heading
+    assert "## Swarm specification" not in out
+    assert "**Problem:** verify." in out
+    assert "tail content" in out
+
+
+def test_sanitize_section_body_preserves_clean_content_and_subheadings():
+    from swarm_dispatch import _sanitize_section_body
+    from issue_spec import SECTIONS
+
+    eng = next(s for s in SECTIONS if s.key == "eng")
+    good = "**Approach:** edit X.\n\n#### Sub-detail\nkeep me"
+    out = _sanitize_section_body(good, eng)
+    assert out == good  # nothing to strip; sub-headings preserved

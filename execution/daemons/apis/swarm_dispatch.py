@@ -50,6 +50,8 @@ import httpx
 from github_gateway import SwarmTrigger
 from issue_spec import (
     SECTIONS,
+    SPEC_MARKER_END,
+    SPEC_MARKER_START,
     IssueSpecStore,
     SpecSection,
     SpecState,
@@ -168,6 +170,52 @@ def content_digest(entities: list[dict]) -> str:
     fresh occurred_at — observed on the PR-87 self-dogfood run."""
     blob = json.dumps(entities, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()[:12]
+
+
+def _sanitize_section_body(text: str, section: SpecSection) -> str:
+    """Clean an agent's raw section text before it is stored + mirrored.
+
+    Agents sometimes echo (a) the managed spec markers and (b) their own
+    section heading. The assembler re-adds the ``### <heading>`` and the mirror
+    re-wraps the markers, so echoing them produces duplicated headings and
+    nested markers in the issue body (observed on #180's first live run). Strip
+    both defensively so the stored section is *content only*:
+
+      * remove any ``SPEC_MARKER_START`` / ``SPEC_MARKER_END`` lines the agent
+        pasted, plus the "## Swarm specification" preamble the assembler owns;
+      * drop a leading heading line that matches this section's own heading
+        (in ``#``/``##``/``###`` form) so the assembler's single ``###`` stands
+        alone.
+
+    Idempotent and conservative: only the agent's OWN leading heading is
+    removed; body sub-headings and other content are preserved verbatim.
+    """
+    if not text:
+        return ""
+    cleaned_lines: list[str] = []
+    heading = (section.heading or "").strip().lower()
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        # Drop echoed managed markers and the assembler-owned preamble line.
+        if SPEC_MARKER_START in line or SPEC_MARKER_END in line:
+            continue
+        if stripped == "## Swarm specification":
+            continue
+        cleaned_lines.append(line)
+    # Trim leading blank lines, then drop a leading heading that duplicates
+    # this section's own heading (the assembler will add exactly one).
+    while cleaned_lines and not cleaned_lines[0].strip():
+        cleaned_lines.pop(0)
+    if cleaned_lines:
+        first = cleaned_lines[0].strip()
+        if first.startswith("#"):
+            first_text = first.lstrip("#").strip().lower()
+            if heading and first_text == heading:
+                cleaned_lines.pop(0)
+                while cleaned_lines and not cleaned_lines[0].strip():
+                    cleaned_lines.pop(0)
+    return "\n".join(cleaned_lines).strip()
 
 
 def parse_gate_verdict(stdout: str) -> str | None:
@@ -787,8 +835,13 @@ class SwarmDispatcher:
         end = blob.find("<<<END_SPEC_SECTION>>>")
         if start != -1 and end != -1 and end > start:
             inner = blob[start + len("<<<SPEC_SECTION>>>"):end]
-            return inner.strip()
-        return blob.strip()
+            return _sanitize_section_body(inner, section)
+        # Fallback: a terse/non-conforming agent emitted no fences. Sanitize
+        # hard — its raw stdout may echo the managed markers and/or its own
+        # section heading, which (once the assembler re-adds the heading and
+        # the mirror re-wraps the markers) produced the duplicated-header +
+        # nested-marker corruption seen on the first live run (#180).
+        return _sanitize_section_body(blob, section)
 
     async def _mirror_spec_to_issue(
         self, trigger: SwarmTrigger, state: SpecState
