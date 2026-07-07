@@ -58,8 +58,14 @@ from issue_spec import (
     assemble_spec_markdown,
     splice_managed_block,
 )
-from review_learning import propose_skill_updates
-from review_panel import Lens, select_expectation_agents, select_panel
+from review_learning import (
+    DEFAULT_OWNER,
+    OWNER_BY_LENS,
+    ReviewFinding,
+    parse_findings,
+    propose_skill_updates,
+)
+from review_panel import LENSES, Lens, select_expectation_agents, select_panel
 from skill_runner import SkillResult, run_skill
 
 from lib.notify import Notifier, Priority
@@ -262,6 +268,37 @@ def parse_gate_verdict(stdout: str) -> str | None:
     """Extract Lanius's GATE_INHERITANCE verdict; None when absent."""
     m = _GATE_VERDICT.search(stdout or "")
     return m.group(1).lower() if m else None
+
+
+# Vanellus / panelist verdict token (SWARM_GITHUB_CONTRACT, skill_runner.py):
+# a review comment carries exactly one of these bold verdict tokens.
+_REVIEW_VERDICT = re.compile(
+    r"\*\*(APPROVE|REQUEST_CHANGES|COMMENT|BLOCKED)\*\*", re.I
+)
+
+
+def parse_review_verdict(stdout: str) -> str | None:
+    """Extract the aggregated review verdict from Vanellus's output.
+
+    Returns one of "approve" | "request_changes" | "comment" | "blocked", or
+    None when no verdict token is present (treat None as not-clear — never
+    silently proceed to a merge-ready signal on an unparseable verdict).
+
+    Vanellus is instructed to repeat its full aggregated verdict inline in
+    stdout (swarm_dispatch `_vanellus_prompt`), so the token is reliably here
+    even when its `gh` comment post fails.
+    """
+    m = _REVIEW_VERDICT.search(stdout or "")
+    return m.group(1).lower() if m else None
+
+
+def review_verdict_is_clear(verdict: str | None) -> bool:
+    """True only for an unambiguous non-blocking verdict (APPROVE or COMMENT).
+
+    REQUEST_CHANGES / BLOCKED / None (unparseable) are all NOT clear — the PR is
+    not merge-ready and blocking findings should route back for a fix.
+    """
+    return verdict in ("approve", "comment")
 
 
 # ── Per-agent GitHub account registry (#109) ─────────────────────────────────
@@ -570,6 +607,10 @@ _AUTH_FAILURE_SIGNATURES = (
     "please run /login",
     "invalid api key",
     "x-api-key header is required",
+    # Billing exhaustion is an infra/credential-class failure too: the model
+    # call cannot run, so its "verdict" is not a review. Reframe + page, don't
+    # treat as a completed fix. (Seen live on a metered-API GHA reviewer.)
+    "credit balance is too low",
 )
 
 
@@ -665,6 +706,11 @@ class DispatchConfig:
     max_concurrent_issue_pipelines: int = int(
         os.environ.get("APIS_MAX_CONCURRENT_ISSUE_PIPELINES", "3")
     )
+    # Max automatic review→fix→re-review rounds before escalating to the operator.
+    # Each round: lens agents propose fixes for their blocking findings, Cicada
+    # implements + pushes, the push (synchronize) re-runs the panel. Bounds the
+    # Cicada↔panel loop so a finding the swarm can't resolve doesn't spin forever.
+    max_fix_rounds: int = int(os.environ.get("APIS_MAX_FIX_ROUNDS", "2"))
 
 
 class SwarmDispatcher:
@@ -1124,21 +1170,417 @@ class SwarmDispatcher:
         #     to re-auth, rather than posting the raw error as a review.
         if detect_auth_failure(vanellus_result.stdout, vanellus_result.stderr):
             await self._handle_panel_auth_failure(trigger, "vanellus")
-        else:
-            # 4b. Dispatcher fallback: if Vanellus's own gh comment did not land
-            #     on the PR, post the captured stdout ourselves (mirrors
-            #     _post_missing_panel_comments for the aggregation step).
-            await self._post_missing_vanellus_comment(trigger, vanellus_result)
+            return
+        # 4b. Dispatcher fallback: if Vanellus's own gh comment did not land
+        #     on the PR, post the captured stdout ourselves (mirrors
+        #     _post_missing_panel_comments for the aggregation step).
+        await self._post_missing_vanellus_comment(trigger, vanellus_result)
 
-        if not self.config.auto_merge:
-            await self._store_merge_checkpoint(trigger, parent, [p.lens for p in panel])
+        # 5. Act on the verdict — this is the loop closure. Previously the
+        #    dispatcher filed a merge checkpoint here UNCONDITIONALLY, ignoring
+        #    whether the panel actually blocked. Now:
+        #      REQUEST_CHANGES/BLOCKED/unparseable → route findings back for a
+        #        fix (lens agents propose, Cicada implements), bounded by
+        #        max_fix_rounds; a Cicada push re-runs this whole handler.
+        #      APPROVE/COMMENT → readiness gate: only signal merge-ready when
+        #        required CI is also green.
+        verdict = parse_review_verdict(vanellus_result.stdout)
+        if not review_verdict_is_clear(verdict):
+            await self._route_blocking_findings(trigger, parent, reviews, verdict)
+            return
+
+        await self._gate_merge_readiness(trigger, parent, panel)
+
+    # ── loop closure: findings → fix → readiness (ateles#179) ────────────────
+
+    # Stable marker for the per-PR fix-round counter comment. The count lives in
+    # a hidden HTML comment on the PR so it survives daemon restarts and is
+    # head-SHA-agnostic (a bounded loop must count rounds, not commits).
+    _FIX_ROUND_MARKER = "<!-- apis-fix-round:{n} -->"
+    _FIX_ROUND_RE = re.compile(r"<!-- apis-fix-round:(\d+) -->")
+
+    def _lens_fix_agent(self, lens: str) -> str:
+        """Agent that authors fix guidance for a finding raised under `lens`.
+
+        The reviewing agent for the lens owns the domain response (model a:
+        reviewer proposes, Cicada implements). Falls back to OWNER_BY_LENS /
+        DEFAULT_OWNER for lenses with no dedicated reviewer.
+        """
+        for lp in LENSES:
+            if lp.lens == lens and lp.agent:
+                return lp.agent
+        return OWNER_BY_LENS.get(lens, DEFAULT_OWNER)
+
+    async def _fix_round_count(self, trigger: SwarmTrigger) -> int:
+        """Read the current auto-fix round count from the PR's marker comment."""
+        list_url = (
+            f"https://api.github.com/repos/{trigger.repository}/issues/"
+            f"{trigger.number}/comments"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    list_url,
+                    params={"per_page": 100},
+                    headers=self._github_headers(trigger.repository),
+                )
+                resp.raise_for_status()
+                best = 0
+                for comment in resp.json():
+                    m = self._FIX_ROUND_RE.search(comment.get("body", ""))
+                    if m:
+                        best = max(best, int(m.group(1)))
+                return best
+        except Exception as exc:
+            # Fail-safe: if we cannot read the count, assume we are AT the cap so
+            # we escalate to the operator rather than risk an unbounded loop.
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                f"fix-round count read failed ({exc}) — treating as at-cap"
+            )
+            return self.config.max_fix_rounds
+
+    async def _record_fix_round(self, trigger: SwarmTrigger, n: int) -> None:
+        """Post the fix-round marker comment (no command tokens; best-effort)."""
+        body = (
+            f"{self._FIX_ROUND_MARKER.format(n=n)}\n"
+            f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+            f"🔁 Auto-fix round {n} of {self.config.max_fix_rounds}: routing the "
+            "panel's blocking findings back to the review agents for guidance, "
+            "then to the implementer. A new push re-runs the panel."
+        )
+        list_url = (
+            f"https://api.github.com/repos/{trigger.repository}/issues/"
+            f"{trigger.number}/comments"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    list_url,
+                    json={"body": body},
+                    headers=self._github_headers(trigger.repository),
+                )
+                resp.raise_for_status()
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                f"could not record fix round {n}: {exc}"
+            )
+
+    async def _route_blocking_findings(
+        self,
+        trigger: SwarmTrigger,
+        parent: int | None,
+        reviews: list[tuple[str, str]],
+        verdict: str | None,
+    ) -> None:
+        """Route panel blocking findings back for an automatic fix (bounded).
+
+        Model (a): each lens's blocking findings go to that lens's reviewing
+        agent, which authors domain-specific fix guidance in its own voice. The
+        consolidated guidance is handed to Cicada, which implements + pushes;
+        the push (synchronize) re-runs the whole PR handler. Bounded by
+        max_fix_rounds so an unresolvable finding escalates to the operator
+        instead of looping forever. Merge stays operator-gated throughout.
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
+
+        # Group blocking findings by the lens that raised them.
+        by_lens: dict[str, list[ReviewFinding]] = {}
+        for lens, text in reviews:
+            for f in parse_findings(text, lens=lens):
+                if f.blocking:
+                    by_lens.setdefault(lens, []).append(f)
+
+        if not by_lens:
+            # Verdict was not clear but no parseable [BLOCKING] block exists
+            # (e.g. a BLOCKED "cannot proceed" or a malformed verdict). Don't
+            # guess a fix — escalate so a human reads the review.
             self.notifier.send(
-                f"PR {ref} reviewed by panel "
-                f"({', '.join(p.lens for p in panel) or 'baseline only'}). "
-                "Merge held for operator approval (checkpoint_brief filed).",
+                f"PR {ref}: review verdict `{verdict or 'unparseable'}` is not "
+                "clear but no blocking findings could be parsed — needs your "
+                "read. Merge held.",
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
             )
+            return
+
+        prior_rounds = await self._fix_round_count(trigger)
+        if prior_rounds >= self.config.max_fix_rounds:
+            lenses = ", ".join(sorted(by_lens))
+            self.notifier.send(
+                f"PR {ref}: {self.config.max_fix_rounds} auto-fix rounds did not "
+                f"clear review (still blocking on: {lenses}). Escalating — needs "
+                "your attention. Merge held.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+            )
+            return
+
+        this_round = prior_rounds + 1
+        await self._record_fix_round(trigger, this_round)
+
+        # Each lens agent proposes fix guidance for its own findings.
+        guidance_blocks: list[str] = []
+        for lens in sorted(by_lens):
+            agent = self._lens_fix_agent(lens)
+            findings_text = "\n".join(
+                f"- [{f.category}] {f.summary}\n  {f.detail}".rstrip()
+                for f in by_lens[lens]
+            )
+            result = await run_skill(
+                agent,
+                self._fix_guidance_prompt(trigger, lens, agent, findings_text),
+                github_token=_token_for_agent_on_repo(agent, trigger.repository),
+                include_github_contract=True,
+            )
+            if result.ok and result.stdout.strip():
+                guidance_blocks.append(
+                    f"### {lens} lens ({agent})\n{result.stdout.strip()}"
+                )
+            else:
+                # Fall back to the raw findings so Cicada still has the work.
+                guidance_blocks.append(
+                    f"### {lens} lens (guidance unavailable — raw findings)\n"
+                    f"{findings_text}"
+                )
+
+        consolidated = "\n\n".join(guidance_blocks)
+
+        # Hand the consolidated guidance to Cicada to implement + push.
+        cicada_result = await run_skill(
+            "cicada",
+            self._cicada_fix_prompt(trigger, parent, this_round, consolidated),
+            github_token=_token_for_agent_on_repo("cicada", trigger.repository),
+            include_github_contract=True,
+        )
+        # An auth-expired claude call can exit 0 with the 401 in stdout, so a
+        # bare `ok` is not enough — reframe an auth failure as an infra page.
+        if detect_auth_failure(cicada_result.stdout, cicada_result.stderr):
+            await self._handle_panel_auth_failure(trigger, "cicada")
+            return
+        if not cicada_result.ok:
+            self.notifier.send(
+                f"PR {ref}: auto-fix round {this_round} — Cicada could not apply "
+                "the review guidance. Needs your attention. Merge held.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+            )
+            return
+        log.info(
+            f"[{DAEMON_NAME}] {ref}: dispatched auto-fix round {this_round} "
+            f"({len(by_lens)} lens(es) → Cicada); awaiting its push to re-review"
+        )
+
+    async def _gate_merge_readiness(
+        self, trigger: SwarmTrigger, parent: int | None, panel: list[Lens]
+    ) -> None:
+        """File the merge checkpoint + notify ONLY when review is clear AND CI green.
+
+        Previously this fired unconditionally after review. Now the operator's
+        merge-ready email is a truthful signal: it means the PR is actually
+        ready. When CI is not green, hold quietly (digest note) rather than
+        paging the operator prematurely; a check completing does not re-invoke
+        this today (that is Phase 4), but a re-push will re-run the panel.
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
+        if self.config.auto_merge:
+            return  # auto-merge path: Vanellus handles merge, no checkpoint.
+
+        ci = await self._required_ci_state(trigger)
+        if ci == "failing":
+            # Route a red CI back for a fix, bounded like review findings.
+            await self._route_ci_failure(trigger, parent)
+            return
+        if ci != "green":
+            # pending / unknown — hold without paging; don't claim ready.
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: review clear but CI {ci} — holding "
+                "merge-ready signal until required checks are green"
+            )
+            self.notifier.send(
+                f"PR {ref}: review clear, required CI {ci} — will hold the "
+                "merge-ready request until checks are green.",
+                priority=Priority.INFO,
+                handler=DAEMON_NAME,
+            )
+            return
+
+        await self._store_merge_checkpoint(trigger, parent, [p.lens for p in panel])
+        self.notifier.send(
+            f"PR {ref} is READY TO MERGE — panel review clear "
+            f"({', '.join(p.lens for p in panel) or 'baseline only'}) and "
+            "required CI green. Approve to merge (checkpoint_brief filed).",
+            priority=Priority.OPERATOR_DECISION,
+            handler=DAEMON_NAME,
+        )
+
+    async def _required_ci_state(self, trigger: SwarmTrigger) -> str:
+        """Return "green" | "failing" | "pending" | "unknown" for the PR head.
+
+        Gates on the combined commit status + check-runs for the PR's head SHA.
+        Fail-open to "unknown" on any fetch error so a transient API failure
+        never fabricates a green (which would page the operator to merge an
+        unverified PR).
+        """
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                headers = self._github_headers(trigger.repository)
+                pr = await client.get(
+                    f"https://api.github.com/repos/{trigger.repository}/pulls/"
+                    f"{trigger.number}",
+                    headers=headers,
+                )
+                pr.raise_for_status()
+                head_sha = pr.json().get("head", {}).get("sha", "")
+                if not head_sha:
+                    return "unknown"
+
+                # Combined legacy commit status (Loxia, external CIs).
+                status = await client.get(
+                    f"https://api.github.com/repos/{trigger.repository}/commits/"
+                    f"{head_sha}/status",
+                    headers=headers,
+                )
+                status.raise_for_status()
+                state = status.json().get("state", "")  # success|failure|pending|""
+
+                # GitHub Actions check-runs (not covered by the status API).
+                checks = await client.get(
+                    f"https://api.github.com/repos/{trigger.repository}/commits/"
+                    f"{head_sha}/check-runs",
+                    headers={**headers, "Accept": "application/vnd.github+json"},
+                )
+                checks.raise_for_status()
+                runs = checks.json().get("check_runs", [])
+                run_conclusions = [r.get("conclusion") for r in runs]
+                run_statuses = [r.get("status") for r in runs]
+
+                failing_run = any(
+                    c in ("failure", "timed_out", "cancelled", "action_required")
+                    for c in run_conclusions
+                )
+                pending_run = any(s != "completed" for s in run_statuses)
+
+                if state == "failure" or failing_run:
+                    return "failing"
+                if state == "pending" or pending_run:
+                    return "pending"
+                if state in ("success", "") and not runs and not failing_run:
+                    # No checks configured at all — treat as green (nothing to fail).
+                    return "green"
+                return "green"
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                f"CI state fetch failed ({exc}) — treating as unknown"
+            )
+            return "unknown"
+
+    async def _route_ci_failure(
+        self, trigger: SwarmTrigger, parent: int | None
+    ) -> None:
+        """Route a red-CI PR back to Cicada for a fix, bounded like review findings."""
+        ref = f"{trigger.repository}#{trigger.number}"
+        prior_rounds = await self._fix_round_count(trigger)
+        if prior_rounds >= self.config.max_fix_rounds:
+            self.notifier.send(
+                f"PR {ref}: review clear but required CI is failing after "
+                f"{self.config.max_fix_rounds} auto-fix rounds. Escalating — "
+                "needs your attention. Merge held.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+            )
+            return
+        this_round = prior_rounds + 1
+        await self._record_fix_round(trigger, this_round)
+        cicada_result = await run_skill(
+            "cicada",
+            self._cicada_ci_fix_prompt(trigger, parent, this_round),
+            github_token=_token_for_agent_on_repo("cicada", trigger.repository),
+            include_github_contract=True,
+        )
+        if detect_auth_failure(cicada_result.stdout, cicada_result.stderr):
+            await self._handle_panel_auth_failure(trigger, "cicada")
+            return
+        if not cicada_result.ok:
+            self.notifier.send(
+                f"PR {ref}: CI-fix round {this_round} — Cicada could not resolve "
+                "the failing checks. Needs your attention. Merge held.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+            )
+            return
+        log.info(
+            f"[{DAEMON_NAME}] {ref}: dispatched CI-fix round {this_round} to "
+            "Cicada; awaiting its push to re-review"
+        )
+
+    @staticmethod
+    def _fix_guidance_prompt(
+        trigger: SwarmTrigger, lens: str, agent: str, findings: str
+    ) -> str:
+        t = trigger
+        return (
+            f"Invoke the {agent} review agent per your appended system prompt.\n\n"
+            f"The PR review panel returned BLOCKING findings under YOUR ({lens}) "
+            f"lens on PR {t.repository}#{t.number}: {t.title}\n{t.html_url}\n\n"
+            "Produce concrete, actionable fix GUIDANCE for the implementer "
+            "(Cicada) — what to change and why, in your domain voice. Do NOT "
+            "write the code yourself; you are the reviewer, Cicada implements. "
+            "Be specific: name files, functions, and the exact change per "
+            "finding. If a finding is actually a false positive, say so and why "
+            "so Cicada can note it rather than force a change.\n\n"
+            "----- BLOCKING FINDINGS (your lens) -----\n"
+            f"{findings}\n"
+            "----- END FINDINGS -----\n\n"
+            f"{_agent_prompt_instruction(agent, lens + ' reviewer')}"
+        )
+
+    @staticmethod
+    def _cicada_fix_prompt(
+        trigger: SwarmTrigger, parent: int | None, round_n: int, guidance: str
+    ) -> str:
+        t = trigger
+        return (
+            "Invoke the cicada agent per your appended system prompt.\n\n"
+            f"PR {t.repository}#{t.number} ({t.title}) got REQUEST_CHANGES from "
+            f"the review panel (auto-fix round {round_n}). Address the review "
+            "guidance below on the PR's existing branch, then push. Your push "
+            "re-runs the panel automatically — do NOT open a new PR and do NOT "
+            "merge.\n\n"
+            f"Parent issue: #{parent if parent else 'unknown'}.\n"
+            f"Check out and work on the PR branch for {t.repository}#{t.number} "
+            f"({t.html_url}); commit with the ateles-agent identity and push to "
+            "update this PR.\n\n"
+            "Apply the per-lens guidance; where a reviewer flagged a false "
+            "positive, note it in your commit/PR comment instead of forcing a "
+            "change. Run the tests and self-review before pushing.\n\n"
+            "----- CONSOLIDATED REVIEW GUIDANCE -----\n"
+            f"{guidance}\n"
+            "----- END GUIDANCE -----\n\n"
+            f"{_agent_prompt_instruction('cicada', 'issue worker')}\n\n"
+            "AUTONOMY GUARDRAIL — DO NOT MERGE. Merge stays operator-gated."
+        )
+
+    @staticmethod
+    def _cicada_ci_fix_prompt(
+        trigger: SwarmTrigger, parent: int | None, round_n: int
+    ) -> str:
+        t = trigger
+        return (
+            "Invoke the cicada agent per your appended system prompt.\n\n"
+            f"PR {t.repository}#{t.number} ({t.title}) passed panel review but "
+            f"required CI is FAILING (auto-fix round {round_n}). Check out the "
+            "PR branch, read the failing checks "
+            f"(`gh pr checks {t.number} --repo {t.repository}` and the run logs), "
+            "fix the cause, run the tests locally, then push to update this PR. "
+            "Your push re-runs the panel + CI automatically — do NOT open a new "
+            "PR and do NOT merge.\n\n"
+            f"Parent issue: #{parent if parent else 'unknown'}. {t.html_url}\n\n"
+            f"{_agent_prompt_instruction('cicada', 'issue worker')}\n\n"
+            "AUTONOMY GUARDRAIL — DO NOT MERGE. Merge stays operator-gated."
+        )
 
     # ── issue_comment pipeline (ateles#112) ─────────────────────────────────
 
