@@ -4,8 +4,18 @@ execution/daemons/apis/swarm_dispatch.py — GitHub-event dispatch pipelines.
 The orchestration layer behind the GitHub webhook gateway (ateles#80):
 
   issue.opened     → harness_event → Lanius (new-issue protocol: init gates,
-                     assign Pavo, label) → review-expectation pre-registration
-                     pass (ateles#81) → Pavo (Phase 1 scoping)
+                     assign Pavo, label) → ORDERED ADDITIVE SPEC sequence:
+                     PM (Pavo) → Design/UX (Accipiter) → Eng (Cicada) →
+                     QA (Phoenicurus) → Security (Waxwing) → Legal (Buteo).
+                     PM/Eng/QA always run; Design/Security/Legal run only when
+                     their lens is selected. Each agent reads the accumulated
+                     spec-so-far and adds/replaces ONLY its own section; the
+                     spec lives in a Neotoma `issue_spec` entity (one per issue,
+                     keyed `<repo>#<n>`) and is mirrored into the issue BODY
+                     between managed markers. Comments carry verdicts only.
+                     When ATELES_SWARM_AUTO_BUILD is ON and gates are green, the
+                     sequence chains into an implementation PR (Cicada build) so
+                     the PR pipeline takes over; OFF (default) = notify-and-wait.
   pull_request.*   → harness_event → Lanius (PR gate inheritance; stop if a
                      pre-impl gate is open) → review panel (neotoma#1640) →
                      learning pass (ateles#82) → Vanellus aggregation →
@@ -17,6 +27,9 @@ write Neotoma metadata and GitHub comments, both reversible. Side-effecting
 steps stay operator-gated by default: Vanellus reviews and aggregates but
 does NOT merge unless APIS_AUTONOMY_AUTO_MERGE=1; the merge boundary gets a
 blocking checkpoint_brief plus an operator_decision notification instead.
+The auto-build handoff (issue → implementation PR) is separately gated behind
+ATELES_SWARM_AUTO_BUILD (default OFF); it NEVER auto-merges — merge stays
+behind APIS_AUTONOMY_AUTO_MERGE regardless.
 """
 
 from __future__ import annotations
@@ -35,6 +48,14 @@ from datetime import datetime, timezone
 import httpx
 
 from github_gateway import SwarmTrigger
+from issue_spec import (
+    SECTIONS,
+    IssueSpecStore,
+    SpecSection,
+    SpecState,
+    assemble_spec_markdown,
+    splice_managed_block,
+)
 from review_learning import propose_skill_updates
 from review_panel import Lens, select_expectation_agents, select_panel
 from skill_runner import SkillResult, run_skill
@@ -544,6 +565,18 @@ class DispatchConfig:
     panel_max: int = int(os.environ.get("APIS_PANEL_MAX", "4"))
     auto_merge: bool = os.environ.get("APIS_AUTONOMY_AUTO_MERGE", "0") == "1"
     dry_run: bool = os.environ.get("APIS_DRY_RUN", "0") == "1"
+    # Auto-build handoff (rollout safety): when ON, a fully-assembled spec whose
+    # gates are green chains into an implementation PR (Cicada build) so the PR
+    # gate pipeline takes over.  Default OFF/unset = spec-only, notify-and-wait
+    # for the operator's `build` approval.  Never auto-MERGES — that boundary
+    # stays operator-gated via APIS_AUTONOMY_AUTO_MERGE regardless.
+    auto_build: bool = os.environ.get("ATELES_SWARM_AUTO_BUILD", "0") == "1"
+    # Concurrency cap for the ordered issue spec pipeline: a burst of many
+    # issue.opened events must not stampede the daemon (each pipeline spawns a
+    # chain of `claude --print` children).  Capped at 3 concurrent pipelines.
+    max_concurrent_issue_pipelines: int = int(
+        os.environ.get("APIS_MAX_CONCURRENT_ISSUE_PIPELINES", "3")
+    )
 
 
 class SwarmDispatcher:
@@ -552,6 +585,12 @@ class SwarmDispatcher:
     def __init__(self, notifier: Notifier, config: DispatchConfig | None = None):
         self.notifier = notifier
         self.config = config or DispatchConfig()
+        # Concurrency-safety for the additive issue spec pipeline: a bounded
+        # semaphore so a burst of issue.opened events runs at most
+        # ``max_concurrent_issue_pipelines`` spec sequences at once (the rest
+        # queue).  Created lazily so tests that construct a dispatcher without a
+        # running loop still work; see ``_issue_pipeline_semaphore``.
+        self._issue_semaphore: asyncio.Semaphore | None = None
 
     async def handle_trigger(self, trigger: SwarmTrigger) -> None:
         """Entry point handed to the webhook gateway. Never raises."""
@@ -583,9 +622,54 @@ class SwarmDispatcher:
                 handler=DAEMON_NAME,
             )
 
-    # ── issue.opened pipeline ────────────────────────────────────────────────
+    # ── issue.opened pipeline (ordered additive spec) ───────────────────────
+
+    def _issue_pipeline_semaphore(self) -> asyncio.Semaphore:
+        """Lazily construct the bounded semaphore for issue spec pipelines.
+
+        Created on first use (inside the running loop) so a dispatcher can be
+        constructed in a test without an active event loop.  A burst of many
+        issue.opened events therefore runs at most
+        ``config.max_concurrent_issue_pipelines`` spec sequences at once; the
+        rest queue on ``acquire`` rather than stampeding the daemon.
+        """
+        if self._issue_semaphore is None:
+            self._issue_semaphore = asyncio.Semaphore(
+                max(1, self.config.max_concurrent_issue_pipelines)
+            )
+        return self._issue_semaphore
+
+    def _selected_sections(self, trigger: SwarmTrigger) -> list[SpecSection]:
+        """The ordered spec sections that run for this issue.
+
+        PM, Eng, QA always run.  The conditional lenses (Design/UX, Security,
+        Legal) run ONLY when ``select_expectation_agents`` — the SAME
+        lens-selection logic used by the review panel — pulls their lens in for
+        this issue's title/body/labels.  The result is always in canonical
+        ``SECTIONS`` order.
+        """
+        selected_agents = {
+            lens.agent
+            for lens in select_expectation_agents(
+                trigger.title, trigger.body, trigger.labels
+            )
+        }
+        out: list[SpecSection] = []
+        for section in SECTIONS:
+            if section.always or section.agent in selected_agents:
+                out.append(section)
+        return out
 
     async def _handle_issue_opened(self, trigger: SwarmTrigger) -> None:
+        """Ordered, additive spec pipeline for a newly-opened issue.
+
+        Concurrency-safe: acquires the bounded issue-pipeline semaphore so a
+        burst of issue.opened events cannot stampede the daemon.
+        """
+        async with self._issue_pipeline_semaphore():
+            await self._run_issue_spec_pipeline(trigger)
+
+    async def _run_issue_spec_pipeline(self, trigger: SwarmTrigger) -> None:
         ref = f"{trigger.repository}#{trigger.number}"
 
         # 1. Lanius: new-issue protocol (init gate_status, assign Pavo, label).
@@ -601,34 +685,192 @@ class SwarmDispatcher:
                 priority=Priority.BLOCKER,
                 handler=DAEMON_NAME,
             )
-            # Continue: expectations are still useful even if gate init failed.
+            # Continue: the additive spec is still useful even if gate init failed.
 
-        # 2. Shift-left review contract (ateles#81): relevant agents
-        #    pre-register what they will check at PR time.
-        lenses = select_expectation_agents(trigger.title, trigger.body, trigger.labels)
-        for lens in lenses:
-            await run_skill(
-                lens.agent,
-                self._expectation_prompt(trigger, lens),
-                github_token=_token_for_agent_on_repo(lens.agent, trigger.repository),
+        # 2. Ordered additive spec sequence. Each selected lens agent runs in
+        #    CANONICAL ORDER and contributes exactly ONE section, reading the
+        #    accumulated spec-so-far and adding/replacing only its own section.
+        sections = self._selected_sections(trigger)
+        spec_store = IssueSpecStore(
+            self.config.neotoma_base_url, self.config.neotoma_token
+        )
+        # Idempotent: re-running on the same issue loads existing sections and
+        # updates them in place (no duplicate entity, no duplicate section).
+        state = await spec_store.load(
+            trigger.repository, trigger.number, trigger.title
+        )
+
+        completed: list[str] = []
+        for section in sections:
+            spec_so_far = assemble_spec_markdown(state.sections or {})
+            result = await run_skill(
+                section.agent,
+                self._spec_section_prompt(trigger, section, spec_so_far),
+                github_token=_token_for_agent_on_repo(
+                    section.agent, trigger.repository
+                ),
                 include_github_contract=True,
             )
+            section_text = self._extract_section_text(result.stdout, section)
+            # Persist ADDITIVELY: correct only this section's field. Even when
+            # extraction yields nothing usable we still record the turn ran so
+            # the sequence_state and mirror reflect progress.
+            state = await spec_store.upsert_section(state, section, section_text)
+            completed.append(section.key)
+            # Mirror after each section so the issue body reflects the growing
+            # spec incrementally (and re-running only replaces the marked block).
+            await self._mirror_spec_to_issue(trigger, state)
 
-        # 3. Pavo takes Phase 1 (pm scoping) — read-only gate, auto-runs.
-        await run_skill(
-            "pavo",
-            self._pavo_prompt(trigger),
-            github_token=_token_for_agent_on_repo("pavo", trigger.repository),
+        await spec_store.mark_mirrored(state)
+
+        # 3. Auto-build handoff (rollout-flagged). When ON and gates are green,
+        #    chain into an implementation PR so the PR gate pipeline takes over
+        #    (and ultimately stops at the operator's merge approval). When OFF,
+        #    STOP and notify that the spec is ready awaiting `build` approval.
+        gates_green = self._gates_green(lanius)
+        if self.config.auto_build and gates_green:
+            opened = await self._open_implementation_pr(trigger, state)
+            self.notifier.send(
+                f"Issue {ref}: additive spec assembled ("
+                f"{', '.join(completed) or 'none'}); "
+                + (
+                    "auto-build ON — implementation PR handoff invoked, PR gate "
+                    "pipeline now owns it (merge stays operator-gated)."
+                    if opened
+                    else "auto-build ON but PR handoff could not be invoked — "
+                    "spec is ready; open the build manually."
+                ),
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+            )
+        else:
+            reason = (
+                "auto-build OFF"
+                if not self.config.auto_build
+                else "gates not green"
+            )
+            self.notifier.send(
+                f"Issue {ref}: additive spec assembled in order "
+                f"({', '.join(completed) or 'none'}); Lanius"
+                f"{'✓' if lanius.ok else '✗'}. "
+                f"Spec is ready and awaiting `build` approval ({reason}). "
+                "No PR opened; nothing auto-merged.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+            )
+
+    def _gates_green(self, lanius: SkillResult) -> bool:
+        """Best-effort read of whether pre-impl gates cleared after the sequence.
+
+        Lanius owns gate_status; when its new-issue protocol ran cleanly and did
+        not emit a `GATE_INHERITANCE: blocked` verdict, we treat the gates as
+        green enough to hand off (the PR pipeline re-checks inheritance and the
+        merge boundary is still operator-gated regardless).  Conservative: any
+        Lanius failure or explicit blocked verdict returns False.
+        """
+        if not lanius.ok:
+            return False
+        return parse_gate_verdict(lanius.stdout) != "blocked"
+
+    @staticmethod
+    def _extract_section_text(stdout: str, section: SpecSection) -> str:
+        """Pull the agent's section contribution out of its stdout.
+
+        The section prompt asks the agent to wrap its section between the
+        fences ``<<<SPEC_SECTION>>>`` … ``<<<END_SPEC_SECTION>>>``.  When those
+        fences are present we take exactly what is inside (the additive
+        contract).  When absent (a terse agent), we fall back to the trimmed
+        stdout so the section is never silently empty.
+        """
+        blob = stdout or ""
+        start = blob.find("<<<SPEC_SECTION>>>")
+        end = blob.find("<<<END_SPEC_SECTION>>>")
+        if start != -1 and end != -1 and end > start:
+            inner = blob[start + len("<<<SPEC_SECTION>>>"):end]
+            return inner.strip()
+        return blob.strip()
+
+    async def _mirror_spec_to_issue(
+        self, trigger: SwarmTrigger, state: SpecState
+    ) -> None:
+        """Mirror the assembled spec into the GitHub issue BODY.
+
+        Assembles ``state.sections`` in canonical order and splices the result
+        into the issue description between the managed markers, preserving the
+        human-written body above them (never clobbers the reporter's text).
+        Re-running replaces only the marked block.  Best-effort, never raises.
+        """
+        repo_token = _token_for_repo(trigger.repository)
+        if not repo_token:
+            log.warning(
+                f"[{DAEMON_NAME}] no GitHub token — spec mirror skipped for "
+                f"{trigger.repository}#{trigger.number}"
+            )
+            return
+        managed = assemble_spec_markdown(state.sections or {})
+        issue_url = (
+            f"https://api.github.com/repos/{trigger.repository}/issues/"
+            f"{trigger.number}"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                # Read the CURRENT body so we splice against live content (the
+                # reporter or another agent may have edited it since open).
+                resp = await client.get(
+                    issue_url, headers=self._github_headers(trigger.repository)
+                )
+                resp.raise_for_status()
+                current_body = resp.json().get("body") or ""
+                new_body = splice_managed_block(current_body, managed)
+                if new_body == current_body:
+                    log.debug(
+                        f"[{DAEMON_NAME}] spec mirror no-op for "
+                        f"{trigger.repository}#{trigger.number} (unchanged)"
+                    )
+                    return
+                patch = await client.patch(
+                    issue_url,
+                    json={"body": new_body},
+                    headers=self._github_headers(trigger.repository),
+                )
+                patch.raise_for_status()
+                log.info(
+                    f"[{DAEMON_NAME}] mirrored spec into issue body of "
+                    f"{trigger.repository}#{trigger.number}"
+                )
+        except Exception as exc:
+            log.error(
+                f"[{DAEMON_NAME}] spec mirror failed for "
+                f"{trigger.repository}#{trigger.number}: {exc}"
+            )
+
+    async def _open_implementation_pr(
+        self, trigger: SwarmTrigger, state: SpecState
+    ) -> bool:
+        """Chain into implementation: dispatch Cicada to open a build PR.
+
+        Only reached when ``ATELES_SWARM_AUTO_BUILD`` is ON and gates are green.
+        Cicada is instructed to branch off FRESH origin/main in a worktree,
+        implement the assembled spec, and open a PR whose body references the
+        issue (`Closes #<n>`) so the existing ``_handle_pr`` gate pipeline takes
+        over.  This method NEVER merges anything.
+
+        Returns True when the Cicada dispatch ran ok, False otherwise.
+        Best-effort: any failure returns False and the caller notifies.
+        """
+        result = await run_skill(
+            "cicada",
+            self._cicada_build_prompt(trigger, state),
+            github_token=_token_for_agent_on_repo("cicada", trigger.repository),
             include_github_contract=True,
         )
-
-        self.notifier.send(
-            f"Issue {ref} triaged autonomously: Lanius"
-            f"{'✓' if lanius.ok else '✗'}, {len(lenses)} review expectation(s) "
-            f"pre-registered, Pavo scoping started",
-            priority=Priority.INFO,
-            handler=DAEMON_NAME,
-        )
+        if not result.ok:
+            log.error(
+                f"[{DAEMON_NAME}] Cicada build handoff failed for "
+                f"{trigger.repository}#{trigger.number}: "
+                f"{result.error or f'rc={result.returncode}'}"
+            )
+        return result.ok
 
     # ── pull_request pipeline ────────────────────────────────────────────────
 
@@ -1588,6 +1830,147 @@ class SwarmDispatcher:
             "`pending` after a successful evaluation — a pending pm gate is "
             "a deadlock for any PR that closes this issue.\n\n"
             f"{_agent_prompt_instruction('pavo', 'pm gate owner')}"
+        )
+
+    @staticmethod
+    def _spec_section_prompt(
+        t: SwarmTrigger, section: SpecSection, spec_so_far: str
+    ) -> str:
+        """Ordered additive-spec prompt: write/replace ONLY this agent's section.
+
+        Each agent in the canonical sequence reads the accumulated spec-so-far
+        and ADDS or REPLACES exactly its own section, building on prior sections
+        (design assumes PM's scope, eng assumes design, qa assumes eng, …).
+
+        The spec lives in the issue BODY, not in comments: the agent must NOT
+        post its section as a GitHub comment.  It returns its section text
+        wrapped between the fences below; the dispatcher stores it into the
+        issue_spec entity's `<section>_section` field and mirrors the body.
+        Verdicts (gate pass/fail, blockers) stay as comments.
+        """
+        # Section-specific method guidance keyed by lens.
+        method_by_lens = {
+            "pm": (
+                "Validate intent, acceptance criteria, and scope. Your section "
+                "is the SCOPE OF RECORD every later lens builds on: crisp problem "
+                "statement, in-scope / out-of-scope, and a bulleted acceptance "
+                "criteria checklist."
+            ),
+            "ux": (
+                "Assume PM's scope above. Specify the agent/developer experience "
+                "of the new surface: naming, error messages with actionable "
+                "hints, and the docs/examples the change must ship."
+            ),
+            "eng": (
+                "Assume the PM scope and Design section above. Specify the "
+                "implementation approach: files/modules to touch, data/contract "
+                "changes, layering, and the concrete build steps a PR will take. "
+                "Do NOT write code here — write the plan the build PR will follow."
+            ),
+            "qa": (
+                "Assume the Engineering plan above. Specify the test plan: the "
+                "regression test for any fixed bug, edge cases for new branches, "
+                "and contract tests for new endpoints — as a definition-of-done "
+                "checklist."
+            ),
+            "arch": (
+                "Assume the sections above. Specify the security/architecture "
+                "requirements: contract-first ordering, tenant isolation on every "
+                "entity lookup, idempotency_key on mutating ops, and any auth / "
+                "credential-exposure constraints the build must honor."
+            ),
+            "legal": (
+                "Assume the sections above. Specify the legal/compliance "
+                "requirements: dependency licensing, PII/data-handling on "
+                "public-effect surfaces, and guest-token / credential scope."
+            ),
+        }
+        method = method_by_lens.get(
+            section.lens, f"Contribute your `{section.lens}` lens to the spec."
+        )
+
+        pm_gate_block = ""
+        if section.lens == "pm":
+            # PM still owns the pm gate: fold the mandatory sign-off in so gate
+            # mechanics keep advancing the pipeline (comments carry the verdict,
+            # the body carries the spec).
+            pm_gate_block = (
+                "\n\nGATE (verdict via comment, not spec): when scoping PASSES you "
+                "MUST also (a) `correct()` the issue entity `gate_status.pm` → "
+                '`"signed_off"`, (b) store a `plan_contribution` '
+                '(`contribution_type: "sign_off"`, `gate: "pm"`, `agent: "pavo"`), '
+                '(c) append `owner_history` `{"gate":"pm","action":"signed_off",'
+                '"actor":"pavo"}`, (d) set `current_owner` → `"arch"`, and (e) post '
+                "ONE short verdict COMMENT confirming the pm gate is signed off. "
+                "Only leave pm `pending`/`blocked` when scoping GENUINELY FAILS — a "
+                "pending pm gate deadlocks any PR that closes this issue."
+            )
+
+        return (
+            f"Invoke the {section.agent} agent per your appended system prompt.\n\n"
+            f"You are the `{section.lens}` lens in the Ateles swarm's ORDERED "
+            f"ADDITIVE SPEC pipeline for GitHub issue "
+            f"{t.repository}#{t.number}: {t.title}\n{t.html_url}\n\n"
+            "----- ISSUE DESCRIPTION -----\n"
+            f"{t.body}\n"
+            "----- END ISSUE DESCRIPTION -----\n\n"
+            "The specification is assembled section-by-section, in this order: "
+            "PM → Design/UX → Eng → QA → Security → Legal. The accumulated "
+            "spec-so-far (prior sections) is below — READ IT and BUILD ON IT.\n\n"
+            "----- SPEC SO FAR -----\n"
+            f"{spec_so_far}\n"
+            "----- END SPEC SO FAR -----\n\n"
+            f"Your task: {method}\n\n"
+            "ADDITIVE CONTRACT — read carefully:\n"
+            f"- Write or REPLACE ONLY the `{section.heading}` section. Do NOT "
+            "rewrite, summarize, or edit any other lens's section — they are "
+            "owned by other agents (mirrors the plan-field merge discipline).\n"
+            "- The spec lives in the issue BODY. Do NOT post your section as a "
+            "GitHub comment — the dispatcher writes it into the issue "
+            "description for you. Comments are for VERDICTS ONLY (gate pass/fail, "
+            "blockers).\n"
+            "- Return your section as markdown wrapped EXACTLY between these "
+            "fences, and nothing else outside them that you want persisted:\n\n"
+            "<<<SPEC_SECTION>>>\n"
+            f"<your `{section.heading}` markdown here — concise, checklist-first, "
+            "building on the sections above>\n"
+            "<<<END_SPEC_SECTION>>>"
+            f"{pm_gate_block}"
+        )
+
+    @staticmethod
+    def _cicada_build_prompt(t: SwarmTrigger, state: SpecState) -> str:
+        """Auto-build handoff prompt: Cicada opens an implementation PR.
+
+        Only used when ``ATELES_SWARM_AUTO_BUILD`` is ON.  Cicada branches off
+        FRESH origin/main in a worktree, implements the assembled spec, and
+        opens a PR referencing the issue so the ``_handle_pr`` gate pipeline
+        takes over.  NEVER merges — the merge boundary stays operator-gated.
+        """
+        spec_md = assemble_spec_markdown(state.sections or {})
+        return (
+            "Invoke the cicada agent per your appended system prompt.\n\n"
+            f"The Ateles swarm has assembled a full additive specification for "
+            f"GitHub issue {t.repository}#{t.number}: {t.title}\n{t.html_url}\n\n"
+            "Auto-build is ON and the pre-impl gates are green. Implement the "
+            "specification below and OPEN AN IMPLEMENTATION PULL REQUEST so the "
+            "swarm's PR gate pipeline takes over.\n\n"
+            "----- ASSEMBLED SPECIFICATION -----\n"
+            f"{spec_md}\n"
+            "----- END ASSEMBLED SPECIFICATION -----\n\n"
+            "BUILD PROTOCOL:\n"
+            "  1. Branch off FRESH origin/main (fetch first) in an isolated git "
+            "worktree — never off a feature branch.\n"
+            "  2. Implement the spec, following the Engineering section's plan "
+            "and honoring the QA/Security/Legal requirements as "
+            "definition-of-done.\n"
+            "  3. Add/extend tests per the QA section and run them.\n"
+            f"  4. Open a PR whose body references the issue with "
+            f"`Closes #{t.number}` so gate inheritance links back to it.\n\n"
+            "HARD GUARDRAIL — DO NOT MERGE. Opening the PR is the end of your "
+            "handoff: the PR gate pipeline reviews it and the merge stays "
+            "operator-gated. Never merge, and never force-push over main.\n\n"
+            f"{_agent_prompt_instruction('cicada', 'implementation build')}"
         )
 
     @staticmethod
