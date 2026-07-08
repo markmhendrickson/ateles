@@ -711,12 +711,60 @@ def test_lanius_verdict_on_first_try_not_retried(monkeypatch):
     assert calls == ["lanius"]
 
 
-def test_lanius_pr_prompt_carries_legacy_issue_rule():
-    # The PR-gate prompt must teach Lanius the legacy distinction so an issue
-    # that predates the pipeline (no gate metadata) is cleared, not blocked.
+def test_lanius_pr_prompt_gate_inheritance_contract_snapshot():
+    """Golden snapshot of the gate-inheritance instruction block (ateles#195).
+
+    Rather than scattered substring checks (which a prompt with all the right
+    words plus a stray contradictory sentence would still pass), this pins the
+    two authoritative sentences verbatim AND asserts their ORDER, so the policy
+    reads as one coherent contract: read gate_status as source of truth FIRST,
+    then the legacy rule only applies when the key is truly absent, and legacy
+    init preserves — never downgrades — existing sign-offs.
+
+    (NB: Lanius is an LLM agent — the retrieve→honor→merge behaviour executes
+    inside a `claude --print` call, so a unit test cannot exercise the "pending
+    still blocks" runtime branch; that is what the agentic_eval follow-up on
+    ateles#195 covers. This test guards the CONTRACT Lanius is handed.)
+    """
     prompt = SwarmDispatcher._lanius_pr_prompt(_trigger(), parent=80)
-    assert "LEGACY-ISSUE RULE" in prompt
-    assert "never initialized" in prompt or "NO gate_status" in prompt
+
+    source_of_truth = (
+        "the parent issue's `gate_status` lives on its NEOTOMA issue entity, "
+        "NOT in the GitHub issue body"
+    )
+    retrieve_call = (
+        "retrieve_entity_by_identifier(entity_type='issue', "
+        "identifier=<number>, identifier_field='github_number')"
+    )
+    authoritative = "Treat that stored `gate_status` as AUTHORITATIVE."
+    satisfied = (
+        "A pre-impl gate in `signed_off`, `waived`, or `not_required` counts "
+        "as satisfied."
+    )
+    legacy_only_when_absent = (
+        "ONLY when the retrieved issue entity has NO `gate_status` key at all "
+        "(truly absent — not merely pending) do you treat it as legacy"
+    )
+    merge_not_overwrite = "Legacy init MUST MERGE, never overwrite"
+    never_downgrade = "never downgrade a `signed_off` gate to `pending`"
+    blocked_only_when_pending = (
+        "Only emit `blocked` when `gate_status` exists AND a pre-impl gate is "
+        "genuinely `pending`"
+    )
+
+    for fragment in (
+        source_of_truth, retrieve_call, authoritative, satisfied,
+        legacy_only_when_absent, merge_not_overwrite, never_downgrade,
+        blocked_only_when_pending,
+    ):
+        assert fragment in prompt, f"missing gate-inheritance clause: {fragment!r}"
+
+    # Order: source-of-truth is established BEFORE the legacy carve-out, and the
+    # legacy rule requires true absence before it fires — so a pending gate can
+    # never be re-cleared as "legacy".
+    assert prompt.index(authoritative) < prompt.index(legacy_only_when_absent)
+    assert prompt.index(legacy_only_when_absent) < prompt.index(never_downgrade)
+    # The clear/blocked terminal-line contract is still present.
     assert "GATE_INHERITANCE: clear" in prompt
     assert "trigger_swarm_pr.py issue" in prompt
 
