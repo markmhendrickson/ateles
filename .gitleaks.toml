@@ -123,6 +123,10 @@ regexes = [
   '''@(?:group\.v\.calendar|import\.calendar)\.google\.com\b''',
   # git author trailer used in commits
   '''Co-Authored-By:.*@''',
+  # SSH git-remote URL example strings (git@<host>:owner/repo) — the user@host
+  # shape matches pii-email but is a remote-URL literal, not a contact address.
+  # Used in publish.py's remote-URL parser + its test fixtures.
+  '''(?i)\bgit@(?:github\.com|[a-z0-9.-]+):[a-z0-9._/-]+''',
   # placeholder phone numbers in docs/examples (sequential or repeated digits)
   '''\+?1234567890\b''',
   '''\+?0{7,}\b''',
