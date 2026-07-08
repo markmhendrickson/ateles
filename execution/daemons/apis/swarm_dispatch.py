@@ -1653,21 +1653,29 @@ class SwarmDispatcher:
         )
 
     async def _gate_merge_readiness(
-        self, trigger: SwarmTrigger, parent: int | None, panel: list[Lens]
+        self,
+        trigger: SwarmTrigger,
+        parent: int | None,
+        panel: list[Lens],
+        ci_state: str | None = None,
     ) -> None:
         """File the merge checkpoint + notify ONLY when review is clear AND CI green.
 
         Previously this fired unconditionally after review. Now the operator's
         merge-ready email is a truthful signal: it means the PR is actually
         ready. When CI is not green, hold quietly (digest note) rather than
-        paging the operator prematurely; a check completing does not re-invoke
-        this today (that is Phase 4), but a re-push will re-run the panel.
+        paging the operator prematurely. A completed check re-invokes this via
+        the ci_status path; a re-push re-runs the whole panel.
+
+        `ci_state` may be passed by a caller that already computed it (the
+        ci_status path) to avoid a redundant _required_ci_state fetch (3 GitHub
+        API round-trips); when None we compute it here as before.
         """
         ref = f"{trigger.repository}#{trigger.number}"
         if self.config.auto_merge:
             return  # auto-merge path: Vanellus handles merge, no checkpoint.
 
-        ci = await self._required_ci_state(trigger)
+        ci = ci_state if ci_state is not None else await self._required_ci_state(trigger)
         if ci == "failing":
             # Route a red CI back for a fix, bounded like review findings.
             await self._route_ci_failure(trigger, parent)
@@ -1771,7 +1779,7 @@ class SwarmDispatcher:
         prior_rounds = await self._fix_round_count(trigger)
         if prior_rounds >= self.config.max_fix_rounds:
             self.notifier.send(
-                f"PR {ref}: review clear but required CI is failing after "
+                f"PR {ref}: required CI is failing after "
                 f"{self.config.max_fix_rounds} auto-fix rounds. Escalating — "
                 "needs your attention. Merge held.",
                 priority=Priority.OPERATOR_DECISION,
@@ -2244,14 +2252,18 @@ class SwarmDispatcher:
             )
             return
         log.info(f"[{DAEMON_NAME}] {ref}: CI green + review clear — gating readiness")
-        await self._gate_merge_readiness(pr_trigger, parent, panel=[])
+        # Pass the CI state we already computed so the gate does not re-fetch it.
+        await self._gate_merge_readiness(pr_trigger, parent, panel=[], ci_state=ci)
 
     async def _pr_review_is_clear(self, repository: str, pr_number: int) -> bool:
         """True when the latest Vanellus aggregation on the PR is a clear verdict.
 
-        Reads the PR's comments, finds the most recent one carrying the Vanellus
-        aggregation marker, and parses its verdict. Fail-closed (False) on any
-        error — we must never claim merge-ready off a failed read.
+        Reads the PR's comments NEWEST-FIRST (sort=created&direction=desc) and
+        returns the verdict of the first Vanellus-aggregation marker found — so
+        the latest verdict is honoured even on a PR with >100 comments (the
+        marker would otherwise sit on a later page of an oldest-first scan and be
+        missed). Fail-closed (False) on any error — we must never claim
+        merge-ready off a failed read.
         """
         url = (
             f"https://api.github.com/repos/{repository}/issues/"
@@ -2261,18 +2273,15 @@ class SwarmDispatcher:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.get(
                     url,
-                    params={"per_page": 100},
+                    params={"per_page": 100, "sort": "created", "direction": "desc"},
                     headers=self._github_headers(repository),
                 )
                 resp.raise_for_status()
-                latest: str | None = None
-                for comment in resp.json():
+                for comment in resp.json():  # newest-first
                     body = comment.get("body", "")
                     if _VANELLUS_COMMENT_MARKER in body:
-                        latest = body  # comments are chronological; keep the last
-                if latest is None:
-                    return False
-                return review_verdict_is_clear(parse_review_verdict(latest))
+                        return review_verdict_is_clear(parse_review_verdict(body))
+                return False
         except Exception as exc:
             log.warning(
                 f"[{DAEMON_NAME}] {repository}#{pr_number}: review-verdict read "

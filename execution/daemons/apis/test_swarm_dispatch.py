@@ -630,7 +630,7 @@ def _wire_ci_status(monkeypatch, *, ci_state, review_clear, pr_head="abc123",
     async def fake_route(self, trigger, parent):
         calls.append(("route", trigger.number))
 
-    async def fake_gate(self, trigger, parent, panel):
+    async def fake_gate(self, trigger, parent, panel, ci_state=None):
         calls.append(("gate", trigger.number))
 
     monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
@@ -694,6 +694,74 @@ def test_ci_status_closed_pr_is_ignored(monkeypatch):
                         pr_state="closed", calls=calls)
     asyncio.run(d._handle_ci_status(_ci_status_trigger()))
     assert calls == []
+
+
+def test_ci_status_green_threads_ci_state_into_gate(monkeypatch):
+    # Loxia review nit: don't re-fetch CI in the gate when the ci_status path
+    # already computed it. Assert the gate receives ci_state="green".
+    seen = {}
+
+    async def fake_fetch_pr(self, repo, num):
+        return {"number": num, "state": "open", "draft": False,
+                "title": "t", "body": "Closes #80", "html_url": "u",
+                "head": {"sha": "abc123", "ref": "f"}, "base": {"ref": "main"}}
+
+    async def fake_ci(self, trigger):
+        return "green"
+
+    async def fake_clear(self, repo, num):
+        return True
+
+    async def fake_gate(self, trigger, parent, panel, ci_state=None):
+        seen["ci_state"] = ci_state
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_pr_review_is_clear", fake_clear)
+    monkeypatch.setattr(SwarmDispatcher, "_gate_merge_readiness", fake_gate)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(d._handle_ci_status(_ci_status_trigger()))
+    assert seen.get("ci_state") == "green"
+
+
+def test_pr_review_is_clear_reads_newest_first(monkeypatch):
+    # Loxia review nit: an unpaginated oldest-first scan misses the latest
+    # Vanellus marker on a >100-comment PR. We now fetch newest-first and take
+    # the FIRST marker — so a stale REQUEST_CHANGES followed by a newer APPROVE
+    # (which GitHub returns first under direction=desc) reads as clear.
+    captured = {}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def get(self, url, **kwargs):
+            captured["params"] = kwargs.get("params", {})
+            # Simulate direction=desc: newest (APPROVE) first, older one after.
+            bodies = [
+                "<!-- vanellus-aggregation -->\n**APPROVE**\nlgtm",
+                "<!-- vanellus-aggregation -->\n**REQUEST_CHANGES**\nold",
+            ]
+
+            class _Resp:
+                def raise_for_status(self_inner):
+                    pass
+
+                def json(self_inner):
+                    return [{"body": b} for b in bodies]
+
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _Client())
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    result = asyncio.run(d._pr_review_is_clear("owner/repo", 87))
+    assert result is True
+    # Confirms we requested newest-first, not a plain first-100 scan.
+    assert captured["params"].get("direction") == "desc"
 
 
 # ── prompt generators — guardrails must survive refactors ────────────────────
