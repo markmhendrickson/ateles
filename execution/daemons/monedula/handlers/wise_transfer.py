@@ -2,9 +2,11 @@
 handlers/wise_transfer.py — Generic Wise transfer handler for Monedula.
 
 Executes a Wise IBAN transfer for any PaymentProfile with payment_type="wise".
-Contact (name + IBAN) is loaded from contacts.parquet using the profile's
-contact_id prefix and category/platform fallback — all driven by env vars,
-no business-specific values hardcoded here.
+Contact (name + IBAN, ideally + Wise recipient id) is resolved primarily from
+the Neotoma contact entity linked via profile.contact_id; contacts.parquet is
+consulted only as a legacy fallback when Neotoma yields no usable IBAN (see
+_load_contact). All values are driven by profile config / env vars, no
+business-specific values hardcoded here.
 
 Wise API flow:
   1. GET /v1/profiles → pick personal profile_id
@@ -28,9 +30,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from ..handler_base import PaymentHandler
+    from ..handler_base import PaymentHandler, match_events_for_profile
 except ImportError:
-    from handler_base import PaymentHandler  # type: ignore[no-redef]
+    from handler_base import PaymentHandler, match_events_for_profile  # type: ignore[no-redef]
 from .payment_profile import PaymentProfile
 
 log = logging.getLogger(__name__)
@@ -49,15 +51,14 @@ class WiseTransferHandler(PaymentHandler):
         return self.profile.name
 
     def matches(self, events: list[dict]) -> list[dict]:
-        """Return a match for each event whose title contains any profile keyword."""
-        matched = []
-        for event in events:
-            summary = event.get("summary", "") or ""
-            low = summary.lower()
-            if any(kw in low for kw in self.profile.calendar_keywords):
-                log.info(f"[{self.name}] Matched event: {summary!r}")
-                matched.append({"event": event, "summary": summary})
-        return matched
+        """
+        Return a match for each event that triggers this profile.
+
+        Prefers stable calendar_recurring_event_id / calendar_event_ids
+        matching when configured (see handler_base.match_events_for_profile);
+        falls back to calendar_keywords title-substring matching otherwise.
+        """
+        return match_events_for_profile(self.profile, events, self.name)
 
     def preview(self, match: dict) -> str:
         summary = match.get("summary", self.profile.label)
@@ -174,24 +175,140 @@ class WiseTransferHandler(PaymentHandler):
 
 
 # ---------------------------------------------------------------------------
-# Contact loading (from contacts.parquet, generic)
+# Contact loading — Neotoma first, contacts.parquet as legacy fallback only
 # ---------------------------------------------------------------------------
 
 
 def _load_contact(profile: PaymentProfile) -> dict | None:
     """
-    Load payment contact from contacts.parquet using profile config.
-    Tries contact_id prefix first, then category+platform fallback.
-    Returns dict with at least 'name' and 'iban', or None on failure.
+    Resolve the payment recipient (name + IBAN, ideally + Wise recipient id)
+    for this profile.
+
+    Resolution order:
+      1. Neotoma: profile.contact_id -> retrieve the linked `contact` entity
+         and read its iban / wise_recipient_id / name fields directly.
+      2. contacts.parquet: ONLY as a legacy fallback when Neotoma yields
+         nothing (DATA_DIR unset, contact not found, or field missing) —
+         never a hard requirement. A daemon with no DATA_DIR configured must
+         still be able to pay when the data lives in Neotoma.
+
+    Returns dict with at least 'name' and 'iban' (and 'wise_recipient_id'
+    when known), or None if no source has usable data — callers must treat
+    that as a fail-safe "do not execute" signal, not raise.
+    """
+    contact = _load_contact_from_neotoma(profile)
+    if contact and contact.get("iban"):
+        return contact
+
+    parquet_contact = _load_contact_from_parquet(profile)
+    if parquet_contact and parquet_contact.get("iban"):
+        if contact:
+            # Neotoma had a partial record (e.g. name but no IBAN yet) —
+            # prefer Neotoma's fields, fill gaps from parquet.
+            merged = dict(parquet_contact)
+            merged.update({k: v for k, v in contact.items() if v})
+            return merged
+        return parquet_contact
+
+    # Neither source has a usable IBAN. Return whatever partial Neotoma
+    # record we found (if any) so preview()/execute() can still report a
+    # useful "No IBAN found" error with the recipient name — but never
+    # invent an IBAN.
+    return contact
+
+
+def _load_contact_from_neotoma(profile: PaymentProfile) -> dict | None:
+    """
+    Resolve recipient fields from the Neotoma contact entity linked via
+    profile.contact_id (expected to be a Neotoma entity id, e.g. "ent_...").
+
+    Reads the contact snapshot directly over the Neotoma HTTP API — no CLI
+    subprocess dependency, so this works even when the `neotoma` binary is
+    unavailable. Any failure (network, auth, missing entity, missing field)
+    returns None/partial rather than raising — fail-safe, never blocks the
+    parquet fallback path.
+    """
+    contact_id = (profile.contact_id or "").strip()
+    if not contact_id or not contact_id.startswith("ent_"):
+        # Not a Neotoma entity id (e.g. a legacy parquet contact_id prefix,
+        # or unset) — nothing to resolve here.
+        return None
+
+    import urllib.error
+    import urllib.request
+
+    base_url = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180").rstrip("/")
+    bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "").strip()
+    is_loopback = "localhost" in base_url or "127.0.0.1" in base_url
+
+    headers = {"Accept": "application/json"}
+    if bearer and not is_loopback:
+        headers["Authorization"] = f"Bearer {bearer}"
+
+    # GET /entities/{id} — same route used by execution/scripts/render_plan_docs.py
+    # and phoenicurus-release/publish.py (neotoma_fetch_entity). Response nests
+    # fields under .snapshot (occasionally double-nested .snapshot.snapshot);
+    # unwrap defensively rather than relying on a single exact shape.
+    url = f"{base_url}/entities/{contact_id}"
+    try:
+        req = urllib.request.Request(url, method="GET", headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+        log.warning(
+            f"[{profile.name}] Neotoma contact lookup failed for {contact_id}: {exc}"
+        )
+        return None
+
+    snap = data.get("snapshot", data) if isinstance(data, dict) else None
+    if isinstance(snap, dict) and isinstance(snap.get("snapshot"), dict):
+        snap = snap["snapshot"]
+    if not isinstance(snap, dict):
+        log.warning(f"[{profile.name}] Neotoma contact {contact_id} returned no snapshot")
+        return None
+
+    name = str(snap.get("name") or snap.get("full_name") or "").strip()
+    iban = str(snap.get("iban") or "").strip().replace(" ", "")
+    wise_recipient_id = str(snap.get("wise_recipient_id") or "").strip()
+    phone = str(snap.get("phone") or "").strip()
+
+    if not name and not iban:
+        log.warning(
+            f"[{profile.name}] Neotoma contact {contact_id} has neither name nor iban"
+        )
+        return None
+    if not iban:
+        log.warning(
+            f"[{profile.name}] Neotoma contact {contact_id} ({name!r}) has no iban field "
+            f"— will try contacts.parquet fallback"
+        )
+
+    result = {"name": name, "iban": iban, "phone": phone, "contact_id": contact_id}
+    if wise_recipient_id:
+        result["wise_recipient_id"] = wise_recipient_id
+    return result
+
+
+def _load_contact_from_parquet(profile: PaymentProfile) -> dict | None:
+    """
+    Legacy fallback: load payment contact from contacts.parquet using
+    profile config. Tries contact_id prefix first, then category+platform
+    fallback. Returns dict with at least 'name' and 'iban', or None.
+
+    Only consulted when Neotoma resolution (_load_contact_from_neotoma)
+    yields no usable IBAN — this path must never be a hard requirement.
     """
     data_dir = os.environ.get("DATA_DIR", "").strip()
     if not data_dir:
-        log.warning(f"[{profile.name}] DATA_DIR not set — cannot load contacts")
+        log.info(
+            f"[{profile.name}] DATA_DIR not set — skipping legacy contacts.parquet "
+            f"fallback (expected once Neotoma has the recipient data)"
+        )
         return None
 
     contacts_path = Path(data_dir) / "contacts" / "contacts.parquet"
     if not contacts_path.exists():
-        log.warning(f"[{profile.name}] contacts.parquet not found at {contacts_path}")
+        log.info(f"[{profile.name}] contacts.parquet not found at {contacts_path}")
         return None
 
     try:
@@ -205,7 +322,7 @@ def _load_contact(profile: PaymentProfile) -> dict | None:
     except ImportError:
         return _load_contact_pandas(contacts_path, profile)
     except Exception as exc:
-        log.error(f"[{profile.name}] Error loading contacts: {exc}")
+        log.error(f"[{profile.name}] Error loading contacts.parquet: {exc}")
         return None
 
 

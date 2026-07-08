@@ -18,9 +18,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from ..handler_base import PaymentHandler
+    from ..handler_base import PaymentHandler, match_events_for_profile
 except ImportError:
-    from handler_base import PaymentHandler  # type: ignore[no-redef]
+    from handler_base import PaymentHandler, match_events_for_profile  # type: ignore[no-redef]
 from .payment_profile import PaymentProfile
 
 log = logging.getLogger(__name__)
@@ -39,14 +39,14 @@ class BtcTransferHandler(PaymentHandler):
         return self.profile.name
 
     def matches(self, events: list[dict]) -> list[dict]:
-        matched = []
-        for event in events:
-            summary = event.get("summary", "") or ""
-            low = summary.lower()
-            if any(kw in low for kw in self.profile.calendar_keywords):
-                log.info(f"[{self.name}] Matched event: {summary!r}")
-                matched.append({"event": event, "summary": summary})
-        return matched
+        """
+        Return a match for each event that triggers this profile.
+
+        Prefers stable calendar_recurring_event_id / calendar_event_ids
+        matching when configured (see handler_base.match_events_for_profile);
+        falls back to calendar_keywords title-substring matching otherwise.
+        """
+        return match_events_for_profile(self.profile, events, self.name)
 
     def preview(self, match: dict) -> str:
         summary = match.get("summary", self.profile.label)
