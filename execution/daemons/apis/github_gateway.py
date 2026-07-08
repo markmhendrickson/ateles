@@ -70,6 +70,12 @@ ISSUE_COMMENT_ACTIONS = {"created"}
 # pull_request_review events (approval loop): the operator clicking "Approve"
 # in the GitHub PR review UI. Only "submitted" carries a fresh verdict.
 PR_REVIEW_ACTIONS = {"submitted"}
+# check_suite events (ateles#197): a CI rollup completing. We only act on the
+# terminal "completed" action — acting on every in-progress check_run would
+# storm the pipeline. `status` events are intentionally NOT handled: they fire
+# per-context and would multiply for the same head; check_suite:completed is the
+# single terminal signal per commit.
+CHECK_SUITE_ACTIONS = {"completed"}
 
 
 @dataclass
@@ -103,6 +109,15 @@ class SwarmTrigger:
     # reviewer's login.
     review_state: str = ""
     review_author: str = ""
+    # check_suite/status extras (ateles#197 — CI-driven loop closure): populated
+    # when kind == "ci_status". `ci_head_sha` is the commit the checks ran
+    # against; `ci_conclusion` is the terminal rollup ("success" | "failure" |
+    # "cancelled" | "timed_out" | ...); `ci_pr_numbers` are the PRs GitHub
+    # associates with that head (from check_suite.pull_requests), used to resolve
+    # which PR to re-evaluate.
+    ci_head_sha: str = ""
+    ci_conclusion: str = ""
+    ci_pr_numbers: list[int] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -221,6 +236,35 @@ def parse_github_event(
             base_ref=(pr.get("base") or {}).get("ref", ""),
             review_state=(review.get("state") or "").lower(),
             review_author=(review.get("user") or {}).get("login", ""),
+            raw=payload,
+        )
+
+    # check_suite events (ateles#197): a CI rollup completed for a commit. We
+    # normalize to a `ci_status` trigger carrying the head SHA, the terminal
+    # conclusion, and the PRs GitHub links to that head. The dispatcher resolves
+    # the affected PR and re-runs the readiness/routing logic — so a check going
+    # green (while review is clear) can finally advance the merge signal, and a
+    # check going red can route back to a fix, without waiting for a re-push.
+    if event_type == "check_suite" and action in CHECK_SUITE_ACTIONS:
+        suite = payload.get("check_suite") or {}
+        prs = suite.get("pull_requests") or []
+        first_pr = prs[0] if prs else {}
+        return SwarmTrigger(
+            kind="ci_status",
+            repository=repository,
+            # number is the first associated PR (0 if none — dispatcher guards).
+            number=first_pr.get("number", 0),
+            # check_suite carries no PR title/body/url; the dispatcher re-fetches
+            # the PR to get them, so empty placeholders are fine here.
+            title=first_pr.get("title", ""),
+            body="",
+            author="",
+            html_url="",
+            delivery_id=delivery_id,
+            action=action,
+            ci_head_sha=suite.get("head_sha", ""),
+            ci_conclusion=(suite.get("conclusion") or "").lower(),
+            ci_pr_numbers=[p.get("number", 0) for p in prs if p.get("number")],
             raw=payload,
         )
 

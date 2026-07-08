@@ -600,6 +600,102 @@ def test_required_ci_state_unknown_fails_open_on_api_error(monkeypatch):
     assert _ci_state(monkeypatch, raise_on={"pulls"}) == "unknown"
 
 
+# ── _handle_ci_status (check_suite:completed → route/readiness, ateles#197) ──
+
+
+def _ci_status_trigger(**over):
+    base = dict(
+        kind="ci_status", repository="owner/repo", number=87,
+        title="", body="", author="", html_url="",
+        delivery_id="d-ci", action="completed",
+        ci_head_sha="abc123", ci_conclusion="success", ci_pr_numbers=[87],
+    )
+    base.update(over)
+    return SwarmTrigger(**base)
+
+
+def _wire_ci_status(monkeypatch, *, ci_state, review_clear, pr_head="abc123",
+                    pr_state="open", pr_draft=False, calls):
+    async def fake_fetch_pr(self, repo, num):
+        return {"number": num, "state": pr_state, "draft": pr_draft,
+                "title": "t", "body": "Closes #80", "html_url": "u",
+                "head": {"sha": pr_head, "ref": "feat/x"}, "base": {"ref": "main"}}
+
+    async def fake_ci(self, trigger):
+        return ci_state
+
+    async def fake_clear(self, repo, num):
+        return review_clear
+
+    async def fake_route(self, trigger, parent):
+        calls.append(("route", trigger.number))
+
+    async def fake_gate(self, trigger, parent, panel):
+        calls.append(("gate", trigger.number))
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_pr_review_is_clear", fake_clear)
+    monkeypatch.setattr(SwarmDispatcher, "_route_ci_failure", fake_route)
+    monkeypatch.setattr(SwarmDispatcher, "_gate_merge_readiness", fake_gate)
+    return SwarmDispatcher(_StubNotifier(), _config())
+
+
+def test_ci_status_failing_routes_to_fix(monkeypatch):
+    calls = []
+    d = _wire_ci_status(monkeypatch, ci_state="failing", review_clear=True, calls=calls)
+    asyncio.run(d._handle_ci_status(_ci_status_trigger()))
+    assert ("route", 87) in calls
+    assert not any(c[0] == "gate" for c in calls)
+
+
+def test_ci_status_green_and_review_clear_gates_readiness(monkeypatch):
+    calls = []
+    d = _wire_ci_status(monkeypatch, ci_state="green", review_clear=True, calls=calls)
+    asyncio.run(d._handle_ci_status(_ci_status_trigger()))
+    assert ("gate", 87) in calls
+    assert not any(c[0] == "route" for c in calls)
+
+
+def test_ci_status_green_but_review_not_clear_does_nothing(monkeypatch):
+    calls = []
+    d = _wire_ci_status(monkeypatch, ci_state="green", review_clear=False, calls=calls)
+    asyncio.run(d._handle_ci_status(_ci_status_trigger()))
+    assert calls == []
+
+
+def test_ci_status_pending_does_nothing(monkeypatch):
+    calls = []
+    d = _wire_ci_status(monkeypatch, ci_state="pending", review_clear=True, calls=calls)
+    asyncio.run(d._handle_ci_status(_ci_status_trigger()))
+    assert calls == []
+
+
+def test_ci_status_stale_head_is_ignored(monkeypatch):
+    # check_suite head != PR's current head → a superseded commit's checks must
+    # not drive anything.
+    calls = []
+    d = _wire_ci_status(monkeypatch, ci_state="failing", review_clear=True,
+                        pr_head="newhead999", calls=calls)
+    asyncio.run(d._handle_ci_status(_ci_status_trigger(ci_head_sha="oldhead111")))
+    assert calls == []
+
+
+def test_ci_status_no_associated_pr_is_ignored(monkeypatch):
+    calls = []
+    d = _wire_ci_status(monkeypatch, ci_state="failing", review_clear=True, calls=calls)
+    asyncio.run(d._handle_ci_status(_ci_status_trigger(number=0, ci_pr_numbers=[])))
+    assert calls == []
+
+
+def test_ci_status_closed_pr_is_ignored(monkeypatch):
+    calls = []
+    d = _wire_ci_status(monkeypatch, ci_state="green", review_clear=True,
+                        pr_state="closed", calls=calls)
+    asyncio.run(d._handle_ci_status(_ci_status_trigger()))
+    assert calls == []
+
+
 # ── prompt generators — guardrails must survive refactors ────────────────────
 
 
