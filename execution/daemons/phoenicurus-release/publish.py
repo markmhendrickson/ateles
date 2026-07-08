@@ -278,6 +278,15 @@ class StepError(Exception):
     """A publish step failed; message is operator-facing."""
 
 
+class InsufficientPermissionsError(StepError):
+    """gh pr merge failed because the acting account lacks merge rights.
+
+    Distinct from a generic StepError so operators scanning logs immediately
+    recognize this as an operator action (grant merge rights / merge manually
+    and resume), not a merge-conflict or network failure.
+    """
+
+
 def run(
     cmd: list[str],
     cwd: Path | None = None,
@@ -396,31 +405,110 @@ def preflight(version: str, rc_branch: str, dry_run: bool) -> None:
     log.info(f"Preflight OK for {version} (rc_branch={rc_branch}, dry_run={dry_run})")
 
 
-def merge_rc_pr(rc_pr_url: str, rc_branch: str, dry_run: bool) -> None:
+def preflight_post_merge(version: str, dry_run: bool) -> None:
+    """
+    Guard the irreversible steps (tag_and_push, npm_publish) against the
+    version-bump commit being missing from the merged RC PR. Must run AFTER
+    merge_rc_pr (the bump commit lands via that merge) and BEFORE tag_and_push
+    — this is the exact class of failure that caused the v0.18.8 incident
+    (neotoma#1920): the RC PR merged without a bump commit and publish.py
+    tagged/would-have-published the wrong version.
+    """
+    if dry_run:
+        log.info(f"[dry-run] would verify package.json version == {version}")
+        return
+    target = version.lstrip("v")
+    pkg_path = NEOTOMA_REPO_ROOT / "package.json"
+    try:
+        actual = json.loads(pkg_path.read_text()).get("version", "")
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        raise StepError(
+            f"preflight/version-match FAILED: could not read/parse "
+            f"{pkg_path} ({exc}). Refusing to publish without confirming the "
+            f"checked-out version matches the target release version."
+        ) from exc
+    if actual != target:
+        raise StepError(
+            f"Preflight FAILED: package.json version ({actual}) does not match "
+            f"target release version ({target}).\n"
+            f"This means the version-bump commit is missing from the merged RC "
+            f"PR — publishing now would tag/publish the WRONG version (this is "
+            f"the exact defect that caused the v0.18.8 incident).\n"
+            f"Fix: verify the RC PR included a `chore(release): bump version to "
+            f"v{target}` commit. If missing, run "
+            f"`npm version {target} --no-git-tag-version`, commit as "
+            f"`chore(release): bump version to v{target} + supplement`, push, "
+            f"and re-merge before re-running publish.py."
+        )
+    log.info(f"preflight/version-match OK: package.json version == {target}")
+
+
+def _owner_repo_from_remote_url(url: str) -> str:
+    """Parse 'owner/repo' out of an SSH or HTTPS git remote URL."""
+    url = url.strip().removesuffix(".git")
+    if url.startswith("git@"):
+        # git@github.com:owner/repo
+        return url.split(":", 1)[-1]
+    # https://github.com/owner/repo
+    return "/".join(url.rsplit("/", 2)[-2:])
+
+
+def merge_rc_pr(rc_pr_url: str, rc_branch: str, dry_run: bool, version: str = "") -> None:
     if dry_run:
         log.info(f"[dry-run] would merge RC PR {rc_pr_url}")
         return
     # Merge via gh (squash to keep main linear); tolerate already-merged.
     pr_ref = rc_pr_url or rc_branch
     proc = run(["gh", "pr", "merge", pr_ref, "--merge"], check=False)
-    if proc.returncode != 0 and "not mergeable" not in (proc.stderr or "").lower():
-        # Already merged is fine; anything else is fatal.
-        state = run(
-            ["gh", "pr", "view", pr_ref, "--json", "state", "--jq", ".state"],
-            check=False,
-        ).stdout.strip()
-        if state != "MERGED":
-            raise StepError(f"RC PR merge failed and state={state!r}: {rc_pr_url}")
-    run(["git", "checkout", "main"], check=False)
-    run(["git", "pull", "origin", "main", "--quiet"])
+    if proc.returncode != 0:
+        stderr = proc.stderr or ""
+        if "does not have the correct permissions" in stderr.lower():
+            remote_url = run(
+                ["git", "remote", "get-url", "origin"], check=False
+            ).stdout.strip()
+            repo = _owner_repo_from_remote_url(remote_url)
+            pr_number = pr_ref.rstrip("/").rsplit("/", 1)[-1]
+            raise InsufficientPermissionsError(
+                f"merge_rc_pr FAILED: the gh account running this command does "
+                f"not have permission to merge pull request {pr_number} on "
+                f"{repo} (GitHub returned: \"{stderr.strip()[:500]}\").\n"
+                f"This is an operator action, not a retryable pipeline error.\n"
+                f"Fix: have an operator with merge rights run "
+                f"`gh pr merge {pr_number} --merge` (or merge via the GitHub "
+                f"UI), then re-run: "
+                f"python publish.py --resume-from=tag_and_push "
+                f"--version={version}"
+            )
+        if "not mergeable" not in stderr.lower():
+            # Already merged is fine; anything else is fatal.
+            state = run(
+                ["gh", "pr", "view", pr_ref, "--json", "state", "--jq", ".state"],
+                check=False,
+            ).stdout.strip()
+            if state != "MERGED":
+                raise StepError(f"RC PR merge failed and state={state!r}: {rc_pr_url}")
+    run(["git", "fetch", "origin", "main", "--quiet"])
+    run(["git", "checkout", "--detach", "FETCH_HEAD"])
+    sha = run(["git", "rev-parse", "--short", "HEAD"], check=False).stdout.strip()
+    log.info(
+        f"merge_rc_pr: checked out origin/main in detached HEAD ({sha}) — "
+        f"safe under concurrent worktrees."
+    )
 
 
 def tag_and_push(version: str, dry_run: bool) -> None:
     if dry_run:
-        log.info(f"[dry-run] would tag {version} and push origin main + tag")
+        log.info(f"[dry-run] would tag {version} and push tag")
         return
     run(["git", "tag", "-a", version, "-m", f"Release {version}"])
-    run(["git", "push", "origin", "main"])
+    # merge_rc_pr always merges server-side via `gh pr merge` — there is no
+    # local-merge code path in this file — so origin/main is already up to
+    # date and a follow-up `git push origin main` would be a no-op push.
+    log.info(
+        f"tag_and_push: RC PR merged server-side via gh pr merge — skipping "
+        f"git push origin main (already up to date on origin). Pushing tag "
+        f"{version} only."
+    )
     run(["git", "push", "origin", version])
 
 
@@ -540,8 +628,30 @@ def post_release(version: str, dry_run: bool) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Fixed step order, used to resolve --resume-from to a skip-before index.
+# preflight_post_merge is not independently resumable — it always runs
+# immediately before tag_and_push (the first irreversible step), regardless of
+# --resume-from, since it's cheap and idempotent (re-reads package.json, no
+# side effects) and is the guard against publishing without the version-bump
+# commit.
+STEP_ORDER = [
+    "preflight",
+    "merge_rc_pr",
+    "tag_and_push",
+    "npm_publish",
+    "github_release",
+    "deploy_sandbox",
+    "publish_github_release_draft",
+    "post_release",
+]
+
+
 def publish_release(
-    release: dict, version: str, dry_run: bool, force: bool
+    release: dict,
+    version: str,
+    dry_run: bool,
+    force: bool,
+    resume_from: str | None = None,
 ) -> None:
     f = _entity_fields(release)
     status = str(f.get("status") or "")
@@ -560,13 +670,28 @@ def publish_release(
     if not dry_run:
         set_release_status(version, "publishing")
 
-    preflight(version, rc_branch, dry_run)
-    merge_rc_pr(rc_pr_url, rc_branch, dry_run)
-    tag_and_push(version, dry_run)
-    npm_publish(version, dry_run)
-    github_release(version, notes_path, dry_run)
-    deploy_sandbox(version, dry_run)
-    publish_github_release_draft(version, dry_run)
+    resume_idx = STEP_ORDER.index(resume_from) if resume_from else 0
+
+    if resume_idx <= STEP_ORDER.index("preflight"):
+        preflight(version, rc_branch, dry_run)
+    if resume_idx <= STEP_ORDER.index("merge_rc_pr"):
+        merge_rc_pr(rc_pr_url, rc_branch, dry_run, version=version)
+    if resume_idx <= STEP_ORDER.index("tag_and_push"):
+        # Always runs before the first irreversible step (tag_and_push), even
+        # when resuming past merge_rc_pr (e.g. an operator merged manually and
+        # resumes with --resume-from=tag_and_push) — that resume path is
+        # exactly how the v0.18.8 incident's missing bump commit slipped
+        # through undetected.
+        preflight_post_merge(version, dry_run)
+        tag_and_push(version, dry_run)
+    if resume_idx <= STEP_ORDER.index("npm_publish"):
+        npm_publish(version, dry_run)
+    if resume_idx <= STEP_ORDER.index("github_release"):
+        github_release(version, notes_path, dry_run)
+    if resume_idx <= STEP_ORDER.index("deploy_sandbox"):
+        deploy_sandbox(version, dry_run)
+    if resume_idx <= STEP_ORDER.index("publish_github_release_draft"):
+        publish_github_release_draft(version, dry_run)
     summary = post_release(version, dry_run)
 
     if dry_run:
@@ -604,6 +729,13 @@ def main() -> int:
         action="store_true",
         help="publish even if release status != approved",
     )
+    ap.add_argument(
+        "--resume-from",
+        choices=STEP_ORDER,
+        default=None,
+        help="resume from this step, skipping earlier steps (e.g. after a "
+        "manual fix following a merge_rc_pr/insufficient_permissions failure)",
+    )
     args = ap.parse_args()
 
     if not args.version and not args.entity_id:
@@ -630,7 +762,9 @@ def main() -> int:
         return 2
 
     try:
-        publish_release(release, version, args.dry_run, args.force)
+        publish_release(
+            release, version, args.dry_run, args.force, resume_from=args.resume_from
+        )
         return 0
     except StepError as exc:
         log.error(f"publish failed: {exc}")

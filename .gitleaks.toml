@@ -123,6 +123,13 @@ regexes = [
   '''@(?:group\.v\.calendar|import\.calendar)\.google\.com\b''',
   # git author trailer used in commits
   '''Co-Authored-By:.*@''',
+  # SSH git-remote URL example strings (git@<host>:owner/repo). pii-email's
+  # regex only captures the user@host portion as its "secret" (the `:owner/repo`
+  # suffix isn't part of the local-part@domain match), so the allowlist regex
+  # must match that bare `git@<host>` form directly, not the full literal with
+  # the path suffix. The literal local-part "git" is never a real contact.
+  # Used in publish.py's remote-URL parser + its test fixtures.
+  '''(?i)^git@[a-z0-9.-]+$''',
   # placeholder phone numbers in docs/examples (sequential or repeated digits)
   '''\+?1234567890\b''',
   '''\+?0{7,}\b''',
