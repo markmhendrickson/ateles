@@ -716,9 +716,29 @@ def test_lanius_pr_prompt_carries_legacy_issue_rule():
     # that predates the pipeline (no gate metadata) is cleared, not blocked.
     prompt = SwarmDispatcher._lanius_pr_prompt(_trigger(), parent=80)
     assert "LEGACY-ISSUE RULE" in prompt
-    assert "never initialized" in prompt or "NO gate_status" in prompt
+    assert "NO `gate_status` key" in prompt
     assert "GATE_INHERITANCE: clear" in prompt
     assert "trigger_swarm_pr.py issue" in prompt
+
+
+def test_lanius_pr_prompt_treats_neotoma_gate_status_as_authoritative():
+    # Regression for ateles#195: Lanius must read the Neotoma issue entity's
+    # gate_status (not the GitHub issue body) and honor signed_off/waived.
+    prompt = SwarmDispatcher._lanius_pr_prompt(_trigger(), parent=80)
+    assert "retrieve_entity_by_identifier" in prompt
+    assert "github_number" in prompt
+    assert "AUTHORITATIVE" in prompt
+    # signed_off / waived / not_required all count as satisfied.
+    assert "signed_off" in prompt and "waived" in prompt and "not_required" in prompt
+
+
+def test_lanius_pr_prompt_legacy_init_merges_not_overwrites():
+    # Regression for ateles#195: legacy init must never downgrade a signed_off
+    # gate to pending — it merges only genuinely-absent gate keys.
+    prompt = SwarmDispatcher._lanius_pr_prompt(_trigger(), parent=80)
+    assert "MERGE" in prompt
+    assert "never" in prompt.lower() and "downgrade" in prompt
+    assert "PRESERVE" in prompt
 
 
 # ── pipeline-bypass guard (product PR with no parent issue) ──────────────────
