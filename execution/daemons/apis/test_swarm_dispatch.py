@@ -681,11 +681,59 @@ def test_ci_status_stale_head_is_ignored(monkeypatch):
     assert calls == []
 
 
+def test_ci_status_stale_head_skip_sends_no_notification(monkeypatch):
+    # Stale-head is a structural no-op, not a hold: GitHub fires a distinct
+    # check_suite:completed per (head_sha, CI app), so the PR's current head
+    # gets its own independent completion event that re-drives this handler.
+    # A stale skip can never be the terminal CI event for a PR — notifying on
+    # every one would page the operator on ordinary out-of-order delivery.
+    calls = []
+    d = _wire_ci_status(monkeypatch, ci_state="failing", review_clear=True,
+                        pr_head="newhead999", calls=calls)
+    asyncio.run(d._handle_ci_status(_ci_status_trigger(ci_head_sha="oldhead111")))
+    assert d.notifier.sent == []
+
+
 def test_ci_status_no_associated_pr_is_ignored(monkeypatch):
     calls = []
     d = _wire_ci_status(monkeypatch, ci_state="failing", review_clear=True, calls=calls)
     asyncio.run(d._handle_ci_status(_ci_status_trigger(number=0, ci_pr_numbers=[])))
     assert calls == []
+
+
+def test_ci_status_fetch_pr_failure_notifies_operator(monkeypatch):
+    # ateles#197's core failure mode: a transient GitHub API error must not
+    # drop the loop-closure event with zero operator-visible trace.
+    calls = []
+
+    async def fake_fetch_pr_fails(self, repo, num):
+        return None
+
+    async def fake_ci(self, trigger):
+        return "green"
+
+    async def fake_clear(self, repo, num):
+        return True
+
+    async def fake_route(self, trigger, parent):
+        calls.append(("route", trigger.number))
+
+    async def fake_gate(self, trigger, parent, panel, ci_state=None):
+        calls.append(("gate", trigger.number))
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr_fails)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_pr_review_is_clear", fake_clear)
+    monkeypatch.setattr(SwarmDispatcher, "_route_ci_failure", fake_route)
+    monkeypatch.setattr(SwarmDispatcher, "_gate_merge_readiness", fake_gate)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    asyncio.run(d._handle_ci_status(_ci_status_trigger()))
+
+    assert calls == []
+    assert len(d.notifier.sent) == 1
+    assert "owner/repo#87" in d.notifier.sent[0]
+    assert "could not fetch PR" in d.notifier.sent[0]
 
 
 def test_ci_status_closed_pr_is_ignored(monkeypatch):

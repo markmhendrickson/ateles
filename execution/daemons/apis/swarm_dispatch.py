@@ -2205,6 +2205,16 @@ class SwarmDispatcher:
         superseded commit must not drive anything); do nothing unless review is
         already clear (CI-green on an unreviewed PR is not merge-ready — the
         normal panel path owns that). Fully best-effort; never raises.
+
+        The stale-head skip is silent by design, not a hold: GitHub creates a
+        distinct check_suite object per (head_sha, CI app), so a stale event
+        for a superseded commit never suppresses or replaces the check_suite
+        for the PR's current head — that head gets its own independent
+        check_suite:completed event once its checks finish. A stale skip can
+        therefore never be the terminal CI event for a PR; the current head's
+        own completion re-drives this handler. Notifying on every stale skip
+        would page the operator on ordinary out-of-order delivery, which is
+        ateles#197 with `ci` swapped for `status`.
         """
         pr_number = next((n for n in trigger.ci_pr_numbers if n), 0) or trigger.number
         if not pr_number:
@@ -2217,7 +2227,17 @@ class SwarmDispatcher:
 
         pr = await self._fetch_pr(trigger.repository, pr_number)
         if not pr:
-            return  # fetch failed; fail-open (a later event or push re-drives)
+            # Fetch failed; fail-open (a later event or push re-drives) but the
+            # operator must see the loop-closure event was dropped rather than
+            # silently vanishing (ateles#197's core failure mode).
+            self.notifier.send(
+                f"CI-completion event for {ref}: could not fetch PR — the "
+                "read failed. Loop-closure may be delayed; a later event or "
+                "push will retry.",
+                priority=Priority.INFO,
+                handler=DAEMON_NAME,
+            )
+            return
         if pr.get("state") != "open" or pr.get("draft"):
             return
         current_head = (pr.get("head") or {}).get("sha", "")
