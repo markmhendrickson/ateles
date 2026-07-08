@@ -19,6 +19,11 @@
     <key>KeepAlive</key>
     <true/>
 
+    <!-- Minimum seconds between restarts — prevents launchd restart-storm
+         during intermittent Neotoma 502 windows (ateles#193) -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
     <key>StandardOutPath</key>
     <string>/Users/markmhendrickson/Library/Logs/ateles/apis.log</string>
     <key>StandardErrorPath</key>
