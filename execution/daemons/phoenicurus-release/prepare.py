@@ -268,17 +268,25 @@ release-candidate PR, then HALT:
 6. Run the /review skill over <last_tag>..HEAD and write
    docs/releases/in_progress/<TAG>/test_coverage_review.md. RESOLVE any BLOCKING
    findings before opening the RC PR.
-7. Open the release-candidate PR (release/<TAG> -> main) with the supplement as
+7. Bump the version and commit it together with the supplement — this commit
+   is REQUIRED and MUST land in the RC PR (a missing bump commit caused the
+   v0.18.8 incident: the RC PR merged without it and publish.py would have
+   tagged/published the wrong version). Run exactly:
+   `npm version <TAG-without-v-prefix> --no-git-tag-version`
+   then commit package.json + package-lock.json together with the supplement,
+   using exactly this commit message format (matching precedent commit
+   01344fec9): `chore(release): bump version to <TAG> + supplement`.
+8. Open the release-candidate PR (release/<TAG> -> main) with the supplement as
    the body. Post `@claude review` on it.
-8. Render the exact GitHub Release notes with
+9. Render the exact GitHub Release notes with
    `npm run -s release-notes:render -- --tag <TAG> --head-ref HEAD --supplement <path>`.
 
 Then record + notify:
-9. Store a Neotoma `release_result` entity (POST {os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180")}/store)
-   with fields: version=<TAG>, status="pending_approval", branch="release/<TAG>",
-   and put the RC PR URL in the `release_url` field. Use idempotency_key
-   "release-<TAG>-pending_approval-{date.today().isoformat()}".
-10. Send a Telegram notification with: the version, the FULL rendered release
+10. Store a Neotoma `release_result` entity (POST {os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180")}/store)
+    with fields: version=<TAG>, status="pending_approval", branch="release/<TAG>",
+    and put the RC PR URL in the `release_url` field. Use idempotency_key
+    "release-<TAG>-pending_approval-{date.today().isoformat()}".
+11. Send a Telegram notification with: the version, the FULL rendered release
     notes, the RC PR URL, and any advisory flags (security sensitive=true,
     /review findings, CI status). End with: "Reply `approve <TAG>` to publish, or
     `skip <TAG>` to discard." {topic_note}

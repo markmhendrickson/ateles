@@ -46,7 +46,17 @@ python3 publish.py --entity-id ent_xxx
 
 # Publish even if status != approved (manual override)
 python3 publish.py --version v0.16.0 --force
+
+# Resume from a specific step after a manual fix (e.g. after resolving a
+# merge_rc_pr/insufficient_permissions failure — see Troubleshooting below)
+python3 publish.py --version v0.16.0 --resume-from=tag_and_push
 ```
+
+`--resume-from` skips every step before the named one (`preflight`,
+`merge_rc_pr`, `tag_and_push`, `npm_publish`, `github_release`,
+`deploy_sandbox`, `publish_github_release_draft`, `post_release`) — useful
+when an earlier step already completed (e.g. the RC PR was merged manually)
+and re-running it would be redundant or unsafe.
 
 ### Safety properties
 
@@ -55,6 +65,17 @@ python3 publish.py --version v0.16.0 --force
 - **Clean-tree guard**: refuses to publish if the Neotoma working tree has
   uncommitted non-release files.
 - **No-clobber**: aborts if the git tag already exists.
+- **`preflight/version-match`**: after the RC PR is merged and before tagging,
+  confirms the checked-out `package.json` version matches the target release
+  version — hard-refuses (no continue-anyway path) if the version-bump commit
+  is missing from the merge. See Troubleshooting for the exact failure/fix.
+- **Detached-HEAD checkout**: `merge_rc_pr` checks out `origin/main` via
+  `git fetch` + `git checkout --detach FETCH_HEAD` instead of `git checkout
+  main`, so it is safe to run even when the operator's primary checkout
+  already has `main` checked out in another worktree.
+- **No redundant push**: since the RC PR is always merged server-side via
+  `gh pr merge`, `tag_and_push` no longer runs a follow-up `git push origin
+  main` — only the release tag is pushed.
 - **npm auth preflight**: runs `npm whoami` with the automation token before
   publishing; a missing/expired token fails **loud** (Telegram) rather than
   producing a tagged-but-unpublished release.
@@ -80,6 +101,51 @@ python3 publish.py --version v0.16.0 --force
 on Telegram: Ateles flips the `release_result` to `approved`, then runs
 `python3 publish.py --version <version>`. See the Ateles SOUL.md
 "Release approval" section.
+
+## Troubleshooting
+
+### Worked example: missing version-bump commit (the v0.18.8 incident)
+
+During the v0.18.8 release, the RC PR merged without the `chore(release): bump
+version to v0.18.8 + supplement` commit. Without the `preflight/version-match`
+guard, `publish.py` would have tagged and published the *previous* version's
+code as `v0.18.8`. This was caught manually and required reverting main to
+v0.18.7 to re-run the pipeline cleanly (neotoma#1920).
+
+With the guard in place, the operator now sees this instead:
+
+```
+Preflight FAILED: package.json version (0.18.7) does not match target release version (0.18.8).
+This means the version-bump commit is missing from the merged RC PR — publishing now would tag/publish the WRONG version (this is the exact defect that caused the v0.18.8 incident).
+Fix: verify the RC PR included a `chore(release): bump version to v0.18.8` commit. If missing, run `npm version 0.18.8 --no-git-tag-version`, commit as `chore(release): bump version to v0.18.8 + supplement`, push, and re-merge before re-running publish.py.
+```
+
+**Fix steps:**
+1. Confirm the RC PR is missing the bump commit (`git log release/v0.18.8`).
+2. On the RC branch: `npm version 0.18.8 --no-git-tag-version`.
+3. Commit as `chore(release): bump version to v0.18.8 + supplement` (matching
+   precedent commit `01344fec9`).
+4. Push, re-merge the RC PR, and re-run `python3 publish.py --version v0.18.8`.
+
+### `merge_rc_pr/insufficient_permissions`
+
+If the `gh` account running `publish.py` lacks merge rights on the RC PR, the
+pipeline fails loud with a distinct, named failure class instead of a generic
+error:
+
+```
+merge_rc_pr FAILED: the gh account running this command does not have permission to merge pull request 9 on owner/repo (GitHub returned: "does not have the correct permissions to execute MergePullRequest").
+This is an operator action, not a retryable pipeline error.
+Fix: have an operator with merge rights run `gh pr merge 9 --merge` (or merge via the GitHub UI), then re-run: python publish.py --resume-from=tag_and_push --version=v0.18.8
+```
+
+This does not retry automatically and does not fall through to `tag_and_push`
+against an unmerged PR.
+
+**Known limitation**: `ateles-agent` cannot merge PRs today, so
+`merge_rc_pr/insufficient_permissions` is expected/normal until
+[ateles#202](https://github.com/markmhendrickson/ateles/issues/202) lands
+standing merge-rights/approval-routing changes — it is not a regression.
 
 ## Install
 
