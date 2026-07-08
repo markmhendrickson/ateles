@@ -358,3 +358,55 @@ def test_approve_email_accepted_builds_operator_trigger():
     assert trig.review_state == "approved"
     # Attributed to the operator login so the shared handler's guard passes.
     assert trig.review_author == "markmhendrickson"
+
+
+# ── check_suite parsing (CI-driven loop closure, ateles#197) ────────────────
+
+
+def _check_suite_payload(action="completed", conclusion="success",
+                         head_sha="deadbeef", prs=((7, "PR title"),)):
+    return {
+        "action": action,
+        "repository": {"full_name": "o/r"},
+        "check_suite": {
+            "head_sha": head_sha,
+            "conclusion": conclusion,
+            "pull_requests": [{"number": n, "title": t} for n, t in prs],
+        },
+    }
+
+
+def test_check_suite_completed_parses_to_ci_status():
+    t = parse_github_event("check_suite", _check_suite_payload(), "d-ci")
+    assert t is not None
+    assert t.kind == "ci_status"
+    assert t.repository == "o/r"
+    assert t.number == 7
+    assert t.ci_head_sha == "deadbeef"
+    assert t.ci_conclusion == "success"
+    assert t.ci_pr_numbers == [7]
+
+
+def test_check_suite_failure_conclusion_lowercased():
+    t = parse_github_event("check_suite", _check_suite_payload(conclusion="FAILURE"))
+    assert t is not None
+    assert t.ci_conclusion == "failure"
+
+
+def test_check_suite_non_completed_action_ignored():
+    # Only the terminal "completed" action drives the pipeline; requested/etc. no-op.
+    assert parse_github_event("check_suite", _check_suite_payload(action="requested")) is None
+
+
+def test_check_suite_with_no_prs_parses_with_zero_number():
+    t = parse_github_event("check_suite", _check_suite_payload(prs=()))
+    assert t is not None
+    assert t.kind == "ci_status"
+    assert t.number == 0
+    assert t.ci_pr_numbers == []
+
+
+def test_status_event_not_handled():
+    # `status` events fire per-context and would multiply per head; only
+    # check_suite:completed is ingested.
+    assert parse_github_event("status", {"repository": {"full_name": "o/r"}}) is None

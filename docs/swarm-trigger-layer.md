@@ -36,6 +36,9 @@ swarm_dispatch.SwarmDispatcher
                             ├─► learning pass (ateles#82): systemic
                             │     [BLOCKING] findings → operator-gated
                             │     proposed_skill_update entities
+                            ├─► check_suite.completed (ateles#197):
+                            │     CI failed → route to Cicada; CI green +
+                            │     review clear → readiness gate → notify
                             ├─► Vanellus (aggregate verdicts; NO merge)
                             └─► verdict router (ateles#179):
                                   • REQUEST_CHANGES/BLOCKED → per-lens agents
@@ -95,7 +98,11 @@ Side-effecting steps stay operator-gated:
 1. Configure a GitHub webhook on each pipeline repo (ateles, neotoma):
    payload URL → the tunnel in front of `127.0.0.1:8742/github/webhook`,
    content type `application/json`, secret = `APIS_GITHUB_WEBHOOK_SECRET`,
-   events: Issues, Pull requests.
+   events: Issues, Pull requests, Pull request reviews, **Check suites**
+   (the last drives CI-completion → readiness/route, ateles#197). `status`
+   events are intentionally not consumed — `check_suite:completed` is the
+   single terminal per-commit signal, so subscribing to `status` would only
+   add duplicate deliveries.
 2. Ensure `~/.config/neotoma/.env` carries `APIS_GITHUB_WEBHOOK_SECRET`,
    `NEOTOMA_BEARER_TOKEN`, and `GITHUB_TOKEN` (or `ATELES_AGENT_PAT`,
    classic `repo` scope — fine-grained PATs 403 on public-repo writes).

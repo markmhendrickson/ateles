@@ -892,6 +892,8 @@ class SwarmDispatcher:
                 await self._handle_pr_review(trigger)
             elif trigger.kind == "email_approve":
                 await self._handle_email_approve(trigger)
+            elif trigger.kind == "ci_status":
+                await self._handle_ci_status(trigger)
             elif trigger.is_pr:
                 await self._handle_pr(trigger)
             elif trigger.kind == "issue_comment":
@@ -1651,21 +1653,29 @@ class SwarmDispatcher:
         )
 
     async def _gate_merge_readiness(
-        self, trigger: SwarmTrigger, parent: int | None, panel: list[Lens]
+        self,
+        trigger: SwarmTrigger,
+        parent: int | None,
+        panel: list[Lens],
+        ci_state: str | None = None,
     ) -> None:
         """File the merge checkpoint + notify ONLY when review is clear AND CI green.
 
         Previously this fired unconditionally after review. Now the operator's
         merge-ready email is a truthful signal: it means the PR is actually
         ready. When CI is not green, hold quietly (digest note) rather than
-        paging the operator prematurely; a check completing does not re-invoke
-        this today (that is Phase 4), but a re-push will re-run the panel.
+        paging the operator prematurely. A completed check re-invokes this via
+        the ci_status path; a re-push re-runs the whole panel.
+
+        `ci_state` may be passed by a caller that already computed it (the
+        ci_status path) to avoid a redundant _required_ci_state fetch (3 GitHub
+        API round-trips); when None we compute it here as before.
         """
         ref = f"{trigger.repository}#{trigger.number}"
         if self.config.auto_merge:
             return  # auto-merge path: Vanellus handles merge, no checkpoint.
 
-        ci = await self._required_ci_state(trigger)
+        ci = ci_state if ci_state is not None else await self._required_ci_state(trigger)
         if ci == "failing":
             # Route a red CI back for a fix, bounded like review findings.
             await self._route_ci_failure(trigger, parent)
@@ -1769,7 +1779,7 @@ class SwarmDispatcher:
         prior_rounds = await self._fix_round_count(trigger)
         if prior_rounds >= self.config.max_fix_rounds:
             self.notifier.send(
-                f"PR {ref}: review clear but required CI is failing after "
+                f"PR {ref}: required CI is failing after "
                 f"{self.config.max_fix_rounds} auto-fix rounds. Escalating — "
                 "needs your attention. Merge held.",
                 priority=Priority.OPERATOR_DECISION,
@@ -2175,6 +2185,167 @@ class SwarmDispatcher:
             "routing to shared approval path"
         )
         await self._approve_and_maybe_merge(trigger, source="email reply")
+
+    async def _handle_ci_status(self, trigger: SwarmTrigger) -> None:
+        """React to a completed CI rollup (check_suite:completed) for a PR head.
+
+        Closes the last loop-closure gap (ateles#197): previously only a re-push
+        re-ran the pipeline, so a PR that was review-clear but CI-pending held
+        silently even after CI later went green, and a post-review CI failure was
+        invisible until a human looked. Now:
+
+          - required CI failed → route back to Cicada for a fix (bounded, shared
+            with the push path via _route_ci_failure);
+          - required CI green AND the panel verdict is already clear → run the
+            readiness gate so the operator gets the (now-truthful) merge-ready
+            signal.
+
+        Guards: resolve the PR from the check_suite's associated PRs; SKIP if the
+        suite's head_sha is not the PR's CURRENT head (a stale check for a
+        superseded commit must not drive anything); do nothing unless review is
+        already clear (CI-green on an unreviewed PR is not merge-ready — the
+        normal panel path owns that). Fully best-effort; never raises.
+
+        The stale-head skip is silent by design, not a hold: GitHub creates a
+        distinct check_suite object per (head_sha, CI app), so a stale event
+        for a superseded commit never suppresses or replaces the check_suite
+        for the PR's current head — that head gets its own independent
+        check_suite:completed event once its checks finish. A stale skip can
+        therefore never be the terminal CI event for a PR; the current head's
+        own completion re-drives this handler. Notifying on every stale skip
+        would page the operator on ordinary out-of-order delivery, which is
+        ateles#197 with `ci` swapped for `status`.
+        """
+        pr_number = next((n for n in trigger.ci_pr_numbers if n), 0) or trigger.number
+        if not pr_number:
+            log.debug(
+                f"[{DAEMON_NAME}] ci_status on {trigger.repository} carried no "
+                "associated PR — ignored"
+            )
+            return
+        ref = f"{trigger.repository}#{pr_number}"
+
+        pr = await self._fetch_pr(trigger.repository, pr_number)
+        if not pr:
+            # Fetch failed; fail-open (a later event or push re-drives) but the
+            # operator must see the loop-closure event was dropped rather than
+            # silently vanishing (ateles#197's core failure mode).
+            self.notifier.send(
+                f"CI-completion event for {ref}: could not fetch PR — the "
+                "read failed. Loop-closure may be delayed; a later event or "
+                "push will retry.",
+                priority=Priority.INFO,
+                handler=DAEMON_NAME,
+            )
+            return
+        if pr.get("state") != "open" or pr.get("draft"):
+            return
+        current_head = (pr.get("head") or {}).get("sha", "")
+        if trigger.ci_head_sha and current_head and trigger.ci_head_sha != current_head:
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: check_suite head "
+                f"{trigger.ci_head_sha[:9]} != PR head {current_head[:9]} — "
+                "stale CI event, ignored"
+            )
+            return
+
+        # Build a PR-shaped trigger the readiness/route helpers expect.
+        pr_trigger = self._pr_trigger_from_api(trigger.repository, pr)
+        parent = self._parent_issue_number(pr_trigger.body)
+
+        # Terminal CI conclusion → failing? Route back (bounded), regardless of
+        # review state: a broken build must be fixed to merge.
+        ci = await self._required_ci_state(pr_trigger)
+        if ci == "failing":
+            log.info(f"[{DAEMON_NAME}] {ref}: CI completed failing — routing to fix")
+            await self._route_ci_failure(pr_trigger, parent)
+            return
+        if ci != "green":
+            return  # pending/unknown — a later check_suite:completed will re-fire
+
+        # CI green: only advance the merge-ready signal if review is ALREADY
+        # clear. An unreviewed PR going green is the panel path's job, not ours.
+        if not await self._pr_review_is_clear(trigger.repository, pr_number):
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: CI green but no clear panel verdict yet "
+                "— leaving to the review path"
+            )
+            return
+        log.info(f"[{DAEMON_NAME}] {ref}: CI green + review clear — gating readiness")
+        # Pass the CI state we already computed so the gate does not re-fetch it.
+        await self._gate_merge_readiness(pr_trigger, parent, panel=[], ci_state=ci)
+
+    async def _pr_review_is_clear(self, repository: str, pr_number: int) -> bool:
+        """True when the latest Vanellus aggregation on the PR is a clear verdict.
+
+        Reads the PR's comments NEWEST-FIRST (sort=created&direction=desc) and
+        returns the verdict of the first Vanellus-aggregation marker found — so
+        the latest verdict is honoured even on a PR with >100 comments (the
+        marker would otherwise sit on a later page of an oldest-first scan and be
+        missed). Fail-closed (False) on any error — we must never claim
+        merge-ready off a failed read.
+        """
+        url = (
+            f"https://api.github.com/repos/{repository}/issues/"
+            f"{pr_number}/comments"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    url,
+                    params={"per_page": 100, "sort": "created", "direction": "desc"},
+                    headers=self._github_headers(repository),
+                )
+                resp.raise_for_status()
+                for comment in resp.json():  # newest-first
+                    body = comment.get("body", "")
+                    if _VANELLUS_COMMENT_MARKER in body:
+                        return review_verdict_is_clear(parse_review_verdict(body))
+                return False
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {repository}#{pr_number}: review-verdict read "
+                f"failed ({exc}) — treating as not-clear"
+            )
+            return False
+
+    async def _fetch_pr(self, repository: str, pr_number: int) -> dict | None:
+        """Fetch a PR object from the GitHub API; None on error (fail-open)."""
+        url = f"https://api.github.com/repos/{repository}/pulls/{pr_number}"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    url, headers=self._github_headers(repository)
+                )
+                resp.raise_for_status()
+                return resp.json()
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] could not fetch PR {repository}#{pr_number}: "
+                f"{exc}"
+            )
+            return None
+
+    @staticmethod
+    def _pr_trigger_from_api(repository: str, pr: dict) -> SwarmTrigger:
+        """Build a pr-shaped SwarmTrigger from a GitHub PR API object.
+
+        Used by the CI-status path so it can reuse the readiness/route helpers,
+        which expect a trigger carrying number/title/body/html_url/head_ref.
+        """
+        return SwarmTrigger(
+            kind="pr_synchronize",
+            repository=repository,
+            number=pr.get("number", 0),
+            title=pr.get("title", ""),
+            body=pr.get("body") or "",
+            author=(pr.get("user") or {}).get("login", ""),
+            html_url=pr.get("html_url", ""),
+            delivery_id="",
+            action="synchronize",
+            head_ref=(pr.get("head") or {}).get("ref", ""),
+            base_ref=(pr.get("base") or {}).get("ref", ""),
+        )
 
     async def _handle_approve(self, trigger: SwarmTrigger) -> None:
         """Execute the /approve operator command (Phase H1 HITL checkpoint).

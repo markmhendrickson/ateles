@@ -600,6 +600,218 @@ def test_required_ci_state_unknown_fails_open_on_api_error(monkeypatch):
     assert _ci_state(monkeypatch, raise_on={"pulls"}) == "unknown"
 
 
+# ── _handle_ci_status (check_suite:completed → route/readiness, ateles#197) ──
+
+
+def _ci_status_trigger(**over):
+    base = dict(
+        kind="ci_status", repository="owner/repo", number=87,
+        title="", body="", author="", html_url="",
+        delivery_id="d-ci", action="completed",
+        ci_head_sha="abc123", ci_conclusion="success", ci_pr_numbers=[87],
+    )
+    base.update(over)
+    return SwarmTrigger(**base)
+
+
+def _wire_ci_status(monkeypatch, *, ci_state, review_clear, pr_head="abc123",
+                    pr_state="open", pr_draft=False, calls):
+    async def fake_fetch_pr(self, repo, num):
+        return {"number": num, "state": pr_state, "draft": pr_draft,
+                "title": "t", "body": "Closes #80", "html_url": "u",
+                "head": {"sha": pr_head, "ref": "feat/x"}, "base": {"ref": "main"}}
+
+    async def fake_ci(self, trigger):
+        return ci_state
+
+    async def fake_clear(self, repo, num):
+        return review_clear
+
+    async def fake_route(self, trigger, parent):
+        calls.append(("route", trigger.number))
+
+    async def fake_gate(self, trigger, parent, panel, ci_state=None):
+        calls.append(("gate", trigger.number))
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_pr_review_is_clear", fake_clear)
+    monkeypatch.setattr(SwarmDispatcher, "_route_ci_failure", fake_route)
+    monkeypatch.setattr(SwarmDispatcher, "_gate_merge_readiness", fake_gate)
+    return SwarmDispatcher(_StubNotifier(), _config())
+
+
+def test_ci_status_failing_routes_to_fix(monkeypatch):
+    calls = []
+    d = _wire_ci_status(monkeypatch, ci_state="failing", review_clear=True, calls=calls)
+    asyncio.run(d._handle_ci_status(_ci_status_trigger()))
+    assert ("route", 87) in calls
+    assert not any(c[0] == "gate" for c in calls)
+
+
+def test_ci_status_green_and_review_clear_gates_readiness(monkeypatch):
+    calls = []
+    d = _wire_ci_status(monkeypatch, ci_state="green", review_clear=True, calls=calls)
+    asyncio.run(d._handle_ci_status(_ci_status_trigger()))
+    assert ("gate", 87) in calls
+    assert not any(c[0] == "route" for c in calls)
+
+
+def test_ci_status_green_but_review_not_clear_does_nothing(monkeypatch):
+    calls = []
+    d = _wire_ci_status(monkeypatch, ci_state="green", review_clear=False, calls=calls)
+    asyncio.run(d._handle_ci_status(_ci_status_trigger()))
+    assert calls == []
+
+
+def test_ci_status_pending_does_nothing(monkeypatch):
+    calls = []
+    d = _wire_ci_status(monkeypatch, ci_state="pending", review_clear=True, calls=calls)
+    asyncio.run(d._handle_ci_status(_ci_status_trigger()))
+    assert calls == []
+
+
+def test_ci_status_stale_head_is_ignored(monkeypatch):
+    # check_suite head != PR's current head → a superseded commit's checks must
+    # not drive anything.
+    calls = []
+    d = _wire_ci_status(monkeypatch, ci_state="failing", review_clear=True,
+                        pr_head="newhead999", calls=calls)
+    asyncio.run(d._handle_ci_status(_ci_status_trigger(ci_head_sha="oldhead111")))
+    assert calls == []
+
+
+def test_ci_status_stale_head_skip_sends_no_notification(monkeypatch):
+    # Stale-head is a structural no-op, not a hold: GitHub fires a distinct
+    # check_suite:completed per (head_sha, CI app), so the PR's current head
+    # gets its own independent completion event that re-drives this handler.
+    # A stale skip can never be the terminal CI event for a PR — notifying on
+    # every one would page the operator on ordinary out-of-order delivery.
+    calls = []
+    d = _wire_ci_status(monkeypatch, ci_state="failing", review_clear=True,
+                        pr_head="newhead999", calls=calls)
+    asyncio.run(d._handle_ci_status(_ci_status_trigger(ci_head_sha="oldhead111")))
+    assert d.notifier.sent == []
+
+
+def test_ci_status_no_associated_pr_is_ignored(monkeypatch):
+    calls = []
+    d = _wire_ci_status(monkeypatch, ci_state="failing", review_clear=True, calls=calls)
+    asyncio.run(d._handle_ci_status(_ci_status_trigger(number=0, ci_pr_numbers=[])))
+    assert calls == []
+
+
+def test_ci_status_fetch_pr_failure_notifies_operator(monkeypatch):
+    # ateles#197's core failure mode: a transient GitHub API error must not
+    # drop the loop-closure event with zero operator-visible trace.
+    calls = []
+
+    async def fake_fetch_pr_fails(self, repo, num):
+        return None
+
+    async def fake_ci(self, trigger):
+        return "green"
+
+    async def fake_clear(self, repo, num):
+        return True
+
+    async def fake_route(self, trigger, parent):
+        calls.append(("route", trigger.number))
+
+    async def fake_gate(self, trigger, parent, panel, ci_state=None):
+        calls.append(("gate", trigger.number))
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr_fails)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_pr_review_is_clear", fake_clear)
+    monkeypatch.setattr(SwarmDispatcher, "_route_ci_failure", fake_route)
+    monkeypatch.setattr(SwarmDispatcher, "_gate_merge_readiness", fake_gate)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    asyncio.run(d._handle_ci_status(_ci_status_trigger()))
+
+    assert calls == []
+    assert len(d.notifier.sent) == 1
+    assert "owner/repo#87" in d.notifier.sent[0]
+    assert "could not fetch PR" in d.notifier.sent[0]
+
+
+def test_ci_status_closed_pr_is_ignored(monkeypatch):
+    calls = []
+    d = _wire_ci_status(monkeypatch, ci_state="green", review_clear=True,
+                        pr_state="closed", calls=calls)
+    asyncio.run(d._handle_ci_status(_ci_status_trigger()))
+    assert calls == []
+
+
+def test_ci_status_green_threads_ci_state_into_gate(monkeypatch):
+    # Loxia review nit: don't re-fetch CI in the gate when the ci_status path
+    # already computed it. Assert the gate receives ci_state="green".
+    seen = {}
+
+    async def fake_fetch_pr(self, repo, num):
+        return {"number": num, "state": "open", "draft": False,
+                "title": "t", "body": "Closes #80", "html_url": "u",
+                "head": {"sha": "abc123", "ref": "f"}, "base": {"ref": "main"}}
+
+    async def fake_ci(self, trigger):
+        return "green"
+
+    async def fake_clear(self, repo, num):
+        return True
+
+    async def fake_gate(self, trigger, parent, panel, ci_state=None):
+        seen["ci_state"] = ci_state
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_required_ci_state", fake_ci)
+    monkeypatch.setattr(SwarmDispatcher, "_pr_review_is_clear", fake_clear)
+    monkeypatch.setattr(SwarmDispatcher, "_gate_merge_readiness", fake_gate)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(d._handle_ci_status(_ci_status_trigger()))
+    assert seen.get("ci_state") == "green"
+
+
+def test_pr_review_is_clear_reads_newest_first(monkeypatch):
+    # Loxia review nit: an unpaginated oldest-first scan misses the latest
+    # Vanellus marker on a >100-comment PR. We now fetch newest-first and take
+    # the FIRST marker — so a stale REQUEST_CHANGES followed by a newer APPROVE
+    # (which GitHub returns first under direction=desc) reads as clear.
+    captured = {}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def get(self, url, **kwargs):
+            captured["params"] = kwargs.get("params", {})
+            # Simulate direction=desc: newest (APPROVE) first, older one after.
+            bodies = [
+                "<!-- vanellus-aggregation -->\n**APPROVE**\nlgtm",
+                "<!-- vanellus-aggregation -->\n**REQUEST_CHANGES**\nold",
+            ]
+
+            class _Resp:
+                def raise_for_status(self_inner):
+                    pass
+
+                def json(self_inner):
+                    return [{"body": b} for b in bodies]
+
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _Client())
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    result = asyncio.run(d._pr_review_is_clear("owner/repo", 87))
+    assert result is True
+    # Confirms we requested newest-first, not a plain first-100 scan.
+    assert captured["params"].get("direction") == "desc"
+
+
 # ── prompt generators — guardrails must survive refactors ────────────────────
 
 
