@@ -19,6 +19,15 @@
     <key>KeepAlive</key>
     <true/>
 
+    <!-- Minimum seconds between relaunches. Guards against a restart storm when
+         the daemon exits repeatedly in a short window (e.g. an intermittent
+         Neotoma prod 502 from the Cloudflare tunnel): without this, KeepAlive
+         relaunches on launchd's 10s floor and a burst of exits can hammer
+         restarts, killing in-flight panel dispatches each cycle. 30s lets a
+         transient upstream blip clear between attempts. (ateles#193) -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
     <key>StandardOutPath</key>
     <string>/Users/markmhendrickson/Library/Logs/ateles/apis.log</string>
     <key>StandardErrorPath</key>
