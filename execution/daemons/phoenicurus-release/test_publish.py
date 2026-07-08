@@ -387,7 +387,7 @@ class TestResumeFromSkipsCompletedSteps:
 
         mock_preflight.assert_not_called()
         mock_merge.assert_not_called()
-        mock_ppm.assert_not_called()
+        mock_ppm.assert_called_once()
         mock_tag.assert_called_once()
         mock_npm.assert_called_once()
         mock_gh.assert_called_once()
@@ -426,6 +426,46 @@ class TestResumeFromSkipsCompletedSteps:
         mock_merge.assert_called_once()
         mock_ppm.assert_called_once()
         mock_tag.assert_called_once()
+
+    def test_resume_from_tag_and_push_still_catches_missing_bump_commit(
+        self, tmp_path, monkeypatch
+    ):
+        """The exact incident path: an operator merges the RC PR manually
+        (without the bump commit landing) and resumes with
+        --resume-from=tag_and_push. preflight_post_merge must still run and
+        block tag_and_push/npm_publish — this is the defect ateles#203 was
+        filed to fix, and skipping the guard on this resume path would silently
+        reintroduce it.
+        """
+        _write_package_json(tmp_path, "0.18.7")  # bump commit missing
+        monkeypatch.setattr(publish, "NEOTOMA_REPO_ROOT", tmp_path)
+
+        with patch.object(publish, "preflight") as mock_preflight, patch.object(
+            publish, "merge_rc_pr"
+        ) as mock_merge, patch.object(
+            publish, "tag_and_push"
+        ) as mock_tag, patch.object(
+            publish, "npm_publish"
+        ) as mock_npm, patch.object(
+            publish, "set_release_status"
+        ), patch.object(
+            publish, "telegram_send"
+        ):
+            try:
+                publish.publish_release(
+                    self._release(), "v0.18.8", dry_run=False, force=False,
+                    resume_from="tag_and_push",
+                )
+                raised = None
+            except publish.StepError as exc:
+                raised = exc
+
+        assert raised is not None, "expected StepError for version mismatch"
+        assert "0.18.7" in str(raised) and "0.18.8" in str(raised)
+        mock_preflight.assert_not_called()
+        mock_merge.assert_not_called()
+        mock_tag.assert_not_called()
+        mock_npm.assert_not_called()
 
     def test_invalid_resume_from_choice_rejected_by_argparse(self, monkeypatch):
         monkeypatch.setattr(

@@ -629,9 +629,11 @@ def post_release(version: str, dry_run: bool) -> str:
 
 
 # Fixed step order, used to resolve --resume-from to a skip-before index.
-# preflight_post_merge is not independently resumable — it always runs when
-# resuming at or after merge_rc_pr, since it's cheap and idempotent (re-reads
-# package.json, no side effects).
+# preflight_post_merge is not independently resumable — it always runs
+# immediately before tag_and_push (the first irreversible step), regardless of
+# --resume-from, since it's cheap and idempotent (re-reads package.json, no
+# side effects) and is the guard against publishing without the version-bump
+# commit.
 STEP_ORDER = [
     "preflight",
     "merge_rc_pr",
@@ -674,8 +676,13 @@ def publish_release(
         preflight(version, rc_branch, dry_run)
     if resume_idx <= STEP_ORDER.index("merge_rc_pr"):
         merge_rc_pr(rc_pr_url, rc_branch, dry_run, version=version)
-        preflight_post_merge(version, dry_run)
     if resume_idx <= STEP_ORDER.index("tag_and_push"):
+        # Always runs before the first irreversible step (tag_and_push), even
+        # when resuming past merge_rc_pr (e.g. an operator merged manually and
+        # resumes with --resume-from=tag_and_push) — that resume path is
+        # exactly how the v0.18.8 incident's missing bump commit slipped
+        # through undetected.
+        preflight_post_merge(version, dry_run)
         tag_and_push(version, dry_run)
     if resume_idx <= STEP_ORDER.index("npm_publish"):
         npm_publish(version, dry_run)
