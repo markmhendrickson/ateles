@@ -1733,7 +1733,7 @@ def transcribe_audio_file(
         audio_duration = get_audio_duration(metadata_path)
 
         return {
-            "transcription_text": transcript_text,
+            "transcription_text": _postprocess_transcript(transcript_text),
             "language": transcript_language,
             "audio_duration_seconds": audio_duration,
             "file_size_bytes": file_size,
