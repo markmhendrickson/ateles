@@ -342,6 +342,56 @@ def _utterance_stitch_seconds() -> float:
     return _env_float("TRANSCRIBE_UTTERANCE_STITCH_SECONDS", 4.0)
 
 
+# Proper nouns the STT model reliably mishears, mapped canonical → regex of known
+# mistranscriptions. Two uses: the canonical names become `keyterms` (bias the
+# model at transcription time), and the regexes drive a post-transcription
+# correction pass for anything that still slips through. Extend via
+# TRANSCRIBE_PROPER_NOUNS ("Canonical=variant1|variant2, Other=...").
+_PROPER_NOUN_CORRECTIONS: list[tuple[str, str]] = [
+    # canonical, regex of mistranscriptions (case-insensitive, word-bounded)
+    ("Bottega8", r"Bottega,?\s*(?:eight|8)|Bottega\s*Aid[e]?|Pitague|Take\s*Eight|Day\s*Eight|Potato\s*(?:Eight|8)"),
+    # bare "Bottega" (not already followed by 8) → Bottega8
+    ("Bottega8", r"Bottega(?!8)(?!\s*8)"),
+    ("Ateles", r"Ateli\'?s?|Atelis|Atelees|Achelis|Itelli\'?s?|Iteles"),
+    ("Neotoma", r"Neautoma|the\s+[Aa]utoma|Neo\s*toma|Mutombo|2\s*LEDS"),
+    ("Prospect CRM", r"Prospect\s*CRMs\b"),
+    ("Hobbs", r"Hobbes"),
+]
+
+
+def _extra_proper_nouns() -> list[tuple[str, str]]:
+    """Parse TRANSCRIBE_PROPER_NOUNS='Canonical=v1|v2, Other=v3' into pairs."""
+    raw = os.environ.get("TRANSCRIBE_PROPER_NOUNS", "").strip()
+    pairs: list[tuple[str, str]] = []
+    if not raw:
+        return pairs
+    for entry in raw.split(","):
+        if "=" in entry:
+            canon, variants = entry.split("=", 1)
+            canon = canon.strip()
+            variants = variants.strip()
+            if canon and variants:
+                pairs.append((canon, variants))
+    return pairs
+
+
+def _apply_proper_noun_corrections(text: str) -> str:
+    """
+    Repair known STT mistranscriptions of proper nouns (belt-and-suspenders to
+    the keyterms bias). Regex-based, word-bounded, case-insensitive. Runs on the
+    merged transcript, so it applies to every path (multichannel, diarized, and
+    the plain single-speaker case).
+    """
+    if not text:
+        return text
+    for canon, variant_re in _PROPER_NOUN_CORRECTIONS + _extra_proper_nouns():
+        text = re.sub(rf"\b(?:{variant_re})\b", canon, text)
+    # Collapse any doubled suffix an overlapping rule may have produced.
+    text = re.sub(r"Bottega8+8", "Bottega8", text)
+    text = re.sub(r"Bottega8\s+8\b", "Bottega8", text)
+    return text
+
+
 def _merge_word_events_by_utterance(
     events: list[dict],
     labels: dict | None = None,
@@ -784,6 +834,14 @@ def _ffmpeg_split_audio_segments(
 def _parse_elevenlabs_stt_response(
     body: object, language: str | None
 ) -> tuple[str, str]:
+    """Parse the STT response, then repair known proper-noun mishears."""
+    text, lang = _parse_elevenlabs_stt_response_raw(body, language)
+    return _apply_proper_noun_corrections(text), lang
+
+
+def _parse_elevenlabs_stt_response_raw(
+    body: object, language: str | None
+) -> tuple[str, str]:
     if isinstance(body, dict) and "message" in body and "request_id" in body:
         if "text" not in body and "transcripts" not in body:
             raise RuntimeError(
@@ -953,6 +1011,11 @@ def transcribe_with_elevenlabs_speech_to_text(
     if effective_language:
         data["language_code"] = effective_language
 
+    # NOTE: ElevenLabs' keyterms/keywords biasing is rejected on this
+    # scribe_v2 + diarize path ("invalid_keyword"), so proper-noun accuracy is
+    # handled entirely by the post-transcription corrector
+    # (_apply_proper_noun_corrections), not a model-side hint.
+
     if verbose:
         mode = "multichannel" if use_multi_channel else "diarized"
         print(
@@ -1007,7 +1070,7 @@ def transcribe_with_elevenlabs_speech_to_text(
         finally:
             shutil.rmtree(split_dir, ignore_errors=True)
 
-        transcription_text = (
+        transcription_text = _apply_proper_noun_corrections(
             _merge_word_events_by_utterance(all_events, _channel_labels()) or ""
         )
         return {
