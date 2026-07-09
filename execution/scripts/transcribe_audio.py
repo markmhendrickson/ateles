@@ -342,29 +342,23 @@ def _utterance_stitch_seconds() -> float:
     return _env_float("TRANSCRIBE_UTTERANCE_STITCH_SECONDS", 4.0)
 
 
-# Proper nouns the STT model reliably mishears, mapped canonical → regex of known
-# mistranscriptions. Two uses: the canonical names become `keyterms` (bias the
-# model at transcription time), and the regexes drive a post-transcription
-# correction pass for anything that still slips through. Extend via
-# TRANSCRIBE_PROPER_NOUNS ("Canonical=variant1|variant2, Other=...").
-_PROPER_NOUN_CORRECTIONS: list[tuple[str, str]] = [
-    # canonical, regex of mistranscriptions (case-insensitive, word-bounded)
-    ("Bottega8", r"Bottega,?\s*(?:eight|8)|Bottega\s*Aid[e]?|Pitague|Take\s*Eight|Day\s*Eight|Potato\s*(?:Eight|8)"),
-    # bare "Bottega" (not already followed by 8) → Bottega8
-    ("Bottega8", r"Bottega(?!8)(?!\s*8)"),
-    ("Ateles", r"Ateli\'?s?|Atelis|Atelees|Achelis|Itelli\'?s?|Iteles"),
-    ("Neotoma", r"Neautoma|the\s+[Aa]utoma|Neo\s*toma|Mutombo"),
-    ("Prospect CRM", r"Prospect\s*CRMs\b"),
-    # Names that are also real English words / common surnames (e.g. "Hobbes"
-    # the philosopher, or "2 LEDS" as hardware) are intentionally NOT in the
-    # shipped map to avoid false positives — add them per-operator via
-    # TRANSCRIBE_PROPER_NOUNS="Hobbs=Hobbes" when the transcript vocabulary makes
-    # the correction safe.
-]
+# Proper-noun corrections are OPERATOR-SPECIFIC vocabulary (the product,
+# company, and people names that recur in the operator's own meetings, plus the
+# ways the STT model mishears them). This repo is public, so it ships NO baked-in
+# vocabulary — the map is loaded at runtime, in priority order, from:
+#   1. TRANSCRIBE_PROPER_NOUNS env: "Canonical=variant1|variant2, Other=v3"
+#   2. TRANSCRIBE_PROPER_NOUNS_FILE: path to a JSON file, either a
+#      {"corrections": [{"canonical","variants_regex"}, ...]} object or a plain
+#      [["Canonical","regex"], ...] list.
+#   3. A Neotoma `transcription_vocabulary` entity (set
+#      TRANSCRIBE_VOCABULARY_ENTITY_ID, or it auto-resolves by name) — the
+#      canonical operator store, kept out of this public repo.
+# All sources are merged; later sources add to (never replace) earlier ones.
+# Each entry is (canonical, variants_regex); matching is case-insensitive and
+# word-bounded. Nothing here is operator data.
 
 
-def _extra_proper_nouns() -> list[tuple[str, str]]:
-    """Parse TRANSCRIBE_PROPER_NOUNS='Canonical=v1|v2, Other=v3' into pairs."""
+def _proper_nouns_from_env() -> list[tuple[str, str]]:
     raw = os.environ.get("TRANSCRIBE_PROPER_NOUNS", "").strip()
     pairs: list[tuple[str, str]] = []
     if not raw:
@@ -372,26 +366,118 @@ def _extra_proper_nouns() -> list[tuple[str, str]]:
     for entry in raw.split(","):
         if "=" in entry:
             canon, variants = entry.split("=", 1)
-            canon = canon.strip()
-            variants = variants.strip()
+            canon, variants = canon.strip(), variants.strip()
             if canon and variants:
                 pairs.append((canon, variants))
     return pairs
 
 
+def _proper_nouns_from_file() -> list[tuple[str, str]]:
+    path = os.environ.get("TRANSCRIBE_PROPER_NOUNS_FILE", "").strip()
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        data = json.loads(open(path, encoding="utf-8").read())
+    except Exception:
+        return []
+    return _coerce_correction_pairs(data)
+
+
+def _proper_nouns_from_neotoma() -> list[tuple[str, str]]:
+    """
+    Load the operator's proper-noun vocabulary from a Neotoma
+    `transcription_vocabulary` entity. Best-effort and offline-safe: any failure
+    (no CLI, no auth, entity missing) returns an empty list without raising.
+    """
+    if os.environ.get("TRANSCRIBE_DISABLE_NEOTOMA_VOCAB", "").strip() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return []
+    if not shutil.which("neotoma"):
+        return []
+    entity_id = os.environ.get("TRANSCRIBE_VOCABULARY_ENTITY_ID", "").strip()
+    base = _neotoma_prod_base_url()
+    # `entities get <id>` when we have an id; otherwise `entities search <name>`.
+    if entity_id:
+        cmd = ["neotoma", "--base-url", base, "--api-only", "--json",
+               "entities", "get", entity_id]
+    else:
+        cmd = ["neotoma", "--base-url", base, "--api-only", "--json",
+               "entities", "search", "operator transcription proper-noun corrections",
+               "--type", "transcription_vocabulary"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        if result.returncode != 0 or not result.stdout.strip():
+            return []
+        data = json.loads(result.stdout)
+    except Exception:
+        return []
+    # Unwrap common shapes: {entities:[{snapshot:{snapshot:{corrections}}}]}, etc.
+    corrections = _find_corrections_field(data)
+    return _coerce_correction_pairs(corrections)
+
+
+def _find_corrections_field(obj: object) -> object:
+    """Depth-first search for a `corrections` list in a Neotoma response."""
+    if isinstance(obj, dict):
+        if isinstance(obj.get("corrections"), list):
+            return obj["corrections"]
+        for v in obj.values():
+            found = _find_corrections_field(v)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for v in obj:
+            found = _find_corrections_field(v)
+            if found:
+                return found
+    return None
+
+
+def _coerce_correction_pairs(data: object) -> list[tuple[str, str]]:
+    """Accept [{canonical,variants_regex}] or [[canonical, regex]] shapes."""
+    pairs: list[tuple[str, str]] = []
+    if isinstance(data, dict):
+        data = data.get("corrections", [])
+    for item in data or []:
+        if isinstance(item, dict):
+            canon = str(item.get("canonical", "")).strip()
+            variants = str(item.get("variants_regex", "")).strip()
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            canon, variants = str(item[0]).strip(), str(item[1]).strip()
+        else:
+            continue
+        if canon and variants:
+            pairs.append((canon, variants))
+    return pairs
+
+
+def _proper_noun_corrections() -> list[tuple[str, str]]:
+    """Merge the operator vocabulary from env + file + Neotoma (all optional)."""
+    return (
+        _proper_nouns_from_env()
+        + _proper_nouns_from_file()
+        + _proper_nouns_from_neotoma()
+    )
+
+
 def _apply_proper_noun_corrections(text: str) -> str:
     """
-    Repair known STT mistranscriptions of proper nouns. Regex-based,
-    word-bounded, case-insensitive. Runs on the merged transcript, so it applies
-    to every path (multichannel, diarized, and the plain single-speaker case).
+    Repair known STT mistranscriptions of proper nouns using the operator's
+    runtime-loaded vocabulary. Regex-based, word-bounded, case-insensitive. Runs
+    on the merged transcript, so it applies to every path (multichannel,
+    diarized, and the plain single-speaker case). A no-op when no vocabulary is
+    configured, so the public default corrects nothing.
     """
     if not text:
         return text
-    for canon, variant_re in _PROPER_NOUN_CORRECTIONS + _extra_proper_nouns():
+    for canon, variant_re in _proper_noun_corrections():
         text = re.sub(rf"\b(?:{variant_re})\b", canon, text, flags=re.IGNORECASE)
-    # Collapse any doubled suffix an overlapping rule may have produced.
-    text = re.sub(r"Bottega8+8", "Bottega8", text)
-    text = re.sub(r"Bottega8\s+8\b", "Bottega8", text)
+        # Collapse a doubled canonical an overlapping rule may have produced
+        # (e.g. a "<canon><digit>" rule firing on already-corrected text).
+        text = re.sub(re.escape(canon) + r"(\d)\1\b", canon + r"\1", text)
     return text
 
 
