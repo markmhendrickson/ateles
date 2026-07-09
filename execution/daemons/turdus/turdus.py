@@ -203,13 +203,20 @@ _INVOICE_SENDER_KEYWORDS = [
     "quickbooks",
 ]
 
-# Notification / automation senders that are NEVER invoices. A code-forge or
-# system notification whose subject merely *mentions* an invoice keyword (e.g. a
-# GitHub email about a PR titled "...break invoice loop") must not be routed to
-# the payment daemon. Checked first, before any positive keyword match.
+# Pure notification/automation senders that are NEVER invoices — a code-forge
+# or provider system notice whose subject merely *mentions* an invoice keyword
+# (e.g. a GitHub email about a PR titled "...break invoice loop"). These are
+# hard denials: no real invoice is sent from these addresses.
 _INVOICE_SENDER_DENYLIST = [
-    "notifications@",  # code-forge / system notifications (github, etc.)
-    "noreply-accounts@",  # provider account notices (google, etc.)
+    "notifications@",  # code-forge / system notifications (github, gitlab, …)
+    "noreply-accounts@",  # provider account notices (google, …)
+]
+
+# Generic "no-reply" prefixes are a WEAK deny: many legitimate billing systems
+# send invoices from noreply@<billing-domain>. So a no-reply sender is only
+# treated as non-invoice when it lacks a positive invoice sender-keyword — the
+# known billing fragment (billing@, stripe, paypal, …) wins over the prefix.
+_INVOICE_SOFT_DENY_PREFIXES = [
     "no-reply@",
     "noreply@",
 ]
@@ -229,19 +236,25 @@ _INVOICE_NEGATIVE_SUBJECT_KEYWORDS = [
 ]
 
 
+def _has_invoice_sender_keyword(sender_lower: str) -> bool:
+    return any(kw in sender_lower for kw in _INVOICE_SENDER_KEYWORDS)
+
+
 def _is_invoice(sender: str, subject: str, snippet: str) -> bool:
     """Return True if this message is an invoice or payment request.
 
     Precision guards run first so a bare keyword match can't misroute a
     notification or a refund to the payment daemon (ateles#205):
-      1. Automation/notification senders are never invoices.
-      2. Refund / receipt-of-payment / data-share subjects are excluded even
+      1. Pure automation/notification senders are never invoices.
+      2. A generic no-reply@ sender is non-invoice UNLESS it also carries a
+         known billing sender-keyword (a real billing system may use no-reply@).
+      3. Refund / receipt-of-payment / data-share subjects are excluded even
          when they contain an invoice keyword.
     """
     subj_lower = subject.lower()
     sender_lower = sender.lower()
 
-    # 1. Never treat known notification/automation senders as invoices.
+    # 1. Hard deny: pure notification/automation senders.
     for deny in _INVOICE_SENDER_DENYLIST:
         if deny in sender_lower:
             return False
@@ -251,13 +264,21 @@ def _is_invoice(sender: str, subject: str, snippet: str) -> bool:
         if neg in subj_lower:
             return False
 
-    for kw in _INVOICE_SUBJECT_KEYWORDS:
-        if kw in subj_lower:
-            return True
-    for kw in _INVOICE_SENDER_KEYWORDS:
-        if kw in sender_lower:
-            return True
-    return False
+    subject_signal = any(kw in subj_lower for kw in _INVOICE_SUBJECT_KEYWORDS)
+    sender_signal = _has_invoice_sender_keyword(sender_lower)
+
+    # 3. Soft deny: a generic no-reply@ sender is non-invoice ONLY when there is
+    #    no positive invoice signal at all — neither a billing sender-keyword nor
+    #    an invoice subject-keyword. A real billing system that mails from
+    #    noreply@<billing-domain> with an "invoice"/"factura" subject still routes.
+    if (
+        any(p in sender_lower for p in _INVOICE_SOFT_DENY_PREFIXES)
+        and not sender_signal
+        and not subject_signal
+    ):
+        return False
+
+    return subject_signal or sender_signal
 
 
 # ── State management ──────────────────────────────────────────────────────────

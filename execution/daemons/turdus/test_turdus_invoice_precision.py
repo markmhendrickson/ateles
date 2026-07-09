@@ -57,11 +57,22 @@ def test_forge_notification_mentioning_invoice_is_not_invoice():
     )
 
 
-def test_noreply_sender_is_never_invoice():
+def test_plain_noreply_without_invoice_signal_is_not_invoice():
+    # A generic no-reply sender with no invoice signal at all is not an invoice.
     assert not turdus._is_invoice(
-        "Billing <no-reply@vendor.example>",
-        "Your invoice is ready",  # keyword present, but no-reply sender vetoes
-        "",
+        "Newsletter <noreply@news.example>", "Your weekly digest", ""
+    )
+
+
+def test_noreply_billing_vendor_still_classifies():
+    # A real billing system that mails from noreply@<billing-domain> with an
+    # invoice keyword MUST still route (Phoenicurus edge-case on #206): the
+    # no-reply prefix is a soft deny, overridden by a positive invoice signal.
+    assert turdus._is_invoice(
+        "Stripe <noreply@stripe.com>", "Your invoice is ready", ""
+    )
+    assert turdus._is_invoice(
+        "Billing <no-reply@billing.vendor.example>", "Invoice #4471 attached", ""
     )
 
 
@@ -69,6 +80,21 @@ def test_payment_received_receipt_is_not_invoice():
     assert not turdus._is_invoice(
         "Card <statements@bank.example>",
         "We've received your payment",
+        "",
+    )
+
+
+def test_negative_substring_collision_is_a_known_limitation():
+    # Documents the accepted tradeoff (Phoenicurus non-blocking note on #206):
+    # a genuine invoice whose subject also contains a negative substring
+    # ("on the way") is currently vetoed. Preferring a missed keyword-collision
+    # invoice over a spurious monedula payment task is the conservative choice;
+    # the negative keywords are deliberately broad. If this misses real invoices
+    # in practice, anchor the phrase to refund context or move to the LLM
+    # classifier (tracked on ateles#205).
+    assert not turdus._is_invoice(
+        "Shop <billing@shop.example>",
+        "Your shipment is on the way — invoice #4471 attached",
         "",
     )
 
