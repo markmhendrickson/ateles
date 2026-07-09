@@ -353,9 +353,13 @@ _PROPER_NOUN_CORRECTIONS: list[tuple[str, str]] = [
     # bare "Bottega" (not already followed by 8) → Bottega8
     ("Bottega8", r"Bottega(?!8)(?!\s*8)"),
     ("Ateles", r"Ateli\'?s?|Atelis|Atelees|Achelis|Itelli\'?s?|Iteles"),
-    ("Neotoma", r"Neautoma|the\s+[Aa]utoma|Neo\s*toma|Mutombo|2\s*LEDS"),
+    ("Neotoma", r"Neautoma|the\s+[Aa]utoma|Neo\s*toma|Mutombo"),
     ("Prospect CRM", r"Prospect\s*CRMs\b"),
-    ("Hobbs", r"Hobbes"),
+    # Names that are also real English words / common surnames (e.g. "Hobbes"
+    # the philosopher, or "2 LEDS" as hardware) are intentionally NOT in the
+    # shipped map to avoid false positives — add them per-operator via
+    # TRANSCRIBE_PROPER_NOUNS="Hobbs=Hobbes" when the transcript vocabulary makes
+    # the correction safe.
 ]
 
 
