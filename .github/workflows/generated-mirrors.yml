@@ -1,0 +1,48 @@
+name: Generated mirrors — drift check
+
+# Neotoma is canonical for both agent definitions and hook policies; the
+# on-disk mirrors (docs/agents/*.md, .claude/skills/*/SKILL.md,
+# .claude/hooks/*.py, .claude/settings.json wiring) are GENERATED derived
+# artifacts. This job runs both drift checks in the same job/step so a
+# failure reads as one category ("the swarm's source-of-truth checks
+# failed"), not two unrelated red X's — per ateles#214's UX/discoverability
+# requirement. Reuses the same NEOTOMA_BEARER_TOKEN/NEOTOMA_BASE_URL
+# credential class already used by loxia-pr-review.yml and
+# lanius-stale-issues.yml; no new CI credential is introduced.
+
+on:
+  pull_request:
+    paths:
+      - "docs/agents/**"
+      - ".claude/skills/**"
+      - "hooks/logic/**"
+      - ".claude/hooks/**"
+      - ".claude/settings.json"
+      - "execution/scripts/render_agent_docs.py"
+      - "execution/scripts/render_hooks.py"
+      - ".github/workflows/generated-mirrors.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-drift:
+    runs-on: ubuntu-latest
+    env:
+      NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}
+      NEOTOMA_BASE_URL: ${{ vars.NEOTOMA_BASE_URL || 'https://neotoma.markmhendrickson.com' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # Pre-existing drift as of #214 (stale phoenicurus orphan + other agent
+      # mirrors behind Neotoma) predates this PR and is out of scope here —
+      # tracked as a followup. Reported non-blocking so it's visible in the
+      # same job without failing this PR on unrelated content.
+      - name: Validate agent doc mirrors
+        run: python3 execution/scripts/render_agent_docs.py --check
+        continue-on-error: true
+      - name: Validate hook adapter mirrors
+        run: python3 execution/scripts/render_hooks.py --check

@@ -1,0 +1,9 @@
+{
+  "tool_name": "mcp__ccd_session__spawn_task",
+  "tool_input": {
+    "title": "Build the widget exporter"
+  },
+  "tool_response": {
+    "task_id": "task_abc123"
+  }
+}
