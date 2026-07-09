@@ -97,6 +97,13 @@ def test_negative_substring_collision_is_a_known_limitation():
         "Your shipment is on the way — invoice #4471 attached",
         "",
     )
+    # Same tradeoff, different negative keyword ("has been paid") — a trusted
+    # billing sender referencing a prior installment collides with the veto.
+    assert not turdus._is_invoice(
+        "Vendor <billing@vendor.example>",
+        "Invoice #452 — balance due, prior installment has been paid",
+        "",
+    )
 
 
 # ── genuine invoices that must still classify (positive controls) ────────────
