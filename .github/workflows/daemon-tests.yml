@@ -1,0 +1,34 @@
+name: daemon tests
+
+# Runs the daemon regression suites that live under execution/daemons/**.
+# The ateles-package workflow (ateles-tests.yml) is path-scoped to ateles/**
+# and never triggers on daemon code, so daemon regression tests were invisible
+# to CI (QA gate finding on PRs #190/#198/#206). This lane closes that gap for
+# the Turdus daemon — the tests those PRs add — using only core deps (httpx is
+# a core dependency; apprise is import-guarded in lib/notify, so no extra deps).
+
+on:
+  pull_request:
+    paths:
+      - "execution/daemons/turdus/**"
+      - "lib/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/daemon-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  turdus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Run Turdus daemon tests
+        # Run from repo root so the tests' sys.path bootstrap (repo root +
+        # daemon dir) resolves lib.daemon_runtime / lib.notify imports.
+        run: uv run --extra dev python -m pytest execution/daemons/turdus/ -q
