@@ -1,13 +1,15 @@
 name: ateles package tests
 
-# Enforces the W0/W1+ package test suite on every PR that touches it — the
-# regression lane the QA gate asked for. Scoped to the ateles/ package so it is
-# fast and independent of the daemon test surface.
+# Enforces the W0/W1+ package test suite plus the daemon test surface on every
+# PR that touches either — the regression lane the QA gate asked for
+# (ateles#206: the daemon path filter was missing entirely, so daemon
+# regression tests never ran in CI).
 
 on:
   pull_request:
     paths:
       - "ateles/**"
+      - "execution/daemons/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/ateles-tests.yml"
@@ -26,3 +28,5 @@ jobs:
           python-version: "3.13"
       - name: Run ateles package tests
         run: uv run --extra dev python -m pytest ateles/ -q
+      - name: Run daemon tests
+        run: uv run --extra dev python -m pytest execution/daemons/ -q
