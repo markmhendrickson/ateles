@@ -46,11 +46,12 @@ def test_data_share_notification_is_not_invoice():
     )
 
 
-def test_github_notification_mentioning_invoice_is_not_invoice():
+def test_forge_notification_mentioning_invoice_is_not_invoice():
     # A code-forge email about a PR titled "...break invoice loop" must not be
     # routed to the payment daemon just because "invoice" is in the subject.
+    # `notifications@` is denied for any forge domain (synthetic here).
     assert not turdus._is_invoice(
-        '"forge-bot[bot]" <notifications@github.com>',
+        '"forge-bot[bot]" <notifications@forge.example>',
         "Re: [org/repo] fix: break invoice self-notification loop (#198)",
         "",
     )
@@ -99,3 +100,90 @@ def test_payment_due_still_classifies():
     assert turdus._is_invoice(
         "Shop <orders@shop.example>", "Payment due for order 123", ""
     )
+
+
+# ── call-path effect tests (issue #205 QA item 4) ────────────────────────────
+# These go through the real entry point `_create_task_for_email`, not the
+# `_is_invoice` helper in isolation, and assert the *effect*: whether the task
+# payload posted to Neotoma routes to monedula. A future change that shadows or
+# bypasses `_is_invoice` inside `_create_task_for_email` would break these even
+# if the helper-level tests stayed green.
+
+import asyncio
+
+
+class _CapturingAsyncClient:
+    """Minimal async-context httpx.AsyncClient stub that records POST payloads."""
+
+    def __init__(self, sink, *args, **kwargs):
+        self._sink = sink
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, json=None, **kwargs):
+        self._sink.append({"url": url, "json": json})
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            @staticmethod
+            def json():
+                return {"entity_id": "ent_test"}
+
+        return _Resp()
+
+
+def _run_create_task(monkeypatch, sender, subject):
+    """Call _create_task_for_email through a stubbed httpx and return the posted
+    task payload (the first POST), so tests can assert routing."""
+    posted = []
+    monkeypatch.setattr(turdus, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(turdus, "NEOTOMA_BASE_URL", "http://neotoma.test")
+    monkeypatch.setattr(turdus, "DRY_RUN", False)
+
+    import httpx
+
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda *a, **k: _CapturingAsyncClient(posted, *a, **k)
+    )
+    msg = {"id": "m1", "sender": sender, "subject": subject, "snippet": ""}
+    asyncio.run(turdus._create_task_for_email(msg, email_entity_id=None))
+    # The first POST is the task entity.
+    task_posts = [p for p in posted if p["json"].get("entity_type") == "task"]
+    return task_posts[0]["json"]["snapshot"] if task_posts else None
+
+
+def test_refund_does_not_route_to_monedula(monkeypatch):
+    snap = _run_create_task(
+        monkeypatch,
+        '"service@paypal.example" <service@paypal.example>',
+        "Your refund from A-SHOP is on the way",
+    )
+    assert snap is not None
+    assert snap.get("assigned_to") != "monedula"
+    assert snap.get("priority") != "urgent"
+
+
+def test_forge_notification_does_not_route_to_monedula(monkeypatch):
+    snap = _run_create_task(
+        monkeypatch,
+        '"forge-bot[bot]" <notifications@forge.example>',
+        "Re: [org/repo] fix: break invoice self-notification loop (#198)",
+    )
+    assert snap is not None
+    assert snap.get("assigned_to") != "monedula"
+
+
+def test_genuine_invoice_does_route_to_monedula(monkeypatch):
+    # Positive control on the effect path: a real invoice MUST reach monedula.
+    snap = _run_create_task(
+        monkeypatch, "Billing <billing@vendor.example>", "Your invoice is ready"
+    )
+    assert snap is not None
+    assert snap.get("assigned_to") == "monedula"
+    assert snap.get("priority") == "urgent"

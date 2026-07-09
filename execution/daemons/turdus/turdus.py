@@ -208,9 +208,8 @@ _INVOICE_SENDER_KEYWORDS = [
 # GitHub email about a PR titled "...break invoice loop") must not be routed to
 # the payment daemon. Checked first, before any positive keyword match.
 _INVOICE_SENDER_DENYLIST = [
-    "notifications@github.com",
-    "noreply@github.com",
-    "noreply-accounts@google.com",
+    "notifications@",  # code-forge / system notifications (github, etc.)
+    "noreply-accounts@",  # provider account notices (google, etc.)
     "no-reply@",
     "noreply@",
 ]
