@@ -203,11 +203,55 @@ _INVOICE_SENDER_KEYWORDS = [
     "quickbooks",
 ]
 
+# Notification / automation senders that are NEVER invoices. A code-forge or
+# system notification whose subject merely *mentions* an invoice keyword (e.g. a
+# GitHub email about a PR titled "...break invoice loop") must not be routed to
+# the payment daemon. Checked first, before any positive keyword match.
+_INVOICE_SENDER_DENYLIST = [
+    "notifications@github.com",
+    "noreply@github.com",
+    "noreply-accounts@google.com",
+    "no-reply@",
+    "noreply@",
+]
+
+# Subject fragments that signal a NON-payment message even when an invoice
+# keyword is present — refunds, receipts-of-something-received, data-shares.
+# A refund or a "receipt is ready" note is not a payment the operator owes.
+_INVOICE_NEGATIVE_SUBJECT_KEYWORDS = [
+    "refund",
+    "on the way",
+    "shared some",
+    "account data",
+    "has been paid",
+    "payment received",
+    "we've received your payment",
+    "thanks for your payment",
+]
+
 
 def _is_invoice(sender: str, subject: str, snippet: str) -> bool:
-    """Return True if this message is an invoice or payment request."""
+    """Return True if this message is an invoice or payment request.
+
+    Precision guards run first so a bare keyword match can't misroute a
+    notification or a refund to the payment daemon (ateles#205):
+      1. Automation/notification senders are never invoices.
+      2. Refund / receipt-of-payment / data-share subjects are excluded even
+         when they contain an invoice keyword.
+    """
     subj_lower = subject.lower()
     sender_lower = sender.lower()
+
+    # 1. Never treat known notification/automation senders as invoices.
+    for deny in _INVOICE_SENDER_DENYLIST:
+        if deny in sender_lower:
+            return False
+
+    # 2. Negative subject signals veto a positive keyword match.
+    for neg in _INVOICE_NEGATIVE_SUBJECT_KEYWORDS:
+        if neg in subj_lower:
+            return False
+
     for kw in _INVOICE_SUBJECT_KEYWORDS:
         if kw in subj_lower:
             return True
