@@ -119,6 +119,54 @@ def test_empty_and_whitespace_input_unchanged():
 
 
 # --------------------------------------------------------------------------
+# Stutter cleaner: real hyphenated words must survive; stutters must clean.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "real_word_text",
+    [
+        "re-read the doc",
+        "re-record the call",
+        "re-review it",
+        "co-coordinate the launch",
+        "pre-preview mode",
+        "de-duplicate rows",
+        "non-agentic setup",
+        "co-founders met",
+    ],
+)
+def test_stutter_cleaner_keeps_real_prefix_words(real_word_text):
+    # A "<real-prefix>-<word>" where the root repeats the prefix (re-read) is a
+    # legitimate hyphenated word, not a restart stutter — must not collapse.
+    assert ta._clean_stutters(real_word_text) == real_word_text
+
+
+@pytest.mark.parametrize(
+    "stutter,expected_fragment",
+    [
+        ("b-before it happened", "before it happened"),
+        ("topolog-topology diagram", "topology diagram"),
+        ("in-interacting with it", "interacting with it"),
+        ("s- you know the drill", "you know the drill"),
+    ],
+)
+def test_stutter_cleaner_still_cleans_genuine_restarts(stutter, expected_fragment):
+    assert expected_fragment in ta._clean_stutters(stutter)
+
+
+def test_stutter_cleaner_collapses_immediate_repeats():
+    assert ta._clean_stutters("the, the, the plan") == "the plan"
+    assert ta._clean_stutters("I I I think so") == "I think so"
+
+
+def test_stutter_cleaner_disabled_by_env(monkeypatch):
+    monkeypatch.setenv("TRANSCRIBE_CLEAN_STUTTERS", "0")
+    text = "b-before the, the meeting"
+    assert ta._clean_stutters(text) == text
+
+
+# --------------------------------------------------------------------------
 # Vocabulary loading: env / file / merge
 # --------------------------------------------------------------------------
 

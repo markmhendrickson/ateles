@@ -481,6 +481,15 @@ def _apply_proper_noun_corrections(text: str) -> str:
     return text
 
 
+# Real English word-forming prefixes: never treat "<prefix>-<word>" as a
+# restart stutter (e.g. "re-read", "co-coordinate", "pre-preview" are real
+# closed-sense hyphenated words even when the root repeats the prefix).
+_REAL_PREFIXES = {
+    "re", "co", "pre", "de", "un", "non", "anti", "post", "sub", "mid",
+    "over", "under", "self", "ex", "pro", "semi", "multi", "inter", "intra",
+}
+
+
 def _clean_stutters(text: str) -> str:
     """
     Remove speech-disfluency stutter artifacts that ElevenLabs transcribes
@@ -504,8 +513,14 @@ def _clean_stutters(text: str) -> str:
     #    where the stub is a leading fragment of that word: "b-before" ->
     #    "before". Require the stub to be a case-insensitive prefix of the
     #    following word so we don't delete real closed hyphenated terms.
+    #    BUT skip real English word-forming prefixes ("re-read", "co-coordinate",
+    #    "pre-preview") — there the hyphenated word is legitimate and the root
+    #    happens to repeat the prefix, so a naive prefix match would wrongly
+    #    collapse it and silently change meaning.
     def _restart(m: re.Match) -> str:
         stub, word = m.group(1), m.group(2)
+        if stub.lower() in _REAL_PREFIXES:
+            return m.group(0)
         return word if word.lower().startswith(stub.lower()) else m.group(0)
 
     text = re.sub(r"\b([A-Za-z]{1,})-([A-Za-z]+)\b", _restart, text)
