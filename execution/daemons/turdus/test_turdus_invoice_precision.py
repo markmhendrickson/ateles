@@ -69,10 +69,14 @@ def test_noreply_billing_vendor_still_classifies():
     # invoice keyword MUST still route (Phoenicurus edge-case on #206): the
     # no-reply prefix is a soft deny, overridden by a positive invoice signal.
     assert turdus._is_invoice(
-        "Stripe <noreply@stripe.com>", "Your invoice is ready", ""
+        "Stripe <noreply@stripe.example>", "Your invoice is ready", ""
     )
+    # no-reply@ whose local-part is not a billing keyword still routes when the
+    # subject keyword is corroborated by a money amount (guard #3).
     assert turdus._is_invoice(
-        "Billing <no-reply@billing.vendor.example>", "Invoice #4471 attached", ""
+        "Billing <no-reply@acme-billing.example>",
+        "Invoice #4471 — €1,762.09 due",
+        "",
     )
 
 
@@ -129,10 +133,37 @@ def test_billing_sender_fragment_still_classifies():
     )
 
 
-def test_payment_due_still_classifies():
+def test_payment_due_with_amount_still_classifies():
+    # "payment due" is a subject keyword; from a non-billing sender it needs a
+    # money signal (guard #3) to route.
     assert turdus._is_invoice(
-        "Shop <orders@shop.example>", "Payment due for order 123", ""
+        "Shop <orders@shop.example>", "Payment due: €49.90 for order 123", ""
     )
+
+
+# ── guard #3: money-signal gate (ateles#205) ─────────────────────────────────
+
+
+def test_bare_invoice_keyword_without_amount_is_not_invoice():
+    # A subject invoice keyword with NO money amount and NO billing sender must
+    # not route to monedula — the bare-keyword failure mode guard #3 closes.
+    assert not turdus._is_invoice(
+        "Alex <alex@company.example>", "Please see attached invoice", ""
+    )
+
+
+def test_bare_keyword_with_amount_in_snippet_classifies():
+    # The money signal may live in the snippet, not just the subject.
+    assert turdus._is_invoice(
+        "Alex <alex@company.example>",
+        "Please see attached invoice",
+        "Total due: $1,240.00 by end of month",
+    )
+
+
+def test_trusted_billing_sender_needs_no_amount():
+    # A known billing sender is sufficient on its own — no money signal required.
+    assert turdus._is_invoice("Stripe <receipts@stripe.example>", "Your invoice", "")
 
 
 # ── call-path effect tests (issue #205 QA item 4) ────────────────────────────
