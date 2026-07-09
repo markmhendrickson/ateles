@@ -319,17 +319,32 @@ def _channel_labels() -> dict[int, str]:
 # Utterance segmentation tuning (overridable via env for edge cases).
 # GAP: a silence longer than this on one channel ends an utterance.
 # STITCH: consecutive same-speaker utterances closer than this are re-joined.
+def _env_float(name: str, default: float) -> float:
+    """Parse a float env override, falling back to default on malformed input."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        print(
+            f"    (ignoring malformed {name}={raw!r}; using {default})",
+            file=sys.stderr,
+        )
+        return default
+
+
 def _utterance_gap_seconds() -> float:
-    return float(os.environ.get("TRANSCRIBE_UTTERANCE_GAP_SECONDS", "1.2"))
+    return _env_float("TRANSCRIBE_UTTERANCE_GAP_SECONDS", 1.2)
 
 
 def _utterance_stitch_seconds() -> float:
-    return float(os.environ.get("TRANSCRIBE_UTTERANCE_STITCH_SECONDS", "4.0"))
+    return _env_float("TRANSCRIBE_UTTERANCE_STITCH_SECONDS", 4.0)
 
 
 def _merge_word_events_by_utterance(
     events: list[dict],
-    labels: dict[int, str],
+    labels: dict | None = None,
 ) -> str | None:
     """
     Build a readable dialogue from timestamped word events by grouping each
@@ -342,52 +357,58 @@ def _merge_word_events_by_utterance(
     TRANSCRIBE_UTTERANCE_GAP_SECONDS) stays whole even when the other person
     interjects mid-sentence, which is how real dialogue reads.
 
-    Each event: {"start": float, "end": float, "channel": int, "text": str}.
+    Each event: {"start": float, "end": float, "group": hashable, "text": str}.
+    ``group`` is the speaker key — a channel index (multichannel) or a
+    speaker_id (diarized mono). ``labels`` maps group → display name; unknown
+    groups fall back to the group value itself.
+
     Returns None if there are no usable events (caller falls back).
     """
-    words = [e for e in events if str(e.get("text", "")).strip()]
+    labels = labels or {}
+    words = [
+        e
+        for e in events
+        if str(e.get("text", "")).strip() and e.get("group") is not None
+    ]
     if not words:
         return None
 
     gap = _utterance_gap_seconds()
     stitch = _utterance_stitch_seconds()
 
-    # Segment each channel independently into utterances on silence gaps.
-    by_channel: dict[int, list[dict]] = {}
+    # Segment each speaker independently into utterances on silence gaps.
+    by_group: dict = {}
     for w in words:
-        by_channel.setdefault(w["channel"], []).append(w)
+        by_group.setdefault(w["group"], []).append(w)
 
     utterances: list[dict] = []
-    for ch, ch_words in by_channel.items():
-        ch_words.sort(key=lambda w: w["start"])
+    for grp, grp_words in by_group.items():
+        grp_words.sort(key=lambda w: w["start"])
         cur: list[dict] = []
-        for w in ch_words:
+
+        def emit(run: list[dict]) -> None:
+            utterances.append(
+                {
+                    "group": grp,
+                    "start": run[0]["start"],
+                    "end": run[-1]["end"],
+                    "text": " ".join(x["text"].strip() for x in run).strip(),
+                }
+            )
+
+        for w in grp_words:
             if cur and (w["start"] - cur[-1]["end"]) > gap:
-                utterances.append(
-                    {
-                        "channel": ch,
-                        "start": cur[0]["start"],
-                        "end": cur[-1]["end"],
-                        "text": " ".join(x["text"].strip() for x in cur).strip(),
-                    }
-                )
+                emit(cur)
                 cur = []
             cur.append(w)
         if cur:
-            utterances.append(
-                {
-                    "channel": ch,
-                    "start": cur[0]["start"],
-                    "end": cur[-1]["end"],
-                    "text": " ".join(x["text"].strip() for x in cur).strip(),
-                }
-            )
+            emit(cur)
 
     if not utterances:
         return None
 
-    # Order utterances by start time; break ties by channel for determinism.
-    utterances.sort(key=lambda u: (u["start"], u["channel"]))
+    # Order utterances by start time; break ties by group string for determinism.
+    utterances.sort(key=lambda u: (u["start"], str(u["group"])))
 
     # Stitch consecutive same-speaker utterances separated only by the other
     # speaker's brief backchannel (or a short pause) back into one turn.
@@ -395,7 +416,7 @@ def _merge_word_events_by_utterance(
     for u in utterances:
         if (
             merged
-            and merged[-1]["channel"] == u["channel"]
+            and merged[-1]["group"] == u["group"]
             and (u["start"] - merged[-1]["end"]) < stitch
         ):
             merged[-1]["text"] = (merged[-1]["text"] + " " + u["text"]).strip()
@@ -405,7 +426,7 @@ def _merge_word_events_by_utterance(
 
     parts: list[str] = []
     for u in merged:
-        label = labels.get(u["channel"], f"Channel {u['channel']}")
+        label = labels.get(u["group"], str(u["group"]))
         text = re.sub(r"\s+", " ", u["text"]).strip()
         if text:
             parts.append(f"[{label}]\n{text}")
@@ -447,11 +468,64 @@ def _multichannel_words_to_events(
                 {
                     "start": float(start) + time_offset,
                     "end": float(end if end is not None else start) + time_offset,
-                    "channel": ch_int,
+                    "group": ch_int,
                     "text": str(text),
                 }
             )
     return events
+
+
+def _diarized_words_to_events(words: list, time_offset: float = 0.0) -> list[dict]:
+    """
+    Flatten a diarized single-file `words` array (flat list, each word carrying a
+    ``speaker_id``) into word events grouped by speaker. Same event shape as
+    _multichannel_words_to_events, so the utterance merge handles both.
+    """
+    events: list[dict] = []
+    for w in words or []:
+        if not isinstance(w, dict):
+            continue
+        if w.get("type") not in (None, "word"):
+            continue
+        start = w.get("start")
+        end = w.get("end", start)
+        text = w.get("text")
+        if start is None or text is None or not str(text).strip():
+            continue
+        speaker = w.get("speaker_id") or w.get("speaker") or "speaker_0"
+        events.append(
+            {
+                "start": float(start) + time_offset,
+                "end": float(end if end is not None else start) + time_offset,
+                "group": str(speaker),
+                "text": str(text),
+            }
+        )
+    return events
+
+
+def _diarized_speaker_labels(events: list[dict]) -> dict:
+    """
+    Map diarized speaker_ids to display names. If exactly two speakers are
+    present, use TRANSCRIBE_LABEL_SYSTEM / TRANSCRIBE_LABEL_MIC (the same knobs
+    as multichannel) in first-appearance order so a mixed single-file recording
+    reads with the same human labels. Otherwise fall back to Speaker 1..N.
+    """
+    order: list[str] = []
+    for e in sorted(events, key=lambda e: e["start"]):
+        g = e["group"]
+        if g not in order:
+            order.append(g)
+    labels: dict = {}
+    if len(order) == 2:
+        two = _channel_labels()
+        # channel 0 label → first speaker to appear, channel 1 label → second
+        labels[order[0]] = two.get(0, "Speaker 1")
+        labels[order[1]] = two.get(1, "Speaker 2")
+    else:
+        for i, g in enumerate(order):
+            labels[g] = f"Speaker {i + 1}"
+    return labels
 
 
 def _format_multichannel_transcripts_chronologically(transcripts: list) -> str | None:
@@ -742,8 +816,23 @@ def _parse_elevenlabs_stt_response(
         return transcription_text, transcript_language
 
     if isinstance(body, dict):
-        transcription_text = (body.get("text") or "").strip()
         transcript_language = body.get("language_code") or language or "auto"
+        # Diarized single (mixed) file: build a speaker-attributed dialogue from
+        # the per-word speaker_id stream via the same utterance merge, so one
+        # mixed recording gets the same fidelity + labeling as a two-track one.
+        # (Previously this branch returned body["text"] with NO speaker labels.)
+        events = _diarized_words_to_events(body.get("words") or [])
+        speaker_ids = {e["group"] for e in events}
+        if events and len(speaker_ids) >= 2:
+            merged = _merge_word_events_by_utterance(
+                events, _diarized_speaker_labels(events)
+            )
+            if merged:
+                return merged, transcript_language
+        # Single speaker (or no word-level data): plain text is correct.
+        transcription_text = (body.get("text") or "").strip()
+        if not transcription_text and events:
+            transcription_text = " ".join(e["text"] for e in events).strip()
         return transcription_text, transcript_language
 
     raise RuntimeError(
@@ -1217,9 +1306,10 @@ def transcribe_two_files(
     """
     Transcribe a mic track + a system/remote track as one 2-speaker dialogue.
 
-    The two mono tracks are combined into a single 2-channel file (mic → left /
-    channel 0, system → right / channel 1) and transcribed via ElevenLabs
-    MULTICHANNEL mode. Speaker identity then comes from the channel number, not
+    The two mono tracks are combined into a single 2-channel file (system → left
+    / channel 0, mic → right / channel 1 — the order record_meeting also uses)
+    and transcribed via ElevenLabs MULTICHANNEL mode. Speaker identity then comes
+    from the channel number, not
     from an acoustic diarization guess — deterministic and correct by
     construction for known-separate tracks. The readable dialogue is built by
     utterance (see _merge_word_events_by_utterance), so cross-talk stays legible.
@@ -1334,6 +1424,9 @@ def transcribe_audio_file(
                 "language": el["language"],
                 "audio_duration_seconds": get_audio_duration(metadata_path),
                 "file_size_bytes": metadata_path.stat().st_size,
+                # Carry the raw ElevenLabs response through so the single-file
+                # path also writes the .stt_raw.json sidecar for offline re-merge.
+                "raw_response": el.get("raw_response"),
             }
 
         # OpenAI Whisper path
