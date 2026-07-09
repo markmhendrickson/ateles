@@ -24,6 +24,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -297,29 +298,164 @@ def get_audio_duration(audio_path: Path) -> float | None:
 
 
 def _channel_labels() -> dict[int, str]:
-    return {0: "System", 1: "Mic", 2: "Channel 2", 3: "Channel 3", 4: "Channel 4"}
-
-
-def _format_multichannel_transcripts_chronologically(transcripts: list) -> str | None:
     """
-    Merge per-channel transcripts into one string ordered by word start time.
-    Returns None if there are no usable word-level timestamps (caller falls back
-    to channel-index order).
+    Speaker labels by channel index. Channel 0 = system (remote party), channel
+    1 = mic (operator) — the order _combine_tracks_to_stereo and record_meeting
+    both produce. Override the two primary labels with TRANSCRIBE_LABEL_SYSTEM /
+    TRANSCRIBE_LABEL_MIC (e.g. the remote person's name and the operator's name)
+    for a human-readable dialogue.
+    """
+    system_label = os.environ.get("TRANSCRIBE_LABEL_SYSTEM", "System").strip() or "System"
+    mic_label = os.environ.get("TRANSCRIBE_LABEL_MIC", "Mic").strip() or "Mic"
+    return {
+        0: system_label,
+        1: mic_label,
+        2: "Channel 2",
+        3: "Channel 3",
+        4: "Channel 4",
+    }
+
+
+# Utterance segmentation tuning (overridable via env for edge cases).
+# GAP: a silence longer than this on one channel ends an utterance.
+# STITCH: consecutive same-speaker utterances closer than this are re-joined.
+def _env_float(name: str, default: float) -> float:
+    """Parse a float env override, falling back to default on malformed input."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        print(
+            f"    (ignoring malformed {name}={raw!r}; using {default})",
+            file=sys.stderr,
+        )
+        return default
+
+
+def _utterance_gap_seconds() -> float:
+    return _env_float("TRANSCRIBE_UTTERANCE_GAP_SECONDS", 1.2)
+
+
+def _utterance_stitch_seconds() -> float:
+    return _env_float("TRANSCRIBE_UTTERANCE_STITCH_SECONDS", 4.0)
+
+
+def _merge_word_events_by_utterance(
+    events: list[dict],
+    labels: dict | None = None,
+) -> str | None:
+    """
+    Build a readable dialogue from timestamped word events by grouping each
+    speaker's continuous speech into whole UTTERANCES, then ordering utterances
+    by start time — instead of interleaving individual words chronologically.
+
+    Word-level chronological ordering shreds cross-talk: when both people speak
+    at once, their words alternate one-by-one into an unreadable ping-pong. An
+    utterance (a run of one speaker's words with no internal silence gap beyond
+    TRANSCRIBE_UTTERANCE_GAP_SECONDS) stays whole even when the other person
+    interjects mid-sentence, which is how real dialogue reads.
+
+    Each event: {"start": float, "end": float, "group": hashable, "text": str}.
+    ``group`` is the speaker key — a channel index (multichannel) or a
+    speaker_id (diarized mono). ``labels`` maps group → display name; unknown
+    groups fall back to the group value itself.
+
+    Returns None if there are no usable events (caller falls back).
+    """
+    labels = labels or {}
+    words = [
+        e
+        for e in events
+        if str(e.get("text", "")).strip() and e.get("group") is not None
+    ]
+    if not words:
+        return None
+
+    gap = _utterance_gap_seconds()
+    stitch = _utterance_stitch_seconds()
+
+    # Segment each speaker independently into utterances on silence gaps.
+    by_group: dict = {}
+    for w in words:
+        by_group.setdefault(w["group"], []).append(w)
+
+    utterances: list[dict] = []
+    for grp, grp_words in by_group.items():
+        grp_words.sort(key=lambda w: w["start"])
+        cur: list[dict] = []
+
+        def emit(run: list[dict]) -> None:
+            utterances.append(
+                {
+                    "group": grp,
+                    "start": run[0]["start"],
+                    "end": run[-1]["end"],
+                    "text": " ".join(x["text"].strip() for x in run).strip(),
+                }
+            )
+
+        for w in grp_words:
+            if cur and (w["start"] - cur[-1]["end"]) > gap:
+                emit(cur)
+                cur = []
+            cur.append(w)
+        if cur:
+            emit(cur)
+
+    if not utterances:
+        return None
+
+    # Order utterances by start time; break ties by group string for determinism.
+    utterances.sort(key=lambda u: (u["start"], str(u["group"])))
+
+    # Stitch consecutive same-speaker utterances separated only by the other
+    # speaker's brief backchannel (or a short pause) back into one turn.
+    merged: list[dict] = []
+    for u in utterances:
+        if (
+            merged
+            and merged[-1]["group"] == u["group"]
+            and (u["start"] - merged[-1]["end"]) < stitch
+        ):
+            merged[-1]["text"] = (merged[-1]["text"] + " " + u["text"]).strip()
+            merged[-1]["end"] = u["end"]
+        else:
+            merged.append(dict(u))
+
+    parts: list[str] = []
+    for u in merged:
+        label = labels.get(u["group"], str(u["group"]))
+        text = re.sub(r"\s+", " ", u["text"]).strip()
+        if text:
+            parts.append(f"[{label}]\n{text}")
+
+    return "\n\n".join(parts) if parts else None
+
+
+def _multichannel_words_to_events(
+    transcripts: list, time_offset: float = 0.0
+) -> list[dict]:
+    """
+    Flatten ElevenLabs multichannel `transcripts` into word events with an
+    optional time_offset added to every timestamp (used to re-base the words of
+    a later segment when a long recording is split under the 1-hour cap).
     """
     events: list[dict] = []
-    labels = _channel_labels()
-
     for ch_idx, t in enumerate(transcripts):
         if not isinstance(t, dict):
             continue
-        words = t.get("words")
-        if not words:
-            continue
-        for w in words:
+        for w in t.get("words") or []:
             if not isinstance(w, dict):
                 continue
+            if w.get("type") not in (None, "word"):
+                # Drop spacing/audio_event tokens from the readable transcript.
+                continue
             start = w.get("start")
-            if start is None:
+            end = w.get("end", start)
+            text = w.get("text")
+            if start is None or text is None or not str(text).strip():
                 continue
             ch = w.get("channel_index")
             if ch is None:
@@ -328,45 +464,80 @@ def _format_multichannel_transcripts_chronologically(transcripts: list) -> str |
                 ch_int = int(ch)
             except (TypeError, ValueError):
                 ch_int = ch_idx
-            text = w.get("text")
-            if text is None:
-                continue
             events.append(
                 {
-                    "start": float(start),
-                    "channel": ch_int,
+                    "start": float(start) + time_offset,
+                    "end": float(end if end is not None else start) + time_offset,
+                    "group": ch_int,
                     "text": str(text),
                 }
             )
+    return events
 
+
+def _diarized_words_to_events(words: list, time_offset: float = 0.0) -> list[dict]:
+    """
+    Flatten a diarized single-file `words` array (flat list, each word carrying a
+    ``speaker_id``) into word events grouped by speaker. Same event shape as
+    _multichannel_words_to_events, so the utterance merge handles both.
+    """
+    events: list[dict] = []
+    for w in words or []:
+        if not isinstance(w, dict):
+            continue
+        if w.get("type") not in (None, "word"):
+            continue
+        start = w.get("start")
+        end = w.get("end", start)
+        text = w.get("text")
+        if start is None or text is None or not str(text).strip():
+            continue
+        speaker = w.get("speaker_id") or w.get("speaker") or "speaker_0"
+        events.append(
+            {
+                "start": float(start) + time_offset,
+                "end": float(end if end is not None else start) + time_offset,
+                "group": str(speaker),
+                "text": str(text),
+            }
+        )
+    return events
+
+
+def _diarized_speaker_labels(events: list[dict]) -> dict:
+    """
+    Map diarized speaker_ids to display names. If exactly two speakers are
+    present, use TRANSCRIBE_LABEL_SYSTEM / TRANSCRIBE_LABEL_MIC (the same knobs
+    as multichannel) in first-appearance order so a mixed single-file recording
+    reads with the same human labels. Otherwise fall back to Speaker 1..N.
+    """
+    order: list[str] = []
+    for e in sorted(events, key=lambda e: e["start"]):
+        g = e["group"]
+        if g not in order:
+            order.append(g)
+    labels: dict = {}
+    if len(order) == 2:
+        two = _channel_labels()
+        # channel 0 label → first speaker to appear, channel 1 label → second
+        labels[order[0]] = two.get(0, "Speaker 1")
+        labels[order[1]] = two.get(1, "Speaker 2")
+    else:
+        for i, g in enumerate(order):
+            labels[g] = f"Speaker {i + 1}"
+    return labels
+
+
+def _format_multichannel_transcripts_chronologically(transcripts: list) -> str | None:
+    """
+    Merge per-channel transcripts into one readable dialogue by utterance.
+    Returns None if there are no usable word-level timestamps (caller falls back
+    to channel-index order).
+    """
+    events = _multichannel_words_to_events(transcripts)
     if not events:
         return None
-
-    events.sort(key=lambda e: (e["start"], e["channel"]))
-
-    parts: list[str] = []
-    current_ch: int | None = None
-    buf: list[str] = []
-
-    def flush() -> None:
-        nonlocal current_ch, buf
-        if current_ch is None or not buf:
-            return
-        label = labels.get(current_ch, f"Channel {current_ch}")
-        chunk = "".join(buf).strip()
-        if chunk:
-            parts.append(f"[{label}]\n{chunk}")
-        buf = []
-
-    for ev in events:
-        ch = ev["channel"]
-        if ch != current_ch:
-            flush()
-            current_ch = ch
-        buf.append(ev["text"])
-    flush()
-
-    return "\n\n".join(parts) if parts else None
+    return _merge_word_events_by_utterance(events, _channel_labels())
 
 
 def get_audio_channel_count(audio_path: Path) -> int | None:
@@ -405,6 +576,70 @@ def _elevenlabs_request_timeout() -> tuple[float, float]:
     connect = float(os.environ.get("ELEVENLABS_STT_TIMEOUT_CONNECT", "600"))
     read = float(os.environ.get("ELEVENLABS_STT_TIMEOUT_READ", "3600"))
     return (connect, read)
+
+
+def _combine_tracks_to_stereo(
+    mic_path: Path, system_path: Path, verbose: bool = False
+) -> tuple[Path, Path | None]:
+    """
+    Combine two mono tracks into one 2-channel WAV using the SAME channel
+    convention record_meeting produces: system → channel 0 (left), mic →
+    channel 1 (right). Downmixed to 16 kHz mono per channel, 16-bit PCM
+    (ElevenLabs' recommended STT sample rate; lossless so no MP3 artifacts).
+
+    Keeping the same order as record_meeting means _channel_labels()
+    ({0: System, 1: Mic}) applies unchanged to both stereo sources.
+
+    The two tracks MUST share a t=0 origin (same-length captures from the same
+    session, as record_meeting produces). Channel order is what makes speaker
+    labels deterministic downstream, so it is fixed here, not guessed later.
+
+    Returns (stereo_wav_path, temp_dir). Caller shutil.rmtree(temp_dir) when done.
+    """
+    ffmpeg_path = shutil.which("ffmpeg")
+    if not ffmpeg_path:
+        raise RuntimeError(
+            "ffmpeg is required to combine mic + system tracks for multichannel "
+            "transcription but was not found on PATH."
+        )
+    temp_dir = Path(tempfile.mkdtemp(prefix="stt_stereo_"))
+    out = temp_dir / "combined_stereo.wav"
+    cmd = [
+        ffmpeg_path,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        # Input 0 = system, input 1 = mic → channel 0 = system, channel 1 = mic.
+        "-i",
+        str(system_path),
+        "-i",
+        str(mic_path),
+        "-filter_complex",
+        # Force each input to mono, then join as L=system(ch0), R=mic(ch1).
+        "[0:a]aformat=channel_layouts=mono[l];"
+        "[1:a]aformat=channel_layouts=mono[r];"
+        "[l][r]join=inputs=2:channel_layout=stereo[a]",
+        "-map",
+        "[a]",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        str(out),
+    ]
+    if verbose:
+        print(
+            "    Combining tracks → stereo (system=ch0, mic=ch1) at 16 kHz",
+            file=sys.stderr,
+        )
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0 or not out.exists():
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise RuntimeError(
+            f"ffmpeg failed to combine tracks to stereo: {result.stderr.strip()}"
+        )
+    return out, temp_dir
 
 
 def prepare_elevenlabs_upload_file(
@@ -563,7 +798,8 @@ def _parse_elevenlabs_stt_response(
             transcription_text = chronological
         else:
             lines: list[str] = []
-            labels = ("System", "Mic", "Channel 2", "Channel 3", "Channel 4")
+            label_map = _channel_labels()
+            labels = tuple(label_map[i] for i in sorted(label_map))
             for idx, t in enumerate(transcripts):
                 if not isinstance(t, dict):
                     continue
@@ -580,8 +816,23 @@ def _parse_elevenlabs_stt_response(
         return transcription_text, transcript_language
 
     if isinstance(body, dict):
-        transcription_text = (body.get("text") or "").strip()
         transcript_language = body.get("language_code") or language or "auto"
+        # Diarized single (mixed) file: build a speaker-attributed dialogue from
+        # the per-word speaker_id stream via the same utterance merge, so one
+        # mixed recording gets the same fidelity + labeling as a two-track one.
+        # (Previously this branch returned body["text"] with NO speaker labels.)
+        events = _diarized_words_to_events(body.get("words") or [])
+        speaker_ids = {e["group"] for e in events}
+        if events and len(speaker_ids) >= 2:
+            merged = _merge_word_events_by_utterance(
+                events, _diarized_speaker_labels(events)
+            )
+            if merged:
+                return merged, transcript_language
+        # Single speaker (or no word-level data): plain text is correct.
+        transcription_text = (body.get("text") or "").strip()
+        if not transcription_text and events:
+            transcription_text = " ".join(e["text"] for e in events).strip()
         return transcription_text, transcript_language
 
     raise RuntimeError(
@@ -589,13 +840,13 @@ def _parse_elevenlabs_stt_response(
     )
 
 
-def _post_elevenlabs_stt(
+def _post_elevenlabs_stt_raw(
     upload_path: Path,
     data: dict,
     api_key: str,
-    language: str | None,
     verbose: bool,
-) -> tuple[str, str]:
+) -> object:
+    """POST to ElevenLabs STT and return the raw parsed JSON body."""
     timeout = _elevenlabs_request_timeout()
     with open(upload_path, "rb") as audio_fp:
         files = {"file": (upload_path.name, audio_fp)}
@@ -616,7 +867,18 @@ def _post_elevenlabs_stt(
             f"ElevenLabs speech-to-text failed ({resp.status_code}): {detail}"
         )
 
-    return _parse_elevenlabs_stt_response(resp.json(), language)
+    return resp.json()
+
+
+def _post_elevenlabs_stt(
+    upload_path: Path,
+    data: dict,
+    api_key: str,
+    language: str | None,
+    verbose: bool,
+) -> tuple[str, str]:
+    body = _post_elevenlabs_stt_raw(upload_path, data, api_key, verbose)
+    return _parse_elevenlabs_stt_response(body, language)
 
 
 def transcribe_with_elevenlabs_speech_to_text(
@@ -651,24 +913,51 @@ def transcribe_with_elevenlabs_speech_to_text(
     use_multi_channel = channels >= 2
     send_diarize = not use_multi_channel
 
+    # scribe_v1 was deprecated/removed 2026-07-09; scribe_v2 is the current
+    # flagship STT model (highest accuracy, tuned for long recordings).
     model_id = os.environ.get("ELEVENLABS_STT_MODEL_ID", "scribe_v2").strip()
+
+    # tag_audio_events off by default → clean verbatim transcript (no "(laughter)"
+    # tokens interleaved with speech). Override with TRANSCRIBE_TAG_AUDIO_EVENTS=1.
+    tag_events = os.environ.get("TRANSCRIBE_TAG_AUDIO_EVENTS", "0").strip() in (
+        "1",
+        "true",
+        "yes",
+    )
 
     data = {
         "model_id": model_id,
-        "tag_audio_events": "true",
+        "tag_audio_events": "true" if tag_events else "false",
         "diarize": "true" if send_diarize else "false",
         "use_multi_channel": "true" if use_multi_channel else "false",
+        "timestamps_granularity": "word",
         "webhook": "false",
     }
     if use_multi_channel:
-        data["timestamps_granularity"] = "word"
-    if language:
-        data["language_code"] = language
+        # "separate" → one transcript array per channel, each a clean word list
+        # with a single channel_index. We build the readable dialogue ourselves
+        # by utterance (see _merge_word_events_by_utterance) so cross-talk stays
+        # legible. ("combined" returns a flat, already-interleaved word stream
+        # whose plain text fuses overlapping speech into a run-on blob.)
+        data["multichannel_output_style"] = "separate"
+    elif send_diarize:
+        # Known 2-party calls: hint the speaker count to sharpen diarization.
+        num_speakers = os.environ.get("TRANSCRIBE_NUM_SPEAKERS", "").strip()
+        if num_speakers:
+            data["num_speakers"] = num_speakers
+    # Default to an English hint when the caller gave none (our calls are English);
+    # override per-call with --language or TRANSCRIBE_DEFAULT_LANGUAGE.
+    effective_language = language or os.environ.get(
+        "TRANSCRIBE_DEFAULT_LANGUAGE", "eng"
+    ).strip()
+    if effective_language:
+        data["language_code"] = effective_language
 
     if verbose:
         mode = "multichannel" if use_multi_channel else "diarized"
         print(
-            f"    ElevenLabs STT model={model_id} mode={mode} channels={channels}",
+            f"    ElevenLabs STT model={model_id} mode={mode} channels={channels} "
+            f"lang={data.get('language_code', 'auto')}",
             file=sys.stderr,
         )
 
@@ -687,50 +976,66 @@ def transcribe_with_elevenlabs_speech_to_text(
         segment_paths, split_dir = _ffmpeg_split_audio_segments(
             original_path, max_multichannel_sec, verbose=verbose
         )
-        merged_parts: list[str] = []
+        # Collect word events across all segments, re-basing each segment's
+        # timestamps by its start offset, then merge ONCE by utterance. This
+        # keeps a speaker's turn whole across a segment boundary instead of
+        # emitting disconnected [Part N] blobs.
+        all_events: list[dict] = []
+        raw_segments: list[object] = []
         transcript_language = language or "auto"
         try:
             for i, seg in enumerate(segment_paths):
+                offset = i * max_multichannel_sec
                 up, up_dir = prepare_elevenlabs_upload_file(seg, verbose=verbose)
                 try:
-                    t_text, t_lang = _post_elevenlabs_stt(
-                        up, data, api_key, language, verbose
-                    )
+                    body = _post_elevenlabs_stt_raw(up, data, api_key, verbose)
                 finally:
                     if up_dir is not None:
                         shutil.rmtree(up_dir, ignore_errors=True)
-                if i == 0 and t_lang:
-                    transcript_language = t_lang
-                merged_parts.append(
-                    f"[Part {i + 1} / {len(segment_paths)}]\n{t_text.strip()}"
-                )
-            transcription_text = "\n\n".join(merged_parts)
+                raw_segments.append(body)
+                if isinstance(body, dict) and "transcripts" in body:
+                    all_events.extend(
+                        _multichannel_words_to_events(
+                            body["transcripts"], time_offset=offset
+                        )
+                    )
+                    if i == 0 and body["transcripts"]:
+                        transcript_language = (
+                            body["transcripts"][0].get("language_code")
+                            or transcript_language
+                        )
         finally:
             shutil.rmtree(split_dir, ignore_errors=True)
 
+        transcription_text = (
+            _merge_word_events_by_utterance(all_events, _channel_labels()) or ""
+        )
         return {
             "transcription_text": transcription_text,
             "language": transcript_language,
             "audio_duration_seconds": duration,
             "file_size_bytes": original_path.stat().st_size,
+            "raw_response": {"segments": raw_segments},
         }
 
     upload_path, upload_temp = prepare_elevenlabs_upload_file(
         original_path, verbose=verbose
     )
     try:
-        transcription_text, transcript_language = _post_elevenlabs_stt(
-            upload_path, data, api_key, language, verbose
-        )
+        body = _post_elevenlabs_stt_raw(upload_path, data, api_key, verbose)
     finally:
         if upload_temp is not None:
             shutil.rmtree(upload_temp, ignore_errors=True)
 
+    transcription_text, transcript_language = _parse_elevenlabs_stt_response(
+        body, language
+    )
     return {
         "transcription_text": transcription_text,
         "language": transcript_language,
         "audio_duration_seconds": get_audio_duration(original_path),
         "file_size_bytes": original_path.stat().st_size,
+        "raw_response": body,
     }
 
 
@@ -992,155 +1297,6 @@ def split_audio_file(
         raise RuntimeError(f"Failed to split audio file: {e}") from e
 
 
-def _elevenlabs_raw_words(
-    audio_path: Path,
-    *,
-    diarize: bool,
-    language: str | None,
-    verbose: bool,
-) -> tuple[list[dict], str]:
-    """
-    Call ElevenLabs STT and return (words_list, language_code).
-
-    Each word dict has at minimum: {"text": str, "start": float, "speaker_id": str|None}.
-    Used by transcribe_two_files() to merge mic + remote word streams.
-    Forces mono diarized or mono non-diarized (caller decides).
-    """
-    api_key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("ELEVENLABS_API_KEY is not set")
-
-    model_id = os.environ.get("ELEVENLABS_STT_MODEL_ID", "scribe_v2").strip()
-    data: dict = {
-        "model_id": model_id,
-        "tag_audio_events": "true",
-        "diarize": "true" if diarize else "false",
-        "use_multi_channel": "false",
-        "timestamps_granularity": "word",
-        "webhook": "false",
-    }
-    if language:
-        data["language_code"] = language
-
-    upload_path, upload_temp = prepare_elevenlabs_upload_file(audio_path, verbose=verbose)
-    try:
-        timeout = _elevenlabs_request_timeout()
-        with open(upload_path, "rb") as fp:
-            resp = requests.post(
-                "https://api.elevenlabs.io/v1/speech-to-text",
-                headers={"xi-api-key": api_key},
-                data=data,
-                files={"file": (upload_path.name, fp)},
-                timeout=timeout,
-            )
-        if resp.status_code != 200:
-            try:
-                detail = resp.json()
-            except Exception:
-                detail = resp.text
-            raise RuntimeError(
-                f"ElevenLabs STT failed ({resp.status_code}): {detail}"
-            )
-        body = resp.json()
-    finally:
-        if upload_temp is not None:
-            shutil.rmtree(upload_temp, ignore_errors=True)
-
-    lang = "auto"
-    if isinstance(body, dict):
-        lang = body.get("language_code") or language or "auto"
-
-    words: list[dict] = []
-    if isinstance(body, dict):
-        raw_words = body.get("words") or []
-        for w in raw_words:
-            if not isinstance(w, dict):
-                continue
-            start = w.get("start")
-            text = w.get("text")
-            if start is None or text is None:
-                continue
-            words.append({
-                "text": str(text),
-                "start": float(start),
-                "end": float(w.get("end", start)),
-                "speaker_id": w.get("speaker_id") or w.get("speaker") or None,
-                "type": w.get("type", "word"),
-            })
-
-    # Fallback: if no word-level data, wrap full text as single pseudo-word at t=0
-    if not words and isinstance(body, dict):
-        text = (body.get("text") or "").strip()
-        if text:
-            words = [{"text": text, "start": 0.0, "end": 0.0, "speaker_id": None, "type": "word"}]
-
-    return words, lang
-
-
-def _merge_two_file_words(
-    mic_words: list[dict],
-    remote_words: list[dict],
-) -> str:
-    """
-    Merge word streams from mic (you) and remote (diarized others) into a single
-    chronological transcript with speaker labels.
-
-    Mic words → [You]
-    Remote words → [Speaker_N] (or renamed if speaker_id present)
-
-    Groups consecutive words from the same speaker into paragraphs.
-    """
-    # Tag mic words
-    tagged: list[dict] = []
-    for w in mic_words:
-        tagged.append({**w, "_label": "You"})
-
-    # Tag remote words — use speaker_id if present, else "Remote"
-    speaker_map: dict[str, str] = {}
-    counter = 0
-    for w in remote_words:
-        sid = w.get("speaker_id")
-        if sid:
-            if sid not in speaker_map:
-                speaker_map[sid] = f"Speaker_{counter}"
-                counter += 1
-            label = speaker_map[sid]
-        else:
-            label = "Remote"
-        tagged.append({**w, "_label": label})
-
-    # Sort by start time; mic wins ties (you started the utterance)
-    tagged.sort(key=lambda w: (w["start"], 0 if w["_label"] == "You" else 1))
-
-    # Group into runs of same label, build paragraphs
-    parts: list[str] = []
-    current_label: str | None = None
-    buf: list[str] = []
-
-    def flush() -> None:
-        nonlocal current_label, buf
-        if current_label is None or not buf:
-            return
-        chunk = " ".join(buf).strip()
-        if chunk:
-            parts.append(f"[{current_label}]\n{chunk}")
-        buf = []
-
-    for w in tagged:
-        # Skip non-word tokens (audio events like [laughter]) but keep them inline
-        label = w["_label"]
-        text = w["text"]
-        if not text.strip():
-            continue
-        if label != current_label:
-            flush()
-            current_label = label
-        buf.append(text)
-
-    flush()
-    return "\n\n".join(parts)
-
-
 def transcribe_two_files(
     mic_path: Path,
     remote_path: Path,
@@ -1148,63 +1304,53 @@ def transcribe_two_files(
     verbose: bool = False,
 ) -> dict:
     """
-    Transcribe mic + remote audio files separately via ElevenLabs, then merge
-    into a single chronological transcript with [You] / [Speaker_N] labels.
+    Transcribe a mic track + a system/remote track as one 2-speaker dialogue.
 
-    mic_path   — your microphone only (mono, single speaker, no diarization needed)
-    remote_path — system-wide audio (mono, 1–N remote speakers, diarized)
+    The two mono tracks are combined into a single 2-channel file (system → left
+    / channel 0, mic → right / channel 1 — the order record_meeting also uses)
+    and transcribed via ElevenLabs MULTICHANNEL mode. Speaker identity then comes
+    from the channel number, not
+    from an acoustic diarization guess — deterministic and correct by
+    construction for known-separate tracks. The readable dialogue is built by
+    utterance (see _merge_word_events_by_utterance), so cross-talk stays legible.
+
+    This supersedes the old approach of transcribing each track in a separate API
+    call and interleaving words by timestamp, which shredded overlapping speech
+    and could mis-order words when the two independent calls' clocks drifted.
+
+    mic_path    — operator microphone track (mono) → labeled [Mic]
+    remote_path — system-wide audio track (mono)   → labeled [System]
 
     Returns same shape as transcribe_audio_file().
     """
     if verbose:
-        print(f"    Two-file transcription: mic={mic_path.name} remote={remote_path.name}", file=sys.stderr)
+        print(
+            f"    Two-track transcription (multichannel): "
+            f"mic={mic_path.name} system={remote_path.name}",
+            file=sys.stderr,
+        )
 
-    if verbose:
-        print("    Transcribing mic file (single speaker)...", file=sys.stderr)
-    mic_words, mic_lang = _elevenlabs_raw_words(
-        mic_path, diarize=False, language=language, verbose=verbose
+    stereo_path, stereo_dir = _combine_tracks_to_stereo(
+        mic_path, remote_path, verbose=verbose
     )
+    try:
+        result = transcribe_with_elevenlabs_speech_to_text(
+            stereo_path, language=language, verbose=verbose
+        )
+    finally:
+        if stereo_dir is not None:
+            shutil.rmtree(stereo_dir, ignore_errors=True)
 
-    if verbose:
-        print("    Transcribing remote file (diarized)...", file=sys.stderr)
-    remote_words, remote_lang = _elevenlabs_raw_words(
-        remote_path, diarize=True, language=language, verbose=verbose
-    )
-
-    transcript_language = mic_lang if mic_lang != "auto" else remote_lang
-
-    merged_text = _merge_two_file_words(mic_words, remote_words)
-
-    if not merged_text.strip():
-        # Fallback: just concatenate raw texts
-        mic_text = " ".join(w["text"] for w in mic_words).strip()
-        remote_text = " ".join(w["text"] for w in remote_words).strip()
-        parts = []
-        if mic_text:
-            parts.append(f"[You]\n{mic_text}")
-        if remote_text:
-            parts.append(f"[Remote]\n{remote_text}")
-        merged_text = "\n\n".join(parts)
-
-    # Duration = max of both files
+    # Duration = max of both source files (the stereo file equals this).
     mic_dur = get_audio_duration(mic_path)
     remote_dur = get_audio_duration(remote_path)
-    duration: float | None = None
-    if mic_dur is not None and remote_dur is not None:
-        duration = max(mic_dur, remote_dur)
-    elif mic_dur is not None:
-        duration = mic_dur
-    elif remote_dur is not None:
-        duration = remote_dur
+    durations = [d for d in (mic_dur, remote_dur) if d is not None]
+    if durations:
+        result["audio_duration_seconds"] = max(durations)
 
-    return {
-        "transcription_text": merged_text,
-        "language": transcript_language,
-        "audio_duration_seconds": duration,
-        "file_size_bytes": remote_path.stat().st_size,
-        "mic_file": str(mic_path),
-        "remote_file": str(remote_path),
-    }
+    result["mic_file"] = str(mic_path)
+    result["remote_file"] = str(remote_path)
+    return result
 
 
 def transcribe_audio_file(
@@ -1278,6 +1424,9 @@ def transcribe_audio_file(
                 "language": el["language"],
                 "audio_duration_seconds": get_audio_duration(metadata_path),
                 "file_size_bytes": metadata_path.stat().st_size,
+                # Carry the raw ElevenLabs response through so the single-file
+                # path also writes the .stt_raw.json sidecar for offline re-merge.
+                "raw_response": el.get("raw_response"),
             }
 
         # OpenAI Whisper path
@@ -1759,6 +1908,40 @@ def is_already_transcribed(audio_path: Path) -> bool:
     return len(entities) > 0
 
 
+def _write_transcript_sidecars(
+    audio_path: Path, result: dict, verbose: bool = False
+) -> None:
+    """
+    Write two sidecars next to the audio file:
+      <stem>.transcript.txt   — the merged, speaker-labeled transcript
+      <stem>.stt_raw.json     — the raw ElevenLabs response (word timings, per
+                                channel/speaker), for offline re-merge
+
+    Best-effort: never raise (a sidecar failure must not fail transcription).
+    """
+    try:
+        text = (result.get("transcription_text") or "").strip()
+        if text:
+            txt_path = audio_path.with_suffix(audio_path.suffix + ".transcript.txt")
+            txt_path.write_text(text, encoding="utf-8")
+            if verbose:
+                print(f"    Wrote transcript sidecar: {txt_path.name}", file=sys.stderr)
+        raw = result.get("raw_response")
+        if raw is not None:
+            json_path = audio_path.with_suffix(audio_path.suffix + ".stt_raw.json")
+            json_path.write_text(
+                json.dumps(raw, ensure_ascii=False), encoding="utf-8"
+            )
+            if verbose:
+                print(
+                    f"    Wrote raw STT JSON sidecar: {json_path.name}",
+                    file=sys.stderr,
+                )
+    except Exception as e:  # noqa: BLE001 — sidecars are best-effort
+        if verbose:
+            print(f"    (sidecar write skipped: {e})", file=sys.stderr)
+
+
 def save_transcription(
     audio_path: Path,
     transcription_result: dict,
@@ -2123,6 +2306,12 @@ def main():
                 language=args.language,
                 use_diarization=use_diarization,
             )
+
+        # Always drop sidecars next to the audio: a .txt of the merged transcript
+        # (recoverable even if the Neotoma store is later rejected as a duplicate
+        # idempotency key) and the raw ElevenLabs JSON (so the dialogue can be
+        # re-merged with different segmentation without re-billing the API).
+        _write_transcript_sidecars(audio_path, transcription_result, verbose=True)
 
         if args.no_store:
             text = (transcription_result.get("transcription_text") or "").strip()
