@@ -377,19 +377,100 @@ def _extra_proper_nouns() -> list[tuple[str, str]]:
 
 def _apply_proper_noun_corrections(text: str) -> str:
     """
-    Repair known STT mistranscriptions of proper nouns (belt-and-suspenders to
-    the keyterms bias). Regex-based, word-bounded, case-insensitive. Runs on the
-    merged transcript, so it applies to every path (multichannel, diarized, and
-    the plain single-speaker case).
+    Repair known STT mistranscriptions of proper nouns. Regex-based,
+    word-bounded, case-insensitive. Runs on the merged transcript, so it applies
+    to every path (multichannel, diarized, and the plain single-speaker case).
     """
     if not text:
         return text
     for canon, variant_re in _PROPER_NOUN_CORRECTIONS + _extra_proper_nouns():
-        text = re.sub(rf"\b(?:{variant_re})\b", canon, text)
+        text = re.sub(rf"\b(?:{variant_re})\b", canon, text, flags=re.IGNORECASE)
     # Collapse any doubled suffix an overlapping rule may have produced.
     text = re.sub(r"Bottega8+8", "Bottega8", text)
     text = re.sub(r"Bottega8\s+8\b", "Bottega8", text)
     return text
+
+
+def _clean_stutters(text: str) -> str:
+    """
+    Remove speech-disfluency stutter artifacts that ElevenLabs transcribes
+    faithfully but that hurt readability. CONSERVATIVE by design — it only
+    removes false-start fragments and immediate repeats; it never drops a whole
+    real word or filler ("um"/"uh"/"like" stay). Disable with
+    TRANSCRIBE_CLEAN_STUTTERS=0 for a verbatim transcript.
+
+    Handles:
+      - word-restart stubs: "b-before" -> "before", "s-set" -> "set",
+        "in- interacting" -> "interacting" (fragment is a prefix of the next word)
+      - hyphen/space false starts: "topolog- topology" -> "topology"
+      - immediate word repeats: "the, the, the" / "I I I" -> one
+    """
+    if os.environ.get("TRANSCRIBE_CLEAN_STUTTERS", "1").strip() in ("0", "false", "no"):
+        return text
+    if not text:
+        return text
+
+    # 1) Word-restart stub immediately followed (no space) by the full word,
+    #    where the stub is a leading fragment of that word: "b-before" ->
+    #    "before". Require the stub to be a case-insensitive prefix of the
+    #    following word so we don't delete real closed hyphenated terms.
+    def _restart(m: re.Match) -> str:
+        stub, word = m.group(1), m.group(2)
+        return word if word.lower().startswith(stub.lower()) else m.group(0)
+
+    text = re.sub(r"\b([A-Za-z]{1,})-([A-Za-z]+)\b", _restart, text)
+
+    # 2) Abandoned false-start fragment: a short stub ending in a hyphen, then a
+    #    SPACE, then another word — the speaker began a word, cut off, and said
+    #    something else ("s- you" -> "you", "th- what" -> "what", "in-- First" ->
+    #    "First"). Only fires with the space + trailing hyphen, so real closed
+    #    compounds ("high-level", "one-on-one", "Mm-hmm") — no space around the
+    #    hyphen — are never touched. The stub must NOT be a real word, so a real
+    #    short word that legitimately trails a dash ("So-- but", "I mean-- like",
+    #    "fine-- I think") is kept.
+    _REAL_SHORT_WORDS = {
+        "a", "an", "and", "as", "at", "be", "but", "by", "do", "for", "go",
+        "he", "i", "if", "in", "is", "it", "its", "me", "my", "no", "of", "on",
+        "or", "so", "to", "up", "us", "we", "yes", "you", "the", "this", "that",
+        "then", "them", "they", "here", "mean", "fine", "well", "like", "just",
+        "not", "now", "how", "why", "who", "our", "out", "she", "her", "his",
+        "was", "are", "all", "can", "did", "get", "got", "had", "has", "him",
+        "let", "may", "new", "one", "two", "way", "yet",
+    }
+
+    def _abandon(m: re.Match) -> str:
+        stub = m.group(1)
+        return "" if stub.lower() not in _REAL_SHORT_WORDS else m.group(0)
+
+    text = re.sub(r"\b([A-Za-z]{1,4})-{1,2}\s+(?=[A-Za-z])", _abandon, text)
+
+    # If the restart form left a space-separated prefix stutter
+    # ("topolog- topology"), collapse it too (prefix check, longer stubs only).
+    def _restart_spaced(m: re.Match) -> str:
+        stub, word = m.group(1), m.group(2)
+        return word if word.lower().startswith(stub.lower()) else m.group(0)
+
+    text = re.sub(r"\b([A-Za-z]{2,})-\s+([A-Za-z]+)\b", _restart_spaced, text)
+
+    # 2) Immediate identical word repeats (with optional comma/space between):
+    #    "the, the, the" -> "the", "I I I" -> "I". Case-insensitive match, keep
+    #    the first occurrence's casing.
+    text = re.sub(
+        r"\b(\w+)(?:[,\s]+\1\b)+",
+        lambda m: m.group(1),
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # 3) Tidy spacing/punctuation the removals may have left.
+    text = re.sub(r"\s+([,.?!])", r"\1", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
+
+
+def _postprocess_transcript(text: str) -> str:
+    """Standard post-merge cleanup: fix proper nouns, then de-stutter."""
+    return _clean_stutters(_apply_proper_noun_corrections(text))
 
 
 def _merge_word_events_by_utterance(
@@ -834,9 +915,9 @@ def _ffmpeg_split_audio_segments(
 def _parse_elevenlabs_stt_response(
     body: object, language: str | None
 ) -> tuple[str, str]:
-    """Parse the STT response, then repair known proper-noun mishears."""
+    """Parse the STT response, then fix proper nouns and clean stutters."""
     text, lang = _parse_elevenlabs_stt_response_raw(body, language)
-    return _apply_proper_noun_corrections(text), lang
+    return _postprocess_transcript(text), lang
 
 
 def _parse_elevenlabs_stt_response_raw(
@@ -1070,7 +1151,7 @@ def transcribe_with_elevenlabs_speech_to_text(
         finally:
             shutil.rmtree(split_dir, ignore_errors=True)
 
-        transcription_text = _apply_proper_noun_corrections(
+        transcription_text = _postprocess_transcript(
             _merge_word_events_by_utterance(all_events, _channel_labels()) or ""
         )
         return {
