@@ -1,10 +1,19 @@
 """
 handlers/btc_transfer.py — Generic BTC transfer handler for Monedula.
 
-Executes a BTC payment for any PaymentProfile with payment_type="btc".
-Uses claude --print with the btc-wallet MCP to execute the transfer.
-All profile-specific values (address, amount, task ID) are loaded from env
-via PaymentProfile — no hardcoded business data here.
+Executes a BTC payment for any PaymentProfile with payment_type="btc" by calling
+the bitcoin wallet library's functions DIRECTLY (BTCConfig.from_env +
+send_transfer_multi), mirroring how wise_transfer.py calls the Wise REST API.
+
+This deliberately does NOT shell out to `claude --print` with a scripted payment
+prompt: a headless sub-agent correctly refuses to move funds from a context-free
+"send X to address Y" script (it reads as prompt-injection), so that path never
+executes. A direct library call has no such ambiguity and honours dry_run.
+
+The wallet module is imported from BTC_WALLET_MODULE_PATH (default
+~/repos/mcp-server-bitcoin). Wallet secrets (BTC_MNEMONIC, BTC_NETWORK, …) must
+be present in the daemon env. All profile-specific values (address, amount, task
+ID) come from PaymentProfile — no hardcoded business data here.
 """
 
 from __future__ import annotations
@@ -61,7 +70,8 @@ class BtcTransferHandler(PaymentHandler):
         )
 
     def execute(self, match: dict) -> dict[str, Any]:
-        log.info(f"[{self.name}] Executing BTC payment via claude --print...")
+        dry_run = os.environ.get("MONEDULA_DRYRUN", "1") != "0"
+        log.info(f"[{self.name}] Executing BTC payment via wallet lib (dry_run={dry_run})...")
 
         if not self.profile.btc_address:
             return {
@@ -70,54 +80,45 @@ class BtcTransferHandler(PaymentHandler):
                 "error": f"{self.profile.prefix}_BTC_ADDRESS not set",
             }
 
-        prompt = _build_claude_prompt(self.profile)
-        claude_path = _find_claude()
-        if not claude_path:
-            return {
-                "status": "failed",
-                "handler": self.name,
-                "error": "claude CLI not found in PATH",
-            }
-
+        # Invoke the deterministic runner using the WALLET's own venv python
+        # (it has bip_utils etc., which the daemon venv does not). The runner is
+        # a pure function call — no LLM, nothing to refuse — and honours dry_run.
+        py = _wallet_python()
+        runner = Path(__file__).parent / "btc_send_runner.py"
+        req = json.dumps({
+            "address": self.profile.btc_address,
+            "amount_eur": self.profile.amount_eur,
+            "dry_run": dry_run,
+        })
         try:
-            result = subprocess.run(
-                [claude_path, "--print", "--dangerously-skip-permissions", prompt],
-                capture_output=True,
-                text=True,
-                timeout=300,
-                env=os.environ,
+            proc = subprocess.run(
+                [py, str(runner), req],
+                capture_output=True, text=True, timeout=180, env=os.environ,
             )
         except subprocess.TimeoutExpired:
-            return {
-                "status": "failed",
-                "handler": self.name,
-                "error": "claude subprocess timed out after 300s",
-            }
-        except Exception as exc:
-            return {
-                "status": "failed",
-                "handler": self.name,
-                "error": f"claude subprocess error: {exc}",
-            }
+            return {"status": "failed", "handler": self.name,
+                    "error": "btc_send_runner timed out after 180s"}
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "failed", "handler": self.name,
+                    "error": f"btc_send_runner invocation error: {exc}"}
 
-        output = result.stdout or ""
-        log.debug(
-            f"[{self.name}] claude stdout ({len(output)} chars):\n{output[:2000]}"
-        )
-
-        payment_result = _parse_payment_result(output)
-        if payment_result is None:
-            log.error(
-                f"[{self.name}] No PAYMENT_RESULT line found in output:\n{output[:1000]}"
-            )
-            return {
-                "status": "failed",
-                "handler": self.name,
-                "error": "No PAYMENT_RESULT line in claude output",
-                "raw_output": output[:500],
-            }
+        out = (proc.stdout or "").strip()
+        try:
+            payment_result = json.loads(out) if out else {}
+        except json.JSONDecodeError:
+            log.error(f"[{self.name}] runner stdout not JSON: {out[:300]!r} "
+                      f"stderr={(proc.stderr or '')[:300]!r}")
+            return {"status": "failed", "handler": self.name,
+                    "error": "btc_send_runner returned non-JSON",
+                    "raw_output": out[:300]}
 
         payment_result["handler"] = self.name
+        payment_result.setdefault("amount_eur", self.profile.amount_eur)
+
+        if payment_result.get("status") == "dry_run":
+            log.info(f"[{self.name}] DRY-RUN built tx (not broadcast): "
+                     f"{payment_result.get('txid')}")
+            return payment_result
 
         if payment_result.get("status") == "sent":
             txid = payment_result.get("txid", "")
@@ -147,56 +148,24 @@ class BtcTransferHandler(PaymentHandler):
             return f"❌ {self.profile.label} payment failed: {error}"
 
 
-def _find_claude() -> str | None:
-    import shutil
+def _wallet_python() -> str:
+    """Path to the bitcoin wallet's own venv python (has bip_utils etc.).
 
-    return shutil.which("claude")
-
-
-def _build_claude_prompt(profile: PaymentProfile) -> str:
-    today_str = date.today().isoformat()
-    address = profile.btc_address
-    amount = profile.amount_eur
-    label = profile.label
-    return f"""You are executing a Bitcoin payment for {label}.
-
-Today is {today_str}.
-
-INSTRUCTIONS:
-1. First call btc_wallet_preview_transfer with these arguments:
-   {{ "to_address": "{address}", "amount_eur": {amount} }}
-
-2. Review the preview. If it looks reasonable (correct address, amount ~€{amount}), proceed.
-
-3. Call btc_wallet_send_transfer with these arguments (do NOT pass memo or OP_RETURN):
-   {{ "to_address": "{address}", "amount_eur": {amount} }}
-
-4. After sending, output exactly one line in this format (no other text after it):
-PAYMENT_RESULT: {{"status": "sent", "txid": "<actual txid>", "amount_eur": {amount}}}
-
-If anything fails, output:
-PAYMENT_RESULT: {{"status": "failed", "txid": "", "amount_eur": {amount}, "error": "<description>"}}
-
-Important constraints:
-- Do NOT pass a memo field (no OP_RETURN on-chain)
-- The PAYMENT_RESULT line must be the very last line of your response
-- Do not include any extra text after the PAYMENT_RESULT line
-"""
-
-
-def _parse_payment_result(output: str) -> dict | None:
-    for line in reversed(output.splitlines()):
-        line = line.strip()
-        if line.startswith("PAYMENT_RESULT:"):
-            json_str = line[len("PAYMENT_RESULT:") :].strip()
-            try:
-                return json.loads(json_str)
-            except json.JSONDecodeError as exc:
-                log.error(
-                    f"Failed to parse PAYMENT_RESULT JSON: {exc}\n  line={line!r}"
-                )
-                return None
-    return None
+    BTC_WALLET_PYTHON overrides; otherwise <BTC_WALLET_MODULE_PATH>/venv13/bin/
+    python3, else the wallet module dir's venv, else plain 'python3'.
+    """
+    override = os.environ.get("BTC_WALLET_PYTHON", "").strip()
+    if override:
+        return override
+    module_path = Path(
+        os.environ.get("BTC_WALLET_MODULE_PATH",
+                       str(Path.home() / "repos" / "mcp-server-bitcoin"))
+    ).expanduser()
+    for cand in (module_path / "venv13" / "bin" / "python3",
+                 module_path / "venv" / "bin" / "python3"):
+        if cand.exists():
+            return str(cand)
+    return "python3"
 
 
 def _update_task(profile: PaymentProfile, txid: str) -> None:

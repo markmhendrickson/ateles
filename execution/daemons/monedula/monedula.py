@@ -445,16 +445,34 @@ def _mark_tasks_paid(task_results: list[tuple], due_tasks: list[dict]) -> None:
             continue
         ref = (result.get("transfer_id") or result.get("txid")
                or result.get("reference") or "")
-        note = f"Paid {date.today().isoformat()} via Monedula ({handler.name}); ref={ref}"
-        try:
-            subprocess.run(
-                [neotoma, "--api-only", "entities", "update", tid,
-                 "--status", "done", "--notes", note],
-                capture_output=True, text=True, timeout=30, env=os.environ,
-            )
-            log.info(f"[autoexec] Marked task {tid} done ({handler.name}).")
-        except Exception as exc:  # noqa: BLE001
-            log.warning(f"[autoexec] Failed to mark task {tid} done: {exc}")
+
+        # Use `neotoma corrections create` (one high-priority correction per
+        # field) — the CLI has no `entities update` verb. Set status=done and
+        # record the payment reference in payment_event_id for idempotency.
+        def _correct(field: str, value: str) -> bool:
+            try:
+                r = subprocess.run(
+                    [neotoma, "--api-only", "corrections", "create", tid,
+                     "--entity-type", "task",
+                     "--field-name", field, "--corrected-value", value],
+                    capture_output=True, text=True, timeout=30, env=os.environ,
+                )
+                if r.returncode != 0:
+                    log.warning(f"[autoexec] corrections create {field} failed "
+                                f"(rc={r.returncode}): {(r.stderr or '').strip()[:160]}")
+                    return False
+                return True
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"[autoexec] corrections create {field} error: {exc}")
+                return False
+
+        ok_status = _correct("status", "done")
+        ok_ref = _correct("payment_event_id", str(ref)) if ref else True
+        if ok_status and ok_ref:
+            log.info(f"[autoexec] Marked task {tid} done ({handler.name}), ref={ref}.")
+        else:
+            log.warning(f"[autoexec] Task {tid} NOT fully marked paid "
+                        f"(status_ok={ok_status}, ref_ok={ok_ref}) — needs manual close.")
 
 
 # ---------------------------------------------------------------------------
