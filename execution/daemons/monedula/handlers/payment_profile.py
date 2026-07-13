@@ -59,10 +59,16 @@ class PaymentProfile:
     amount_eur: int
 
     # Wise-specific
-    contact_id: str = ""  # Neotoma contact_id prefix for IBAN lookup
-    contact_category: str = ""  # fallback: contacts.parquet category
-    contact_platform: str = ""  # fallback: contacts.parquet platform
+    contact_id: str = ""  # Neotoma contact entity id — payee resolved from its snapshot
+    contact_category: str = ""  # (legacy, unused since parquet removal)
+    contact_platform: str = ""  # (legacy, unused since parquet removal)
     wise_reference: str = ""  # Wise transfer reference
+    # Direct recipient resolution (preferred over contacts.parquet when set):
+    # a verified Wise recipient/account id reuses an already name-checked payee;
+    # iban + recipient_name let the profile carry the payee without parquet.
+    wise_recipient_id: str = ""  # verified Wise account id (skips recipient creation)
+    wise_iban: str = ""  # payee IBAN carried on the profile
+    wise_recipient_name: str = ""  # payee legal name for a profile-carried IBAN
 
     # BTC-specific
     btc_address: str = ""
@@ -216,6 +222,9 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
                 contact_category=snap.get("contact_category", ""),
                 contact_platform=snap.get("contact_platform", ""),
                 wise_reference=snap.get("wise_reference", ""),
+                wise_recipient_id=str(snap.get("wise_recipient_id", "") or ""),
+                wise_iban=str(snap.get("wise_iban", "") or ""),
+                wise_recipient_name=str(snap.get("wise_recipient_name", "") or ""),
                 btc_address=snap.get("btc_address", ""),
                 neotoma_task_id=snap.get("neotoma_task_id", ""),
                 task_keywords=task_keywords,
@@ -322,6 +331,9 @@ def _load_profile(prefix: str) -> PaymentProfile | None:
         contact_category=env("CONTACT_CATEGORY"),
         contact_platform=env("CONTACT_PLATFORM"),
         wise_reference=env("WISE_REFERENCE"),
+        wise_recipient_id=env("WISE_RECIPIENT_ID"),
+        wise_iban=env("WISE_IBAN"),
+        wise_recipient_name=env("WISE_RECIPIENT_NAME"),
         # btc
         btc_address=env("BTC_ADDRESS"),
         # neotoma

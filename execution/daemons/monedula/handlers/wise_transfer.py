@@ -2,9 +2,10 @@
 handlers/wise_transfer.py — Generic Wise transfer handler for Monedula.
 
 Executes a Wise IBAN transfer for any PaymentProfile with payment_type="wise".
-Contact (name + IBAN) is loaded from contacts.parquet using the profile's
-contact_id prefix and category/platform fallback — all driven by env vars,
-no business-specific values hardcoded here.
+The payee is resolved entirely from Neotoma (the swarm's canonical store) —
+either from profile-carried fields (wise_recipient_id / wise_iban) or from the
+linked Neotoma contact entity (profile.contact_id). There is NO parquet
+dependency; no business-specific values are hardcoded here.
 
 Wise API flow:
   1. GET /v1/profiles → pick personal profile_id
@@ -24,7 +25,6 @@ import logging
 import os
 import subprocess
 from datetime import date, timedelta
-from pathlib import Path
 from typing import Any
 
 try:
@@ -77,24 +77,36 @@ class WiseTransferHandler(PaymentHandler):
         """Execute Wise transfer. Returns result dict with status and details."""
         log.info(f"[{self.name}] Executing Wise payment...")
 
-        contact = _load_contact(self.profile)
-        if not contact:
+        # Recipient resolution order (all Neotoma-sourced; no parquet):
+        #   1. profile.wise_recipient_id  — reuse a verified Wise account (safest;
+        #      no recipient re-creation, name already checked by Wise).
+        #   2. profile.wise_iban          — IBAN carried on the profile itself.
+        #   3. Neotoma contact entity (profile.contact_id) — reads
+        #      wise_recipient_id / iban / name from the contact snapshot.
+        recipient_id = str(getattr(self.profile, "wise_recipient_id", "") or "").strip()
+        iban = str(getattr(self.profile, "wise_iban", "") or "").strip()
+        recipient_name = str(getattr(self.profile, "wise_recipient_name", "") or "").strip()
+
+        if not recipient_id and not iban:
+            contact = _load_contact(self.profile)
+            if not contact:
+                return {
+                    "status": "manual_required",
+                    "handler": self.name,
+                    "error": "No wise_recipient_id/wise_iban on profile and no Neotoma contact resolved",
+                    "amount_eur": self.profile.amount_eur,
+                    "reference": self.profile.wise_reference,
+                }
+            # A contact may itself carry a verified Wise recipient id — prefer it.
+            recipient_id = recipient_id or contact.get("wise_recipient_id", "")
+            iban = contact.get("iban", "")
+            recipient_name = recipient_name or contact.get("name", "")
+
+        if not recipient_id and not iban:
             return {
                 "status": "manual_required",
                 "handler": self.name,
-                "error": "Could not load contact",
-                "amount_eur": self.profile.amount_eur,
-                "reference": self.profile.wise_reference,
-            }
-
-        iban = contact.get("iban", "")
-        recipient_name = contact.get("name", "")
-
-        if not iban:
-            return {
-                "status": "manual_required",
-                "handler": self.name,
-                "error": "No IBAN found in contact",
+                "error": "No Wise recipient id or IBAN resolved",
                 "amount_eur": self.profile.amount_eur,
                 "reference": self.profile.wise_reference,
                 "recipient_name": recipient_name,
@@ -121,6 +133,8 @@ class WiseTransferHandler(PaymentHandler):
                 self.profile.amount_eur,
                 self.profile.wise_reference,
                 label=self.name,
+                recipient_id=recipient_id,
+                dry_run=os.environ.get("MONEDULA_DRYRUN", "1") != "0",
             )
         except Exception as exc:
             log.error(f"[{self.name}] Wise transfer exception: {exc}")
@@ -174,89 +188,73 @@ class WiseTransferHandler(PaymentHandler):
 
 
 # ---------------------------------------------------------------------------
-# Contact loading (from contacts.parquet, generic)
+# Contact loading (from Neotoma — the swarm's canonical store; no parquet)
 # ---------------------------------------------------------------------------
 
 
 def _load_contact(profile: PaymentProfile) -> dict | None:
     """
-    Load payment contact from contacts.parquet using profile config.
-    Tries contact_id prefix first, then category+platform fallback.
-    Returns dict with at least 'name' and 'iban', or None on failure.
+    Load the payment contact from Neotoma (the canonical store) using the
+    profile's `contact_id` (a Neotoma contact entity id). Reads payment fields
+    directly from the contact snapshot: name, iban, wise_recipient_id,
+    btc_address. Returns a dict with at least 'name' and 'iban', or None.
+
+    Prefer profile-carried recipient fields (wise_recipient_id / wise_iban) over
+    this lookup — see WiseTransferHandler.execute(). This function exists for the
+    contact_id path; there is NO parquet dependency.
     """
-    data_dir = os.environ.get("DATA_DIR", "").strip()
-    if not data_dir:
-        log.warning(f"[{profile.name}] DATA_DIR not set — cannot load contacts")
+    contact_id = str(getattr(profile, "contact_id", "") or "").strip()
+    if not contact_id:
+        log.warning(f"[{profile.name}] No contact_id on profile — cannot resolve payee from Neotoma")
         return None
 
-    contacts_path = Path(data_dir) / "contacts" / "contacts.parquet"
-    if not contacts_path.exists():
-        log.warning(f"[{profile.name}] contacts.parquet not found at {contacts_path}")
+    snap = _fetch_contact_snapshot(contact_id)
+    if not snap:
+        log.warning(f"[{profile.name}] Contact {contact_id} not found in Neotoma")
         return None
 
+    return _normalize_contact(snap)
+
+
+def _fetch_contact_snapshot(entity_id: str) -> dict | None:
+    """Fetch a Neotoma contact entity's snapshot dict by id. None on any error."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    base_url = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180").rstrip("/")
+    bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "").strip()
+    is_loopback = "localhost" in base_url or "127.0.0.1" in base_url
     try:
-        import pyarrow.parquet as pq
-
-        table = pq.read_table(str(contacts_path))
-        df = table.to_pydict()
-        n = len(next(iter(df.values())))
-        rows = [{k: df[k][i] for k in df} for i in range(n)]
-        return _find_contact_in_rows(rows, profile)
-    except ImportError:
-        return _load_contact_pandas(contacts_path, profile)
-    except Exception as exc:
-        log.error(f"[{profile.name}] Error loading contacts: {exc}")
+        url = f"{base_url}/entities/{entity_id}"
+        headers = {"Accept": "application/json"}
+        if bearer and not is_loopback:
+            headers["Authorization"] = f"Bearer {bearer}"
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            entity = json.loads(resp.read())
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+        log.error(f"Neotoma contact fetch failed for {entity_id}: {exc}")
         return None
 
-
-def _load_contact_pandas(contacts_path: Path, profile: PaymentProfile) -> dict | None:
-    """Fallback contact loader using pandas."""
-    try:
-        import pandas as pd
-
-        df = pd.read_parquet(str(contacts_path))
-        rows = df.to_dict(orient="records")
-        return _find_contact_in_rows(rows, profile)
-    except Exception as exc:
-        log.error(f"[{profile.name}] Pandas contact load error: {exc}")
-        return None
+    # The entity may nest the resolved fields under snapshot.snapshot.
+    snap = entity.get("snapshot") or entity
+    if isinstance(snap.get("snapshot"), dict):
+        snap = snap["snapshot"]
+    return snap if isinstance(snap, dict) else None
 
 
-def _find_contact_in_rows(rows: list[dict], profile: PaymentProfile) -> dict | None:
-    """Find a matching contact row using profile's contact_id prefix or category/platform."""
-    # Primary: match by contact_id prefix
-    if profile.contact_id:
-        for row in rows:
-            cid = str(row.get("contact_id") or row.get("id") or "")
-            if cid.startswith(profile.contact_id):
-                return _normalize_contact(row)
-
-    # Fallback: category + platform
-    if profile.contact_category or profile.contact_platform:
-        for row in rows:
-            cat = str(row.get("category") or "").lower()
-            plat = str(row.get("platform") or "").lower()
-            cat_match = (not profile.contact_category) or (
-                cat == profile.contact_category.lower()
-            )
-            plat_match = (not profile.contact_platform) or (
-                plat == profile.contact_platform.lower()
-            )
-            if cat_match and plat_match:
-                return _normalize_contact(row)
-
-    log.warning(f"[{profile.name}] Contact not found in contacts.parquet")
-    return None
-
-
-def _normalize_contact(row: dict) -> dict:
-    """Extract name and IBAN from a contact row (handles varied column names)."""
-    name = row.get("name") or row.get("full_name") or row.get("display_name") or ""
-    iban = (
-        row.get("iban") or row.get("bank_account") or row.get("payment_details") or ""
-    )
-    phone = row.get("phone") or row.get("phone_number") or ""
-    return {"name": str(name), "iban": str(iban), "phone": str(phone), **row}
+def _normalize_contact(snap: dict) -> dict:
+    """Extract name + payment identifiers from a Neotoma contact snapshot."""
+    name = snap.get("name") or snap.get("full_name") or snap.get("canonical_name") or ""
+    iban = snap.get("iban") or ""
+    return {
+        "name": str(name),
+        "iban": str(iban),
+        "wise_recipient_id": str(snap.get("wise_recipient_id") or ""),
+        "btc_address": str(snap.get("btc_address") or ""),
+        "phone": str(snap.get("phone") or snap.get("mobile") or ""),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -376,18 +374,42 @@ def _execute_wise_transfer(
     amount_eur: int,
     reference: str,
     label: str = "payment",
+    recipient_id: str = "",
+    dry_run: bool = False,
 ) -> dict:
-    """Full Wise transfer flow. Returns result dict with status and details."""
-    log.info(f"[{label}] Starting Wise transfer: €{amount_eur} to IBAN {iban[:10]}…")
+    """Full Wise transfer flow. Returns result dict with status and details.
+
+    When `recipient_id` is provided, reuse that verified Wise account instead of
+    creating a recipient from the IBAN. When `dry_run` is True, authenticate and
+    build the quote but do NOT create or fund a transfer (no money moves).
+    """
+    log.info(f"[{label}] Starting Wise transfer: €{amount_eur} (dry_run={dry_run})")
 
     profile_id = _get_wise_profile_id(token)
     log.info(f"[{label}] Wise profile_id: {profile_id}")
 
-    account_id = _get_or_create_recipient(token, profile_id, iban, recipient_name)
-    log.info(f"[{label}] Wise recipient account_id: {account_id}")
+    if recipient_id:
+        account_id = int(recipient_id)
+        log.info(f"[{label}] Using verified Wise recipient account_id: {account_id}")
+    else:
+        account_id = _get_or_create_recipient(token, profile_id, iban, recipient_name)
+        log.info(f"[{label}] Wise recipient account_id: {account_id}")
 
     quote_uuid = _create_quote(token, profile_id, amount_eur)
     log.info(f"[{label}] Wise quote_uuid: {quote_uuid}")
+
+    if dry_run:
+        # Auth + recipient + quote all succeeded; stop before creating/funding.
+        log.info(f"[{label}] DRY-RUN — not creating or funding transfer.")
+        return {
+            "status": "dry_run",
+            "handler": label,
+            "account_id": account_id,
+            "quote_uuid": quote_uuid,
+            "amount_eur": amount_eur,
+            "recipient_name": recipient_name,
+            "reference": reference,
+        }
 
     transfer_id = _create_transfer(token, account_id, quote_uuid, reference)
     log.info(f"[{label}] Wise transfer_id: {transfer_id}")
