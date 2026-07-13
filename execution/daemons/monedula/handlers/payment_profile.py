@@ -159,8 +159,17 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
                 keywords_raw = [k.strip() for k in keywords_raw.split(",") if k.strip()]
         calendar_keywords = [str(k).strip().lower() for k in keywords_raw if k]
 
-        if not calendar_keywords:
-            log.warning(f"payment_profile {label!r} has no calendar_keywords — skipped")
+        # A profile is triggerable two ways (mirrors monedula.py): by a matching
+        # calendar event (needs calendar_keywords) OR by a linked due Neotoma task
+        # (needs neotoma_task_id). One-off / invoice payments have no recurring
+        # calendar event, so keep task-linked profiles even without keywords —
+        # only skip a profile that has neither trigger.
+        has_task_link = bool(str(snap.get("neotoma_task_id", "")).strip())
+        if not calendar_keywords and not has_task_link:
+            log.warning(
+                f"payment_profile {label!r} has no calendar_keywords and no "
+                f"neotoma_task_id — untriggerable, skipped"
+            )
             continue
 
         payment_type_raw = str(snap.get("payment_type", "wise")).lower()

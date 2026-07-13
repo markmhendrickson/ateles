@@ -307,15 +307,203 @@ def _task_to_preview_item(task: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Task-based auto-execute (approval-gated, idempotent, dry-run-safe)
+# ---------------------------------------------------------------------------
+#
+# Approval model (operator chose "Neotoma approval flag", 2026-07-13): a due
+# payment task executes only when its snapshot carries `payment_approved: true`.
+# The operator sets that field (via Inspector / CLI / the Ateles agent) after
+# reviewing the emailed preview. This replaces the interactive Telegram reply
+# for the email-primary channel, and is fully auditable in Neotoma.
+#
+# Idempotency: a task whose status is already "done" (or already carries a
+# `payment_event_id`) is never re-executed — no double-pay.
+#
+# Dry-run safety: MONEDULA_DRYRUN defaults to "1" (on). While on, handlers are
+# invoked with a dry_run flag / no real broadcast, so wiring can be verified
+# without moving money. The operator flips MONEDULA_DRYRUN=0 to arm real sends.
+
+
+def _dryrun_enabled() -> bool:
+    """True unless the operator has explicitly armed real sends (MONEDULA_DRYRUN=0)."""
+    return os.environ.get("MONEDULA_DRYRUN", "1") != "0"
+
+
+def _task_fields(task: dict) -> dict:
+    return task.get("snapshot") or task.get("fields") or task
+
+
+def _task_is_approved(task: dict) -> bool:
+    """True iff the task snapshot explicitly flags payment_approved truthy."""
+    val = _task_fields(task).get("payment_approved")
+    return str(val).strip().lower() in ("true", "1", "yes")
+
+
+def _task_already_paid(task: dict) -> bool:
+    """True iff the task is already settled (status done or a payment_event recorded)."""
+    fields = _task_fields(task)
+    if str(fields.get("status") or "").strip().lower() == "done":
+        return True
+    return bool(str(fields.get("payment_event_id") or "").strip())
+
+
+def _handler_for_task(task: dict, handlers: list) -> Any | None:
+    """Return the handler whose profile.neotoma_task_id points at this task."""
+    tid = str(task.get("entity_id") or task.get("id") or "").strip()
+    if not tid:
+        return None
+    for h in handlers:
+        prof_tid = str(getattr(getattr(h, "profile", None), "neotoma_task_id", "") or "").strip()
+        if prof_tid and prof_tid == tid:
+            return h
+    return None
+
+
+def execute_approved_tasks(due_tasks: list[dict], handlers: list) -> list[tuple]:
+    """
+    Execute the due payment tasks that are operator-approved and not already paid.
+
+    Returns a list of (handler, result) tuples for tasks that were acted on.
+    Respects MONEDULA_DRYRUN (default on): while dry-run, the handler is asked to
+    build-but-not-broadcast where it supports a dry_run flag, and the result is
+    tagged status="dry_run" so no confirmation implies a real send.
+    """
+    results: list[tuple] = []
+    dry = _dryrun_enabled()
+
+    for task in due_tasks:
+        fields = _task_fields(task)
+        title = str(fields.get("title") or fields.get("name") or "(unnamed task)")
+
+        if _task_already_paid(task):
+            log.info(f"[autoexec] Skipping already-paid task {title!r}.")
+            continue
+        if not _task_is_approved(task):
+            log.info(f"[autoexec] Task {title!r} not approved (payment_approved) — skipping.")
+            continue
+
+        handler = _handler_for_task(task, handlers)
+        if handler is None:
+            log.warning(f"[autoexec] No handler resolves task {title!r} — skipping.")
+            continue
+
+        synthetic_match = {"summary": title, "source": "task",
+                           "entity_id": task.get("entity_id") or task.get("id")}
+
+        if dry:
+            log.info(f"[autoexec] DRY-RUN — would execute {handler.name} for {title!r} "
+                     f"(€{getattr(handler.profile, 'amount_eur', '?')}).")
+            results.append((handler, {
+                "status": "dry_run", "handler": handler.name,
+                "amount_eur": getattr(handler.profile, "amount_eur", None),
+                "task": title,
+            }))
+            continue
+
+        log.info(f"[autoexec] Executing {handler.name} for approved task {title!r}...")
+        try:
+            result = handler.execute(synthetic_match)
+        except Exception as exc:  # noqa: BLE001 — never crash the daemon
+            log.error(f"[autoexec] {handler.name} execution error: {exc}")
+            result = {"status": "failed", "handler": handler.name, "error": str(exc)}
+        results.append((handler, result))
+
+    return results
+
+
+def _mark_tasks_paid(task_results: list[tuple], due_tasks: list[dict]) -> None:
+    """
+    After a REAL successful send, mark the corresponding task done in Neotoma
+    with a payment note. No-op for dry-run results and for non-'sent' statuses,
+    so a task is only ever marked paid when money actually moved.
+
+    Follows a recurring-obligation exception: if the task/profile is flagged as a
+    never-complete recurring obligation, callers should not route it here — this
+    helper is for the one-off vendor/reimbursement tasks that DO complete.
+    """
+    import shutil
+
+    if _dryrun_enabled():
+        return  # never mutate task lifecycle during dry-run
+
+    neotoma = shutil.which("neotoma")
+    if not neotoma:
+        log.warning("[autoexec] neotoma CLI not found — cannot mark tasks paid.")
+        return
+
+    # Map handler.name -> its task entity_id via due_tasks + profile link.
+    by_handler_task = {}
+    for t in due_tasks:
+        tid = str(t.get("entity_id") or t.get("id") or "")
+        by_handler_task[tid] = t
+
+    for handler, result in task_results:
+        if result.get("status") != "sent":
+            continue
+        tid = str(getattr(getattr(handler, "profile", None), "neotoma_task_id", "") or "")
+        if not tid:
+            continue
+        ref = (result.get("transfer_id") or result.get("txid")
+               or result.get("reference") or "")
+        note = f"Paid {date.today().isoformat()} via Monedula ({handler.name}); ref={ref}"
+        try:
+            subprocess.run(
+                [neotoma, "--api-only", "entities", "update", tid,
+                 "--status", "done", "--notes", note],
+                capture_output=True, text=True, timeout=30, env=os.environ,
+            )
+            log.info(f"[autoexec] Marked task {tid} done ({handler.name}).")
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[autoexec] Failed to mark task {tid} done: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Telegram helpers
 # ---------------------------------------------------------------------------
 
 
-def telegram_send(text: str) -> None:
+def _email_send(text: str) -> bool:
+    """Send an operator notification by email via `gws gmail +send`. Fail-open.
+
+    Subject = "[Monedula] " + the message's first line; body = full message.
+    Uses an argv list (no shell) so notification text can't be misinterpreted.
+    Returns True on success, False on any failure so the caller can fall back
+    to Telegram (break-glass). Gated by ATELES_NOTIFY_EMAIL / OPERATOR_EMAIL.
     """
-    Send a Telegram message via the shared Node.js send.mjs helper,
-    falling back to telegram-send CLI.
-    """
+    import shutil
+
+    if os.environ.get("ATELES_NOTIFY_EMAIL", "0") != "1":
+        return False
+    operator_email = os.environ.get("OPERATOR_EMAIL", "").strip()
+    if not operator_email:
+        return False
+    gws = shutil.which("gws")
+    if not gws:
+        log.warning("[notify] gws not found — cannot send email, falling back")
+        return False
+
+    first = (text.strip().splitlines() or ["notification"])[0]
+    subject = f"[Monedula] {first[:80]}"
+    cmd = [gws, "gmail", "+send", "--to", operator_email,
+           "--subject", subject, "--body", text]
+    swarm_email = os.environ.get("ATELES_SWARM_EMAIL", "").strip()
+    if swarm_email:
+        cmd += ["--from", swarm_email]
+    try:
+        r = subprocess.run(cmd, timeout=30, capture_output=True, text=True, env=os.environ)
+        if r.returncode != 0:
+            log.warning("[notify] gws +send failed (rc=%s): %s",
+                        r.returncode, (r.stderr or "").strip()[:200])
+            return False
+        log.info("[notify] Operator notified by email (%s).", operator_email)
+        return True
+    except Exception as exc:  # noqa: BLE001 — never crash the caller
+        log.warning("[notify] email send error: %s", exc)
+        return False
+
+
+def _telegram_only(text: str) -> None:
+    """Deliver via Telegram (send.mjs helper, falling back to telegram-send CLI)."""
     import shutil
 
     node = shutil.which("node")
@@ -338,6 +526,25 @@ def telegram_send(text: str) -> None:
             )
         except Exception as exc:
             log.warning(f"telegram-send fallback failed: {exc}")
+
+
+def telegram_send(text: str) -> None:
+    """
+    Deliver an operator notification.
+
+    Operator prefers email (2026-07-13): when ATELES_NOTIFY_EMAIL=1, deliver via
+    `gws gmail +send` and only fall through to Telegram (break-glass) if email
+    delivery fails. When the flag is off, behaviour is unchanged (Telegram only).
+    Name kept as `telegram_send` so existing call sites are untouched.
+
+    NOTE: the interactive approval poll (`telegram_long_poll_once`) still reads
+    replies from Telegram, so calendar-triggered payments that wait for a reply
+    require Telegram for the *reply* channel. Task-reminder previews (the common
+    path here) are one-way and are satisfied by email alone.
+    """
+    if _email_send(text):
+        return
+    _telegram_only(text)
 
 
 def telegram_long_poll_once(timeout_sec: int = 120) -> str | None:
@@ -503,8 +710,15 @@ def _build_preview_message(
         lines.append(f"  yes {name:<10} — pay {name} only")
     lines.append("  no          — skip all")
     if due_tasks:
+        lines.append("")
         lines.append(
-            "  (task reminders above are FYI — reply to approve calendar payments)"
+            "  Task payments auto-execute once approved: set payment_approved=true"
+        )
+        lines.append(
+            "  on the task in Neotoma (Inspector / CLI / ask Ateles). Monedula runs"
+        )
+        lines.append(
+            "  them on its next poll (dry-run until MONEDULA_DRYRUN=0 is set)."
         )
 
     return "\n".join(lines)
@@ -530,6 +744,7 @@ def main() -> None:
 
     yesterday = _yesterday()
     yesterday_str = yesterday.isoformat()
+    today_str = date.today().isoformat()
     log.info(f"Checking calendar for yesterday: {yesterday_str}")
 
     # Load handlers from env-var-defined payment profiles.
@@ -571,9 +786,26 @@ def main() -> None:
     log.info("Sending payment preview to Telegram...")
     telegram_send(preview_msg)
 
+    # Task-based auto-execute (approval-gated). Runs independently of the
+    # calendar-triggered interactive path: any due task carrying
+    # payment_approved=true is executed via its linked handler (dry-run unless
+    # MONEDULA_DRYRUN=0). Then a per-payment confirmation is emailed.
+    if due_tasks:
+        task_results = execute_approved_tasks(due_tasks, all_handlers)
+        if task_results:
+            conf_lines = [f"📋 Monedula task-payment results for {today_str}:", ""]
+            for handler, result in task_results:
+                if hasattr(handler, "format_confirmation"):
+                    conf_lines.append(handler.format_confirmation(result))
+                else:
+                    conf_lines.append(f"{handler.name}: {result.get('status')}")
+                conf_lines.append("")
+            telegram_send("\n".join(conf_lines).rstrip())
+            _mark_tasks_paid(task_results, due_tasks)
+
     # If there are only task reminders (no actionable calendar payments), don't wait for approval.
     if not triggered:
-        log.info("Task reminders sent — no calendar payments to approve. Done.")
+        log.info("Task auto-execute complete — no calendar payments to approve. Done.")
         return
 
     # Wait for operator reply (2 minutes)
