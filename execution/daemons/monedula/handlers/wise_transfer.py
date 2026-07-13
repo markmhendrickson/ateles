@@ -134,6 +134,7 @@ class WiseTransferHandler(PaymentHandler):
                 self.profile.wise_reference,
                 label=self.name,
                 recipient_id=recipient_id,
+                legal_type=str(getattr(self.profile, "wise_legal_type", "") or ""),
                 dry_run=os.environ.get("MONEDULA_DRYRUN", "1") != "0",
             )
         except Exception as exc:
@@ -307,14 +308,18 @@ def _get_wise_profile_id(token: str) -> int:
     raise RuntimeError("No Wise profiles found")
 
 
-def _get_or_create_recipient(token: str, profile_id: int, iban: str, name: str) -> int:
-    iban[:2].upper() if len(iban) >= 2 else "ES"
+def _get_or_create_recipient(
+    token: str, profile_id: int, iban: str, name: str, legal_type: str = "PRIVATE"
+) -> int:
+    lt = (legal_type or "PRIVATE").upper()
+    if lt not in ("PRIVATE", "BUSINESS"):
+        lt = "PRIVATE"
     body = {
         "profile": profile_id,
         "accountHolderName": name,
         "currency": "EUR",
         "type": "iban",
-        "details": {"legalType": "PRIVATE", "iban": iban.replace(" ", "")},
+        "details": {"legalType": lt, "iban": iban.replace(" ", "")},
     }
     result = _wise_post(token, "/v1/accounts", body)
     account_id = result.get("id")
@@ -375,6 +380,7 @@ def _execute_wise_transfer(
     reference: str,
     label: str = "payment",
     recipient_id: str = "",
+    legal_type: str = "",
     dry_run: bool = False,
 ) -> dict:
     """Full Wise transfer flow. Returns result dict with status and details.
@@ -392,8 +398,10 @@ def _execute_wise_transfer(
         account_id = int(recipient_id)
         log.info(f"[{label}] Using verified Wise recipient account_id: {account_id}")
     else:
-        account_id = _get_or_create_recipient(token, profile_id, iban, recipient_name)
-        log.info(f"[{label}] Wise recipient account_id: {account_id}")
+        account_id = _get_or_create_recipient(
+            token, profile_id, iban, recipient_name, legal_type=legal_type
+        )
+        log.info(f"[{label}] Wise recipient account_id: {account_id} (legalType={legal_type or 'PRIVATE'})")
 
     quote_uuid = _create_quote(token, profile_id, amount_eur)
     log.info(f"[{label}] Wise quote_uuid: {quote_uuid}")

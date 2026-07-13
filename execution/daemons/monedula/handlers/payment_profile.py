@@ -69,6 +69,7 @@ class PaymentProfile:
     wise_recipient_id: str = ""  # verified Wise account id (skips recipient creation)
     wise_iban: str = ""  # payee IBAN carried on the profile
     wise_recipient_name: str = ""  # payee legal name for a profile-carried IBAN
+    wise_legal_type: str = ""  # "PRIVATE" (default) | "BUSINESS" for company payees
 
     # BTC-specific
     btc_address: str = ""
@@ -225,6 +226,7 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
                 wise_recipient_id=str(snap.get("wise_recipient_id", "") or ""),
                 wise_iban=str(snap.get("wise_iban", "") or ""),
                 wise_recipient_name=str(snap.get("wise_recipient_name", "") or ""),
+                wise_legal_type=str(snap.get("wise_legal_type", "") or ""),
                 btc_address=snap.get("btc_address", ""),
                 neotoma_task_id=snap.get("neotoma_task_id", ""),
                 task_keywords=task_keywords,
@@ -334,6 +336,7 @@ def _load_profile(prefix: str) -> PaymentProfile | None:
         wise_recipient_id=env("WISE_RECIPIENT_ID"),
         wise_iban=env("WISE_IBAN"),
         wise_recipient_name=env("WISE_RECIPIENT_NAME"),
+        wise_legal_type=env("WISE_LEGAL_TYPE"),
         # btc
         btc_address=env("BTC_ADDRESS"),
         # neotoma
