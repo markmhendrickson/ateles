@@ -480,13 +480,14 @@ def _mark_tasks_paid(task_results: list[tuple], due_tasks: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _email_send(text: str) -> bool:
+def _email_send(text: str, attachments: list[str] | None = None) -> bool:
     """Send an operator notification by email via `gws gmail +send`. Fail-open.
 
     Subject = "[Monedula] " + the message's first line; body = full message.
-    Uses an argv list (no shell) so notification text can't be misinterpreted.
-    Returns True on success, False on any failure so the caller can fall back
-    to Telegram (break-glass). Gated by ATELES_NOTIFY_EMAIL / OPERATOR_EMAIL.
+    `attachments` are file paths (e.g. Wise receipt PDFs); gws requires them
+    under the current directory, so they are copied into a repo-local temp dir
+    for the send and removed after. Uses an argv list (no shell). Returns True
+    on success. Gated by ATELES_NOTIFY_EMAIL / OPERATOR_EMAIL.
     """
     import shutil
 
@@ -507,17 +508,46 @@ def _email_send(text: str) -> bool:
     swarm_email = os.environ.get("ATELES_SWARM_EMAIL", "").strip()
     if swarm_email:
         cmd += ["--from", swarm_email]
+
+    # gws only attaches files under CWD — stage copies in a repo-local temp dir.
+    staged: list[Path] = []
+    stage_dir = PROJECT_ROOT / ".monedula_receipts_tmp"
+    for src in (attachments or []):
+        try:
+            if not os.path.exists(src):
+                continue
+            stage_dir.mkdir(parents=True, exist_ok=True)
+            dst = stage_dir / Path(src).name
+            shutil.copyfile(src, dst)
+            staged.append(dst)
+            cmd += ["--attach", str(dst.relative_to(PROJECT_ROOT))]
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[notify] could not stage attachment {src}: {exc}")
+
     try:
-        r = subprocess.run(cmd, timeout=30, capture_output=True, text=True, env=os.environ)
+        r = subprocess.run(cmd, timeout=60, capture_output=True, text=True,
+                           cwd=str(PROJECT_ROOT), env=os.environ)
         if r.returncode != 0:
             log.warning("[notify] gws +send failed (rc=%s): %s",
                         r.returncode, (r.stderr or "").strip()[:200])
             return False
-        log.info("[notify] Operator notified by email (%s).", operator_email)
+        log.info("[notify] Operator notified by email (%s)%s.", operator_email,
+                 f" with {len(staged)} receipt(s)" if staged else "")
         return True
     except Exception as exc:  # noqa: BLE001 — never crash the caller
         log.warning("[notify] email send error: %s", exc)
         return False
+    finally:
+        for p in staged:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        try:
+            if stage_dir.exists() and not any(stage_dir.iterdir()):
+                stage_dir.rmdir()
+        except OSError:
+            pass
 
 
 def _telegram_only(text: str) -> None:
@@ -546,7 +576,7 @@ def _telegram_only(text: str) -> None:
             log.warning(f"telegram-send fallback failed: {exc}")
 
 
-def telegram_send(text: str) -> None:
+def telegram_send(text: str, attachments: list[str] | None = None) -> None:
     """
     Deliver an operator notification.
 
@@ -555,13 +585,19 @@ def telegram_send(text: str) -> None:
     delivery fails. When the flag is off, behaviour is unchanged (Telegram only).
     Name kept as `telegram_send` so existing call sites are untouched.
 
+    `attachments` (e.g. Wise receipt PDFs) ride the email path; the Telegram
+    fallback is text-only, so a note is appended listing what didn't attach.
+
     NOTE: the interactive approval poll (`telegram_long_poll_once`) still reads
     replies from Telegram, so calendar-triggered payments that wait for a reply
     require Telegram for the *reply* channel. Task-reminder previews (the common
     path here) are one-way and are satisfied by email alone.
     """
-    if _email_send(text):
+    if _email_send(text, attachments=attachments):
         return
+    if attachments:
+        names = ", ".join(Path(a).name for a in attachments)
+        text = f"{text}\n\n(📎 receipts available but not attachable via Telegram: {names})"
     _telegram_only(text)
 
 
@@ -812,13 +848,19 @@ def main() -> None:
         task_results = execute_approved_tasks(due_tasks, all_handlers)
         if task_results:
             conf_lines = [f"📋 Monedula task-payment results for {today_str}:", ""]
+            receipts: list[str] = []
             for handler, result in task_results:
                 if hasattr(handler, "format_confirmation"):
                     conf_lines.append(handler.format_confirmation(result))
                 else:
                     conf_lines.append(f"{handler.name}: {result.get('status')}")
+                # Collect any proof-of-payment receipt for attachment (Wise PDF);
+                # BTC results carry an explorer URL in the confirmation text.
+                rp = result.get("receipt_path")
+                if rp and os.path.exists(rp):
+                    receipts.append(rp)
                 conf_lines.append("")
-            telegram_send("\n".join(conf_lines).rstrip())
+            telegram_send("\n".join(conf_lines).rstrip(), attachments=receipts)
             _mark_tasks_paid(task_results, due_tasks)
 
     # If there are only task reminders (no actionable calendar payments), don't wait for approval.

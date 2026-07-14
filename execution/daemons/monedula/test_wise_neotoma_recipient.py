@@ -67,7 +67,7 @@ def test_load_contact_none_when_neotoma_misses(monkeypatch):
 def test_execute_prefers_profile_recipient_id(monkeypatch):
     captured = {}
 
-    def _fake_exec(token, iban, name, amount, ref, label="", recipient_id="", dry_run=False):
+    def _fake_exec(token, iban, name, amount, ref, label="", recipient_id="", legal_type="", dry_run=False):
         captured.update(recipient_id=recipient_id, iban=iban, dry_run=dry_run)
         return {"status": "dry_run"}
 
@@ -86,7 +86,7 @@ def test_execute_prefers_profile_recipient_id(monkeypatch):
 def test_execute_falls_back_to_neotoma_contact(monkeypatch):
     captured = {}
 
-    def _fake_exec(token, iban, name, amount, ref, label="", recipient_id="", dry_run=False):
+    def _fake_exec(token, iban, name, amount, ref, label="", recipient_id="", legal_type="", dry_run=False):
         captured.update(recipient_id=recipient_id, iban=iban)
         return {"status": "dry_run"}
 

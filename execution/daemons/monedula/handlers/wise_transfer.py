@@ -24,6 +24,8 @@ import json
 import logging
 import os
 import subprocess
+import urllib.error
+import urllib.request
 from datetime import date, timedelta
 from typing import Any
 
@@ -150,6 +152,16 @@ class WiseTransferHandler(PaymentHandler):
             }
 
         result["handler"] = self.name
+
+        # Fetch the official Wise receipt PDF (the payee's "justificante") for a
+        # real send, so the confirmation email can attach proof of payment.
+        if result.get("status") == "sent" and result.get("transfer_id"):
+            receipt_path = _fetch_wise_receipt(
+                token, str(result["transfer_id"]), label=self.name
+            )
+            if receipt_path:
+                result["receipt_path"] = receipt_path
+                result["receipt_kind"] = "wise_pdf"
 
         if result.get("status") in ("sent", "manual_required"):
             _update_task(self.profile, result)
@@ -296,6 +308,37 @@ def _wise_post(token: str, path: str, body: dict) -> dict:
         raise RuntimeError(
             f"Wise API {path} HTTP {exc.code}: {body_bytes.decode()[:400]}"
         ) from exc
+
+
+def _fetch_wise_receipt(token: str, transfer_id: str, label: str = "payment") -> str | None:
+    """Download the official Wise receipt PDF for a transfer.
+
+    Returns a local file path (under MONEDULA_RECEIPTS_DIR, default a temp dir),
+    or None on any failure — receipt fetch is best-effort and never blocks a
+    payment that already succeeded.
+    """
+    import tempfile
+    from pathlib import Path
+
+    url = f"{WISE_BASE_URL}/v1/transfers/{transfer_id}/receipt.pdf"
+    try:
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read()
+        if not data[:5] == b"%PDF-":
+            log.warning(f"[{label}] Wise receipt for {transfer_id} not a PDF — skipping")
+            return None
+        out_dir = Path(
+            os.environ.get("MONEDULA_RECEIPTS_DIR", tempfile.gettempdir())
+        ).expanduser()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"wise-receipt-{transfer_id}.pdf"
+        out_path.write_bytes(data)
+        log.info(f"[{label}] Saved Wise receipt: {out_path} ({len(data)} bytes)")
+        return str(out_path)
+    except (urllib.error.URLError, OSError) as exc:
+        log.warning(f"[{label}] Wise receipt fetch failed for {transfer_id}: {exc}")
+        return None
 
 
 def _get_wise_profile_id(token: str) -> int:
