@@ -122,10 +122,17 @@ class BtcTransferHandler(PaymentHandler):
 
         if payment_result.get("status") == "sent":
             txid = payment_result.get("txid", "")
-            mempool_url = f"https://mempool.space/tx/{txid}"
-            copy_paste_line = f"{self.profile.amount_eur} € 📤 {mempool_url}"
-            payment_result["copy_paste_line"] = copy_paste_line
-            log.info(f"[{self.name}] Payment sent. txid={txid}")
+            network = str(payment_result.get("network")
+                          or os.environ.get("BTC_NETWORK", "mainnet"))
+            explorer_url = _explorer_url(txid, network)
+            payment_result["explorer_url"] = explorer_url
+            # receipt_kind mirrors the Wise handler's proof-of-payment surface:
+            # for BTC the on-chain explorer page IS the receipt.
+            payment_result["receipt_kind"] = "btc_explorer"
+            payment_result["copy_paste_line"] = (
+                f"{self.profile.amount_eur} € 📤 {explorer_url}"
+            )
+            log.info(f"[{self.name}] Payment sent. txid={txid} {explorer_url}")
             _update_task(self.profile, txid)
 
         return payment_result
@@ -133,15 +140,14 @@ class BtcTransferHandler(PaymentHandler):
     def format_confirmation(self, result: dict) -> str:
         if result.get("status") == "sent":
             txid = result.get("txid", "unknown")
-            copy_paste = result.get(
-                "copy_paste_line",
-                f"{self.profile.amount_eur} € 📤 https://mempool.space/tx/{txid}",
-            )
+            explorer = result.get("explorer_url") or _explorer_url(
+                txid, str(result.get("network") or "mainnet"))
             return (
                 f"✅ {self.profile.label} payment sent!\n"
-                f"  txid: {txid}\n\n"
+                f"  txid: {txid}\n"
+                f"  Blockchain explorer: {explorer}\n\n"
                 f"Copy-paste line:\n"
-                f"  {copy_paste}"
+                f"  {self.profile.amount_eur} € 📤 {explorer}"
             )
         else:
             error = result.get("error", "unknown error")
@@ -168,6 +174,24 @@ def _wallet_python() -> str:
     return "python3"
 
 
+def _explorer_url(txid: str, network: str = "mainnet") -> str:
+    """Return a mempool.space explorer URL for a txid, network-aware.
+
+    BTC_EXPLORER_BASE overrides the base (default https://mempool.space). Testnet
+    / signet get their path prefix so a non-mainnet txid never links to a wrong
+    mainnet page.
+    """
+    base = os.environ.get("BTC_EXPLORER_BASE", "https://mempool.space").rstrip("/")
+    net = (network or "mainnet").lower()
+    prefix = {
+        "mainnet": "",
+        "testnet": "/testnet",
+        "testnet3": "/testnet",
+        "signet": "/signet",
+    }.get(net, "")
+    return f"{base}{prefix}/tx/{txid}"
+
+
 def _update_task(profile: PaymentProfile, txid: str) -> None:
     """Update Neotoma task with payment note and rolled due_date."""
     import shutil
@@ -185,10 +209,10 @@ def _update_task(profile: PaymentProfile, txid: str) -> None:
         return
 
     today = date.today()
-    mempool_url = f"https://mempool.space/tx/{txid}"
+    explorer = _explorer_url(txid, os.environ.get("BTC_NETWORK", "mainnet"))
     note = (
         f"Payment sent {today.isoformat()}: "
-        f"{profile.amount_eur} EUR BTC txid={txid} {mempool_url}"
+        f"{profile.amount_eur} EUR BTC txid={txid} {explorer}"
     )
 
     try:

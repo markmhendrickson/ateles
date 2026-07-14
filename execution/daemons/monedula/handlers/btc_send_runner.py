@@ -91,6 +91,7 @@ def main() -> int:
         "status": "dry_run" if dry_run else "sent",
         "txid": str(txid),
         "amount_sats": amount_sats,
+        "network": str(getattr(cfg, "network", "mainnet")),
     })
     return 0
 
