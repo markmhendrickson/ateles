@@ -359,6 +359,259 @@ def _handler_for_task(task: dict, handlers: list) -> Any | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Email reply-to-approve (operator approves a payment by replying to its email)
+# ---------------------------------------------------------------------------
+#
+# Each due, unapproved payment gets one email whose subject carries a stable
+# per-payment token: "[APPROVE-<token>]". The operator replies APPROVE (to pay)
+# or SKIP (to decline); the body also asks them to confirm attendance for
+# session-gated payments. On the next run, process_email_approvals() scans the
+# inbox, and any message containing "APPROVE <token>" flips payment_approved=true
+# on that task (SKIP sets it false). Matching is by the exact token, so a reply
+# can never approve the wrong payment.
+
+
+def _payment_token(task_id: str) -> str:
+    """Stable short token for a task id (same across runs, so re-sends match)."""
+    import hashlib
+
+    h = hashlib.sha256(task_id.encode()).hexdigest()[:8].upper()
+    return h
+
+
+def _set_task_approved(task_id: str, approved: bool) -> bool:
+    """Set payment_approved on a task via `neotoma corrections create`."""
+    import shutil
+
+    neotoma = shutil.which("neotoma")
+    if not neotoma:
+        log.warning("[approve] neotoma CLI not found — cannot set approval")
+        return False
+    try:
+        r = subprocess.run(
+            [neotoma, "--api-only", "corrections", "create", task_id,
+             "--entity-type", "task", "--field-name", "payment_approved",
+             "--corrected-value", "true" if approved else "false"],
+            capture_output=True, text=True, timeout=30, env=os.environ,
+        )
+        if r.returncode != 0:
+            log.warning(f"[approve] corrections create failed (rc={r.returncode}): "
+                        f"{(r.stderr or '').strip()[:160]}")
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[approve] corrections create error: {exc}")
+        return False
+
+
+def _build_approval_email(task: dict, handler) -> tuple[str, str]:
+    """Return (subject, body) for a per-payment approval request email."""
+    fields = _task_fields(task)
+    tid = str(task.get("entity_id") or task.get("id") or "")
+    token = _payment_token(tid)
+    title = str(fields.get("title") or fields.get("name") or "payment")
+    profile = getattr(handler, "profile", None)
+    amount = getattr(profile, "amount_eur", fields.get("amount") or fields.get("amount_eur") or "?")
+    rail = getattr(profile, "payment_type", "?")
+    due = str(fields.get("due_date") or "")
+    ref = getattr(profile, "wise_reference", "") or ""
+
+    # Recipient (rail-specific, no secrets beyond what the operator already has).
+    if rail == "wise":
+        payee = (getattr(profile, "wise_recipient_name", "")
+                 or getattr(profile, "label", "") or "recipient")
+        dest = getattr(profile, "wise_iban", "") or getattr(profile, "wise_recipient_id", "") or ""
+    else:
+        payee = getattr(profile, "label", "") or "recipient"
+        dest = getattr(profile, "btc_address", "") or ""
+
+    subject = f"[Ateles] Approve payment: {title} €{amount} [APPROVE-{token}]"
+
+    # Session-gated payments (yoga/therapy) ask for attendance confirmation.
+    session_note = ""
+    low = (title + " " + str(fields.get("notes") or "")).lower()
+    if any(k in low for k in ("yoga", "therapy", "terapia", "session", "sesión")):
+        session_note = (
+            "\nThis is a per-session payment. Only approve if you ATTENDED the "
+            f"session on {due or 'the due date'}.\n"
+        )
+
+    dest_label = "IBAN/acct" if rail == "wise" else "Address"
+    dest_line = f"  {dest_label}: {dest}\n" if dest else ""
+
+    body = (
+        f"Payment awaiting your approval:\n\n"
+        f"  What:      {title}\n"
+        f"  Amount:    €{amount} ({rail.upper()})\n"
+        f"  To:        {payee}\n"
+        + dest_line
+        + f"  Due:       {due}\n"
+        + (f"  Reference: {ref}\n" if ref else "")
+        + session_note
+        + "\nJust hit Reply and send:\n"
+        "    APPROVE      — to pay it\n"
+        "    SKIP         — to decline\n\n"
+        f"Monedula executes approved payments on its next run "
+        f"(currently {'DRY-RUN' if _dryrun_enabled() else 'LIVE'}).\n"
+        f"(Your reply is matched to this payment automatically via the subject "
+        f"line — you don't need to type any code.)\n"
+    )
+    return subject, body
+
+
+def send_approval_requests(due_tasks: list[dict], handlers: list) -> int:
+    """Email one approval request per due, unapproved, unpaid payment. Returns count."""
+    sent = 0
+    for task in due_tasks:
+        if _task_already_paid(task) or _task_is_approved(task):
+            continue
+        handler = _handler_for_task(task, handlers)
+        if handler is None:
+            continue
+        subject, body = _build_approval_email(task, handler)
+        if _email_send_with_subject(subject, body):
+            sent += 1
+            fields = _task_fields(task)
+            log.info(f"[approve] Sent approval request for "
+                     f"{fields.get('title')!r} (token in subject).")
+    return sent
+
+
+def process_email_approvals(due_tasks: list[dict]) -> int:
+    """Scan the inbox for APPROVE/SKIP <token> replies; apply to matching tasks.
+
+    Returns the number of tasks whose approval state was changed. Only tasks in
+    `due_tasks` are eligible, and matching is by exact per-payment token.
+    """
+    if os.environ.get("ATELES_NOTIFY_EMAIL", "0") != "1":
+        return 0
+    token_to_task = {}
+    for task in due_tasks:
+        tid = str(task.get("entity_id") or task.get("id") or "")
+        if tid and not _task_already_paid(task):
+            token_to_task[_payment_token(tid)] = tid
+    if not token_to_task:
+        return 0
+
+    replies = _read_recent_email_bodies()
+    changed = 0
+    for text in replies:
+        up = text.upper()
+        # Only consider the operator's REPLY, not our own outgoing request. Our
+        # request's body says "Just hit Reply and send"; a reply is prefixed "RE:".
+        is_reply = up.lstrip().startswith("RE:") or "\nRE:" in up
+        if not is_reply:
+            continue
+
+        for token, tid in token_to_task.items():
+            # The token rides along in the quoted subject of the reply
+            # ("Re: … [APPROVE-<token>]"), so the operator never types it.
+            if token not in up:
+                continue
+            verdict = _reply_verdict(up, token)
+            if verdict is None:
+                continue
+            if _set_task_approved(tid, verdict):
+                log.info(f"[approve] Email {'APPROVE' if verdict else 'SKIP'} "
+                         f"for token {token} → task {tid}")
+                changed += 1
+    return changed
+
+
+def _reply_verdict(up: str, token: str) -> bool | None:
+    """Return True (approve), False (skip), or None (no verdict) for a reply.
+
+    Accepts a bare "APPROVE"/"SKIP" (the token is matched separately from the
+    subject line), and the explicit "APPROVE <token>" form. SKIP wins if both
+    appear, so an ambiguous reply never pays by accident.
+    """
+    has_skip = ("SKIP" in up)
+    has_approve = ("APPROVE" in up)
+    # Our own request text contains both words; a reply quoting it would too.
+    # Require the verb to appear OUTSIDE the quoted instruction lines.
+    for line in up.splitlines():
+        s = line.strip()
+        if s.startswith(">") or "JUST HIT REPLY" in s or "TO DECLINE" in s:
+            continue
+        if s in ("SKIP", f"SKIP {token}", f"SKIP-{token}"):
+            return False
+        if s in ("APPROVE", f"APPROVE {token}", f"APPROVE-{token}"):
+            return True
+    # Fall back to a looser read only when unambiguous.
+    if has_skip and not has_approve:
+        return False
+    return None
+
+
+def _read_recent_email_bodies(max_msgs: int = 30) -> list[str]:
+    """Return recent inbox subjects+snippets via `gws gmail +triage`. Best-effort.
+
+    Approval tokens live in the SUBJECT of the operator's reply (a reply keeps
+    "APPROVE <token>" visible, and the quoted original subject also carries the
+    token), so subject text is sufficient to match. Fail-open (returns []).
+    """
+    import shutil
+
+    gws = shutil.which("gws")
+    if not gws:
+        return []
+    try:
+        r = subprocess.run(
+            [gws, "gmail", "+triage", "--format", "json",
+             "--max", str(max_msgs), "--query", "newer_than:3d"],
+            capture_output=True, text=True, timeout=45, env=os.environ,
+        )
+        if r.returncode != 0:
+            log.warning(f"[approve] gws +triage failed: {(r.stderr or '').strip()[:160]}")
+            return []
+        data = json.loads(r.stdout or "[]")
+        msgs = data if isinstance(data, list) else (
+            data.get("messages") or data.get("results") or [])
+        out = []
+        for m in msgs:
+            out.append(" ".join([
+                str(m.get("subject") or ""),
+                str(m.get("snippet") or ""),
+                str(m.get("from") or ""),
+            ]))
+        return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[approve] read email error: {exc}")
+        return []
+
+
+def _email_send_with_subject(subject: str, body: str) -> bool:
+    """Send an email with an explicit subject (approval requests need the token
+    in the subject). Mirrors _email_send but does not derive subject from body."""
+    import shutil
+
+    if os.environ.get("ATELES_NOTIFY_EMAIL", "0") != "1":
+        return False
+    operator_email = os.environ.get("OPERATOR_EMAIL", "").strip()
+    if not operator_email:
+        return False
+    gws = shutil.which("gws")
+    if not gws:
+        return False
+    cmd = [gws, "gmail", "+send", "--to", operator_email,
+           "--subject", subject, "--body", body]
+    swarm_email = os.environ.get("ATELES_SWARM_EMAIL", "").strip()
+    if swarm_email:
+        cmd += ["--from", swarm_email]
+    try:
+        r = subprocess.run(cmd, timeout=60, capture_output=True, text=True,
+                           cwd=str(PROJECT_ROOT), env=os.environ)
+        if r.returncode != 0:
+            log.warning(f"[approve] approval email send failed (rc={r.returncode}): "
+                        f"{(r.stderr or '').strip()[:160]}")
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[approve] approval email error: {exc}")
+        return False
+
+
 def execute_approved_tasks(due_tasks: list[dict], handlers: list) -> list[tuple]:
     """
     Execute the due payment tasks that are operator-approved and not already paid.
@@ -840,6 +1093,14 @@ def main() -> None:
     log.info("Sending payment preview to Telegram...")
     telegram_send(preview_msg)
 
+    # Email reply-to-approve: first apply any APPROVE/SKIP <token> replies the
+    # operator sent since the last run (flips payment_approved on matching tasks).
+    if due_tasks:
+        applied = process_email_approvals(due_tasks)
+        if applied:
+            log.info(f"[approve] Applied {applied} email approval(s); re-fetching tasks.")
+            due_tasks = fetch_due_payment_tasks(all_handlers)
+
     # Task-based auto-execute (approval-gated). Runs independently of the
     # calendar-triggered interactive path: any due task carrying
     # payment_approved=true is executed via its linked handler (dry-run unless
@@ -862,6 +1123,12 @@ def main() -> None:
                 conf_lines.append("")
             telegram_send("\n".join(conf_lines).rstrip(), attachments=receipts)
             _mark_tasks_paid(task_results, due_tasks)
+
+        # For any tasks still awaiting approval, email a per-payment approval
+        # request (with its token) so the operator can approve by replying.
+        requested = send_approval_requests(due_tasks, all_handlers)
+        if requested:
+            log.info(f"[approve] Emailed {requested} approval request(s).")
 
     # If there are only task reminders (no actionable calendar payments), don't wait for approval.
     if not triggered:
