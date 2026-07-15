@@ -10,6 +10,7 @@ Apis POST + gws +read stubbed out. The security-critical properties under test:
 """
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -312,6 +313,70 @@ def test_poll_query_excludes_processed_label(monkeypatch):
     assert "--query" in captured["cmd"]
     qi = captured["cmd"].index("--query") + 1
     assert f"-label:{turdus.PROCESSED_LABEL}" in captured["cmd"][qi]
+
+
+def test_label_uses_real_modify_api_and_marks_read(monkeypatch):
+    # Regression: this used to shell out to `gws gmail messages label`, a
+    # subcommand that does not exist, so every label write failed silently and
+    # `Turdus/processed` was never applied — the mechanical cause of the loop.
+    calls = []
+
+    def fake_run(cmd, *a, **k):
+        calls.append(cmd)
+
+        class R:
+            returncode = 0
+            stderr = ""
+            # labels list → the label already exists; modify → echo an id back
+            stdout = (
+                'Using keyring backend: keyring\n'
+                '{"labels":[{"name":"Turdus/processed","id":"Label_42"}]}'
+                if "labels" in cmd
+                else 'Using keyring backend: keyring\n{"id":"m1"}'
+            )
+
+        return R()
+
+    monkeypatch.setattr(turdus, "DRY_RUN", False)
+    monkeypatch.setattr(turdus, "_LABEL_ID_CACHE", {})
+    monkeypatch.setattr(turdus.subprocess, "run", fake_run)
+
+    assert turdus._label_gmail_message("m1", turdus.PROCESSED_LABEL) is True
+
+    modify = [c for c in calls if "modify" in c]
+    assert modify, "must call the real users/messages/modify endpoint"
+    cmd = modify[0]
+    assert cmd[:5] == ["gws", "gmail", "users", "messages", "modify"]
+    body = json.loads(cmd[cmd.index("--json") + 1])
+    assert body["addLabelIds"] == ["Label_42"]  # resolved ID, not the name
+    assert body["removeLabelIds"] == ["UNREAD"]  # marks read → leaves is:unread
+
+
+def test_label_creates_missing_label(monkeypatch):
+    # 'Turdus/processed' did not exist in the real mailbox; the resolver must
+    # create it rather than silently failing forever.
+    calls = []
+
+    def fake_run(cmd, *a, **k):
+        calls.append(cmd)
+
+        class R:
+            returncode = 0
+            stderr = ""
+            stdout = (
+                '{"labels":[{"name":"Other","id":"L1"}]}'
+                if ("labels" in cmd and "list" in cmd)
+                else '{"id":"Label_new"}'
+            )
+
+        return R()
+
+    monkeypatch.setattr(turdus, "DRY_RUN", False)
+    monkeypatch.setattr(turdus, "_LABEL_ID_CACHE", {})
+    monkeypatch.setattr(turdus.subprocess, "run", fake_run)
+
+    assert turdus._resolve_label_id("Turdus/processed") == "Label_new"
+    assert any("create" in c for c in calls), "must create the absent label"
 
 
 def test_invoice_notifies_once_then_deduped(monkeypatch):

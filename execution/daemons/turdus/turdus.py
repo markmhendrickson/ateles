@@ -134,6 +134,9 @@ PROCESSED_LABEL = "Turdus/processed"
 # excluded by the poll label filter, so aging out is safe).
 _MAX_PROCESSED_IDS = 500
 
+# Gmail label NAME -> label ID, resolved lazily. messages.modify takes IDs.
+_LABEL_ID_CACHE: dict[str, str] = {}
+
 # ── Classification rules (Phase 4: keyword-based; Phase 7: LLM) ───────────────
 
 # Sender patterns that produce tasks
@@ -345,50 +348,128 @@ def _poll_gmail_messages(max_count: int) -> list[dict]:
         return []
 
 
+def _gws_json(args: list[str], timeout: int = 15) -> dict | None:
+    """
+    Run a `gws` command expected to emit JSON on stdout and parse it.
+
+    The CLI prefixes stdout with a keyring banner line, so drop any leading
+    lines before the first '{'. Returns None on any failure (fail-open: the
+    caller degrades rather than crashing the poll loop).
+    """
+    try:
+        result = subprocess.run(
+            ["gws", *args], capture_output=True, text=True, timeout=timeout
+        )
+        if result.returncode != 0:
+            log.warning(
+                f"[{DAEMON_NAME}] gws {' '.join(args[:3])} failed "
+                f"(rc={result.returncode}): {(result.stderr or '').strip()[:200]}"
+            )
+            return None
+        out = result.stdout
+        brace = out.find("{")
+        if brace == -1:
+            return None
+        return json.loads(out[brace:])
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
+        log.warning(f"[{DAEMON_NAME}] gws {' '.join(args[:3])} error: {exc}")
+        return None
+
+
+def _resolve_label_id(label_name: str) -> str | None:
+    """
+    Resolve a Gmail label NAME to its label ID, creating the label if absent.
+
+    Gmail's messages.modify takes label IDs, not names. Cached per process.
+    Returns None if the label can neither be found nor created.
+    """
+    cached = _LABEL_ID_CACHE.get(label_name)
+    if cached:
+        return cached
+
+    listing = _gws_json(["gmail", "users", "labels", "list", "--params", '{"userId":"me"}'])
+    if listing:
+        for lbl in listing.get("labels", []):
+            if lbl.get("name") == label_name:
+                label_id = lbl.get("id")
+                if label_id:
+                    _LABEL_ID_CACHE[label_name] = label_id
+                    return label_id
+
+    # Absent — create it. This is why the label never stuck before: nothing
+    # ever created 'Turdus/processed', so no message could carry it.
+    created = _gws_json(
+        [
+            "gmail",
+            "users",
+            "labels",
+            "create",
+            "--params",
+            '{"userId":"me"}',
+            "--json",
+            json.dumps(
+                {
+                    "name": label_name,
+                    "labelListVisibility": "labelShow",
+                    "messageListVisibility": "show",
+                }
+            ),
+        ]
+    )
+    label_id = (created or {}).get("id")
+    if label_id:
+        log.info(f"[{DAEMON_NAME}] created Gmail label {label_name!r} (id={label_id})")
+        _LABEL_ID_CACHE[label_name] = label_id
+        return label_id
+
+    log.warning(f"[{DAEMON_NAME}] could not resolve or create label {label_name!r}")
+    return None
+
+
 def _label_gmail_message(message_id: str, label: str) -> bool:
     """
     Mark a processed message as handled: add the processed label AND remove the
-    UNREAD label.
+    UNREAD label, via Gmail's messages.modify.
 
     Both are required to stop the re-notification loop. The label is what the
     poll query filters on (`-label:Turdus/processed`); removing UNREAD keeps the
     default `is:unread` basis truthful so a handled invoice cannot reappear even
-    if label propagation lags. Failures are logged (previously swallowed
-    silently) because a silent label failure perpetuates the loop.
+    if label propagation lags.
+
+    Failures are logged rather than swallowed: this call previously shelled out
+    to `gws gmail messages label`, a subcommand that does not exist, so every
+    label write failed silently and the processed label was never applied — the
+    mechanical root cause of the re-notification loop.
     """
+    if not message_id:
+        return False
     if DRY_RUN:
         log.info(
             f"[{DAEMON_NAME}] DRY RUN — would label {message_id} with {label!r} "
             "and mark read"
         )
         return True
-    try:
-        result = subprocess.run(
-            [
-                "gws",
-                "gmail",
-                "messages",
-                "label",
-                message_id,
-                "--add",
-                label,
-                "--remove",
-                "UNREAD",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if result.returncode != 0:
-            log.warning(
-                f"[{DAEMON_NAME}] failed to label/mark-read {message_id} "
-                f"(rc={result.returncode}): {result.stderr[:200]}"
-            )
-            return False
-        return True
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-        log.warning(f"[{DAEMON_NAME}] error labeling {message_id}: {exc}")
+
+    label_id = _resolve_label_id(label)
+    if not label_id:
         return False
+
+    modified = _gws_json(
+        [
+            "gmail",
+            "users",
+            "messages",
+            "modify",
+            "--params",
+            json.dumps({"userId": "me", "id": message_id}),
+            "--json",
+            json.dumps({"addLabelIds": [label_id], "removeLabelIds": ["UNREAD"]}),
+        ]
+    )
+    if modified is None:
+        log.warning(f"[{DAEMON_NAME}] failed to label/mark-read {message_id}")
+        return False
+    return True
 
 
 # ── Neotoma writes ────────────────────────────────────────────────────────────
