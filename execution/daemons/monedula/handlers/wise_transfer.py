@@ -182,6 +182,16 @@ class WiseTransferHandler(PaymentHandler):
                 f"  Amount: €{amount}\n"
                 f"  Reference: {reference}"
             )
+        elif status == "dry_run":
+            # A dry-run is a successful rehearsal, NOT a failure. Reporting it
+            # through the generic error branch produced alarming
+            # "payment failed: unknown error" emails.
+            return (
+                f"🧪 {self.profile.label} DRY-RUN ok (no money moved).\n"
+                f"  Would send: €{amount} via Wise\n"
+                f"  Recipient acct: {result.get('account_id', 'n/a')}\n"
+                f"  Reference: {reference}"
+            )
         elif status == "manual_required":
             iban = result.get("iban", "see contacts")
             name = result.get("recipient_name", "recipient")
@@ -196,7 +206,9 @@ class WiseTransferHandler(PaymentHandler):
                 f"  Reference: {reference}"
             )
         else:
-            error = result.get("error", "unknown error")
+            # Name the actual status — a bare "unknown error" hid the fact that
+            # the result was simply a status this branch didn't know about.
+            error = result.get("error") or f"unexpected status {status!r}"
             return f"❌ {self.profile.label} payment failed: {error}"
 
 

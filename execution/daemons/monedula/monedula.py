@@ -460,18 +460,48 @@ def _build_approval_email(task: dict, handler) -> tuple[str, str]:
     return subject, body
 
 
+APPROVAL_SENT_FILE = Path(__file__).parent / ".monedula_approvals_sent.json"
+
+
+def _approval_sent_state() -> dict:
+    try:
+        return json.loads(APPROVAL_SENT_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _record_approval_sent(task_id: str) -> None:
+    state = _approval_sent_state()
+    state[task_id] = date.today().isoformat()
+    try:
+        APPROVAL_SENT_FILE.write_text(json.dumps(state))
+    except OSError as exc:  # noqa: BLE001
+        log.warning(f"[approve] could not record approval-sent state: {exc}")
+
+
 def send_approval_requests(due_tasks: list[dict], handlers: list) -> int:
-    """Email one approval request per due, unapproved, unpaid payment. Returns count."""
+    """Email one approval request per due, unapproved, unpaid payment.
+
+    Asks at most ONCE PER DAY per task: Monedula polls every ~15 min to read
+    replies, and without this guard every poll would re-email the same request.
+    Returns the number of requests sent.
+    """
     sent = 0
+    today = date.today().isoformat()
+    state = _approval_sent_state()
     for task in due_tasks:
         if _task_already_paid(task) or _task_is_approved(task):
             continue
+        tid = str(task.get("entity_id") or task.get("id") or "")
+        if state.get(tid) == today:
+            continue  # already asked today — waiting on the operator's reply
         handler = _handler_for_task(task, handlers)
         if handler is None:
             continue
         subject, body = _build_approval_email(task, handler)
         if _email_send_with_subject(subject, body):
             sent += 1
+            _record_approval_sent(tid)
             fields = _task_fields(task)
             log.info(f"[approve] Sent approval request for "
                      f"{fields.get('title')!r} (token in subject).")
@@ -494,16 +524,10 @@ def process_email_approvals(due_tasks: list[dict]) -> int:
     if not token_to_task:
         return 0
 
-    replies = _read_recent_email_bodies()
+    replies = _read_reply_texts(list(token_to_task.keys()))
     changed = 0
     for text in replies:
         up = text.upper()
-        # Only consider the operator's REPLY, not our own outgoing request. Our
-        # request's body says "Just hit Reply and send"; a reply is prefixed "RE:".
-        is_reply = up.lstrip().startswith("RE:") or "\nRE:" in up
-        if not is_reply:
-            continue
-
         for token, tid in token_to_task.items():
             # The token rides along in the quoted subject of the reply
             # ("Re: … [APPROVE-<token>]"), so the operator never types it.
@@ -526,59 +550,95 @@ def _reply_verdict(up: str, token: str) -> bool | None:
     subject line), and the explicit "APPROVE <token>" form. SKIP wins if both
     appear, so an ambiguous reply never pays by accident.
     """
-    has_skip = ("SKIP" in up)
-    has_approve = ("APPROVE" in up)
-    # Our own request text contains both words; a reply quoting it would too.
-    # Require the verb to appear OUTSIDE the quoted instruction lines.
-    for line in up.splitlines():
-        s = line.strip()
+    # Strip the quoted original: Gmail plain-text replies put the operator's own
+    # words FIRST, then "On <date> ... wrote:" followed by the quoted request
+    # (which itself contains the words APPROVE and SKIP). Only read the part the
+    # operator actually typed, or a quoted instruction would count as a verdict.
+    body = up
+    for marker in ("\nON ", "\n-----ORIGINAL", "\n________"):
+        idx = body.find(marker)
+        if idx > 0:
+            body = body[:idx]
+            break
+
+    verdict = None
+    for line in body.splitlines():
+        s = line.strip().rstrip(".!")
         if s.startswith(">") or "JUST HIT REPLY" in s or "TO DECLINE" in s:
             continue
+        # Ignore the subject line itself (it always contains "APPROVE-<token>").
+        if s.startswith("RE:") or s.startswith("[ATELES]"):
+            continue
         if s in ("SKIP", f"SKIP {token}", f"SKIP-{token}"):
-            return False
-        if s in ("APPROVE", f"APPROVE {token}", f"APPROVE-{token}"):
-            return True
-    # Fall back to a looser read only when unambiguous.
-    if has_skip and not has_approve:
-        return False
-    return None
+            return False  # SKIP is decisive — never pay on an ambiguous reply
+        if s in ("APPROVE", "YES", f"APPROVE {token}", f"APPROVE-{token}"):
+            verdict = True
+    return verdict
 
 
-def _read_recent_email_bodies(max_msgs: int = 30) -> list[str]:
-    """Return recent inbox subjects+snippets via `gws gmail +triage`. Best-effort.
-
-    Approval tokens live in the SUBJECT of the operator's reply (a reply keeps
-    "APPROVE <token>" visible, and the quoted original subject also carries the
-    token), so subject text is sufficient to match. Fail-open (returns []).
-    """
+def _gws_json(args: list[str], timeout: int = 45) -> Any:
+    """Run a gws command and parse its JSON, tolerating banner/warning preamble."""
     import shutil
 
     gws = shutil.which("gws")
     if not gws:
-        return []
+        return None
     try:
-        r = subprocess.run(
-            [gws, "gmail", "+triage", "--format", "json",
-             "--max", str(max_msgs), "--query", "newer_than:3d"],
-            capture_output=True, text=True, timeout=45, env=os.environ,
-        )
+        r = subprocess.run([gws, *args], capture_output=True, text=True,
+                           timeout=timeout, env=os.environ)
         if r.returncode != 0:
-            log.warning(f"[approve] gws +triage failed: {(r.stderr or '').strip()[:160]}")
-            return []
-        data = json.loads(r.stdout or "[]")
-        msgs = data if isinstance(data, list) else (
-            data.get("messages") or data.get("results") or [])
-        out = []
-        for m in msgs:
-            out.append(" ".join([
-                str(m.get("subject") or ""),
-                str(m.get("snippet") or ""),
-                str(m.get("from") or ""),
-            ]))
-        return out
+            log.warning(f"[approve] gws {args[:2]} failed: {(r.stderr or '').strip()[:160]}")
+            return None
+        out = r.stdout or ""
+        # gws prints a keyring/format banner before the JSON — start at the first
+        # '{' or '[' so json.loads doesn't choke on it.
+        start = min([i for i in (out.find("{"), out.find("[")) if i >= 0] or [-1])
+        if start < 0:
+            return None
+        return json.loads(out[start:])
     except Exception as exc:  # noqa: BLE001
-        log.warning(f"[approve] read email error: {exc}")
+        log.warning(f"[approve] gws json error: {exc}")
+        return None
+
+
+def _read_reply_texts(tokens: list[str], max_msgs: int = 40) -> list[str]:
+    """Return full text (subject + body) of recent replies carrying any token.
+
+    `gws gmail +triage` returns only date/from/id/subject — NOT the body — so the
+    operator's verdict ("approve") is invisible there. We therefore triage to find
+    candidate message ids whose subject carries a token, then `+read --id` each to
+    pull the actual body. Fail-open (returns []).
+    """
+    if not tokens:
         return []
+    texts: list[str] = []
+    seen_ids: set[str] = set()
+
+    for token in tokens:
+        data = _gws_json(["gmail", "+triage", "--format", "json", "--max",
+                          str(max_msgs), "--query", f"newer_than:3d {token}"])
+        msgs = []
+        if isinstance(data, dict):
+            msgs = data.get("messages") or data.get("results") or []
+        elif isinstance(data, list):
+            msgs = data
+        for m in msgs:
+            mid = str(m.get("id") or "")
+            subject = str(m.get("subject") or "")
+            # Only the operator's REPLY can carry a verdict; our own request can't.
+            if not mid or mid in seen_ids or not subject.upper().startswith("RE:"):
+                continue
+            seen_ids.add(mid)
+            body_data = _gws_json(["gmail", "+read", "--id", mid, "--headers",
+                                   "--format", "json"], timeout=30)
+            body = ""
+            if isinstance(body_data, dict):
+                # gws +read returns the plain-text body under `body_text`.
+                body = str(body_data.get("body_text")
+                           or body_data.get("body")
+                           or body_data.get("text") or "")
+            texts.append(f"{subject}\n{body}")
+    return texts
 
 
 def _email_send_with_subject(subject: str, body: str) -> bool:
@@ -1039,15 +1099,21 @@ def _build_preview_message(
 def main() -> None:
     log.info("Monedula starting.")
 
-    # Idempotency: exit immediately if already ran today
-    if _check_already_ran_today():
-        log.info("Already ran today — exiting.")
-        return
-
-    # Mark as started immediately to prevent concurrent launchd re-launches.
-    # We clear this at the very end if something goes wrong before completion,
-    # but keep it on successful runs to prevent double-payment.
-    _mark_ran_today()
+    # The once-daily guard applies to the CALENDAR-triggered path only: that path
+    # pays for yesterday's sessions and must fire exactly once per day.
+    #
+    # The task/approval path must run on EVERY poll — it reads the operator's
+    # emailed APPROVE/SKIP replies, which can arrive at any time. Gating the whole
+    # run on "already ran today" made every scheduled poll a no-op after the first,
+    # so replies were never processed. That path is independently idempotent
+    # (payment_approved gate + _task_already_paid), so polling it is safe.
+    calendar_leg_done_today = _check_already_ran_today()
+    if calendar_leg_done_today:
+        log.info("Calendar leg already ran today — task/approval leg still polling.")
+    else:
+        # Mark as started immediately to prevent concurrent launchd re-launches
+        # from double-paying the calendar leg.
+        _mark_ran_today()
 
     yesterday = _yesterday()
     yesterday_str = yesterday.isoformat()
@@ -1060,18 +1126,20 @@ def main() -> None:
 
     all_handlers = load_handlers()
 
-    # Fetch yesterday's events
-    events = fetch_yesterday_events()
-
-    # Find triggered handlers from calendar
+    # Calendar leg — skipped once it has already run today (it pays for
+    # yesterday's sessions and must not fire twice).
     triggered: list[tuple] = []  # [(handler, [match, ...]), ...]
-    for handler in all_handlers:
-        matches = handler.matches(events)
-        if matches:
-            triggered.append((handler, matches))
+    if calendar_leg_done_today:
+        log.info("Skipping calendar leg (already ran today).")
+    else:
+        events = fetch_yesterday_events()
+        for handler in all_handlers:
+            matches = handler.matches(events)
+            if matches:
+                triggered.append((handler, matches))
 
-    if triggered:
-        log.info(f"Triggered handlers: {[h.name for h, _ in triggered]}")
+        if triggered:
+            log.info(f"Triggered handlers: {[h.name for h, _ in triggered]}")
 
     # Fetch due payment tasks from Neotoma, scoped to profile-linked task IDs only.
     due_tasks = fetch_due_payment_tasks(all_handlers)
@@ -1088,10 +1156,14 @@ def main() -> None:
             "No calendar-triggered payments, but due payment tasks found — sending reminder only."
         )
 
-    # Build and send preview
-    preview_msg = _build_preview_message(triggered, yesterday_str, due_tasks=due_tasks)
-    log.info("Sending payment preview to Telegram...")
-    telegram_send(preview_msg)
+    # Build and send the daily preview/digest — only on the calendar leg's
+    # once-daily run. On the 15-min approval polls this would re-send every
+    # cycle, so it is suppressed there.
+    if not calendar_leg_done_today:
+        preview_msg = _build_preview_message(triggered, yesterday_str,
+                                             due_tasks=due_tasks)
+        log.info("Sending payment preview...")
+        telegram_send(preview_msg)
 
     # Email reply-to-approve: first apply any APPROVE/SKIP <token> replies the
     # operator sent since the last run (flips payment_approved on matching tasks).
@@ -1107,10 +1179,21 @@ def main() -> None:
     # MONEDULA_DRYRUN=0). Then a per-payment confirmation is emailed.
     if due_tasks:
         task_results = execute_approved_tasks(due_tasks, all_handlers)
-        if task_results:
+
+        # Only REAL outcomes are worth an email. A dry-run is a rehearsal, and
+        # this leg polls every ~15 min — emailing dry-run results notified the
+        # operator every cycle (and, worse, rendered them as "payment failed:
+        # unknown error"). Report only actually-attempted payments.
+        reportable = [(h, r) for h, r in task_results
+                      if r.get("status") != "dry_run"]
+        if task_results and not reportable:
+            log.info(f"[autoexec] {len(task_results)} dry-run result(s) — "
+                     f"not emailing (rehearsal only).")
+
+        if reportable:
             conf_lines = [f"📋 Monedula task-payment results for {today_str}:", ""]
             receipts: list[str] = []
-            for handler, result in task_results:
+            for handler, result in reportable:
                 if hasattr(handler, "format_confirmation"):
                     conf_lines.append(handler.format_confirmation(result))
                 else:
@@ -1122,7 +1205,7 @@ def main() -> None:
                     receipts.append(rp)
                 conf_lines.append("")
             telegram_send("\n".join(conf_lines).rstrip(), attachments=receipts)
-            _mark_tasks_paid(task_results, due_tasks)
+            _mark_tasks_paid(reportable, due_tasks)
 
         # For any tasks still awaiting approval, email a per-payment approval
         # request (with its token) so the operator can approve by replying.
