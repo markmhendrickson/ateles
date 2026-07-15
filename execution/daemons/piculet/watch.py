@@ -226,11 +226,35 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# Dedup state for Telegram alerts — avoids repeat messages for persistent errors.
+# Dedup state for operator alerts — avoids repeat messages for persistent errors.
 # Maps alert text → (first_sent_time, send_count). Cleared when the error resolves.
 _telegram_alert_state: dict[str, tuple[float, int]] = {}
 # Re-notify for the same persistent error after this many seconds (hourly reminder).
 _TELEGRAM_REPEAT_INTERVAL = 3600
+
+
+def _alert_is_due(key: str) -> bool:
+    """
+    Rate-limit gate for a repeating alert, shared by every operator channel.
+
+    Returns True the first time `key` is seen, then again only once per
+    _TELEGRAM_REPEAT_INTERVAL while the condition persists (so a stuck error
+    stays visible without spamming). Call _telegram_clear(key) on resolve.
+
+    Exists because the email path used to bypass the Telegram-only dedup and
+    notified on EVERY failed poll — a transient Neotoma timeout produced one
+    operator email per poll interval, indefinitely.
+    """
+    now = time.monotonic()
+    state = _telegram_alert_state.get(key)
+    if state is None:
+        _telegram_alert_state[key] = (now, 1)
+        return True
+    first_sent, count = state
+    if now - first_sent >= _TELEGRAM_REPEAT_INTERVAL * count:
+        _telegram_alert_state[key] = (first_sent, count + 1)
+        return True
+    return False
 
 
 def _telegram(message: str) -> None:
@@ -279,20 +303,15 @@ def _telegram_deduped(message: str) -> None:
     but sends a reminder when the interval lapses so persistent issues stay visible.
     Call _telegram_clear(message) when the condition resolves.
     """
-    now = time.monotonic()
-    state = _telegram_alert_state.get(message)
-    if state is None:
-        # New alert — send immediately
-        _telegram_alert_state[message] = (now, 1)
+    if not _alert_is_due(message):
+        return
+    _, count = _telegram_alert_state[message]
+    if count == 1:
         _telegram(message)
     else:
-        first_sent, count = state
-        elapsed = now - first_sent
-        if elapsed >= _TELEGRAM_REPEAT_INTERVAL * count:
-            # Remind once per hour for persistent issues
-            count += 1
-            _telegram_alert_state[message] = (first_sent, count)
-            _telegram(f"{message} (still ongoing, {int(elapsed / 60)}m)")
+        first_sent, _ = _telegram_alert_state[message]
+        elapsed = int((time.monotonic() - first_sent) / 60)
+        _telegram(f"{message} (still ongoing, {elapsed}m)")
 
 
 def _telegram_clear(message: str) -> None:
@@ -301,17 +320,25 @@ def _telegram_clear(message: str) -> None:
 
 
 def log_error(message: str) -> None:
-    """Log at ERROR level and send a deduplicated Telegram alert + lib/notify."""
+    """Log at ERROR level and alert the operator, deduplicated per channel.
+
+    Both the Telegram and the lib/notify (email) alert go through the same
+    rate-limit gate. The email path previously bypassed dedup entirely and
+    fired on every failed poll, so one persistent condition (e.g. a Neotoma
+    timeout) emailed the operator once per poll interval, forever.
+    """
     log.error(message)
     _telegram_deduped(f"🔴 [piculet] ERROR: {message}")
-    _notify_lib(f"piculet error: {message}", priority="blocker")
+    if _alert_is_due(f"notify:error:{message}"):
+        _notify_lib(f"piculet error: {message}", priority="blocker")
 
 
 def log_warning(message: str) -> None:
-    """Log at WARNING level and send a deduplicated Telegram alert + lib/notify."""
+    """Log at WARNING level and alert the operator, deduplicated per channel."""
     log.warning(message)
     _telegram_deduped(f"🟡 [piculet] WARNING: {message}")
-    _notify_lib(f"piculet warning: {message}", priority="info")
+    if _alert_is_due(f"notify:warning:{message}"):
+        _notify_lib(f"piculet warning: {message}", priority="info")
 
 
 # ---------------------------------------------------------------------------
