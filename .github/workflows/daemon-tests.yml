@@ -1,0 +1,28 @@
+name: piculet daemon tests
+
+# Runs the piculet daemon test suite in CI (ateles#225 / ateles#228 review
+# finding: test_watch.py existed but was never executed in CI because
+# ateles-tests.yml only triggers on ateles/**). Scoped to piculet + the repo
+# root working directory it's invoked from — not the full execution/daemons/**
+# tree, which has its own pre-existing CI-coverage gap tracked separately.
+
+on:
+  pull_request:
+    paths:
+      - "execution/daemons/piculet/**"
+      - ".github/workflows/daemon-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Run piculet daemon tests
+        run: uv run --extra dev python -m pytest execution/daemons/piculet -q
