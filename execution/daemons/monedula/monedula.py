@@ -724,6 +724,35 @@ def execute_approved_tasks(due_tasks: list[dict], handlers: list) -> list[tuple]
     return results
 
 
+def task_for(task_id: str, due_tasks: list[dict]) -> dict:
+    """Return the due-task dict with this entity id (empty dict if absent)."""
+    for t in due_tasks:
+        if str(t.get("entity_id") or t.get("id") or "") == task_id:
+            return t
+    return {}
+
+
+def _is_recurring_obligation(task: dict, handler=None) -> bool:
+    """True when a task is a standing per-session obligation that must NEVER be
+    marked completed — only have its due_date rolled (operator standing rule for
+    yoga / therapy and similar recurring wellness commitments).
+
+    Signals, cheapest first: an explicit `recurrence` field on the task, or a
+    session-payment keyword in the title/notes.
+    """
+    fields = task.get("snapshot") or task.get("fields") or task or {}
+    if str(fields.get("recurrence") or "").strip():
+        return True
+    hay = " ".join([
+        str(fields.get("title") or ""),
+        str(fields.get("notes") or ""),
+        str(getattr(getattr(handler, "profile", None), "label", "") or ""),
+    ]).lower()
+    return any(k in hay for k in
+               ("yoga", "therapy", "terapia", "osteopat", "per-session",
+                "pay only for attended"))
+
+
 def _mark_tasks_paid(task_results: list[tuple], due_tasks: list[dict]) -> None:
     """
     After a REAL successful send, mark the corresponding task done in Neotoma
@@ -779,8 +808,23 @@ def _mark_tasks_paid(task_results: list[tuple], due_tasks: list[dict]) -> None:
                 log.warning(f"[autoexec] corrections create {field} error: {exc}")
                 return False
 
-        ok_status = _correct("status", "done")
+        # Recurring-obligation rule: a per-session obligation (yoga, therapy, …)
+        # is NEVER completed — the task is the standing obligation, not one
+        # payment. Only record the payment reference; the due_date rolls to the
+        # next session separately. One-off tasks (vendor invoices,
+        # reimbursements) do complete.
         ok_ref = _correct("payment_event_id", str(ref)) if ref else True
+        if _is_recurring_obligation(task_for(tid, due_tasks), handler):
+            if ok_ref:
+                log.info(f"[autoexec] Recorded payment on recurring task {tid} "
+                         f"({handler.name}), ref={ref} — NOT marked done "
+                         f"(recurring obligation).")
+            else:
+                log.warning(f"[autoexec] Recurring task {tid} payment ref not "
+                            f"recorded — needs manual note.")
+            continue
+
+        ok_status = _correct("status", "done")
         if ok_status and ok_ref:
             log.info(f"[autoexec] Marked task {tid} done ({handler.name}), ref={ref}.")
         else:
