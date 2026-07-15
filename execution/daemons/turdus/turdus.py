@@ -371,7 +371,12 @@ def _gws_json(args: list[str], timeout: int = 15) -> dict | None:
         if brace == -1:
             return None
         return json.loads(out[brace:])
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
+    except (
+        FileNotFoundError,
+        subprocess.TimeoutExpired,
+        OSError,
+        json.JSONDecodeError,
+    ) as exc:
         log.warning(f"[{DAEMON_NAME}] gws {' '.join(args[:3])} error: {exc}")
         return None
 
