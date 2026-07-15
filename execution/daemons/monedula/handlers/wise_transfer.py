@@ -34,7 +34,6 @@ try:
 except ImportError:
     from handler_base import PaymentHandler  # type: ignore[no-redef]
 from .payment_profile import PaymentProfile
-from .share_message import build_share_message
 
 log = logging.getLogger(__name__)
 
@@ -176,21 +175,15 @@ class WiseTransferHandler(PaymentHandler):
         if status == "sent":
             transfer_id = result.get("transfer_id", "unknown")
             name = result.get("recipient_name", "recipient")
-            # Operator rule: always include a premade message to copy-paste to
-            # the payee. Wise has no public explorer link, so the message just
-            # states the transfer was sent (no IBAN — never share account data).
-            share = result.get("share_message") or build_share_message(
-                amount_eur=amount, label=self.profile.label, rail="wise",
-                contact_id=getattr(self.profile, "contact_id", "") or "")
+            # No payee copy-paste line for Wise: there is no public explorer, so
+            # there is nothing for the payee to verify. The share line is a
+            # blockchain-only convention (see handlers/share_message.py).
             return (
                 f"✅ {self.profile.label} payment sent via Wise!\n"
                 f"  Transfer ID: {transfer_id}\n"
                 f"  Recipient: {name}\n"
                 f"  Amount: €{amount}\n"
-                f"  Reference: {reference}\n\n"
-                f"— — — Copy-paste to send the payee — — —\n"
-                f"{share}\n"
-                f"— — — — — — — — — — — — — — — — — — — —"
+                f"  Reference: {reference}"
             )
         elif status == "dry_run":
             # A dry-run is a successful rehearsal, NOT a failure. Reporting it

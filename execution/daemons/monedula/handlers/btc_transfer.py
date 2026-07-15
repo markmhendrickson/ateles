@@ -130,17 +130,11 @@ class BtcTransferHandler(PaymentHandler):
             # receipt_kind mirrors the Wise handler's proof-of-payment surface:
             # for BTC the on-chain explorer page IS the receipt.
             payment_result["receipt_kind"] = "btc_explorer"
-            # Operator rule: every confirmation carries a premade message to
-            # copy-paste to the payee, with the explorer link for on-chain sends.
-            payment_result["share_message"] = build_share_message(
+            # Payee copy-paste line — "[AMOUNT] € [LINK TO EXPLORER]".
+            payment_result["copy_paste_line"] = build_share_message(
                 amount_eur=self.profile.amount_eur,
-                label=self.profile.label,
                 rail="btc",
                 explorer_url=explorer_url,
-                contact_id=getattr(self.profile, "contact_id", "") or "",
-            )
-            payment_result["copy_paste_line"] = (
-                f"{self.profile.amount_eur} € 📤 {explorer_url}"
             )
             log.info(f"[{self.name}] Payment sent. txid={txid} {explorer_url}")
             _update_task(self.profile, txid)
@@ -152,17 +146,15 @@ class BtcTransferHandler(PaymentHandler):
             txid = result.get("txid", "unknown")
             explorer = result.get("explorer_url") or _explorer_url(
                 txid, str(result.get("network") or "mainnet"))
-            share = result.get("share_message") or build_share_message(
-                amount_eur=self.profile.amount_eur, label=self.profile.label,
-                rail="btc", explorer_url=explorer,
-                contact_id=getattr(self.profile, "contact_id", "") or "")
+            copy_paste = result.get("copy_paste_line") or build_share_message(
+                amount_eur=self.profile.amount_eur, rail="btc",
+                explorer_url=explorer)
             return (
                 f"✅ {self.profile.label} payment sent!\n"
                 f"  txid: {txid}\n"
                 f"  Blockchain explorer: {explorer}\n\n"
-                f"— — — Copy-paste to send the payee — — —\n"
-                f"{share}\n"
-                f"— — — — — — — — — — — — — — — — — — — —"
+                f"Copy-paste line:\n"
+                f"  {copy_paste}"
             )
         else:
             error = result.get("error", "unknown error")
