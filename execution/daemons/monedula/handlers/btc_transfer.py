@@ -31,6 +31,7 @@ try:
 except ImportError:
     from handler_base import PaymentHandler  # type: ignore[no-redef]
 from .payment_profile import PaymentProfile
+from .share_message import build_share_message
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +130,15 @@ class BtcTransferHandler(PaymentHandler):
             # receipt_kind mirrors the Wise handler's proof-of-payment surface:
             # for BTC the on-chain explorer page IS the receipt.
             payment_result["receipt_kind"] = "btc_explorer"
+            # Operator rule: every confirmation carries a premade message to
+            # copy-paste to the payee, with the explorer link for on-chain sends.
+            payment_result["share_message"] = build_share_message(
+                amount_eur=self.profile.amount_eur,
+                label=self.profile.label,
+                rail="btc",
+                explorer_url=explorer_url,
+                contact_id=getattr(self.profile, "contact_id", "") or "",
+            )
             payment_result["copy_paste_line"] = (
                 f"{self.profile.amount_eur} € 📤 {explorer_url}"
             )
@@ -142,12 +152,17 @@ class BtcTransferHandler(PaymentHandler):
             txid = result.get("txid", "unknown")
             explorer = result.get("explorer_url") or _explorer_url(
                 txid, str(result.get("network") or "mainnet"))
+            share = result.get("share_message") or build_share_message(
+                amount_eur=self.profile.amount_eur, label=self.profile.label,
+                rail="btc", explorer_url=explorer,
+                contact_id=getattr(self.profile, "contact_id", "") or "")
             return (
                 f"✅ {self.profile.label} payment sent!\n"
                 f"  txid: {txid}\n"
                 f"  Blockchain explorer: {explorer}\n\n"
-                f"Copy-paste line:\n"
-                f"  {self.profile.amount_eur} € 📤 {explorer}"
+                f"— — — Copy-paste to send the payee — — —\n"
+                f"{share}\n"
+                f"— — — — — — — — — — — — — — — — — — — —"
             )
         else:
             error = result.get("error", "unknown error")
