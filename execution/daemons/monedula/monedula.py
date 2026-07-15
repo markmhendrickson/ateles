@@ -909,16 +909,29 @@ def _mark_tasks_paid(task_results: list[tuple], due_tasks: list[dict]) -> None:
         # payment. Only record the payment reference; the due_date rolls to the
         # next session separately. One-off tasks (vendor invoices,
         # reimbursements) do complete.
-        ok_ref = _correct("payment_event_id", str(ref)) if ref else True
         if _is_recurring_obligation(task_for(tid, due_tasks), handler):
-            if ok_ref:
-                log.info(f"[autoexec] Recorded payment on recurring task {tid} "
-                         f"({handler.name}), ref={ref} — NOT marked done "
-                         f"(recurring obligation).")
+            # A recurring obligation is never completed, so `status` cannot mark
+            # it settled. The handler's _update_task records the payment in
+            # `notes` and rolls `due_date` to the next session.
+            #
+            # Reset the approval gate: a new session is a NEW decision. Leaving
+            # payment_approved=true would let the next session auto-pay without
+            # the operator approving it. payment_event_id is likewise cleared —
+            # it blocks re-payment (via _task_already_paid), which is correct for
+            # THIS session but would wrongly block the next one.
+            ok_clear_appr = _correct("payment_approved", "false")
+            ok_clear_ref = _correct("payment_event_id", "")
+            if ok_clear_appr and ok_clear_ref:
+                log.info(f"[autoexec] Recurring task {tid} ({handler.name}) paid "
+                         f"ref={ref} — left open, approval reset for next session.")
             else:
-                log.warning(f"[autoexec] Recurring task {tid} payment ref not "
-                            f"recorded — needs manual note.")
+                log.warning(f"[autoexec] Recurring task {tid} approval NOT reset "
+                            f"(approved_cleared={ok_clear_appr}, "
+                            f"ref_cleared={ok_clear_ref}) — next session may "
+                            f"auto-pay or be blocked; needs manual check.")
             continue
+
+        ok_ref = _correct("payment_event_id", str(ref)) if ref else True
 
         ok_status = _correct("status", "done")
         if ok_status and ok_ref:

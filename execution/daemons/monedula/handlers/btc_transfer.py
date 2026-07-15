@@ -30,6 +30,7 @@ try:
     from ..handler_base import PaymentHandler
 except ImportError:
     from handler_base import PaymentHandler  # type: ignore[no-redef]
+from .neotoma_cli import correct_field
 from .payment_profile import PaymentProfile
 from .share_message import build_share_message
 
@@ -200,14 +201,7 @@ def _explorer_url(txid: str, network: str = "mainnet") -> str:
 
 
 def _update_task(profile: PaymentProfile, txid: str) -> None:
-    """Update Neotoma task with payment note and rolled due_date."""
-    import shutil
-
-    neotoma = shutil.which("neotoma")
-    if not neotoma:
-        log.warning(f"[{profile.name}] neotoma CLI not found — skipping task update")
-        return
-
+    """Append a payment note to the Neotoma task and roll its due_date."""
     task_id = profile.neotoma_task_id
     if not task_id:
         log.warning(
@@ -221,50 +215,11 @@ def _update_task(profile: PaymentProfile, txid: str) -> None:
         f"Payment sent {today.isoformat()}: "
         f"{profile.amount_eur} EUR BTC txid={txid} {explorer}"
     )
-
-    try:
-        res = subprocess.run(
-            [neotoma, "--api-only", "entities", "update", task_id, "--notes", note],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=os.environ,
-        )
-        if res.returncode != 0:
-            log.warning(
-                f"[{profile.name}] neotoma notes update failed: {res.stderr.strip()[:200]}"
-            )
-        else:
-            log.info(f"[{profile.name}] Neotoma task notes updated.")
-    except Exception as exc:
-        log.warning(f"[{profile.name}] neotoma update error: {exc}")
+    correct_field(task_id, "notes", note, label=profile.name)
 
     next_due = _find_next_event_due_date(profile)
     if next_due:
-        try:
-            res = subprocess.run(
-                [
-                    neotoma,
-                    "--api-only",
-                    "entities",
-                    "update",
-                    task_id,
-                    "--due-date",
-                    next_due,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=os.environ,
-            )
-            if res.returncode != 0:
-                log.warning(
-                    f"[{profile.name}] neotoma due_date update failed: {res.stderr.strip()[:200]}"
-                )
-            else:
-                log.info(f"[{profile.name}] Neotoma task due_date set to {next_due}.")
-        except Exception as exc:
-            log.warning(f"[{profile.name}] neotoma due_date update error: {exc}")
+        correct_field(task_id, "due_date", next_due, label=profile.name)
     else:
         log.warning(
             f"[{profile.name}] Could not find next event date — due_date not updated."
