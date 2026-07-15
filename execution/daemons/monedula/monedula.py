@@ -604,7 +604,33 @@ def _gws_json(args: list[str], timeout: int = 45) -> Any:
 # Maps payment token -> the Gmail message id of the operator's APPROVE reply, so
 # the payment confirmation can be sent as a reply IN THAT THREAD (rather than as
 # a new standalone "results" email, which is what the operator saw before).
-_REPLY_MSG_IDS: dict[str, str] = {}
+#
+# Persisted: a payment can be approved on one poll and execute on a later one (or
+# the daemon may restart in between). Keeping this only in memory silently lost
+# the thread and downgraded the confirmation to a standalone digest.
+REPLY_IDS_FILE = Path(__file__).parent / ".monedula_reply_ids.json"
+
+
+def _load_reply_ids() -> dict[str, str]:
+    try:
+        data = json.loads(REPLY_IDS_FILE.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _remember_reply_id(token: str, message_id: str) -> None:
+    ids = _load_reply_ids()
+    if ids.get(token) == message_id:
+        return
+    ids[token] = message_id
+    try:
+        REPLY_IDS_FILE.write_text(json.dumps(ids))
+    except OSError as exc:  # noqa: BLE001
+        log.warning(f"[approve] could not persist reply id: {exc}")
+
+
+_REPLY_MSG_IDS: dict[str, str] = _load_reply_ids()
 
 
 def _read_reply_texts(tokens: list[str], max_msgs: int = 40) -> list[str]:
@@ -644,8 +670,10 @@ def _read_reply_texts(tokens: list[str], max_msgs: int = 40) -> list[str]:
                            or body_data.get("body")
                            or body_data.get("text") or "")
             # Remember which message to reply to, so the payment confirmation
-            # lands in this same thread.
+            # lands in this same thread — persisted, since the payment may
+            # execute on a later poll or after a restart.
             _REPLY_MSG_IDS[token] = mid
+            _remember_reply_id(token, mid)
             texts.append(f"{subject}\n{body}")
     return texts
 
