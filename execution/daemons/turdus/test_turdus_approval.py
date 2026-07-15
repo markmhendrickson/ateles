@@ -252,3 +252,81 @@ def test_read_body_falls_back_to_html_when_no_text(monkeypatch):
 
     monkeypatch.setattr(_sp, "run", lambda *a, **k: _R())
     assert turdus._read_message_body("msg-2") == "<p>only html</p>"
+
+
+# ── notification loop regression (invoice re-notify bug) ─────────────────────
+#
+# The bug: an unread invoice was re-detected and re-notified on every ~5-min
+# poll because (a) the poll query never excluded processed mail and (b) the
+# notification fired on a per-cycle count with no per-message-ID dedup.
+
+
+def _invoice_msg(mid="inv1"):
+    return {
+        "id": mid,
+        "from": "billing@vendor.example",
+        "subject": "Factura 2026-07 — payment due",
+        "date": "2026-07-15T09:00:00Z",
+        "labels": [],
+    }
+
+
+def _wire_poll(monkeypatch, *, messages):
+    """Stub the poll cycle's side effects so only classification/notify runs."""
+    monkeypatch.setattr(turdus, "DRY_RUN", False)
+    monkeypatch.setattr(turdus, "_poll_gmail_messages", lambda *_: list(messages))
+
+    async def _noop_store(_msg):
+        return "ent_email_stub"
+
+    async def _noop_task(*_a, **_k):
+        return "ent_task_stub"
+
+    async def _no_approval(_msg, _notifier):
+        return False
+
+    monkeypatch.setattr(turdus, "_store_email_entity", _noop_store)
+    monkeypatch.setattr(turdus, "_create_task_for_email", _noop_task)
+    monkeypatch.setattr(turdus, "_maybe_handle_swarm_approval", _no_approval)
+    monkeypatch.setattr(turdus, "_maybe_handle_release_approval", _no_approval)
+    monkeypatch.setattr(turdus, "_label_gmail_message", lambda *a, **k: True)
+
+
+def test_poll_query_excludes_processed_label(monkeypatch):
+    # The poll must ask Gmail to exclude already-processed mail, or the same
+    # unread invoice returns every cycle.
+    captured = {}
+
+    def fake_run(cmd, *a, **k):
+        captured["cmd"] = cmd
+
+        class R:
+            returncode = 0
+            stdout = '{"messages": []}'
+            stderr = ""
+
+        return R()
+
+    monkeypatch.setattr(turdus.subprocess, "run", fake_run)
+    turdus._poll_gmail_messages(5)
+    assert "--query" in captured["cmd"]
+    qi = captured["cmd"].index("--query") + 1
+    assert f"-label:{turdus.PROCESSED_LABEL}" in captured["cmd"][qi]
+
+
+def test_invoice_notifies_once_then_deduped(monkeypatch):
+    # First poll: one invoice → exactly one BLOCKER notification.
+    # Second poll returns the SAME message ID (simulating a label-write lag) →
+    # no second notification, because the ID is recorded in processed_ids.
+    _wire_poll(monkeypatch, messages=[_invoice_msg("inv1")])
+    notifier = _StubNotifier()
+
+    state = _run(turdus.poll_once(notifier, {"last_message_id": None}))
+    invoice_notes = [m for m in notifier.sent if "invoice(s)" in m]
+    assert len(invoice_notes) == 1
+    assert "inv1" in state.get("processed_ids", [])
+
+    # Same message id comes back; state carries the dedup set forward.
+    notifier2 = _StubNotifier()
+    _run(turdus.poll_once(notifier2, state))
+    assert [m for m in notifier2.sent if "invoice(s)" in m] == []
