@@ -601,6 +601,12 @@ def _gws_json(args: list[str], timeout: int = 45) -> Any:
         return None
 
 
+# Maps payment token -> the Gmail message id of the operator's APPROVE reply, so
+# the payment confirmation can be sent as a reply IN THAT THREAD (rather than as
+# a new standalone "results" email, which is what the operator saw before).
+_REPLY_MSG_IDS: dict[str, str] = {}
+
+
 def _read_reply_texts(tokens: list[str], max_msgs: int = 40) -> list[str]:
     """Return full text (subject + body) of recent replies carrying any token.
 
@@ -637,8 +643,70 @@ def _read_reply_texts(tokens: list[str], max_msgs: int = 40) -> list[str]:
                 body = str(body_data.get("body_text")
                            or body_data.get("body")
                            or body_data.get("text") or "")
+            # Remember which message to reply to, so the payment confirmation
+            # lands in this same thread.
+            _REPLY_MSG_IDS[token] = mid
             texts.append(f"{subject}\n{body}")
     return texts
+
+
+def _email_reply_in_thread(message_id: str, body: str,
+                           attachments: list[str] | None = None) -> bool:
+    """Reply to `message_id` so the confirmation lands in the SAME thread as the
+    operator's approval. Uses `gws gmail +reply`, which handles threading.
+
+    Verifies the resolved recipient is the operator: `+reply` can misaddress when
+    replying to a message the operator themselves sent (a known gws quirk), so we
+    pass --to explicitly rather than trusting the inferred recipient.
+    Fail-open: returns False so the caller can fall back to a standalone email.
+    """
+    import shutil
+
+    if os.environ.get("ATELES_NOTIFY_EMAIL", "0") != "1":
+        return False
+    operator_email = os.environ.get("OPERATOR_EMAIL", "").strip()
+    gws = shutil.which("gws")
+    if not gws or not message_id or not operator_email:
+        return False
+
+    cmd = [gws, "gmail", "+reply", "--message-id", message_id,
+           "--body", body, "--to", operator_email]
+    swarm_email = os.environ.get("ATELES_SWARM_EMAIL", "").strip()
+    if swarm_email:
+        cmd += ["--from", swarm_email]
+
+    staged: list[Path] = []
+    stage_dir = PROJECT_ROOT / ".monedula_receipts_tmp"
+    for src in (attachments or []):
+        try:
+            if not os.path.exists(src):
+                continue
+            stage_dir.mkdir(parents=True, exist_ok=True)
+            dst = stage_dir / Path(src).name
+            shutil.copyfile(src, dst)
+            staged.append(dst)
+            cmd += ["--attach", str(dst.relative_to(PROJECT_ROOT))]
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[notify] could not stage attachment {src}: {exc}")
+
+    try:
+        r = subprocess.run(cmd, timeout=60, capture_output=True, text=True,
+                           cwd=str(PROJECT_ROOT), env=os.environ)
+        if r.returncode != 0:
+            log.warning(f"[notify] +reply failed (rc={r.returncode}): "
+                        f"{(r.stderr or '').strip()[:160]}")
+            return False
+        log.info(f"[notify] Confirmation replied in thread ({message_id}).")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[notify] +reply error: {exc}")
+        return False
+    finally:
+        for p in staged:
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
 
 def _email_send_with_subject(subject: str, body: str) -> bool:
@@ -1235,20 +1303,39 @@ def main() -> None:
                      f"not emailing (rehearsal only).")
 
         if reportable:
-            conf_lines = [f"📋 Monedula task-payment results for {today_str}:", ""]
-            receipts: list[str] = []
+            # Confirm each payment as a REPLY in its own approval thread, so the
+            # receipt lands in the conversation the operator approved from.
+            # Anything without a known thread falls back to a standalone digest.
+            unthreaded: list[tuple] = []
             for handler, result in reportable:
-                if hasattr(handler, "format_confirmation"):
-                    conf_lines.append(handler.format_confirmation(result))
-                else:
-                    conf_lines.append(f"{handler.name}: {result.get('status')}")
-                # Collect any proof-of-payment receipt for attachment (Wise PDF);
-                # BTC results carry an explorer URL in the confirmation text.
+                text = (handler.format_confirmation(result)
+                        if hasattr(handler, "format_confirmation")
+                        else f"{handler.name}: {result.get('status')}")
                 rp = result.get("receipt_path")
-                if rp and os.path.exists(rp):
-                    receipts.append(rp)
-                conf_lines.append("")
-            telegram_send("\n".join(conf_lines).rstrip(), attachments=receipts)
+                receipts = [rp] if rp and os.path.exists(rp) else []
+
+                tid = str(getattr(getattr(handler, "profile", None),
+                                  "neotoma_task_id", "") or "")
+                msg_id = _REPLY_MSG_IDS.get(_payment_token(tid)) if tid else None
+                if msg_id and _email_reply_in_thread(msg_id, text,
+                                                     attachments=receipts):
+                    continue
+                unthreaded.append((handler, result))
+
+            if unthreaded:
+                conf_lines = [f"📋 Monedula task-payment results for {today_str}:", ""]
+                receipts = []
+                for handler, result in unthreaded:
+                    conf_lines.append(
+                        handler.format_confirmation(result)
+                        if hasattr(handler, "format_confirmation")
+                        else f"{handler.name}: {result.get('status')}")
+                    rp = result.get("receipt_path")
+                    if rp and os.path.exists(rp):
+                        receipts.append(rp)
+                    conf_lines.append("")
+                telegram_send("\n".join(conf_lines).rstrip(), attachments=receipts)
+
             _mark_tasks_paid(reportable, due_tasks)
 
         # For any tasks still awaiting approval, email a per-payment approval
