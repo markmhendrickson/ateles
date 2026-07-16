@@ -37,11 +37,33 @@ SYSTEMIC_CITATION_PATTERNS = (
 )
 
 # Review block header: "[BLOCKING] tenant-isolation: ..." (panel reviews and
-# the Claude GHA both emit this shape).
+# the Claude GHA both emit this shape). An optional trailing
+# "(finding_kind: implementation|decision)" tag (ateles#230) lets the raising
+# lens agent classify the finding for auto-dispatch routing; the group is
+# optional so older reviews with no tag still parse unchanged.
 _FINDING_HEADER = re.compile(
-    r"^\[(?P<severity>BLOCKING|NON-BLOCKING)\]\s*(?P<category>[^:\n]+?)\s*:\s*(?P<summary>.*)$",
+    r"^\[(?P<severity>BLOCKING|NON-BLOCKING)\]\s*(?P<category>[^:\n]+?)\s*:\s*"
+    r"(?P<summary>.*?)"
+    r"(?:\s*\(finding_kind:\s*(?P<finding_kind>\w+)\s*\))?$",
     re.MULTILINE,
 )
+
+# Closed enum for finding_kind. Anything outside this set — including a
+# missing tag — is NOT "implementation"; see _classify_finding_kind.
+FINDING_KINDS = ("implementation", "decision")
+# Fail-closed default: an unclassified or invalid finding_kind is treated as
+# "decision" (hold the gate for a human), never "implementation" (which would
+# auto-dispatch Cicada). This is the load-bearing correctness property of
+# ateles#230 — silently defaulting to auto-dispatch would let a mis-tagged
+# security/product judgment get "addressed" by automation.
+DEFAULT_FINDING_KIND = "decision"
+
+
+def _classify_finding_kind(raw: str | None) -> str:
+    if raw and raw.strip().lower() in FINDING_KINDS:
+        return raw.strip().lower()
+    return DEFAULT_FINDING_KIND
+
 
 # Default systemic-finding owner by review lens. The implementer (Gryllus)
 # owns correctness-class lessons; content-class lessons route to Corvus.
@@ -60,6 +82,10 @@ class ReviewFinding:
     lens: str = ""
     files: list[str] = field(default_factory=list)
     rule_citations: list[str] = field(default_factory=list)
+    # Fail-closed default at the dataclass level too (defense in depth against
+    # a future caller that constructs ReviewFinding directly rather than via
+    # parse_findings — ateles#230).
+    finding_kind: str = DEFAULT_FINDING_KIND
 
 
 def parse_findings(review_text: str, lens: str = "") -> list[ReviewFinding]:
@@ -81,6 +107,7 @@ def parse_findings(review_text: str, lens: str = "") -> list[ReviewFinding]:
                 rule_citations=[
                     p for p in SYSTEMIC_CITATION_PATTERNS if re.search(p, block, re.I)
                 ],
+                finding_kind=_classify_finding_kind(m.group("finding_kind")),
             )
         )
     return findings
