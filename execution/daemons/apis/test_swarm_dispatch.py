@@ -107,6 +107,14 @@ def _config(**overrides):
     )
 
 
+def _config_auto_address():
+    # Same as _config() but with ATELES_SWARM_AUTO_ADDRESS_FINDINGS ON
+    # (ateles#230 auto-dispatch of implementation-only findings).
+    return DispatchConfig(
+        neotoma_token="", github_token="", auto_address_findings=True
+    )
+
+
 # ── content_digest ──────────────────────────────────────────────────────────
 
 
@@ -751,6 +759,340 @@ def test_route_findings_unparseable_dedup_suppresses_renotify(monkeypatch):
     assert not any(
         "no blocking findings could be parsed" in m for m in notifier.sent
     )
+
+
+# ── ateles#230 — auto-dispatch implementation-only findings ─────────────────
+#
+# Flag OFF (default): _route_blocking_findings behaves exactly as before —
+# covered by the pre-existing tests above (they all use _config(), which
+# leaves auto_address_findings False). Flag ON: partition blocking findings
+# by finding_kind and only auto-dispatch implementation-kind ones; decision
+# and unclassified findings always hold the gate.
+
+
+def test_route_findings_flag_off_dispatches_regardless_of_finding_kind(monkeypatch):
+    """Regression: with the flag OFF, a finding_kind tag must not change
+    dispatch behavior at all — every blocking finding still goes to Cicada,
+    tagged or not (parity with pre-#230 behavior)."""
+    dispatched = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        dispatched.append(skill)
+        return SkillResult(skill, True, 0, "guidance/fix applied", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())  # flag OFF
+    reviews = [
+        ("ux", "[BLOCKING] naming: undiscoverable (finding_kind: decision)\ndetail"),
+        ("qa", "[BLOCKING] coverage: no test (finding_kind: implementation)\ndetail"),
+    ]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    assert _lens_agent("ux") in dispatched
+    assert _lens_agent("qa") in dispatched
+    assert "cicada" in dispatched
+
+
+def test_route_findings_flag_on_dispatches_implementation_only(monkeypatch):
+    """Flag ON, mixed set: only the implementation-kind lens's owning agent
+    is invoked for fix guidance; the decision-kind lens never is, and its
+    finding never reaches Cicada's prompt (neither as guidance nor as a
+    raw-findings fallback)."""
+    dispatched = []
+    captured = {}
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        dispatched.append(skill)
+        if skill == "cicada":
+            captured["prompt"] = prompt
+            return SkillResult(skill, True, 0, "applied", "")
+        if skill == _lens_agent("qa"):
+            return SkillResult(skill, True, 0, "concrete qa guidance", "")
+        return SkillResult(skill, True, 0, "guidance", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+
+    d = SwarmDispatcher(_StubNotifier(), _config_auto_address())
+    reviews = [
+        ("ux", "[BLOCKING] naming: undiscoverable (finding_kind: decision)\nux-decision-detail"),
+        ("qa", "[BLOCKING] coverage: no test (finding_kind: implementation)\nqa-impl-detail"),
+    ]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    assert _lens_agent("qa") in dispatched
+    assert _lens_agent("ux") not in dispatched
+    assert "cicada" in dispatched
+    assert "concrete qa guidance" in captured["prompt"]
+    assert "ux-decision-detail" not in captured["prompt"]
+    assert "qa-impl-detail" not in captured["prompt"]  # superseded by lens guidance above
+
+
+def test_route_findings_flag_on_mixed_set_notifies_decision_holds_gate(monkeypatch):
+    """Flag ON, mixed set: the operator notification names the decision lens
+    explicitly and states it still holds the gate, even though the
+    implementation finding was auto-dispatched."""
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "guidance/fix applied", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config_auto_address())
+    reviews = [
+        ("ux", "[BLOCKING] naming: undiscoverable (finding_kind: decision)\ndetail"),
+        ("qa", "[BLOCKING] coverage: no test (finding_kind: implementation)\ndetail"),
+    ]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    assert any(
+        "auto-dispatched" in m and "ux" in m and "hold the gate" in m
+        for m in notifier.sent
+    )
+
+
+def test_route_findings_flag_on_all_decision_holds_without_dispatch(monkeypatch):
+    """Flag ON, all findings decision-kind: nothing is dispatched to any
+    agent (including Cicada); the operator is told none were
+    auto-dispatchable and the merge stays held."""
+    async def fake_run_skill(skill, prompt, **kwargs):
+        raise AssertionError("no agent should be dispatched — all decision-kind")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config_auto_address())
+    reviews = [
+        ("pm", "[BLOCKING] scope: needs a product call (finding_kind: decision)\ndetail"),
+    ]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    assert any(
+        "all blocking findings are decision/attestation-kind" in m
+        and "none are auto-dispatchable" in m
+        for m in notifier.sent
+    )
+
+
+def test_route_findings_flag_on_unclassified_finding_fails_closed(monkeypatch):
+    """Flag ON, a [BLOCKING] finding with NO finding_kind tag at all: fails
+    closed to decision and is never dispatched to Cicada. This is the
+    single load-bearing correctness property of ateles#230 — an unclassified
+    finding must never be silently treated as implementation-kind."""
+    async def fake_run_skill(skill, prompt, **kwargs):
+        raise AssertionError("unclassified finding must not be auto-dispatched")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config_auto_address())
+    reviews = [("security", "[BLOCKING] auth: something looks off\nno tag on this line")]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    assert any(
+        "all blocking findings are decision/attestation-kind" in m
+        for m in notifier.sent
+    )
+
+
+def test_route_findings_flag_on_invalid_finding_kind_fails_closed(monkeypatch):
+    """Flag ON, a [BLOCKING] finding with an invalid finding_kind value
+    (neither 'implementation' nor 'decision'): fails closed to decision,
+    same as unclassified — never silently defaults to auto-dispatch."""
+    async def fake_run_skill(skill, prompt, **kwargs):
+        raise AssertionError("invalid finding_kind must not be auto-dispatched")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config_auto_address())
+    reviews = [
+        ("security", "[BLOCKING] auth: bad tag (finding_kind: banana)\ndetail"),
+    ]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    assert any(
+        "all blocking findings are decision/attestation-kind" in m
+        for m in notifier.sent
+    )
+
+
+def test_route_findings_flag_on_self_certification_never_short_circuits(monkeypatch):
+    """Self-certification boundary: even when Cicada's fix-round call
+    succeeds, _route_blocking_findings never writes a gate-clearing signal
+    itself — it only logs/dispatches. The gate can only clear via a
+    subsequent panel re-review (parse_review_verdict on a NEW Vanellus
+    aggregation), which is outside this function entirely. This test proves
+    no notifier message from this path claims resolution/success — only
+    dispatch-in-progress language."""
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "applied", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config_auto_address())
+    reviews = [("qa", "[BLOCKING] coverage: no test (finding_kind: implementation)\ndetail")]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    forbidden = ("resolved", "auto-resolved", "cleared", "signed off", "signed_off")
+    for m in notifier.sent:
+        lowered = m.lower()
+        assert not any(word in lowered for word in forbidden), (
+            f"notifier message implies gate-clearing without re-review: {m!r}"
+        )
+
+
+def test_route_findings_flag_on_reopened_finding_still_bounded_by_fix_rounds(monkeypatch):
+    """A previously-auto-addressed finding that reappears (still blocking on
+    re-review) is subject to the same max_fix_rounds cap as any other —
+    auto-dispatch does not grant unlimited additional rounds."""
+    async def fake_run_skill(skill, prompt, **kwargs):
+        raise AssertionError("should not dispatch — already at fix-round cap")
+
+    async def fake_count(self, trigger):
+        return 2  # == default max_fix_rounds
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config_auto_address())
+    reviews = [
+        ("qa", "[BLOCKING] coverage: still no test (finding_kind: implementation)\ndetail"),
+    ]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    assert any("auto-fix rounds did not clear" in m for m in notifier.sent)
+
+
+def test_route_findings_flag_on_cicada_dispatch_failure_still_pages_operator(monkeypatch):
+    """Flag ON: a Cicada dispatch failure on an implementation-kind finding
+    surfaces the same loud, distinct operator page as the flag-off path —
+    auto-dispatch does not silently swallow a Cicada failure."""
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "cicada":
+            return SkillResult(skill, False, 1, "", "boom")
+        return SkillResult(skill, True, 0, "guidance", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config_auto_address())
+    reviews = [("qa", "[BLOCKING] coverage: no test (finding_kind: implementation)\ndetail")]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    assert any("Cicada could not apply" in m for m in notifier.sent)
+
+
+def test_route_findings_flag_on_zero_blocking_findings_escalates_as_before(monkeypatch):
+    """Flag ON, verdict unclear but nothing parses as [BLOCKING] at all: same
+    escalation as the flag-off path — partition logic never runs on an
+    empty by_lens set."""
+    async def fake_run_skill(skill, prompt, **kwargs):
+        raise AssertionError("should not dispatch when nothing parses")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config_auto_address())
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80,
+                                   reviews=[("pm", "cannot proceed")],
+                                   verdict="blocked")
+    )
+    assert any("no blocking findings could be parsed" in m for m in notifier.sent)
+
+
+# ── ateles#230 — finding_kind contract (review_learning parsing) ────────────
+
+
+def test_finding_kind_round_trips_through_parse_findings():
+    from review_learning import parse_findings
+
+    text = "[BLOCKING] tests: add a concurrency test (finding_kind: implementation)\ndetail"
+    f = parse_findings(text)[0]
+    assert f.finding_kind == "implementation"
+    assert f.summary == "add a concurrency test"  # tag stripped from summary
+
+
+def test_finding_kind_defaults_to_decision_when_absent():
+    from review_learning import parse_findings
+
+    text = "[BLOCKING] scope: no tag here at all\ndetail"
+    f = parse_findings(text)[0]
+    assert f.finding_kind == "decision"
+
+
+def test_finding_kind_defaults_to_decision_when_invalid():
+    from review_learning import parse_findings
+
+    text = "[BLOCKING] scope: bad value (finding_kind: not-a-real-kind)\ndetail"
+    f = parse_findings(text)[0]
+    assert f.finding_kind == "decision"
+
+
+def test_review_finding_dataclass_defaults_to_decision():
+    """Defense in depth: a ReviewFinding constructed directly (not via
+    parse_findings) also fails closed to decision at the dataclass level."""
+    from review_learning import ReviewFinding
+
+    f = ReviewFinding(category="x", summary="y", detail="z", blocking=True)
+    assert f.finding_kind == "decision"
 
 
 # ── _gate_merge_readiness (verdict-clear AND CI-green) ───────────────────────
@@ -4968,6 +5310,31 @@ def test_config_auto_build_reads_env_on_reimport(monkeypatch):
     finally:
         # Restore the module to the unset-env default for later tests.
         monkeypatch.delenv("ATELES_SWARM_AUTO_BUILD", raising=False)
+        importlib.reload(swarm_dispatch)
+
+
+def test_config_auto_address_findings_default_is_off():
+    """Without the env flag set, auto_address_findings defaults to False."""
+    cfg = DispatchConfig()
+    assert cfg.auto_address_findings is False
+
+
+def test_config_auto_address_findings_reads_env_on_reimport(monkeypatch):
+    """auto_address_findings is driven by ATELES_SWARM_AUTO_ADDRESS_FINDINGS,
+    read at class-def time — same wiring pattern as auto_build/auto_merge, and
+    independent of both: setting this flag must not flip auto_build or
+    auto_merge, and vice versa (ateles#230 contract test)."""
+    import importlib
+
+    monkeypatch.setenv("ATELES_SWARM_AUTO_ADDRESS_FINDINGS", "1")
+    reloaded = importlib.reload(swarm_dispatch)
+    try:
+        cfg = reloaded.DispatchConfig()
+        assert cfg.auto_address_findings is True
+        assert cfg.auto_build is False
+        assert cfg.auto_merge is False
+    finally:
+        monkeypatch.delenv("ATELES_SWARM_AUTO_ADDRESS_FINDINGS", raising=False)
         importlib.reload(swarm_dispatch)
 
 
