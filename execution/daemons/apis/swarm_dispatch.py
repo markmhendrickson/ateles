@@ -860,6 +860,23 @@ class DispatchConfig:
     # implements + pushes, the push (synchronize) re-runs the panel. Bounds the
     # Cicada↔panel loop so a finding the swarm can't resolve doesn't spin forever.
     max_fix_rounds: int = int(os.environ.get("APIS_MAX_FIX_ROUNDS", "2"))
+    # Auto re-review on push (ateles#230). When a PR's parent issue still has an
+    # open pre-impl gate, Lanius returns `blocked` and `_handle_pr` skips the
+    # panel — correct on the FIRST look (nothing has been reviewed yet), but on a
+    # re-push it means an author can push exactly the fix a lens asked for and
+    # nothing re-evaluates it: the PR waits for a human to manually re-invoke the
+    # reviewer (`/swarm-run`). When ON, a `synchronize` push to a gate-blocked PR
+    # re-invokes the lens agents that own the open gates against the new head, so
+    # they re-affirm the block, raise a new finding, or sign off on their own.
+    #
+    # This does NOT weaken the self-certification boundary: the gate still flips
+    # only on a LENS agent's own verdict — a push never clears a gate, and the
+    # dispatcher never infers sign-off from the fact that code changed. Merge
+    # stays behind APIS_AUTONOMY_AUTO_MERGE regardless. Default OFF preserves
+    # today's notify-and-wait exactly.
+    auto_rereview_on_push: bool = (
+        os.environ.get("ATELES_SWARM_AUTO_REREVIEW", "0") == "1"
+    )
 
 
 class SwarmDispatcher:
@@ -1351,13 +1368,46 @@ class SwarmDispatcher:
             )
             verdict = parse_gate_verdict(lanius.stdout)
         if verdict == "blocked":
-            log.info(f"[{DAEMON_NAME}] {ref}: pre-impl gates open — panel skipped")
-            self.notifier.send(
-                f"PR {ref} blocked by Lanius — pre-impl gates not signed off",
-                priority=Priority.INFO,
-                handler=DAEMON_NAME,
-            )
-            return
+            # ateles#230: on the FIRST look a gate-blocked PR should skip the
+            # panel — nothing has been reviewed, so there is no finding to
+            # re-evaluate and running the panel would just front-run the gates.
+            # But on a RE-PUSH the same skip is the autonomy hole: an author can
+            # push exactly the fix a lens asked for and nothing re-evaluates it;
+            # the PR sits until a human manually re-invokes the reviewer. The
+            # `max_fix_rounds` contract above already assumes "the push
+            # (synchronize) re-runs the panel" — this restores that for
+            # externally-authored pushes too, not just Cicada's.
+            #
+            # SELF-CERTIFICATION BOUNDARY (ateles#230 arch §4): re-REVIEW is not
+            # re-APPROVE. This re-runs the LENS AGENTS, which reach their own
+            # verdicts and own their own gate_status mutations (Lanius/lens own
+            # that — the dispatcher never writes gate state here, and never
+            # infers sign-off from the fact that a push happened).
+            if self.config.auto_rereview_on_push and trigger.kind == "pr_synchronize":
+                log.info(
+                    f"[{DAEMON_NAME}] {ref}: pre-impl gates open, but this is a "
+                    "re-push — auto-re-reviewing against the new head "
+                    "(ATELES_SWARM_AUTO_REREVIEW=1)"
+                )
+                # Fall through to the panel: the lenses re-evaluate the new head
+                # and either re-affirm the block, raise a new finding, or sign
+                # off. Merge stays behind APIS_AUTONOMY_AUTO_MERGE regardless.
+            else:
+                log.info(
+                    f"[{DAEMON_NAME}] {ref}: pre-impl gates open — panel skipped"
+                )
+                self.notifier.send(
+                    f"PR {ref} blocked by Lanius — pre-impl gates not signed off"
+                    + (
+                        ""
+                        if trigger.kind != "pr_synchronize"
+                        else " (re-push: set ATELES_SWARM_AUTO_REREVIEW=1 to "
+                        "auto-re-review pushes against open gates)"
+                    ),
+                    priority=Priority.INFO,
+                    handler=DAEMON_NAME,
+                )
+                return
         if not verdict:
             log.warning(
                 f"[{DAEMON_NAME}] {ref}: Lanius emitted no GATE_INHERITANCE "

@@ -214,6 +214,96 @@ def test_handle_pr_unparseable_verdict_routes_not_gates(monkeypatch):
     assert ("gate", None) not in calls
 
 
+# ── auto re-review on push against open gates (ateles#230) ───────────────────
+
+
+def _gate_blocked_dispatcher(monkeypatch, *, calls, auto_rereview):
+    """Dispatcher whose Lanius returns GATE_INHERITANCE: blocked, recording
+    which lens skills actually run so we can assert panel-skip vs re-review."""
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: blocked", "")
+        if skill == "vanellus":
+            return SkillResult(skill, True, 0, "**REQUEST_CHANGES**\nstill blocked", "")
+        calls.append(("lens", skill))
+        return SkillResult(skill, True, 0, "**COMMENT**\nre-reviewed", "")
+
+    async def fake_changed_files(self, trigger):
+        return ["src/x.ts"]
+
+    async def fake_route(self, trigger, parent, reviews, verdict):
+        calls.append(("route", verdict))
+
+    async def fake_gate(self, trigger, parent, panel):
+        calls.append(("gate", None))
+
+    async def fake_noop(self, *a, **k):
+        return None
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_changed_files", fake_changed_files)
+    monkeypatch.setattr(SwarmDispatcher, "_route_blocking_findings", fake_route)
+    monkeypatch.setattr(SwarmDispatcher, "_gate_merge_readiness", fake_gate)
+    monkeypatch.setattr(SwarmDispatcher, "_post_missing_vanellus_comment", fake_noop)
+    monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_noop)
+    monkeypatch.setattr(SwarmDispatcher, "_post_missing_panel_comments", fake_noop)
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_preregistered_expectations",
+        lambda self, repo, parent: _async_return({}),
+    )
+    cfg = DispatchConfig(
+        neotoma_token="", github_token="", auto_rereview_on_push=auto_rereview
+    )
+    return SwarmDispatcher(_StubNotifier(), cfg)
+
+
+def test_gate_blocked_first_look_skips_panel_even_with_rereview_on(monkeypatch):
+    """A gate-blocked PR on its FIRST look still skips the panel: nothing has
+    been reviewed yet, so there is no finding to re-evaluate."""
+    calls = []
+    d = _gate_blocked_dispatcher(monkeypatch, calls=calls, auto_rereview=True)
+    asyncio.run(d._handle_pr(_trigger(kind="pr_opened", action="opened")))
+    assert not any(c[0] == "lens" for c in calls)
+    assert not any(c[0] == "route" for c in calls)
+
+
+def test_gate_blocked_repush_skips_panel_when_flag_off(monkeypatch):
+    """Flag OFF (default) preserves today's behaviour exactly: a re-push to a
+    gate-blocked PR is still a panel skip."""
+    calls = []
+    d = _gate_blocked_dispatcher(monkeypatch, calls=calls, auto_rereview=False)
+    asyncio.run(d._handle_pr(_trigger(kind="pr_synchronize", action="synchronize")))
+    assert not any(c[0] == "lens" for c in calls)
+    assert not any(c[0] == "route" for c in calls)
+
+
+def test_gate_blocked_repush_auto_rereviews_when_flag_on(monkeypatch):
+    """Flag ON: a re-push to a gate-blocked PR re-invokes the lens agents
+    against the new head instead of waiting for a manual /swarm-run."""
+    calls = []
+    d = _gate_blocked_dispatcher(monkeypatch, calls=calls, auto_rereview=True)
+    asyncio.run(d._handle_pr(_trigger(kind="pr_synchronize", action="synchronize")))
+    assert any(c[0] == "lens" for c in calls), "lens agents must re-review the new head"
+
+
+def test_auto_rereview_never_gates_merge_readiness(monkeypatch):
+    """Self-certification boundary (ateles#230 arch §4): an auto-re-review of a
+    gate-blocked PR must never reach merge-readiness — a push is not a sign-off.
+    The lens verdict (REQUEST_CHANGES here) routes findings instead."""
+    calls = []
+    d = _gate_blocked_dispatcher(monkeypatch, calls=calls, auto_rereview=True)
+    asyncio.run(d._handle_pr(_trigger(kind="pr_synchronize", action="synchronize")))
+    assert not any(c[0] == "gate" for c in calls), "a push must never gate merge-ready"
+    assert any(c[0] == "route" for c in calls)
+
+
+def test_auto_rereview_flag_defaults_off():
+    """Default OFF — autonomy expansions are opt-in (ateles#80 rollout rule)."""
+    assert DispatchConfig(neotoma_token="", github_token="").auto_rereview_on_push is False
+
+
 # ── _route_blocking_findings (per-lens → Cicada, bounded) ────────────────────
 
 
