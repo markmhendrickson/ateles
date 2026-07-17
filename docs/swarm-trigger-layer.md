@@ -220,6 +220,33 @@ that introduced it — against itself. Fixes that came out of that run:
   infers approval from the fact that code changed. Auto-re-*review* ≠
   auto-*approve*; merge remains behind `APIS_AUTONOMY_AUTO_MERGE`.
 
+  **Issue-pipeline resume after a restart (`APIS_RESUME_REPOSITORIES`).**
+  The issue pipeline (`issue.opened`, `/swarm-run`) spawns its lens agents as
+  in-process `claude --print` children and holds progress only in memory, so a
+  daemon restart — a crash, a `KeepAlive` bounce, or a deliberate `launchctl
+  bootout` to pick up new code — orphans the children and silently voids the
+  run. Nothing retried it: the `task` stall watchdog implements
+  resume-after-restart, but it sweeps `task` entities and the issue pipeline
+  creates none, so this work was invisible to it. (Observed 2026-07-17: two
+  `/swarm-run` invocations logged as started, then lost to a restart ~3 minutes
+  later, leaving no trace on the issue and no retry.)
+
+  `_handle_issue_opened` now posts a hidden `<!-- apis-pipeline-inflight:… -->`
+  marker before the first agent spawn and clears it in a `finally` — the same
+  durable primitive `apis-fix-round` uses precisely because a marker comment
+  survives daemon restarts, and it needs no Neotoma round-trip (Neotoma itself
+  was erroring during the outage window that motivated this). Only a restart
+  can prevent the `finally`, so a surviving marker is an unambiguous signature
+  of an interrupted run. At startup the daemon sweeps
+  `APIS_RESUME_REPOSITORIES` (default `<operator>/ateles,<operator>/neotoma`;
+  empty disables) for open issues carrying the marker and re-runs those
+  pipelines. The sweep is fail-open — a broken repo is skipped, a failed resume
+  is counted and logged, and nothing there can prevent the daemon from booting.
+
+  A pipeline that fails for a *real* reason still clears its marker: it has
+  already reported itself, and leaving it marked would resurrect it on every
+  boot.
+
 ## Agent identity on GitHub
 
 GitHub comments are posted through a shared per-repo machine identity

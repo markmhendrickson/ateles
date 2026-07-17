@@ -883,6 +883,17 @@ class DispatchConfig:
     auto_rereview_on_push: bool = (
         os.environ.get("ATELES_SWARM_AUTO_REREVIEW", "0") == "1"
     )
+    # Repos the startup resume sweep scans for issue pipelines left in flight by
+    # a daemon restart. The daemon is otherwise webhook-driven and keeps no repo
+    # list, so this is explicit. Comma-separated; empty disables the sweep.
+    resume_repositories: tuple[str, ...] = tuple(
+        r.strip()
+        for r in os.environ.get(
+            "APIS_RESUME_REPOSITORIES",
+            f"{_OPERATOR_LOGIN}/ateles,{_OPERATOR_LOGIN}/neotoma",
+        ).split(",")
+        if r.strip()
+    )
 
 
 class SwarmDispatcher:
@@ -972,14 +983,202 @@ class SwarmDispatcher:
                 out.append(section)
         return out
 
+    # ── in-flight pipeline marker (restart resume) ───────────────────────────
+    #
+    # The issue pipeline spawns `claude --print` children in-process and holds
+    # its progress only in memory. A daemon restart (crash, KeepAlive bounce,
+    # a deliberate `launchctl bootout` to pick up new code) therefore orphans
+    # the children and silently voids the run: nothing retries it, and the
+    # issue is left looking as though the pipeline simply never happened.
+    # Observed 2026-07-17: two /swarm-run invocations were logged as started
+    # and lost to a restart ~3 minutes later, with no trace and no retry.
+    #
+    # The `task` watchdog already implements resume-after-restart, but it
+    # sweeps `task` entities and the issue pipeline creates none, so it cannot
+    # see this work. Rather than force pipeline runs into the 82-field
+    # operator-domain `task` schema (semantic abuse, and its re-dispatch goes
+    # to the task executor, not here), mark the run on the ISSUE itself with a
+    # hidden marker comment — the same durable primitive `_FIX_ROUND_MARKER`
+    # already uses precisely because it "survives daemon restarts". It needs no
+    # Neotoma round-trip, which matters: Neotoma was returning 530s during the
+    # very outage window this fix addresses.
+    _PIPELINE_INFLIGHT_MARKER = "<!-- apis-pipeline-inflight:{started_at} -->"
+    # datetime.isoformat() emits "+00:00" (not "Z"), so the timestamp group must
+    # accept "+"/":" — a regex that only allowed "Z" would write markers it could
+    # never match back, silently breaking both the clear and the resume sweep.
+    _PIPELINE_INFLIGHT_RE = re.compile(
+        r"<!-- apis-pipeline-inflight:([0-9T:.+\-]+Z?) -->"
+    )
+
     async def _handle_issue_opened(self, trigger: SwarmTrigger) -> None:
         """Ordered, additive spec pipeline for a newly-opened issue.
 
         Concurrency-safe: acquires the bounded issue-pipeline semaphore so a
         burst of issue.opened events cannot stampede the daemon.
+
+        Restart-safe: records an in-flight marker before the first agent spawn
+        and clears it on completion, so a restart mid-pipeline leaves a durable
+        trace the startup sweep can resume (ateles#230 follow-up).
         """
         async with self._issue_pipeline_semaphore():
-            await self._run_issue_spec_pipeline(trigger)
+            await self._mark_pipeline_inflight(trigger)
+            try:
+                await self._run_issue_spec_pipeline(trigger)
+            finally:
+                # Clear on success AND on failure: a pipeline that ran to a
+                # real error is not "interrupted" — it already reported itself
+                # and must not be resurrected by the sweep on every boot.
+                await self._clear_pipeline_inflight(trigger)
+
+    async def _mark_pipeline_inflight(self, trigger: SwarmTrigger) -> None:
+        """Post the hidden in-flight marker. Best-effort: a marker we cannot
+        write only costs resumability, so it must never block the pipeline."""
+        marker = self._PIPELINE_INFLIGHT_MARKER.format(
+            started_at=datetime.now(timezone.utc).isoformat()
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"https://api.github.com/repos/{trigger.repository}/issues/"
+                    f"{trigger.number}/comments",
+                    json={"body": marker},
+                    headers=self._github_headers(trigger.repository),
+                )
+                resp.raise_for_status()
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: could "
+                f"not record in-flight pipeline marker ({exc}) — the run "
+                "proceeds but will not be resumable if the daemon restarts"
+            )
+
+    async def _clear_pipeline_inflight(self, trigger: SwarmTrigger) -> None:
+        """Delete any in-flight markers on this issue. Best-effort."""
+        ref = f"{trigger.repository}#{trigger.number}"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    f"https://api.github.com/repos/{trigger.repository}/issues/"
+                    f"{trigger.number}/comments",
+                    params={"per_page": 100},
+                    headers=self._github_headers(trigger.repository),
+                )
+                resp.raise_for_status()
+                for comment in resp.json():
+                    if self._PIPELINE_INFLIGHT_RE.search(comment.get("body", "")):
+                        await client.delete(
+                            f"https://api.github.com/repos/{trigger.repository}"
+                            f"/issues/comments/{comment.get('id')}",
+                            headers=self._github_headers(trigger.repository),
+                        )
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: could not clear in-flight pipeline "
+                f"marker ({exc}) — a stale marker may cause one redundant "
+                "resume on the next daemon start"
+            )
+
+    async def resume_interrupted_pipelines(self, repositories: list[str]) -> dict:
+        """Resume issue pipelines left in flight by a daemon restart.
+
+        Called once at startup. Searches each repo for open issues carrying the
+        hidden in-flight marker — the signature of a pipeline that began but
+        never finished, because only a restart can prevent the `finally` that
+        clears it — and re-runs each one.
+
+        Bounded and fail-open by construction:
+          * only OPEN issues with the marker are candidates (a closed issue's
+            pipeline is moot);
+          * `_handle_issue_opened` clears the marker in its own `finally`, so a
+            resumed run cannot re-trigger itself into a loop;
+          * the existing issue-pipeline semaphore still applies, so a resume
+            burst cannot stampede the daemon;
+          * every failure path logs and returns — a broken resume must never
+            stop the daemon from booting.
+
+        Returns a summary dict for logging/tests.
+        """
+        summary = {"scanned": 0, "resumed": 0, "failed": 0}
+        for repository in repositories:
+            try:
+                issues = await self._issues_with_inflight_marker(repository)
+            except Exception as exc:
+                log.warning(
+                    f"[{DAEMON_NAME}] resume sweep: could not scan {repository} "
+                    f"({exc}) — skipping"
+                )
+                continue
+            summary["scanned"] += len(issues)
+            for issue in issues:
+                ref = f"{repository}#{issue.get('number')}"
+                log.info(
+                    f"[{DAEMON_NAME}] resume sweep: {ref} has an in-flight "
+                    "pipeline marker — the daemon restarted mid-run; re-running"
+                )
+                self.notifier.send(
+                    f"Resuming issue pipeline on {ref} — it was interrupted by "
+                    "a daemon restart",
+                    priority=Priority.INFO,
+                    handler=DAEMON_NAME,
+                )
+                try:
+                    await self._handle_issue_opened(
+                        SwarmTrigger(
+                            kind="issue_opened",
+                            repository=repository,
+                            number=issue.get("number", 0),
+                            title=issue.get("title", ""),
+                            body=issue.get("body") or "",
+                            author=(issue.get("user") or {}).get("login", ""),
+                            html_url=issue.get("html_url", ""),
+                            delivery_id=f"resume-{issue.get('number')}",
+                            action="opened",
+                            labels=[
+                                lbl.get("name", "")
+                                for lbl in (issue.get("labels") or [])
+                                if isinstance(lbl, dict)
+                            ],
+                        )
+                    )
+                    summary["resumed"] += 1
+                except Exception as exc:
+                    summary["failed"] += 1
+                    log.error(
+                        f"[{DAEMON_NAME}] resume sweep: {ref} failed to resume "
+                        f"({exc})",
+                        exc_info=True,
+                    )
+        if summary["scanned"]:
+            log.info(f"[{DAEMON_NAME}] resume sweep: {summary}")
+        return summary
+
+    async def _issues_with_inflight_marker(self, repository: str) -> list[dict]:
+        """Open issues in `repository` carrying the in-flight pipeline marker."""
+        out: list[dict] = []
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"https://api.github.com/repos/{repository}/issues",
+                params={"state": "open", "per_page": 100},
+                headers=self._github_headers(repository),
+            )
+            resp.raise_for_status()
+            for issue in resp.json():
+                # /issues returns PRs too; a PR's pipeline is the PR handler's.
+                if issue.get("pull_request"):
+                    continue
+                comments = await client.get(
+                    f"https://api.github.com/repos/{repository}/issues/"
+                    f"{issue.get('number')}/comments",
+                    params={"per_page": 100},
+                    headers=self._github_headers(repository),
+                )
+                comments.raise_for_status()
+                if any(
+                    self._PIPELINE_INFLIGHT_RE.search(c.get("body", ""))
+                    for c in comments.json()
+                ):
+                    out.append(issue)
+        return out
 
     async def _run_issue_spec_pipeline(self, trigger: SwarmTrigger) -> None:
         ref = f"{trigger.repository}#{trigger.number}"

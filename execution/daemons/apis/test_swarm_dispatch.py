@@ -4222,3 +4222,138 @@ def test_open_implementation_pr_returns_none_when_no_pr(monkeypatch):
 def _empty_spec_state():
     from issue_spec import SpecState
     return SpecState(repo="markmhendrickson/neotoma", issue_number=1882, title="t")
+
+
+# ── issue-pipeline resume after restart (ateles#230 follow-up) ───────────────
+
+
+def _resume_dispatcher(monkeypatch, *, calls):
+    """Dispatcher with the pipeline body and marker I/O stubbed, recording the
+    marker lifecycle so we can assert start/clear ordering."""
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_pipeline(self, trigger):
+        calls.append(("pipeline", trigger.number))
+
+    async def fake_mark(self, trigger):
+        calls.append(("mark", trigger.number))
+
+    async def fake_clear(self, trigger):
+        calls.append(("clear", trigger.number))
+
+    monkeypatch.setattr(SwarmDispatcher, "_run_issue_spec_pipeline", fake_pipeline)
+    monkeypatch.setattr(SwarmDispatcher, "_mark_pipeline_inflight", fake_mark)
+    monkeypatch.setattr(SwarmDispatcher, "_clear_pipeline_inflight", fake_clear)
+    return d
+
+
+def test_pipeline_marks_inflight_then_clears_on_success(monkeypatch):
+    calls = []
+    d = _resume_dispatcher(monkeypatch, calls=calls)
+    asyncio.run(d._handle_issue_opened(_trigger(kind="issue_opened", number=230)))
+    # Marker must be written BEFORE the run and cleared after — that ordering is
+    # what makes an interrupted run detectable.
+    assert calls == [("mark", 230), ("pipeline", 230), ("clear", 230)]
+
+
+def test_pipeline_clears_inflight_marker_even_when_pipeline_raises(monkeypatch):
+    """A pipeline that fails for a real reason already reports itself; it must
+    NOT be left marked in-flight or the sweep would resurrect it every boot."""
+    calls = []
+    d = _resume_dispatcher(monkeypatch, calls=calls)
+
+    async def boom(self, trigger):
+        calls.append(("pipeline", trigger.number))
+        raise RuntimeError("lens exploded")
+
+    monkeypatch.setattr(SwarmDispatcher, "_run_issue_spec_pipeline", boom)
+    try:
+        asyncio.run(d._handle_issue_opened(_trigger(kind="issue_opened", number=230)))
+    except RuntimeError:
+        pass
+    assert ("clear", 230) in calls
+
+
+def test_resume_sweep_reruns_pipelines_with_inflight_marker(monkeypatch):
+    resumed = []
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_scan(self, repository):
+        assert repository == "owner/repo"
+        return [{"number": 230, "title": "stranded", "body": "b", "user": {"login": "x"},
+                 "html_url": "u", "labels": [{"name": "enhancement"}]}]
+
+    async def fake_handle(self, trigger):
+        resumed.append((trigger.repository, trigger.number, trigger.kind))
+
+    monkeypatch.setattr(SwarmDispatcher, "_issues_with_inflight_marker", fake_scan)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle)
+    summary = asyncio.run(d.resume_interrupted_pipelines(["owner/repo"]))
+    assert resumed == [("owner/repo", 230, "issue_opened")]
+    assert summary == {"scanned": 1, "resumed": 1, "failed": 0}
+
+
+def test_resume_sweep_skips_issues_without_marker(monkeypatch):
+    """No marker → the pipeline either never started or finished cleanly."""
+    resumed = []
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_scan(self, repository):
+        return []
+
+    async def fake_handle(self, trigger):
+        resumed.append(trigger.number)
+
+    monkeypatch.setattr(SwarmDispatcher, "_issues_with_inflight_marker", fake_scan)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle)
+    summary = asyncio.run(d.resume_interrupted_pipelines(["owner/repo"]))
+    assert resumed == []
+    assert summary["resumed"] == 0
+
+
+def test_resume_sweep_survives_a_repo_that_fails_to_scan(monkeypatch):
+    """A broken repo must not stop the other repos, nor kill daemon startup."""
+    resumed = []
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_scan(self, repository):
+        if repository == "owner/broken":
+            raise RuntimeError("GitHub 500")
+        return [{"number": 7, "title": "t", "body": "", "user": {"login": "x"},
+                 "html_url": "u", "labels": []}]
+
+    async def fake_handle(self, trigger):
+        resumed.append(trigger.number)
+
+    monkeypatch.setattr(SwarmDispatcher, "_issues_with_inflight_marker", fake_scan)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle)
+    summary = asyncio.run(
+        d.resume_interrupted_pipelines(["owner/broken", "owner/good"])
+    )
+    assert resumed == [7]
+    assert summary["resumed"] == 1
+
+
+def test_resume_sweep_counts_a_failed_resume_without_raising(monkeypatch):
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_scan(self, repository):
+        return [{"number": 9, "title": "t", "body": "", "user": {"login": "x"},
+                 "html_url": "u", "labels": []}]
+
+    async def fake_handle(self, trigger):
+        raise RuntimeError("pipeline died again")
+
+    monkeypatch.setattr(SwarmDispatcher, "_issues_with_inflight_marker", fake_scan)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle)
+    summary = asyncio.run(d.resume_interrupted_pipelines(["owner/repo"]))
+    assert summary == {"scanned": 1, "resumed": 0, "failed": 1}
+
+
+def test_inflight_marker_regex_roundtrip():
+    marker = SwarmDispatcher._PIPELINE_INFLIGHT_MARKER.format(
+        started_at="2026-07-17T12:25:53.123456+00:00"
+    )
+    assert SwarmDispatcher._PIPELINE_INFLIGHT_RE.search(marker)
+    # Must not match the sibling fix-round marker.
+    assert not SwarmDispatcher._PIPELINE_INFLIGHT_RE.search("<!-- apis-fix-round:2 -->")
