@@ -186,6 +186,20 @@ that introduced it — against itself. Fixes that came out of that run:
     `APIS_MAX_FIX_ROUNDS` (default 2, counted via a hidden `apis-fix-round:N`
     PR comment so it survives daemon restarts and is head-SHA-agnostic); at the
     cap it escalates to the operator instead of looping.
+
+    **Every lens runs inside a writable PR-branch worktree** (its `cwd`, via
+    `prepare_pr_worktree`) and may only raise a `[BLOCKING]` finding for
+    something it **executed** — the command and its real output go in the
+    finding's detail. A concern it cannot reproduce is filed `[NON-BLOCKING]`.
+    This was qa-only until 2026-07-17 (plan `ent_ccd6660fc28800a2ae3a5623`):
+    measured on neotoma PR #1946, 0 of 11 blocking findings across 3 rounds
+    cited executing anything, and both wrong findings came from `arch`, the
+    diff-only lens. The bar mirrors
+    `fixed_means_behavior_verified_not_contract_accepted`
+    (`ent_db0b7855d47012084477fb00`), which binds implementers — reviewers are
+    now held to it too. Worktree prep is best-effort: on failure the lens
+    reviews diff-only and its prompt says so, rather than claiming a checkout
+    it does not have.
   - **clear** (APPROVE/COMMENT) → `_gate_merge_readiness` files the merge
     checkpoint + `OPERATOR_DECISION` ping **only when required CI is also
     green** (`_required_ci_state` polls the combined commit status + check-runs

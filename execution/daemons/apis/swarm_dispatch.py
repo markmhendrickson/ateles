@@ -543,28 +543,35 @@ async def _git(args: list[str], cwd: str, timeout: int = 60) -> tuple[int, str, 
 
 
 async def prepare_pr_worktree(repo: str, pr_number: int, agent: str) -> str | None:
-    """Prepare a writable worktree of a PR branch for the qa eval-authoring child.
+    """Prepare a writable worktree of a PR branch as a review/eval child's cwd.
 
     Returns the worktree path, or None on any failure (best-effort).
+
+    Given to EVERY panel lens, not just qa (plan ent_ccd6660fc28800a2ae3a5623).
+    Originally qa-only (QE3) so Phoenicurus could author + run an eval; now also
+    the affordance that lets a reviewing lens EXECUTE the claim it is about to
+    block on rather than infer it from the diff. See the call site in
+    `_handle_pr_review` for the measurement that motivated the change.
 
     Steps:
       1. Verify the local base clone exists (NEOTOMA_LOCAL_CHECKOUT).
       2. ``git fetch origin pull/<n>/head`` into a temp ref.
       3. ``git worktree add --detach <tmp> FETCH_HEAD`` — isolated from the base.
-      4. Point the worktree's ``origin`` push URL at
-         ``https://x-access-token:<token>@github.com/<repo>.git`` so the child's
-         ``git push`` authenticates as the agent (#109), independent of the base
-         clone's SSH remote.
+      4. Configure ``gh`` as the worktree-scoped credential helper so a child that
+         pushes (qa authoring an eval fixture) authenticates as the agent (#109)
+         without writing a token to disk. Read-only lenses never exercise this;
+         it is skipped entirely when the agent has no token.
 
-    Only neotoma is supported (the eval harness lives there); other repos -> None.
+    Only neotoma is supported (the eval harness lives there, and it is the only
+    repo with a known local base clone); other repos -> None, i.e. diff-only.
     """
     if not repo.endswith("/neotoma"):
         return None
     base = NEOTOMA_LOCAL_CHECKOUT
     if not os.path.isdir(os.path.join(base, ".git")):
         log.warning(
-            f"[{DAEMON_NAME}] QE3: local neotoma checkout absent at {base} — "
-            "qa child falls back to diff-only (no eval authoring)"
+            f"[{DAEMON_NAME}] worktree: local neotoma checkout absent at {base} — "
+            f"{agent} falls back to diff-only (cannot execute against the PR)"
         )
         return None
 
@@ -574,16 +581,19 @@ async def prepare_pr_worktree(repo: str, pr_number: int, agent: str) -> str | No
     )
     if rc != 0:
         log.warning(
-            f"[{DAEMON_NAME}] QE3: fetch pull/{pr_number}/head failed: {err.strip()}"
+            f"[{DAEMON_NAME}] worktree: fetch pull/{pr_number}/head failed for "
+            f"{agent}: {err.strip()}"
         )
         return None
 
-    wt = tempfile.mkdtemp(prefix=f"qa_eval_pr{pr_number}_")
+    wt = tempfile.mkdtemp(prefix=f"{agent}_pr{pr_number}_")
     rc, _, err = await _git(
         ["worktree", "add", "--detach", wt, "FETCH_HEAD"], cwd=base
     )
     if rc != 0:
-        log.warning(f"[{DAEMON_NAME}] QE3: worktree add failed: {err.strip()}")
+        log.warning(
+            f"[{DAEMON_NAME}] worktree: add failed for {agent}: {err.strip()}"
+        )
         shutil.rmtree(wt, ignore_errors=True)
         return None
 
@@ -618,12 +628,14 @@ async def prepare_pr_worktree(repo: str, pr_number: int, agent: str) -> str | No
         )
     else:
         log.info(
-            f"[{DAEMON_NAME}] QE3: no token for {agent} on {repo} — qa child can "
-            "write+run the eval locally for the QA report but cannot push "
-            "(degraded-but-functional)"
+            f"[{DAEMON_NAME}] worktree: no token for {agent} on {repo} — the child "
+            "can read and execute locally but cannot push "
+            "(degraded-but-functional; read-only lenses never need to)"
         )
 
-    log.info(f"[{DAEMON_NAME}] QE3: prepared PR worktree {wt} for {agent} on {repo}#{pr_number}")
+    log.info(
+        f"[{DAEMON_NAME}] worktree: prepared {wt} for {agent} on {repo}#{pr_number}"
+    )
     return wt
 
 
@@ -1381,28 +1393,44 @@ class SwarmDispatcher:
 
         reviews: list[tuple[str, str]] = []
         for lens in panel:
-            # QE3: the qa lens (Phoenicurus) authors + runs an eval, so it needs a
-            # writable PR-branch checkout as its cwd. Other lenses stay diff-only
-            # (cwd=None). Best-effort: prep failure → diff-only fallback, no stall.
-            qa_worktree: str | None = None
-            if lens.agent == "phoenicurus":
-                qa_worktree = await prepare_pr_worktree(
-                    trigger.repository, trigger.number, lens.agent
-                )
+            # Every lens gets a writable PR-branch checkout as its cwd (plan
+            # ent_ccd6660fc28800a2ae3a5623).
+            #
+            # This was qa-only (QE3), because Phoenicurus authors + runs an eval.
+            # Measured on neotoma PR #1946: across 3 review rounds, 0 of 11
+            # blocking findings cited executing anything, and both of the 2 wrong
+            # findings came from arch — the diff-only lens. Both quoted real code
+            # accurately and reasoned carefully; one even printed the correct JSON
+            # payload and drew the wrong conclusion from it. That is the signature
+            # of read-only review, not carelessness. The lenses already have Bash
+            # (agent_definition.tool_allowlist is null → ["*"]); they simply had
+            # nowhere to run it. A reviewer that can execute the claim it is about
+            # to block on does not need to guess.
+            #
+            # Best-effort throughout: prep failure → cwd=None → diff-only review,
+            # exactly the prior behaviour. A worktree is an affordance, never a
+            # precondition, so a lens is never skipped for lack of one.
+            lens_worktree: str | None = await prepare_pr_worktree(
+                trigger.repository, trigger.number, lens.agent
+            )
             try:
                 result = await run_skill(
                     lens.agent,
                     self._panelist_prompt(
-                        trigger, lens, expectations.get(lens.agent, ""), parent
+                        trigger,
+                        lens,
+                        expectations.get(lens.agent, ""),
+                        parent,
+                        has_worktree=bool(lens_worktree),
                     ),
                     github_token=_token_for_agent_on_repo(
                         lens.agent, trigger.repository
                     ),
                     include_github_contract=True,
-                    cwd=qa_worktree,
+                    cwd=lens_worktree,
                 )
             finally:
-                await cleanup_pr_worktree(qa_worktree)
+                await cleanup_pr_worktree(lens_worktree)
             if result.ok:
                 reviews.append((lens.lens, result.stdout))
 
@@ -3253,8 +3281,19 @@ class SwarmDispatcher:
 
     @staticmethod
     def _panelist_prompt(
-        t: SwarmTrigger, lens: Lens, expectation: str, parent: int | None = None
+        t: SwarmTrigger,
+        lens: Lens,
+        expectation: str,
+        parent: int | None = None,
+        has_worktree: bool = False,
     ) -> str:
+        """Build a lens panelist's prompt.
+
+        `has_worktree` reflects whether this panelist actually got a writable PR
+        checkout as its cwd. It gates the evidence bar: telling a lens to "run
+        the code" when worktree prep failed and it is reviewing diff-only would
+        be a lie that either wastes its turn or invites invented output.
+        """
         expectation_block = (
             "Your pre-registered expectations on the parent issue were:\n"
             f"{expectation}\n\nReview against them first: did the change meet "
@@ -3262,6 +3301,33 @@ class SwarmDispatcher:
             if expectation
             else "You did not pre-register expectations for this issue; review "
             "against your standing lens criteria."
+        )
+        # The evidence bar for a [BLOCKING] verdict. Motivated by neotoma PR
+        # #1946: 0 of 11 blocking findings across 3 rounds cited executing
+        # anything, and both wrong findings came from the lens with no checkout.
+        # Reading the code is a hypothesis; running it is evidence.
+        evidence_bar = (
+            "EVIDENCE BAR FOR BLOCKING. Your cwd is a writable checkout of the "
+            "PR branch, and you have Bash. A finding may be `[BLOCKING]` ONLY "
+            "if you RAN something that demonstrates it — a failing test, a "
+            "command whose output contradicts what the code claims, a "
+            "reproduction of the defect. Quote the command and its ACTUAL "
+            "output in the finding's detail. If you cannot reproduce it, or you "
+            "only reasoned from reading the diff, file it `[NON-BLOCKING]` and "
+            "say what you could not verify. This is the standard "
+            "`fixed_means_behavior_verified_not_contract_accepted` "
+            "(ent_db0b7855d47012084477fb00) already imposes on the implementer; "
+            "it binds you too. Do not block a merge on a hypothesis — an "
+            "unreproducible concern is still worth filing, just not as a gate."
+            if has_worktree
+            else "EVIDENCE BAR FOR BLOCKING. You are reviewing DIFF-ONLY this "
+            "run: no PR checkout could be prepared, so you cannot execute the "
+            "code. Findings you cannot demonstrate by running something are "
+            "hypotheses. Prefer `[NON-BLOCKING]`, and state plainly that the "
+            "concern is unverified and what would confirm it. Reserve "
+            "`[BLOCKING]` for defects evident from the diff itself (a missing "
+            "declaration, a contradicted invariant, an absent required artifact) "
+            "— never for a claim about runtime behaviour you could not observe."
         )
         blocking_rules = (
             "Your output is FORWARD-LOOKING and non-blocking: do not request "
@@ -3272,7 +3338,7 @@ class SwarmDispatcher:
             "`[BLOCKING] <category>: <summary>` followed by detail and file "
             "references. Non-blocking suggestions: `[NON-BLOCKING] <category>: "
             "<summary>`. Cite the standing rule or guardrail doc when one "
-            "applies — that marks the finding as systemic."
+            "applies — that marks the finding as systemic.\n\n" + evidence_bar
         )
         # Build the check-off instruction only when there is a parent issue AND
         # this panelist pre-registered expectations (so there is a comment to edit).

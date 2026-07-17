@@ -3533,15 +3533,17 @@ def test_cleanup_pr_worktree_removes_stray_dir(monkeypatch, tmp_path):
     assert not stray.exists()
 
 
-def test_only_qa_lens_gets_a_worktree(monkeypatch):
-    # In the panel loop, prepare_pr_worktree is invoked ONLY for phoenicurus;
-    # every other lens runs diff-only (cwd=None).
+def test_every_lens_gets_a_worktree(monkeypatch):
+    # Plan ent_ccd6660fc28800a2ae3a5623: EVERY panel lens gets a writable PR
+    # checkout as its cwd, not just qa. A lens that cannot execute the code
+    # reviews from the diff and blocks on hypotheses — measured on neotoma
+    # PR #1946, where both wrong findings came from the diff-only arch lens.
     prep_calls = []
     cwd_seen = {}
 
     async def fake_prepare(repo, number, agent):
         prep_calls.append(agent)
-        return f"/tmp/wt-{agent}" if agent == "phoenicurus" else None
+        return f"/tmp/wt-{agent}"
 
     async def fake_cleanup(wt):
         return None
@@ -3557,13 +3559,13 @@ def test_only_qa_lens_gets_a_worktree(monkeypatch):
     monkeypatch.setattr(swarm_dispatch, "cleanup_pr_worktree", fake_cleanup)
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
 
-    # Force a panel that includes phoenicurus + at least one other lens.
     monkeypatch.setattr(
         swarm_dispatch,
         "select_panel",
         lambda **kw: [
             Lens(agent="phoenicurus", lens="qa", gate="qa", checks="evals"),
             Lens(agent="pavo", lens="pm", gate="pm", checks="scope"),
+            Lens(agent="waxwing", lens="arch", gate="arch", checks="contracts"),
         ],
     )
 
@@ -3571,11 +3573,88 @@ def test_only_qa_lens_gets_a_worktree(monkeypatch):
     dispatcher = SwarmDispatcher(notifier, _config())
     asyncio.run(dispatcher._handle_pr(_trigger(repository="markmhendrickson/neotoma")))
 
-    # Worktree prep attempted only for the qa lens.
-    assert prep_calls == ["phoenicurus"], prep_calls
-    # qa child got the worktree as cwd; other panelists got None.
+    # Prep attempted for every lens, not just qa.
+    assert sorted(prep_calls) == ["pavo", "phoenicurus", "waxwing"], prep_calls
+    # Each panelist ran inside its OWN worktree — no sharing, no None.
     assert cwd_seen.get("phoenicurus") == "/tmp/wt-phoenicurus"
-    assert cwd_seen.get("pavo") is None
+    assert cwd_seen.get("pavo") == "/tmp/wt-pavo"
+    assert cwd_seen.get("waxwing") == "/tmp/wt-waxwing"
+
+
+def test_lens_falls_back_to_diff_only_when_worktree_prep_fails(monkeypatch):
+    # A worktree is an affordance, never a precondition: prep failure must
+    # degrade to a diff-only review (cwd=None), never skip the lens or stall.
+    cwd_seen = {}
+    cleaned = []
+
+    async def fake_prepare(repo, number, agent):
+        return None  # e.g. non-neotoma repo, or absent local base clone
+
+    async def fake_cleanup(wt):
+        cleaned.append(wt)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        cwd_seen[skill] = kwargs.get("cwd")
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        return SkillResult(skill, True, 0, "VERDICT: COMMENT", "")
+
+    monkeypatch.setattr(swarm_dispatch, "prepare_pr_worktree", fake_prepare)
+    monkeypatch.setattr(swarm_dispatch, "cleanup_pr_worktree", fake_cleanup)
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(
+        swarm_dispatch,
+        "select_panel",
+        lambda **kw: [Lens(agent="waxwing", lens="arch", gate="arch", checks="x")],
+    )
+
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+    asyncio.run(dispatcher._handle_pr(_trigger(repository="markmhendrickson/neotoma")))
+
+    # The lens still ran, just without a checkout.
+    assert "waxwing" in cwd_seen
+    assert cwd_seen["waxwing"] is None
+    # Cleanup is still invoked (and is a no-op on None).
+    assert cleaned == [None]
+
+
+def test_panelist_prompt_evidence_bar_tracks_worktree_availability():
+    # The evidence bar must tell the truth about what the lens can do. Claiming
+    # "your cwd is a writable checkout" to a diff-only lens would either waste
+    # its turn or invite it to invent command output.
+    lens = Lens(agent="waxwing", lens="arch", gate="arch", checks="contracts")
+    trigger = _trigger(repository="markmhendrickson/neotoma")
+
+    with_wt = SwarmDispatcher._panelist_prompt(
+        trigger, lens, "", None, has_worktree=True
+    )
+    assert "writable checkout" in with_wt
+    assert "ONLY if you RAN something" in with_wt
+    assert "DIFF-ONLY" not in with_wt
+
+    without_wt = SwarmDispatcher._panelist_prompt(
+        trigger, lens, "", None, has_worktree=False
+    )
+    assert "DIFF-ONLY" in without_wt
+    assert "unverified" in without_wt
+    assert "writable checkout" not in without_wt
+
+
+def test_forward_looking_lens_has_no_evidence_bar():
+    # Forward-looking lenses never block, so the blocking evidence bar is noise.
+    lens = Lens(
+        agent="corvus", lens="content", gate="", checks="x", forward_looking=True
+    )
+    prompt = SwarmDispatcher._panelist_prompt(
+        _trigger(repository="markmhendrickson/neotoma"),
+        lens,
+        "",
+        None,
+        has_worktree=True,
+    )
+    assert "EVIDENCE BAR" not in prompt
+    assert "FORWARD-LOOKING" in prompt
 
 
 

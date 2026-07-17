@@ -2,6 +2,8 @@
 
 **Status:** design (2026-06-19) · **Scope:** neotoma PRs first (operator-chosen) · **Depends on:** QE1 (merged #133)
 
+> **Superseded in part, 2026-07-17** — the "qa lens only" scope below no longer holds. `prepare_pr_worktree` is now called for **every** panel lens, not just Phoenicurus (plan `ent_ccd6660fc28800a2ae3a5623`). The eval-authoring rationale in this document is unchanged and still qa-specific; what changed is that a PR checkout turned out to be valuable to *reviewing* lenses too, so they can execute the claim they are about to block on rather than infer it from the diff. Measured on neotoma PR #1946: 0 of 11 blocking findings across 3 rounds cited executing anything, and both wrong findings came from `arch` — the diff-only lens. Read §"The affordance" below as describing qa's *use* of the worktree, not the set of lenses that receive one.
+
 **Goal:** let a dispatched Phoenicurus (qa-lens) child actually **author an eval fixture, run it, commit it, and push it to the PR branch** — so the `agentic_evals` CI lane becomes the qa-gate evidence (QE2). Today the child cannot: it runs diff-only with no working tree.
 
 ---
