@@ -77,6 +77,12 @@ DAEMON_NAME = "apis"
 _PARENT_ISSUE = re.compile(r"\b(?:closes|fixes|resolves)\s+#(\d+)", re.I)
 _GATE_VERDICT = re.compile(r"GATE_INHERITANCE:\s*(clear|blocked)", re.I)
 
+# ateles#232 QA finding: `reopened` (github_gateway.py maps it to kind
+# "pr_reopened", distinct from "pr_synchronize") re-enters the pipeline the
+# same way a re-push does, so it must be eligible for the same auto-re-review
+# treatment as a synchronize push against a gate-blocked PR.
+_AUTO_REREVIEW_TRIGGER_KINDS = ("pr_synchronize", "pr_reopened")
+
 # Product-code path classifier (ateles: harden pipeline-bypass detection).
 # A PR that touches these paths is a product change that SHOULD originate from a
 # gated issue routed through Cicada. When such a PR has NO parent issue
@@ -1383,10 +1389,13 @@ class SwarmDispatcher:
             # verdicts and own their own gate_status mutations (Lanius/lens own
             # that — the dispatcher never writes gate state here, and never
             # infers sign-off from the fact that a push happened).
-            if self.config.auto_rereview_on_push and trigger.kind == "pr_synchronize":
+            if (
+                self.config.auto_rereview_on_push
+                and trigger.kind in _AUTO_REREVIEW_TRIGGER_KINDS
+            ):
                 log.info(
                     f"[{DAEMON_NAME}] {ref}: pre-impl gates open, but this is a "
-                    "re-push — auto-re-reviewing against the new head "
+                    f"{trigger.kind} — auto-re-reviewing against the new head "
                     "(ATELES_SWARM_AUTO_REREVIEW=1)"
                 )
                 # Fall through to the panel: the lenses re-evaluate the new head
@@ -1400,7 +1409,7 @@ class SwarmDispatcher:
                     f"PR {ref} blocked by Lanius — pre-impl gates not signed off"
                     + (
                         ""
-                        if trigger.kind != "pr_synchronize"
+                        if trigger.kind not in _AUTO_REREVIEW_TRIGGER_KINDS
                         else " (re-push: set ATELES_SWARM_AUTO_REREVIEW=1 to "
                         "auto-re-review pushes against open gates)"
                     ),

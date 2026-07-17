@@ -288,6 +288,17 @@ def test_gate_blocked_repush_auto_rereviews_when_flag_on(monkeypatch):
     assert any(c[0] == "lens" for c in calls), "lens agents must re-review the new head"
 
 
+def test_gate_blocked_reopen_auto_rereviews_when_flag_on(monkeypatch):
+    """Flag ON: reopening a gate-blocked PR re-invokes the lens agents against
+    the new head too — github_gateway.py maps `reopened` to kind
+    "pr_reopened", a distinct string from "pr_synchronize", so this must be
+    checked explicitly rather than assumed covered by the synchronize case."""
+    calls = []
+    d = _gate_blocked_dispatcher(monkeypatch, calls=calls, auto_rereview=True)
+    asyncio.run(d._handle_pr(_trigger(kind="pr_reopened", action="reopened")))
+    assert any(c[0] == "lens" for c in calls), "lens agents must re-review the new head"
+
+
 def test_auto_rereview_never_gates_merge_readiness(monkeypatch):
     """Self-certification boundary (ateles#230 arch §4): an auto-re-review of a
     gate-blocked PR must never reach merge-readiness — a push is not a sign-off.
