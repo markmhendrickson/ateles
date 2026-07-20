@@ -149,6 +149,36 @@ def test_non_marker_payment_event_still_blocks():
     assert monedula._task_already_paid(t) is True
 
 
+def test_created_unconfirmed_stamps_marker_and_blocks_reexec():
+    """A Wise transfer that was CREATED but returned a non-terminal funding status
+    (e.g. transient bounced_back) must not be re-created on the next pass — the
+    transfer already exists at the rail. The marker is stamped just like a send."""
+
+    class _UnconfirmedHandler:
+        def __init__(self, task_id):
+            self.name = "wise"
+            self.profile = _FakeProfile(task_id)
+            self.calls = 0
+
+        def execute(self, match):
+            self.calls += 1
+            # A transfer EXISTS but funding status wasn't terminal.
+            return {"status": "created_unconfirmed", "handler": self.name,
+                    "transfer_id": "T999", "wise_status": "bounced_back"}
+
+        def format_confirmation(self, result):
+            return f"{self.name}: {result.get('status')}"
+
+    t = _task("ent_1", approved=True, recurrence="weekly", due_date="2026-07-16")
+    h = _UnconfirmedHandler("ent_1")
+    monedula.execute_approved_tasks([t], [h])
+    assert h.calls == 1
+    assert t["snapshot"].get("payment_event_id") == "paid:2026-07-16"
+    # Second pass must not re-create the transfer.
+    monedula.execute_approved_tasks([t], [h])
+    assert h.calls == 1  # no double-create
+
+
 # ── 3. Dry-run safety ────────────────────────────────────────────────────────
 
 def test_dryrun_never_executes(monkeypatch):

@@ -481,13 +481,18 @@ def _execute_wise_transfer(
     transfer_id = _create_transfer(token, account_id, quote_uuid, reference)
     log.info(f"[{label}] Wise transfer_id: {transfer_id}")
 
-    funding_result = _fund_transfer(token, profile_id, transfer_id)
-    log.info(f"[{label}] Wise funding result: {funding_result}")
-
-    status = funding_result.get("status", "")
-    if status in ("COMPLETED", "PROCESSING", "PENDING"):
+    # CRITICAL: from here on a Wise transfer EXISTS. Never raise past this point —
+    # a raise would leave the task unstamped and the next poll would create a
+    # SECOND transfer (double-pay). A transient bounced_back can self-recover
+    # (observed 2026-06-23, transfer 2206919954), so an unexpected funding status
+    # is reported as an in-flight transfer to be confirmed out-of-band, NOT retried.
+    try:
+        funding_result = _fund_transfer(token, profile_id, transfer_id)
+    except Exception as exc:  # noqa: BLE001
+        log.error(f"[{label}] Wise funding call failed AFTER transfer {transfer_id} "
+                  f"created: {exc} — reporting as created_unconfirmed (no retry).")
         return {
-            "status": "sent",
+            "status": "created_unconfirmed",
             "transfer_id": transfer_id,
             "quote_uuid": quote_uuid,
             "account_id": account_id,
@@ -495,12 +500,31 @@ def _execute_wise_transfer(
             "iban": iban,
             "recipient_name": recipient_name,
             "reference": reference,
-            "wise_status": status,
+            "wise_status": "funding_call_failed",
+            "error": str(exc),
         }
-    else:
-        raise RuntimeError(
-            f"Wise funding status unexpected: {status} — full result: {funding_result}"
-        )
+    log.info(f"[{label}] Wise funding result: {funding_result}")
+
+    status = funding_result.get("status", "")
+    base = {
+        "transfer_id": transfer_id,
+        "quote_uuid": quote_uuid,
+        "account_id": account_id,
+        "amount_eur": amount_eur,
+        "iban": iban,
+        "recipient_name": recipient_name,
+        "reference": reference,
+        "wise_status": status,
+    }
+    if status in ("COMPLETED", "PROCESSING", "PENDING"):
+        return {"status": "sent", **base}
+    # Any other status (incl. a transient bounced_back) — the transfer exists.
+    # Mark it in-flight so the idempotency marker is stamped and no re-create
+    # happens; the operator/daemon confirms settlement out-of-band.
+    log.warning(f"[{label}] Wise funding status {status!r} after transfer "
+                f"{transfer_id} — created_unconfirmed (no retry; confirm settlement).")
+    return {"status": "created_unconfirmed", "error":
+            f"Wise funding status {status!r} — transfer created, confirm settlement", **base}
 
 
 # ---------------------------------------------------------------------------

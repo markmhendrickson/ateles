@@ -854,11 +854,13 @@ def execute_approved_tasks(due_tasks: list[dict], handlers: list) -> list[tuple]
             log.error(f"[autoexec] {handler.name} execution error: {exc}")
             result = {"status": "failed", "handler": handler.name, "error": str(exc)}
 
-        # Defense-in-depth: the instant a real send succeeds, stamp the in-memory
-        # task snapshot with the session paid-marker so no later iteration in THIS
-        # same run (e.g. a duplicate task row) can re-enter execute() before the
-        # durable Neotoma write-back in _mark_tasks_paid lands.
-        if result.get("status") == "sent":
+        # Defense-in-depth: the instant a payment EXISTS (a real send, or a
+        # transfer created but not yet confirmed), stamp the in-memory task
+        # snapshot with the session paid-marker so no later iteration in THIS
+        # same run — and no later poll — can re-enter execute() and create a
+        # SECOND payment. "created_unconfirmed" counts: the transfer already
+        # exists at the rail, so re-executing would double-pay.
+        if result.get("status") in ("sent", "created_unconfirmed"):
             if tid_local:
                 paid_this_run.add(tid_local)
             marker = _session_paid_marker(task)
@@ -930,7 +932,11 @@ def _mark_tasks_paid(task_results: list[tuple], due_tasks: list[dict]) -> None:
         by_handler_task[tid] = t
 
     for handler, result in task_results:
-        if result.get("status") != "sent":
+        # Durably mark for a confirmed send AND for a created-but-unconfirmed
+        # transfer: in both cases a payment exists at the rail, so the task must
+        # never be re-executed. Only genuinely-not-attempted statuses (failed,
+        # manual_required, dry_run) are left unmarked for a legitimate re-try.
+        if result.get("status") not in ("sent", "created_unconfirmed"):
             continue
         tid = str(getattr(getattr(handler, "profile", None), "neotoma_task_id", "") or "")
         if not tid:
@@ -1477,6 +1483,26 @@ def main() -> None:
         if handler.name not in approved:
             log.info(f"Skipping {handler.name} (not approved).")
             continue
+
+        # Idempotency guard for the legacy calendar/Telegram leg. The task-based
+        # path (execute_approved_tasks) checks _task_already_paid; this leg
+        # historically did NOT, so a stale .monedula_last_run plus a Telegram
+        # reply could re-pay. Apply the SAME durable per-session guard here: if
+        # the handler's linked task already carries this session's paid-marker,
+        # the payment exists — never re-execute.
+        linked_tid = str(getattr(getattr(handler, "profile", None),
+                                 "neotoma_task_id", "") or "").strip()
+        linked_task = None
+        if linked_tid:
+            for _t in (due_tasks or []):
+                if str(_t.get("entity_id") or _t.get("id") or "") == linked_tid:
+                    linked_task = _t
+                    break
+        if linked_task is not None and _task_already_paid(linked_task):
+            log.info(f"[calendar-leg] Skipping {handler.name} — linked task "
+                     f"{linked_tid} already paid this session (idempotency guard).")
+            continue
+
         for match in matches:
             log.info(f"Executing {handler.name} payment...")
             _job = _activity.started(f"executing {handler.name} payment") if _activity else None
