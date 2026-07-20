@@ -44,12 +44,17 @@ class _FakeHandler:
         return f"{self.name}: {result.get('status')}"
 
 
-def _task(entity_id, *, approved=False, status="pending", paid_marker=""):
+def _task(entity_id, *, approved=False, status="pending", paid_marker="",
+          due_date="", recurrence=""):
     snap = {"title": f"task-{entity_id}", "status": status}
     if approved:
         snap["payment_approved"] = True
     if paid_marker:
         snap["payment_event_id"] = paid_marker
+    if due_date:
+        snap["due_date"] = due_date
+    if recurrence:
+        snap["recurrence"] = recurrence
     return {"entity_id": entity_id, "snapshot": snap}
 
 
@@ -90,6 +95,58 @@ def test_task_with_payment_event_skipped():
     monedula.execute_approved_tasks(
         [_task("ent_1", approved=True, paid_marker="pe_9")], [h])
     assert h.executed_with == []
+
+
+# ── 2b. Durable per-session idempotency (double-pay fix) ──────────────────────
+
+def test_session_marker_blocks_repay_for_same_session():
+    """A recurring task carrying the session marker for its current due_date is
+    already-paid THIS session and must not re-execute."""
+    t = _task("ent_1", approved=True, recurrence="weekly", due_date="2026-07-16",
+              paid_marker="paid:2026-07-16")
+    assert monedula._task_already_paid(t) is True
+    h = _FakeHandler("wise", "ent_1")
+    monedula.execute_approved_tasks([t], [h])
+    assert h.executed_with == []  # no re-pay
+
+
+def test_stale_session_marker_does_not_block_next_session():
+    """After due_date rolls, a marker naming the PREVIOUS session must not block
+    the new session (otherwise the payment would never recur)."""
+    t = _task("ent_1", approved=True, recurrence="weekly", due_date="2026-07-23",
+              paid_marker="paid:2026-07-16")  # stale marker, new session
+    assert monedula._task_already_paid(t) is False
+    h = _FakeHandler("wise", "ent_1")
+    monedula.execute_approved_tasks([t], [h])
+    assert len(h.executed_with) == 1  # new session pays
+
+
+def test_successful_send_stamps_in_memory_marker():
+    """Defense-in-depth: a real send stamps the in-memory snapshot so a duplicate
+    task row in the SAME run cannot re-enter execute()."""
+    t = _task("ent_1", approved=True, recurrence="weekly", due_date="2026-07-16")
+    h = _FakeHandler("wise", "ent_1")
+    monedula.execute_approved_tasks([t], [h])
+    assert t["snapshot"].get("payment_event_id") == "paid:2026-07-16"
+    # A second pass over the now-stamped task must not pay again.
+    monedula.execute_approved_tasks([t], [h])
+    assert len(h.executed_with) == 1  # still only one send
+
+
+def test_duplicate_task_rows_pay_once_in_one_run():
+    """Two rows of the same recurring task in one due_tasks list pay only once."""
+    t1 = _task("ent_1", approved=True, recurrence="weekly", due_date="2026-07-16")
+    t2 = _task("ent_1", approved=True, recurrence="weekly", due_date="2026-07-16")
+    h = _FakeHandler("wise", "ent_1")
+    monedula.execute_approved_tasks([t1, t2], [h])
+    assert len(h.executed_with) == 1  # the second row sees the stamped marker
+
+
+def test_non_marker_payment_event_still_blocks():
+    """A legacy real payment reference (not a session marker) blocks conservatively."""
+    t = _task("ent_1", approved=True, recurrence="weekly", due_date="2026-07-16",
+              paid_marker="2251311092")  # a real Wise transfer id
+    assert monedula._task_already_paid(t) is True
 
 
 # ── 3. Dry-run safety ────────────────────────────────────────────────────────

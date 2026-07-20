@@ -339,12 +339,42 @@ def _task_is_approved(task: dict) -> bool:
     return str(val).strip().lower() in ("true", "1", "yes")
 
 
+def _session_paid_marker(task: dict) -> str:
+    """Durable per-session idempotency key for a recurring payment.
+
+    Keyed to the task's current due_date (the session being paid), so a paid
+    session stays blocked across polls/restarts, while the NEXT session — which
+    carries a rolled due_date — gets a different key and is not wrongly blocked.
+    This is why we SET payment_event_id to this marker on success rather than
+    clearing it: clearing relied on a single companion write (payment_approved
+    reset) succeeding, and a failed write re-paid the session.
+    """
+    fields = _task_fields(task)
+    session = str(fields.get("due_date") or "").strip()
+    return f"paid:{session}" if session else ""
+
+
 def _task_already_paid(task: dict) -> bool:
-    """True iff the task is already settled (status done or a payment_event recorded)."""
+    """True iff the task is already settled for THIS session.
+
+    - status == 'done' → settled (one-off tasks).
+    - Any non-empty payment_event_id blocks a one-off task (never re-pay).
+    - For a recurring obligation, a session-scoped marker (paid:<due_date>)
+      blocks only the session it names; once due_date rolls to the next session
+      the marker no longer matches, so the next session is payable. A non-marker
+      payment_event_id (legacy real reference) still blocks, conservatively.
+    """
     fields = _task_fields(task)
     if str(fields.get("status") or "").strip().lower() == "done":
         return True
-    return bool(str(fields.get("payment_event_id") or "").strip())
+    pe = str(fields.get("payment_event_id") or "").strip()
+    if not pe:
+        return False
+    if pe.startswith("paid:"):
+        # Session marker: blocks only its own session. If it names a different
+        # (older) session than the current due_date, this session is unpaid.
+        return pe == _session_paid_marker(task)
+    return True
 
 
 def _handler_for_task(task: dict, handlers: list) -> Any | None:
@@ -779,11 +809,19 @@ def execute_approved_tasks(due_tasks: list[dict], handlers: list) -> list[tuple]
     """
     results: list[tuple] = []
     dry = _dryrun_enabled()
+    # Run-local guard: task ids paid earlier in THIS call. Protects against two
+    # distinct row objects for the same task id appearing in due_tasks (the
+    # in-memory snapshot stamp only covers the same object).
+    paid_this_run: set[str] = set()
 
     for task in due_tasks:
         fields = _task_fields(task)
         title = str(fields.get("title") or fields.get("name") or "(unnamed task)")
+        tid_local = str(task.get("entity_id") or task.get("id") or "").strip()
 
+        if tid_local and tid_local in paid_this_run:
+            log.info(f"[autoexec] Skipping {title!r} — already paid earlier this run.")
+            continue
         if _task_already_paid(task):
             log.info(f"[autoexec] Skipping already-paid task {title!r}.")
             continue
@@ -815,6 +853,22 @@ def execute_approved_tasks(due_tasks: list[dict], handlers: list) -> list[tuple]
         except Exception as exc:  # noqa: BLE001 — never crash the daemon
             log.error(f"[autoexec] {handler.name} execution error: {exc}")
             result = {"status": "failed", "handler": handler.name, "error": str(exc)}
+
+        # Defense-in-depth: the instant a real send succeeds, stamp the in-memory
+        # task snapshot with the session paid-marker so no later iteration in THIS
+        # same run (e.g. a duplicate task row) can re-enter execute() before the
+        # durable Neotoma write-back in _mark_tasks_paid lands.
+        if result.get("status") == "sent":
+            if tid_local:
+                paid_this_run.add(tid_local)
+            marker = _session_paid_marker(task)
+            if marker:
+                snap = task.get("snapshot")
+                if isinstance(snap, dict):
+                    snap["payment_event_id"] = marker
+                else:
+                    fields["payment_event_id"] = marker
+
         results.append((handler, result))
 
     return results
@@ -914,21 +968,35 @@ def _mark_tasks_paid(task_results: list[tuple], due_tasks: list[dict]) -> None:
             # it settled. The handler's _update_task records the payment in
             # `notes` and rolls `due_date` to the next session.
             #
-            # Reset the approval gate: a new session is a NEW decision. Leaving
-            # payment_approved=true would let the next session auto-pay without
-            # the operator approving it. payment_event_id is likewise cleared —
-            # it blocks re-payment (via _task_already_paid), which is correct for
-            # THIS session but would wrongly block the next one.
+            # DURABLE per-session idempotency: SET payment_event_id to a
+            # session-scoped marker (paid:<due_date>) rather than clearing it.
+            # _task_already_paid() treats this marker as "paid for THIS session"
+            # only — once the handler rolls due_date to the next session the
+            # marker no longer matches, so the next session is payable. This
+            # survives a failed approval-reset write: previously the sole guard
+            # against an immediate re-pay was payment_approved=false landing, and
+            # a single failed Neotoma write re-paid the session.
+            marker = _session_paid_marker(task_for(tid, due_tasks)) or f"paid:{ref}"
+            ok_mark = _correct("payment_event_id", marker)
+            # Reset the approval gate too: a new session is a NEW decision.
+            # Leaving payment_approved=true would let the next session auto-pay
+            # without the operator approving it. This is now belt-and-braces —
+            # the session marker already blocks re-pay for the current session.
             ok_clear_appr = _correct("payment_approved", "false")
-            ok_clear_ref = _correct("payment_event_id", "")
-            if ok_clear_appr and ok_clear_ref:
+            if ok_mark and ok_clear_appr:
                 log.info(f"[autoexec] Recurring task {tid} ({handler.name}) paid "
-                         f"ref={ref} — left open, approval reset for next session.")
+                         f"ref={ref}, marker={marker} — left open, approval reset "
+                         f"for next session.")
+            elif ok_mark:
+                log.warning(f"[autoexec] Recurring task {tid} paid marker set "
+                            f"({marker}) but approval NOT reset — session is "
+                            f"safe from re-pay; approval will be re-evaluated "
+                            f"when due_date rolls. Needs no manual action.")
             else:
-                log.warning(f"[autoexec] Recurring task {tid} approval NOT reset "
-                            f"(approved_cleared={ok_clear_appr}, "
-                            f"ref_cleared={ok_clear_ref}) — next session may "
-                            f"auto-pay or be blocked; needs manual check.")
+                log.error(f"[autoexec] Recurring task {tid} paid (ref={ref}) but "
+                          f"the durable paid-marker write FAILED — re-pay guard "
+                          f"depends on payment_approved reset "
+                          f"(cleared={ok_clear_appr}). MANUAL CHECK REQUIRED.")
             continue
 
         ok_ref = _correct("payment_event_id", str(ref)) if ref else True
