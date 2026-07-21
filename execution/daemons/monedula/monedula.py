@@ -47,6 +47,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from execution.lib.neotoma_config import resolve_neotoma_base_url  # noqa: E402
+
 try:
     from lib.notify import Notifier  # noqa: E402
 
@@ -95,7 +97,13 @@ TELEGRAM_TOPIC_MONEDULA = os.environ.get(
     "TELEGRAM_TOPIC_MONEDULA", ""
 ) or os.environ.get("TELEGRAM_TOPIC_PAYMENTS", "")
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
-NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "")
+# Fails loud (NeotomaConfigError) at import time if NEOTOMA_BASE_URL is unset —
+# this daemon must not silently run against an unconfigured or wrong-default
+# Neotoma (ateles#243). Resolved at module scope (not just inside main()) so
+# any caller that imports this module's functions directly — not only
+# main() — gets the same fail-loud guarantee instead of a silent empty-string
+# soft-degrade.
+NEOTOMA_BASE_URL = resolve_neotoma_base_url()
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -209,9 +217,23 @@ def fetch_yesterday_events() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+class NeotomaUnavailableError(Exception):
+    """Neotoma could not be reached to fetch an entity.
+
+    Distinct from "queried fine, entity not found" — a caller (e.g.
+    fetch_due_payment_tasks) must NOT treat this the same as "task doesn't
+    exist" (ateles#243: doing so silently dropped a due payment task from the
+    scan whenever Neotoma was unreachable or misconfigured).
+    """
+
+
 def _fetch_entity_by_id(entity_id: str) -> dict | None:
-    """Fetch a single entity (with snapshot) by ID from Neotoma. None on error."""
-    base_url = (NEOTOMA_BASE_URL or "http://localhost:3180").rstrip("/")
+    """Fetch a single entity (with snapshot) by ID from Neotoma.
+
+    Raises NeotomaUnavailableError if Neotoma cannot be reached — the caller
+    must treat that as "unknown", not "task doesn't exist".
+    """
+    base_url = NEOTOMA_BASE_URL.rstrip("/")
     is_loopback = "localhost" in base_url or "127.0.0.1" in base_url
     try:
         url = f"{base_url}/entities/{entity_id}"
@@ -222,8 +244,9 @@ def _fetch_entity_by_id(entity_id: str) -> dict | None:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read())
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-        log.warning(f"Neotoma entity fetch failed for {entity_id}: {exc}")
-        return None
+        raise NeotomaUnavailableError(
+            f"Neotoma entity fetch failed for {entity_id} at {base_url}: {exc}"
+        ) from exc
 
 
 def fetch_due_payment_tasks(handlers: list | None = None) -> list[dict]:
@@ -237,7 +260,13 @@ def fetch_due_payment_tasks(handlers: list | None = None) -> list[dict]:
     Only tasks a payment profile actually points at are payment tasks.
 
     Returns a list of task dicts (each the raw entity with a 'snapshot').
-    Falls back to empty list on any error or if no handlers/links exist.
+    Returns empty list only if there are no handlers/links to check.
+
+    Raises NeotomaUnavailableError if Neotoma cannot be reached while
+    fetching a linked task — the scan is ABORTED (not partially returned) in
+    that case, since a partial scan silently under-reports due payment tasks
+    (ateles#243: identical failure class to treating "unreachable" as "no
+    release in flight" in prepare.py).
     """
     if not NEOTOMA_BASE_URL:
         log.warning("NEOTOMA_BASE_URL not set — skipping task scan")
@@ -553,14 +582,23 @@ def _build_preview_message(
 def main() -> None:
     log.info("Monedula starting.")
 
+    # Fail loud before any polling/dispatch work starts if NEOTOMA_BASE_URL is
+    # unset — this daemon must not silently run against an unconfigured or
+    # wrong-default Neotoma (ateles#243).
+    global NEOTOMA_BASE_URL
+    NEOTOMA_BASE_URL = resolve_neotoma_base_url()
+
     # Idempotency: exit immediately if already ran today
     if _check_already_ran_today():
         log.info("Already ran today — exiting.")
         return
 
     # Mark as started immediately to prevent concurrent launchd re-launches.
-    # We clear this at the very end if something goes wrong before completion,
-    # but keep it on successful runs to prevent double-payment.
+    # We clear this if something goes wrong before completion (a Neotoma
+    # outage during handler-loading or the due-task scan must not burn the
+    # rest of the day's runs — ateles#243 made those failures raise instead
+    # of silently degrading, so this guard now has to actually fire), but
+    # keep it set on successful runs to prevent double-payment.
     _mark_ran_today()
 
     yesterday = _yesterday()
@@ -571,23 +609,27 @@ def main() -> None:
     # Set MONEDULA_PROFILES=THERAPY,YOGA (and corresponding profile env vars).
     from handlers import load_handlers
 
-    all_handlers = load_handlers()
+    try:
+        all_handlers = load_handlers()
 
-    # Fetch yesterday's events
-    events = fetch_yesterday_events()
+        # Fetch yesterday's events
+        events = fetch_yesterday_events()
 
-    # Find triggered handlers from calendar
-    triggered: list[tuple] = []  # [(handler, [match, ...]), ...]
-    for handler in all_handlers:
-        matches = handler.matches(events)
-        if matches:
-            triggered.append((handler, matches))
+        # Find triggered handlers from calendar
+        triggered: list[tuple] = []  # [(handler, [match, ...]), ...]
+        for handler in all_handlers:
+            matches = handler.matches(events)
+            if matches:
+                triggered.append((handler, matches))
 
-    if triggered:
-        log.info(f"Triggered handlers: {[h.name for h, _ in triggered]}")
+        if triggered:
+            log.info(f"Triggered handlers: {[h.name for h, _ in triggered]}")
 
-    # Fetch due payment tasks from Neotoma, scoped to profile-linked task IDs only.
-    due_tasks = fetch_due_payment_tasks(all_handlers)
+        # Fetch due payment tasks from Neotoma, scoped to profile-linked task IDs only.
+        due_tasks = fetch_due_payment_tasks(all_handlers)
+    except Exception:
+        _clear_run_state()
+        raise
 
     # Abort early only if there's truly nothing to show
     if not triggered and not due_tasks:

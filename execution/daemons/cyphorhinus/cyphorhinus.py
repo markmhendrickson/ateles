@@ -55,6 +55,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from execution.lib.neotoma_config import resolve_neotoma_base_url  # noqa: E402
+
 _NEOTOMA_ENV_FILE = Path.home() / ".config" / "neotoma" / ".env"
 if _NEOTOMA_ENV_FILE.exists():
     for _line in _NEOTOMA_ENV_FILE.read_text().splitlines():
@@ -88,7 +90,7 @@ log = logging.getLogger("cyphorhinus")
 # ── Config ──────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("CYPHORHINUS_TELEGRAM_BOT_TOKEN", "").strip()
 CHAT_ID = os.environ.get("CYPHORHINUS_TELEGRAM_CHAT_ID", "").strip()
-NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180").rstrip("/")
+NEOTOMA_BASE_URL = resolve_neotoma_base_url().rstrip("/")
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 POLL_TIMEOUT = int(os.environ.get("CYPHORHINUS_POLL_TIMEOUT", "50"))
 

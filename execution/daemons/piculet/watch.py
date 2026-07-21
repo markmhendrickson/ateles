@@ -23,6 +23,12 @@ import sys
 import time
 from pathlib import Path
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from execution.lib.neotoma_config import resolve_neotoma_base_url  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -416,9 +422,10 @@ class NeotomaUnavailableError(Exception):
 # Neotoma HTTP helpers — direct API calls, no CLI subprocess
 # ---------------------------------------------------------------------------
 
-# Base URL resolved from env at startup. The plist also sets NEOTOMA_BASE_URL
-# so this will always resolve to prod (3180), never auto-detect dev (3080).
-_NEOTOMA_BASE_URL: str = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180")
+# Base URL resolved from env at startup. The plist sets NEOTOMA_BASE_URL
+# explicitly for the target environment (prod, dev, ...) — there is no
+# default; an unset var fails loud at import time (ateles#243).
+_NEOTOMA_BASE_URL: str = resolve_neotoma_base_url()
 
 # Canonical "Neotoma, Inc." company entity, referenced in the extraction prompt
 # so product mentions get related to it. Env-overridable so a different graph /

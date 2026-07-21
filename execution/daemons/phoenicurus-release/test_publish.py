@@ -16,14 +16,21 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 _DAEMON_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _DAEMON_DIR.parent.parent.parent
 for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+import os as _os  # noqa: E402
+
+_os.environ.setdefault("NEOTOMA_BASE_URL", "https://neotoma.example.com:9180")
 
 import publish  # noqa: E402
 
@@ -589,3 +596,128 @@ class TestGoldenPathEndToEnd:
         ppm_idx = order.index("preflight_post_merge")
         tag_idx = order.index("tag_and_push")
         assert merge_idx < ppm_idx < tag_idx
+
+
+# ── ateles#243: NEOTOMA_BASE_URL fail-fast / fail-loud ──────────────────────
+
+
+class TestNeotomaQueryRaisesOnConnectionFailure:
+    def test_url_error_raises_neotoma_unavailable(self) -> None:
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise urllib.error.URLError("connection refused")
+
+        with patch.object(publish.urllib.request, "urlopen", _boom):
+            with pytest.raises(publish.NeotomaUnavailableError):
+                publish.neotoma_query("release_result")
+
+    def test_success_returns_entities(self) -> None:
+        class _Resp:
+            def read(self) -> bytes:
+                return json.dumps({"entities": [{"id": "ent_1"}]}).encode()
+
+            def __enter__(self) -> "_Resp":
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                return None
+
+        with patch.object(publish.urllib.request, "urlopen", lambda *a, **k: _Resp()):
+            assert publish.neotoma_query("release_result") == [{"id": "ent_1"}]
+
+
+class TestNeotomaFetchEntityRaisesOnConnectionFailure:
+    def test_os_error_raises_neotoma_unavailable(self) -> None:
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise OSError("network unreachable")
+
+        with patch.object(publish.urllib.request, "urlopen", _boom):
+            with pytest.raises(publish.NeotomaUnavailableError):
+                publish.neotoma_fetch_entity("ent_x")
+
+
+class TestNeotomaStoreStaysBestEffort:
+    def test_connection_failure_returns_none_does_not_raise(self) -> None:
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise urllib.error.URLError("connection refused")
+
+        with patch.object(publish.urllib.request, "urlopen", _boom):
+            # neotoma_store is a status-recording write, not a gate — it must
+            # stay catch-and-log so a failed status write never crashes a
+            # publish that already succeeded/failed on its own merits.
+            result = publish.neotoma_store([{"entity_type": "release_result"}], "key-1")
+            assert result is None
+
+
+class TestFindReleasePropagatesNeotomaUnavailable:
+    def test_by_entity_id_propagates(self) -> None:
+        def _boom(entity_id: str) -> None:
+            raise publish.NeotomaUnavailableError("connection refused")
+
+        with patch.object(publish, "neotoma_fetch_entity", _boom):
+            with pytest.raises(publish.NeotomaUnavailableError):
+                publish.find_release(None, "ent_x")
+
+    def test_by_version_propagates(self) -> None:
+        def _boom(entity_type: str, limit: int = 100) -> None:
+            raise publish.NeotomaUnavailableError("connection refused")
+
+        with patch.object(publish, "neotoma_query", _boom):
+            with pytest.raises(publish.NeotomaUnavailableError):
+                publish.find_release("v1.2.3", None)
+
+
+class TestMainHardBlocksOnNeotomaUnavailableInsteadOfNoReleaseFound:
+    def test_main_returns_2_and_does_not_report_no_release_found(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", ["publish.py", "--version", "v1.2.3"])
+
+        def _boom(version: object, entity_id: object) -> None:
+            raise publish.NeotomaUnavailableError("connection refused")
+
+        telegram_mock = MagicMock()
+        with patch.object(publish, "find_release", _boom), patch.object(
+            publish, "telegram_send", telegram_mock
+        ):
+            exit_code = publish.main()
+
+        assert exit_code == 2
+        assert telegram_mock.called
+        sent_text = telegram_mock.call_args[0][0].lower()
+        assert "unreachable" in sent_text
+        assert "no release record" not in sent_text
+
+    def test_main_reports_no_release_found_when_neotoma_reachable_but_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", ["publish.py", "--version", "v1.2.3"])
+
+        telegram_mock = MagicMock()
+        with patch.object(publish, "find_release", lambda v, e: None), patch.object(
+            publish, "telegram_send", telegram_mock
+        ):
+            exit_code = publish.main()
+
+        assert exit_code == 2
+        assert telegram_mock.called
+        assert "no release record" in telegram_mock.call_args[0][0].lower()
+
+
+class TestPublishModuleImportFailsLoudWithoutNeotomaBaseUrl:
+    def test_import_raises_neotoma_config_error_when_unset(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import importlib
+
+        from execution.lib.neotoma_config import NeotomaConfigError
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("NEOTOMA_BASE_URL", raising=False)
+        sys.modules.pop("publish", None)
+        try:
+            with pytest.raises(NeotomaConfigError):
+                importlib.import_module("publish")
+        finally:
+            monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.com:9180")
+            sys.modules.pop("publish", None)
+            importlib.import_module("publish")

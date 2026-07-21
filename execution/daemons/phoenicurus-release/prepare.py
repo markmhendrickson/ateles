@@ -57,6 +57,12 @@ if _NEOTOMA_ENV_FILE.exists():
             _k, _, _v = _line.partition("=")
             os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from execution.lib.neotoma_config import resolve_neotoma_base_url  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -66,6 +72,10 @@ LOG_DIR = Path.home() / "Library" / "Logs" / "ateles"
 LOG_FILE = LOG_DIR / "phoenicurus-release.log"
 STATE_FILE = Path(__file__).parent / ".phoenicurus_prepare_last_run"
 AGENT_LOG = LOG_DIR / "phoenicurus-prepare-agent.log"
+
+# Fails loud (NeotomaConfigError) at import time if NEOTOMA_BASE_URL is unset —
+# this daemon must not silently default to any localhost URL (ateles#243).
+NEOTOMA_BASE_URL = resolve_neotoma_base_url()
 
 NEOTOMA_REPO_ROOT = Path(
     os.environ.get("NEOTOMA_REPO_ROOT", str(Path.home() / "repos" / "neotoma"))
@@ -200,12 +210,25 @@ def main_ci_green() -> bool | None:
 # ---------------------------------------------------------------------------
 
 
+class NeotomaUnavailableError(Exception):
+    """Neotoma could not be reached to check for an in-flight release.
+
+    Distinct from "queried fine, no release_result found" — a caller must NOT
+    treat this the same as "no release in flight" (ateles#243: doing so
+    silently disabled the in-flight-release safety guard whenever Neotoma was
+    unreachable or misconfigured).
+    """
+
+
 def existing_release_status(next_version_hint: str) -> str | None:
     """
     Return the status of any release_result already tracking work since the last
     tag, so we don't re-prepare on top of a pending_approval release.
+
+    Raises NeotomaUnavailableError if Neotoma cannot be reached — the caller
+    must treat that as "unknown", not "no release in flight".
     """
-    base = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180").rstrip("/")
+    base = NEOTOMA_BASE_URL.rstrip("/")
     is_loopback = "localhost" in base or "127.0.0.1" in base
     bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
@@ -220,14 +243,16 @@ def existing_release_status(next_version_hint: str) -> str | None:
         )
         with urllib.request.urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read())
-        entities = data.get("entities") if isinstance(data, dict) else data
-        for e in entities or []:
-            snap = e.get("snapshot") or e.get("fields") or e
-            status = str(snap.get("status") or "")
-            if status in ("prepared", "pending_approval", "approved", "publishing"):
-                return status
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-        log.warning(f"could not check existing release_result: {exc}")
+        raise NeotomaUnavailableError(
+            f"could not check existing release_result at {base}: {exc}"
+        ) from exc
+    entities = data.get("entities") if isinstance(data, dict) else data
+    for e in entities or []:
+        snap = e.get("snapshot") or e.get("fields") or e
+        status = str(snap.get("status") or "")
+        if status in ("prepared", "pending_approval", "approved", "publishing"):
+            return status
     return None
 
 
@@ -282,7 +307,7 @@ release-candidate PR, then HALT:
    `npm run -s release-notes:render -- --tag <TAG> --head-ref HEAD --supplement <path>`.
 
 Then record + notify:
-10. Store a Neotoma `release_result` entity (POST {os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180")}/store)
+10. Store a Neotoma `release_result` entity (POST {NEOTOMA_BASE_URL}/store)
     with fields: version=<TAG>, status="pending_approval", branch="release/<TAG>",
     and put the RC PR URL in the `release_url` field. Use idempotency_key
     "release-<TAG>-pending_approval-{date.today().isoformat()}".
@@ -369,7 +394,22 @@ def run_prepare(dry_run: bool, force: bool) -> int:
         return 0
 
     # Don't re-prepare if a release is already in flight awaiting approval.
-    inflight = existing_release_status(tag)
+    # A Neotoma-unreachable failure here must hard-block, not be treated as
+    # "no release in flight" (ateles#243) — refuse to proceed without a
+    # confirmed answer to "is a release already in flight?".
+    try:
+        inflight = existing_release_status(tag)
+    except NeotomaUnavailableError as exc:
+        log.error(
+            f"Cannot confirm whether a release is already in flight — "
+            f"Neotoma is unreachable: {exc}. Refusing to prepare a release "
+            "without this safety check."
+        )
+        telegram_send(
+            f"🔴 Phoenicurus: Neotoma unreachable — cannot confirm no release "
+            f"is already in flight for {tag}. Not preparing. ({exc})"
+        )
+        return 1
     if inflight:
         log.info(
             f"A release_result is already {inflight!r} — not preparing another. "

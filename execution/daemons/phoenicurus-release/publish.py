@@ -63,6 +63,12 @@ if _NEOTOMA_ENV_FILE.exists():
             _k, _, _v = _line.partition("=")
             os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from execution.lib.neotoma_config import resolve_neotoma_base_url  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Constants / paths
 # ---------------------------------------------------------------------------
@@ -82,7 +88,9 @@ TELEGRAM_TOPIC = os.environ.get("TELEGRAM_TOPIC_PHOENICURUS", "") or os.environ.
 )
 
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
-NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180")
+# Fails loud (NeotomaConfigError) at import time if NEOTOMA_BASE_URL is unset —
+# this daemon must not silently default to any localhost URL (ateles#243).
+NEOTOMA_BASE_URL = resolve_neotoma_base_url()
 # The npm automation token. Accept either conventional name so the release
 # works from whatever the SOPS snapshot materialized: NPM_TOKEN (Ateles'
 # manifest name) OR NODE_AUTH_TOKEN (npm's own env var, also what the neotoma
@@ -155,6 +163,17 @@ def telegram_send(text: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+class NeotomaUnavailableError(Exception):
+    """Neotoma could not be reached while resolving the release to publish.
+
+    Distinct from "queried fine, no matching release_result" — find_release()
+    (and main()) must NOT treat this the same as "no release record found",
+    since that silent conflation would let publish.py report "nothing to
+    publish" when the real problem is that Neotoma is unreachable/misconfigured
+    (ateles#243).
+    """
+
+
 def _neotoma_headers() -> dict:
     base = NEOTOMA_BASE_URL.rstrip("/")
     is_loopback = "localhost" in base or "127.0.0.1" in base
@@ -165,7 +184,12 @@ def _neotoma_headers() -> dict:
 
 
 def neotoma_query(entity_type: str, limit: int = 100) -> list[dict]:
-    """Query entities of a type from Neotoma. Empty list on error."""
+    """Query entities of a type from Neotoma.
+
+    Raises NeotomaUnavailableError on connection failure — this feeds
+    find_release(), a safety-critical release-resolution guard, so a
+    connection failure must not be conflated with "zero matches".
+    """
     base = NEOTOMA_BASE_URL.rstrip("/")
     try:
         body = json.dumps(
@@ -176,16 +200,22 @@ def neotoma_query(entity_type: str, limit: int = 100) -> list[dict]:
         )
         with urllib.request.urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read())
-        if isinstance(data, list):
-            return data
-        return data.get("entities") or data.get("items") or data.get("results") or []
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-        log.warning(f"Neotoma query failed for {entity_type}: {exc}")
-        return []
+        raise NeotomaUnavailableError(
+            f"Neotoma query failed for {entity_type} at {base}: {exc}"
+        ) from exc
+    if isinstance(data, list):
+        return data
+    return data.get("entities") or data.get("items") or data.get("results") or []
 
 
 def neotoma_fetch_entity(entity_id: str) -> dict | None:
-    """Fetch a single entity by id. None on error."""
+    """Fetch a single entity by id.
+
+    Raises NeotomaUnavailableError on connection failure — this feeds
+    find_release(), a safety-critical release-resolution guard, so a
+    connection failure must not be conflated with "entity not found".
+    """
     base = NEOTOMA_BASE_URL.rstrip("/")
     try:
         req = urllib.request.Request(
@@ -194,12 +224,19 @@ def neotoma_fetch_entity(entity_id: str) -> dict | None:
         with urllib.request.urlopen(req, timeout=20) as resp:
             return json.loads(resp.read())
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-        log.warning(f"Neotoma fetch failed for {entity_id}: {exc}")
-        return None
+        raise NeotomaUnavailableError(
+            f"Neotoma fetch failed for {entity_id} at {base}: {exc}"
+        ) from exc
 
 
 def neotoma_store(entities: list[dict], idempotency_key: str) -> dict | None:
-    """Store/update entities via POST /store. None on error."""
+    """Store/update entities via POST /store. None on error.
+
+    Best-effort: this records release status transitions after the gating
+    decision (publish or not) has already been made — a failed status write
+    must not crash a publish that otherwise succeeded/failed on its own
+    merits, so this intentionally stays catch-and-log (not fail-loud).
+    """
     base = NEOTOMA_BASE_URL.rstrip("/")
     try:
         body = json.dumps(
@@ -742,7 +779,21 @@ def main() -> int:
         log.error("must supply --version or --entity-id")
         return 2
 
-    release = find_release(args.version, args.entity_id)
+    # A Neotoma-unreachable failure here must hard-block, not be reported as
+    # "no release record found" (ateles#243) — those are different problems
+    # requiring different operator responses.
+    try:
+        release = find_release(args.version, args.entity_id)
+    except NeotomaUnavailableError as exc:
+        log.error(
+            f"Cannot resolve the release to publish — Neotoma is unreachable: "
+            f"{exc}. Refusing to publish without confirming the release record."
+        )
+        telegram_send(
+            f"🔴 Phoenicurus: Neotoma unreachable — cannot resolve release "
+            f"record for {args.version or args.entity_id}. Not publishing. ({exc})"
+        )
+        return 2
     if not release:
         log.error(
             f"no release record found (version={args.version}, "

@@ -16,12 +16,21 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # ── Path bootstrap (mirrors conftest.py) ──────────────────────────────────────
 _DAEMON_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _DAEMON_DIR.parent.parent.parent
 for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+import os as _os  # noqa: E402
+
+# skill_runner resolves NEOTOMA_BASE_URL at import time (ateles#243) and fails
+# loud if unset — set a default here so collection succeeds in a clean CI
+# environment that doesn't already export it.
+_os.environ.setdefault("NEOTOMA_BASE_URL", "https://neotoma.example.com:9180")
 
 from lib.daemon_runtime import AgentDefinition  # noqa: E402
 
@@ -766,7 +775,7 @@ class TestNeotomaMcpConfigInjection:
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setattr(skill_runner, "NEOTOMA_BASE_URL", "http://localhost:9180")
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-bearer-xyz")
 
         captured_cmd: list = []
@@ -818,7 +827,7 @@ class TestNeotomaMcpConfigInjection:
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setattr(skill_runner, "NEOTOMA_BASE_URL", "http://localhost:9180")
         monkeypatch.delenv("NEOTOMA_BEARER_TOKEN", raising=False)
 
         captured_cmd: list = []
@@ -900,7 +909,7 @@ class TestNeotomaMcpConfigInjection:
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setattr(skill_runner, "NEOTOMA_BASE_URL", "http://localhost:9180")
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "secret-bearer-abc")
 
         captured_cmd: list = []
@@ -972,7 +981,7 @@ class TestNeotomaMcpConfigInjection:
         instance.load.return_value = restricted_def
         MockLoader.return_value = instance
 
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setattr(skill_runner, "NEOTOMA_BASE_URL", "http://localhost:9180")
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "tok")
 
         captured_cmd: list = []
@@ -1013,7 +1022,7 @@ class TestNeotomaMcpConfigInjection:
         instance.load.return_value = wide_def
         MockLoader.return_value = instance
 
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setattr(skill_runner, "NEOTOMA_BASE_URL", "http://localhost:9180")
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "tok")
 
         captured_cmd: list = []
@@ -1595,3 +1604,84 @@ class TestAnthropicAuthPrecedence:
         assert env.get("ANTHROPIC_API_KEY") == "sk-ant-metered", (
             "Without a subscription token, fall back to ANTHROPIC_API_KEY (no regression)"
         )
+
+
+# ── ateles#243: NEOTOMA_BASE_URL fail-fast / fail-loud ──────────────────────
+
+
+class TestSkillRunnerModuleImportFailsLoudWithoutNeotomaBaseUrl:
+    def test_import_raises_neotoma_config_error_when_unset(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        import importlib
+
+        from execution.lib.neotoma_config import NeotomaConfigError
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("NEOTOMA_BASE_URL", raising=False)
+        sys.modules.pop("skill_runner", None)
+        try:
+            with pytest.raises(NeotomaConfigError):
+                importlib.import_module("skill_runner")
+        finally:
+            monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.com:9180")
+            sys.modules.pop("skill_runner", None)
+            importlib.import_module("skill_runner")
+
+
+class TestWriteHarnessEventUsesResolvedBaseUrlNoHardcodedDefault:
+    def test_uses_module_constant_not_inline_default(self, monkeypatch) -> None:
+        monkeypatch.setattr(skill_runner, "NEOTOMA_BASE_URL", "https://neotoma.example.com:9180")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-token")
+
+        captured: dict = {}
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return None
+
+        def _fake_urlopen(req, timeout=5.0):
+            captured["url"] = req.full_url
+            return _Resp()
+
+        monkeypatch.setattr(skill_runner.urllib.request, "urlopen", _fake_urlopen)
+
+        skill_runner._write_harness_event(
+            task_entity_id="ent_abc",
+            role="gryllus",
+            agent_sub="gryllus@ateles-swarm",
+            event_type="dispatch_started",
+            tool_name="run_skill",
+            success="true",
+        )
+
+        assert captured["url"] == "https://neotoma.example.com:9180/store"
+        assert "3180" not in captured["url"]
+        assert "9180" in captured["url"] or "example.com" in captured["url"]
+
+
+class TestWriteHarnessEventNeverRaises:
+    """Lock in the pre-existing (already correct) best-effort contract so the
+    :3180 default swap can't accidentally make this raise on a runtime
+    connection failure — a harness_event failure must not crash dispatch."""
+
+    def test_connection_failure_does_not_raise(self, monkeypatch) -> None:
+        monkeypatch.setattr(skill_runner, "NEOTOMA_BASE_URL", "https://neotoma.example.com:9180")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-token")
+
+        def _boom(req, timeout=5.0):
+            raise OSError("connection refused")
+
+        monkeypatch.setattr(skill_runner.urllib.request, "urlopen", _boom)
+
+        skill_runner._write_harness_event(
+            task_entity_id="ent_abc",
+            role="gryllus",
+            agent_sub="gryllus@ateles-swarm",
+            event_type="dispatch_started",
+            tool_name="run_skill",
+            success="true",
+        )  # must not raise

@@ -45,9 +45,16 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from execution.lib.neotoma_config import resolve_neotoma_base_url  # noqa: E402
 from lib.daemon_runtime import AgentDefinition, AgentLoader  # noqa: E402
 
 log = logging.getLogger("apis.skill_runner")
+
+# Fails loud (NeotomaConfigError) at import time if NEOTOMA_BASE_URL is unset.
+# apis.py (this module's importer) also resolves at its own startup, so this
+# is belt-and-suspenders for standalone import/test of skill_runner.py
+# (ateles#243).
+NEOTOMA_BASE_URL = resolve_neotoma_base_url().rstrip("/")
 
 CLAUDE_BIN = os.environ.get("APIS_CLAUDE_BIN") or shutil.which("claude")
 DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
@@ -267,7 +274,7 @@ def _write_harness_event(
     Uses the same /store endpoint and pattern as lib/activity/_store_activity_log.
     Never raises — a harness_event failure must not crash dispatch.
     """
-    base_url = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180").rstrip("/")
+    base_url = NEOTOMA_BASE_URL
     token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     if not token:
         return
@@ -471,7 +478,7 @@ async def run_skill(
     #   the config to a mode-0600 temp file and pass the file path to --mcp-config.
     #   The temp file is cleaned up in a try/finally after the subprocess exits.
     _mcp_tmp_path: str | None = None
-    _neotoma_base = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180").rstrip("/")
+    _neotoma_base = NEOTOMA_BASE_URL
     _neotoma_token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     _mcp_cfg: dict = {
         "mcpServers": {

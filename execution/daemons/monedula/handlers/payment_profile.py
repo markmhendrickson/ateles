@@ -44,10 +44,31 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
+_HANDLERS_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _HANDLERS_DIR.parent.parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from execution.lib.neotoma_config import resolve_neotoma_base_url  # noqa: E402
+
 log = logging.getLogger(__name__)
+
+
+class NeotomaUnavailableError(Exception):
+    """Neotoma could not be reached while loading payment profiles.
+
+    Distinct from "queried fine, zero profiles configured" — a caller must
+    NOT silently slide into the env-var fallback on this, since monedula
+    could then run for an extended period on stale env-var-configured
+    profiles without anyone knowing the Neotoma-sourced profiles (the
+    presumed source of truth per the Phase 5+ docstring below) were
+    unreachable (ateles#243).
+    """
 
 
 @dataclass
@@ -84,8 +105,12 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
     Queries Neotoma for active payment_profile entities belonging to this
     operator, constructs PaymentProfile objects from snapshot fields.
 
-    Falls back to empty list on any error — caller should then call
-    load_profiles() to use env-var fallback.
+    Returns an empty list if the query succeeds with zero matching profiles
+    — callers may legitimately fall back to env-var profiles in that case.
+
+    Raises NeotomaUnavailableError if Neotoma cannot be reached at all; this
+    is NOT the same as "zero profiles" and callers must not treat it as such
+    (see load_profiles_with_neotoma_fallback).
 
     Required env vars:
       NEOTOMA_BEARER_TOKEN   Neotoma API auth token
@@ -96,9 +121,7 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
     import urllib.request
 
     bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "").strip()
-    base_url = os.environ.get(
-        "NEOTOMA_BASE_URL", "http://localhost:3180"
-    ).rstrip("/")
+    base_url = resolve_neotoma_base_url().rstrip("/")
 
     # On a loopback target the server trusts localhost (NEOTOMA_TRUST_PROD_LOOPBACK)
     # and a stale/invalid bearer is actively rejected — so omit the header locally.
@@ -128,8 +151,9 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-        log.warning(f"Neotoma payment_profile fetch failed: {exc}")
-        return []
+        raise NeotomaUnavailableError(
+            f"Neotoma payment_profile fetch failed at {base_url}: {exc}"
+        ) from exc
 
     items: list[dict] = []
     if isinstance(data, list):
@@ -222,10 +246,18 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
 
 def load_profiles_with_neotoma_fallback() -> list[PaymentProfile]:
     """
-    Load PaymentProfiles: try Neotoma first, fall back to env vars.
+    Load PaymentProfiles: try Neotoma first, fall back to env vars ONLY when
+    Neotoma queried successfully and returned zero profiles.
 
     Phase 5 entrypoint. Monedula callers should use this instead of
     load_profiles() to transparently prefer Neotoma-sourced profiles.
+
+    Raises NeotomaUnavailableError (does NOT silently fall back to env vars)
+    when Neotoma cannot be reached at all — sliding into the env-var path on
+    an unreachable Neotoma would mean monedula could run for an extended
+    period on stale env-var-configured profiles without anyone knowing the
+    Neotoma-sourced profiles (the presumed source of truth) were unreachable
+    (ateles#243).
     """
     profiles = load_profiles_from_neotoma()
     if profiles:

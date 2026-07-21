@@ -144,6 +144,13 @@ _DAEMON_DIR = Path(__file__).resolve().parent
 if str(_DAEMON_DIR) not in sys.path:
     sys.path.insert(0, str(_DAEMON_DIR))
 
+from execution.lib.neotoma_config import resolve_neotoma_base_url  # noqa: E402
+
+# Fails loud (NeotomaConfigError) at import time if NEOTOMA_BASE_URL is unset —
+# apis (and the skill_runner module it imports below) must not silently
+# dispatch against an unconfigured or wrong-default Neotoma (ateles#243).
+resolve_neotoma_base_url()
+
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
     AgentLoader,
