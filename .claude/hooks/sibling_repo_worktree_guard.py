@@ -117,7 +117,17 @@ def shared_main_clone_for(path: Path):
         common_dir = Path(os.path.join(base, cd.stdout.strip())).resolve()
         # Equal → main clone (shared). Differ → linked worktree (safe).
         return toplevel, (git_dir == common_dir)
-    except Exception:  # noqa: BLE001
+    except FileNotFoundError:
+        try:
+            log("guard: git not found, sibling-repo check skipped for this call")
+        except Exception:  # noqa: BLE001 — logging must never block
+            pass
+        return None, False
+    except Exception as exc:  # noqa: BLE001
+        try:
+            log(f"guard: could not evaluate git state for {path}: {exc}")
+        except Exception:  # noqa: BLE001 — logging must never block
+            pass
         return None, False
 
 
@@ -142,8 +152,8 @@ def guidance(toplevel: Path) -> str:
     return (
         f"Refused: this would mutate the SHARED main clone at {toplevel} — "
         f"another session may be using it (this exact hazard landed a commit on "
-        f"another session's branch on 2026-07-21). Create a dedicated worktree "
-        f"first, then target that path:\n"
+        f"another session's branch on 2026-07-21, see ateles#246). Create a "
+        f"dedicated worktree first, then target that path:\n"
         f"  git worktree add ~/repos/{name}-wt-<slug> origin/main\n"
         f"  cd ~/repos/{name}-wt-<slug>\n"
         f"Do all edits/commits there. (Override for a deliberate case: set "

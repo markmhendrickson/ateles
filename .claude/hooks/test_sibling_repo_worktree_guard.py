@@ -290,3 +290,84 @@ class TestFailOpen:
         monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
         code = guard.main()
         assert code == 0
+
+
+# ---------------------------------------------------------------------------
+# guidance() message content — durable issue reference + resolved path.
+# ---------------------------------------------------------------------------
+class TestGuidanceMessage:
+    def test_guidance_cites_issue_246(self, tmp_path):
+        top = tmp_path / "sibling"
+        top.mkdir()
+        msg = guard.guidance(top)
+        assert "ateles#246" in msg
+
+    def test_guidance_includes_resolved_path(self, tmp_path):
+        top = tmp_path / "sibling"
+        top.mkdir()
+        msg = guard.guidance(top)
+        assert str(top.resolve()) in msg
+
+
+# ---------------------------------------------------------------------------
+# Fail-open visibility — internal errors must log, never block, never leak
+# command text/credentials, and be distinguishable from each other.
+# ---------------------------------------------------------------------------
+class TestFailOpenLogging:
+    def test_shared_main_clone_error_logs_before_returning_none(self, tmp_path, monkeypatch):
+        logged = []
+        monkeypatch.setattr(guard, "log", lambda msg: logged.append(msg))
+        monkeypatch.setattr(
+            guard, "_run", lambda *a, **k: (_ for _ in ()).throw(OSError("boom"))
+        )
+        top, is_shared = guard.shared_main_clone_for(tmp_path / "somewhere")
+        assert (top, is_shared) == (None, False)
+        assert any("could not evaluate git state" in m for m in logged)
+
+    def test_git_not_found_logs_distinct_message(self, tmp_path, monkeypatch):
+        logged = []
+        monkeypatch.setattr(guard, "log", lambda msg: logged.append(msg))
+        monkeypatch.setattr(
+            guard, "_run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError())
+        )
+        ateles = tmp_path / "ateles"
+        ateles.mkdir()
+        reason = guard.check_bash("git commit -m x", ateles.resolve())
+        assert reason is None  # fail-open: never blocks
+        assert any("git not found" in m for m in logged)
+        # Must be distinguishable from the generic "could not evaluate" message —
+        # an operator scanning logs needs to tell "git missing" from "unexpected error".
+        assert not any("could not evaluate git state" in m for m in logged)
+
+    def test_log_call_failure_does_not_block(self, tmp_path, monkeypatch):
+        def _raise_log(msg):
+            raise RuntimeError("log broke")
+
+        monkeypatch.setattr(guard, "log", _raise_log)
+        monkeypatch.setattr(
+            guard, "_run", lambda *a, **k: (_ for _ in ()).throw(OSError("boom"))
+        )
+        top, is_shared = guard.shared_main_clone_for(tmp_path / "x")
+        assert (top, is_shared) == (None, False)  # still fails open despite log() raising
+
+    def test_main_logs_on_fail_open(self, tmp_path, monkeypatch, capsys):
+        logged = []
+        monkeypatch.setattr(guard, "log", lambda msg: logged.append(msg))
+        ateles = tmp_path / "ateles"
+        ateles.mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(ateles))
+        monkeypatch.chdir(ateles)
+        monkeypatch.delenv("ATELES_ALLOW_SHARED_REPO_WRITES", raising=False)
+        monkeypatch.setattr(
+            guard, "_run", lambda *a, **k: (_ for _ in ()).throw(OSError("boom"))
+        )
+        event = {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}}
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
+        code = guard.main()
+        assert code == 0
+        assert logged  # something was logged, not silent
+
+
+def test_readme_mentions_override_var():
+    readme = Path(__file__).resolve().parent / "README.md"
+    assert "ATELES_ALLOW_SHARED_REPO_WRITES" in readme.read_text()
