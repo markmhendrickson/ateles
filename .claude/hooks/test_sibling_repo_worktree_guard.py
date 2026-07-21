@@ -186,6 +186,96 @@ class TestCheckBashPrecedence:
         reason = guard.check_bash("git commit -m x", ateles.resolve())
         assert reason is None
 
+    def test_worktree_add_prefix_does_not_shield_trailing_mutation(
+        self, tmp_path, monkeypatch
+    ):
+        # qa lens finding 1: a `worktree add` segment earlier in a compound
+        # command must not blanket-exempt a separate mutating segment later
+        # in the same command.
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.chdir(ateles)
+        reason = guard.check_bash(
+            f"git worktree add {tmp_path}/x origin/main && "
+            f"git -C {sibling} reset --hard",
+            ateles.resolve(),
+        )
+        assert reason is not None
+        assert str(sibling.resolve()) in reason
+
+    def test_cd_takes_last_target_not_first(self, tmp_path, monkeypatch):
+        # qa lens finding 2: m_cd must resolve to the cd immediately
+        # preceding the mutating invocation, not the first cd in the string.
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.chdir(ateles)
+        reason = guard.check_bash(
+            f"cd /tmp && cd {sibling} && git commit -m x", ateles.resolve()
+        )
+        assert reason is not None
+        assert str(sibling.resolve()) in reason
+
+    def test_cd_last_wins_inverse_does_not_false_positive(self, tmp_path, monkeypatch):
+        # Inverse of the above: once the LAST cd wins, moving back out of the
+        # sibling clone before the mutation must not false-positive.
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.chdir(ateles)
+        reason = guard.check_bash(
+            f"cd {sibling} && cd /tmp && git commit -m x", ateles.resolve()
+        )
+        assert reason is None
+
+    def test_dash_c_scoped_to_mutating_segment_not_first_occurrence(
+        self, tmp_path, monkeypatch
+    ):
+        # qa lens finding 3: -C must resolve from the SAME segment as the
+        # mutating verb, not the first -C anywhere in the compound command.
+        sibling = _init_repo(tmp_path / "sibling")
+        other = _init_repo(tmp_path / "other")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.chdir(ateles)
+        reason = guard.check_bash(
+            f"git -C {other} status && git -C {sibling} commit -m x",
+            ateles.resolve(),
+        )
+        assert reason is not None
+        assert str(sibling.resolve()) in reason
+
+    def test_worktree_add_text_in_commit_message_does_not_shield_mutation(
+        self, tmp_path, monkeypatch
+    ):
+        # Self-review finding: the remedy check must key off an ACTUAL `git
+        # worktree add` invocation, not a bare substring match — a mutating
+        # command whose commit message merely contains the text "worktree
+        # add" must still be caught.
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.chdir(ateles)
+        reason = guard.check_bash(
+            f'git -C {sibling} commit -am "worktree add later"', ateles.resolve()
+        )
+        assert reason is not None
+        assert str(sibling.resolve()) in reason
+
+    def test_newline_separated_worktree_add_does_not_shield_trailing_mutation(
+        self, tmp_path, monkeypatch
+    ):
+        # Self-review finding: a multi-line Bash block is just as much a
+        # compound command as one joined with &&/;, and must be split the
+        # same way — a `worktree add` on one line must not shield a
+        # mutating invocation on a later line.
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.chdir(ateles)
+        reason = guard.check_bash(
+            f"git worktree add {tmp_path}/x origin/main\n"
+            f"git -C {sibling} reset --hard",
+            ateles.resolve(),
+        )
+        assert reason is not None
+        assert str(sibling.resolve()) in reason
+
 
 # ---------------------------------------------------------------------------
 # End-to-end — drive main() through the real deny()/exit-code path.

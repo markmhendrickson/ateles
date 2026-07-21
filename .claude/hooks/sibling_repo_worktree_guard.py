@@ -21,14 +21,21 @@ Covered:
   - Edit / Write / NotebookEdit whose file path is inside a sibling main clone.
   - Bash whose command contains a git *mutation* (commit, checkout -b, switch -c,
     reset, merge, rebase, cherry-pick, apply, stash pop/apply, branch -f, push
-    to the shared clone, clean, rm --cached) AND whose cwd resolves into a
-    sibling main clone.
+    to the shared clone, clean, rm --cached). Compound commands (`&&`, `;`,
+    `|`, newlines) are split into segments and evaluated independently, so a
+    later mutating segment is still caught even after an earlier `worktree
+    add` or unrelated segment — each mutating segment resolves its own
+    target dir from its own -C/--git-dir, or the most recently seen `cd` in
+    the chain, or the hook's cwd as last resort.
 
 Explicitly NOT covered (allowed):
   - Anything inside the Ateles repo itself (this is our home).
   - Anything inside a dedicated linked worktree (the safe path).
   - Read-only git (status/log/diff/show/rev-parse/worktree list) and all reads.
-  - `git worktree add` itself (that is the remedy).
+  - An actual `git worktree add` invocation itself (that is the remedy) —
+    but only the segment(s) that ARE that invocation; a compound command
+    mixing `worktree add` with an unrelated mutating segment still blocks
+    on the mutating segment.
 
 Fail-open: any error, missing git, or unparseable input → exit 0 (never block a
 session on our own bug). Deliberate override: set
@@ -69,6 +76,20 @@ _GIT_MUTATION_RE = re.compile(
 _GIT_READONLY_HINT = re.compile(
     r"\bgit\b[^\n;|&]*?\b(status|log|diff|show|rev-parse|worktree\s+list|"
     r"branch\s*$|remote|fetch|ls-remote|ls-files|cat-file|blame|describe)\b",
+    re.IGNORECASE,
+)
+
+# The remedy itself: an actual `git ... worktree add` INVOCATION, not a bare
+# substring match. A bare "worktree add" anywhere in command TEXT (e.g. a
+# commit message `git commit -am "prep for worktree add"`, or that phrase
+# appearing in a LATER, unrelated segment) must never be treated as the
+# remedy — that was a real bypass in the prior substring-based check.
+# `worktree` must be the actual subcommand token: only -C/--git-dir (the
+# flags this hook itself parses) may appear between `git` and `worktree`;
+# any other token there (a different subcommand, a quoted argument) means
+# "worktree add" is just text, not an invocation.
+_GIT_WORKTREE_ADD_RE = re.compile(
+    r"\bgit\b\s*(?:-C\s+\S+\s*|--git-dir[=\s]\S+\s*)*\bworktree\s+add\b",
     re.IGNORECASE,
 )
 
@@ -182,55 +203,90 @@ def check_path_target(raw_path: str, ateles: Path):
     return guidance(top)
 
 
+def _split_segments(command: str):
+    """Split a compound command into ordered &&/;/|/newline segments.
+
+    A plain split is enough here — we don't need a shell parser, just enough
+    to separate invocations so each one can be evaluated on its own terms
+    instead of via first-match-in-the-whole-string regexes. re.split keeps
+    this simple; segments are stripped but otherwise left as raw text for
+    the existing per-segment regexes to match against. Splits on newlines
+    too: a multi-line Bash block (`cmd1\ncmd2`) is just as much a compound
+    command as one joined with `&&`.
+    """
+    return [seg.strip() for seg in re.split(r"&&|;|\||\n", command) if seg.strip()]
+
+
+def _resolve_cand(cand: str):
+    try:
+        cp = Path(os.path.expanduser(cand.strip().strip("'\"")))
+        return cp if cp.is_absolute() else (Path.cwd() / cp)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def check_bash(command: str, ateles: Path):
     if not command:
         return None
-    # Allow the remedy itself and obvious read-only git.
-    if "worktree add" in command:
-        return None
-    if _GIT_READONLY_HINT.search(command) and not _GIT_MUTATION_RE.search(command):
-        return None
     if not _GIT_MUTATION_RE.search(command):
         return None
-    # Determine the dir the git command actually acts on. Precedence:
-    #   1. `git -C <path>` / `git --git-dir=<path>` — git's own explicit target,
-    #      which overrides cwd (Loxia caveat: without this, `git -C ~/repos/neotoma
-    #      commit` resolves to the Ateles cwd and slips through).
-    #   2. a `cd <dir>` prefix in the same command.
+    # Determine the dir EACH mutating git invocation actually acts on.
+    # Compound commands (`&&`, `;`, `|`) can contain several invocations, so
+    # this walks segments left-to-right rather than running -C/--git-dir/cd
+    # regexes against the whole string, which would always key off the FIRST
+    # match anywhere — wrong when a later segment is the mutating one, or
+    # when an earlier `worktree add` segment shielded a later mutation.
+    #
+    # Per segment, precedence:
+    #   1. `git -C <path>` / `git --git-dir=<path>` on THAT segment — git's
+    #      own explicit target, overriding cwd/cd (Loxia caveat).
+    #   2. the most recently seen `cd <dir>` target, tracked while walking
+    #      segments in order (a later `cd` overrides an earlier one for
+    #      subsequent commands in the same chain, matching real shell
+    #      semantics).
     #   3. the hook's own cwd (PWD).
     #
-    # LIMITATION (inherent to the PreToolUse signal): the Bash tool's cwd persists
-    # across calls, but the hook only sees THIS command's text. If a PRIOR command
-    # already `cd`'d into a sibling clone, a later bare `git commit` is evaluated
-    # against the hook's cwd, not the real one — so this is defense-in-depth, not a
-    # hermetic seal. It reliably catches the single-command forms that caused the
-    # incident; the persistent-cwd case is why the never-work-in-shared-clones rule
-    # also lives in operator memory, not only in this hook.
-    def _resolve(cand: str):
-        try:
-            cp = Path(os.path.expanduser(cand.strip().strip("'\"")))
-            return cp if cp.is_absolute() else (Path.cwd() / cp)
-        except Exception:  # noqa: BLE001
-            return None
-
-    target_dir = None
-    m_c = re.search(r"\bgit\b[^\n;|&]*?\s-C\s+([^\s;&|]+)", command)
-    m_gd = re.search(r"--git-dir[=\s]+([^\s;&|]+)", command)
-    m_cd = re.search(r"\bcd\s+([^\s;&|]+)", command)
-    if m_c:
-        target_dir = _resolve(m_c.group(1))
-    elif m_gd:
-        gd = _resolve(m_gd.group(1))
-        # --git-dir points at the .git dir; its parent is the worktree.
-        target_dir = gd.parent if gd and gd.name == ".git" else gd
-    elif m_cd:
-        target_dir = _resolve(m_cd.group(1))
-    if target_dir is None:
-        target_dir = Path.cwd()
-    top, is_shared = shared_main_clone_for(target_dir)
-    if not top or not is_shared or top == ateles:
-        return None
-    return guidance(top)
+    # LIMITATION (inherent to the PreToolUse signal): the Bash tool's cwd
+    # persists across calls, but the hook only sees THIS command's text. If a
+    # PRIOR call already `cd`'d into a sibling clone, a later bare `git
+    # commit` in a NEW call is evaluated against the hook's cwd, not the real
+    # one — so this is defense-in-depth, not a hermetic seal. It reliably
+    # catches the single-command forms that caused the incident; the
+    # persistent-cwd-across-calls case is why the never-work-in-shared-clones
+    # rule also lives in operator memory, not only in this hook.
+    cd_state = None
+    for segment in _split_segments(command):
+        # This segment's own `cd` (if any) updates state for THIS and later
+        # segments — extracted once up front regardless of which branch
+        # below fires. Note: a real shell would apply `cd` before evaluating
+        # the rest of an `&&`-joined segment, but a `cd` and a mutating `git`
+        # never coexist as a single _split_segments() segment (the `&&`/`;`
+        # between them is exactly what splits them apart), so ordering here
+        # doesn't matter in practice.
+        m_cd = re.search(r"\bcd\s+([^\s;&|]+)", segment)
+        if m_cd:
+            cd_state = _resolve_cand(m_cd.group(1))
+        if _GIT_WORKTREE_ADD_RE.search(segment):
+            continue
+        if not _GIT_MUTATION_RE.search(segment):
+            continue
+        target_dir = None
+        m_c = re.search(r"\bgit\b[^\n;|&]*?\s-C\s+([^\s;&|]+)", segment)
+        m_gd = re.search(r"--git-dir[=\s]+([^\s;&|]+)", segment)
+        if m_c:
+            target_dir = _resolve_cand(m_c.group(1))
+        elif m_gd:
+            gd = _resolve_cand(m_gd.group(1))
+            # --git-dir points at the .git dir; its parent is the worktree.
+            target_dir = gd.parent if gd and gd.name == ".git" else gd
+        elif cd_state is not None:
+            target_dir = cd_state
+        if target_dir is None:
+            target_dir = Path.cwd()
+        top, is_shared = shared_main_clone_for(target_dir)
+        if top and is_shared and top != ateles:
+            return guidance(top)
+    return None
 
 
 def main() -> int:
@@ -242,11 +298,26 @@ def main() -> int:
 
     # Cheap early-out BEFORE any git subprocess: a Bash command with no git
     # mutation, or an editless tool, cannot trip the guard. Keeps the common
-    # case (most Bash calls) at pure-Python cost.
+    # case (most Bash calls) at pure-Python cost. A bare substring check for
+    # "worktree add" is NOT safe here — a compound command can carry a
+    # `worktree add` segment AND a separate mutating segment (e.g. `git
+    # worktree add ... && git -C <sibling> reset --hard`), so only skip when
+    # EVERY mutation-matching segment is itself an actual `worktree add`
+    # invocation (_GIT_WORKTREE_ADD_RE, not a bare substring match — a
+    # mutating command whose commit message/branch name merely CONTAINS the
+    # text "worktree add" must not be treated as the remedy); otherwise fall
+    # through to check_bash for the real per-segment check.
     if tool == "Bash":
         cmd = ti.get("command", "")
-        if not _GIT_MUTATION_RE.search(cmd) or "worktree add" in cmd:
+        if not _GIT_MUTATION_RE.search(cmd):
             return 0
+        if _GIT_WORKTREE_ADD_RE.search(cmd):
+            segments = _split_segments(cmd)
+            if all(
+                _GIT_WORKTREE_ADD_RE.search(seg) or not _GIT_MUTATION_RE.search(seg)
+                for seg in segments
+            ):
+                return 0
     elif tool not in ("Edit", "Write", "NotebookEdit"):
         return 0
 
