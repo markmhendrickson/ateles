@@ -46,11 +46,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _session_integrity import read_hook_input, log  # noqa: E402
 
 # git subcommands / flag-forms that MUTATE the repo or its refs.
+# A plain `checkout <branch>` / `switch <branch>` also mutates a shared clone's
+# HEAD/working tree (the exact failure that opened this incident — a switch that
+# aborted mid-way left the session on another branch), so those are matched too,
+# not only the branch-CREATING forms.
 _GIT_MUTATION_RE = re.compile(
     r"\bgit\b[^\n;|&]*?\b("
     r"commit|merge|rebase|cherry-pick|revert|"
     r"reset|apply|am|"
-    r"checkout\s+-\w*b|switch\s+-\w*c|"          # branch-creating checkout/switch
+    r"checkout|switch|"                           # any checkout/switch (incl. plain branch move)
     r"branch\s+-\w*[fDdm]|"                       # force/delete/move branch
     r"stash\s+(pop|apply|drop|push|save)|"
     r"clean\b|"
@@ -178,16 +182,39 @@ def check_bash(command: str, ateles: Path):
         return None
     if not _GIT_MUTATION_RE.search(command):
         return None
-    # Determine the cwd the command runs in: an explicit `cd <dir>` prefix, else PWD.
-    target_dir = None
-    m = re.search(r"\bcd\s+([^\s;&|]+)", command)
-    if m:
-        cand = m.group(1).strip().strip("'\"")
+    # Determine the dir the git command actually acts on. Precedence:
+    #   1. `git -C <path>` / `git --git-dir=<path>` — git's own explicit target,
+    #      which overrides cwd (Loxia caveat: without this, `git -C ~/repos/neotoma
+    #      commit` resolves to the Ateles cwd and slips through).
+    #   2. a `cd <dir>` prefix in the same command.
+    #   3. the hook's own cwd (PWD).
+    #
+    # LIMITATION (inherent to the PreToolUse signal): the Bash tool's cwd persists
+    # across calls, but the hook only sees THIS command's text. If a PRIOR command
+    # already `cd`'d into a sibling clone, a later bare `git commit` is evaluated
+    # against the hook's cwd, not the real one — so this is defense-in-depth, not a
+    # hermetic seal. It reliably catches the single-command forms that caused the
+    # incident; the persistent-cwd case is why the never-work-in-shared-clones rule
+    # also lives in operator memory, not only in this hook.
+    def _resolve(cand: str):
         try:
-            cand_p = Path(os.path.expanduser(cand))
-            target_dir = cand_p if cand_p.is_absolute() else (Path.cwd() / cand_p)
+            cp = Path(os.path.expanduser(cand.strip().strip("'\"")))
+            return cp if cp.is_absolute() else (Path.cwd() / cp)
         except Exception:  # noqa: BLE001
-            target_dir = None
+            return None
+
+    target_dir = None
+    m_c = re.search(r"\bgit\b[^\n;|&]*?\s-C\s+([^\s;&|]+)", command)
+    m_gd = re.search(r"--git-dir[=\s]+([^\s;&|]+)", command)
+    m_cd = re.search(r"\bcd\s+([^\s;&|]+)", command)
+    if m_c:
+        target_dir = _resolve(m_c.group(1))
+    elif m_gd:
+        gd = _resolve(m_gd.group(1))
+        # --git-dir points at the .git dir; its parent is the worktree.
+        target_dir = gd.parent if gd and gd.name == ".git" else gd
+    elif m_cd:
+        target_dir = _resolve(m_cd.group(1))
     if target_dir is None:
         target_dir = Path.cwd()
     top, is_shared = shared_main_clone_for(target_dir)
