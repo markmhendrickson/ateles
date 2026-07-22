@@ -84,6 +84,19 @@ class BtcTransferHandler(PaymentHandler):
                 "error": f"{self.profile.prefix}_BTC_ADDRESS not set",
             }
 
+        missing = _key_material_missing()
+        if missing:
+            # Surface as a CONFIG error, not a failed payment: nothing was
+            # attempted, and the operator's approval is still valid once the
+            # wallet is reachable. Reported before any broadcast is possible.
+            log.error(f"[{self.name}] {missing}")
+            return {
+                "status": "manual_required",
+                "handler": self.name,
+                "error": missing,
+                "amount_eur": amount_eur,
+            }
+
         # Invoke the deterministic runner using the WALLET's own venv python
         # (it has bip_utils etc., which the daemon venv does not). The runner is
         # a pure function call — no LLM, nothing to refuse — and honours dry_run.
@@ -164,6 +177,35 @@ class BtcTransferHandler(PaymentHandler):
         else:
             error = result.get("error", "unknown error")
             return f"❌ {self.profile.label} payment failed: {error}"
+
+
+def _key_material_missing() -> str:
+    """Return a diagnostic if BTC key material is unreachable, else "".
+
+    Checks the same two sources the runner does — the process environment and
+    the wallet checkout's own `.env` — WITHOUT reading any value. Lets a
+    misconfigured wallet be reported as a config problem up front rather than
+    as a failed payment after the operator has already approved it.
+    """
+    if os.environ.get("BTC_MNEMONIC") or os.environ.get("BTC_PRIVATE_KEY"):
+        return ""
+    wallet_path = Path(
+        os.environ.get("BTC_WALLET_MODULE_PATH",
+                       str(Path.home() / "repos" / "mcp-server-bitcoin"))
+    ).expanduser()
+    env_file = wallet_path / ".env"
+    try:
+        if env_file.is_file():
+            for raw in env_file.read_text().splitlines():
+                stripped = raw.strip()
+                if stripped.startswith("export "):
+                    stripped = stripped[len("export "):].lstrip()
+                if stripped.startswith(("BTC_MNEMONIC=", "BTC_PRIVATE_KEY=")):
+                    return ""
+    except OSError:
+        pass
+    return (f"No BTC key material: neither BTC_MNEMONIC nor BTC_PRIVATE_KEY in "
+            f"the environment, and none found in {env_file}. Payment not attempted.")
 
 
 def _wallet_python() -> str:
