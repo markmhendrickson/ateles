@@ -34,7 +34,7 @@ try:
 except ImportError:
     from handler_base import PaymentHandler  # type: ignore[no-redef]
 from .neotoma_cli import correct_field
-from .payment_profile import PaymentProfile
+from .payment_profile import PaymentProfile, effective_amount_eur
 
 log = logging.getLogger(__name__)
 
@@ -78,7 +78,8 @@ class WiseTransferHandler(PaymentHandler):
 
     def execute(self, match: dict) -> dict[str, Any]:
         """Execute Wise transfer. Returns result dict with status and details."""
-        log.info(f"[{self.name}] Executing Wise payment...")
+        amount_eur = effective_amount_eur(self.profile, match)
+        log.info(f"[{self.name}] Executing Wise payment (€{amount_eur})...")
 
         # Recipient resolution order (all Neotoma-sourced; no parquet):
         #   1. profile.wise_recipient_id  — reuse a verified Wise account (safest;
@@ -97,7 +98,7 @@ class WiseTransferHandler(PaymentHandler):
                     "status": "manual_required",
                     "handler": self.name,
                     "error": "No wise_recipient_id/wise_iban on profile and no Neotoma contact resolved",
-                    "amount_eur": self.profile.amount_eur,
+                    "amount_eur": amount_eur,
                     "reference": self.profile.wise_reference,
                 }
             # A contact may itself carry a verified Wise recipient id — prefer it.
@@ -110,7 +111,7 @@ class WiseTransferHandler(PaymentHandler):
                 "status": "manual_required",
                 "handler": self.name,
                 "error": "No Wise recipient id or IBAN resolved",
-                "amount_eur": self.profile.amount_eur,
+                "amount_eur": amount_eur,
                 "reference": self.profile.wise_reference,
                 "recipient_name": recipient_name,
             }
@@ -122,7 +123,7 @@ class WiseTransferHandler(PaymentHandler):
                 "status": "manual_required",
                 "handler": self.name,
                 "error": "WISE_API_TOKEN not set",
-                "amount_eur": self.profile.amount_eur,
+                "amount_eur": amount_eur,
                 "iban": iban,
                 "recipient_name": recipient_name,
                 "reference": self.profile.wise_reference,
@@ -133,7 +134,7 @@ class WiseTransferHandler(PaymentHandler):
                 token,
                 iban,
                 recipient_name,
-                self.profile.amount_eur,
+                amount_eur,
                 self.profile.wise_reference,
                 label=self.name,
                 recipient_id=recipient_id,
@@ -146,7 +147,7 @@ class WiseTransferHandler(PaymentHandler):
                 "status": "manual_required",
                 "handler": self.name,
                 "error": str(exc),
-                "amount_eur": self.profile.amount_eur,
+                "amount_eur": amount_eur,
                 "iban": iban,
                 "recipient_name": recipient_name,
                 "reference": self.profile.wise_reference,
@@ -171,7 +172,9 @@ class WiseTransferHandler(PaymentHandler):
 
     def format_confirmation(self, result: dict) -> str:
         status = result.get("status")
-        amount = self.profile.amount_eur
+        # Prefer the amount actually charged (carries any one-off override);
+        # the profile's standing rate is only a last-resort fallback.
+        amount = result.get("amount_eur", self.profile.amount_eur)
         reference = self.profile.wise_reference
         if status == "sent":
             transfer_id = result.get("transfer_id", "unknown")

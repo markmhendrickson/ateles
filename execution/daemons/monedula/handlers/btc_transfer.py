@@ -31,7 +31,7 @@ try:
 except ImportError:
     from handler_base import PaymentHandler  # type: ignore[no-redef]
 from .neotoma_cli import correct_field
-from .payment_profile import PaymentProfile
+from .payment_profile import PaymentProfile, effective_amount_eur
 from .share_message import build_share_message
 
 log = logging.getLogger(__name__)
@@ -73,7 +73,9 @@ class BtcTransferHandler(PaymentHandler):
 
     def execute(self, match: dict) -> dict[str, Any]:
         dry_run = os.environ.get("MONEDULA_DRYRUN", "1") != "0"
-        log.info(f"[{self.name}] Executing BTC payment via wallet lib (dry_run={dry_run})...")
+        amount_eur = effective_amount_eur(self.profile, match)
+        log.info(f"[{self.name}] Executing BTC payment via wallet lib "
+                 f"(€{amount_eur}, dry_run={dry_run})...")
 
         if not self.profile.btc_address:
             return {
@@ -89,7 +91,7 @@ class BtcTransferHandler(PaymentHandler):
         runner = Path(__file__).parent / "btc_send_runner.py"
         req = json.dumps({
             "address": self.profile.btc_address,
-            "amount_eur": self.profile.amount_eur,
+            "amount_eur": amount_eur,
             "dry_run": dry_run,
         })
         try:
@@ -115,7 +117,7 @@ class BtcTransferHandler(PaymentHandler):
                     "raw_output": out[:300]}
 
         payment_result["handler"] = self.name
-        payment_result.setdefault("amount_eur", self.profile.amount_eur)
+        payment_result.setdefault("amount_eur", amount_eur)
 
         if payment_result.get("status") == "dry_run":
             log.info(f"[{self.name}] DRY-RUN built tx (not broadcast): "
@@ -133,7 +135,7 @@ class BtcTransferHandler(PaymentHandler):
             payment_result["receipt_kind"] = "btc_explorer"
             # Payee copy-paste line — "[AMOUNT] € [LINK TO EXPLORER]".
             payment_result["copy_paste_line"] = build_share_message(
-                amount_eur=self.profile.amount_eur,
+                amount_eur=amount_eur,
                 rail="btc",
                 explorer_url=explorer_url,
             )
@@ -147,9 +149,11 @@ class BtcTransferHandler(PaymentHandler):
             txid = result.get("txid", "unknown")
             explorer = result.get("explorer_url") or _explorer_url(
                 txid, str(result.get("network") or "mainnet"))
+            # Prefer the amount actually charged (carries any one-off override);
+            # the profile's standing rate is only a last-resort fallback.
             copy_paste = result.get("copy_paste_line") or build_share_message(
-                amount_eur=self.profile.amount_eur, rail="btc",
-                explorer_url=explorer)
+                amount_eur=result.get("amount_eur", self.profile.amount_eur),
+                rail="btc", explorer_url=explorer)
             return (
                 f"✅ {self.profile.label} payment sent!\n"
                 f"  txid: {txid}\n"

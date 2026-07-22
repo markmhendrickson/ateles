@@ -377,6 +377,27 @@ def _task_already_paid(task: dict) -> bool:
     return True
 
 
+def _effective_task_amount(task: dict, handler) -> Any:
+    """The amount this task will actually charge (one-off override, else standing rate).
+
+    Mirrors handlers.payment_profile.effective_amount_eur() so the daemon's
+    logging and approval email quote the SAME figure the handler will send —
+    an override must never be invisible at the moment the operator approves.
+    """
+    profile = getattr(handler, "profile", None)
+    standing = getattr(profile, "amount_eur", None)
+    if profile is None:
+        return standing
+    try:
+        from handlers.payment_profile import effective_amount_eur
+    except ImportError:  # package-relative import when run as a module
+        from .handlers.payment_profile import effective_amount_eur  # type: ignore[no-redef]
+    fields = _task_fields(task)
+    return effective_amount_eur(
+        profile, {"amount_eur_override": fields.get("amount_eur_override")}
+    )
+
+
 def _handler_for_task(task: dict, handlers: list) -> Any | None:
     """Return the handler whose profile.neotoma_task_id points at this task."""
     tid = str(task.get("entity_id") or task.get("id") or "").strip()
@@ -442,7 +463,18 @@ def _build_approval_email(task: dict, handler) -> tuple[str, str]:
     token = _payment_token(tid)
     title = str(fields.get("title") or fields.get("name") or "payment")
     profile = getattr(handler, "profile", None)
-    amount = getattr(profile, "amount_eur", fields.get("amount") or fields.get("amount_eur") or "?")
+    standing = getattr(profile, "amount_eur", fields.get("amount") or fields.get("amount_eur") or "?")
+    amount = _effective_task_amount(task, handler)
+    if amount is None:
+        amount = standing
+    # A one-off must be visible at the moment of consent, not silently charged.
+    override_note = ""
+    if amount != standing:
+        override_note = (
+            f"\n⚠ ONE-OFF AMOUNT: €{amount} for this session only "
+            f"(standing rate is €{standing}). The standing rate is unchanged; "
+            f"the next session reverts to €{standing}.\n"
+        )
     rail = getattr(profile, "payment_type", "?")
     due = str(fields.get("due_date") or "")
     ref = getattr(profile, "wise_reference", "") or ""
@@ -478,6 +510,7 @@ def _build_approval_email(task: dict, handler) -> tuple[str, str]:
         + dest_line
         + f"  Due:       {due}\n"
         + (f"  Reference: {ref}\n" if ref else "")
+        + override_note
         + session_note
         + "\nJust hit Reply and send:\n"
         "    APPROVE      — to pay it\n"
@@ -834,15 +867,20 @@ def execute_approved_tasks(due_tasks: list[dict], handlers: list) -> list[tuple]
             log.warning(f"[autoexec] No handler resolves task {title!r} — skipping.")
             continue
 
+        # Carry any one-off per-session amount from the task onto the match, so
+        # the handler charges it instead of the profile's standing rate. See
+        # handlers/payment_profile.effective_amount_eur().
         synthetic_match = {"summary": title, "source": "task",
-                           "entity_id": task.get("entity_id") or task.get("id")}
+                           "entity_id": task.get("entity_id") or task.get("id"),
+                           "amount_eur_override": fields.get("amount_eur_override")}
+        charged = _effective_task_amount(task, handler)
 
         if dry:
             log.info(f"[autoexec] DRY-RUN — would execute {handler.name} for {title!r} "
-                     f"(€{getattr(handler.profile, 'amount_eur', '?')}).")
+                     f"(€{charged}).")
             results.append((handler, {
                 "status": "dry_run", "handler": handler.name,
-                "amount_eur": getattr(handler.profile, "amount_eur", None),
+                "amount_eur": charged,
                 "task": title,
             }))
             continue
@@ -989,6 +1027,18 @@ def _mark_tasks_paid(task_results: list[tuple], due_tasks: list[dict]) -> None:
             # without the operator approving it. This is now belt-and-braces —
             # the session marker already blocks re-pay for the current session.
             ok_clear_appr = _correct("payment_approved", "false")
+            # Clear any one-off amount override: it applied to THIS session only.
+            # Leaving it set would silently charge the one-off rate again on the
+            # next session — the exact failure mode the override exists to avoid.
+            fields_now = _task_fields(task_for(tid, due_tasks))
+            if str(fields_now.get("amount_eur_override") or "").strip():
+                if _correct("amount_eur_override", ""):
+                    log.info(f"[autoexec] Cleared one-off amount override on {tid} "
+                             f"— next session uses the standing rate.")
+                else:
+                    log.error(f"[autoexec] Task {tid} paid but the one-off amount "
+                              f"override could NOT be cleared — the next session "
+                              f"would re-use it. MANUAL CHECK REQUIRED.")
             if ok_mark and ok_clear_appr:
                 log.info(f"[autoexec] Recurring task {tid} ({handler.name}) paid "
                          f"ref={ref}, marker={marker} — left open, approval reset "

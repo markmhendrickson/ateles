@@ -84,6 +84,51 @@ class PaymentProfile:
         return self.prefix.lower()
 
 
+def effective_amount_eur(profile: "PaymentProfile", match: dict | None = None) -> int:
+    """Resolve the amount to charge for THIS payment.
+
+    A recurring obligation normally pays its profile's standing rate. A single
+    session can deviate (a group class, a double session, a partial refund)
+    without editing the standing rate: the task snapshot carries
+    `amount_eur_override`, which execute_approved_tasks() copies onto the match
+    dict as `amount_eur_override`.
+
+    The override is SESSION-SCOPED by construction: it lives on the task
+    alongside due_date, and the operator clears it when the session is paid (see
+    monedula._clear_amount_override). It is deliberately NOT persisted onto the
+    profile, so a one-off can never silently become the standing rate.
+
+    Invalid or non-positive overrides are ignored (fall back to the standing
+    rate) rather than raising — a malformed override must never send €0 or crash
+    the daemon mid-payment.
+    """
+    if not match:
+        return profile.amount_eur
+    raw = match.get("amount_eur_override")
+    if raw is None or str(raw).strip() == "":
+        return profile.amount_eur
+    try:
+        override = int(raw)
+    except (TypeError, ValueError):
+        log.warning(
+            f"payment_profile {profile.label!r} invalid amount_eur_override="
+            f"{raw!r} — using standing rate €{profile.amount_eur}"
+        )
+        return profile.amount_eur
+    if override <= 0:
+        log.warning(
+            f"payment_profile {profile.label!r} amount_eur_override={override} "
+            f"must be positive — using standing rate €{profile.amount_eur}"
+        )
+        return profile.amount_eur
+    if override != profile.amount_eur:
+        log.info(
+            f"payment_profile {profile.label!r} one-off override: "
+            f"€{override} (standing rate €{profile.amount_eur})"
+        )
+    return override
+
+
 def load_profiles_from_neotoma() -> list[PaymentProfile]:
     """
     Load PaymentProfiles from Neotoma payment_profile entities (Phase 5+).
