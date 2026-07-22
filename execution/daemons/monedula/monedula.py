@@ -455,8 +455,29 @@ def _task_payment_token(task: dict) -> str:
     return _payment_token(tid, session)
 
 
+def _verify_task_field(task_id: str, field: str, expected: Any) -> bool:
+    """Re-read a task field and report whether it now holds `expected`.
+
+    Write-verification for corrections: a `corrections create` that returns
+    success may still have been dropped as an idempotency replay (neotoma#1991),
+    so a payment-gating field must be read back rather than assumed.
+
+    Compared as lowercased strings, since booleans round-trip through the
+    snapshot as either real booleans or their string forms.
+    """
+    entity = _fetch_entity_by_id(task_id)
+    if not entity:
+        return False  # cannot verify -> do not claim success
+    actual = _task_fields(entity).get(field)
+    return str(actual).strip().lower() == str(expected).strip().lower()
+
+
 def _set_task_approved(task_id: str, approved: bool) -> bool:
-    """Set payment_approved on a task via `neotoma corrections create`."""
+    """Set payment_approved on a task via `neotoma corrections create`.
+
+    Returns True only when the value is confirmed to have landed — see
+    _verify_task_field() and neotoma#1991.
+    """
     import shutil
 
     neotoma = shutil.which("neotoma")
@@ -473,6 +494,17 @@ def _set_task_approved(task_id: str, approved: bool) -> bool:
         if r.returncode != 0:
             log.warning(f"[approve] corrections create failed (rc={r.returncode}): "
                         f"{(r.stderr or '').strip()[:160]}")
+            return False
+        # rc=0 is NOT proof the correction applied. The CLI derives its
+        # idempotency key from (entity, field, value), so re-submitting a value
+        # this field has held before is treated as a replay: HTTP success, a
+        # correction_id, and no observation written (neotoma#1991). Because this
+        # field alternates true/false, every approval after the first would be
+        # silently dropped while we logged success. Read the value back.
+        if not _verify_task_field(task_id, "payment_approved", approved):
+            log.error(f"[approve] corrections create reported success but "
+                      f"payment_approved did not become {approved} on {task_id} "
+                      f"— treating as NOT approved (see neotoma#1991).")
             return False
         return True
     except Exception as exc:  # noqa: BLE001

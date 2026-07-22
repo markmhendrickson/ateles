@@ -215,3 +215,62 @@ def test_stale_session_token_not_in_matcher_map(monkeypatch):
     monedula.process_email_approvals([current])
     assert stale_token not in captured.get("tokens", []), \
         "daemon still searches for the previous session's approval token"
+
+
+# --- 7. Correction write-verification --------------------------------------
+#
+# Regression for neotoma#1991: `corrections create` derives its idempotency key
+# from (entity, field, value), so re-submitting a value the field has held
+# before returns HTTP success while writing nothing. payment_approved
+# alternates true/false, so from the second cycle on, every approval was
+# silently dropped while the daemon logged success.
+
+def test_set_task_approved_false_when_value_did_not_land(monkeypatch):
+    """CLI says success, but the field never changes → must report failure."""
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda _n: "/usr/bin/neotoma")
+
+    class _OK:
+        returncode = 0
+        stdout = '{"success": true}'
+        stderr = ""
+
+    monkeypatch.setattr(monedula.subprocess, "run", lambda *a, **k: _OK())
+    # The read-back still shows the OLD value — the correction was dropped.
+    monkeypatch.setattr(monedula, "_fetch_entity_by_id",
+                        lambda _tid: {"snapshot": {"payment_approved": False}})
+    assert monedula._set_task_approved("ent_task", True) is False
+
+
+def test_set_task_approved_true_when_value_landed(monkeypatch):
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda _n: "/usr/bin/neotoma")
+
+    class _OK:
+        returncode = 0
+        stdout = '{"success": true}'
+        stderr = ""
+
+    monkeypatch.setattr(monedula.subprocess, "run", lambda *a, **k: _OK())
+    monkeypatch.setattr(monedula, "_fetch_entity_by_id",
+                        lambda _tid: {"snapshot": {"payment_approved": True}})
+    assert monedula._set_task_approved("ent_task", True) is True
+
+
+def test_verify_accepts_stringified_boolean():
+    """Snapshots round-trip booleans as real bools OR their string forms."""
+    import types
+    for stored in (True, "true", "True"):
+        mod_fetch = lambda _tid, s=stored: {"snapshot": {"payment_approved": s}}
+        orig = monedula._fetch_entity_by_id
+        monedula._fetch_entity_by_id = mod_fetch
+        try:
+            assert monedula._verify_task_field("ent_task", "payment_approved", True)
+        finally:
+            monedula._fetch_entity_by_id = orig
+
+
+def test_verify_fails_closed_when_entity_unreadable(monkeypatch):
+    """If we cannot read it back, we must NOT claim the write succeeded."""
+    monkeypatch.setattr(monedula, "_fetch_entity_by_id", lambda _tid: None)
+    assert monedula._verify_task_field("ent_task", "payment_approved", True) is False
