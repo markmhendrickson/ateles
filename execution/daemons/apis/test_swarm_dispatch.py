@@ -3951,6 +3951,14 @@ def test_mirror_preserves_human_body_and_replaces_only_managed_block(monkeypatch
     """_mirror_spec_to_issue reads the current issue body, splices the assembled
     spec between the managed markers, and PATCHes it back — preserving the
     reporter's original text above the markers."""
+    # _mirror_spec_to_issue resolves its credential via _token_for_repo(), which
+    # reads ATELES_AGENT_PAT / GITHUB_TOKEN from the ENVIRONMENT and ignores
+    # DispatchConfig.github_token. Without this the method logs "no GitHub token
+    # — spec mirror skipped" and returns before PATCHing, so the assertions below
+    # fail with KeyError: 'body'. Setting it explicitly makes the test
+    # independent of whatever happens to be exported on the developer's machine
+    # (it passed locally and failed on a clean CI runner).
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
     captured = {}
 
     class _FakeResp:
