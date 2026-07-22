@@ -423,12 +423,36 @@ def _handler_for_task(task: dict, handlers: list) -> Any | None:
 # can never approve the wrong payment.
 
 
-def _payment_token(task_id: str) -> str:
-    """Stable short token for a task id (same across runs, so re-sends match)."""
+def _payment_token(task_id: str, session: str = "") -> str:
+    """Short token identifying ONE session's payment.
+
+    Stable across runs for the same session (so a re-sent request matches the
+    operator's earlier reply), but DIFFERENT for the next session.
+
+    The session component is essential for a recurring obligation. Hashing the
+    task id alone yields one token for all time, and because replies are matched
+    from the inbox over a rolling window, a prior session's "APPROVE" reply
+    still sitting in the inbox re-approves the NEXT session — a payment the
+    operator never consented to, potentially at a different amount. Observed
+    2026-07-22: the Jul 16 reply (token 628BBAC3) re-approved the Jul 21
+    session, which carried a €70 one-off override rather than the €60 the
+    operator had actually approved.
+
+    Callers should pass the task's due_date as `session`. Omitting it preserves
+    the legacy task-only token (used only where no session is in scope).
+    """
     import hashlib
 
-    h = hashlib.sha256(task_id.encode()).hexdigest()[:8].upper()
+    basis = f"{task_id}|{session}" if session else task_id
+    h = hashlib.sha256(basis.encode()).hexdigest()[:8].upper()
     return h
+
+
+def _task_payment_token(task: dict) -> str:
+    """Session-scoped approval token for a task (keyed to its current due_date)."""
+    tid = str(task.get("entity_id") or task.get("id") or "")
+    session = str(_task_fields(task).get("due_date") or "").strip()
+    return _payment_token(tid, session)
 
 
 def _set_task_approved(task_id: str, approved: bool) -> bool:
@@ -460,7 +484,7 @@ def _build_approval_email(task: dict, handler) -> tuple[str, str]:
     """Return (subject, body) for a per-payment approval request email."""
     fields = _task_fields(task)
     tid = str(task.get("entity_id") or task.get("id") or "")
-    token = _payment_token(tid)
+    token = _task_payment_token(task)
     title = str(fields.get("title") or fields.get("name") or "payment")
     profile = getattr(handler, "profile", None)
     standing = getattr(profile, "amount_eur", fields.get("amount") or fields.get("amount_eur") or "?")
@@ -583,7 +607,8 @@ def process_email_approvals(due_tasks: list[dict]) -> int:
     for task in due_tasks:
         tid = str(task.get("entity_id") or task.get("id") or "")
         if tid and not _task_already_paid(task):
-            token_to_task[_payment_token(tid)] = tid
+            # Session-scoped: a PRIOR session's reply must not approve this one.
+            token_to_task[_task_payment_token(task)] = tid
     if not token_to_task:
         return 0
 
@@ -1481,7 +1506,10 @@ def main() -> None:
 
                 tid = str(getattr(getattr(handler, "profile", None),
                                   "neotoma_task_id", "") or "")
-                msg_id = _REPLY_MSG_IDS.get(_payment_token(tid)) if tid else None
+                # Session-scoped token, matching the one the request was sent
+                # under, so the confirmation lands in that session's thread.
+                msg_id = (_REPLY_MSG_IDS.get(_task_payment_token(task_for(tid, due_tasks)))
+                          if tid else None)
                 if msg_id and _email_reply_in_thread(msg_id, text,
                                                      attachments=receipts):
                     continue

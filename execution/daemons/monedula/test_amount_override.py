@@ -160,3 +160,58 @@ def test_approval_email_has_no_override_note_for_normal_payment():
     subject, body = monedula._build_approval_email(_task("ent_task", approved=False), h)
     assert f"€{STANDING}" in subject
     assert "ONE-OFF AMOUNT" not in body
+
+
+# --- 6. Session-scoped approval tokens -------------------------------------
+#
+# Regression for a real incident (2026-07-22): _payment_token hashed only the
+# task id, so a recurring obligation had ONE token for all time. Replies are
+# matched from the inbox over a rolling window, so the previous session's
+# "APPROVE" reply re-approved the NEXT session — at a different amount than the
+# operator had consented to.
+
+def test_token_differs_across_sessions():
+    """The core fix: one task, two sessions → two distinct tokens."""
+    jul16 = monedula._task_payment_token(_task("ent_task", due="2026-07-16"))
+    jul21 = monedula._task_payment_token(_task("ent_task", due="2026-07-21"))
+    assert jul16 != jul21, "a prior session's reply could re-approve this one"
+
+
+def test_token_stable_within_a_session():
+    """Re-sending a request for the SAME session must reuse the same token."""
+    a = monedula._task_payment_token(_task("ent_task", due="2026-07-21"))
+    b = monedula._task_payment_token(_task("ent_task", due="2026-07-21"))
+    assert a == b
+
+
+def test_token_differs_across_tasks_in_same_session():
+    """Distinct obligations on the same date must not share a token."""
+    yoga = monedula._task_payment_token(_task("ent_yoga", due="2026-07-21"))
+    therapy = monedula._task_payment_token(_task("ent_therapy", due="2026-07-21"))
+    assert yoga != therapy
+
+
+def test_approval_email_carries_session_scoped_token():
+    """The emailed token must be the session token the matcher will look for."""
+    h = _FakeHandler("yoga", "ent_task")
+    task = _task("ent_task", approved=False, due="2026-07-21")
+    subject, _ = monedula._build_approval_email(task, h)
+    assert f"[APPROVE-{monedula._task_payment_token(task)}]" in subject
+
+
+def test_stale_session_token_not_in_matcher_map(monkeypatch):
+    """A reply carrying LAST session's token must not resolve to this session."""
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+    current = _task("ent_task", due="2026-07-21", approved=False)
+    stale_token = monedula._task_payment_token(_task("ent_task", due="2026-07-16"))
+
+    captured = {}
+
+    def _fake_read(tokens, max_msgs=40):
+        captured["tokens"] = list(tokens)
+        return []  # no replies; we only care which tokens are searched for
+
+    monkeypatch.setattr(monedula, "_read_reply_texts", _fake_read)
+    monedula.process_email_approvals([current])
+    assert stale_token not in captured.get("tokens", []), \
+        "daemon still searches for the previous session's approval token"
