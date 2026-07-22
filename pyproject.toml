@@ -49,6 +49,11 @@ dev = [
     "pytest-cov>=4.1",
     "pytest-mock>=3.11",
     "ruff>=0.5",
+    # Imported by the apis daemon (github_gateway, swarm_dispatch) and so
+    # needed to COLLECT its test modules. Declared in
+    # execution/scripts/daemon-requirements.txt, which `uv run --extra dev`
+    # does not read, so CI could not collect those tests at all.
+    "aiohttp>=3.13",
 ]
 
 [project.scripts]
