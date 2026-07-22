@@ -120,13 +120,28 @@ class TestMutationRegex:
     def test_mutation_detection(self, command, expected):
         assert bool(guard._GIT_MUTATION_RE.search(command)) is expected
 
-    def test_readonly_hint_matches_status_and_log(self):
-        assert guard._GIT_READONLY_HINT.search("git status")
-        assert guard._GIT_READONLY_HINT.search("git log --oneline")
-        assert guard._GIT_READONLY_HINT.search("git worktree list")
-
-    def test_readonly_hint_does_not_match_commit(self):
-        assert not guard._GIT_READONLY_HINT.search("git commit -m 'x'")
+    # The former _GIT_READONLY_HINT allow-list was removed (#245 review panel):
+    # the segment-based check_bash rewrite left it defined-but-never-consulted,
+    # and a dead allow-list reads as protection that isn't wired in. What
+    # actually matters is the BEHAVIOR it was meant to protect — a read-only
+    # invocation whose text merely contains a mutation keyword must not be
+    # denied — so assert that directly instead of the regex's internals.
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git log --grep=reset",
+            "git log --grep=commit --oneline",
+            "git show HEAD --stat",
+            "git diff --name-only",
+        ],
+    )
+    def test_readonly_invocation_with_mutation_word_is_not_denied(
+        self, command, tmp_path, monkeypatch
+    ):
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.chdir(sibling)
+        assert guard.check_bash(command, ateles.resolve()) is None
 
 
 # ---------------------------------------------------------------------------

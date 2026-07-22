@@ -72,12 +72,15 @@ _GIT_MUTATION_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Read-only git we never want to touch even if the regex is fooled.
-_GIT_READONLY_HINT = re.compile(
-    r"\bgit\b[^\n;|&]*?\b(status|log|diff|show|rev-parse|worktree\s+list|"
-    r"branch\s*$|remote|fetch|ls-remote|ls-files|cat-file|blame|describe)\b",
-    re.IGNORECASE,
-)
+# NOTE: an earlier draft carried a _GIT_READONLY_HINT allow-list here as a
+# second line of defense against the mutation regex over-matching. The
+# segment-based check_bash rewrite made it dead code — it was defined but never
+# consulted — and a dead allow-list is worse than none: it reads as protection
+# that isn't wired in. Read-only safety now comes from splitting the command
+# into segments and matching the mutation regex per-segment, so a read-only
+# invocation whose TEXT merely contains a mutation word (e.g.
+# `git log --grep=res.et`) no longer trips the guard. Verified by the
+# readonly cases in tests/hooks/. Removed per the #245 review panel.
 
 # The remedy itself: an actual `git ... worktree add` INVOCATION, not a bare
 # substring match. A bare "worktree add" anywhere in command TEXT (e.g. a
@@ -217,6 +220,29 @@ def _split_segments(command: str):
     return [seg.strip() for seg in re.split(r"&&|;|\||\n", command) if seg.strip()]
 
 
+# Flag VALUES and quoted strings are data, not the git subcommand. `git log
+# --grep=reset` and `git commit -m "reset the thing"` both contain a mutation
+# keyword in their text, but only the second is a mutation. Scrub argument
+# payloads before asking "is this a mutating invocation?" so a read-only
+# search whose QUERY happens to name a mutation is not falsely denied
+# (#245 review panel — this over-blocking was the real bug behind the
+# defined-but-never-consulted readonly allow-list that used to sit here).
+_ARG_PAYLOAD_RE = re.compile(
+    r"""--[A-Za-z0-9][-A-Za-z0-9]*=\S+   # --grep=reset, --author=commit
+      | '[^']*'                          # '...'  single-quoted payload
+      | "[^"]*"                          # "..."  double-quoted payload
+    """,
+    re.VERBOSE,
+)
+
+
+def _scrub_arg_payloads(segment: str) -> str:
+    """Blank out flag values / quoted payloads so keyword matching sees only
+    the invocation's own words. Length is not preserved; callers only ask
+    boolean 'does a mutation keyword appear' questions of the result."""
+    return _ARG_PAYLOAD_RE.sub(" ", segment)
+
+
 def _resolve_cand(cand: str):
     try:
         cp = Path(os.path.expanduser(cand.strip().strip("'\"")))
@@ -228,7 +254,7 @@ def _resolve_cand(cand: str):
 def check_bash(command: str, ateles: Path):
     if not command:
         return None
-    if not _GIT_MUTATION_RE.search(command):
+    if not _GIT_MUTATION_RE.search(_scrub_arg_payloads(command)):
         return None
     # Determine the dir EACH mutating git invocation actually acts on.
     # Compound commands (`&&`, `;`, `|`) can contain several invocations, so
@@ -268,7 +294,7 @@ def check_bash(command: str, ateles: Path):
             cd_state = _resolve_cand(m_cd.group(1))
         if _GIT_WORKTREE_ADD_RE.search(segment):
             continue
-        if not _GIT_MUTATION_RE.search(segment):
+        if not _GIT_MUTATION_RE.search(_scrub_arg_payloads(segment)):
             continue
         target_dir = None
         m_c = re.search(r"\bgit\b[^\n;|&]*?\s-C\s+([^\s;&|]+)", segment)
@@ -309,12 +335,13 @@ def main() -> int:
     # through to check_bash for the real per-segment check.
     if tool == "Bash":
         cmd = ti.get("command", "")
-        if not _GIT_MUTATION_RE.search(cmd):
+        if not _GIT_MUTATION_RE.search(_scrub_arg_payloads(cmd)):
             return 0
         if _GIT_WORKTREE_ADD_RE.search(cmd):
             segments = _split_segments(cmd)
             if all(
-                _GIT_WORKTREE_ADD_RE.search(seg) or not _GIT_MUTATION_RE.search(seg)
+                _GIT_WORKTREE_ADD_RE.search(seg)
+                or not _GIT_MUTATION_RE.search(_scrub_arg_payloads(seg))
                 for seg in segments
             ):
                 return 0
