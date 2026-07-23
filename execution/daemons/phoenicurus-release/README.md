@@ -101,9 +101,18 @@ and re-running it would be redundant or unsafe.
 - **No redundant push**: since the RC PR is always merged server-side via
   `gh pr merge`, `tag_and_push` no longer runs a follow-up `git push origin
   main` — only the release tag is pushed.
-- **npm auth preflight**: runs `npm whoami` with the automation token before
-  publishing; a missing/expired token fails **loud** (Telegram) rather than
-  producing a tagged-but-unpublished release.
+- **npm publish runs in CI** (neotoma#2015): the tag push fires
+  `.github/workflows/npm-publish.yml`, which builds on a pinned Node 20 and
+  publishes with **provenance** (a signed attestation binding the tarball to the
+  commit — not obtainable from a local publish). `publish.py` then polls the
+  registry until the version appears.
+  - **Bounded, loud wait**: moving the publish off-box turns a synchronous
+    failure into an asynchronous one, so the poll has a hard timeout
+    (`PHOENICURUS_NPM_PUBLISH_WAIT_S`, default 900s) that **fails the release**
+    with a Telegram alert rather than falling through to `github_release` with
+    nothing on npm.
+  - **Local fallback**: set `PHOENICURUS_NPM_PUBLISH_MODE=local` to publish from
+    this host instead (keeps the old `npm whoami` preflight + registry verify).
 - **Registry verify**: confirms `npm view neotoma version` matches after publish.
 - **Sandbox verify**: confirms `version` + `mode: sandbox` on the live host
   before publishing the GitHub Release draft.
@@ -112,7 +121,9 @@ and re-running it would be redundant or unsafe.
 
 | Var | Purpose |
 |-----|---------|
-| `NPM_TOKEN` | npm granular automation token (Publish scope, `neotoma` only, bypass-2FA). Operator-managed; never echoed. |
+| `NPM_TOKEN` | npm granular automation token. Only needed for `PHOENICURUS_NPM_PUBLISH_MODE=local`; the default CI path uses the `NPM_TOKEN` **repo secret** instead. |
+| `PHOENICURUS_NPM_PUBLISH_MODE` | `ci` (default — await the Actions publish) or `local` (publish from this host). |
+| `PHOENICURUS_NPM_PUBLISH_WAIT_S` | How long to wait for CI to land the version (default 900). Timeout fails the release loudly. |
 | `NEOTOMA_BEARER_TOKEN` | Neotoma API auth (omitted automatically on loopback). |
 | `NEOTOMA_BASE_URL` | Neotoma API base (default `http://localhost:3180`). |
 | `NEOTOMA_REPO_ROOT` | Neotoma source checkout to release from (default `~/repos/neotoma`). |

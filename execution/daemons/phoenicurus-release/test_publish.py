@@ -589,3 +589,76 @@ class TestGoldenPathEndToEnd:
         ppm_idx = order.index("preflight_post_merge")
         tag_idx = order.index("tag_and_push")
         assert merge_idx < ppm_idx < tag_idx
+
+
+# ── CI npm publish handoff (neotoma#2015) ────────────────────────────────────
+#
+# Publishing moved to GitHub Actions for provenance + laptop-independence. The
+# risk that introduces is a SYNCHRONOUS failure becoming an ASYNCHRONOUS one:
+# if the wait were quiet, a failed CI publish would let the release continue to
+# github_release and "succeed" with nothing on npm. These tests pin the loud
+# behaviour.
+
+
+def test_await_ci_publish_returns_once_registry_flips():
+    """Polls until the registry reports the target version, then returns."""
+    seen = iter(["0.18.8", "0.18.8", "0.19.0"])
+    with patch.object(publish, "_registry_version", side_effect=lambda *a: next(seen)):
+        with patch.object(publish, "time") as t:
+            t.monotonic.side_effect = [0, 1, 2, 3, 4, 5]
+            publish.await_ci_npm_publish("v0.19.0", dry_run=False)
+            # Slept between polls rather than hot-looping the registry.
+            assert t.sleep.called
+
+
+def test_await_ci_publish_short_circuits_when_already_published():
+    """A --resume-from re-run must not wait for a publish that already landed."""
+    with patch.object(publish, "_registry_version", return_value="0.19.0") as rv:
+        with patch.object(publish, "time") as t:
+            publish.await_ci_npm_publish("v0.19.0", dry_run=False)
+            assert rv.call_count == 1, "should return on the first registry read"
+            assert not t.sleep.called, "must not sleep when already published"
+
+
+def test_await_ci_publish_timeout_raises_and_telegrams():
+    """Timeout must FAIL the release loudly, not fall through to github_release."""
+    with patch.object(publish, "_registry_version", return_value="0.18.8"):
+        with patch.object(publish, "telegram_send") as tg:
+            with patch.object(publish, "time") as t:
+                # First call arms the deadline; subsequent calls are past it.
+                t.monotonic.side_effect = [0, 10_000, 10_000, 10_000]
+                try:
+                    publish.await_ci_npm_publish("v0.19.0", dry_run=False)
+                    raise AssertionError("expected StepError on timeout")
+                except publish.StepError as exc:
+                    msg = str(exc)
+                    # The operator must learn the release is tagged-but-unpublished,
+                    # where to look, and how to recover.
+                    assert "TAGGED but NOT" in msg
+                    assert "resume-from=npm_publish" in msg
+                    assert "actions" in msg.lower()
+            assert tg.called, "timeout must notify the operator"
+            assert "🔴" in tg.call_args[0][0]
+
+
+def test_await_ci_publish_dry_run_makes_no_registry_calls():
+    with patch.object(publish, "_registry_version") as rv:
+        publish.await_ci_npm_publish("v0.19.0", dry_run=True)
+        assert not rv.called
+
+
+def test_npm_publish_routes_to_ci_by_default():
+    with patch.object(publish, "NPM_PUBLISH_MODE", "ci"):
+        with patch.object(publish, "await_ci_npm_publish") as ci:
+            with patch.object(publish, "npm_publish_local") as local:
+                publish.npm_publish("v0.19.0", dry_run=False)
+                assert ci.called and not local.called
+
+
+def test_npm_publish_local_mode_publishes_from_host():
+    """The local fallback stays reachable when CI publishing is unavailable."""
+    with patch.object(publish, "NPM_PUBLISH_MODE", "local"):
+        with patch.object(publish, "await_ci_npm_publish") as ci:
+            with patch.object(publish, "npm_publish_local") as local:
+                publish.npm_publish("v0.19.0", dry_run=False)
+                assert local.called and not ci.called
