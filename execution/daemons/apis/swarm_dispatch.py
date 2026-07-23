@@ -41,6 +41,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -531,6 +532,17 @@ NEOTOMA_LOCAL_CHECKOUT = os.path.expanduser(
     os.environ.get("NEOTOMA_LOCAL_CHECKOUT", "~/neotoma-rc-src")
 )
 
+# Auto-release (push_main trigger): the only repo with a publishable release
+# pipeline. A merge to any other repo's main does not prepare a release.
+PHOENICURUS_RELEASE_REPO = os.environ.get(
+    "PHOENICURUS_RELEASE_REPO", "markmhendrickson/neotoma"
+)
+# Cap on the synchronous half of prepare.py (preflight + spawning the detached
+# prepare agent). Generous: it shells out to git and `gh run list`.
+PHOENICURUS_PREPARE_TIMEOUT_S = int(
+    os.environ.get("PHOENICURUS_PREPARE_TIMEOUT_S", "300")
+)
+
 
 async def _git(args: list[str], cwd: str, timeout: int = 60) -> tuple[int, str, str]:
     """Run a git command, returning (rc, stdout, stderr). Never raises."""
@@ -928,6 +940,8 @@ class SwarmDispatcher:
                 await self._handle_email_approve(trigger)
             elif trigger.kind == "ci_status":
                 await self._handle_ci_status(trigger)
+            elif trigger.kind == "push_main":
+                await self._handle_push_main(trigger)
             elif trigger.is_pr:
                 await self._handle_pr(trigger)
             elif trigger.kind == "issue_comment":
@@ -2604,6 +2618,72 @@ class SwarmDispatcher:
             head_ref=(pr.get("head") or {}).get("ref", ""),
             base_ref=(pr.get("base") or {}).get("ref", ""),
         )
+
+    async def _handle_push_main(self, trigger: SwarmTrigger) -> None:
+        """React to a merge landing on main by asking the release daemon to prepare.
+
+        This is the auto-release trigger: instead of waiting for the Mon-Thu
+        07:00 scheduled sweep, every merge to main immediately offers Phoenicurus
+        a chance to cut a release candidate. The approval gate is UNCHANGED - this
+        only removes the schedule lag before the operator is asked.
+
+        We deliberately do NOT re-implement any release policy here. ``prepare.py
+        --on-merge`` re-applies every gate it already owns (unreleased-commit
+        count vs PHOENICURUS_MIN_COMMITS, main CI green, no release already in
+        flight) and rate-limits per main commit, so a burst of merges cannot
+        stack up release candidates. This handler's only job is to invoke it and
+        stay quiet when there is nothing to do.
+
+        Only the Neotoma repo has a publishable release pipeline; a push to any
+        other repo is ignored. Fully best-effort; never raises.
+        """
+        if trigger.repository != PHOENICURUS_RELEASE_REPO:
+            log.debug(
+                f"[{DAEMON_NAME}] push to {trigger.repository} is not the release "
+                "repo - ignoring"
+            )
+            return
+
+        script = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "phoenicurus-release",
+            "prepare.py",
+        )
+        if not os.path.exists(script):
+            log.warning(f"[{DAEMON_NAME}] release prepare script missing: {script}")
+            return
+
+        sha = (trigger.push_after or "")[:9]
+        log.info(
+            f"[{DAEMON_NAME}] main advanced to {sha} on {trigger.repository} - "
+            "invoking release prepare (--on-merge)"
+        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                script,
+                "--on-merge",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            # prepare.py's phase 1 is a fast preflight; phase 2 spawns a detached
+            # headless agent and returns. A generous cap keeps a wedged git/gh
+            # call from pinning the dispatcher forever.
+            out, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=PHOENICURUS_PREPARE_TIMEOUT_S
+            )
+            tail = (out or b"").decode(errors="replace").strip().splitlines()
+            log.info(
+                f"[{DAEMON_NAME}] release prepare exited rc={proc.returncode}"
+                + (f": {tail[-1]}" if tail else "")
+            )
+        except asyncio.TimeoutError:
+            log.error(
+                f"[{DAEMON_NAME}] release prepare timed out after "
+                f"{PHOENICURUS_PREPARE_TIMEOUT_S}s for {sha}"
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            log.error(f"[{DAEMON_NAME}] release prepare failed for {sha}: {exc}")
 
     async def _handle_approve(self, trigger: SwarmTrigger) -> None:
         """Execute the /approve operator command (Phase H1 HITL checkpoint).

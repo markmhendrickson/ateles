@@ -20,12 +20,19 @@ This daemon NEVER tags, publishes, or deploys. That is publish.py's job, invoked
 only after the operator approves on Telegram (routed by Ateles).
 
 The schedule (Mon–Thu) is set in the launchd plist via four StartCalendarInterval
-dicts with Weekday 1..4.
+dicts with Weekday 1..4. That scheduled run is now a SAFETY NET: the primary
+trigger is a merge to Neotoma's main, which reaches this daemon as a GitHub
+`push` webhook -> the Apis gateway (github_gateway.parse_github_event ->
+swarm_dispatch._handle_push_main) -> `prepare.py --on-merge`. Merge-mode runs are
+rate-limited per main commit rather than per day, so several merges in one day
+each get a prepare attempt; the two locks are independent, so a merge run never
+suppresses the day's scheduled sweep.
 
 Usage:
   python3 prepare.py            # normal scheduled run
   python3 prepare.py --dry-run  # preflight only; print what it WOULD do, no spawn
   python3 prepare.py --force    # skip the "already-ran-today" guard
+  python3 prepare.py --on-merge # merge-triggered; rate-limit per commit, not per day
 
 Exit codes:
   0  ran (prepared / spawned, or nothing to do)
@@ -65,6 +72,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent  # ateles ro
 LOG_DIR = Path.home() / "Library" / "Logs" / "ateles"
 LOG_FILE = LOG_DIR / "phoenicurus-release.log"
 STATE_FILE = Path(__file__).parent / ".phoenicurus_prepare_last_run"
+# On-merge mode keys idempotency off the main commit it last considered rather
+# than the calendar day, so a merge can trigger a prepare run the same day an
+# earlier one already ran (the scheduled path's daily lock would swallow it).
+MERGE_STATE_FILE = Path(__file__).parent / ".phoenicurus_prepare_last_sha"
 AGENT_LOG = LOG_DIR / "phoenicurus-prepare-agent.log"
 
 NEOTOMA_REPO_ROOT = Path(
@@ -110,6 +121,35 @@ def _already_ran_today() -> bool:
 
 def _mark_ran_today() -> None:
     STATE_FILE.write_text(date.today().isoformat())
+
+
+def _head_sha() -> str:
+    return _git(["rev-parse", "origin/main"])
+
+
+def _already_ran_for_sha(sha: str) -> bool:
+    return (
+        bool(sha)
+        and MERGE_STATE_FILE.exists()
+        and MERGE_STATE_FILE.read_text().strip() == sha
+    )
+
+
+def _mark_ran_for_sha(sha: str) -> None:
+    if sha:
+        MERGE_STATE_FILE.write_text(sha)
+
+
+def _mark_ran(on_merge: bool, head: str) -> None:
+    """
+    Stamp whichever idempotency lock applies to this run's mode. On-merge runs
+    stamp the SHA only, so they never suppress the day's scheduled safety-net
+    run (and vice versa).
+    """
+    if on_merge:
+        _mark_ran_for_sha(head)
+    else:
+        _mark_ran_today()
 
 
 # ---------------------------------------------------------------------------
@@ -335,12 +375,15 @@ def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool
 # ---------------------------------------------------------------------------
 
 
-def run_prepare(dry_run: bool, force: bool) -> int:
+def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
     if not (NEOTOMA_REPO_ROOT / "package.json").exists():
         log.error(f"NEOTOMA_REPO_ROOT has no package.json: {NEOTOMA_REPO_ROOT}")
         return 1
 
-    if _already_ran_today() and not force and not dry_run:
+    # The scheduled path is rate-limited to one run per calendar day. On-merge
+    # runs are rate-limited per main commit instead (checked after the fetch
+    # below), so several merges in a day each get a prepare attempt.
+    if not on_merge and _already_ran_today() and not force and not dry_run:
         log.info("Already ran today — exiting.")
         return 0
 
@@ -351,6 +394,11 @@ def run_prepare(dry_run: bool, force: bool) -> int:
         capture_output=True,
         timeout=120,
     )
+
+    head = _head_sha() if on_merge else ""
+    if on_merge and _already_ran_for_sha(head) and not force and not dry_run:
+        log.info(f"Already ran for origin/main {head[:9]} — exiting.")
+        return 0
 
     tag = latest_tag()
     if not tag:
@@ -365,7 +413,7 @@ def run_prepare(dry_run: bool, force: bool) -> int:
             "nothing to prepare. Exiting."
         )
         if not dry_run:
-            _mark_ran_today()
+            _mark_ran(on_merge, head)
         return 0
 
     # Don't re-prepare if a release is already in flight awaiting approval.
@@ -376,7 +424,7 @@ def run_prepare(dry_run: bool, force: bool) -> int:
             "(Approve or skip the pending one first.)"
         )
         if not dry_run:
-            _mark_ran_today()
+            _mark_ran(on_merge, head)
         return 0
 
     # CI gate.
@@ -388,12 +436,12 @@ def run_prepare(dry_run: bool, force: bool) -> int:
             "CI is RED. Not preparing a release until CI is green."
         )
         if not dry_run:
-            _mark_ran_today()
+            _mark_ran(on_merge, head)
         return 0
     if ci is None:
         log.warning("main CI status unknown / in progress — deferring to next run.")
         if not dry_run:
-            _mark_ran_today()
+            _mark_ran(on_merge, head)
         return 0
 
     log.info(
@@ -402,7 +450,7 @@ def run_prepare(dry_run: bool, force: bool) -> int:
     )
     ok = spawn_prepare_agent(tag, count, dry_run)
     if not dry_run:
-        _mark_ran_today()
+        _mark_ran(on_merge, head)
     return 0 if ok else 1
 
 
@@ -416,9 +464,17 @@ def main() -> int:
     ap.add_argument(
         "--force", action="store_true", help="skip the already-ran-today guard"
     )
+    ap.add_argument(
+        "--on-merge",
+        action="store_true",
+        help=(
+            "merge-triggered run: rate-limit per origin/main commit instead of "
+            "per calendar day (all other gates unchanged)"
+        ),
+    )
     args = ap.parse_args()
     try:
-        return run_prepare(args.dry_run, args.force)
+        return run_prepare(args.dry_run, args.force, on_merge=args.on_merge)
     except Exception as exc:  # noqa: BLE001
         log.exception(f"prepare fatal error: {exc}")
         telegram_send(f"🔴 Phoenicurus prepare crashed — {exc}")

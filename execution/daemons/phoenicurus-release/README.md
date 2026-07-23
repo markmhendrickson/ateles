@@ -7,7 +7,8 @@ Operator-approved release executor for Neotoma. Two halves:
   push → `npm publish` → GitHub Release → sandbox deploy → verify → publish draft →
   post-deploy probes → mark published → Telegram confirmation. No LLM. Invoked
   **on demand** after approval, not on a schedule.
-- **`prepare.py`** — the scheduled Mon–Thu prep run. Two-phase (like Cotinga):
+- **`prepare.py`** — the prep run, triggered on every merge to Neotoma's main
+  (with the Mon–Thu schedule kept as a safety net). Two-phase (like Cotinga):
   Phase 1 is a fast preflight gate (unreleased commits since the last tag ≥
   `PHOENICURUS_MIN_COMMITS`? main CI green? no release already in flight?); if it
   passes, Phase 2 spawns a headless `claude --print` agent that runs the
@@ -19,6 +20,30 @@ Operator-approved release executor for Neotoma. Two halves:
 This split exists because release approval can take hours — a launchd daemon
 cannot block in-process that long (unlike Monedula's 120 s payment approval).
 Prepare runs and exits; publish fires later when the operator approves.
+
+## Triggering (auto-release)
+
+A merge to Neotoma's `main` prepares a release candidate immediately, instead of
+waiting for the next scheduled sweep:
+
+```
+merge to main → GitHub `push` webhook → Apis gateway (github_gateway)
+  → swarm_dispatch._handle_push_main → prepare.py --on-merge
+```
+
+`--on-merge` changes **only** the rate limit — from once per calendar day to once
+per `origin/main` commit (state file `.phoenicurus_prepare_last_sha`). Every other
+gate is unchanged: `PHOENICURUS_MIN_COMMITS`, main CI green, and the in-flight
+`release_result` check all still apply, so a burst of merges cannot stack up
+release candidates. The two locks are independent — a merge-triggered run never
+consumes the daily lock, so the scheduled Mon–Thu run still fires as a safety net
+if the webhook path is down.
+
+**The approval gate is unchanged.** This only removes the schedule lag before the
+operator is asked; publishing still requires `approve <version>`.
+
+Tag pushes are deliberately ignored by the gateway — publishing a release pushes
+a tag, which would otherwise re-trigger prepare in a loop.
 
 ## State model (`release_result` entity)
 

@@ -410,3 +410,58 @@ def test_status_event_not_handled():
     # `status` events fire per-context and would multiply per head; only
     # check_suite:completed is ingested.
     assert parse_github_event("status", {"repository": {"full_name": "o/r"}}) is None
+
+
+# ── push → auto-release trigger ────────────────────────────────────────────
+
+
+def _push_payload(
+    ref="refs/heads/main",
+    after="a" * 40,
+    deleted=False,
+    message="feat: add thing (#123)",
+):
+    return {
+        "repository": {"full_name": "o/r"},
+        "ref": ref,
+        "after": after,
+        "deleted": deleted,
+        "head_commit": {
+            "message": message,
+            "author": {"username": "someone"},
+            "url": "https://github.com/o/r/commit/abc",
+        },
+    }
+
+
+def test_push_to_main_parses():
+    t = parse_github_event("push", _push_payload(), "d-9")
+    assert t is not None
+    assert t.kind == "push_main"
+    assert t.repository == "o/r"
+    assert t.push_ref == "refs/heads/main"
+    assert t.push_after == "a" * 40
+    # Only the subject line of the commit message is carried.
+    assert t.title == "feat: add thing (#123)"
+    assert not t.is_pr
+
+
+def test_push_to_feature_branch_ignored():
+    assert parse_github_event("push", _push_payload(ref="refs/heads/feat/x")) is None
+
+
+def test_push_of_tag_ignored():
+    # Critical: publishing a release pushes a tag. If tag pushes triggered a
+    # release prepare, every release would re-trigger the pipeline.
+    assert parse_github_event("push", _push_payload(ref="refs/tags/v1.2.3")) is None
+
+
+def test_branch_deletion_ignored():
+    # A deleted branch arrives with an all-zero `after` SHA.
+    assert (
+        parse_github_event("push", _push_payload(after="0" * 40, deleted=True)) is None
+    )
+
+
+def test_push_with_deleted_flag_ignored():
+    assert parse_github_event("push", _push_payload(deleted=True)) is None

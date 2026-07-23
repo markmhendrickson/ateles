@@ -1,0 +1,109 @@
+name: Ateles release
+
+# Cuts a dated GitHub Release for the Ateles repo on every push to main, so the
+# swarm's own changes get the same durable, linkable changelog that Neotoma
+# releases have.
+#
+# WHY THIS IS DIFFERENT FROM NEOTOMA'S RELEASE FLOW: Ateles has no package.json
+# and publishes to no registry — it is agent prompts, daemons and skills that run
+# from a checkout, not an installable artifact. So there is nothing to version
+# semantically and nothing to publish. This workflow therefore does the one thing
+# that carries real value here: it tags each state of main and writes the commit
+# log since the previous tag into a GitHub Release, giving every swarm change an
+# auditable, citable point in history.
+#
+# Calendar versioning (vYYYY.MM.DD[.N]) is used deliberately over semver: with no
+# public API surface there is no compatibility contract for semver to express,
+# and a date answers the question actually asked of these releases ("what was the
+# swarm running on day X?").
+#
+# Concurrency is serialized (cancel-in-progress: false) because two runs racing
+# would compute the same tag and one would fail on push.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ateles-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for the commit log)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next calendar tag
+        id: tag
+        run: |
+          set -euo pipefail
+          BASE="v$(date -u +%Y.%m.%d)"
+          # Several merges can land on one day; suffix .1, .2, ... after the first.
+          TAG="$BASE"
+          N=1
+          while git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; do
+            TAG="$BASE.$N"
+            N=$((N + 1))
+          done
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          PREV="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          echo "prev=$PREV" >> "$GITHUB_OUTPUT"
+          echo "Releasing $TAG (previous: ${PREV:-none})"
+
+      - name: Build release notes
+        id: notes
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          PREV: ${{ steps.tag.outputs.prev }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Changes"
+            echo
+            if [ -n "$PREV" ]; then
+              git log --no-merges --pretty=format:'- %s (%h)' "$PREV..HEAD"
+              echo
+              echo
+              echo "**Full diff:** ${{ github.server_url }}/${{ github.repository }}/compare/$PREV...$TAG"
+            else
+              echo "Initial release."
+            fi
+          } > /tmp/notes.md
+          echo "--- notes ---"; cat /tmp/notes.md
+
+      # Skip cutting an empty release when main moved but produced no non-merge
+      # commits since the last tag (e.g. a merge-only push).
+      - name: Check there is something to release
+        id: check
+        env:
+          PREV: ${{ steps.tag.outputs.prev }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PREV" ]; then
+            COUNT="$(git rev-list --no-merges --count "$PREV..HEAD")"
+          else
+            COUNT=1
+          fi
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "$COUNT non-merge commit(s) since ${PREV:-repo start}"
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file /tmp/notes.md \
+            --target "${{ github.sha }}"
+          echo "Released $TAG"

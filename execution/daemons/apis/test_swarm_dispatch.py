@@ -4357,3 +4357,75 @@ def test_inflight_marker_regex_roundtrip():
     assert SwarmDispatcher._PIPELINE_INFLIGHT_RE.search(marker)
     # Must not match the sibling fix-round marker.
     assert not SwarmDispatcher._PIPELINE_INFLIGHT_RE.search("<!-- apis-fix-round:2 -->")
+
+
+# ── push_main → release prepare (auto-release trigger) ─────────────────────
+
+
+def _push_main_trigger(repository="markmhendrickson/neotoma"):
+    return SwarmTrigger(
+        kind="push_main",
+        repository=repository,
+        number=0,
+        title="feat: thing",
+        body="",
+        author="someone",
+        html_url="",
+        delivery_id="d-1",
+        action="push",
+        push_ref="refs/heads/main",
+        push_after="a" * 40,
+    )
+
+
+def test_push_main_invokes_release_prepare(monkeypatch):
+    """A merge to the release repo's main shells out to prepare.py --on-merge."""
+    spawned = []
+
+    async def fake_exec(*args, **kwargs):
+        spawned.append(args)
+
+        class _P:
+            returncode = 0
+
+            async def communicate(self):
+                return (b"nothing to prepare", b"")
+
+        return _P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: True)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(d._handle_push_main(_push_main_trigger()))
+
+    assert len(spawned) == 1, "expected exactly one prepare.py invocation"
+    argv = spawned[0]
+    assert argv[1].endswith("prepare.py")
+    # The --on-merge flag is what swaps the daily lock for the per-commit lock.
+    assert "--on-merge" in argv
+
+
+def test_push_main_ignores_non_release_repo(monkeypatch):
+    """Only the repo with a publishable pipeline prepares a release."""
+    spawned = []
+
+    async def fake_exec(*args, **kwargs):
+        spawned.append(args)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(d._handle_push_main(_push_main_trigger(repository="o/other")))
+    assert spawned == []
+
+
+def test_push_main_survives_prepare_failure(monkeypatch):
+    """A failing prepare must never raise into the dispatcher."""
+
+    async def boom(*args, **kwargs):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", boom)
+    monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: True)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(d._handle_push_main(_push_main_trigger()))  # must not raise
