@@ -37,6 +37,10 @@ All hooks are **fail-open** (stdlib-only Python; any error or missing `NEOTOMA_B
 
 **Rollout posture:** defaults to **WARN** (logs the violation, exits 0). Set `ATELES_SESSION_INTEGRITY_ENFORCE=1` to switch the Stop hook to **BLOCK** (exit 2 + `{"decision":"block"}`), preventing a clean stop until the session binds a plan and stores its turns. Per-session state lives in `.claude/.session_state/` (gitignored).
 
+## Repo-isolation hook (mechanical enforcement)
+
+- **`sibling_repo_worktree_guard.py`** (PreToolUse: `Edit|Write|NotebookEdit|Bash`) — a distinct concern from the session-integrity hooks above: it protects **other repos**, not this session's audit trail. When operating from the Ateles repo, it **hard-blocks** any mutation of a *sibling* repo's **shared main clone** (e.g. `~/repos/neotoma`): file edits, and git-mutating Bash (commit, checkout/switch, reset, merge, rebase, cherry-pick, push, …). It allows the Ateles repo itself, any dedicated **linked worktree**, read-only git, and `git worktree add` (the remedy). On a hit it directs you to `git worktree add ~/repos/<repo>-wt-<slug> origin/main` first. Detection: `git rev-parse --git-dir` == `--git-common-dir` ⇒ main clone; also honors `git -C <path>` / `--git-dir=<path>`. Fail-open (stdlib-only; any error → exit 0). Override a deliberate case with `ATELES_ALLOW_SHARED_REPO_WRITES=1`. Motivated by a 2026-07-21 incident where a stray write + commit landed on another session's branch in the shared checkout.
+
 ---
 
 ## Standing constraints
