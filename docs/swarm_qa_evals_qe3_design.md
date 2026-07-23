@@ -2,6 +2,8 @@
 
 **Status:** design (2026-06-19) · **Scope:** neotoma PRs first (operator-chosen) · **Depends on:** QE1 (merged #133)
 
+> **Note, 2026-07-23** — the qa-only scope below still holds. Extending the PR-branch worktree to every review lens was proposed and measured (plan `ent_ccd6660fc28800a2ae3a5623`) but deferred: ~1.1 GB per lens and the replay did not isolate it as the cause of the accuracy gain. What did ship is the evidence bar — a lens may only `[BLOCKING]` something it executed — which works with or without a checkout.
+
 **Goal:** let a dispatched Phoenicurus (qa-lens) child actually **author an eval fixture, run it, commit it, and push it to the PR branch** — so the `agentic_evals` CI lane becomes the qa-gate evidence (QE2). Today the child cannot: it runs diff-only with no working tree.
 
 ---

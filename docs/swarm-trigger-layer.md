@@ -186,6 +186,25 @@ that introduced it — against itself. Fixes that came out of that run:
     `APIS_MAX_FIX_ROUNDS` (default 2, counted via a hidden `apis-fix-round:N`
     PR comment so it survives daemon restarts and is head-SHA-agnostic); at the
     cap it escalates to the operator instead of looping.
+
+    **Every lens runs inside a writable PR-branch worktree** (its `cwd`, via
+    `prepare_pr_worktree`) and may only raise a `[BLOCKING]` finding for
+    something it **executed** — the command and its real output go in the
+    finding's detail. A concern it cannot reproduce is filed `[NON-BLOCKING]`.
+    This was qa-only until 2026-07-17 (plan `ent_ccd6660fc28800a2ae3a5623`):
+    measured on neotoma PR #1946, 0 of 11 blocking findings across 3 rounds
+    cited executing anything, and both wrong findings came from `arch`, the
+    diff-only lens. The bar mirrors
+    `fixed_means_behavior_verified_not_contract_accepted`
+    (`ent_db0b7855d47012084477fb00`), which binds implementers — reviewers are
+    now held to it too. Only the qa lens currently gets a writable PR checkout
+    (QE3); every other lens is diff-only, and its prompt says so plainly rather
+    than claiming a checkout it does not have — so it is told to prefer
+    `[NON-BLOCKING]` for anything it cannot run. Extending the checkout to every
+    lens was measured and deferred: ~1.1 GB per lens (~4.4 GB per panel), and
+    the replay did not isolate it as the cause of the accuracy gain. Tracked in
+    plan `ent_ccd6660fc28800a2ae3a5623` (todo lens-acc-6, blocked on
+    ateles#236).
   - **clear** (APPROVE/COMMENT) → `_gate_merge_readiness` files the merge
     checkpoint + `OPERATOR_DECISION` ping **only when required CI is also
     green** (`_required_ci_state` polls the combined commit status + check-runs
@@ -199,53 +218,6 @@ that introduced it — against itself. Fixes that came out of that run:
   completing does not itself re-invoke the readiness gate, and formal
   `pull_request_review` / `check_suite` webhook events are not yet ingested — a
   re-push is still what re-runs the panel.
-
-  **Re-push against an OPEN pre-impl gate (`ATELES_SWARM_AUTO_REREVIEW`, ateles#230).**
-  The "a re-push re-runs the panel" contract above has one hole: when the PR's
-  parent issue still has an unsigned pre-impl gate, Lanius returns
-  `GATE_INHERITANCE: blocked` and `_handle_pr` returns *before* the panel. On the
-  first look that is correct — nothing has been reviewed, so there is no finding
-  to re-evaluate. On a **re-push** it strands the PR: an author can push exactly
-  the fix a lens asked for and nothing re-evaluates it, because the gate that
-  blocks the panel is the same gate the fix was meant to unblock. The PR waits
-  for a human to manually re-invoke the reviewer (`/swarm-run`).
-
-  Set `ATELES_SWARM_AUTO_REREVIEW=1` so a `synchronize` push to a gate-blocked PR
-  re-invokes the lens agents against the new head; they re-affirm the block,
-  raise a new finding, or sign off on their own. Default OFF = today's skip.
-
-  This does **not** weaken the self-certification boundary: a push is not a
-  sign-off. The gate still flips only on a lens agent's own verdict — the
-  dispatcher never writes `gate_status` (Lanius/the lens own that) and never
-  infers approval from the fact that code changed. Auto-re-*review* ≠
-  auto-*approve*; merge remains behind `APIS_AUTONOMY_AUTO_MERGE`.
-
-  **Issue-pipeline resume after a restart (`APIS_RESUME_REPOSITORIES`).**
-  The issue pipeline (`issue.opened`, `/swarm-run`) spawns its lens agents as
-  in-process `claude --print` children and holds progress only in memory, so a
-  daemon restart — a crash, a `KeepAlive` bounce, or a deliberate `launchctl
-  bootout` to pick up new code — orphans the children and silently voids the
-  run. Nothing retried it: the `task` stall watchdog implements
-  resume-after-restart, but it sweeps `task` entities and the issue pipeline
-  creates none, so this work was invisible to it. (Observed 2026-07-17: two
-  `/swarm-run` invocations logged as started, then lost to a restart ~3 minutes
-  later, leaving no trace on the issue and no retry.)
-
-  `_handle_issue_opened` now posts a hidden `<!-- apis-pipeline-inflight:… -->`
-  marker before the first agent spawn and clears it in a `finally` — the same
-  durable primitive `apis-fix-round` uses precisely because a marker comment
-  survives daemon restarts, and it needs no Neotoma round-trip (Neotoma itself
-  was erroring during the outage window that motivated this). Only a restart
-  can prevent the `finally`, so a surviving marker is an unambiguous signature
-  of an interrupted run. At startup the daemon sweeps
-  `APIS_RESUME_REPOSITORIES` (default `<operator>/ateles,<operator>/neotoma`;
-  empty disables) for open issues carrying the marker and re-runs those
-  pipelines. The sweep is fail-open — a broken repo is skipped, a failed resume
-  is counted and logged, and nothing there can prevent the daemon from booting.
-
-  A pipeline that fails for a *real* reason still clears its marker: it has
-  already reported itself, and leaving it marked would resurrect it on every
-  boot.
 
 ## Agent identity on GitHub
 

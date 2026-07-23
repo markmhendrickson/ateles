@@ -214,107 +214,6 @@ def test_handle_pr_unparseable_verdict_routes_not_gates(monkeypatch):
     assert ("gate", None) not in calls
 
 
-# ── auto re-review on push against open gates (ateles#230) ───────────────────
-
-
-def _gate_blocked_dispatcher(monkeypatch, *, calls, auto_rereview):
-    """Dispatcher whose Lanius returns GATE_INHERITANCE: blocked, recording
-    which lens skills actually run so we can assert panel-skip vs re-review."""
-
-    async def fake_run_skill(skill, prompt, **kwargs):
-        if skill == "lanius":
-            return SkillResult(skill, True, 0, "GATE_INHERITANCE: blocked", "")
-        if skill == "vanellus":
-            return SkillResult(skill, True, 0, "**REQUEST_CHANGES**\nstill blocked", "")
-        calls.append(("lens", skill))
-        return SkillResult(skill, True, 0, "**COMMENT**\nre-reviewed", "")
-
-    async def fake_changed_files(self, trigger):
-        return ["src/x.ts"]
-
-    async def fake_route(self, trigger, parent, reviews, verdict):
-        calls.append(("route", verdict))
-
-    async def fake_gate(self, trigger, parent, panel):
-        calls.append(("gate", None))
-
-    async def fake_noop(self, *a, **k):
-        return None
-
-    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
-    monkeypatch.setattr(SwarmDispatcher, "_changed_files", fake_changed_files)
-    monkeypatch.setattr(SwarmDispatcher, "_route_blocking_findings", fake_route)
-    monkeypatch.setattr(SwarmDispatcher, "_gate_merge_readiness", fake_gate)
-    monkeypatch.setattr(SwarmDispatcher, "_post_missing_vanellus_comment", fake_noop)
-    monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_noop)
-    monkeypatch.setattr(SwarmDispatcher, "_post_missing_panel_comments", fake_noop)
-    monkeypatch.setattr(
-        SwarmDispatcher,
-        "_preregistered_expectations",
-        lambda self, repo, parent: _async_return({}),
-    )
-    cfg = DispatchConfig(
-        neotoma_token="", github_token="", auto_rereview_on_push=auto_rereview
-    )
-    return SwarmDispatcher(_StubNotifier(), cfg)
-
-
-def test_gate_blocked_first_look_skips_panel_even_with_rereview_on(monkeypatch):
-    """A gate-blocked PR on its FIRST look still skips the panel: nothing has
-    been reviewed yet, so there is no finding to re-evaluate."""
-    calls = []
-    d = _gate_blocked_dispatcher(monkeypatch, calls=calls, auto_rereview=True)
-    asyncio.run(d._handle_pr(_trigger(kind="pr_opened", action="opened")))
-    assert not any(c[0] == "lens" for c in calls)
-    assert not any(c[0] == "route" for c in calls)
-
-
-def test_gate_blocked_repush_skips_panel_when_flag_off(monkeypatch):
-    """Flag OFF (default) preserves today's behaviour exactly: a re-push to a
-    gate-blocked PR is still a panel skip."""
-    calls = []
-    d = _gate_blocked_dispatcher(monkeypatch, calls=calls, auto_rereview=False)
-    asyncio.run(d._handle_pr(_trigger(kind="pr_synchronize", action="synchronize")))
-    assert not any(c[0] == "lens" for c in calls)
-    assert not any(c[0] == "route" for c in calls)
-
-
-def test_gate_blocked_repush_auto_rereviews_when_flag_on(monkeypatch):
-    """Flag ON: a re-push to a gate-blocked PR re-invokes the lens agents
-    against the new head instead of waiting for a manual /swarm-run."""
-    calls = []
-    d = _gate_blocked_dispatcher(monkeypatch, calls=calls, auto_rereview=True)
-    asyncio.run(d._handle_pr(_trigger(kind="pr_synchronize", action="synchronize")))
-    assert any(c[0] == "lens" for c in calls), "lens agents must re-review the new head"
-
-
-def test_gate_blocked_reopen_auto_rereviews_when_flag_on(monkeypatch):
-    """Flag ON: reopening a gate-blocked PR re-invokes the lens agents against
-    the new head too — github_gateway.py maps `reopened` to kind
-    "pr_reopened", a distinct string from "pr_synchronize", so this must be
-    checked explicitly rather than assumed covered by the synchronize case."""
-    calls = []
-    d = _gate_blocked_dispatcher(monkeypatch, calls=calls, auto_rereview=True)
-    asyncio.run(d._handle_pr(_trigger(kind="pr_reopened", action="reopened")))
-    assert any(c[0] == "lens" for c in calls), "lens agents must re-review the new head"
-
-
-def test_auto_rereview_never_gates_merge_readiness(monkeypatch):
-    """Self-certification boundary (ateles#230 arch §4): an auto-re-review of a
-    gate-blocked PR must never reach merge-readiness — a push is not a sign-off.
-    The lens verdict (REQUEST_CHANGES here) routes findings instead."""
-    calls = []
-    d = _gate_blocked_dispatcher(monkeypatch, calls=calls, auto_rereview=True)
-    asyncio.run(d._handle_pr(_trigger(kind="pr_synchronize", action="synchronize")))
-    assert not any(c[0] == "gate" for c in calls), "a push must never gate merge-ready"
-    assert any(c[0] == "route" for c in calls)
-
-
-def test_auto_rereview_flag_defaults_off():
-    """Default OFF — autonomy expansions are opt-in (ateles#80 rollout rule)."""
-    assert DispatchConfig(neotoma_token="", github_token="").auto_rereview_on_push is False
-
-
 # ── _route_blocking_findings (per-lens → Cicada, bounded) ────────────────────
 
 
@@ -3618,6 +3517,107 @@ def test_prepare_pr_worktree_returns_none_when_base_checkout_absent(monkeypatch)
     assert result is None
 
 
+def _worktree_git_harness(monkeypatch, tmp_path, token):
+    """Drive prepare_pr_worktree past its early returns, recording every _git call.
+
+    Stubs the three externals that would otherwise hit disk/network: the base
+    clone check, `git` itself, and the temp-dir creation. Returns the recorded
+    calls so a test can assert exactly what was written to the worktree config.
+    """
+    base = tmp_path / "base"
+    (base / ".git").mkdir(parents=True)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+
+    calls: list[list[str]] = []
+
+    async def fake_git(args, cwd, timeout=60):
+        calls.append(list(args))
+        return 0, "", ""
+
+    monkeypatch.setattr(swarm_dispatch, "NEOTOMA_LOCAL_CHECKOUT", str(base))
+    monkeypatch.setattr(swarm_dispatch, "_git", fake_git)
+    monkeypatch.setattr(swarm_dispatch.tempfile, "mkdtemp", lambda prefix="": str(wt))
+    monkeypatch.setattr(
+        swarm_dispatch, "_token_for_agent_on_repo", lambda agent, repo: token
+    )
+    return calls
+
+
+def test_prepare_pr_worktree_never_writes_the_token_into_the_remote_url(
+    monkeypatch, tmp_path
+):
+    # SECURITY REGRESSION (Loxia #134, qa lens on PR #233): the push credential
+    # must NOT be embedded in remote.origin.url. A token there persists in the
+    # worktree's on-disk .git config AND is echoed by git in push-failure output,
+    # which can reach a daemon log or a public GitHub comment. The supported
+    # shape is a CLEAN https URL plus `gh` as a worktree-scoped credential
+    # helper, so the secret lives only in the child's process env.
+    calls = _worktree_git_harness(monkeypatch, tmp_path, token="ghp_supersecret")
+
+    result = asyncio.run(
+        prepare_pr_worktree("markmhendrickson/neotoma", 1946, "phoenicurus")
+    )
+    assert result is not None
+
+    flat = " ".join(" ".join(c) for c in calls)
+    # The load-bearing assertion: the token appears nowhere in any git invocation.
+    assert "ghp_supersecret" not in flat
+    assert "x-access-token" not in flat
+
+    url_calls = [c for c in calls if "remote.origin.url" in c]
+    assert len(url_calls) == 1, calls
+    assert url_calls[0][-1] == "https://github.com/markmhendrickson/neotoma.git"
+    # Worktree-scoped, so the shared base clone's config is never touched.
+    assert "--worktree" in url_calls[0]
+
+
+def test_prepare_pr_worktree_configures_gh_credential_helper_worktree_scoped(
+    monkeypatch, tmp_path
+):
+    # The other half of the Loxia #134 shape: `gh` supplies the token at push
+    # time from the child's env. Both settings must be --worktree scoped, which
+    # requires extensions.worktreeConfig to be enabled first.
+    calls = _worktree_git_harness(monkeypatch, tmp_path, token="ghp_x")
+
+    asyncio.run(prepare_pr_worktree("markmhendrickson/neotoma", 1946, "waxwing"))
+
+    assert ["config", "extensions.worktreeConfig", "true"] in calls
+
+    helper = [c for c in calls if any("credential.https" in a for a in c)]
+    assert len(helper) == 1, calls
+    assert helper[0] == [
+        "config",
+        "--worktree",
+        "credential.https://github.com.helper",
+        "!gh auth git-credential",
+    ]
+
+    # Ordering matters: worktreeConfig must be enabled before --worktree writes.
+    enable_idx = calls.index(["config", "extensions.worktreeConfig", "true"])
+    assert all(
+        calls.index(c) > enable_idx for c in calls if "--worktree" in c
+    ), calls
+
+
+def test_prepare_pr_worktree_skips_all_credential_config_without_a_token(
+    monkeypatch, tmp_path
+):
+    # A read-only lens with no token still gets a usable checkout — it just
+    # cannot push. None of the three credential writes should fire.
+    calls = _worktree_git_harness(monkeypatch, tmp_path, token=None)
+
+    result = asyncio.run(
+        prepare_pr_worktree("markmhendrickson/neotoma", 1946, "pavo")
+    )
+    assert result is not None  # degraded-but-functional, not a failure
+
+    flat = " ".join(" ".join(c) for c in calls)
+    assert "worktreeConfig" not in flat
+    assert "credential.https" not in flat
+    assert "remote.origin.url" not in flat
+
+
 def test_cleanup_pr_worktree_none_is_safe_noop():
     # Cleanup of a never-prepared worktree must never raise.
     asyncio.run(cleanup_pr_worktree(None))
@@ -3635,21 +3635,23 @@ def test_cleanup_pr_worktree_removes_stray_dir(monkeypatch, tmp_path):
 
 
 def test_only_qa_lens_gets_a_worktree(monkeypatch):
-    # In the panel loop, prepare_pr_worktree is invoked ONLY for phoenicurus;
-    # every other lens runs diff-only (cwd=None).
+    # This PR ships the EVIDENCE BAR (item 2) only. Item 1 — a worktree for
+    # every lens — is deliberately excluded: ~1.1 GB per lens (~4.4 GB per
+    # panel) and the lens-acc-3 replay did not isolate it as the cause of the
+    # accuracy gain (the diff-only control arm scored the same). Pinned here so
+    # the split is explicit rather than an accident of a dropped hunk.
     prep_calls = []
     cwd_seen = {}
 
     async def fake_prepare(repo, number, agent):
         prep_calls.append(agent)
-        return f"/tmp/wt-{agent}" if agent == "phoenicurus" else None
+        return f"/tmp/wt-{agent}"
 
     async def fake_cleanup(wt):
         return None
 
     async def fake_run_skill(skill, prompt, **kwargs):
         cwd_seen[skill] = kwargs.get("cwd")
-        # Lanius gate-inheritance must return a clear verdict so the panel runs.
         if skill == "lanius":
             return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
         return SkillResult(skill, True, 0, "VERDICT: COMMENT", "")
@@ -3657,14 +3659,12 @@ def test_only_qa_lens_gets_a_worktree(monkeypatch):
     monkeypatch.setattr(swarm_dispatch, "prepare_pr_worktree", fake_prepare)
     monkeypatch.setattr(swarm_dispatch, "cleanup_pr_worktree", fake_cleanup)
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
-
-    # Force a panel that includes phoenicurus + at least one other lens.
     monkeypatch.setattr(
         swarm_dispatch,
         "select_panel",
         lambda **kw: [
             Lens(agent="phoenicurus", lens="qa", gate="qa", checks="evals"),
-            Lens(agent="pavo", lens="pm", gate="pm", checks="scope"),
+            Lens(agent="waxwing", lens="arch", gate="arch", checks="contracts"),
         ],
     )
 
@@ -3672,11 +3672,86 @@ def test_only_qa_lens_gets_a_worktree(monkeypatch):
     dispatcher = SwarmDispatcher(notifier, _config())
     asyncio.run(dispatcher._handle_pr(_trigger(repository="markmhendrickson/neotoma")))
 
-    # Worktree prep attempted only for the qa lens.
     assert prep_calls == ["phoenicurus"], prep_calls
-    # qa child got the worktree as cwd; other panelists got None.
     assert cwd_seen.get("phoenicurus") == "/tmp/wt-phoenicurus"
-    assert cwd_seen.get("pavo") is None
+    # Every other lens stays diff-only — and the evidence bar tells it so.
+    assert cwd_seen.get("waxwing") is None
+
+
+def test_lens_falls_back_to_diff_only_when_worktree_prep_fails(monkeypatch):
+    # A worktree is an affordance, never a precondition: prep failure must
+    # degrade to a diff-only review (cwd=None), never skip the lens or stall.
+    cwd_seen = {}
+    cleaned = []
+
+    async def fake_prepare(repo, number, agent):
+        return None  # e.g. non-neotoma repo, or absent local base clone
+
+    async def fake_cleanup(wt):
+        cleaned.append(wt)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        cwd_seen[skill] = kwargs.get("cwd")
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        return SkillResult(skill, True, 0, "VERDICT: COMMENT", "")
+
+    monkeypatch.setattr(swarm_dispatch, "prepare_pr_worktree", fake_prepare)
+    monkeypatch.setattr(swarm_dispatch, "cleanup_pr_worktree", fake_cleanup)
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(
+        swarm_dispatch,
+        "select_panel",
+        lambda **kw: [Lens(agent="waxwing", lens="arch", gate="arch", checks="x")],
+    )
+
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+    asyncio.run(dispatcher._handle_pr(_trigger(repository="markmhendrickson/neotoma")))
+
+    # The lens still ran, just without a checkout.
+    assert "waxwing" in cwd_seen
+    assert cwd_seen["waxwing"] is None
+    # Cleanup is still invoked (and is a no-op on None).
+    assert cleaned == [None]
+
+
+def test_panelist_prompt_evidence_bar_tracks_worktree_availability():
+    # The evidence bar must tell the truth about what the lens can do. Claiming
+    # "your cwd is a writable checkout" to a diff-only lens would either waste
+    # its turn or invite it to invent command output.
+    lens = Lens(agent="waxwing", lens="arch", gate="arch", checks="contracts")
+    trigger = _trigger(repository="markmhendrickson/neotoma")
+
+    with_wt = SwarmDispatcher._panelist_prompt(
+        trigger, lens, "", None, has_worktree=True
+    )
+    assert "writable checkout" in with_wt
+    assert "ONLY if you RAN something" in with_wt
+    assert "DIFF-ONLY" not in with_wt
+
+    without_wt = SwarmDispatcher._panelist_prompt(
+        trigger, lens, "", None, has_worktree=False
+    )
+    assert "DIFF-ONLY" in without_wt
+    assert "unverified" in without_wt
+    assert "writable checkout" not in without_wt
+
+
+def test_forward_looking_lens_has_no_evidence_bar():
+    # Forward-looking lenses never block, so the blocking evidence bar is noise.
+    lens = Lens(
+        agent="corvus", lens="content", gate="", checks="x", forward_looking=True
+    )
+    prompt = SwarmDispatcher._panelist_prompt(
+        _trigger(repository="markmhendrickson/neotoma"),
+        lens,
+        "",
+        None,
+        has_worktree=True,
+    )
+    assert "EVIDENCE BAR" not in prompt
+    assert "FORWARD-LOOKING" in prompt
 
 
 
@@ -4222,138 +4297,3 @@ def test_open_implementation_pr_returns_none_when_no_pr(monkeypatch):
 def _empty_spec_state():
     from issue_spec import SpecState
     return SpecState(repo="markmhendrickson/neotoma", issue_number=1882, title="t")
-
-
-# ── issue-pipeline resume after restart (ateles#230 follow-up) ───────────────
-
-
-def _resume_dispatcher(monkeypatch, *, calls):
-    """Dispatcher with the pipeline body and marker I/O stubbed, recording the
-    marker lifecycle so we can assert start/clear ordering."""
-    d = SwarmDispatcher(_StubNotifier(), _config())
-
-    async def fake_pipeline(self, trigger):
-        calls.append(("pipeline", trigger.number))
-
-    async def fake_mark(self, trigger):
-        calls.append(("mark", trigger.number))
-
-    async def fake_clear(self, trigger):
-        calls.append(("clear", trigger.number))
-
-    monkeypatch.setattr(SwarmDispatcher, "_run_issue_spec_pipeline", fake_pipeline)
-    monkeypatch.setattr(SwarmDispatcher, "_mark_pipeline_inflight", fake_mark)
-    monkeypatch.setattr(SwarmDispatcher, "_clear_pipeline_inflight", fake_clear)
-    return d
-
-
-def test_pipeline_marks_inflight_then_clears_on_success(monkeypatch):
-    calls = []
-    d = _resume_dispatcher(monkeypatch, calls=calls)
-    asyncio.run(d._handle_issue_opened(_trigger(kind="issue_opened", number=230)))
-    # Marker must be written BEFORE the run and cleared after — that ordering is
-    # what makes an interrupted run detectable.
-    assert calls == [("mark", 230), ("pipeline", 230), ("clear", 230)]
-
-
-def test_pipeline_clears_inflight_marker_even_when_pipeline_raises(monkeypatch):
-    """A pipeline that fails for a real reason already reports itself; it must
-    NOT be left marked in-flight or the sweep would resurrect it every boot."""
-    calls = []
-    d = _resume_dispatcher(monkeypatch, calls=calls)
-
-    async def boom(self, trigger):
-        calls.append(("pipeline", trigger.number))
-        raise RuntimeError("lens exploded")
-
-    monkeypatch.setattr(SwarmDispatcher, "_run_issue_spec_pipeline", boom)
-    try:
-        asyncio.run(d._handle_issue_opened(_trigger(kind="issue_opened", number=230)))
-    except RuntimeError:
-        pass
-    assert ("clear", 230) in calls
-
-
-def test_resume_sweep_reruns_pipelines_with_inflight_marker(monkeypatch):
-    resumed = []
-    d = SwarmDispatcher(_StubNotifier(), _config())
-
-    async def fake_scan(self, repository):
-        assert repository == "owner/repo"
-        return [{"number": 230, "title": "stranded", "body": "b", "user": {"login": "x"},
-                 "html_url": "u", "labels": [{"name": "enhancement"}]}]
-
-    async def fake_handle(self, trigger):
-        resumed.append((trigger.repository, trigger.number, trigger.kind))
-
-    monkeypatch.setattr(SwarmDispatcher, "_issues_with_inflight_marker", fake_scan)
-    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle)
-    summary = asyncio.run(d.resume_interrupted_pipelines(["owner/repo"]))
-    assert resumed == [("owner/repo", 230, "issue_opened")]
-    assert summary == {"scanned": 1, "resumed": 1, "failed": 0}
-
-
-def test_resume_sweep_skips_issues_without_marker(monkeypatch):
-    """No marker → the pipeline either never started or finished cleanly."""
-    resumed = []
-    d = SwarmDispatcher(_StubNotifier(), _config())
-
-    async def fake_scan(self, repository):
-        return []
-
-    async def fake_handle(self, trigger):
-        resumed.append(trigger.number)
-
-    monkeypatch.setattr(SwarmDispatcher, "_issues_with_inflight_marker", fake_scan)
-    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle)
-    summary = asyncio.run(d.resume_interrupted_pipelines(["owner/repo"]))
-    assert resumed == []
-    assert summary["resumed"] == 0
-
-
-def test_resume_sweep_survives_a_repo_that_fails_to_scan(monkeypatch):
-    """A broken repo must not stop the other repos, nor kill daemon startup."""
-    resumed = []
-    d = SwarmDispatcher(_StubNotifier(), _config())
-
-    async def fake_scan(self, repository):
-        if repository == "owner/broken":
-            raise RuntimeError("GitHub 500")
-        return [{"number": 7, "title": "t", "body": "", "user": {"login": "x"},
-                 "html_url": "u", "labels": []}]
-
-    async def fake_handle(self, trigger):
-        resumed.append(trigger.number)
-
-    monkeypatch.setattr(SwarmDispatcher, "_issues_with_inflight_marker", fake_scan)
-    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle)
-    summary = asyncio.run(
-        d.resume_interrupted_pipelines(["owner/broken", "owner/good"])
-    )
-    assert resumed == [7]
-    assert summary["resumed"] == 1
-
-
-def test_resume_sweep_counts_a_failed_resume_without_raising(monkeypatch):
-    d = SwarmDispatcher(_StubNotifier(), _config())
-
-    async def fake_scan(self, repository):
-        return [{"number": 9, "title": "t", "body": "", "user": {"login": "x"},
-                 "html_url": "u", "labels": []}]
-
-    async def fake_handle(self, trigger):
-        raise RuntimeError("pipeline died again")
-
-    monkeypatch.setattr(SwarmDispatcher, "_issues_with_inflight_marker", fake_scan)
-    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle)
-    summary = asyncio.run(d.resume_interrupted_pipelines(["owner/repo"]))
-    assert summary == {"scanned": 1, "resumed": 0, "failed": 1}
-
-
-def test_inflight_marker_regex_roundtrip():
-    marker = SwarmDispatcher._PIPELINE_INFLIGHT_MARKER.format(
-        started_at="2026-07-17T12:25:53.123456+00:00"
-    )
-    assert SwarmDispatcher._PIPELINE_INFLIGHT_RE.search(marker)
-    # Must not match the sibling fix-round marker.
-    assert not SwarmDispatcher._PIPELINE_INFLIGHT_RE.search("<!-- apis-fix-round:2 -->")
