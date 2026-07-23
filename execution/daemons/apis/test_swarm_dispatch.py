@@ -3517,6 +3517,107 @@ def test_prepare_pr_worktree_returns_none_when_base_checkout_absent(monkeypatch)
     assert result is None
 
 
+def _worktree_git_harness(monkeypatch, tmp_path, token):
+    """Drive prepare_pr_worktree past its early returns, recording every _git call.
+
+    Stubs the three externals that would otherwise hit disk/network: the base
+    clone check, `git` itself, and the temp-dir creation. Returns the recorded
+    calls so a test can assert exactly what was written to the worktree config.
+    """
+    base = tmp_path / "base"
+    (base / ".git").mkdir(parents=True)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+
+    calls: list[list[str]] = []
+
+    async def fake_git(args, cwd, timeout=60):
+        calls.append(list(args))
+        return 0, "", ""
+
+    monkeypatch.setattr(swarm_dispatch, "NEOTOMA_LOCAL_CHECKOUT", str(base))
+    monkeypatch.setattr(swarm_dispatch, "_git", fake_git)
+    monkeypatch.setattr(swarm_dispatch.tempfile, "mkdtemp", lambda prefix="": str(wt))
+    monkeypatch.setattr(
+        swarm_dispatch, "_token_for_agent_on_repo", lambda agent, repo: token
+    )
+    return calls
+
+
+def test_prepare_pr_worktree_never_writes_the_token_into_the_remote_url(
+    monkeypatch, tmp_path
+):
+    # SECURITY REGRESSION (Loxia #134, qa lens on PR #233): the push credential
+    # must NOT be embedded in remote.origin.url. A token there persists in the
+    # worktree's on-disk .git config AND is echoed by git in push-failure output,
+    # which can reach a daemon log or a public GitHub comment. The supported
+    # shape is a CLEAN https URL plus `gh` as a worktree-scoped credential
+    # helper, so the secret lives only in the child's process env.
+    calls = _worktree_git_harness(monkeypatch, tmp_path, token="ghp_supersecret")
+
+    result = asyncio.run(
+        prepare_pr_worktree("markmhendrickson/neotoma", 1946, "phoenicurus")
+    )
+    assert result is not None
+
+    flat = " ".join(" ".join(c) for c in calls)
+    # The load-bearing assertion: the token appears nowhere in any git invocation.
+    assert "ghp_supersecret" not in flat
+    assert "x-access-token" not in flat
+
+    url_calls = [c for c in calls if "remote.origin.url" in c]
+    assert len(url_calls) == 1, calls
+    assert url_calls[0][-1] == "https://github.com/markmhendrickson/neotoma.git"
+    # Worktree-scoped, so the shared base clone's config is never touched.
+    assert "--worktree" in url_calls[0]
+
+
+def test_prepare_pr_worktree_configures_gh_credential_helper_worktree_scoped(
+    monkeypatch, tmp_path
+):
+    # The other half of the Loxia #134 shape: `gh` supplies the token at push
+    # time from the child's env. Both settings must be --worktree scoped, which
+    # requires extensions.worktreeConfig to be enabled first.
+    calls = _worktree_git_harness(monkeypatch, tmp_path, token="ghp_x")
+
+    asyncio.run(prepare_pr_worktree("markmhendrickson/neotoma", 1946, "waxwing"))
+
+    assert ["config", "extensions.worktreeConfig", "true"] in calls
+
+    helper = [c for c in calls if any("credential.https" in a for a in c)]
+    assert len(helper) == 1, calls
+    assert helper[0] == [
+        "config",
+        "--worktree",
+        "credential.https://github.com.helper",
+        "!gh auth git-credential",
+    ]
+
+    # Ordering matters: worktreeConfig must be enabled before --worktree writes.
+    enable_idx = calls.index(["config", "extensions.worktreeConfig", "true"])
+    assert all(
+        calls.index(c) > enable_idx for c in calls if "--worktree" in c
+    ), calls
+
+
+def test_prepare_pr_worktree_skips_all_credential_config_without_a_token(
+    monkeypatch, tmp_path
+):
+    # A read-only lens with no token still gets a usable checkout — it just
+    # cannot push. None of the three credential writes should fire.
+    calls = _worktree_git_harness(monkeypatch, tmp_path, token=None)
+
+    result = asyncio.run(
+        prepare_pr_worktree("markmhendrickson/neotoma", 1946, "pavo")
+    )
+    assert result is not None  # degraded-but-functional, not a failure
+
+    flat = " ".join(" ".join(c) for c in calls)
+    assert "worktreeConfig" not in flat
+    assert "credential.https" not in flat
+    assert "remote.origin.url" not in flat
+
+
 def test_cleanup_pr_worktree_none_is_safe_noop():
     # Cleanup of a never-prepared worktree must never raise.
     asyncio.run(cleanup_pr_worktree(None))
