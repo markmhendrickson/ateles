@@ -69,9 +69,11 @@ def _trigger(**overrides):
 class _StubNotifier:
     def __init__(self):
         self.sent = []
+        self.sent_full = []  # (message, priority) — for priority assertions
 
     def send(self, message, priority=None, handler=None):
         self.sent.append(message)
+        self.sent_full.append((message, priority))
 
 
 def _config():
@@ -469,8 +471,12 @@ def test_route_findings_escalates_at_retry_cap(monkeypatch):
     async def fake_count(self, trigger):
         return 2  # == default max_fix_rounds
 
+    async def fake_claim(self, trigger, kind):
+        return True  # first escalation → notify
+
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
 
     notifier = _StubNotifier()
     d = SwarmDispatcher(notifier, _config())
@@ -482,6 +488,36 @@ def test_route_findings_escalates_at_retry_cap(monkeypatch):
     # At the cap: no agents dispatched; operator escalated instead.
     assert dispatched == []
     assert any("auto-fix rounds did not clear" in m for m in notifier.sent)
+
+
+def test_route_findings_exhausted_dedup_suppresses_renotify(monkeypatch):
+    """A re-review after the cap must not re-page the operator.
+
+    Regression for the duplicate-fire bug (ateles#262 sent four identical
+    auto-fix-exhausted pings): when _claim_escalation reports the condition was
+    already escalated (returns False), the notification is suppressed.
+    """
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "x", "")
+
+    async def fake_count(self, trigger):
+        return 2  # == default max_fix_rounds
+
+    async def fake_claim(self, trigger, kind):
+        return False  # already escalated → suppress
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    assert not any("auto-fix rounds did not clear" in m for m in notifier.sent)
 
 
 def test_route_findings_cicada_auth_failure_pages_infra(monkeypatch):
@@ -525,7 +561,11 @@ def test_route_findings_no_parseable_blocking_escalates(monkeypatch):
     async def fake_run_skill(skill, prompt, **kwargs):
         raise AssertionError("should not dispatch when nothing parses")
 
+    async def fake_claim(self, trigger, kind):
+        return True  # first escalation → notify
+
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
     notifier = _StubNotifier()
     d = SwarmDispatcher(notifier, _config())
     # BLOCKED verdict with no [BLOCKING] blocks → escalate, don't guess.
@@ -535,6 +575,28 @@ def test_route_findings_no_parseable_blocking_escalates(monkeypatch):
                                    verdict="blocked")
     )
     assert any("no blocking findings could be parsed" in m for m in notifier.sent)
+
+
+def test_route_findings_unparseable_dedup_suppresses_renotify(monkeypatch):
+    """A re-review of the same unparseable verdict must not re-page the operator."""
+    async def fake_run_skill(skill, prompt, **kwargs):
+        raise AssertionError("should not dispatch when nothing parses")
+
+    async def fake_claim(self, trigger, kind):
+        return False  # already escalated → suppress
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80,
+                                   reviews=[("pm", "cannot proceed")],
+                                   verdict="blocked")
+    )
+    assert not any(
+        "no blocking findings could be parsed" in m for m in notifier.sent
+    )
 
 
 # ── _gate_merge_readiness (verdict-clear AND CI-green) ───────────────────────
@@ -1112,12 +1174,17 @@ def test_touches_product_code_mixed_diff_flags_when_any_product_file():
     )
 
 
-def _stub_bypass_dispatcher(monkeypatch, *, changed_files, posted):
+def _stub_bypass_dispatcher(monkeypatch, *, changed_files, posted, newly=True):
     """Wire a dispatcher whose _handle_pr short-circuits after the bypass guard.
 
     Lanius returns `blocked` so the panel never spawns (keeps the test focused on
     the guard), _changed_files is stubbed, and _post_pipeline_bypass_comment is
     replaced with a recorder so we assert the comment attempt without HTTP.
+
+    `newly` is the value the stubbed _post_pipeline_bypass_comment returns —
+    True means the bypass was surfaced for the first time (operator should be
+    notified), False means an existing marker was merely re-edited (duplicate
+    PR event; notification must be suppressed).
     """
 
     async def fake_run_skill(skill, prompt, **kwargs):
@@ -1128,6 +1195,7 @@ def _stub_bypass_dispatcher(monkeypatch, *, changed_files, posted):
 
     async def fake_post_bypass(self, trigger):
         posted.append(trigger.number)
+        return newly
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_changed_files", fake_changed_files)
@@ -1149,6 +1217,91 @@ def test_pr_no_parent_product_code_surfaces_bypass_loudly(monkeypatch):
     # A visible PR comment was attempted and the operator was notified.
     assert posted == [87]
     assert any("bypassed the gated" in m for m in notifier.sent)
+
+
+def test_pr_bypass_duplicate_event_does_not_renotify(monkeypatch):
+    """A repeat PR event for an already-surfaced bypass must not re-notify.
+
+    Regression for the duplicate-fire bug: ateles#242 received four identical
+    'touched product code' pings. When _post_pipeline_bypass_comment reports the
+    marker already existed (returns False), the operator notification is skipped
+    even though the guard path still runs.
+    """
+    posted = []
+    dispatcher, notifier = _stub_bypass_dispatcher(
+        monkeypatch,
+        changed_files=["src/cli/mcp_config_scan.ts"],
+        posted=posted,
+        newly=False,
+    )
+    asyncio.run(dispatcher._handle_pr(_trigger(body="A fix, no issue link.")))
+
+    # The guard still ran (comment attempted) but no duplicate ping was sent.
+    assert posted == [87]
+    assert not any("bypassed the gated" in m for m in notifier.sent)
+
+
+def test_post_bypass_comment_fail_open_when_new_post_errors(monkeypatch):
+    """A first-time bypass whose comment POST fails transiently must still
+    return True (fail-open), so the operator is notified — aligning with
+    _claim_escalation. Loxia review observation on PR #271."""
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return []  # no existing marker → this is a first surfacing
+
+    class _FailPostClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def get(self, url, **kwargs):
+            return _Resp()
+
+        async def post(self, url, **kwargs):
+            raise httpx.HTTPError("transient boom")
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _FailPostClient())
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    result = asyncio.run(d._post_pipeline_bypass_comment(_trigger()))
+    assert result is True  # fail-open → caller will notify
+
+
+def test_post_bypass_comment_fail_closed_when_duplicate_patch_errors(monkeypatch):
+    """A confirmed-duplicate bypass whose PATCH fails must return False — the
+    bypass is already surfaced, so never re-notify even on a transient error."""
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return [{"id": 5, "body": "<!-- pipeline-bypass-notice -->"}]
+
+    class _FailPatchClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def get(self, url, **kwargs):
+            return _Resp()
+
+        async def patch(self, url, **kwargs):
+            raise httpx.HTTPError("transient boom")
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _FailPatchClient())
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    result = asyncio.run(d._post_pipeline_bypass_comment(_trigger()))
+    assert result is False  # fail-closed → known bypass, no re-notify
 
 
 def test_pr_with_parent_does_not_trigger_bypass(monkeypatch):
@@ -1890,6 +2043,48 @@ def test_github_trigger_lanius_issue_passes_contract(monkeypatch):
             f"run_skill call for skill={call['skill']!r} in _handle_issue_opened "
             "must pass include_github_contract=True"
         )
+
+
+def test_additive_spec_pr_opened_is_info_priority(monkeypatch):
+    """A successfully auto-built spec (PR opened) notifies at INFO, not
+    OPERATOR_DECISION — it is FYI and belongs in the digest, since the PR gate
+    pipeline now owns the work and stops at the operator's merge approval."""
+    from lib.notify import Priority
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "ok", "")
+
+    async def fake_open_pr(self, trigger, state):
+        return "https://github.com/markmhendrickson/ateles/pull/999"
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(swarm_dispatch, "select_expectation_agents",
+                        lambda *a, **kw: [])
+    monkeypatch.setattr(SwarmDispatcher, "_gates_green", lambda self, lanius: True)
+    monkeypatch.setattr(SwarmDispatcher, "_open_implementation_pr", fake_open_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_mark_pipeline_inflight",
+                        lambda self, t: _async_none())
+    monkeypatch.setattr(SwarmDispatcher, "_clear_pipeline_inflight",
+                        lambda self, t: _async_none())
+
+    notifier = _StubNotifier()
+    cfg = _config()
+    cfg.auto_build = True
+    dispatcher = SwarmDispatcher(notifier, cfg)
+    t = _trigger(kind="issue_opened", number=1, title="New issue", body="Body.")
+    asyncio.run(dispatcher._handle_issue_opened(t))
+
+    opened = [
+        (m, p) for (m, p) in notifier.sent_full if "implementation PR opened" in m
+    ]
+    assert opened, "expected a PR-opened notification"
+    assert all(p == Priority.INFO for _, p in opened), (
+        "auto-build-succeeded notice must be INFO (digest), not immediate"
+    )
+
+
+async def _async_none():
+    return None
 
 
 def test_github_trigger_pr_pipeline_passes_contract(monkeypatch):

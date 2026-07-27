@@ -1295,7 +1295,14 @@ class SwarmDispatcher:
                     "Spec is ready; open the build manually or re-run once the "
                     "spec is implementable."
                 ),
-                priority=Priority.OPERATOR_DECISION,
+                # A successfully-opened PR is FYI — the PR gate pipeline owns it
+                # and will stop at the operator's merge approval, so this needs
+                # no immediate action and belongs in the digest. The NO-PR branch
+                # is a real failure the operator must act on, so it stays an
+                # immediate operator decision.
+                priority=(
+                    Priority.INFO if pr_url else Priority.OPERATOR_DECISION
+                ),
                 handler=DAEMON_NAME,
             )
         else:
@@ -1574,15 +1581,21 @@ class SwarmDispatcher:
                     f"[{DAEMON_NAME}] {ref}: product-code PR with no parent "
                     "issue — surfacing pipeline bypass (review still proceeds)"
                 )
-                await self._post_pipeline_bypass_comment(trigger)
-                self.notifier.send(
-                    f"PR {ref} touched product code with no parent issue — it "
-                    "bypassed the gated pm/arch → Cicada pipeline. Review "
-                    "proceeds; merge stays operator-gated. File the issue and "
-                    "add `Closes #N`, or accept the bypass.",
-                    priority=Priority.OPERATOR_DECISION,
-                    handler=DAEMON_NAME,
+                newly_surfaced = await self._post_pipeline_bypass_comment(
+                    trigger
                 )
+                # Only ping the operator the first time the bypass is surfaced.
+                # Later PR events (synchronize/label/reopen) re-enter this path
+                # for the same PR and would otherwise re-notify identically.
+                if newly_surfaced:
+                    self.notifier.send(
+                        f"PR {ref} touched product code with no parent issue — it "
+                        "bypassed the gated pm/arch → Cicada pipeline. Review "
+                        "proceeds; merge stays operator-gated. File the issue and "
+                        "add `Closes #N`, or accept the bypass.",
+                        priority=Priority.OPERATOR_DECISION,
+                        handler=DAEMON_NAME,
+                    )
 
         # 1. Lanius: enforce PR gate inheritance against the parent issue.
         _lanius_token = _token_for_agent_on_repo("lanius", trigger.repository)
@@ -1847,6 +1860,60 @@ class SwarmDispatcher:
                 f"could not record fix round {n}: {exc}"
             )
 
+    _ESCALATION_MARKER = "<!-- apis-escalated:{kind} -->"
+
+    async def _claim_escalation(self, trigger: SwarmTrigger, kind: str) -> bool:
+        """First-caller-wins guard for a once-per-PR operator escalation.
+
+        A PR re-review fires on every push/label/reopen, so an operator
+        escalation (`unparseable` verdict, auto-fix-exhausted) would re-notify
+        identically each time — ateles#262 sent four copies of the same
+        auto-fix-exhausted ping, neotoma#1988 three. This posts a hidden marker
+        comment keyed by `kind`; if the marker already exists it returns False
+        so the caller skips the notification. Same edit-not-duplicate primitive
+        as the fix-round and bypass markers, and the body carries no command
+        token. Fail-OPEN: if the marker can't be read or written we return True
+        so a real escalation is never swallowed by a transient GitHub error.
+        """
+        marker = self._ESCALATION_MARKER.format(kind=kind)
+        list_url = (
+            f"https://api.github.com/repos/{trigger.repository}/issues/"
+            f"{trigger.number}/comments"
+        )
+        headers = self._github_headers(trigger.repository)
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    list_url, params={"per_page": 100}, headers=headers
+                )
+                resp.raise_for_status()
+                for comment in resp.json():
+                    if marker in comment.get("body", ""):
+                        log.info(
+                            f"[{DAEMON_NAME}] {trigger.repository}"
+                            f"#{trigger.number}: '{kind}' already escalated — "
+                            "suppressing duplicate operator notification"
+                        )
+                        return False
+                body = (
+                    f"{marker}\n"
+                    f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+                    f"🔔 Escalated to the operator (`{kind}`). Further PR events "
+                    "will not re-notify for this same condition."
+                )
+                resp = await client.post(
+                    list_url, json={"body": body}, headers=headers
+                )
+                resp.raise_for_status()
+                return True
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                f"escalation-dedup check failed for '{kind}' ({exc}) — "
+                "notifying anyway (fail-open)"
+            )
+            return True
+
     async def _route_blocking_findings(
         self,
         trigger: SwarmTrigger,
@@ -1875,26 +1942,33 @@ class SwarmDispatcher:
         if not by_lens:
             # Verdict was not clear but no parseable [BLOCKING] block exists
             # (e.g. a BLOCKED "cannot proceed" or a malformed verdict). Don't
-            # guess a fix — escalate so a human reads the review.
-            self.notifier.send(
-                f"PR {ref}: review verdict `{verdict or 'unparseable'}` is not "
-                "clear but no blocking findings could be parsed — needs your "
-                "read. Merge held.",
-                priority=Priority.OPERATOR_DECISION,
-                handler=DAEMON_NAME,
-            )
+            # guess a fix — escalate so a human reads the review. Only notify
+            # once per PR: a re-review of the same unparseable verdict must not
+            # re-ping the operator.
+            if await self._claim_escalation(trigger, "unparseable-verdict"):
+                self.notifier.send(
+                    f"PR {ref}: review verdict `{verdict or 'unparseable'}` is "
+                    "not clear but no blocking findings could be parsed — needs "
+                    "your read. Merge held.",
+                    priority=Priority.OPERATOR_DECISION,
+                    handler=DAEMON_NAME,
+                )
             return
 
         prior_rounds = await self._fix_round_count(trigger)
         if prior_rounds >= self.config.max_fix_rounds:
             lenses = ", ".join(sorted(by_lens))
-            self.notifier.send(
-                f"PR {ref}: {self.config.max_fix_rounds} auto-fix rounds did not "
-                f"clear review (still blocking on: {lenses}). Escalating — needs "
-                "your attention. Merge held.",
-                priority=Priority.OPERATOR_DECISION,
-                handler=DAEMON_NAME,
-            )
+            # Once-per-PR: the exhausted-rounds condition is re-evaluated on
+            # every subsequent push, so guard the operator ping behind the
+            # escalation marker to avoid identical repeats (ateles#262 ×4).
+            if await self._claim_escalation(trigger, "auto-fix-exhausted"):
+                self.notifier.send(
+                    f"PR {ref}: {self.config.max_fix_rounds} auto-fix rounds did "
+                    f"not clear review (still blocking on: {lenses}). Escalating "
+                    "— needs your attention. Merge held.",
+                    priority=Priority.OPERATOR_DECISION,
+                    handler=DAEMON_NAME,
+                )
             return
 
         this_round = prior_rounds + 1
@@ -3198,7 +3272,7 @@ class SwarmDispatcher:
                     f"on {trigger.repository}#{trigger.number}"
                 )
 
-    async def _post_pipeline_bypass_comment(self, trigger: SwarmTrigger) -> None:
+    async def _post_pipeline_bypass_comment(self, trigger: SwarmTrigger) -> bool:
         """Post (or edit) a visible notice that a product-code PR has no parent issue.
 
         This is the loud half of the pipeline-bypass guard: a product PR that
@@ -3212,6 +3286,13 @@ class SwarmDispatcher:
         token (`/swarm-run`, `/confirm-gates-clear`, `Closes #`) so it cannot
         self-trigger the comment handler or spoof an issue link. Best-effort:
         exceptions are logged, never propagated.
+
+        Returns True when a NEW bypass comment was posted (the bypass is being
+        surfaced for the first time), False when an existing marker was merely
+        re-edited or the post was skipped/failed. The caller uses this to fire
+        the operator notification only on first surfacing — otherwise every
+        subsequent PR event (synchronize, label, re-open) re-notifies for the
+        same already-known bypass (ateles#242 got four identical pings).
         """
         _BYPASS_MARKER = "<!-- pipeline-bypass-notice -->"
 
@@ -3221,7 +3302,7 @@ class SwarmDispatcher:
                 f"[{DAEMON_NAME}] no GitHub token — pipeline-bypass notice "
                 f"skipped for {trigger.repository}#{trigger.number}"
             )
-            return
+            return False
 
         # Body deliberately writes "Closes" with a backtick-escaped hash so the
         # instructional text does not itself parse as a parent-issue link.
@@ -3264,32 +3345,54 @@ class SwarmDispatcher:
                     )
 
                 if existing_id is not None:
+                    # A marker already exists → this bypass was surfaced before.
+                    # Editing it in place is a no-op re-notify; even if the PATCH
+                    # fails transiently the bypass is already known, so fail
+                    # CLOSED (return False) — never re-ping for a known bypass.
                     patch_url = (
                         f"https://api.github.com/repos/{trigger.repository}/"
                         f"issues/comments/{existing_id}"
                     )
-                    resp = await client.patch(
-                        patch_url, json={"body": body}, headers=headers
-                    )
-                    resp.raise_for_status()
-                    log.info(
-                        f"[{DAEMON_NAME}] edited existing pipeline-bypass notice "
-                        f"#{existing_id} on {trigger.repository}#{trigger.number}"
-                    )
-                else:
-                    resp = await client.post(
-                        list_url, json={"body": body}, headers=headers
-                    )
-                    resp.raise_for_status()
-                    log.info(
-                        f"[{DAEMON_NAME}] posted pipeline-bypass notice on "
-                        f"{trigger.repository}#{trigger.number}"
-                    )
+                    try:
+                        resp = await client.patch(
+                            patch_url, json={"body": body}, headers=headers
+                        )
+                        resp.raise_for_status()
+                        log.info(
+                            f"[{DAEMON_NAME}] edited existing pipeline-bypass "
+                            f"notice #{existing_id} on "
+                            f"{trigger.repository}#{trigger.number}"
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            f"[{DAEMON_NAME}] could not edit existing bypass "
+                            f"notice on {trigger.repository}#{trigger.number}: "
+                            f"{exc}"
+                        )
+                    return False
+                resp = await client.post(
+                    list_url, json={"body": body}, headers=headers
+                )
+                resp.raise_for_status()
+                log.info(
+                    f"[{DAEMON_NAME}] posted pipeline-bypass notice on "
+                    f"{trigger.repository}#{trigger.number}"
+                )
+                return True
         except Exception as exc:
+            # We reached here without confirming an existing marker (the dedup
+            # GET failed and/or the NEW-comment POST failed), so this may be a
+            # first-time bypass we could not surface. Fail OPEN — return True so
+            # the operator is still notified — mirroring _claim_escalation and
+            # ensuring a genuine bypass is never silently swallowed by a
+            # transient GitHub error. (A confirmed-duplicate PATCH failure
+            # returns False above and never reaches here.)
             log.warning(
                 f"[{DAEMON_NAME}] failed to post pipeline-bypass notice on "
-                f"{trigger.repository}#{trigger.number}: {exc}"
+                f"{trigger.repository}#{trigger.number}: {exc} — notifying "
+                "anyway (fail-open)"
             )
+            return True
 
     async def _fetch_issue_fields(
         self, repository: str, issue_number: int
