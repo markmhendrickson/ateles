@@ -89,6 +89,13 @@ TELEGRAM_TOPIC = os.environ.get("TELEGRAM_TOPIC_PHOENICURUS", "") or os.environ.
 # a 1-commit patch every weekday). Override with PHOENICURUS_MIN_COMMITS.
 MIN_COMMITS = int(os.environ.get("PHOENICURUS_MIN_COMMITS", "1"))
 
+# Email notification (release RCs also go to the operator's inbox, not just
+# Telegram — mirrors the rest of the swarm, which emails via gws +send). The
+# operator + swarm addresses are the same env vars the shared lib/notify
+# Notifier reads, so release mail matches every other daemon's From/To.
+OPERATOR_EMAIL = os.environ.get("OPERATOR_EMAIL", "").strip()
+SWARM_EMAIL = os.environ.get("ATELES_SWARM_EMAIL", "").strip()
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -182,6 +189,58 @@ def telegram_send(text: str) -> None:
             subprocess.run(args, timeout=20, capture_output=True, env=os.environ)
         except Exception as exc:
             log.warning(f"telegram send failed: {exc}")
+
+
+def email_send(subject: str, body: str) -> bool:
+    """
+    Send a release notification to the operator's inbox via `gws gmail +send`.
+
+    Mirrors the shared lib/notify Notifier's email transport (same OPERATOR_EMAIL
+    To / ATELES_SWARM_EMAIL From, same gws argv-list send) so release mail matches
+    every other swarm daemon. Fail-open: any missing config or send error logs and
+    returns False so the caller keeps Telegram as the guaranteed channel — release
+    notification must never be blocked on email.
+
+    Returns True only if gws reports a successful send.
+    """
+    import shutil
+
+    if not OPERATOR_EMAIL:
+        log.info("OPERATOR_EMAIL unset — skipping release email (Telegram only)")
+        return False
+    gws = shutil.which("gws")
+    if not gws:
+        log.warning("gws CLI not found — cannot email release notification")
+        return False
+    cmd = [gws, "gmail", "+send", "--to", OPERATOR_EMAIL,
+           "--subject", subject, "--body", body]
+    if SWARM_EMAIL:
+        cmd += ["--from", SWARM_EMAIL]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
+                           env=os.environ)
+        if r.returncode != 0:
+            log.warning(f"gws +send failed (rc={r.returncode}): "
+                        f"{(r.stderr or '').strip()[:200]}")
+            return False
+        log.info(f"release email sent to {OPERATOR_EMAIL}")
+        return True
+    except Exception as exc:  # noqa: BLE001 — never block the release on email
+        log.warning(f"release email send error: {exc}")
+        return False
+
+
+def notify_operator(text: str, *, subject: str | None = None) -> None:
+    """
+    Send an operator notification on BOTH channels: Telegram always, email too
+    when OPERATOR_EMAIL is configured. Used for the synchronous hard-block /
+    error notices prepare.py sends directly (agent couldn't spawn, main CI red,
+    crash) — the rich prepared-RC notification is sent by the spawned agent,
+    which owns the rendered notes. Both sends are best-effort and independent;
+    neither failure blocks the other.
+    """
+    telegram_send(text)
+    email_send(subject or (text.strip().splitlines() or ["Phoenicurus"])[0][:80], text)
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +352,18 @@ def _build_agent_prompt(last_tag: str, commit_count: int) -> str:
         if TELEGRAM_TOPIC
         else "Send the Telegram notification to the default chat."
     )
+    from_flag = f' --from "{SWARM_EMAIL}"' if SWARM_EMAIL else ""
+    email_note = (
+        f"""12. ALSO email the operator the SAME notification (release goes to the
+    inbox, not just Telegram). Run exactly:
+    `gws gmail +send --to "{OPERATOR_EMAIL}"{from_flag} --subject "🚀 Release <TAG> ready to approve" --body "<the full notification text: version, the FULL rendered release notes, the RC PR URL, advisory flags, and the exact line: Reply approve <TAG> to publish, or skip <TAG> to discard>"`
+    The email subject MUST start with 🚀 and name the version. The body MUST
+    contain the approve/skip instruction verbatim. If the gws send fails, log it
+    and continue — Telegram (step 11) is the guaranteed channel; do NOT abort the
+    run over an email failure."""
+        if OPERATOR_EMAIL
+        else "12. (Email notification skipped: OPERATOR_EMAIL is not configured.)"
+    )
     return f"""You are Phoenicurus, the Neotoma release-preparation agent.
 
 Run a release PREPARATION pass for the Neotoma repo at {NEOTOMA_REPO_ROOT}.
@@ -341,9 +412,10 @@ Then record + notify:
     notes, the RC PR URL, and any advisory flags (security sensitive=true,
     /review findings, CI status). End with: "Reply `approve <TAG>` to publish, or
     `skip <TAG>` to discard." {topic_note}
+{email_note}
 
 If preflight shows nothing to release, send a one-line Telegram saying so and stop.
-Be precise and terse in the Telegram message. No motivational filler.
+Be precise and terse in the Telegram/email messages. No motivational filler.
 """
 
 
@@ -353,7 +425,7 @@ def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool
     claude = shutil.which("claude")
     if not claude:
         log.error("claude CLI not found — cannot spawn prepare agent")
-        telegram_send(
+        notify_operator(
             "🔴 Phoenicurus: claude CLI not found — cannot prepare release."
         )
         return False
@@ -377,7 +449,7 @@ def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool
         return True
     except Exception as exc:  # noqa: BLE001
         log.error(f"failed to spawn prepare agent: {exc}")
-        telegram_send(f"🔴 Phoenicurus: failed to spawn prepare agent — {exc}")
+        notify_operator(f"🔴 Phoenicurus: failed to spawn prepare agent — {exc}")
         return False
 
 
@@ -442,7 +514,7 @@ def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
     ci = main_ci_green()
     if ci is False:
         log.warning("main CI is RED — refusing to prepare a release.")
-        telegram_send(
+        notify_operator(
             f"⚠️ Phoenicurus: {count} unreleased commit(s) since {tag}, but main "
             "CI is RED. Not preparing a release until CI is green."
         )
@@ -488,7 +560,7 @@ def main() -> int:
         return run_prepare(args.dry_run, args.force, on_merge=args.on_merge)
     except Exception as exc:  # noqa: BLE001
         log.exception(f"prepare fatal error: {exc}")
-        telegram_send(f"🔴 Phoenicurus prepare crashed — {exc}")
+        notify_operator(f"🔴 Phoenicurus prepare crashed — {exc}")
         return 1
 
 

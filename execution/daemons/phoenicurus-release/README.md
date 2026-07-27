@@ -130,13 +130,34 @@ and re-running it would be redundant or unsafe.
 | `NEOTOMA_SANDBOX_URL` | Sandbox host to verify (default `https://neotoma-sandbox.fly.dev`). |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram push (via shared `send.mjs`). |
 | `TELEGRAM_TOPIC_PHOENICURUS` | Optional Telegram topic/thread id for release messages. |
+| `OPERATOR_EMAIL` | Where release RC notifications are emailed (in addition to Telegram). Unset → email is skipped, Telegram only. |
+| `ATELES_SWARM_EMAIL` | Optional `From:` for release email (the shared swarm address, matching the other daemons). |
+
+## Notification channels
+
+A prepared release candidate is sent to the operator on **both Telegram and
+email**. The spawned prepare agent (step 11–12 of its prompt) posts the full
+rendered notes + RC PR link + `approve/skip` instruction to Telegram, and emails
+the same via `gws gmail +send` (subject `🚀 Release <TAG> ready to approve`) using
+the same `OPERATOR_EMAIL`/`ATELES_SWARM_EMAIL` the shared `lib/notify` Notifier
+uses — so release mail matches every other swarm daemon. Email is **fail-open**:
+if `OPERATOR_EMAIL` is unset or the send fails, the run logs it and continues;
+Telegram is the guaranteed channel and the release is never blocked on email.
 
 ## Approval routing (Ateles)
 
 `publish.py` is invoked by Ateles when the operator replies `approve <version>`
-on Telegram: Ateles flips the `release_result` to `approved`, then runs
+**on Telegram**: Ateles flips the `release_result` to `approved`, then runs
 `python3 publish.py --version <version>`. See the Ateles SOUL.md
 "Release approval" section.
+
+**The email is notify-only, not a reply channel.** Riparia routes operator email
+replies back to the swarm only when the subject carries a `[#ent_<task_id>]`
+token (or a matching `run-<task_id>` References chain); a plain `gws +send`
+release email has neither, so **replying to the release email does not approve
+it** — approve on Telegram. Wiring the release email into the reply-routing loop
+(so a `approve <version>` email reply works) is a possible follow-up: it would
+need the send to carry a routable token and Ateles to recognize a release-reply.
 
 ## Troubleshooting
 
