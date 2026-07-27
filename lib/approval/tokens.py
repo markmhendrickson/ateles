@@ -86,7 +86,8 @@ def parse_verdict(text: str, token: str) -> bool | None:
         # first-word check covers the bare verb and the "VERB <anything>" form
         # (e.g. "approve v0.20.0"); the explicit "VERB-<token>" (hyphen-joined,
         # no space) form is matched separately since it is a single word.
-        first = s.split()[0] if s.split() else ""
+        parts = s.split()
+        first = parts[0] if parts else ""
         if first == "SKIP" or s == f"SKIP-{tok}":
             return False  # SKIP is decisive — never act on an ambiguous reply
         if first in ("APPROVE", "YES") or s == f"APPROVE-{tok}":
