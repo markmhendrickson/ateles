@@ -43,6 +43,7 @@ from swarm_dispatch import (
     is_provisioned,
     lenses_missing_comments,
     parse_gate_verdict,
+    parse_pending_gates,
     parse_review_verdict,
     prepare_pr_worktree,
     review_verdict_is_clear,
@@ -107,6 +108,24 @@ def test_parse_gate_verdict_none_when_absent():
     assert parse_gate_verdict("I could not verify the gates.") is None
     assert parse_gate_verdict("") is None
     assert parse_gate_verdict(None) is None
+
+
+# ── parse_pending_gates (ateles#230 panel-assembly fix) ─────────────────────
+
+
+def test_parse_pending_gates_extracts_comma_list():
+    out = "GATE_INHERITANCE: blocked\nGATE_PENDING: arch, ux"
+    assert parse_pending_gates(out) == {"arch", "ux"}
+
+
+def test_parse_pending_gates_case_and_whitespace_insensitive():
+    assert parse_pending_gates("gate_pending:  Arch ,QA ") == {"arch", "qa"}
+
+
+def test_parse_pending_gates_empty_when_absent():
+    assert parse_pending_gates("GATE_INHERITANCE: clear") == set()
+    assert parse_pending_gates("") == set()
+    assert parse_pending_gates(None) == set()
 
 
 # ── parse_review_verdict / review_verdict_is_clear (loop closure) ────────────
