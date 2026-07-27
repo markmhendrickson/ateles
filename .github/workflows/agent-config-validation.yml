@@ -40,7 +40,16 @@ jobs:
         with:
           python-version: "3.11"
 
+      # NOTE: non-blocking for now. NEOTOMA_BEARER_TOKEN is not yet provisioned
+      # as a repo secret (same pre-existing gap loxia-pr-review.yml and
+      # lanius-stale-issues.yml already carry), so this step cannot yet reach
+      # live Neotoma in CI. Per arch review on ateles#255: land the lint
+      # informational first, promote to a hard gate once the secret exists
+      # and a 9/9-green run confirms it. Flip to blocking (remove
+      # `continue-on-error`) once NEOTOMA_BEARER_TOKEN is added to repo
+      # secrets.
       - name: "Validate tool_allowlist grant grammar (no bash: prefix)"
+        continue-on-error: true
         run: python3 scripts/linters/validate_tool_allowlist.py
 
       # NOTE: non-blocking for now. As of ateles#255 the checked-in mirrors
