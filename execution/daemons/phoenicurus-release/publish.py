@@ -45,6 +45,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from datetime import date
@@ -93,6 +94,21 @@ NPM_TOKEN = os.environ.get("NPM_TOKEN", "") or os.environ.get("NODE_AUTH_TOKEN",
 
 SANDBOX_URL = os.environ.get(
     "NEOTOMA_SANDBOX_URL", "https://neotoma-sandbox.fly.dev"
+)
+
+# npm publishing runs in GitHub Actions by default (neotoma#2015): the tag push
+# fires .github/workflows/npm-publish.yml, which builds on a pinned Node and
+# publishes with provenance. Set PHOENICURUS_NPM_PUBLISH_MODE=local to publish
+# from this host instead (fallback if the workflow or its token is unavailable).
+NPM_PUBLISH_MODE = os.environ.get("PHOENICURUS_NPM_PUBLISH_MODE", "ci").strip().lower()
+# How long to wait for CI to land the version on the registry, and how often to
+# check. The wait must cover npm ci + build + publish + registry propagation.
+NPM_PUBLISH_WAIT_S = int(os.environ.get("PHOENICURUS_NPM_PUBLISH_WAIT_S", "900"))
+NPM_PUBLISH_POLL_S = int(os.environ.get("PHOENICURUS_NPM_PUBLISH_POLL_S", "20"))
+# Surfaced in the timeout message so the operator can jump straight to the run.
+ACTIONS_RUNS_URL = os.environ.get(
+    "PHOENICURUS_ACTIONS_RUNS_URL",
+    "https://github.com/markmhendrickson/neotoma/actions/workflows/npm-publish.yml",
 )
 
 # ---------------------------------------------------------------------------
@@ -512,7 +528,69 @@ def tag_and_push(version: str, dry_run: bool) -> None:
     run(["git", "push", "origin", version])
 
 
-def npm_publish(version: str, dry_run: bool) -> None:
+def _registry_version(npm_env: dict | None = None) -> str:
+    """Current `latest` on the npm registry, or '' if it can't be read."""
+    proc = run(
+        ["npm", "view", "neotoma", "version"], env=npm_env, check=False, timeout=120
+    )
+    return (proc.stdout or "").strip()
+
+
+def await_ci_npm_publish(version: str, dry_run: bool) -> None:
+    """
+    Wait for the `npm publish` GitHub workflow (fired by our tag push) to land
+    the release on the registry.
+
+    Publishing moved to CI (neotoma#2015) for provenance, laptop-independence
+    and a reproducible build env. tag_and_push has already pushed the tag, which
+    triggers .github/workflows/npm-publish.yml.
+
+    THE RISK THIS STEP EXISTS TO CONTAIN: moving the publish off-box turns a
+    synchronous failure into an asynchronous one. If this poll were quiet, a
+    failed CI publish would let the release continue to github_release and
+    "succeed" with nothing on npm. So the timeout is bounded and FAILS the
+    release loudly (Telegram + StepError) rather than falling through.
+    """
+    want = version.lstrip("v")
+
+    if dry_run:
+        log.info(f"[dry-run] would await CI npm publish of neotoma@{want}")
+        return
+
+    # Already there (e.g. a --resume-from re-run) — nothing to wait for.
+    if _registry_version() == want:
+        log.info(f"npm already shows neotoma@{want} — skipping wait")
+        return
+
+    deadline = time.monotonic() + NPM_PUBLISH_WAIT_S
+    log.info(
+        f"awaiting CI npm publish of neotoma@{want} "
+        f"(timeout {NPM_PUBLISH_WAIT_S}s) — workflow: {ACTIONS_RUNS_URL}"
+    )
+    while time.monotonic() < deadline:
+        live = _registry_version()
+        if live == want:
+            log.info(f"npm published neotoma@{live} (via CI)")
+            return
+        remaining = int(deadline - time.monotonic())
+        log.info(f"registry shows {live or 'none'!r}; {remaining}s left")
+        time.sleep(NPM_PUBLISH_POLL_S)
+
+    live = _registry_version()
+    msg = (
+        f"npm publish did not land within {NPM_PUBLISH_WAIT_S}s. Registry shows "
+        f"{live or 'none'!r}, expected {want!r}. The release is TAGGED but NOT "
+        f"PUBLISHED. Check the workflow run: {ACTIONS_RUNS_URL} — then re-run "
+        f"`python3 publish.py --version {version} --resume-from=npm_publish` "
+        f"once it succeeds, or publish locally with "
+        f"PHOENICURUS_NPM_PUBLISH_MODE=local."
+    )
+    telegram_send(f"🔴 Phoenicurus {version}: {msg}")
+    raise StepError(msg)
+
+
+def npm_publish_local(version: str, dry_run: bool) -> None:
+    """Publish from this machine (fallback when CI publishing is unavailable)."""
     npm_env, npmrc = _npm_env_with_token()
     try:
         npm_whoami_preflight(npm_env)
@@ -522,8 +600,7 @@ def npm_publish(version: str, dry_run: bool) -> None:
             return
         run(["npm", "publish"], env=npm_env, timeout=900)
         # Verify registry reflects the new version.
-        proc = run(["npm", "view", "neotoma", "version"], env=npm_env, check=False)
-        published = (proc.stdout or "").strip()
+        published = _registry_version(npm_env)
         if published != version.lstrip("v"):
             raise StepError(
                 f"npm publish ran but registry shows {published!r}, expected "
@@ -532,6 +609,15 @@ def npm_publish(version: str, dry_run: bool) -> None:
         log.info(f"npm published neotoma@{published}")
     finally:
         npmrc.unlink(missing_ok=True)
+
+
+def npm_publish(version: str, dry_run: bool) -> None:
+    """Land the release on npm — via CI by default, locally on request."""
+    if NPM_PUBLISH_MODE == "local":
+        log.info("PHOENICURUS_NPM_PUBLISH_MODE=local — publishing from this host")
+        npm_publish_local(version, dry_run)
+        return
+    await_ci_npm_publish(version, dry_run)
 
 
 def github_release(version: str, notes_path: Path | None, dry_run: bool) -> None:

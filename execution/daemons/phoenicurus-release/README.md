@@ -7,7 +7,8 @@ Operator-approved release executor for Neotoma. Two halves:
   push → `npm publish` → GitHub Release → sandbox deploy → verify → publish draft →
   post-deploy probes → mark published → Telegram confirmation. No LLM. Invoked
   **on demand** after approval, not on a schedule.
-- **`prepare.py`** — the scheduled Mon–Thu prep run. Two-phase (like Cotinga):
+- **`prepare.py`** — the prep run, triggered on every merge to Neotoma's main
+  (with the Mon–Thu schedule kept as a safety net). Two-phase (like Cotinga):
   Phase 1 is a fast preflight gate (unreleased commits since the last tag ≥
   `PHOENICURUS_MIN_COMMITS`? main CI green? no release already in flight?); if it
   passes, Phase 2 spawns a headless `claude --print` agent that runs the
@@ -19,6 +20,30 @@ Operator-approved release executor for Neotoma. Two halves:
 This split exists because release approval can take hours — a launchd daemon
 cannot block in-process that long (unlike Monedula's 120 s payment approval).
 Prepare runs and exits; publish fires later when the operator approves.
+
+## Triggering (auto-release)
+
+A merge to Neotoma's `main` prepares a release candidate immediately, instead of
+waiting for the next scheduled sweep:
+
+```
+merge to main → GitHub `push` webhook → Apis gateway (github_gateway)
+  → swarm_dispatch._handle_push_main → prepare.py --on-merge
+```
+
+`--on-merge` changes **only** the rate limit — from once per calendar day to once
+per `origin/main` commit (state file `.phoenicurus_prepare_last_sha`). Every other
+gate is unchanged: `PHOENICURUS_MIN_COMMITS`, main CI green, and the in-flight
+`release_result` check all still apply, so a burst of merges cannot stack up
+release candidates. The two locks are independent — a merge-triggered run never
+consumes the daily lock, so the scheduled Mon–Thu run still fires as a safety net
+if the webhook path is down.
+
+**The approval gate is unchanged.** This only removes the schedule lag before the
+operator is asked; publishing still requires `approve <version>`.
+
+Tag pushes are deliberately ignored by the gateway — publishing a release pushes
+a tag, which would otherwise re-trigger prepare in a loop.
 
 ## State model (`release_result` entity)
 
@@ -76,9 +101,18 @@ and re-running it would be redundant or unsafe.
 - **No redundant push**: since the RC PR is always merged server-side via
   `gh pr merge`, `tag_and_push` no longer runs a follow-up `git push origin
   main` — only the release tag is pushed.
-- **npm auth preflight**: runs `npm whoami` with the automation token before
-  publishing; a missing/expired token fails **loud** (Telegram) rather than
-  producing a tagged-but-unpublished release.
+- **npm publish runs in CI** (neotoma#2015): the tag push fires
+  `.github/workflows/npm-publish.yml`, which builds on a pinned Node 20 and
+  publishes with **provenance** (a signed attestation binding the tarball to the
+  commit — not obtainable from a local publish). `publish.py` then polls the
+  registry until the version appears.
+  - **Bounded, loud wait**: moving the publish off-box turns a synchronous
+    failure into an asynchronous one, so the poll has a hard timeout
+    (`PHOENICURUS_NPM_PUBLISH_WAIT_S`, default 900s) that **fails the release**
+    with a Telegram alert rather than falling through to `github_release` with
+    nothing on npm.
+  - **Local fallback**: set `PHOENICURUS_NPM_PUBLISH_MODE=local` to publish from
+    this host instead (keeps the old `npm whoami` preflight + registry verify).
 - **Registry verify**: confirms `npm view neotoma version` matches after publish.
 - **Sandbox verify**: confirms `version` + `mode: sandbox` on the live host
   before publishing the GitHub Release draft.
@@ -87,7 +121,9 @@ and re-running it would be redundant or unsafe.
 
 | Var | Purpose |
 |-----|---------|
-| `NPM_TOKEN` | npm granular automation token (Publish scope, `neotoma` only, bypass-2FA). Operator-managed; never echoed. |
+| `NPM_TOKEN` | npm granular automation token. Only needed for `PHOENICURUS_NPM_PUBLISH_MODE=local`; the default CI path uses the `NPM_TOKEN` **repo secret** instead. |
+| `PHOENICURUS_NPM_PUBLISH_MODE` | `ci` (default — await the Actions publish) or `local` (publish from this host). |
+| `PHOENICURUS_NPM_PUBLISH_WAIT_S` | How long to wait for CI to land the version (default 900). Timeout fails the release loudly. |
 | `NEOTOMA_BEARER_TOKEN` | Neotoma API auth (omitted automatically on loopback). |
 | `NEOTOMA_BASE_URL` | Neotoma API base (default `http://localhost:3180`). |
 | `NEOTOMA_REPO_ROOT` | Neotoma source checkout to release from (default `~/repos/neotoma`). |

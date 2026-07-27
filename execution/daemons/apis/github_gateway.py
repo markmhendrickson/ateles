@@ -76,6 +76,10 @@ PR_REVIEW_ACTIONS = {"submitted"}
 # per-context and would multiply for the same head; check_suite:completed is the
 # single terminal signal per commit.
 CHECK_SUITE_ACTIONS = {"completed"}
+# push events (auto-release): a merge to the default branch is what makes a new
+# release preparable. Only pushes to this ref trigger; branch/tag pushes and
+# branch deletions are ignored. `push` carries no `action` field.
+RELEASE_PUSH_REF = os.environ.get("APIS_RELEASE_PUSH_REF", "refs/heads/main")
 
 
 @dataclass
@@ -118,6 +122,17 @@ class SwarmTrigger:
     ci_head_sha: str = ""
     ci_conclusion: str = ""
     ci_pr_numbers: list[int] = field(default_factory=list)
+    # `ci_head_branch` is the branch the suite ran against (check_suite.
+    # head_branch). Used to recognize a CI completion on the DEFAULT branch —
+    # which carries no associated PR — so the release-prep retry can fire once a
+    # merge's CI settles (the auto-release deferral path).
+    ci_head_branch: str = ""
+    # push extras (auto-release): populated when kind == "push". `push_ref` is
+    # the fully-qualified ref ("refs/heads/main"); `push_after` is the new head
+    # SHA. A push to the default branch is what makes a release preparable, so
+    # this is the trigger the release daemon keys off.
+    push_ref: str = ""
+    push_after: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -265,6 +280,34 @@ def parse_github_event(
             ci_head_sha=suite.get("head_sha", ""),
             ci_conclusion=(suite.get("conclusion") or "").lower(),
             ci_pr_numbers=[p.get("number", 0) for p in prs if p.get("number")],
+            ci_head_branch=suite.get("head_branch", ""),
+            raw=payload,
+        )
+
+    # push events (auto-release): a merge landed on the default branch, so there
+    # may now be something to release. We normalize to a `push_main` trigger; the
+    # dispatcher hands it to the release daemon, which re-applies its own gates
+    # (unreleased-commit count, main CI green, no release already in flight)
+    # before preparing anything. Deleted branches arrive with an all-zero `after`
+    # SHA and must never trigger a release.
+    if event_type == "push":
+        ref = payload.get("ref", "")
+        after = payload.get("after", "")
+        if ref != RELEASE_PUSH_REF or payload.get("deleted") or set(after) <= {"0"}:
+            return None
+        head_commit = payload.get("head_commit") or {}
+        return SwarmTrigger(
+            kind="push_main",
+            repository=repository,
+            number=0,
+            title=(head_commit.get("message") or "").split("\n")[0],
+            body="",
+            author=(head_commit.get("author") or {}).get("username", ""),
+            html_url=head_commit.get("url", ""),
+            delivery_id=delivery_id,
+            action="push",
+            push_ref=ref,
+            push_after=after,
             raw=payload,
         )
 

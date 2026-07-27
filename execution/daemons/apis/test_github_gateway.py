@@ -7,6 +7,7 @@ import json
 
 from aiohttp.test_utils import TestClient, TestServer
 
+import github_gateway
 from github_gateway import make_app, parse_github_event, verify_github_signature
 
 TEST_HMAC_KEY = "dummy-hmac-fixture-key"
@@ -364,12 +365,14 @@ def test_approve_email_accepted_builds_operator_trigger():
 
 
 def _check_suite_payload(action="completed", conclusion="success",
-                         head_sha="deadbeef", prs=((7, "PR title"),)):
+                         head_sha="deadbeef", head_branch="feature/x",
+                         prs=((7, "PR title"),)):
     return {
         "action": action,
         "repository": {"full_name": "o/r"},
         "check_suite": {
             "head_sha": head_sha,
+            "head_branch": head_branch,
             "conclusion": conclusion,
             "pull_requests": [{"number": n, "title": t} for n, t in prs],
         },
@@ -385,6 +388,18 @@ def test_check_suite_completed_parses_to_ci_status():
     assert t.ci_head_sha == "deadbeef"
     assert t.ci_conclusion == "success"
     assert t.ci_pr_numbers == [7]
+    assert t.ci_head_branch == "feature/x"
+
+
+def test_check_suite_on_main_carries_branch_and_no_pr():
+    # A CI rollup on the default branch (post-merge) has no associated PR; the
+    # branch is what lets the dispatcher recognize it as the release-prep retry.
+    t = parse_github_event(
+        "check_suite", _check_suite_payload(head_branch="main", prs=())
+    )
+    assert t is not None
+    assert t.ci_head_branch == "main"
+    assert t.ci_pr_numbers == []
 
 
 def test_check_suite_failure_conclusion_lowercased():
@@ -410,3 +425,74 @@ def test_status_event_not_handled():
     # `status` events fire per-context and would multiply per head; only
     # check_suite:completed is ingested.
     assert parse_github_event("status", {"repository": {"full_name": "o/r"}}) is None
+
+
+# ── push → auto-release trigger ────────────────────────────────────────────
+
+
+def _push_payload(
+    ref="refs/heads/main",
+    after="a" * 40,
+    deleted=False,
+    message="feat: add thing (#123)",
+):
+    return {
+        "repository": {"full_name": "o/r"},
+        "ref": ref,
+        "after": after,
+        "deleted": deleted,
+        "head_commit": {
+            "message": message,
+            "author": {"username": "someone"},
+            "url": "https://github.com/o/r/commit/abc",
+        },
+    }
+
+
+def test_push_to_main_parses():
+    t = parse_github_event("push", _push_payload(), "d-9")
+    assert t is not None
+    assert t.kind == "push_main"
+    assert t.repository == "o/r"
+    assert t.push_ref == "refs/heads/main"
+    assert t.push_after == "a" * 40
+    # Only the subject line of the commit message is carried.
+    assert t.title == "feat: add thing (#123)"
+    assert not t.is_pr
+
+
+def test_push_to_feature_branch_ignored():
+    assert parse_github_event("push", _push_payload(ref="refs/heads/feat/x")) is None
+
+
+def test_push_of_tag_ignored():
+    # Critical: publishing a release pushes a tag. If tag pushes triggered a
+    # release prepare, every release would re-trigger the pipeline.
+    assert parse_github_event("push", _push_payload(ref="refs/tags/v1.2.3")) is None
+
+
+def test_branch_deletion_ignored():
+    # A deleted branch arrives with an all-zero `after` SHA.
+    assert (
+        parse_github_event("push", _push_payload(after="0" * 40, deleted=True)) is None
+    )
+
+
+def test_push_with_deleted_flag_ignored():
+    assert parse_github_event("push", _push_payload(deleted=True)) is None
+
+
+def test_push_override_ref_ignores_default_main(monkeypatch):
+    # RELEASE_PUSH_REF is read once at import time into a module-level
+    # constant, so monkeypatch.setenv alone would not affect it; patch the
+    # module attribute directly to exercise the override branch.
+    monkeypatch.setattr(github_gateway, "RELEASE_PUSH_REF", "refs/heads/other")
+    assert parse_github_event("push", _push_payload(ref="refs/heads/main")) is None
+
+
+def test_push_override_ref_accepts_configured_ref(monkeypatch):
+    monkeypatch.setattr(github_gateway, "RELEASE_PUSH_REF", "refs/heads/other")
+    t = parse_github_event("push", _push_payload(ref="refs/heads/other"))
+    assert t is not None
+    assert t.kind == "push_main"
+    assert t.push_ref == "refs/heads/other"
