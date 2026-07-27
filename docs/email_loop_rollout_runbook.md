@@ -75,6 +75,7 @@ Only after Stage 3 is clean:
 - **Persist** the flags (they're already in `.env`; just leave them on).
 - **Per-domain graduation:** keep high-blast domains gated. Tune per-agent `execution_policy` (`confidence_threshold`, `blast_radius_default`, `auto_execute_after_n_successful_recurrences`) and the checkpoint `block_until_approve → notify_and_proceed → auto` ladder. Start low-blast (docs/ops), expand as each domain earns trust.
 - **Flip `ATELES_NOTIFY_EMAIL=1`** so system notifications go via email (Telegram becomes break-glass).
+- **Set `ATELES_NOTIFY_TO`** to a delivery address distinct from the sending identity (`ATELES_SWARM_EMAIL`). When notifications are sent *from* the swarm alias *to* the operator's own address, Gmail files them under **Sent** and they never surface in the inbox as unread — real blockers pile up unseen. Point `ATELES_NOTIFY_TO` at a separate address, or a `+alias` a Gmail filter forces to the inbox. Unset ⇒ defaults to `OPERATOR_EMAIL` (unchanged behaviour).
 - **Stand down Cyphorhinus** (Telegram inbound is now Riparia's job): `launchctl bootout gui/$(id -u)/com.ateles.cyphorhinus`.
 
 ---

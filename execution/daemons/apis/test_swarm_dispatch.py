@@ -1241,6 +1241,69 @@ def test_pr_bypass_duplicate_event_does_not_renotify(monkeypatch):
     assert not any("bypassed the gated" in m for m in notifier.sent)
 
 
+def test_post_bypass_comment_fail_open_when_new_post_errors(monkeypatch):
+    """A first-time bypass whose comment POST fails transiently must still
+    return True (fail-open), so the operator is notified — aligning with
+    _claim_escalation. Loxia review observation on PR #271."""
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return []  # no existing marker → this is a first surfacing
+
+    class _FailPostClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def get(self, url, **kwargs):
+            return _Resp()
+
+        async def post(self, url, **kwargs):
+            raise httpx.HTTPError("transient boom")
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _FailPostClient())
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    result = asyncio.run(d._post_pipeline_bypass_comment(_trigger()))
+    assert result is True  # fail-open → caller will notify
+
+
+def test_post_bypass_comment_fail_closed_when_duplicate_patch_errors(monkeypatch):
+    """A confirmed-duplicate bypass whose PATCH fails must return False — the
+    bypass is already surfaced, so never re-notify even on a transient error."""
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return [{"id": 5, "body": "<!-- pipeline-bypass-notice -->"}]
+
+    class _FailPatchClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def get(self, url, **kwargs):
+            return _Resp()
+
+        async def patch(self, url, **kwargs):
+            raise httpx.HTTPError("transient boom")
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _FailPatchClient())
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    result = asyncio.run(d._post_pipeline_bypass_comment(_trigger()))
+    assert result is False  # fail-closed → known bypass, no re-notify
+
+
 def test_pr_with_parent_does_not_trigger_bypass(monkeypatch):
     posted = []
     dispatcher, notifier = _stub_bypass_dispatcher(

@@ -3345,19 +3345,30 @@ class SwarmDispatcher:
                     )
 
                 if existing_id is not None:
+                    # A marker already exists → this bypass was surfaced before.
+                    # Editing it in place is a no-op re-notify; even if the PATCH
+                    # fails transiently the bypass is already known, so fail
+                    # CLOSED (return False) — never re-ping for a known bypass.
                     patch_url = (
                         f"https://api.github.com/repos/{trigger.repository}/"
                         f"issues/comments/{existing_id}"
                     )
-                    resp = await client.patch(
-                        patch_url, json={"body": body}, headers=headers
-                    )
-                    resp.raise_for_status()
-                    log.info(
-                        f"[{DAEMON_NAME}] edited existing pipeline-bypass notice "
-                        f"#{existing_id} on {trigger.repository}#{trigger.number}"
-                    )
-                    # Already surfaced — do not re-notify the operator.
+                    try:
+                        resp = await client.patch(
+                            patch_url, json={"body": body}, headers=headers
+                        )
+                        resp.raise_for_status()
+                        log.info(
+                            f"[{DAEMON_NAME}] edited existing pipeline-bypass "
+                            f"notice #{existing_id} on "
+                            f"{trigger.repository}#{trigger.number}"
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            f"[{DAEMON_NAME}] could not edit existing bypass "
+                            f"notice on {trigger.repository}#{trigger.number}: "
+                            f"{exc}"
+                        )
                     return False
                 resp = await client.post(
                     list_url, json={"body": body}, headers=headers
@@ -3369,11 +3380,19 @@ class SwarmDispatcher:
                 )
                 return True
         except Exception as exc:
+            # We reached here without confirming an existing marker (the dedup
+            # GET failed and/or the NEW-comment POST failed), so this may be a
+            # first-time bypass we could not surface. Fail OPEN — return True so
+            # the operator is still notified — mirroring _claim_escalation and
+            # ensuring a genuine bypass is never silently swallowed by a
+            # transient GitHub error. (A confirmed-duplicate PATCH failure
+            # returns False above and never reaches here.)
             log.warning(
                 f"[{DAEMON_NAME}] failed to post pipeline-bypass notice on "
-                f"{trigger.repository}#{trigger.number}: {exc}"
+                f"{trigger.repository}#{trigger.number}: {exc} — notifying "
+                "anyway (fail-open)"
             )
-            return False
+            return True
 
     async def _fetch_issue_fields(
         self, repository: str, issue_number: int
