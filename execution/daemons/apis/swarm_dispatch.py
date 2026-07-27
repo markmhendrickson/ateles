@@ -455,6 +455,17 @@ def review_verdict_is_clear(verdict: str | None) -> bool:
     return verdict in ("approve", "comment")
 
 
+def finding_id(lens: str, head_sha: str, summary: str) -> str:
+    """Stable ID for one finding, keyed to content rather than position.
+
+    Content-keyed (not index-keyed) so that a later round which resolves an
+    earlier finding does not renumber the survivors — the whole point is that a
+    persisting finding keeps its identity across rounds.
+    """
+    digest = content_digest([lens, head_sha[:12], summary])[:8]
+    return f"{lens}-{digest}"
+
+
 # GitHub's Reviews API accepts exactly these three events.
 _REVIEW_EVENT_APPROVE = "APPROVE"
 _REVIEW_EVENT_REQUEST_CHANGES = "REQUEST_CHANGES"
@@ -1760,6 +1771,19 @@ class SwarmDispatcher:
             pending_gates=pending_gates,
         )
 
+        # Anchor the reviews to the head the panel actually reads (ateles#269).
+        # Resolved BEFORE the lenses run: a push landing mid-panel must not
+        # re-anchor reviews onto a commit no lens ever saw. Best-effort — an
+        # unresolved head degrades to an explicit sentinel, never a wrong SHA.
+        panel_head_sha = ((await self._fetch_pr(trigger.repository, trigger.number)) or {}).get(
+            "head", {}
+        ).get("sha", "")
+        if not panel_head_sha:
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: could not resolve PR head SHA — "
+                "panel reviews persist unanchored (head_sha_unresolved)"
+            )
+
         reviews: list[tuple[str, str]] = []
         for lens in panel:
             # QE3: the qa lens (Phoenicurus) authors + runs an eval, so it needs a
@@ -1794,7 +1818,9 @@ class SwarmDispatcher:
         #     from the PR comments).
         if reviews:
             agents_by_lens = {p.lens: p.agent for p in panel}
-            await self._persist_panel_reviews(trigger, reviews, agents_by_lens)
+            await self._persist_panel_reviews(
+                trigger, reviews, agents_by_lens, head_sha=panel_head_sha
+            )
             await self._post_missing_panel_comments(
                 trigger, reviews, agents_by_lens
             )
@@ -4349,11 +4375,78 @@ class SwarmDispatcher:
         t: SwarmTrigger,
         reviews: list[tuple[str, str]],
         agents_by_lens: dict[str, str] | None = None,
+        head_sha: str = "",
     ) -> None:
-        """Store each captured panel review as a harness_event so the review
-        text survives even when the panelist could not post its PR comment."""
+        """Persist each captured lens review as a `pr_review` entity (ateles#269).
+
+        Neotoma is the RECORD; the GitHub comment is a rendering of it. Identity
+        is the composite (repository, pr_number, review_lens, head_sha), so a
+        re-run against the same head dedupes onto the same entity while a new
+        push creates a distinct one — which is what makes a stale verdict
+        distinguishable from the live one.
+
+        A `harness_event` is still written alongside as the append-only audit
+        row: the two answer different questions (what is the current review of
+        this head, versus what did the daemon do and when). Dropping it would
+        lose dispatch-level history that is not review state.
+
+        When `head_sha` is unavailable the review is still persisted, tagged
+        `head_sha_unresolved` so it can never be mistaken for a head-anchored
+        record and silently deduped against a real one.
+        """
         agents_by_lens = agents_by_lens or {}
-        entities = [
+        sha = head_sha or "head_sha_unresolved"
+        now = datetime.now(timezone.utc).isoformat()
+
+        entities: list[dict] = []
+        for lens, text in reviews:
+            # Reuse the structured parser the learning pass already relies on
+            # (review_learning.parse_findings) rather than a second, weaker
+            # line-splitter — one grammar, one place to fix it.
+            findings = parse_findings(text, lens=lens)
+            blocking = [f for f in findings if f.blocking]
+            non_blocking = [f for f in findings if not f.blocking]
+
+            def _shape(f: ReviewFinding) -> dict:
+                return {
+                    "id": finding_id(lens, sha, f"{f.category}: {f.summary}"),
+                    "category": f.category,
+                    "summary": f.summary,
+                    "files": f.files,
+                }
+
+            entities.append(
+                {
+                    "entity_type": "pr_review",
+                    "repository": t.repository,
+                    "pr_number": t.number,
+                    "pr_title": t.title,
+                    "review_lens": lens,
+                    "reviewer_agent": agents_by_lens.get(lens, ""),
+                    "head_sha": sha,
+                    "verdict": parse_review_verdict(text) or "unparseable",
+                    "status": "live",
+                    "content": text,
+                    "blocking_findings": [_shape(f) for f in blocking],
+                    "nonblocking_findings": [_shape(f) for f in non_blocking],
+                    "finding_ids": [
+                        finding_id(lens, sha, f"{f.category}: {f.summary}")
+                        for f in (*blocking, *non_blocking)
+                    ],
+                    "generated_by": agents_by_lens.get(lens, DAEMON_NAME),
+                    "generated_at": now,
+                }
+            )
+        await self._store_entities(
+            entities,
+            idempotency_key=(
+                f"pr-review-{t.repository}-{t.number}-{sha[:12]}-"
+                f"{content_digest(entities)}"
+            ),
+        )
+
+        # Audit row (unchanged shape) — dispatch history, not review state.
+        audit = [
             {
                 "entity_type": "harness_event",
                 "event_type": "github.panel_review",
@@ -4364,15 +4457,15 @@ class SwarmDispatcher:
                 "delivery_id": t.delivery_id,
                 "lens": lens,
                 "content": text,
-                "occurred_at": datetime.now(timezone.utc).isoformat(),
+                "occurred_at": now,
             }
             for lens, text in reviews
         ]
         await self._store_entities(
-            entities,
+            audit,
             idempotency_key=(
                 f"panel-reviews-{t.repository}-{t.number}-"
-                f"{t.delivery_id}-{content_digest(entities)}"
+                f"{t.delivery_id}-{content_digest(audit)}"
             ),
         )
 

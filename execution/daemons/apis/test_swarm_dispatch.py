@@ -45,6 +45,7 @@ from swarm_dispatch import (
     parse_gate_verdict,
     parse_pending_gates,
     parse_review_verdict,
+    finding_id,
     prepare_pr_worktree,
     review_verdict_is_clear,
     verdict_to_review_event,
@@ -1991,7 +1992,7 @@ def test_confirm_gates_clear_on_pr_comment_retriggers_pr_pipeline(monkeypatch):
     async def fake_post_missing(self, t, reviews, agents_by_lens):
         pass
 
-    async def fake_persist(self, t, reviews, agents_by_lens):
+    async def fake_persist(self, t, reviews, agents_by_lens, head_sha=""):
         pass
 
     async def fake_merge_checkpoint(self, t, parent, lenses):
@@ -2220,7 +2221,7 @@ def test_github_trigger_pr_pipeline_passes_contract(monkeypatch):
     async def fake_post_missing(self, t, reviews, agents_by_lens):
         pass
 
-    async def fake_persist(self, t, reviews, agents_by_lens):
+    async def fake_persist(self, t, reviews, agents_by_lens, head_sha=""):
         pass
 
     async def fake_merge_checkpoint(self, t, parent, lenses):
@@ -3879,7 +3880,7 @@ def test_handle_pr_calls_vanellus_fallback_after_run(monkeypatch):
     async def fake_preregistered(self, repo, number): return {}
     async def fake_store(self, entities, idempotency_key): pass
     async def fake_post_missing(self, t, reviews, agents_by_lens): pass
-    async def fake_persist(self, t, reviews, agents_by_lens): pass
+    async def fake_persist(self, t, reviews, agents_by_lens, head_sha=""): pass
     async def fake_merge_checkpoint(self, t, parent, lenses): pass
 
     monkeypatch.setattr(SwarmDispatcher, "_changed_files", fake_changed_files)
@@ -5156,3 +5157,151 @@ def test_handle_pr_still_comments_when_no_verdict_anywhere(monkeypatch):
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
     assert ("review", "COMMENT") in calls, calls
     assert any(c[0] == "route" for c in calls), calls
+# ── ateles#269: panel reviews persist as pr_review entities ──────────────────
+
+
+
+
+def test_finding_id_is_content_keyed_not_positional():
+    """A finding keeps its ID across rounds even when earlier ones resolve."""
+    first = finding_id("qa", "abc123def456", "test-coverage: wrapper mocked")
+    # Same content, same head → same ID regardless of surrounding findings.
+    assert first == finding_id("qa", "abc123def456", "test-coverage: wrapper mocked")
+    # Different content → different ID.
+    assert first != finding_id("qa", "abc123def456", "regression: other thing")
+    # Different lens → different ID (two lenses can raise the same summary).
+    assert first != finding_id("pm", "abc123def456", "test-coverage: wrapper mocked")
+
+
+def test_persist_panel_reviews_writes_pr_review_entities(monkeypatch):
+    """Each lens review becomes a pr_review anchored to the head SHA."""
+    stored: list[dict] = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    reviews = [
+        ("qa", "review:qa\n**REQUEST_CHANGES**\n[BLOCKING] coverage: gap here\n"),
+        ("pm", "review:pm\n**APPROVE**\nScope matches the issue.\n"),
+    ]
+    asyncio.run(
+        dispatcher._persist_panel_reviews(
+            _trigger(),
+            reviews,
+            {"qa": "phoenicurus", "pm": "pavo"},
+            head_sha="deadbeefcafe1234",
+        )
+    )
+
+    prs = [e for e in stored if e.get("entity_type") == "pr_review"]
+    assert len(prs) == 2, f"expected 2 pr_review entities, got {stored}"
+
+    qa = next(e for e in prs if e["review_lens"] == "qa")
+    assert qa["verdict"] == "request_changes"
+    assert qa["head_sha"] == "deadbeefcafe1234"
+    assert qa["repository"] == "owner/repo"
+    assert qa["pr_number"] == 87
+    assert qa["reviewer_agent"] == "phoenicurus"
+    assert qa["status"] == "live"
+    assert [f["summary"] for f in qa["blocking_findings"]] == ["gap here"]
+    assert qa["blocking_findings"][0]["category"] == "coverage"
+    assert len(qa["finding_ids"]) == 1
+
+    pm = next(e for e in prs if e["review_lens"] == "pm")
+    assert pm["verdict"] == "approve"
+    assert pm["blocking_findings"] == []
+
+
+def test_persist_panel_reviews_still_writes_harness_event_audit_row(monkeypatch):
+    """The audit row survives alongside the record — they answer different questions."""
+    stored: list[dict] = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    asyncio.run(
+        dispatcher._persist_panel_reviews(
+            _trigger(), [("qa", "**APPROVE**")], {"qa": "phoenicurus"}, head_sha="abc123"
+        )
+    )
+
+    assert any(e.get("entity_type") == "pr_review" for e in stored)
+    audit = [e for e in stored if e.get("entity_type") == "harness_event"]
+    assert len(audit) == 1
+    assert audit[0]["event_type"] == "github.panel_review"
+
+
+def test_persist_panel_reviews_unparseable_verdict_is_explicit(monkeypatch):
+    """A missing verdict token records 'unparseable' — never a silent approve."""
+    stored: list[dict] = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    asyncio.run(
+        dispatcher._persist_panel_reviews(
+            _trigger(),
+            [("ux", "review:ux\nSome prose with no bold verdict token.\n")],
+            {"ux": "accipiter"},
+            head_sha="abc123",
+        )
+    )
+
+    review = next(e for e in stored if e.get("entity_type") == "pr_review")
+    assert review["verdict"] == "unparseable"
+    assert review["verdict"] != "approve"
+
+
+def test_persist_panel_reviews_unresolved_head_uses_sentinel(monkeypatch):
+    """An unresolved head is tagged, never silently deduped against a real SHA."""
+    stored: list[dict] = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    asyncio.run(
+        dispatcher._persist_panel_reviews(
+            _trigger(), [("qa", "**APPROVE**")], {"qa": "phoenicurus"}, head_sha=""
+        )
+    )
+
+    review = next(e for e in stored if e.get("entity_type") == "pr_review")
+    assert review["head_sha"] == "head_sha_unresolved"
+
+
+def test_persist_panel_reviews_distinct_heads_are_distinct_records(monkeypatch):
+    """Two rounds on different heads produce separately-identified records.
+
+    This is the ateles#269 pathology: without a head anchor, round 2 is
+    indistinguishable from round 1 and both read as live.
+    """
+    stored: list[dict] = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    for sha, body in (("sha_round1", "**REQUEST_CHANGES**"), ("sha_round2", "**APPROVE**")):
+        asyncio.run(
+            dispatcher._persist_panel_reviews(
+                _trigger(), [("qa", body)], {"qa": "phoenicurus"}, head_sha=sha
+            )
+        )
+
+    prs = [e for e in stored if e.get("entity_type") == "pr_review"]
+    assert [e["head_sha"] for e in prs] == ["sha_round1", "sha_round2"]
+    assert [e["verdict"] for e in prs] == ["request_changes", "approve"]
