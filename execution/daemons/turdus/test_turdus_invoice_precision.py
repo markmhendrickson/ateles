@@ -176,50 +176,33 @@ def test_trusted_billing_sender_needs_no_amount():
 import asyncio
 
 
-class _CapturingAsyncClient:
-    """Minimal async-context httpx.AsyncClient stub that records POST payloads."""
-
-    def __init__(self, sink, *args, **kwargs):
-        self._sink = sink
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
-    async def post(self, url, json=None, **kwargs):
-        self._sink.append({"url": url, "json": json})
-
-        class _Resp:
-            def raise_for_status(self):
-                return None
-
-            @staticmethod
-            def json():
-                return {"entity_id": "ent_test"}
-
-        return _Resp()
-
-
 def _run_create_task(monkeypatch, sender, subject):
-    """Call _create_task_for_email through a stubbed httpx and return the posted
-    task payload (the first POST), so tests can assert routing."""
-    posted = []
+    """Call _create_task_for_email with the MCP store helper stubbed, and return
+    the stored task entity dict, so tests can assert routing.
+
+    Turdus now writes via neotoma_mcp.store_entity (the REST POST /observations
+    was removed server-side). We intercept that call, record the entity dicts it
+    is handed, and return a synthetic entity_id so the caller proceeds as if the
+    write landed. Task fields are now flat on the entity (no nested 'snapshot')."""
+    stored = []
     monkeypatch.setattr(turdus, "NEOTOMA_BEARER_TOKEN", "test-token")
     monkeypatch.setattr(turdus, "NEOTOMA_BASE_URL", "http://neotoma.test")
     monkeypatch.setattr(turdus, "DRY_RUN", False)
 
-    import httpx
+    async def _fake_store(base_url, token, entity, idempotency_key=None, timeout=15.0):
+        stored.append(entity)
+        return "ent_test"
 
-    monkeypatch.setattr(
-        httpx, "AsyncClient", lambda *a, **k: _CapturingAsyncClient(posted, *a, **k)
-    )
+    async def _fake_rel(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(turdus.neotoma_mcp, "store_entity", _fake_store)
+    monkeypatch.setattr(turdus.neotoma_mcp, "create_relationship", _fake_rel)
+
     msg = {"id": "m1", "sender": sender, "subject": subject, "snippet": ""}
     asyncio.run(turdus._create_task_for_email(msg, email_entity_id=None))
-    # The first POST is the task entity.
-    task_posts = [p for p in posted if p["json"].get("entity_type") == "task"]
-    return task_posts[0]["json"]["snapshot"] if task_posts else None
+    task_entities = [e for e in stored if e.get("entity_type") == "task"]
+    return task_entities[0] if task_entities else None
 
 
 def test_refund_does_not_route_to_monedula(monkeypatch):

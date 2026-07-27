@@ -56,7 +56,10 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import neotoma_mcp  # noqa: E402 — sibling module: HTTP-MCP client for Neotoma writes
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
     AgentLoader,
@@ -89,6 +92,17 @@ MAX_MESSAGES = int(os.environ.get("TURDUS_MAX_MESSAGES", "20"))
 # path as a GitHub review or /approve comment. Env-gated: without the operator
 # address AND the shared secret, this path is inert.
 OPERATOR_EMAIL = os.environ.get("OPERATOR_EMAIL", "").strip().lower()
+
+# ── Self-notification guard ───────────────────────────────────────────────────
+# Turdus sends its own digests via the notifier (gws +send --from ATELES_SWARM_EMAIL,
+# a `+swarm` Gmail alias that lands in the SAME inbox). Those digests carry an
+# "[Ateles] [turdus] … invoice(s) …" subject — which matches the invoice/actionable
+# keyword filters, so on the next poll Turdus re-triages its OWN notification and
+# fires another one: a runaway self-feeding loop. Skip any message Turdus itself
+# authored — identified by the swarm From-address or the "[Ateles]" subject prefix.
+SWARM_EMAIL = os.environ.get("ATELES_SWARM_EMAIL", "").strip().lower()
+_SELF_SUBJECT_PREFIX = "[Ateles]"
+
 APIS_APPROVE_URL = os.environ.get(
     "APIS_APPROVE_EMAIL_URL", "http://127.0.0.1:8742/approve-email"
 )
@@ -432,68 +446,61 @@ async def _store_email_entity(message: dict) -> str | None:
     Create an email_message entity in Neotoma for a Gmail message.
 
     Returns the entity_id, or None on failure.
+
+    Writes via the Neotoma MCP transport (neotoma_mcp.store_entity); the former
+    REST POST /observations was removed server-side and 404s. Local loopback
+    accepts writes without a bearer token (TRUST_PROD_LOOPBACK), so this no
+    longer early-returns on an empty token.
     """
-    import httpx
-
-    if not NEOTOMA_BEARER_TOKEN:
-        log.debug(f"[{DAEMON_NAME}] No NEOTOMA_BEARER_TOKEN — skipping Neotoma write")
-        return None
-
     if DRY_RUN:
         log.info(
             f"[{DAEMON_NAME}] DRY RUN — would store email entity for {message.get('id')}"
         )
         return None
 
-    payload = {
+    entity = {
         "entity_type": "email_message",
         "canonical_name": f"email_message:gmail:{message.get('id', 'unknown')}",
-        "snapshot": {
-            "message_id": message.get("id", ""),
-            "sender": message.get("sender", ""),
-            "subject": message.get("subject", ""),
-            "snippet": message.get("snippet", ""),
-            "date": message.get("date_iso", ""),
-            "labels": message.get("labels", []),
-            "classification": message.get("classification", "informational"),
-            "source": "gmail",
-        },
+        "message_id": message.get("id", ""),
+        "sender": message.get("sender", ""),
+        "subject": message.get("subject", ""),
+        "snippet": message.get("snippet", ""),
+        "date": message.get("date_iso", ""),
+        "labels": message.get("labels", []),
+        "classification": message.get("classification", "informational"),
+        "source": "gmail",
     }
 
-    try:
-        async with httpx.AsyncClient(
-            headers={
-                "Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}",
-                "Content-Type": "application/json",
-            },
-            timeout=15,
-        ) as client:
-            resp = await client.post(f"{NEOTOMA_BASE_URL}/observations", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            entity_id = data.get("entity_id") or (
-                data.get("entities", [{}])[0].get("entity_id")
-            )
-            log.info(f"[{DAEMON_NAME}] Stored email_message entity {entity_id}")
-            return entity_id
-    except Exception as exc:
-        log.error(f"[{DAEMON_NAME}] Failed to store email entity: {exc}")
-        return None
+    entity_id = await neotoma_mcp.store_entity(
+        NEOTOMA_BASE_URL,
+        NEOTOMA_BEARER_TOKEN,
+        entity,
+        idempotency_key=f"turdus-email-{message.get('id', 'unknown')}",
+    )
+    if entity_id:
+        log.info(f"[{DAEMON_NAME}] Stored email_message entity {entity_id}")
+    else:
+        log.error(f"[{DAEMON_NAME}] Failed to store email entity for {message.get('id')}")
+    return entity_id
 
 
-async def _create_task_for_email(message: dict, email_entity_id: str | None) -> None:
+async def _create_task_for_email(
+    message: dict, email_entity_id: str | None
+) -> str | None:
     """
     Create a Neotoma task entity for an actionable email.
 
     Invoices/receipts/payment requests are routed directly to Monedula with
     priority=urgent, bypassing general Apis dispatch. All other actionable
     emails create a standard agent-audience task routed through Apis.
+
+    Returns the created task's entity id (None on failure), so the caller can
+    tell the operator WHICH task was created rather than just how many — and so
+    the notifier only claims a task exists when the write actually landed.
+
+    Writes via the Neotoma MCP transport (the REST POST /observations it used to
+    call was removed server-side and 404s on every sweep).
     """
-    import httpx
-
-    if not NEOTOMA_BEARER_TOKEN:
-        return
-
     subject = message.get("subject", "(no subject)")
     sender = message.get("sender", "")
     snippet = message.get("snippet", "")
@@ -539,43 +546,70 @@ async def _create_task_for_email(message: dict, email_entity_id: str | None) -> 
         )
         return
 
-    payload = {
+    entity = {
         "entity_type": "task",
         "canonical_name": f"task:turdus:email:{message.get('id', 'unknown')}",
-        "snapshot": snapshot,
+        **snapshot,
     }
 
-    try:
-        async with httpx.AsyncClient(
-            headers={
-                "Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}",
-                "Content-Type": "application/json",
-            },
-            timeout=15,
-        ) as client:
-            resp = await client.post(f"{NEOTOMA_BASE_URL}/observations", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            task_id = data.get("entity_id") or (
-                data.get("entities", [{}])[0].get("entity_id")
-            )
-            log.info(
-                f"[{DAEMON_NAME}] Created task {task_id} for email from {sender!r}"
-            )
+    task_id = await neotoma_mcp.store_entity(
+        NEOTOMA_BASE_URL,
+        NEOTOMA_BEARER_TOKEN,
+        entity,
+        idempotency_key=f"turdus-task-{message.get('id', 'unknown')}",
+    )
+    if not task_id:
+        log.error(f"[{DAEMON_NAME}] Failed to create task for email from {sender!r}")
+        return None
 
-            # Link task REFERS_TO email entity
-            if email_entity_id and task_id:
-                rel_payload = {
-                    "source_entity_id": task_id,
-                    "target_entity_id": email_entity_id,
-                    "relationship_type": "REFERS_TO",
-                }
-                await client.post(
-                    f"{NEOTOMA_BASE_URL}/create_relationship", json=rel_payload
-                )
+    log.info(f"[{DAEMON_NAME}] Created task {task_id} for email from {sender!r}")
 
-    except Exception as exc:
-        log.error(f"[{DAEMON_NAME}] Failed to create task for email: {exc}")
+    # Link task REFERS_TO email entity (best-effort — a link failure must not
+    # discard the task_id we just earned).
+    if email_entity_id and task_id:
+        await neotoma_mcp.create_relationship(
+            NEOTOMA_BASE_URL,
+            NEOTOMA_BEARER_TOKEN,
+            source_entity_id=task_id,
+            target_entity_id=email_entity_id,
+            relationship_type="REFERS_TO",
+            idempotency_key=f"turdus-rel-{message.get('id', 'unknown')}",
+        )
+    return task_id
+
+
+def _format_sender(sender: str) -> str:
+    """'Name <a@b.com>' -> 'Name (a@b.com)'; bare addresses pass through."""
+    s = (sender or "").strip()
+    if "<" in s and ">" in s:
+        name = s.split("<", 1)[0].strip().strip('"')
+        addr = s.split("<", 1)[1].split(">", 1)[0].strip()
+        return f"{name} ({addr})" if name else addr
+    return s or "(unknown sender)"
+
+
+def _format_digest(headline: str, items: list[dict], max_items: int = 10) -> str:
+    """Render a notification that says WHO and WHAT, not just a count.
+
+    The previous form — "turdus: 1 invoice(s) → urgent task(s) created for
+    monedula" — carried no sender, subject, or task id, so it was unactionable
+    without opening Neotoma. Each line now names the sender and subject, with the
+    created task id for follow-up.
+    """
+    lines = [f"{DAEMON_NAME}: {headline}", ""]
+    for item in items[:max_items]:
+        subject = (item.get("subject") or "(no subject)").strip()
+        if len(subject) > 78:
+            subject = subject[:77] + "…"
+        lines.append(f"• {subject}")
+        lines.append(f"    from: {_format_sender(item.get('sender', ''))}")
+        if item.get("task_id"):
+            lines.append(f"    task: {item['task_id']}")
+        else:
+            lines.append("    task: (creation failed — see logs)")
+    if len(items) > max_items:
+        lines.append(f"…and {len(items) - max_items} more.")
+    return "\n".join(lines).rstrip()
 
 
 # ── Swarm PR-approval-by-email (approval loop) ────────────────────────────────
@@ -586,6 +620,20 @@ def _extract_sender_address(sender: str) -> str:
     m = re.search(r"<([^>]+)>", sender or "")
     addr = (m.group(1) if m else (sender or "")).strip().lower()
     return addr
+
+
+def _is_self_notification(sender: str, subject: str) -> bool:
+    """True if this message is one Turdus (or the swarm) sent to the operator.
+
+    Triage feeds on the operator's inbox, into which the notifier delivers swarm
+    digests via a `+swarm` alias — same inbox, unread. Left unfiltered, Turdus's
+    own "[Ateles] …" digest matches the invoice/actionable keywords and triggers
+    an endless self-notification loop. Match on the swarm From-address (primary)
+    or the "[Ateles]" subject prefix (fallback when the address isn't configured).
+    """
+    if SWARM_EMAIL and _extract_sender_address(sender) == SWARM_EMAIL:
+        return True
+    return (subject or "").lstrip().startswith(_SELF_SUBJECT_PREFIX)
 
 
 def _parse_approve_token(text: str) -> tuple[str, int] | None:
@@ -785,6 +833,8 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
 
     actionable_count = 0
     invoice_count = 0
+    invoice_items: list[dict] = []
+    actionable_items: list[dict] = []
     approval_count = 0
     for msg in new_messages:
         # Swarm PR-approval reply takes precedence over normal classification:
@@ -800,6 +850,15 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         sender = msg.get("sender", msg.get("from", ""))
         subject = msg.get("subject", "(no subject)")
         snippet = msg.get("snippet", "")
+
+        # Skip Turdus's own swarm digests — they re-enter the inbox via the
+        # +swarm alias and would otherwise self-trigger an invoice loop.
+        if _is_self_notification(sender, subject):
+            log.info(
+                f"[{DAEMON_NAME}] SELF-SKIP: own swarm digest "
+                f"subject={subject[:60]!r}"
+            )
+            continue
 
         classification = _classify_message(sender, subject, snippet)
         msg["classification"] = classification
@@ -818,11 +877,21 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         email_entity_id = await _store_email_entity(msg)
 
         if classification == "actionable" or is_invoice:
+            task_id = await _create_task_for_email(msg, email_entity_id)
+            # Keep WHO and WHAT, not just a tally — a bare count ("1 invoice(s)")
+            # tells the operator nothing actionable.
+            item = {
+                "sender": sender,
+                "subject": subject,
+                "task_id": task_id,
+                "snippet": snippet,
+            }
             if is_invoice:
                 invoice_count += 1
+                invoice_items.append(item)
             else:
                 actionable_count += 1
-            await _create_task_for_email(msg, email_entity_id)
+                actionable_items.append(item)
             _label_gmail_message(msg.get("id", ""), "Turdus/processed")
 
     # Update state with newest processed message ID
@@ -833,13 +902,19 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
 
     if invoice_count > 0:
         notifier.send(
-            f"{DAEMON_NAME}: {invoice_count} invoice(s) → urgent task(s) created for monedula",
+            _format_digest(
+                f"{invoice_count} invoice(s) → urgent task(s) for monedula",
+                invoice_items,
+            ),
             priority=Priority.BLOCKER,
             handler=DAEMON_NAME,
         )
     if actionable_count > 0:
         notifier.send(
-            f"{DAEMON_NAME}: {actionable_count} actionable email(s) → tasks created",
+            _format_digest(
+                f"{actionable_count} actionable email(s) → task(s) created",
+                actionable_items,
+            ),
             priority=Priority.INFO,
             handler=DAEMON_NAME,
         )
