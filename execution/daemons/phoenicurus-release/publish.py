@@ -738,6 +738,7 @@ def publish_release(
     dry_run: bool,
     force: bool,
     resume_from: str | None = None,
+    email_approval: bool = False,
 ) -> None:
     f = _entity_fields(release)
     status = str(f.get("status") or "")
@@ -745,6 +746,30 @@ def publish_release(
     rc_branch = str(f.get("rc_branch") or f"release/{version}")
     notes_path_s = str(f.get("notes_path") or "")
     notes_path = Path(notes_path_s) if notes_path_s else None
+
+    # Email-approval path (Turdus -> Apis -> here): the operator replied
+    # `approve <version>` to the RC email. This IS the approval, so flip
+    # pending_approval -> approved here — but ONLY from pending_approval, the
+    # exact gate the Ateles Telegram-approve path applies. Refuse any other
+    # starting state (already publishing/published, or never prepared) so a
+    # duplicate or stale email reply can't re-publish or publish an un-prepared
+    # version. This runs before the approved-gate below, which then passes.
+    if email_approval and not force:
+        if status == "approved":
+            log.info(f"{version} already approved — proceeding to publish")
+        elif status == "pending_approval":
+            if not dry_run:
+                set_release_status(version, "approved")
+            status = "approved"
+            log.info(f"{version} approved via email reply -> publishing")
+        else:
+            raise StepError(
+                f"email-approval for {version} refused: release status is "
+                f"{status!r}, not 'pending_approval'. A release can only be "
+                "email-approved from pending_approval (this guards against a "
+                "duplicate/stale reply re-publishing or publishing an "
+                "un-prepared version)."
+            )
 
     if status not in ("approved",) and not force:
         raise StepError(
@@ -822,6 +847,13 @@ def main() -> int:
         help="resume from this step, skipping earlier steps (e.g. after a "
         "manual fix following a merge_rc_pr/insufficient_permissions failure)",
     )
+    ap.add_argument(
+        "--from-email-approval",
+        action="store_true",
+        help="the operator approved by email reply (Turdus->Apis): flip the "
+        "release from pending_approval to approved, then publish. Refuses any "
+        "other starting state.",
+    )
     args = ap.parse_args()
 
     if not args.version and not args.entity_id:
@@ -849,7 +881,9 @@ def main() -> int:
 
     try:
         publish_release(
-            release, version, args.dry_run, args.force, resume_from=args.resume_from
+            release, version, args.dry_run, args.force,
+            resume_from=args.resume_from,
+            email_approval=args.from_email_approval,
         )
         return 0
     except StepError as exc:
