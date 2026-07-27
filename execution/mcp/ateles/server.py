@@ -79,38 +79,73 @@ def _headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}
 
 
-def _get(path: str, params: dict | None = None) -> dict | None:
+# Last transport failure, so callers can tell "Neotoma said no rows" apart from
+# "the request never succeeded". Both still surface as None/[] from the helpers
+# — this records WHY, and tools echo it back to the agent.
+#
+# Motivating bug: _retrieve_entities posted to a 404 path, got None, returned
+# [], and get_swarm_roster reported "swarm_roster not found" — a data-absence
+# message for a transport failure. The URL fix alone would leave the next wrong
+# endpoint, expired token, or outage just as silent.
+_last_transport_error: str | None = None
+
+
+def _clear_transport_error() -> None:
+    global _last_transport_error
+    _last_transport_error = None
+
+
+def _record_transport_error(kind: str, method: str, path: str, detail: str) -> None:
+    """kind is the agent-actionable class: no_token | not_found | request_failed."""
+    global _last_transport_error
+    _last_transport_error = f"{kind}: {method} {path} — {detail}"
+    log.warning("neotoma %s %s failed (%s): %s", method, path, kind, detail)
+
+
+def _describe_transport_error() -> str | None:
+    return _last_transport_error
+
+
+def _request(method: str, path: str, *, params: dict | None = None, body: dict | None = None) -> dict | None:
     if not NEOTOMA_BEARER_TOKEN:
+        _record_transport_error(
+            "no_token", method, path,
+            "NEOTOMA_BEARER_TOKEN is unset — escalate to the operator, retrying will not help",
+        )
         return None
     try:
-        resp = httpx.get(
+        resp = httpx.request(
+            method,
             f"{NEOTOMA_BASE_URL}{path}",
             headers=_headers(),
             params=params,
-            timeout=15,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as exc:
-        log.warning("neotoma GET %s failed: %s", path, exc)
-        return None
-
-
-def _post(path: str, body: dict) -> dict | None:
-    if not NEOTOMA_BEARER_TOKEN:
-        return None
-    try:
-        resp = httpx.post(
-            f"{NEOTOMA_BASE_URL}{path}",
-            headers=_headers(),
             json=body,
             timeout=15,
         )
         resp.raise_for_status()
+        _clear_transport_error()
         return resp.json()
-    except Exception as exc:
-        log.warning("neotoma POST %s failed: %s", path, exc)
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        kind = "not_found" if status == 404 else "request_failed"
+        hint = (
+            " — endpoint does not exist on this Neotoma instance (entity lists are POST /entities/query)"
+            if status == 404
+            else ""
+        )
+        _record_transport_error(kind, method, path, f"HTTP {status}{hint}")
         return None
+    except Exception as exc:
+        _record_transport_error("request_failed", method, path, f"{type(exc).__name__}: {exc}")
+        return None
+
+
+def _get(path: str, params: dict | None = None) -> dict | None:
+    return _request("GET", path, params=params)
+
+
+def _post(path: str, body: dict) -> dict | None:
+    return _request("POST", path, body=body)
 
 
 def _retrieve_entities(
@@ -129,7 +164,9 @@ def _retrieve_entities(
         body["search"] = search
     if snapshot_filters:
         body["snapshot_filters"] = snapshot_filters
-    data = _post("/retrieve", body)
+    # POST /entities/query — NOT /retrieve, which 404s. The GET /entities list
+    # endpoint does not exist either; see lib/daemon_runtime/agent_loader.py.
+    data = _post("/entities/query", body)
     if data is None:
         return []
     return data.get("entities", [])
@@ -156,6 +193,37 @@ def _correct(entity_id: str, entity_type: str, field: str, value: Any, idem_key:
     return result is not None
 
 
+# Tie-break order for equal-length keyword matches, most specific first.
+#
+# Only consulted when two roles match a description with keywords of identical
+# length; unequal lengths are always decided by length alone. Without this,
+# equal-length ties fall to whichever role appears first in role_keywords —
+# reintroducing the declaration-order dependence the length rule exists to
+# remove (e.g. "payment" and "bug fix" are both 7 characters).
+#
+# Rationale for the order: money and irreversible external actions outrank
+# generic implementation work, so an ambiguous description escalates toward the
+# more consequential handler rather than silently landing on code.
+ROLE_TIE_BREAK: tuple[str, ...] = (
+    "payments",
+    "tax",
+    "release_manager",
+    "compliance",
+    "pr_steward",
+    "issue_triage",
+    "qa",
+    "code",
+)
+
+
+def _role_priority(role: str) -> int:
+    """Higher is more specific. Unlisted roles share the lowest priority."""
+    try:
+        return len(ROLE_TIE_BREAK) - ROLE_TIE_BREAK.index(role)
+    except ValueError:
+        return 0
+
+
 # ── Tool implementations ─────────────────────────────────────────────────────
 
 def _get_swarm_roster() -> dict:
@@ -165,6 +233,15 @@ def _get_swarm_roster() -> dict:
         limit=1,
     )
     if not entities:
+        # Distinguish "Neotoma has no such roster" from "the request failed" —
+        # reporting the former for the latter is what hid the /retrieve 404.
+        transport_error = _describe_transport_error()
+        if transport_error:
+            return {
+                "error": f"could not reach Neotoma: {transport_error}",
+                "roster_key": ROSTER_KEY,
+                "transport_error": transport_error,
+            }
         return {"error": "swarm_roster not found", "roster_key": ROSTER_KEY}
 
     snap = _snapshot_of(entities[0])
@@ -196,8 +273,9 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
     best_agent: str | None = None
 
     desc_lower = task_description.lower()
-    # Ordered most-specific first: multi-word keywords must match before
-    # single-word substrings (e.g. "review pr" → pr_steward, not code).
+    # Declaration order is cosmetic — the longest matching keyword wins (see
+    # the selection loop below), so specificity is decided by keyword length,
+    # not by position in this table. Grouping here is for readability only.
     role_keywords: dict[str, list[str]] = {
         "pr_steward": ["review pr", "merge pr", "pull request review"],
         "issue_triage": ["issue", "bug report", "github issue", "triage issue"],
@@ -221,19 +299,50 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
         "pm": ["product", "roadmap", "feature plan"],
         "crm": ["contact", "crm", "relationship"],
         "qa": ["test", "qa ", "quality"],
-        "code": ["code", "implement", "build", "fix bug", "refactor"],
+        "code": [
+            "code", "implement", "build", "refactor",
+            # Natural bug-fix phrasings. A rigid "fix bug" misses the far more
+            # common "fix a bug" / "fix the bug", which then fell through to
+            # the dispatcher fallback.
+            "fix bug", "fix a bug", "fix the bug", "bugfix", "bug fix",
+        ],
         "dispatcher": ["dispatch", "assign", "route"],
     }
 
+    # Selection is (keyword length, role priority) — never dict order.
+    #
+    # Longest keyword wins: "refactor the payment module" must reach code via
+    # "refactor" (8) rather than payments via "payment" (7).
+    #
+    # Ties are the subtle half. Length alone leaves equal-length matches to be
+    # settled by whichever role is declared first, which is the same
+    # order-dependence in a different disguise — e.g. "process payment for a
+    # bug fix" matches payments' "payment" (7) and code's "bug fix" (7), and
+    # silently resolved to payments purely by position. ROLE_TIE_BREAK states
+    # the intent explicitly: when two roles match equally well, the more
+    # consequential/specific handler wins. Roles absent from the list share the
+    # lowest priority and then fall back to alphabetical order, so the result is
+    # always deterministic and never depends on table position.
+    best_key: tuple[int, int, str] | None = None
+    matched_keyword: str | None = None
     for role, keywords in role_keywords.items():
+        if role not in roles:
+            continue
         for kw in keywords:
-            if kw in desc_lower and role in roles:
+            if kw not in desc_lower:
+                continue
+            # Higher tuple sorts better: longer keyword, then higher priority,
+            # then a stable alphabetical tiebreak (negated via reverse compare).
+            priority = _role_priority(role)
+            key = (len(kw), priority, role)
+            if best_key is None or key > best_key:
+                best_key = key
+                matched_keyword = kw
                 best_role = role
                 best_agent = roles[role]
-                break
-        if best_role:
-            break
 
+    # Fallback: nothing in the table matched this description at all.
+    matched_via = "keyword" if matched_keyword else "fallback"
     if not best_agent:
         best_role = "dispatcher"
         best_agent = roles.get("dispatcher")
@@ -273,6 +382,11 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
     result: dict[str, Any] = {
         "matched_role": best_role,
         "matched_agent": best_agent,
+        # Why this role won: the keyword that matched (longest match wins), or
+        # "fallback" when nothing matched. Makes a misroute a one-field
+        # diagnosis instead of a source dive through role_keywords.
+        "matched_keyword": matched_keyword,
+        "matched_via": matched_via,
         "swarm_domain": roster.get("swarm_domain", ""),
     }
     if agent_def:
