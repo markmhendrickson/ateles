@@ -45,14 +45,21 @@ def parse_verdict(text: str, token: str) -> bool | None:
     """Return True (approve), False (skip), or None (no verdict) for a reply.
 
     Accepts a bare "APPROVE"/"SKIP"/"YES" (the token is matched separately, from
-    the quoted subject) and the explicit "APPROVE <token>" / "APPROVE-<token>"
-    forms. SKIP is decisive: if both a skip and an approve appear, the result is
-    SKIP, so an ambiguous reply never acts by accident.
+    the quoted subject), the explicit "APPROVE <token>" / "APPROVE-<token>"
+    forms, and a line that simply STARTS with the verb followed by anything —
+    e.g. "approve v0.20.0" (the release-approval UX, where the operator names
+    the version). SKIP is decisive: if both a skip and an approve appear, the
+    result is SKIP, so an ambiguous reply never acts by accident.
+
+    The verb must be the FIRST word of the operator's own (unquoted) line — a
+    chatty "i approve this" mid-sentence is NOT a verdict, and the quoted
+    original is stripped first, so a quoted instruction never counts.
 
     `text` should be the full reply text (subject + body); matching is
-    case-insensitive.
+    case-insensitive, including the token.
     """
     up = text.upper()
+    tok = (token or "").upper()
 
     # Strip the quoted original. Gmail plain-text replies put the operator's own
     # words FIRST, then "On <date> ... wrote:" followed by the quoted request
@@ -73,8 +80,15 @@ def parse_verdict(text: str, token: str) -> bool | None:
         # Ignore the subject line itself (it always contains "APPROVE-<token>").
         if s.startswith("RE:") or s.startswith("[ATELES]"):
             continue
-        if s in ("SKIP", f"SKIP {token}", f"SKIP-{token}"):
+        # The first word of the operator's own line decides. SKIP-as-first-word
+        # is decisive (returns immediately); APPROVE/YES-as-first-word marks
+        # approve but keeps scanning in case a later line says SKIP. The
+        # first-word check covers the bare verb and the "VERB <anything>" form
+        # (e.g. "approve v0.20.0"); the explicit "VERB-<token>" (hyphen-joined,
+        # no space) form is matched separately since it is a single word.
+        first = s.split()[0] if s.split() else ""
+        if first == "SKIP" or s == f"SKIP-{tok}":
             return False  # SKIP is decisive — never act on an ambiguous reply
-        if s in ("APPROVE", "YES", f"APPROVE {token}", f"APPROVE-{token}"):
+        if first in ("APPROVE", "YES") or s == f"APPROVE-{tok}":
             verdict = True
     return verdict
