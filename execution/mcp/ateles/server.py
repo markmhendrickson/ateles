@@ -54,9 +54,6 @@ AGENT_POLICY_OVERRIDES: dict[str, str] = {
     ),
 }
 
-CHECKPOINT_APPROVED_STATES = frozenset({"approved", "approve", "accepted"})
-CHECKPOINT_REJECTED_STATES = frozenset({"rejected", "reject", "declined", "denied"})
-
 SERVER_INSTRUCTIONS = """\
 You are connected to Ateles. Follow these operating rules:
 
