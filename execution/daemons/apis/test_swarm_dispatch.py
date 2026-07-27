@@ -4431,6 +4431,48 @@ def test_push_main_survives_prepare_failure(monkeypatch):
     asyncio.run(d._handle_push_main(_push_main_trigger()))  # must not raise
 
 
+def test_push_main_prepare_timeout(monkeypatch, caplog):
+    """A wedged prepare.py subprocess must be bounded, swallowed, and logged.
+
+    ``_handle_push_main`` is documented as "Fully best-effort; never raises" -
+    a hung git/gh call inside prepare.py must not wedge the dispatcher, and
+    the failure must surface as a diagnosable log line instead of silently
+    vanishing.
+    """
+
+    class _P:
+        returncode = None
+
+        async def communicate(self):
+            # Never actually awaited by fake_wait_for below (that's the point
+            # of the timeout), but must be a real coroutine to avoid an
+            # "unawaited coroutine" warning when wait_for() is called on it.
+            await asyncio.sleep(0)
+            return (b"", b"")
+
+    async def fake_exec(*args, **kwargs):
+        return _P()
+
+    async def fake_wait_for(coro, timeout):
+        coro.close()
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
+    monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: True)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    trigger = _push_main_trigger()
+    with caplog.at_level("ERROR", logger="apis.swarm_dispatch"):
+        asyncio.run(d._handle_push_main(trigger))  # must not raise
+
+    sha = trigger.push_after[:9]
+    assert any(
+        sha in rec.message and str(swarm_dispatch.PHOENICURUS_PREPARE_TIMEOUT_S) in rec.message
+        for rec in caplog.records
+    ), "timeout must be logged with the SHA and the configured timeout for diagnosis"
+
+
 # ── auto-release retry: main CI completion re-drives release prep ────────────
 #
 # A push_main that fires while its merge's CI is still running defers WITHOUT

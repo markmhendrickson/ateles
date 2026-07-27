@@ -7,6 +7,7 @@ import json
 
 from aiohttp.test_utils import TestClient, TestServer
 
+import github_gateway
 from github_gateway import make_app, parse_github_event, verify_github_signature
 
 TEST_HMAC_KEY = "dummy-hmac-fixture-key"
@@ -479,3 +480,19 @@ def test_branch_deletion_ignored():
 
 def test_push_with_deleted_flag_ignored():
     assert parse_github_event("push", _push_payload(deleted=True)) is None
+
+
+def test_push_override_ref_ignores_default_main(monkeypatch):
+    # RELEASE_PUSH_REF is read once at import time into a module-level
+    # constant, so monkeypatch.setenv alone would not affect it; patch the
+    # module attribute directly to exercise the override branch.
+    monkeypatch.setattr(github_gateway, "RELEASE_PUSH_REF", "refs/heads/other")
+    assert parse_github_event("push", _push_payload(ref="refs/heads/main")) is None
+
+
+def test_push_override_ref_accepts_configured_ref(monkeypatch):
+    monkeypatch.setattr(github_gateway, "RELEASE_PUSH_REF", "refs/heads/other")
+    t = parse_github_event("push", _push_payload(ref="refs/heads/other"))
+    assert t is not None
+    assert t.kind == "push_main"
+    assert t.push_ref == "refs/heads/other"

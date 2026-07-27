@@ -45,14 +45,12 @@ jobs:
         id: tag
         run: |
           set -euo pipefail
-          BASE="v$(date -u +%Y.%m.%d)"
-          # Several merges can land on one day; suffix .1, .2, ... after the first.
-          TAG="$BASE"
-          N=1
-          while git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; do
-            TAG="$BASE.$N"
-            N=$((N + 1))
-          done
+          TODAY="$(date -u +%Y.%m.%d)"
+          # Tag/versioning logic lives in tag_utils.py (unit tested in
+          # test_tag_utils.py) rather than inline here — see that module for
+          # the calendar-suffix rules.
+          TAG="$(python3 execution/daemons/phoenicurus-release/tag_utils.py compute-tag \
+            --today "$TODAY" --existing-tags "$(git tag)")"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           PREV="$(git describe --tags --abbrev=0 2>/dev/null || true)"
           echo "prev=$PREV" >> "$GITHUB_OUTPUT"
@@ -80,7 +78,8 @@ jobs:
           echo "--- notes ---"; cat /tmp/notes.md
 
       # Skip cutting an empty release when main moved but produced no non-merge
-      # commits since the last tag (e.g. a merge-only push).
+      # commits since the last tag (e.g. a merge-only push). Guard logic lives
+      # in tag_utils.has_releasable_commits (unit tested).
       - name: Check there is something to release
         id: check
         env:
@@ -90,10 +89,19 @@ jobs:
           if [ -n "$PREV" ]; then
             COUNT="$(git rev-list --no-merges --count "$PREV..HEAD")"
           else
-            COUNT=1
+            COUNT=0
           fi
-          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
-          echo "$COUNT non-merge commit(s) since ${PREV:-repo start}"
+          if python3 execution/daemons/phoenicurus-release/tag_utils.py has-releasable-commits \
+            --count "$COUNT" --prev "$PREV"; then
+            echo "count=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "count=0" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "$PREV" ]; then
+            echo "$COUNT non-merge commit(s) since $PREV"
+          else
+            echo "No previous tag — proceeding with the initial release"
+          fi
 
       - name: Create GitHub Release
         if: steps.check.outputs.count != '0'
