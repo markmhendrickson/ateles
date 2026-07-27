@@ -14,7 +14,7 @@ later be sent to a vision LLM for contextual analysis against the transcript.
 
 Optional env:
     RECORD_MEETING_FRAME_INTERVAL  seconds between frames (default 60)
-    NEOTOMA_PROD_BASE_URL          prod Neotoma base URL (default http://localhost:3180)
+    NEOTOMA_PROD_BASE_URL          prod Neotoma base URL (default http://localhost:9180)
     NEOTOMA_BEARER_TOKEN           bearer token for Neotoma API
 """
 
@@ -59,7 +59,7 @@ def extract_frames(video_path: Path, output_dir: Path, interval_sec: int) -> lis
 
 
 def _neotoma_prod_base_url() -> str:
-    return os.environ.get("NEOTOMA_PROD_BASE_URL", "http://localhost:3180")
+    return os.environ.get("NEOTOMA_PROD_BASE_URL", "http://localhost:9180")
 
 
 def _neotoma_cli_available() -> bool:
