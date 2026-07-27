@@ -79,38 +79,73 @@ def _headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}
 
 
-def _get(path: str, params: dict | None = None) -> dict | None:
+# Last transport failure, so callers can tell "Neotoma said no rows" apart from
+# "the request never succeeded". Both still surface as None/[] from the helpers
+# — this records WHY, and tools echo it back to the agent.
+#
+# Motivating bug: _retrieve_entities posted to a 404 path, got None, returned
+# [], and get_swarm_roster reported "swarm_roster not found" — a data-absence
+# message for a transport failure. The URL fix alone would leave the next wrong
+# endpoint, expired token, or outage just as silent.
+_last_transport_error: str | None = None
+
+
+def _clear_transport_error() -> None:
+    global _last_transport_error
+    _last_transport_error = None
+
+
+def _record_transport_error(kind: str, method: str, path: str, detail: str) -> None:
+    """kind is the agent-actionable class: no_token | not_found | request_failed."""
+    global _last_transport_error
+    _last_transport_error = f"{kind}: {method} {path} — {detail}"
+    log.warning("neotoma %s %s failed (%s): %s", method, path, kind, detail)
+
+
+def _describe_transport_error() -> str | None:
+    return _last_transport_error
+
+
+def _request(method: str, path: str, *, params: dict | None = None, body: dict | None = None) -> dict | None:
     if not NEOTOMA_BEARER_TOKEN:
+        _record_transport_error(
+            "no_token", method, path,
+            "NEOTOMA_BEARER_TOKEN is unset — escalate to the operator, retrying will not help",
+        )
         return None
     try:
-        resp = httpx.get(
+        resp = httpx.request(
+            method,
             f"{NEOTOMA_BASE_URL}{path}",
             headers=_headers(),
             params=params,
-            timeout=15,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as exc:
-        log.warning("neotoma GET %s failed: %s", path, exc)
-        return None
-
-
-def _post(path: str, body: dict) -> dict | None:
-    if not NEOTOMA_BEARER_TOKEN:
-        return None
-    try:
-        resp = httpx.post(
-            f"{NEOTOMA_BASE_URL}{path}",
-            headers=_headers(),
             json=body,
             timeout=15,
         )
         resp.raise_for_status()
+        _clear_transport_error()
         return resp.json()
-    except Exception as exc:
-        log.warning("neotoma POST %s failed: %s", path, exc)
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        kind = "not_found" if status == 404 else "request_failed"
+        hint = (
+            " — endpoint does not exist on this Neotoma instance (entity lists are POST /entities/query)"
+            if status == 404
+            else ""
+        )
+        _record_transport_error(kind, method, path, f"HTTP {status}{hint}")
         return None
+    except Exception as exc:
+        _record_transport_error("request_failed", method, path, f"{type(exc).__name__}: {exc}")
+        return None
+
+
+def _get(path: str, params: dict | None = None) -> dict | None:
+    return _request("GET", path, params=params)
+
+
+def _post(path: str, body: dict) -> dict | None:
+    return _request("POST", path, body=body)
 
 
 def _retrieve_entities(
@@ -167,6 +202,15 @@ def _get_swarm_roster() -> dict:
         limit=1,
     )
     if not entities:
+        # Distinguish "Neotoma has no such roster" from "the request failed" —
+        # reporting the former for the latter is what hid the /retrieve 404.
+        transport_error = _describe_transport_error()
+        if transport_error:
+            return {
+                "error": f"could not reach Neotoma: {transport_error}",
+                "roster_key": ROSTER_KEY,
+                "transport_error": transport_error,
+            }
         return {"error": "swarm_roster not found", "roster_key": ROSTER_KEY}
 
     snap = _snapshot_of(entities[0])
@@ -240,15 +284,19 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
     # because payments is declared earlier. Preferring the most specific
     # (longest) matching keyword makes the outcome order-independent.
     best_kw_len = 0
+    matched_keyword: str | None = None
     for role, keywords in role_keywords.items():
         if role not in roles:
             continue
         for kw in keywords:
             if kw in desc_lower and len(kw) > best_kw_len:
                 best_kw_len = len(kw)
+                matched_keyword = kw
                 best_role = role
                 best_agent = roles[role]
 
+    # Fallback: nothing in the table matched this description at all.
+    matched_via = "keyword" if matched_keyword else "fallback"
     if not best_agent:
         best_role = "dispatcher"
         best_agent = roles.get("dispatcher")
@@ -288,6 +336,11 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
     result: dict[str, Any] = {
         "matched_role": best_role,
         "matched_agent": best_agent,
+        # Why this role won: the keyword that matched (longest match wins), or
+        # "fallback" when nothing matched. Makes a misroute a one-field
+        # diagnosis instead of a source dive through role_keywords.
+        "matched_keyword": matched_keyword,
+        "matched_via": matched_via,
         "swarm_domain": roster.get("swarm_domain", ""),
     }
     if agent_def:
