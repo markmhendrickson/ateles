@@ -12,6 +12,7 @@ on:
       - "ateles/**"
       - ".claude/hooks/**"
       - "execution/daemons/phoenicurus-release/**"
+      - "execution/mcp/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/ateles-tests.yml"
@@ -32,3 +33,19 @@ jobs:
         run: uv run --extra dev python -m pytest ateles/ .claude/hooks/ -q
       - name: Run phoenicurus-release daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/phoenicurus-release/ -q
+
+  mcp-server-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Install MCP server deps
+        run: |
+          uv venv .mcp-venv
+          VIRTUAL_ENV=.mcp-venv uv pip install mcp httpx
+      - name: Run ateles MCP server tests
+        run: .mcp-venv/bin/python execution/mcp/ateles/test_server.py
+      - name: Run ateles MCP server smoke tests
+        run: .mcp-venv/bin/python execution/mcp/ateles/test_server_smoke.py
