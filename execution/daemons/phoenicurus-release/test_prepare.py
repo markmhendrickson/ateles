@@ -171,3 +171,36 @@ def test_notify_operator_email_failure_does_not_block_telegram(monkeypatch):
     except RuntimeError:
         pass
     assert "tg" in order  # Telegram fired first, regardless of email outcome
+
+
+# ── _agent_env: prefer Max OAuth over pay-per-token API key ──────────────────
+#
+# The first live prepare run (2026-07-27) died on "Credit balance is too low":
+# the headless agent inherited both credentials and `claude --print` used the
+# empty-credit ANTHROPIC_API_KEY. _agent_env drops the API key from the CHILD
+# env when the OAuth token is present, so the agent bills the subscription.
+
+
+def test_agent_env_prefers_oauth_when_both_set(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-tok")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-xxx")
+    env = prepare._agent_env()
+    assert "ANTHROPIC_API_KEY" not in env, "API key must be dropped from child env"
+    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "oauth-tok"
+
+
+def test_agent_env_leaves_api_key_only_untouched(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-xxx")
+    env = prepare._agent_env()
+    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-xxx", "no OAuth → keep the API key"
+
+
+def test_agent_env_does_not_mutate_daemon_env(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-tok")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-xxx")
+    prepare._agent_env()
+    import os as _os
+    assert _os.environ.get("ANTHROPIC_API_KEY") == "sk-ant-xxx", (
+        "the daemon's own env must be untouched — only the child copy is trimmed"
+    )
