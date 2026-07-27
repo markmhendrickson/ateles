@@ -355,17 +355,33 @@ def _build_agent_prompt(last_tag: str, commit_count: int) -> str:
     from_flag = f' --from "{SWARM_EMAIL}"' if SWARM_EMAIL else ""
     email_note = (
         f"""12. ALSO email the operator the SAME notification (release goes to the
-    inbox, not just Telegram — and the operator can approve BY EMAIL REPLY). Run
-    exactly:
-    `gws gmail +send --to "{OPERATOR_EMAIL}"{from_flag} --subject "🚀 Release <TAG> ready to approve" --body "<the full notification text: version, the FULL rendered release notes, the RC PR URL, advisory flags. Then, on their OWN lines: the exact line: Reply approve <TAG> to publish, or skip <TAG> to discard   AND the exact correlation token line: release-approve: <TAG>>"`
-    The email subject MUST start with 🚀 and contain the phrase "ready to
-    approve" and name the version. The body MUST contain BOTH (a) the
-    approve/skip instruction verbatim and (b) a line reading exactly
-    `release-approve: <TAG>` (with the real tag, e.g. `release-approve: v0.20.0`)
-    — Turdus keys off that token to route an `approve <TAG>` reply to the publish
-    gate, so it MUST be present and exact. If the gws send fails, log it and
-    continue — Telegram (step 11) is the guaranteed channel; do NOT abort the run
-    over an email failure."""
+    inbox, not just Telegram — and the operator can approve BY EMAIL REPLY).
+
+    SEND AS HTML, not raw markdown. The release notes are markdown; if sent as a
+    plain --body they render as a literal wall of `##` and `-` characters in
+    Gmail. Convert the notes to clean, well-formed HTML and pass `--html`:
+      - Write the HTML to a temp file and send with:
+        `gws gmail +send --to "{OPERATOR_EMAIL}"{from_flag} --subject "🚀 Release <TAG> ready to approve" --html --body "$(cat /tmp/release-<TAG>-email.html)"`
+        (or pass the HTML string directly to --body). ALWAYS include `--html`.
+      - Convert markdown → HTML properly: `##` headings → <h2>, `-` lists → <ul><li>,
+        `**bold**` → <strong>, code/backticks → <code>, blank lines → paragraph
+        breaks. Do NOT inline a tiny font-size; let the client default apply
+        (normal size). Keep it simple and readable — headings, paragraphs, lists.
+      - Put the RC PR URL as a real <a href> link.
+
+    The email MUST still contain, as VISIBLE TEXT the operator (and their reply
+    quote) will carry:
+      (a) the subject starting 🚀 with the phrase "ready to approve" + the version;
+      (b) an approve/skip instruction, e.g. a line: Reply <code>approve &lt;TAG&gt;</code>
+          to publish, or <code>skip &lt;TAG&gt;</code> to discard;
+      (c) a line reading exactly `release-approve: <TAG>` (real tag, e.g.
+          `release-approve: v0.20.0`) — Turdus parses this token from the reply
+          body to route an `approve <TAG>` reply to the publish gate, so it MUST be
+          present, exact, and in a form that survives as plain text in a quoted
+          reply (put it in its own <p> or <code> line, NOT only inside an href).
+
+    If the gws send fails, log it and continue — Telegram (step 11) is the
+    guaranteed channel; do NOT abort the run over an email failure."""
         if OPERATOR_EMAIL
         else "12. (Email notification skipped: OPERATOR_EMAIL is not configured.)"
     )
