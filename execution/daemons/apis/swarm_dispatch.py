@@ -844,6 +844,36 @@ _GH_PR_CREATE_FAILURE_SIGNATURES = (
 # on prose containing an unrelated word ending in "...gh:" (e.g. "though:").
 _GH_CLI_ERROR_PREFIX_RE = re.compile(r"(?<![a-z])gh:\s")
 
+# Secret shapes that can appear verbatim in a Cicada build child's stdout/stderr
+# (echoed by `git`/`gh` error output, or a leaked env dump): GitHub PATs (both
+# the legacy 40-hex `ghp_...` form and the newer fine-grained `github_pat_...`
+# form), and auth-in-URL basic-auth creds (`https://user:token@host/...`, the
+# shape `prepare_pr_worktree` deliberately avoids writing to disk but which can
+# still surface in a subprocess's own error text).
+_SECRET_PATTERNS = (
+    re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"://[^\s/@]+:[^\s/@]+@"),
+)
+
+_REDACTED = "[REDACTED]"
+
+
+def _redact_secrets(text: str) -> str:
+    """Scrub known GitHub-token and auth-in-URL shapes from build-handoff text.
+
+    Applied before stdout/stderr is persisted (excerpt and full fields alike)
+    or logged, so a leaked token in a Cicada build child's output never lands
+    in Neotoma or the daemon log verbatim. Pure string transform; never raises
+    on None/empty input.
+    """
+    if not text:
+        return text or ""
+    redacted = text
+    for pattern in _SECRET_PATTERNS:
+        redacted = pattern.sub(_REDACTED, redacted)
+    return redacted
+
 
 def classify_build_failure(
     returncode: int | None,
@@ -4136,6 +4166,11 @@ class SwarmDispatcher:
         untruncated stdout+stderr at ERROR level so the detail isn't lost
         twice (fallback per the design's empty/error-states section).
 
+        `stdout`/`stderr` are passed through `_redact_secrets` before ANY
+        derived field (excerpt or full) or the log.error fallback sink sees
+        them, so a token leaked by the build child's `git`/`gh` subprocess
+        output never reaches Neotoma or the daemon log verbatim.
+
         When at least one prior `build_attempt` exists for this issue (per
         `_count_prior_build_attempts`), this attempt's entity carries a
         SUPERSEDES relationship to the immediately-prior attempt. The prior
@@ -4145,8 +4180,8 @@ class SwarmDispatcher:
         since the key is fully determined by (repository, issue_number,
         attempt_seq).
         """
-        stdout = stdout or ""
-        stderr = stderr or ""
+        stdout = _redact_secrets(stdout or "")
+        stderr = _redact_secrets(stderr or "")
 
         def _excerpt(text: str) -> str:
             if len(text) <= 4000:

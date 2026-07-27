@@ -4636,6 +4636,108 @@ def test_store_build_attempt_supersedes_immediately_prior_attempt(monkeypatch):
     ]
 
 
+# ── _redact_secrets: no raw token survives into build_attempt or the log ─────
+
+
+def test_redact_secrets_scrubs_legacy_and_fine_grained_github_pats():
+    text = (
+        "remote: Invalid credentials for token ghp_"
+        + "A" * 36
+        + " and github_pat_"
+        + "B" * 30
+    )
+    redacted = swarm_dispatch._redact_secrets(text)
+    assert "ghp_" not in redacted
+    assert "github_pat_" not in redacted
+    assert redacted.count("[REDACTED]") == 2
+
+
+def test_redact_secrets_scrubs_auth_in_url():
+    text = "fatal: could not read from https://x-access-token:ghp_" + "C" * 36 + "@github.com/owner/repo.git"
+    redacted = swarm_dispatch._redact_secrets(text)
+    assert "ghp_" not in redacted
+    assert "@github.com" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_secrets_leaves_ordinary_text_untouched():
+    text = "fatal: pathspec 'foo' did not match any files"
+    assert swarm_dispatch._redact_secrets(text) == text
+
+
+def test_redact_secrets_handles_none_and_empty():
+    assert swarm_dispatch._redact_secrets("") == ""
+    assert swarm_dispatch._redact_secrets(None) == ""
+
+
+def test_store_build_attempt_scrubs_token_from_every_stored_field(monkeypatch):
+    """Effect-level: a token embedded in stdout/stderr must not survive into
+    ANY of stdout_excerpt/stderr_excerpt/stdout_full/stderr_full — the actual
+    reported effect (pm-lens finding on PR #258) is that `_store_build_attempt`
+    stored `stdout_full`/`stderr_full` verbatim with no scrubbing anywhere."""
+    async def fake_count(self, trigger):
+        return 0
+    monkeypatch.setattr(SwarmDispatcher, "_count_prior_build_attempts", fake_count)
+
+    captured = {}
+
+    async def fake_store_entities(self, entities, idempotency_key):
+        captured["entities"] = entities
+        return True
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store_entities)
+
+    token = "ghp_" + "D" * 36
+    long_prefix = "x" * 4100  # forces the excerpt path (> 4000 chars)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(
+        d._store_build_attempt(
+            _issue_trigger(),
+            returncode=1,
+            stdout=f"{long_prefix} leaked token {token} more",
+            stderr=f"auth failed for https://x-access-token:{token}@github.com/owner/repo.git",
+            failure_class="unclassified",
+            hint="hint text",
+            duration_ms=10,
+        )
+    )
+    entity = captured["entities"][0]
+    for field in ("stdout_excerpt", "stderr_excerpt", "stdout_full", "stderr_full"):
+        assert token not in entity[field], f"{field} leaked the raw token: {entity[field]!r}"
+
+
+def test_store_build_attempt_log_fallback_scrubs_token_on_store_failure(monkeypatch, caplog):
+    """The log.error fallback sink (hit when the Neotoma store itself fails)
+    must not echo the raw token either — it reuses the same redacted
+    stdout/stderr locals as the stored entity fields."""
+    async def fake_count(self, trigger):
+        return 0
+    monkeypatch.setattr(SwarmDispatcher, "_count_prior_build_attempts", fake_count)
+
+    async def fake_store_entities(self, entities, idempotency_key):
+        return False
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store_entities)
+
+    token = "ghp_" + "E" * 36
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    with caplog.at_level("ERROR", logger="apis.swarm_dispatch"):
+        entity_id = asyncio.run(
+            d._store_build_attempt(
+                _issue_trigger(),
+                returncode=1,
+                stdout=f"leaked {token}",
+                stderr="err",
+                failure_class="unclassified",
+                hint="hint text",
+                duration_ms=10,
+            )
+        )
+    assert entity_id is None
+    log_text = "\n".join(r.message for r in caplog.records)
+    assert token not in log_text
+    assert "[REDACTED]" in log_text
+
+
 # ── issue-pipeline resume after restart (ateles#230 follow-up) ───────────────
 
 

@@ -161,6 +161,8 @@ Escalation entities are created by any daemon or agent when a condition requires
 
 Full-fidelity diagnostics record of one Cicada auto-build handoff attempt (`SwarmDispatcher._open_implementation_pr` in `execution/daemons/apis/swarm_dispatch.py`). Written on every failed or no-op ("ran ok but opened no PR") attempt so the operator/developer never has to guess why a handoff failed from a bare `rc=1` log line — the complete stdout/stderr is stored untruncated. See [ateles#256](https://github.com/markmhendrickson/ateles/issues/256).
 
+**`guest_access_policy`: not guest-readable.** `stdout_full`/`stderr_full` carry raw subprocess output from a build child; `_redact_secrets` scrubs known GitHub-token and auth-in-URL shapes before storage, but this entity type is not a reviewed public-read surface and must NOT be given `read_only` guest access — link it in prose (`build_attempt ent_...`), never as a bare guest-accessible URL.
+
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `repository` | string | ✓ | `owner/repo` slug the handoff targeted |
