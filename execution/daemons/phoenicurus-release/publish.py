@@ -742,8 +742,14 @@ def publish_release(
 ) -> None:
     f = _entity_fields(release)
     status = str(f.get("status") or "")
-    rc_pr_url = str(f.get("rc_pr_url") or "")
-    rc_branch = str(f.get("rc_branch") or f"release/{version}")
+    # Field-name reconciliation: prepare.py's agent stores the RC PR URL under
+    # `release_url` and the branch under `branch`, but this reader historically
+    # only looked for `rc_pr_url` / `rc_branch`. That mismatch left both empty on
+    # publish, so merge_rc_pr fell back to the literal `release/<version>` and
+    # the PR URL was lost. Accept BOTH names (rc_* preferred when present) so a
+    # release_result stored under either convention publishes correctly.
+    rc_pr_url = str(f.get("rc_pr_url") or f.get("release_url") or "")
+    rc_branch = str(f.get("rc_branch") or f.get("branch") or f"release/{version}")
     notes_path_s = str(f.get("notes_path") or "")
     notes_path = Path(notes_path_s) if notes_path_s else None
 

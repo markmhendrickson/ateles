@@ -410,8 +410,11 @@ release-candidate PR, then HALT:
 
 Then record + notify:
 10. Store a Neotoma `release_result` entity (POST {os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180")}/store)
-    with fields: version=<TAG>, status="pending_approval", branch="release/<TAG>",
-    and put the RC PR URL in the `release_url` field. Use idempotency_key
+    with fields: version=<TAG>, status="pending_approval". Set BOTH branch-name
+    fields to "release/<TAG>": `rc_branch` AND `branch`. Set BOTH PR-URL fields
+    to the RC PR URL: `rc_pr_url` AND `release_url`. (publish.py reads the `rc_*`
+    names; the plain names are kept for continuity — write both so either reader
+    resolves.) Use idempotency_key
     "release-<TAG>-pending_approval-{date.today().isoformat()}".
 11. Send a Telegram notification with: the version, the FULL rendered release
     notes, the RC PR URL, and any advisory flags (security sensitive=true,

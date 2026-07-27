@@ -727,3 +727,60 @@ def test_email_approval_dry_run_does_not_flip_status(monkeypatch):
     publish.publish_release(_release("pending_approval"), "v0.20.0",
                             dry_run=True, force=False, email_approval=True)
     assert flips == []  # dry-run makes no state change
+
+
+# ── RC field-name reconciliation (release_url/branch vs rc_pr_url/rc_branch) ──
+#
+# prepare.py's agent historically stored `release_url` + `branch`; publish.py
+# read only `rc_pr_url` + `rc_branch`, so both came back empty and the PR URL
+# was lost on publish. The reader now accepts both names (rc_* preferred).
+
+
+def _capture_rc_fields(release, monkeypatch):
+    """Run publish_release far enough to capture the resolved rc_pr_url/rc_branch,
+    then abort before any irreversible step."""
+    captured = {}
+
+    def fake_preflight(version, rc_branch, dry_run):
+        captured["rc_branch"] = rc_branch  # preflight runs first
+
+    def fake_merge(rc_pr_url, rc_branch, dry_run, version=""):
+        captured["rc_pr_url"] = rc_pr_url
+        # abort here — after both rc_branch (preflight) and rc_pr_url are captured,
+        # before tag_and_push / npm / any irreversible step
+        raise publish.StepError("stop-after-capture")
+
+    monkeypatch.setattr(publish, "set_release_status", lambda *a, **k: None)
+    monkeypatch.setattr(publish, "preflight", fake_preflight)
+    monkeypatch.setattr(publish, "merge_rc_pr", fake_merge)
+    monkeypatch.setattr(publish, "telegram_send", lambda *a, **k: None)
+    try:
+        publish.publish_release(release, "v0.20.0", dry_run=False, force=True)
+    except publish.StepError:
+        pass
+    return captured
+
+
+def test_reads_rc_fields_when_present(monkeypatch):
+    rel = {"snapshot": {"status": "approved", "rc_pr_url": "https://x/pr/9",
+                        "rc_branch": "release/v0.20.0"}}
+    cap = _capture_rc_fields(rel, monkeypatch)
+    assert cap["rc_branch"] == "release/v0.20.0"
+
+
+def test_falls_back_to_release_url_and_branch(monkeypatch):
+    # the OLD prepare convention: release_url + branch, no rc_* — must still resolve
+    rel = {"snapshot": {"status": "approved", "release_url": "https://x/pr/9",
+                        "branch": "release/v0.20.0"}}
+    cap = _capture_rc_fields(rel, monkeypatch)
+    assert cap["rc_pr_url"] == "https://x/pr/9", "release_url must be picked up"
+    assert cap["rc_branch"] == "release/v0.20.0", "branch must be picked up"
+
+
+def test_rc_name_wins_over_plain_when_both_present(monkeypatch):
+    rel = {"snapshot": {"status": "approved",
+                        "rc_pr_url": "https://x/pr/RC", "release_url": "https://x/pr/OLD",
+                        "rc_branch": "release/RC", "branch": "release/OLD"}}
+    cap = _capture_rc_fields(rel, monkeypatch)
+    assert cap["rc_pr_url"] == "https://x/pr/RC"
+    assert cap["rc_branch"] == "release/RC"
