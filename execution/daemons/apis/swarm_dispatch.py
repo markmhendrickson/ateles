@@ -455,6 +455,40 @@ def review_verdict_is_clear(verdict: str | None) -> bool:
     return verdict in ("approve", "comment")
 
 
+# GitHub's Reviews API accepts exactly these three events.
+_REVIEW_EVENT_APPROVE = "APPROVE"
+_REVIEW_EVENT_REQUEST_CHANGES = "REQUEST_CHANGES"
+_REVIEW_EVENT_COMMENT = "COMMENT"
+
+
+def verdict_to_review_event(verdict: str | None) -> str:
+    """Map an aggregated panel verdict onto a native GitHub review event.
+
+    This is the load-bearing half of ateles#241: it turns a parsed-prose verdict
+    into a real review state that GitHub itself enforces (visible in the PR's
+    Reviews section and honoured by branch protection), instead of a verdict that
+    only the dispatcher can see.
+
+    Mapping — deliberately conservative in one direction only:
+      approve         -> APPROVE
+      request_changes -> REQUEST_CHANGES
+      comment         -> COMMENT
+      blocked         -> COMMENT   (blocking is expressed by routing findings
+                                    back for a fix, not by hard-blocking merge)
+      None            -> COMMENT   (unparseable: never escalate on a guess)
+
+    REQUEST_CHANGES is returned for EXACTLY ONE input. That asymmetry is the
+    point: escalating on a mis-parse would block a good PR under branch
+    protection, and de-escalating a real REQUEST_CHANGES would defeat the
+    feature. Everything ambiguous lands on the inert COMMENT.
+    """
+    if verdict == "approve":
+        return _REVIEW_EVENT_APPROVE
+    if verdict == "request_changes":
+        return _REVIEW_EVENT_REQUEST_CHANGES
+    return _REVIEW_EVENT_COMMENT
+
+
 # ── Per-agent GitHub account registry (#109) ─────────────────────────────────
 # Canonical login for each of the 8 GitHub-facing agents.  Accounts are named
 # `<APIS_OPERATOR_LOGIN>-ateles-<agent>` so that each fork of this public repo
@@ -1807,11 +1841,93 @@ class SwarmDispatcher:
         #      APPROVE/COMMENT → readiness gate: only signal merge-ready when
         #        required CI is also green.
         verdict = parse_review_verdict(vanellus_result.stdout)
+
+        # 5a. Emit the verdict as a NATIVE GitHub Review (ateles#241) before
+        #     branching, so it lands on BOTH paths — a REQUEST_CHANGES that
+        #     routes findings back is exactly as worth recording in GitHub's
+        #     review state as an APPROVE that proceeds. Best-effort: a failure
+        #     here must not change the routing decision below, which remains
+        #     driven by the parsed verdict.
+        await self._emit_formal_review(trigger, verdict, vanellus_result.stdout)
+
         if not review_verdict_is_clear(verdict):
             await self._route_blocking_findings(trigger, parent, reviews, verdict)
             return
 
         await self._gate_merge_readiness(trigger, parent, panel)
+
+    async def _emit_formal_review(
+        self, t: SwarmTrigger, verdict: str | None, body: str
+    ) -> str | None:
+        """Post the aggregated panel verdict as a native GitHub Review.
+
+        This is ateles#241: the swarm's verdicts previously existed only as prose
+        in an issue comment, so GitHub's own review state stayed empty and branch
+        protection had nothing to enforce. Emitting a real review event puts the
+        verdict where GitHub (and a human scanning the PR) can see it.
+
+        Deliberately dispatcher-side rather than agent-side: headless panelists
+        routinely fail their own `gh` calls, and of the lens agents only Vanellus
+        and Waxwing even hold `gh pr review` grants.
+
+        Best-effort — returns the review id on success, else None. NEVER raises:
+        the routing decision in `_handle_pr` is driven by the parsed verdict, and
+        a GitHub hiccup must not change which branch runs.
+
+        Two failures are expected and handled quietly rather than as errors:
+        - 422 "Can not approve your own pull request" — the swarm authored the PR
+          and is reviewing under the same identity. Falls back to COMMENT so the
+          verdict still lands. Resolves once per-agent accounts (#109) ship.
+        - 422 on a closed/merged PR — a race between the panel and a merge.
+        """
+        event = verdict_to_review_event(verdict)
+        ref = f"{t.repository}#{t.number}"
+
+        if not _token_for_repo(t.repository) and not self.config.github_token:
+            log.warning(
+                f"[{DAEMON_NAME}] no GitHub token — formal review skipped for {ref}"
+            )
+            return None
+
+        url = f"https://api.github.com/repos/{t.repository}/pulls/{t.number}/reviews"
+        # GitHub rejects a bodyless REQUEST_CHANGES/COMMENT (only APPROVE may be
+        # bodyless), so always carry text.
+        text = (body or "").strip() or (
+            f"Aggregated swarm panel verdict: {verdict or 'unparseable'}."
+        )
+        payload = {"event": event, "body": text[:65000]}
+
+        async def _post(p: dict) -> httpx.Response:
+            async with httpx.AsyncClient(timeout=30) as client:
+                return await client.post(
+                    url, json=p, headers=self._github_headers(t.repository)
+                )
+
+        try:
+            resp = await _post(payload)
+            if resp.status_code == 422 and event != _REVIEW_EVENT_COMMENT:
+                # Self-review or otherwise-unacceptable event: degrade to COMMENT
+                # so the verdict is still recorded, and say so plainly.
+                detail = (resp.text or "")[:200]
+                log.warning(
+                    f"[{DAEMON_NAME}] formal review {event} rejected on {ref} "
+                    f"(422) — retrying as COMMENT: {detail}"
+                )
+                resp = await _post({**payload, "event": _REVIEW_EVENT_COMMENT})
+            resp.raise_for_status()
+            review_id = resp.json().get("id")
+            log.info(
+                f"[{DAEMON_NAME}] posted formal GitHub review {event} on {ref} "
+                f"(id={review_id}, verdict={verdict})"
+            )
+            return str(review_id) if review_id is not None else None
+        except Exception as exc:
+            # Never fail the handler on a review-post problem.
+            log.warning(
+                f"[{DAEMON_NAME}] formal review post failed on {ref} "
+                f"({event}): {exc}"
+            )
+            return None
 
     # ── loop closure: findings → fix → readiness (ateles#179) ────────────────
 
