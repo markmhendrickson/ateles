@@ -29,6 +29,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -54,6 +55,59 @@ DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
 ATELES_REPO = Path(
     os.environ.get("ATELES_REPO_PATH", str(Path.home() / "repos" / "ateles"))
 )
+
+# ── Dropped-allowlist-rule detection (ateles#255) ──────────────────────────────
+# The CLI silently continues past a rejected `--allowedTools` rule, logging a
+# single stderr line per dropped rule instead of failing the dispatch. Before
+# this, that line was only visible in ~/Library/Logs/ateles/apis.log — a
+# swarm-wide breakage (see issue #255) went unnoticed for a week because
+# nothing surfaced it to the operator. This regex + helper turn every dropped
+# rule into one batched notifier alert per dispatch (never one alert per rule,
+# to avoid paging noise on a single bad grant).
+#
+# The CLI line-wraps this message (confirmed in the issue's own quoted repro):
+#   "... dispatch failed (rc=1): Ignoring\n--allowedTools rule \"pr*\": ..."
+# — a newline, not a space, separates "Ignoring" and "--allowedTools". `\s+`
+# (DOTALL not needed; \s already matches \n) tolerates that wrap so the
+# detector actually matches real CLI output, not just a single-line fixture.
+_DROPPED_ALLOWLIST_RULE_RE = re.compile(r'Ignoring\s+--allowedTools rule "([^"]*)"')
+
+
+def _find_dropped_allowlist_rules(stderr: str) -> list[str]:
+    """Return the distinct dropped-rule names named in a dispatch's stderr.
+
+    Order-preserving, de-duplicated (the same rule can be logged more than
+    once for a single dispatch). Empty input / no match -> empty list.
+    """
+    if not stderr:
+        return []
+    seen: dict[str, None] = {}
+    for m in _DROPPED_ALLOWLIST_RULE_RE.finditer(stderr):
+        seen.setdefault(m.group(1), None)
+    return list(seen)
+
+
+def _notify_dropped_allowlist_rules(
+    notifier, *, role: str, rules: list[str], returncode: int | None
+) -> None:
+    """Send ONE batched notifier alert naming every dropped rule for this
+    dispatch (never one alert per rule — see module docstring above)."""
+    if not rules or notifier is None:
+        return
+    rule_list = ", ".join(f'"{r}"' for r in rules)
+    msg = (
+        f"Agent {role!r} dispatch had {len(rules)} --allowedTools rule(s) "
+        f"silently dropped by the CLI: {rule_list} (rc={returncode}). "
+        "The corresponding tool_allowlist grant(s) never reached the agent — "
+        "fix the grant grammar in the agent_definition."
+    )
+    try:
+        from lib.notify import Priority
+
+        notifier.send(msg, priority=Priority.WARN, handler="apis")
+    except Exception as exc:
+        log.debug(f"[apis] dropped-allowlist-rule notifier.send failed: {exc}")
+
 
 # ── Agent-definition cache ─────────────────────────────────────────────────────
 # Per-role cache within the process lifetime. AgentLoader.load() makes a
@@ -235,9 +289,7 @@ def build_system_prompt(
                 False,
             )
         return (
-            f"{definition_prompt}\n\n"
-            "---\n\n"
-            f"{skill_md}",
+            f"{definition_prompt}\n\n---\n\n{skill_md}",
             False,
         )
     # Degraded: no definition_prompt.
@@ -421,6 +473,7 @@ async def run_skill(
         if notifier is not None:
             try:
                 from lib.notify import Priority
+
                 notifier.send(warn_msg, priority=Priority.WARN, handler="apis")
             except Exception as exc:
                 log.debug(f"[apis] notifier.send failed: {exc}")
@@ -471,7 +524,9 @@ async def run_skill(
     #   the config to a mode-0600 temp file and pass the file path to --mcp-config.
     #   The temp file is cleaned up in a try/finally after the subprocess exits.
     _mcp_tmp_path: str | None = None
-    _neotoma_base = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180").rstrip("/")
+    _neotoma_base = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180").rstrip(
+        "/"
+    )
     _neotoma_token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     _mcp_cfg: dict = {
         "mcpServers": {
@@ -493,7 +548,9 @@ async def run_skill(
         with os.fdopen(fd, "w") as _f:
             json.dump(_mcp_cfg, _f)
         cmd += ["--mcp-config", _mcp_tmp_path]
-        log.debug(f"[apis] Injected --mcp-config {_mcp_tmp_path} (mcpsrv_neotoma HTTP MCP)")
+        log.debug(
+            f"[apis] Injected --mcp-config {_mcp_tmp_path} (mcpsrv_neotoma HTTP MCP)"
+        )
     except Exception as exc:
         # Non-fatal: proceed without the MCP config injection rather than abort.
         log.warning(f"[apis] Could not write MCP config temp file (non-fatal): {exc}")
@@ -632,6 +689,20 @@ async def run_skill(
             stdout=stdout.decode("utf-8", errors="replace"),
             stderr=stderr.decode("utf-8", errors="replace"),
         )
+
+        # ── Dropped-allowlist-rule notification (ateles#255) ──────────────────────
+        # Checked regardless of exit code: the CLI logs "Ignoring --allowedTools
+        # rule" and continues, so a drop can coexist with rc=0. One batched alert
+        # per dispatch, not one per rule. Off-loaded to a thread (like the
+        # harness_event writes below) so an unusually large stderr blob can't
+        # block the event loop for other concurrent dispatches.
+        dropped_rules = await asyncio.to_thread(
+            _find_dropped_allowlist_rules, result.stderr
+        )
+        if dropped_rules:
+            _notify_dropped_allowlist_rules(
+                notifier, role=_role, rules=dropped_rules, returncode=proc.returncode
+            )
 
         # ── Stage 2: harness_event at completion ──────────────────────────────────
         if result.ok:

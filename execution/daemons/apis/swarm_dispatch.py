@@ -1288,6 +1288,7 @@ class SwarmDispatcher:
             self._lanius_issue_prompt(trigger),
             github_token=_token_for_agent_on_repo("lanius", trigger.repository),
             include_github_contract=True,
+            notifier=self.notifier,
         )
         if not lanius.ok:
             self.notifier.send(
@@ -1320,6 +1321,7 @@ class SwarmDispatcher:
                     section.agent, trigger.repository
                 ),
                 include_github_contract=True,
+                notifier=self.notifier,
             )
             section_text = self._extract_section_text(result.stdout, section)
             # Persist ADDITIVELY: correct only this section's field. Even when
@@ -1504,6 +1506,7 @@ class SwarmDispatcher:
             self._cicada_build_prompt(trigger, state),
             github_token=_token_for_agent_on_repo("cicada", trigger.repository),
             include_github_contract=True,
+            notifier=self.notifier,
         )
         if not result.ok:
             log.error(
@@ -1661,6 +1664,7 @@ class SwarmDispatcher:
             self._lanius_pr_prompt(trigger, parent),
             github_token=_lanius_token,
             include_github_contract=True,
+            notifier=self.notifier,
         )
         verdict = parse_gate_verdict(lanius.stdout)
         if verdict is None and lanius.ok:
@@ -1682,6 +1686,7 @@ class SwarmDispatcher:
                 ),
                 github_token=_lanius_token,
                 include_github_contract=True,
+                notifier=self.notifier,
             )
             verdict = parse_gate_verdict(lanius.stdout)
         # Gates Lanius reports as still-pending (from its GATE_PENDING: line on a
@@ -1775,6 +1780,7 @@ class SwarmDispatcher:
                         lens.agent, trigger.repository
                     ),
                     include_github_contract=True,
+                    notifier=self.notifier,
                     cwd=qa_worktree,
                 )
             finally:
@@ -1818,6 +1824,7 @@ class SwarmDispatcher:
             self._vanellus_prompt(trigger, parent, [p.lens for p in panel], reviews),
             github_token=_token_for_agent_on_repo("vanellus", trigger.repository),
             include_github_contract=True,
+            notifier=self.notifier,
         )
 
         # 4a. Credential-expiry guard: if the aggregation's claude call failed
@@ -2132,6 +2139,7 @@ class SwarmDispatcher:
                 self._fix_guidance_prompt(trigger, lens, agent, findings_text),
                 github_token=_token_for_agent_on_repo(agent, trigger.repository),
                 include_github_contract=True,
+                notifier=self.notifier,
             )
             if result.ok and result.stdout.strip():
                 guidance_blocks.append(
@@ -2152,6 +2160,7 @@ class SwarmDispatcher:
             self._cicada_fix_prompt(trigger, parent, this_round, consolidated),
             github_token=_token_for_agent_on_repo("cicada", trigger.repository),
             include_github_contract=True,
+            notifier=self.notifier,
         )
         # An auth-expired claude call can exit 0 with the 401 in stdout, so a
         # bare `ok` is not enough — reframe an auth failure as an infra page.
@@ -2312,6 +2321,7 @@ class SwarmDispatcher:
             self._cicada_ci_fix_prompt(trigger, parent, this_round),
             github_token=_token_for_agent_on_repo("cicada", trigger.repository),
             include_github_contract=True,
+            notifier=self.notifier,
         )
         if detect_auth_failure(cicada_result.stdout, cicada_result.stderr):
             await self._handle_panel_auth_failure(trigger, "cicada")
@@ -3702,6 +3712,7 @@ class SwarmDispatcher:
             prompt,
             github_token=_token_for_agent_on_repo("lanius", trigger.repository),
             include_github_contract=True,
+            notifier=self.notifier,
         )
         if not result.ok:
             log.error(

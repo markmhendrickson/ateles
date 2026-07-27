@@ -146,7 +146,9 @@ class TestRunSkill:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_composite_prompt_when_definition_loaded(self, MockLoader, mock_write_harness) -> None:
+    def test_composite_prompt_when_definition_loaded(
+        self, MockLoader, mock_write_harness
+    ) -> None:
         """When agent_definition has prompt_markdown, the spawned system prompt
         must contain BOTH the definition text and the SKILL.md text."""
         fake_def = _make_def(prompt_markdown="Role: Gryllus. You are an issue worker.")
@@ -192,7 +194,9 @@ class TestRunSkill:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_skill_md_only_when_no_definition(self, MockLoader, mock_write_harness) -> None:
+    def test_skill_md_only_when_no_definition(
+        self, MockLoader, mock_write_harness
+    ) -> None:
         """When prompt_markdown is empty, the system prompt is SKILL.md alone."""
         stub = _stub_def()
         instance = MagicMock()
@@ -235,7 +239,9 @@ class TestRunSkill:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_degraded_produces_harness_event_with_marker(self, MockLoader, mock_write_harness) -> None:
+    def test_degraded_produces_harness_event_with_marker(
+        self, MockLoader, mock_write_harness
+    ) -> None:
         """Empty prompt_markdown must produce a harness_event with
         output_summary containing 'degraded_generic_subagent'."""
         stub = _stub_def()
@@ -280,7 +286,9 @@ class TestRunSkill:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_tool_allowlist_applied_when_restricted(self, MockLoader, mock_write_harness) -> None:
+    def test_tool_allowlist_applied_when_restricted(
+        self, MockLoader, mock_write_harness
+    ) -> None:
         """When tool_allowlist is restricted (not '*'), --allowed-tools must appear in the command."""
         restricted_def = _make_def(
             prompt_markdown="Restricted agent.",
@@ -326,7 +334,9 @@ class TestRunSkill:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_wildcard_allowlist_omits_allowed_tools_flag(self, MockLoader, mock_write_harness) -> None:
+    def test_wildcard_allowlist_omits_allowed_tools_flag(
+        self, MockLoader, mock_write_harness
+    ) -> None:
         """When tool_allowlist is '*', --allowed-tools must NOT appear."""
         wide_def = _make_def(prompt_markdown="Full-tool agent.", tool_allowlist="*")
         instance = MagicMock()
@@ -365,7 +375,9 @@ class TestRunSkill:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_harness_events_written_on_success(self, MockLoader, mock_write_harness) -> None:
+    def test_harness_events_written_on_success(
+        self, MockLoader, mock_write_harness
+    ) -> None:
         """A successful dispatch must produce at least start + completion harness_events."""
         full_def = _make_def()
         instance = MagicMock()
@@ -400,7 +412,9 @@ class TestRunSkill:
         assert result.ok
         # At least 2 calls: start (partial) + completion (true)
         success_calls = [
-            c for c in mock_write_harness.call_args_list if c.kwargs.get("success") == "true"
+            c
+            for c in mock_write_harness.call_args_list
+            if c.kwargs.get("success") == "true"
         ]
         assert len(success_calls) >= 1
 
@@ -440,13 +454,17 @@ class TestRunSkill:
 
         assert not result.ok
         fail_calls = [
-            c for c in mock_write_harness.call_args_list if c.kwargs.get("success") == "false"
+            c
+            for c in mock_write_harness.call_args_list
+            if c.kwargs.get("success") == "false"
         ]
         assert len(fail_calls) >= 1
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_harness_event_failure_does_not_crash_dispatch(self, MockLoader, mock_write_harness) -> None:
+    def test_harness_event_failure_does_not_crash_dispatch(
+        self, MockLoader, mock_write_harness
+    ) -> None:
         """A harness_event write failure must not propagate and crash the dispatch."""
         full_def = _make_def()
         instance = MagicMock()
@@ -552,7 +570,9 @@ class TestRoleSigningEnvInjection:
         subprocess_env must contain NEOTOMA_AAUTH_PRIVATE_JWK_PATH (correct path),
         NEOTOMA_AAUTH_SUB (== agent_def.aauth_sub), NEOTOMA_AAUTH_ISS (default),
         and must NOT contain NEOTOMA_AAUTH_ROLE."""
-        fake_def = _make_def(prompt_markdown="Role: Gryllus.", aauth_sub="gryllus@ateles-swarm")
+        fake_def = _make_def(
+            prompt_markdown="Role: Gryllus.", aauth_sub="gryllus@ateles-swarm"
+        )
         instance = MagicMock()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
@@ -588,15 +608,16 @@ class TestRoleSigningEnvInjection:
                 )
             )
 
-        assert captured_env.get("NEOTOMA_AAUTH_PRIVATE_JWK_PATH") == "/secrets/keys/gryllus.jwk.json", (
-            "Expected NEOTOMA_AAUTH_PRIVATE_JWK_PATH='/secrets/keys/gryllus.jwk.json'"
-        )
+        assert (
+            captured_env.get("NEOTOMA_AAUTH_PRIVATE_JWK_PATH")
+            == "/secrets/keys/gryllus.jwk.json"
+        ), "Expected NEOTOMA_AAUTH_PRIVATE_JWK_PATH='/secrets/keys/gryllus.jwk.json'"
         assert captured_env.get("NEOTOMA_AAUTH_SUB") == "gryllus@ateles-swarm", (
             "Expected NEOTOMA_AAUTH_SUB='gryllus@ateles-swarm' (agent_def.aauth_sub)"
         )
-        assert captured_env.get("NEOTOMA_AAUTH_ISS") == "https://markmhendrickson.com", (
-            "Expected NEOTOMA_AAUTH_ISS default 'https://markmhendrickson.com'"
-        )
+        assert (
+            captured_env.get("NEOTOMA_AAUTH_ISS") == "https://markmhendrickson.com"
+        ), "Expected NEOTOMA_AAUTH_ISS default 'https://markmhendrickson.com'"
         assert "NEOTOMA_AAUTH_ROLE" not in captured_env, (
             "NEOTOMA_AAUTH_ROLE must not be present — it is superseded by the real signer vars"
         )
@@ -608,7 +629,9 @@ class TestRoleSigningEnvInjection:
     ) -> None:
         """When the JWK file does not exist at <keys_dir>/<role>.jwk.json,
         none of the three signer vars should be injected."""
-        fake_def = _make_def(prompt_markdown="Role: Gryllus.", aauth_sub="gryllus@ateles-swarm")
+        fake_def = _make_def(
+            prompt_markdown="Role: Gryllus.", aauth_sub="gryllus@ateles-swarm"
+        )
         instance = MagicMock()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
@@ -775,7 +798,10 @@ class TestNeotomaMcpConfigInjection:
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
             patch.object(Path, "exists", return_value=True),
             patch.object(Path, "read_text", return_value="skill md"),
-            patch("asyncio.create_subprocess_exec", side_effect=self._make_exec_capturer(captured_cmd)),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._make_exec_capturer(captured_cmd),
+            ),
             patch("os.path.exists", return_value=False),  # no JWK file
         ):
             result = self._run(
@@ -785,7 +811,9 @@ class TestNeotomaMcpConfigInjection:
             )
 
         assert result.ok
-        assert "--mcp-config" in captured_cmd, "Expected --mcp-config in spawned command"
+        assert "--mcp-config" in captured_cmd, (
+            "Expected --mcp-config in spawned command"
+        )
         mcp_idx = captured_cmd.index("--mcp-config") + 1
         mcp_file = captured_cmd[mcp_idx]
         # Temp file is cleaned up after subprocess; we check content was correct by
@@ -843,6 +871,7 @@ class TestNeotomaMcpConfigInjection:
                 # os.path.exists is NOT patched so the real file is accessible.
                 if captured_paths:
                     import os as _real_os
+
                     fpath = captured_paths[-1]
                     if _real_os.path.isfile(fpath):
                         with open(fpath) as f:
@@ -869,7 +898,9 @@ class TestNeotomaMcpConfigInjection:
 
         assert result.ok
         assert "--mcp-config" in captured_cmd
-        assert len(written_contents) == 1, "Expected MCP config to be read during communicate"
+        assert len(written_contents) == 1, (
+            "Expected MCP config to be read during communicate"
+        )
         cfg = written_contents[0]
         neotoma_cfg = cfg["mcpServers"]["mcpsrv_neotoma"]
         assert neotoma_cfg["url"].endswith("/mcp"), (
@@ -922,6 +953,7 @@ class TestNeotomaMcpConfigInjection:
             async def _communicate(input=None):
                 if captured_paths:
                     import os as _real_os
+
                     fpath = captured_paths[-1]
                     if _real_os.path.isfile(fpath):
                         with open(fpath) as f:
@@ -946,15 +978,18 @@ class TestNeotomaMcpConfigInjection:
             )
 
         assert result.ok
-        assert len(written_contents) == 1, "Expected MCP config to be read during communicate"
+        assert len(written_contents) == 1, (
+            "Expected MCP config to be read during communicate"
+        )
         cfg = written_contents[0]
         neotoma_cfg = cfg["mcpServers"]["mcpsrv_neotoma"]
         assert neotoma_cfg["url"] == "http://localhost:9180/mcp", (
             f"Expected url 'http://localhost:9180/mcp', got {neotoma_cfg['url']!r}"
         )
-        assert neotoma_cfg.get("headers", {}).get("Authorization") == "Bearer secret-bearer-abc", (
-            "Expected Authorization header with bearer token"
-        )
+        assert (
+            neotoma_cfg.get("headers", {}).get("Authorization")
+            == "Bearer secret-bearer-abc"
+        ), "Expected Authorization header with bearer token"
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -981,7 +1016,10 @@ class TestNeotomaMcpConfigInjection:
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
             patch.object(Path, "exists", return_value=True),
             patch.object(Path, "read_text", return_value="skill md"),
-            patch("asyncio.create_subprocess_exec", side_effect=self._make_exec_capturer(captured_cmd)),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._make_exec_capturer(captured_cmd),
+            ),
             patch("os.path.exists", return_value=False),
         ):
             result = self._run(
@@ -1022,7 +1060,10 @@ class TestNeotomaMcpConfigInjection:
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
             patch.object(Path, "exists", return_value=True),
             patch.object(Path, "read_text", return_value="skill md"),
-            patch("asyncio.create_subprocess_exec", side_effect=self._make_exec_capturer(captured_cmd)),
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=self._make_exec_capturer(captured_cmd),
+            ),
             patch("os.path.exists", return_value=False),
         ):
             self._run(
@@ -1288,7 +1329,9 @@ class TestSwarmGithubContractInjection:
         prompt, degraded = skill_runner.build_system_prompt(
             agent_def, skill_md, include_github_contract=True
         )
-        assert degraded, "Degraded flag must still be True when prompt_markdown is empty"
+        assert degraded, (
+            "Degraded flag must still be True when prompt_markdown is empty"
+        )
         assert skill_runner.SWARM_GITHUB_CONTRACT in prompt
         assert "Fallback instructions." in prompt
 
@@ -1580,7 +1623,10 @@ class TestAnthropicAuthPrecedence:
 
     def test_oauth_token_present_drops_api_key(self) -> None:
         env = self._spawn_and_capture_env(
-            {"CLAUDE_CODE_OAUTH_TOKEN": "sk-oauth-xyz", "ANTHROPIC_API_KEY": "sk-ant-metered"}
+            {
+                "CLAUDE_CODE_OAUTH_TOKEN": "sk-oauth-xyz",
+                "ANTHROPIC_API_KEY": "sk-ant-metered",
+            }
         )
         assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-oauth-xyz"
         assert "ANTHROPIC_API_KEY" not in env, (
@@ -1595,3 +1641,168 @@ class TestAnthropicAuthPrecedence:
         assert env.get("ANTHROPIC_API_KEY") == "sk-ant-metered", (
             "Without a subscription token, fall back to ANTHROPIC_API_KEY (no regression)"
         )
+
+
+# ── Dropped-allowlist-rule notification (ateles#255) ────────────────────────────
+
+
+class TestFindDroppedAllowlistRules:
+    def test_single_rule_extracted(self) -> None:
+        stderr = (
+            "ERROR apis.skill_runner [apis] cicada dispatch failed (rc=1): Ignoring "
+            '--allowedTools rule "pr*": Wildcard tool name "pr*" is not supported.'
+        )
+        assert skill_runner._find_dropped_allowlist_rules(stderr) == ["pr*"]
+
+    def test_multiple_distinct_rules_extracted_in_order(self) -> None:
+        stderr = (
+            'Ignoring --allowedTools rule "pr*": ...\n'
+            'Ignoring --allowedTools rule "issue*": ...\n'
+        )
+        assert skill_runner._find_dropped_allowlist_rules(stderr) == ["pr*", "issue*"]
+
+    def test_duplicate_rule_deduplicated(self) -> None:
+        stderr = (
+            'Ignoring --allowedTools rule "pr*": ...\n'
+            'Ignoring --allowedTools rule "pr*": ...\n'
+        )
+        assert skill_runner._find_dropped_allowlist_rules(stderr) == ["pr*"]
+
+    def test_clean_stderr_returns_empty(self) -> None:
+        assert skill_runner._find_dropped_allowlist_rules("") == []
+        assert skill_runner._find_dropped_allowlist_rules("no problems here") == []
+
+    def test_real_cli_line_wrapped_format_extracted(self) -> None:
+        """Regression: the real Claude Code CLI line-wraps this message with a
+        newline (not a space) between "Ignoring" and "--allowedTools" — the
+        exact text quoted in ateles#255's repro. A plain-space-only regex
+        never matches this and the whole notification feature goes silently
+        inert against real dispatch output."""
+        stderr = (
+            "ERROR apis.skill_runner [apis] cicada dispatch failed (rc=1): Ignoring\n"
+            '--allowedTools rule "pr*": Wildcard tool name "pr*" is not supported in allow\n'
+            "rules. An allow pattern must name the scope it widens — globs are permitted\n"
+            "only in the tool position after a literal mcp__<server>__ prefix. Deny and ask\n"
+            "rules accept wildcards anywhere."
+        )
+        assert skill_runner._find_dropped_allowlist_rules(stderr) == ["pr*"]
+
+
+class TestNotifyDroppedAllowlistRules:
+    def test_no_rules_sends_nothing(self) -> None:
+        notifier = MagicMock()
+        skill_runner._notify_dropped_allowlist_rules(
+            notifier, role="cicada", rules=[], returncode=0
+        )
+        notifier.send.assert_not_called()
+
+    def test_none_notifier_does_not_raise(self) -> None:
+        # Must not raise even though there's nothing to call .send on.
+        skill_runner._notify_dropped_allowlist_rules(
+            None, role="cicada", rules=["pr*"], returncode=1
+        )
+
+    def test_single_rule_sends_one_notification(self) -> None:
+        notifier = MagicMock()
+        skill_runner._notify_dropped_allowlist_rules(
+            notifier, role="cicada", rules=["pr*"], returncode=1
+        )
+        assert notifier.send.call_count == 1
+        msg = notifier.send.call_args[0][0]
+        assert "cicada" in msg
+        assert "pr*" in msg
+
+    def test_multi_rule_batches_into_one_notification(self) -> None:
+        """Two dropped rules in one dispatch -> ONE notification naming both,
+        not two separate alerts (avoids duplicate paging)."""
+        notifier = MagicMock()
+        skill_runner._notify_dropped_allowlist_rules(
+            notifier, role="cicada", rules=["pr*", "issue*"], returncode=1
+        )
+        assert notifier.send.call_count == 1
+        msg = notifier.send.call_args[0][0]
+        assert "pr*" in msg
+        assert "issue*" in msg
+
+    def test_notifier_send_failure_does_not_raise(self) -> None:
+        notifier = MagicMock()
+        notifier.send.side_effect = RuntimeError("apprise down")
+        # Must not propagate — a notification failure must not crash dispatch.
+        skill_runner._notify_dropped_allowlist_rules(
+            notifier, role="cicada", rules=["pr*"], returncode=1
+        )
+
+
+class TestRunSkillDroppedAllowlistNotification:
+    """End-to-end (mocked subprocess) coverage: run_skill must invoke the
+    notifier exactly once when the CLI stderr reports dropped rules, and must
+    not invoke it at all on a clean dispatch."""
+
+    def setup_method(self) -> None:
+        skill_runner._agent_def_cache.clear()
+
+    def _run_with_stderr(self, stderr_bytes: bytes, notifier):
+        fake_def = _make_def(prompt_markdown="Role prompt.")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+
+        async def fake_exec(*cmd, **kwargs):
+            proc = MagicMock()
+            proc.returncode = 1 if stderr_bytes else 0
+
+            async def _communicate(input=None):
+                return b"", stderr_bytes
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.AgentLoader", return_value=instance),
+            patch("skill_runner._write_harness_event"),
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="Skill instructions."),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            return asyncio.run(
+                skill_runner.run_skill(
+                    "cicada",
+                    "work prompt",
+                    role="cicada",
+                    task_entity_id="ent_x",
+                    notifier=notifier,
+                )
+            )
+
+    def test_notification_fires_on_dropped_rule(self) -> None:
+        """Uses the REAL CLI line-wrapped format (newline, not space, between
+        "Ignoring" and "--allowedTools") — the exact text from ateles#255's
+        repro — so this e2e test actually exercises the wrap the regex must
+        handle, not a simplified single-line stand-in."""
+        notifier = MagicMock()
+        stderr = (
+            b"ERROR apis.skill_runner [apis] cicada dispatch failed (rc=1): Ignoring\n"
+            b'--allowedTools rule "pr*": Wildcard tool name "pr*" is not supported.'
+        )
+        result = self._run_with_stderr(stderr, notifier)
+        assert not result.ok
+        assert notifier.send.call_count == 1
+
+    def test_no_notification_on_clean_dispatch(self) -> None:
+        notifier = MagicMock()
+        result = self._run_with_stderr(b"", notifier)
+        assert result.ok
+        notifier.send.assert_not_called()
+
+    def test_multi_rule_drop_in_one_dispatch_batches_single_notification(self) -> None:
+        notifier = MagicMock()
+        stderr = (
+            b'Ignoring --allowedTools rule "pr*": ...\n'
+            b'Ignoring --allowedTools rule "issue*": ...\n'
+        )
+        result = self._run_with_stderr(stderr, notifier)
+        assert not result.ok
+        assert notifier.send.call_count == 1
+        msg = notifier.send.call_args[0][0]
+        assert "pr*" in msg
+        assert "issue*" in msg
