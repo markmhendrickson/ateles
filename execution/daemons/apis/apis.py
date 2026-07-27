@@ -870,12 +870,37 @@ async def main() -> None:
                 exc_info=True,
             )
 
+    # 8. Deferred-review resume sweep: a PR review throttled by a usage limit
+    #    posts a `review-deferred-until:<ISO>` marker instead of a verdict. The
+    #    reset is often hours out, so unlike the one-shot pipeline resume this
+    #    must run PERIODICALLY — the daemon may never restart inside the window.
+    #    Each pass re-dispatches PRs whose deferral has matured; if the limit is
+    #    still active, the re-run just posts a fresh (later) deferral marker.
+    #    Fire-and-forget and fail-open — a broken sweep must never stop the loop.
+    deferred_interval = int(
+        os.environ.get("APIS_DEFERRED_REVIEW_SWEEP_SECONDS", "600")
+    )
+
+    async def deferred_review_sweep() -> None:
+        while True:
+            try:
+                await dispatcher.resume_deferred_reviews(
+                    list(dispatcher.config.resume_repositories)
+                )
+            except Exception as exc:
+                log.error(
+                    f"[{DAEMON_NAME}] deferred-review sweep failed: {exc}",
+                    exc_info=True,
+                )
+            await asyncio.sleep(deferred_interval)
+
     log.info(f"[{DAEMON_NAME}] Subscribing to SSE: {SUBSCRIBE_ENTITY_TYPES}")
     await asyncio.gather(
         sse.stream(dispatch),
         github_gateway.serve(gateway_app, GITHUB_WEBHOOK_PORT),
         watchdog.run(notifier, watchdog_dispatch),
         resume_sweep(),
+        deferred_review_sweep(),
     )
 
 

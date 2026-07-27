@@ -4592,3 +4592,130 @@ def test_ci_status_non_release_repo_main_does_not_retry(monkeypatch):
     )
     asyncio.run(d._handle_ci_status(trig))
     assert seen == [], "non-release repo main must not prepare a release"
+
+
+# ── Session/usage-limit detection + auto-resume (feat/swarm-resume-after-limit) ──
+
+
+def test_detect_session_limit_matches_real_message():
+    # The exact stub text seen on ateles PR #254.
+    msg = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    assert swarm_dispatch.detect_session_limit(msg) is True
+
+
+def test_detect_session_limit_variants():
+    for m in [
+        "usage limit reached, resets at 19:30",
+        "rate limit exceeded — resets in a bit",
+        "You've reached your usage limit.",
+    ]:
+        assert swarm_dispatch.detect_session_limit(m) is True, m
+
+
+def test_detect_session_limit_ignores_unrelated_prose():
+    # Must not misfire on a normal verdict that merely mentions "rate" etc.
+    for m in [
+        "VERDICT: APPROVE — no findings",
+        "the rate of false positives is low",  # 'rate' but no limit/reset cue
+        "",
+    ]:
+        assert swarm_dispatch.detect_session_limit(m) is False, m
+
+
+def test_session_limit_is_distinct_from_auth_failure():
+    # A pure limit message is NOT an auth failure (different remediation).
+    limit = "you've hit your session limit · resets 7:30pm"
+    assert swarm_dispatch.detect_session_limit(limit) is True
+    assert swarm_dispatch.detect_auth_failure(limit) is False
+    # And a 401 is not a session limit.
+    auth = "API Error: 401 invalid authentication credentials"
+    assert swarm_dispatch.detect_auth_failure(auth) is True
+    assert swarm_dispatch.detect_session_limit(auth) is False
+
+
+def test_parse_limit_reset_delay_reads_the_clock():
+    from datetime import datetime
+    now = datetime(2026, 7, 23, 16, 45, 0)  # 4:45pm
+    # "resets 7:30pm" -> 19:30 same day -> 2h45m + 120s pad
+    delay = swarm_dispatch.parse_limit_reset_delay(
+        "resets 7:30pm (Europe/Madrid)", now=now
+    )
+    assert 2 * 3600 + 45 * 60 <= delay <= 2 * 3600 + 45 * 60 + 130
+
+
+def test_parse_limit_reset_delay_rolls_to_next_day_when_past():
+    from datetime import datetime
+    now = datetime(2026, 7, 23, 20, 0, 0)  # 8pm, after a 7:30pm reset
+    delay = swarm_dispatch.parse_limit_reset_delay("resets 7:30pm", now=now)
+    # target rolls to tomorrow 19:30 -> ~23.5h away, not negative
+    assert delay > 23 * 3600
+
+
+def test_parse_limit_reset_delay_default_when_no_time():
+    d = swarm_dispatch.parse_limit_reset_delay("you've hit your session limit")
+    assert d >= 300  # a sane, non-zero default
+
+
+def test_deferred_review_sweep_redispatches_matured_pr(monkeypatch):
+    # A PR whose deferral time has passed is re-dispatched through _handle_pr.
+    resumed = []
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_scan(self, repository, now):
+        return {
+            "due": [{"number": 254, "title": "evidence bar", "body": "b",
+                     "user": {"login": "x"}, "html_url": "u",
+                     "head": {"ref": "feat/x"}, "base": {"ref": "main"}}],
+            "scanned": 1, "not_yet": 0,
+        }
+
+    async def fake_handle(self, trigger):
+        resumed.append((trigger.number, trigger.kind))
+
+    monkeypatch.setattr(SwarmDispatcher, "_prs_with_matured_deferral", fake_scan)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle)
+    summary = asyncio.run(d.resume_deferred_reviews(["owner/repo"]))
+    assert resumed == [(254, "pr_synchronize")]
+    assert summary["resumed"] == 1 and summary["failed"] == 0
+
+
+def test_deferred_review_sweep_leaves_unmatured_pr_alone(monkeypatch):
+    # A PR whose deferral is still in the future must NOT be re-dispatched.
+    resumed = []
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_scan(self, repository, now):
+        return {"due": [], "scanned": 1, "not_yet": 1}
+
+    async def fake_handle(self, trigger):
+        resumed.append(trigger.number)
+
+    monkeypatch.setattr(SwarmDispatcher, "_prs_with_matured_deferral", fake_scan)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle)
+    summary = asyncio.run(d.resume_deferred_reviews(["owner/repo"]))
+    assert resumed == []
+    assert summary["not_yet"] == 1 and summary["resumed"] == 0
+
+
+def test_deferred_review_sweep_is_fail_open_per_repo(monkeypatch):
+    # One repo failing to scan must not stop the others.
+    resumed = []
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_scan(self, repository, now):
+        if repository == "owner/broken":
+            raise RuntimeError("scan boom")
+        return {"due": [{"number": 5, "title": "t", "body": "", "user": {},
+                         "html_url": "", "head": {}, "base": {}}],
+                "scanned": 1, "not_yet": 0}
+
+    async def fake_handle(self, trigger):
+        resumed.append(trigger.number)
+
+    monkeypatch.setattr(SwarmDispatcher, "_prs_with_matured_deferral", fake_scan)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle)
+    summary = asyncio.run(
+        d.resume_deferred_reviews(["owner/broken", "owner/good"])
+    )
+    assert resumed == [5]  # the good repo still ran
+    assert summary["resumed"] == 1

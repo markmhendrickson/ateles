@@ -44,7 +44,7 @@ import shutil
 import sys
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -769,6 +769,74 @@ _AUTH_FAILURE_SIGNATURES = (
 )
 
 
+# Signatures of a SESSION / USAGE-LIMIT failure — distinct from an auth failure.
+# A 401 needs the operator to re-auth (page + wait for a human). A usage limit
+# clears ON ITS OWN at a known reset time, so the right response is not "page and
+# stop" but "wait for the reset, then resume the same work automatically". These
+# are kept separate from _AUTH_FAILURE_SIGNATURES precisely because the
+# remediation differs: re-auth vs. auto-resume. ("credit balance is too low"
+# stays with auth — a metered-billing exhaustion needs an operator top-up, not a
+# timed retry.)
+_SESSION_LIMIT_SIGNATURES = (
+    "hit your session limit",
+    "you've hit your session limit",
+    "session limit reached",
+    "usage limit reached",
+    "you've reached your usage limit",
+    "rate limit",
+    "resets at",
+    "resets ",
+)
+
+
+def detect_session_limit(*texts: str) -> bool:
+    """True when a panelist/aggregation failed on a self-clearing usage limit.
+
+    Distinguished from :func:`detect_auth_failure` so the dispatcher can SCHEDULE
+    A RESUME after the reset window rather than page-and-stop: a session/usage
+    limit is transient and clears on its own, unlike an expired token."""
+    blob = " ".join(t for t in texts if t).lower()
+    # Require an explicit "limit" or "reset" cue, not just any of the softer
+    # substrings, to avoid misfiring on prose that merely mentions "rate".
+    if not any(sig in blob for sig in _SESSION_LIMIT_SIGNATURES):
+        return False
+    return "limit" in blob or "reset" in blob
+
+
+def parse_limit_reset_delay(*texts: str, now: "datetime | None" = None) -> int:
+    """Best-effort seconds until a usage limit resets, from the failure message.
+
+    Parses shapes like "resets 7:30pm", "resets at 19:30", "resets 7pm
+    (Europe/Madrid)". Returns a conservative default when no time is found, and
+    always at least a small floor so a mis-parse can't busy-loop. The clock is
+    injected for testability; timezone in the message is ignored (we resume a
+    little late rather than early, which is safe)."""
+    import re
+
+    default = int(os.environ.get("APIS_LIMIT_RESET_DEFAULT_SECONDS", str(3 * 3600)))
+    floor = 300
+    blob = " ".join(t for t in texts if t).lower()
+    m = re.search(r"resets?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", blob)
+    if not m:
+        return default
+    now = now or datetime.now()
+    hour = int(m.group(1))
+    minute = int(m.group(2) or 0)
+    ampm = m.group(3)
+    if ampm == "pm" and hour < 12:
+        hour += 12
+    elif ampm == "am" and hour == 12:
+        hour = 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return default
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    delay = int((target - now).total_seconds())
+    # Pad past the reset boundary so we don't retry the instant it flips.
+    return max(floor, delay + 120)
+
+
 def detect_auth_failure(*texts: str) -> bool:
     """True when any text carries a Claude/Anthropic auth-failure signature.
 
@@ -1193,6 +1261,123 @@ class SwarmDispatcher:
         if summary["scanned"]:
             log.info(f"[{DAEMON_NAME}] resume sweep: {summary}")
         return summary
+
+    async def resume_deferred_reviews(self, repositories: list[str]) -> dict:
+        """Re-run PR reviews that were deferred by a usage limit and have matured.
+
+        A panel/aggregation throttled by a session limit posts a
+        ``review-deferred-until:<ISO>`` marker instead of a verdict (see
+        :meth:`_handle_panel_session_limit`). This sweep — run PERIODICALLY, since
+        a reset is hours out and the daemon may not restart in that window — finds
+        open PRs whose deferral time has passed and re-dispatches them through
+        ``_handle_pr``, which re-runs the whole panel. If the limit has cleared,
+        a real verdict lands; if not, a fresh (later) deferral marker replaces it.
+
+        Bounded and fail-open, same discipline as resume_interrupted_pipelines:
+          * only OPEN PRs with a MATURED marker are candidates;
+          * the marker's timestamp gates re-dispatch, so an unmatured deferral is
+            left alone (no busy-loop before the reset);
+          * a re-run posts a new marker or a verdict, superseding the old one, so
+            a still-limited PR can't thrash — it just re-defers to the next reset;
+          * every failure path logs and continues.
+        """
+        summary = {"scanned": 0, "resumed": 0, "not_yet": 0, "failed": 0}
+        now = datetime.now(timezone.utc)
+        for repository in repositories:
+            try:
+                prs = await self._prs_with_matured_deferral(repository, now)
+            except Exception as exc:
+                log.warning(
+                    f"[{DAEMON_NAME}] deferred-review sweep: could not scan "
+                    f"{repository} ({exc}) — skipping"
+                )
+                continue
+            summary["scanned"] += prs["scanned"]
+            summary["not_yet"] += prs["not_yet"]
+            for pr in prs["due"]:
+                ref = f"{repository}#{pr.get('number')}"
+                log.info(
+                    f"[{DAEMON_NAME}] deferred-review sweep: {ref} deferral has "
+                    "matured — re-running the panel"
+                )
+                try:
+                    trigger = SwarmTrigger(
+                        kind="pr_synchronize",
+                        repository=repository,
+                        number=int(pr.get("number")),
+                        title=pr.get("title", ""),
+                        body=pr.get("body") or "",
+                        author=(pr.get("user") or {}).get("login", ""),
+                        html_url=pr.get("html_url", ""),
+                        delivery_id=f"deferred-resume-{pr.get('number')}",
+                        action="synchronize",
+                        head_ref=(pr.get("head") or {}).get("ref", ""),
+                        base_ref=(pr.get("base") or {}).get("ref", ""),
+                    )
+                    await self._handle_pr(trigger)
+                    summary["resumed"] += 1
+                except Exception as exc:
+                    summary["failed"] += 1
+                    log.error(
+                        f"[{DAEMON_NAME}] deferred-review sweep: {ref} failed to "
+                        f"resume ({exc})",
+                        exc_info=True,
+                    )
+        if summary["scanned"]:
+            log.info(f"[{DAEMON_NAME}] deferred-review sweep: {summary}")
+        return summary
+
+    async def _prs_with_matured_deferral(self, repository: str, now: datetime) -> dict:
+        """Open PRs in `repository` split by whether their deferral has matured.
+
+        Returns {"due": [pr,...], "scanned": n, "not_yet": n}. A PR is 'due' when
+        its latest deferral marker's ISO time is <= now. PRs with no deferral
+        marker are ignored entirely (not scanned count). Best-effort per PR."""
+        result: dict = {"due": [], "scanned": 0, "not_yet": 0}
+        list_url = f"https://api.github.com/repos/{repository}/pulls"
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                list_url,
+                params={"state": "open", "per_page": 100},
+                headers=self._github_headers(repository),
+            )
+            resp.raise_for_status()
+            for pr in resp.json():
+                num = pr.get("number")
+                c_url = (
+                    f"https://api.github.com/repos/{repository}/issues/{num}/comments"
+                )
+                try:
+                    cresp = await client.get(
+                        c_url,
+                        params={"per_page": 100},
+                        headers=self._github_headers(repository),
+                    )
+                    cresp.raise_for_status()
+                except Exception:
+                    continue
+                # Latest deferral marker wins (a re-defer posts a newer one).
+                latest_iso = None
+                for c in cresp.json():
+                    m = self._REVIEW_DEFERRED_RE.search(c.get("body", ""))
+                    if m:
+                        latest_iso = m.group(1)
+                if latest_iso is None:
+                    continue
+                result["scanned"] += 1
+                try:
+                    due_at = datetime.strptime(
+                        latest_iso, "%Y-%m-%dT%H:%M:%SZ"
+                    ).replace(tzinfo=timezone.utc)
+                except ValueError:
+                    # Unparseable marker — treat as due so it can't get stuck.
+                    result["due"].append(pr)
+                    continue
+                if due_at <= now:
+                    result["due"].append(pr)
+                else:
+                    result["not_yet"] += 1
+        return result
 
     async def _issues_with_inflight_marker(self, repository: str) -> list[dict]:
         """Open issues in `repository` carrying the in-flight pipeline marker."""
@@ -1744,6 +1929,18 @@ class SwarmDispatcher:
             include_github_contract=True,
         )
 
+        # 4a-0. Session/usage-limit guard (checked BEFORE auth, since a limit
+        #     message can co-occur with auth-ish prose): the aggregation's claude
+        #     call was throttled, not un-authenticated. Its "verdict" is just the
+        #     limit notice. Post a truthful REVIEW-INCOMPLETE marker (never a stub
+        #     that reads like a verdict) and schedule a resume after the reset,
+        #     rather than paging the operator to fix nothing.
+        if detect_session_limit(vanellus_result.stdout, vanellus_result.stderr):
+            await self._handle_panel_session_limit(
+                trigger, parent, "vanellus",
+                vanellus_result.stdout, vanellus_result.stderr,
+            )
+            return
         # 4a. Credential-expiry guard: if the aggregation's claude call failed
         #     auth (expired OAuth / missing ANTHROPIC_API_KEY), its "verdict" is
         #     just the 401. Reframe it as an infra failure and page the operator
@@ -4032,6 +4229,96 @@ class SwarmDispatcher:
         except Exception as exc:
             log.error(
                 f"[{DAEMON_NAME}] auth-failure comment failed for "
+                f"{t.repository}#{t.number}: {exc}"
+            )
+
+    # Durable marker: a PR whose review was deferred by a usage limit. Carries
+    # the ISO resume time so the sweep can re-dispatch it once the limit clears.
+    # Head-SHA-agnostic and restart-surviving, same substrate as the fix-round
+    # counter. Distinct from _VANELLUS_COMMENT_MARKER so a deferral is NEVER
+    # mistaken for an aggregation that ran.
+    _REVIEW_DEFERRED_MARKER = "<!-- review-deferred-until:{iso} -->"
+    _REVIEW_DEFERRED_RE = re.compile(r"<!-- review-deferred-until:([^ ]+) -->")
+
+    async def _handle_panel_session_limit(
+        self,
+        t: SwarmTrigger,
+        parent: int | None,
+        agent: str,
+        stdout: str,
+        stderr: str,
+    ) -> None:
+        """A panel/aggregation call was throttled by a self-clearing usage limit.
+
+        Unlike an auth failure (page + wait for a human), a usage limit resets on
+        its own — so this posts a TRUTHFUL "review incomplete, will resume" marker
+        (never a stub that reads like a verdict) with the resume time, and lets
+        the resume sweep re-dispatch after the reset. Best-effort; never raises.
+        """
+        delay = parse_limit_reset_delay(stdout, stderr)
+        resume_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        iso = resume_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+        log.warning(
+            f"[{DAEMON_NAME}] {agent} panel on {t.repository}#{t.number} hit a "
+            f"usage limit; deferring review resume until {iso} (~{delay}s)"
+        )
+        # Notify at DIGEST, not BLOCKER: nothing for the operator to fix — it
+        # self-resolves. (An operator who wants it sooner can top up / wait.)
+        try:
+            self.notifier.send(
+                f"⏳ Swarm review on {t.repository}#{t.number} paused on a usage "
+                f"limit; auto-resumes at {iso}. No action needed.",
+                priority=Priority.DIGEST,
+                handler=DAEMON_NAME,
+            )
+        except Exception as exc:
+            log.error(f"[{DAEMON_NAME}] session-limit notice failed: {exc}")
+
+        repo_token = _token_for_repo(t.repository)
+        if not repo_token:
+            return
+        body = (
+            f"{self._REVIEW_DEFERRED_MARKER.format(iso=iso)}\n"
+            f"{attribution_header('vanellus', 'PR steward')}\n\n"
+            "⏳ **Review incomplete — panel throttled by a usage limit.** The "
+            f"`{agent}` aggregation could not run because the model call hit a "
+            "session/usage limit. This is **not** a verdict — the PR has not been "
+            f"assessed. The review will resume automatically after the limit "
+            f"resets (scheduled ~`{iso}`); no operator action is required.\n\n"
+            "_Posted by the Apis dispatcher — distinct from a `vanellus-"
+            "aggregation` verdict on purpose, so a throttled review is never "
+            "mistaken for a completed one._"
+        )
+        url = f"https://api.github.com/repos/{t.repository}/issues/{t.number}/comments"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                # Idempotent: skip if a deferral marker is already present.
+                resp = await client.get(
+                    url, params={"per_page": 100},
+                    headers=self._github_headers(t.repository),
+                )
+                resp.raise_for_status()
+                if any(
+                    self._REVIEW_DEFERRED_RE.search(c.get("body", ""))
+                    for c in resp.json()
+                ):
+                    log.info(
+                        f"[{DAEMON_NAME}] deferral marker already present on "
+                        f"{t.repository}#{t.number}; not re-posting"
+                    )
+                    return
+                post = await client.post(
+                    url, json={"body": body},
+                    headers=self._github_headers(t.repository),
+                )
+                post.raise_for_status()
+                log.info(
+                    f"[{DAEMON_NAME}] posted review-deferred marker on "
+                    f"{t.repository}#{t.number} (resume {iso})"
+                )
+        except Exception as exc:
+            log.error(
+                f"[{DAEMON_NAME}] deferral comment failed for "
                 f"{t.repository}#{t.number}: {exc}"
             )
 
