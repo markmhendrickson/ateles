@@ -281,7 +281,7 @@ class TestGracefulDegradation(unittest.TestCase):
 
     def test_post_without_token(self):
         srv.NEOTOMA_BEARER_TOKEN = ""
-        result = srv._post("/retrieve", {"entity_type": "task"})
+        result = srv._post("/entities/query", {"entity_type": "task"})
         self.assertIsNone(result)
 
     def test_roster_without_token(self):
@@ -299,6 +299,34 @@ class TestGracefulDegradation(unittest.TestCase):
         srv.NEOTOMA_BEARER_TOKEN = ""
         result = srv._resolve_checkpoint("ent_123", "approve")
         self.assertIn("error", result)
+
+
+class TestNeotomaEndpoints(unittest.TestCase):
+    """
+    Pins the HTTP paths this server calls.
+
+    Regression guard: every other test mocks _get/_post, so a wrong endpoint
+    path passes the whole suite while 404ing against a live Neotoma. The
+    entity-list endpoint is POST /entities/query — NOT /retrieve (404) and not
+    GET /entities (also 404); see lib/daemon_runtime/agent_loader.py.
+    """
+
+    @patch("server._post")
+    def test_retrieve_entities_posts_to_entities_query(self, mock_post):
+        mock_post.return_value = {"entities": []}
+        srv._retrieve_entities("swarm_roster", limit=5)
+        mock_post.assert_called_once()
+        path = mock_post.call_args[0][0]
+        self.assertEqual(path, "/entities/query")
+
+    @patch("server._post")
+    def test_retrieve_entities_forwards_query_body(self, mock_post):
+        mock_post.return_value = {"entities": []}
+        srv._retrieve_entities("task", search="deploy", limit=7)
+        body = mock_post.call_args[0][1]
+        self.assertEqual(body["entity_type"], "task")
+        self.assertEqual(body["search"], "deploy")
+        self.assertEqual(body["limit"], 7)
 
 
 class TestGetSwarmRoster(unittest.TestCase):

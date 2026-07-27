@@ -129,7 +129,9 @@ def _retrieve_entities(
         body["search"] = search
     if snapshot_filters:
         body["snapshot_filters"] = snapshot_filters
-    data = _post("/retrieve", body)
+    # POST /entities/query — NOT /retrieve, which 404s. The GET /entities list
+    # endpoint does not exist either; see lib/daemon_runtime/agent_loader.py.
+    data = _post("/entities/query", body)
     if data is None:
         return []
     return data.get("entities", [])
