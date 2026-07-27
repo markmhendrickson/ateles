@@ -4449,12 +4449,12 @@ def test_ci_status_main_success_retries_release_prep(monkeypatch):
     d = SwarmDispatcher(_StubNotifier(), _config())
     trig = _ci_status_trigger(
         repository="markmhendrickson/neotoma", ci_head_branch="main",
-        ci_conclusion="success", ci_head_sha="f"*40, ci_pr_numbers=[],
+        ci_conclusion="success", ci_head_sha="f" * 40, ci_pr_numbers=[],
     )
     asyncio.run(d._handle_ci_status(trig))
     assert len(seen) == 1, "main CI success must retry release prep"
     assert seen[0].kind == "push_main"
-    assert seen[0].push_after == "f"*40
+    assert seen[0].push_after == "f" * 40
     assert seen[0].push_ref == "refs/heads/main"
 
 
