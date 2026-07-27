@@ -409,6 +409,21 @@ def parse_gate_verdict(stdout: str) -> str | None:
     return m.group(1).lower() if m else None
 
 
+# Lanius names the still-unsigned pre-impl gates on a `blocked` verdict, e.g.
+# `GATE_PENDING: arch,ux`. The dispatcher feeds these to select_panel so the
+# owning lenses are guaranteed a panel seat under the cap (ateles#230 gap: a
+# carried-over gate could never clear because its lens was never re-invoked).
+_GATE_PENDING = re.compile(r"GATE_PENDING:\s*([a-z0-9_,\s]+)", re.I)
+
+
+def parse_pending_gates(stdout: str) -> set[str]:
+    """Extract the gates Lanius reported as still-pending; empty when absent."""
+    m = _GATE_PENDING.search(stdout or "")
+    if not m:
+        return set()
+    return {g.strip().lower() for g in m.group(1).split(",") if g.strip()}
+
+
 # Vanellus / panelist verdict token (SWARM_GITHUB_CONTRACT, skill_runner.py):
 # a review comment carries exactly one of these bold verdict tokens.
 _REVIEW_VERDICT = re.compile(
@@ -1627,6 +1642,11 @@ class SwarmDispatcher:
                 include_github_contract=True,
             )
             verdict = parse_gate_verdict(lanius.stdout)
+        # Gates Lanius reports as still-pending (from its GATE_PENDING: line on a
+        # blocked verdict). Fed to select_panel so the owning lens is guaranteed
+        # a seat under the cap — otherwise a carried-over gate can never clear
+        # because its owning lens is never re-invoked (ateles#230 panel gap).
+        pending_gates = parse_pending_gates(lanius.stdout)
         if verdict == "blocked":
             # ateles#230: on the FIRST look a gate-blocked PR should skip the
             # panel — nothing has been reviewed, so there is no finding to
@@ -1690,6 +1710,7 @@ class SwarmDispatcher:
             gate_contributors=set(expectations),
             changed_files=changed_files,
             max_panel=self.config.panel_max,
+            pending_gates=pending_gates,
         )
 
         reviews: list[tuple[str, str]] = []
@@ -3757,7 +3778,13 @@ class SwarmDispatcher:
             "operator can waive it.\n\n"
             f"{_agent_prompt_instruction('lanius', 'PR gate inheritance')}\n\n"
             "End your reply with exactly one line: `GATE_INHERITANCE: clear` "
-            "or `GATE_INHERITANCE: blocked` so the dispatcher can route."
+            "or `GATE_INHERITANCE: blocked` so the dispatcher can route. When "
+            "you emit `blocked`, add a SECOND line naming the unsigned pre-impl "
+            "gates as a comma-separated list, e.g. `GATE_PENDING: arch,ux` — "
+            "the dispatcher uses this to guarantee the lens agent that owns "
+            "each pending gate a seat on the (capped) review panel, so a gate "
+            "can never stay blocked because its owning lens was never "
+            "re-invoked. Omit the line when clear."
         )
 
     @staticmethod

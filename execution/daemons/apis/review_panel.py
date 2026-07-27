@@ -138,6 +138,7 @@ def select_panel(
     gate_contributors: set[str],
     changed_files: list[str],
     max_panel: int = 4,
+    pending_gates: set[str] | None = None,
 ) -> list[Lens]:
     """
     Pick the review panel for a PR.
@@ -146,13 +147,23 @@ def select_panel(
     (or review_expectation) on the parent issue. Relevance filter per
     neotoma#1640 — not all-agents-always. Dropped lenses are logged so the
     cap never silently truncates.
+
+    `pending_gates` are gate names still unsigned on the parent issue (from
+    Lanius's `GATE_PENDING:` line). A lens that OWNS a pending gate is always
+    relevant AND is prioritized ahead of other blocking lenses when the panel
+    is capped — otherwise a carried-over gate could never clear, because the
+    only agent that can re-evaluate it (its owning lens) would be dropped by
+    the cap and never re-invoked (ateles#230 panel-assembly gap: PR #1944's
+    arch gate stuck `pending` while pm/ux/legal/qa re-ran without arch).
     """
+    pending = pending_gates or set()
     selected: list[Lens] = []
     for lens in LENSES:
         relevant = (
             lens.always
             or lens.agent in gate_contributors
             or _matches_diff(lens, changed_files)
+            or (lens.gate != "" and lens.gate in pending)
         )
         if lens.forward_looking:
             # Size threshold is an additional opt-in path, not an override
@@ -163,9 +174,21 @@ def select_panel(
         if relevant:
             selected.append(lens)
 
-    blocking = [item for item in selected if not item.forward_looking]
+    # Priority order under the cap: lenses owning a still-pending gate first
+    # (they MUST re-run to clear it), then other blocking lenses, then
+    # forward-looking. Registry order is preserved within each tier.
+    gate_owners = [
+        item
+        for item in selected
+        if not item.forward_looking and item.gate != "" and item.gate in pending
+    ]
+    other_blocking = [
+        item
+        for item in selected
+        if not item.forward_looking and item not in gate_owners
+    ]
     forward = [item for item in selected if item.forward_looking]
-    panel = (blocking + forward)[:max_panel]
+    panel = (gate_owners + other_blocking + forward)[:max_panel]
     dropped = [item.lens for item in selected if item not in panel]
     if dropped:
         log.info(f"[apis] review panel capped at {max_panel}; dropped: {dropped}")
