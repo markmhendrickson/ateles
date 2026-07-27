@@ -196,31 +196,33 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
     best_agent: str | None = None
 
     desc_lower = task_description.lower()
+    # Ordered most-specific first: multi-word keywords must match before
+    # single-word substrings (e.g. "review pr" → pr_steward, not code).
     role_keywords: dict[str, list[str]] = {
-        "code": ["code", "implement", "build", "fix bug", "refactor", "pr ", "pull request"],
-        "email_triage": ["email", "inbox", "triage email", "mail"],
-        "health": ["workout", "exercise", "gym", "fitness", "health"],
-        "payments": ["payment", "invoice", "pay ", "transfer", "wage"],
-        "tax": ["tax", "fiscal", "iva", "vat", "hacienda"],
-        "briefings": ["meeting", "briefing", "agenda", "calendar"],
-        "dispatcher": ["dispatch", "assign", "route"],
-        "issue_triage": ["issue", "bug report", "github issue", "triage issue"],
         "pr_steward": ["review pr", "merge pr", "pull request review"],
-        "release_manager": ["release", "deploy", "version"],
-        "mirror": ["mirror", "sync repo", "apus"],
-        "content": ["blog", "write post", "content", "article"],
-        "strategy_adversary": ["strategy", "adversarial", "red team"],
-        "compliance": ["compliance", "legal review", "contract"],
-        "designer": ["design", "mockup", "wireframe", "ui ", "ux "],
-        "recurring_tasks": ["recurring", "scheduled task", "cron"],
-        "crm": ["contact", "crm", "relationship"],
-        "customer_intelligence": ["customer", "lead", "prospect"],
+        "issue_triage": ["issue", "bug report", "github issue", "triage issue"],
+        "email_triage": ["email", "inbox", "triage email", "mail"],
         "financial_analysis": ["financial analysis", "revenue", "forecast"],
+        "customer_intelligence": ["customer", "lead", "prospect"],
+        "strategy_adversary": ["strategy", "adversarial", "red team"],
+        "release_manager": ["release", "deploy", "version"],
+        "recurring_tasks": ["recurring", "scheduled task", "cron"],
         "neotoma_repo": ["neotoma", "neotoma repo"],
-        "qa": ["test", "qa ", "quality"],
+        "compliance": ["compliance", "legal review", "contract"],
         "screenshots": ["screenshot", "capture screen"],
+        "designer": ["design", "mockup", "wireframe", "ui ", "ux "],
+        "content": ["blog", "write post", "content", "article"],
+        "briefings": ["meeting", "briefing", "agenda", "calendar"],
+        "payments": ["payment", "invoice", "pay ", "transfer", "wage"],
+        "health": ["workout", "exercise", "gym", "fitness", "health"],
+        "tax": ["tax", "fiscal", "iva", "vat", "hacienda"],
+        "mirror": ["mirror", "sync repo", "apus"],
         "gtm": ["go to market", "gtm", "launch"],
         "pm": ["product", "roadmap", "feature plan"],
+        "crm": ["contact", "crm", "relationship"],
+        "qa": ["test", "qa ", "quality"],
+        "code": ["code", "implement", "build", "fix bug", "refactor"],
+        "dispatcher": ["dispatch", "assign", "route"],
     }
 
     for role, keywords in role_keywords.items():

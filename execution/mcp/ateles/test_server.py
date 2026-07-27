@@ -43,6 +43,7 @@ class TestRouteTask(unittest.TestCase):
                 "dispatcher": "apis",
                 "email_triage": "turdus",
                 "tax": "picus",
+                "pr_steward": "vanellus",
             },
         }
 
@@ -142,6 +143,30 @@ class TestRouteTask(unittest.TestCase):
 
         result = srv._route_task("read some data", "read_entity")
         self.assertEqual(result["action_blast_radius"], "low")
+
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    @patch("server._get_swarm_roster")
+    def test_pr_steward_beats_code_on_review_pr(self, mock_roster, mock_retrieve, mock_get):
+        mock_roster.return_value = self.mock_roster
+        mock_retrieve.return_value = self.mock_agent_def
+        mock_get.return_value = self.mock_policy
+
+        result = srv._route_task("please review pr 42 and merge it")
+        self.assertEqual(result["matched_role"], "pr_steward")
+        self.assertEqual(result["matched_agent"], "vanellus")
+
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    @patch("server._get_swarm_roster")
+    def test_pr_steward_on_merge_pr(self, mock_roster, mock_retrieve, mock_get):
+        mock_roster.return_value = self.mock_roster
+        mock_retrieve.return_value = self.mock_agent_def
+        mock_get.return_value = self.mock_policy
+
+        result = srv._route_task("merge pr #123 after CI passes")
+        self.assertEqual(result["matched_role"], "pr_steward")
+        self.assertEqual(result["matched_agent"], "vanellus")
 
 
 class TestResolveCheckpoint(unittest.TestCase):
