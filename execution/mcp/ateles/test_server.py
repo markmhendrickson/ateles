@@ -356,6 +356,133 @@ class TestGracefulDegradation(unittest.TestCase):
         self.assertIn("error", result)
 
 
+class TestRouteTaskTieBreak(unittest.TestCase):
+    """
+    Equal-length keyword matches must resolve by declared intent, not by
+    position in role_keywords.
+
+    "payment" / "bug fix" / "fix bug" are all 7 characters, so length alone
+    leaves the winner to whichever role is declared first — the same
+    order-dependence the length rule exists to remove. Uses a roster containing
+    BOTH colliding roles; a mock missing either can't observe the collision.
+    """
+
+    def setUp(self):
+        self.roster = {
+            "entity_id": "e", "roster_key": "default", "swarm_domain": "d",
+            "roles": {"code": "cicada", "payments": "monedula", "dispatcher": "apis"},
+        }
+
+    def _route(self, desc, roster=None):
+        with patch("server._get_swarm_roster", return_value=roster or self.roster), \
+             patch("server._retrieve_entities", return_value=[]), \
+             patch("server._get", return_value=None):
+            return srv._route_task(desc)
+
+    def test_equal_length_tie_resolves_by_priority_not_declaration_order(self):
+        """
+        Discriminating case: pr_steward's "merge pr" and payments' "transfer"
+        are both 8 characters, and the two mechanisms DISAGREE — pr_steward is
+        declared first, but payments has higher tie-break priority. Asserting
+        payments therefore fails if the tie ever falls back to table position.
+
+        (The "payment" vs "bug fix" collision from the review is a real tie but
+        a poor test: payments is both declared first AND higher priority, so it
+        passes under either mechanism.)
+        """
+        roster = {
+            "entity_id": "e", "roster_key": "default", "swarm_domain": "d",
+            "roles": {"pr_steward": "vanellus", "payments": "monedula", "dispatcher": "apis"},
+        }
+        r = self._route("merge pr after the transfer clears", roster)
+        self.assertEqual(r["matched_role"], "payments")
+        self.assertEqual(r["matched_keyword"], "transfer")
+
+    def test_reported_collision_resolves_to_payments(self):
+        """The exact descriptions raised in review, pinned either way."""
+        for desc in (
+            "process payment for a bug fix",
+            "please handle the payment for this fix bug",
+            "payment needed to fix bug in checkout",
+        ):
+            with self.subTest(desc=desc):
+                r = self._route(desc)
+                self.assertEqual(r["matched_role"], "payments")
+                self.assertEqual(len(r["matched_keyword"]), 7)
+
+    def test_tie_break_is_independent_of_table_order(self):
+        """
+        Replays the real selection rule over shuffled copies of the actual
+        role_keywords table. Calling _route_task twice would only show
+        determinism; this shows the *ordering* genuinely doesn't matter.
+        """
+        import ast
+        import random
+        from pathlib import Path
+
+        tree = ast.parse(Path(srv.__file__).read_text())
+        table = tie_break = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AnnAssign):
+                name = getattr(node.target, "id", "")
+                if name == "role_keywords":
+                    table = ast.literal_eval(node.value)
+                elif name == "ROLE_TIE_BREAK":
+                    tie_break = ast.literal_eval(node.value)
+        self.assertIsNotNone(table, "could not extract role_keywords")
+        self.assertIsNotNone(tie_break, "could not extract ROLE_TIE_BREAK")
+
+        def select(desc, items):
+            d = desc.lower()
+            best_key = best_role = None
+            for role, kws in items:
+                for kw in kws:
+                    if kw not in d:
+                        continue
+                    key = (len(kw), srv._role_priority(role), role)
+                    if best_key is None or key > best_key:
+                        best_key, best_role = key, role
+            return best_role or "dispatcher"
+
+        cases = [
+            "process payment for a bug fix",
+            "payment needed to fix bug in checkout",
+            "refactor the payment module",
+            "fix a bug in the login form",
+            "review pr 288",
+        ]
+        baseline = {c: select(c, list(table.items())) for c in cases}
+        rng = random.Random(1)
+        for _ in range(50):
+            items = list(table.items())
+            rng.shuffle(items)
+            for c in cases:
+                self.assertEqual(select(c, items), baseline[c], f"order changed verdict for {c!r}")
+
+    def test_longer_keyword_still_beats_higher_priority_role(self):
+        """Priority only breaks ties — it must not override a longer match."""
+        r = self._route("refactor the payment module")
+        self.assertEqual(r["matched_role"], "code")
+        self.assertEqual(r["matched_keyword"], "refactor")
+
+    def test_role_absent_from_roster_falls_through_to_next_best(self):
+        """
+        The `role not in roles` guard must not strand routing on dispatcher or
+        leak best-match state across the skipped role.
+        """
+        roster_without_payments = {
+            "entity_id": "e", "roster_key": "default", "swarm_domain": "d",
+            "roles": {"code": "cicada", "dispatcher": "apis"},
+        }
+        r = self._route("process payment for a bug fix", roster_without_payments)
+        self.assertEqual(r["matched_role"], "code")
+        self.assertIn(r["matched_keyword"], ("bug fix", "fix bug"))
+
+    def test_matching_is_case_insensitive(self):
+        r = self._route("Fix A Bug In The Login Form")
+        self.assertEqual(r["matched_role"], "code")
+
+
 class TestTransportErrorLegibility(unittest.TestCase):
     """
     A transport failure must not be reported as data absence.
@@ -462,6 +589,22 @@ class TestNeotomaEndpoints(unittest.TestCase):
         self.assertEqual(body["entity_type"], "task")
         self.assertEqual(body["search"], "deploy")
         self.assertEqual(body["limit"], 7)
+
+    @patch("server._post")
+    def test_correct_posts_to_correct_path(self, mock_post):
+        """The other write path carries the same live-404 risk."""
+        mock_post.return_value = {"ok": True}
+        srv._correct("ent_1", "task", "status", "done", "idem-1")
+        self.assertEqual(mock_post.call_args[0][0], "/correct")
+        body = mock_post.call_args[0][1]
+        self.assertEqual(body["entity_id"], "ent_1")
+        self.assertEqual(body["field"], "status")
+        self.assertEqual(body["idempotency_key"], "idem-1")
+
+    def test_single_entity_fetch_uses_entities_id_path(self):
+        with patch("server._request", return_value={}) as mock_request:
+            srv._get("/entities/ent_abc")
+        self.assertEqual(mock_request.call_args[0][1], "/entities/ent_abc")
 
 
 class TestGetSwarmRoster(unittest.TestCase):

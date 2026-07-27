@@ -193,6 +193,37 @@ def _correct(entity_id: str, entity_type: str, field: str, value: Any, idem_key:
     return result is not None
 
 
+# Tie-break order for equal-length keyword matches, most specific first.
+#
+# Only consulted when two roles match a description with keywords of identical
+# length; unequal lengths are always decided by length alone. Without this,
+# equal-length ties fall to whichever role appears first in role_keywords —
+# reintroducing the declaration-order dependence the length rule exists to
+# remove (e.g. "payment" and "bug fix" are both 7 characters).
+#
+# Rationale for the order: money and irreversible external actions outrank
+# generic implementation work, so an ambiguous description escalates toward the
+# more consequential handler rather than silently landing on code.
+ROLE_TIE_BREAK: tuple[str, ...] = (
+    "payments",
+    "tax",
+    "release_manager",
+    "compliance",
+    "pr_steward",
+    "issue_triage",
+    "qa",
+    "code",
+)
+
+
+def _role_priority(role: str) -> int:
+    """Higher is more specific. Unlisted roles share the lowest priority."""
+    try:
+        return len(ROLE_TIE_BREAK) - ROLE_TIE_BREAK.index(role)
+    except ValueError:
+        return 0
+
+
 # ── Tool implementations ─────────────────────────────────────────────────────
 
 def _get_swarm_roster() -> dict:
@@ -278,19 +309,34 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
         "dispatcher": ["dispatch", "assign", "route"],
     }
 
-    # Longest keyword wins, not dict order. First-match-wins made routing
-    # depend on how the table happened to be ordered: "refactor the payment
-    # module" matched payments' "payment" before code's "refactor" purely
-    # because payments is declared earlier. Preferring the most specific
-    # (longest) matching keyword makes the outcome order-independent.
-    best_kw_len = 0
+    # Selection is (keyword length, role priority) — never dict order.
+    #
+    # Longest keyword wins: "refactor the payment module" must reach code via
+    # "refactor" (8) rather than payments via "payment" (7).
+    #
+    # Ties are the subtle half. Length alone leaves equal-length matches to be
+    # settled by whichever role is declared first, which is the same
+    # order-dependence in a different disguise — e.g. "process payment for a
+    # bug fix" matches payments' "payment" (7) and code's "bug fix" (7), and
+    # silently resolved to payments purely by position. ROLE_TIE_BREAK states
+    # the intent explicitly: when two roles match equally well, the more
+    # consequential/specific handler wins. Roles absent from the list share the
+    # lowest priority and then fall back to alphabetical order, so the result is
+    # always deterministic and never depends on table position.
+    best_key: tuple[int, int, str] | None = None
     matched_keyword: str | None = None
     for role, keywords in role_keywords.items():
         if role not in roles:
             continue
         for kw in keywords:
-            if kw in desc_lower and len(kw) > best_kw_len:
-                best_kw_len = len(kw)
+            if kw not in desc_lower:
+                continue
+            # Higher tuple sorts better: longer keyword, then higher priority,
+            # then a stable alphabetical tiebreak (negated via reverse compare).
+            priority = _role_priority(role)
+            key = (len(kw), priority, role)
+            if best_key is None or key > best_key:
+                best_key = key
                 matched_keyword = kw
                 best_role = role
                 best_agent = roles[role]
