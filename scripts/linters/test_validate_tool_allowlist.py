@@ -98,6 +98,40 @@ class TestCheckAgent:
         assert not warnings
 
 
+class TestMissingNeotomaCredentials:
+    """No NEOTOMA_BEARER_TOKEN configured (e.g. a fork, or this repo today —
+    the secret isn't provisioned) must skip cleanly, not fail the build on
+    infrastructure the PR under test didn't touch."""
+
+    def test_fetch_returns_none_without_token(self, monkeypatch, tmp_path) -> None:
+        # Sandbox HOME so a real ~/.config/neotoma/.env on the machine running
+        # this test can't leak a live token in through _load_env()'s fallback.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("NEOTOMA_BEARER_TOKEN", raising=False)
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.invalid")
+        assert lint.fetch_agents_from_neotoma() is None
+
+    def test_fetch_returns_none_without_base_url(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("NEOTOMA_BASE_URL", raising=False)
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "some-token")
+        assert lint.fetch_agents_from_neotoma() is None
+
+    def test_cli_skips_without_token_or_fixture(self, monkeypatch, tmp_path) -> None:
+        env = dict(os.environ)
+        env["HOME"] = str(tmp_path)
+        env.pop("NEOTOMA_BEARER_TOKEN", None)
+        env["NEOTOMA_BASE_URL"] = "https://neotoma.example.invalid"
+        result = subprocess.run(
+            [sys.executable, str(_SCRIPT)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "SKIP" in result.stdout
+
+
 class TestFixtureCLI:
     """End-to-end CLI checks driven through --fixture (subprocess), matching
     the QA table's fixture-file cases exactly."""

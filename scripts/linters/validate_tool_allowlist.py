@@ -104,14 +104,30 @@ def check_agent(name: str, tool_allowlist) -> tuple[list[str], list[str]]:
     return blocking, warnings
 
 
-def fetch_agents_from_neotoma() -> list[dict]:
+def fetch_agents_from_neotoma() -> list[dict] | None:
     """Fetch agent_definition entities via render_agent_docs.py's own fetch —
     same Neotoma query, same env/token resolution, same "real agent" filter
     (tier/genus/aauth_sub required), so this linter can never disagree with
     the renderer about which entities are agents or what their tool_allowlist
-    values normalize to."""
-    base_url, token = render_agent_docs._load_env()
-    agents = render_agent_docs.fetch_agents(base_url, token)
+    values normalize to.
+
+    Returns None (rather than raising) when NEOTOMA_BASE_URL/NEOTOMA_BEARER_TOKEN
+    aren't configured or Neotoma rejects/can't be reached — this lane runs on
+    every PR touching agent config, including forks and environments where the
+    token secret isn't provisioned, and a live-state check has no fixture to
+    fall back to. Same optional-token posture as loxia_review.py's
+    NEOTOMA_BEARER_TOKEN handling: skip cleanly rather than fail the build on
+    infrastructure the PR didn't touch."""
+    try:
+        base_url, token = render_agent_docs._load_env()
+    except SystemExit:
+        return None
+    if not token:
+        return None
+    try:
+        agents = render_agent_docs.fetch_agents(base_url, token)
+    except SystemExit:
+        return None
     return [
         {"name": a["name"], "tool_allowlist": a.get("tool_allowlist")} for a in agents
     ]
@@ -133,22 +149,20 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.fixture:
-        agents = load_fixture(args.fixture)
-    else:
-        try:
-            agents = fetch_agents_from_neotoma()
-        except SystemExit as exc:
-            # Neotoma unreachable (e.g. NEOTOMA_BEARER_TOKEN not configured in
-            # this environment) is an infra gap, not a grant-grammar defect —
-            # do not fail the build over it. lanius-stale-issues.yml hits the
-            # same missing-secret condition; both are pre-existing and outside
-            # any single PR's control. Mirrors the informational treatment
-            # already given to the doc-mirror-freshness step below in CI.
-            print(
-                f"SKIP — Neotoma unreachable, cannot validate live tool_allowlist: {exc}"
-            )
-            return 0
+    agents = load_fixture(args.fixture) if args.fixture else fetch_agents_from_neotoma()
+
+    if agents is None:
+        # Neotoma unreachable (e.g. NEOTOMA_BEARER_TOKEN not configured in this
+        # environment) is an infra gap, not a grant-grammar defect — do not
+        # fail the build over it. lanius-stale-issues.yml hits the same
+        # missing-secret condition; both are pre-existing and outside any
+        # single PR's control. Mirrors the informational treatment already
+        # given to the doc-mirror-freshness step in CI.
+        print(
+            "SKIP — NEOTOMA_BEARER_TOKEN not configured or Neotoma unreachable; "
+            "cannot validate live agent_definition state in this environment"
+        )
+        return 0
 
     all_blocking: list[str] = []
     all_warnings: list[str] = []

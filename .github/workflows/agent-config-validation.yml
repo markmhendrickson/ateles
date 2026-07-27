@@ -3,7 +3,8 @@ name: Agent config validation
 # Validation lane for the Neotoma-canonical agent_definition surface (ateles#255):
 #   1. tool_allowlist grant grammar — the `bash:<command>` prefix is silently
 #      dropped by Claude Code's --allowedTools parser; only Bash(<command>:*)
-#      is honored. This lane fails the build the moment that prefix reappears.
+#      is honored. This lane fails the build the moment that prefix reappears,
+#      PROVIDED NEOTOMA_BEARER_TOKEN is configured (see caveat below).
 #   2. Generated agent-doc mirror freshness — docs/agents/*.md and
 #      .claude/skills/*/SKILL.md are rendered FROM Neotoma agent_definition
 #      entities (execution/scripts/render_agent_docs.py) and must never be
@@ -11,6 +12,9 @@ name: Agent config validation
 #      regenerate_generated_files_before_opening_pr policy.
 #
 # Both checks read live Neotoma state, so this lane needs NEOTOMA_BEARER_TOKEN.
+# validate_tool_allowlist.py itself treats a missing token or unreachable
+# Neotoma as a clean SKIP (exit 0) rather than a crash — see the step-level
+# NOTE below for the informational/continue-on-error rollout plan.
 
 on:
   pull_request:
