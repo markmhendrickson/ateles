@@ -116,6 +116,39 @@ class TestRouteTask(unittest.TestCase):
         result = srv._route_task("")
         self.assertEqual(result["matched_role"], "dispatcher")
 
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    @patch("server._get_swarm_roster")
+    def test_natural_bug_fix_phrasings_route_to_code(self, mock_roster, mock_retrieve, mock_get):
+        """A rigid "fix bug" keyword missed "fix a bug" / "fix the bug", which
+        then fell through to the dispatcher fallback."""
+        mock_roster.return_value = self.mock_roster
+        mock_retrieve.return_value = self.mock_agent_def
+        mock_get.return_value = self.mock_policy
+
+        for desc in ("fix a bug in the login form", "fix the bug in auth", "bug fix for parser"):
+            with self.subTest(desc=desc):
+                self.assertEqual(srv._route_task(desc)["matched_role"], "code")
+
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    @patch("server._get_swarm_roster")
+    def test_longest_keyword_wins_over_dict_order(self, mock_roster, mock_retrieve, mock_get):
+        """"refactor the payment module" matches both payments' "payment" and
+        code's "refactor"; the more specific (longer) keyword must win rather
+        than whichever role happens to be declared first."""
+        mock_roster.return_value = self.mock_roster
+        mock_retrieve.return_value = self.mock_agent_def
+        mock_get.return_value = self.mock_policy
+
+        self.assertEqual(
+            srv._route_task("refactor the payment module")["matched_role"], "code"
+        )
+        # The unambiguous payments case must still route to payments.
+        self.assertEqual(
+            srv._route_task("pay the yoga invoice")["matched_role"], "payments"
+        )
+
     @patch("server._get_swarm_roster")
     def test_roster_error_propagates(self, mock_roster):
         mock_roster.return_value = {"error": "swarm_roster not found", "roster_key": "default"}

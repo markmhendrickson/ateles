@@ -223,18 +223,30 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
         "pm": ["product", "roadmap", "feature plan"],
         "crm": ["contact", "crm", "relationship"],
         "qa": ["test", "qa ", "quality"],
-        "code": ["code", "implement", "build", "fix bug", "refactor"],
+        "code": [
+            "code", "implement", "build", "refactor",
+            # Natural bug-fix phrasings. A rigid "fix bug" misses the far more
+            # common "fix a bug" / "fix the bug", which then fell through to
+            # the dispatcher fallback.
+            "fix bug", "fix a bug", "fix the bug", "bugfix", "bug fix",
+        ],
         "dispatcher": ["dispatch", "assign", "route"],
     }
 
+    # Longest keyword wins, not dict order. First-match-wins made routing
+    # depend on how the table happened to be ordered: "refactor the payment
+    # module" matched payments' "payment" before code's "refactor" purely
+    # because payments is declared earlier. Preferring the most specific
+    # (longest) matching keyword makes the outcome order-independent.
+    best_kw_len = 0
     for role, keywords in role_keywords.items():
+        if role not in roles:
+            continue
         for kw in keywords:
-            if kw in desc_lower and role in roles:
+            if kw in desc_lower and len(kw) > best_kw_len:
+                best_kw_len = len(kw)
                 best_role = role
                 best_agent = roles[role]
-                break
-        if best_role:
-            break
 
     if not best_agent:
         best_role = "dispatcher"
