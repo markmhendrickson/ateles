@@ -537,6 +537,11 @@ NEOTOMA_LOCAL_CHECKOUT = os.path.expanduser(
 PHOENICURUS_RELEASE_REPO = os.environ.get(
     "PHOENICURUS_RELEASE_REPO", "markmhendrickson/neotoma"
 )
+# The release repo's default branch. A check_suite:completed on this branch is
+# the signal that a merge's CI has settled — the retry that lets a push_main
+# deferred on in-progress/red CI finally prepare (prepare.py leaves the SHA lock
+# unstamped on those transient deferrals precisely so this retry can fire).
+PHOENICURUS_RELEASE_BRANCH = os.environ.get("PHOENICURUS_RELEASE_BRANCH", "main")
 # Cap on the synchronous half of prepare.py (preflight + spawning the detached
 # prepare agent). Generous: it shells out to git and `gh run list`.
 PHOENICURUS_PREPARE_TIMEOUT_S = int(
@@ -2488,6 +2493,46 @@ class SwarmDispatcher:
         would page the operator on ordinary out-of-order delivery, which is
         ateles#197 with `ci` swapped for `status`.
         """
+        # Auto-release retry: a CI rollup completing on the release repo's
+        # default branch is how a push_main that deferred on in-progress/red CI
+        # gets a second chance. The merge webhook fires before that merge's CI
+        # finishes, so _handle_push_main often hits `ci is None` and defers
+        # WITHOUT stamping the SHA lock; when the same commit's CI later goes
+        # green this event re-invokes prepare, which now sees green and prepares.
+        # A default-branch suite carries no associated PR, so this must run
+        # before the no-PR early return below.
+        if (
+            trigger.repository == PHOENICURUS_RELEASE_REPO
+            and trigger.ci_head_branch == PHOENICURUS_RELEASE_BRANCH
+        ):
+            if trigger.ci_conclusion == "success":
+                log.info(
+                    f"[{DAEMON_NAME}] {PHOENICURUS_RELEASE_BRANCH} CI succeeded on "
+                    f"{trigger.repository} ({trigger.ci_head_sha[:9]}) — retrying "
+                    "release prep"
+                )
+                push_like = SwarmTrigger(
+                    kind="push_main",
+                    repository=trigger.repository,
+                    number=0,
+                    title="",
+                    body="",
+                    author="",
+                    html_url="",
+                    delivery_id=trigger.delivery_id,
+                    action="push",
+                    push_ref=f"refs/heads/{PHOENICURUS_RELEASE_BRANCH}",
+                    push_after=trigger.ci_head_sha,
+                )
+                await self._handle_push_main(push_like)
+            else:
+                log.info(
+                    f"[{DAEMON_NAME}] {PHOENICURUS_RELEASE_BRANCH} CI on "
+                    f"{trigger.repository} concluded {trigger.ci_conclusion!r} — "
+                    "no release retry"
+                )
+            return
+
         pr_number = next((n for n in trigger.ci_pr_numbers if n), 0) or trigger.number
         if not pr_number:
             log.debug(

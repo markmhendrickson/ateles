@@ -122,6 +122,11 @@ class SwarmTrigger:
     ci_head_sha: str = ""
     ci_conclusion: str = ""
     ci_pr_numbers: list[int] = field(default_factory=list)
+    # `ci_head_branch` is the branch the suite ran against (check_suite.
+    # head_branch). Used to recognize a CI completion on the DEFAULT branch —
+    # which carries no associated PR — so the release-prep retry can fire once a
+    # merge's CI settles (the auto-release deferral path).
+    ci_head_branch: str = ""
     # push extras (auto-release): populated when kind == "push". `push_ref` is
     # the fully-qualified ref ("refs/heads/main"); `push_after` is the new head
     # SHA. A push to the default branch is what makes a release preparable, so
@@ -275,6 +280,7 @@ def parse_github_event(
             ci_head_sha=suite.get("head_sha", ""),
             ci_conclusion=(suite.get("conclusion") or "").lower(),
             ci_pr_numbers=[p.get("number", 0) for p in prs if p.get("number")],
+            ci_head_branch=suite.get("head_branch", ""),
             raw=payload,
         )
 

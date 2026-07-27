@@ -140,14 +140,25 @@ def _mark_ran_for_sha(sha: str) -> None:
         MERGE_STATE_FILE.write_text(sha)
 
 
-def _mark_ran(on_merge: bool, head: str) -> None:
+def _mark_ran(on_merge: bool, head: str, *, transient: bool = False) -> None:
     """
     Stamp whichever idempotency lock applies to this run's mode. On-merge runs
     stamp the SHA only, so they never suppress the day's scheduled safety-net
     run (and vice versa).
+
+    ``transient`` marks a deferral on a state that is expected to change for the
+    SAME head — CI still in progress, or CI red that may go green. In on-merge
+    mode we must NOT stamp the SHA for these: the merge webhook fires before that
+    merge's CI finishes, so stamping here would burn the per-commit lock on a run
+    that did nothing and block the `check_suite`-completion retry from ever
+    preparing this head (the immediacy the auto-release exists to provide would
+    be lost until the next merge or the scheduled sweep). The SCHEDULED path
+    still stamps — its once-a-day deferral is intentional, and a same-day retry
+    there is not wanted.
     """
     if on_merge:
-        _mark_ran_for_sha(head)
+        if not transient:
+            _mark_ran_for_sha(head)
     else:
         _mark_ran_today()
 
@@ -436,12 +447,12 @@ def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
             "CI is RED. Not preparing a release until CI is green."
         )
         if not dry_run:
-            _mark_ran(on_merge, head)
+            _mark_ran(on_merge, head, transient=True)
         return 0
     if ci is None:
         log.warning("main CI status unknown / in progress — deferring to next run.")
         if not dry_run:
-            _mark_ran(on_merge, head)
+            _mark_ran(on_merge, head, transient=True)
         return 0
 
     log.info(

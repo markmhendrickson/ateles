@@ -364,12 +364,14 @@ def test_approve_email_accepted_builds_operator_trigger():
 
 
 def _check_suite_payload(action="completed", conclusion="success",
-                         head_sha="deadbeef", prs=((7, "PR title"),)):
+                         head_sha="deadbeef", head_branch="feature/x",
+                         prs=((7, "PR title"),)):
     return {
         "action": action,
         "repository": {"full_name": "o/r"},
         "check_suite": {
             "head_sha": head_sha,
+            "head_branch": head_branch,
             "conclusion": conclusion,
             "pull_requests": [{"number": n, "title": t} for n, t in prs],
         },
@@ -385,6 +387,18 @@ def test_check_suite_completed_parses_to_ci_status():
     assert t.ci_head_sha == "deadbeef"
     assert t.ci_conclusion == "success"
     assert t.ci_pr_numbers == [7]
+    assert t.ci_head_branch == "feature/x"
+
+
+def test_check_suite_on_main_carries_branch_and_no_pr():
+    # A CI rollup on the default branch (post-merge) has no associated PR; the
+    # branch is what lets the dispatcher recognize it as the release-prep retry.
+    t = parse_github_event(
+        "check_suite", _check_suite_payload(head_branch="main", prs=())
+    )
+    assert t is not None
+    assert t.ci_head_branch == "main"
+    assert t.ci_pr_numbers == []
 
 
 def test_check_suite_failure_conclusion_lowercased():

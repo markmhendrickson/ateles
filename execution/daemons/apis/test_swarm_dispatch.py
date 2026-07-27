@@ -4429,3 +4429,68 @@ def test_push_main_survives_prepare_failure(monkeypatch):
     monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: True)
     d = SwarmDispatcher(_StubNotifier(), _config())
     asyncio.run(d._handle_push_main(_push_main_trigger()))  # must not raise
+
+
+# ── auto-release retry: main CI completion re-drives release prep ────────────
+#
+# A push_main that fires while its merge's CI is still running defers WITHOUT
+# stamping the SHA lock (prepare.py transient deferral). The check_suite:completed
+# on main is the retry: on success it must re-invoke _handle_push_main; on failure
+# or a non-release branch/repo it must NOT.
+
+
+def test_ci_status_main_success_retries_release_prep(monkeypatch):
+    seen = []
+
+    async def fake_push_main(self, trigger):
+        seen.append(trigger)
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_push_main", fake_push_main)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    trig = _ci_status_trigger(
+        repository="markmhendrickson/neotoma", ci_head_branch="main",
+        ci_conclusion="success", ci_head_sha="f"*40, ci_pr_numbers=[],
+    )
+    asyncio.run(d._handle_ci_status(trig))
+    assert len(seen) == 1, "main CI success must retry release prep"
+    assert seen[0].kind == "push_main"
+    assert seen[0].push_after == "f"*40
+    assert seen[0].push_ref == "refs/heads/main"
+
+
+def test_ci_status_main_failure_does_not_retry(monkeypatch):
+    seen = []
+
+    async def fake_push_main(self, trigger):
+        seen.append(trigger)
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_push_main", fake_push_main)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    trig = _ci_status_trigger(
+        repository="markmhendrickson/neotoma", ci_head_branch="main",
+        ci_conclusion="failure", ci_pr_numbers=[],
+    )
+    asyncio.run(d._handle_ci_status(trig))
+    assert seen == [], "a red main build must not prepare a release"
+
+
+def test_ci_status_non_release_repo_main_does_not_retry(monkeypatch):
+    """Only the release repo's main drives release prep; other repos fall through
+    to the normal PR-oriented ci_status path (here: no PR → ignored)."""
+    seen = []
+
+    async def fake_push_main(self, trigger):
+        seen.append(trigger)
+
+    async def fake_fetch_pr(self, repo, num):  # not reached with no PR, but safe
+        return None
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_push_main", fake_push_main)
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    trig = _ci_status_trigger(
+        repository="owner/other", ci_head_branch="main",
+        ci_conclusion="success", number=0, ci_pr_numbers=[],
+    )
+    asyncio.run(d._handle_ci_status(trig))
+    assert seen == [], "non-release repo main must not prepare a release"
