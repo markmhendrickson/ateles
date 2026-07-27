@@ -1,13 +1,17 @@
 name: ateles package tests
 
-# Enforces the W0/W1+ package test suite plus the Claude Code hook tests on
-# every PR that touches either — the regression lane the QA gate asked for.
+# Enforces the W0/W1+ package test suite plus the Claude Code hook tests and the
+# phoenicurus-release daemon's regression tests on every PR that touches any of
+# them — the regression lane the QA gate asked for. The phoenicurus path is
+# included so daemon-only changes (like the plist repair in #242) actually get
+# their tests run in CI, rather than silently skipping the lane.
 
 on:
   pull_request:
     paths:
       - "ateles/**"
       - ".claude/hooks/**"
+      - "execution/daemons/phoenicurus-release/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/ateles-tests.yml"
@@ -26,3 +30,5 @@ jobs:
           python-version: "3.13"
       - name: Run ateles package tests
         run: uv run --extra dev python -m pytest ateles/ .claude/hooks/ -q
+      - name: Run phoenicurus-release daemon tests
+        run: uv run --extra dev python -m pytest execution/daemons/phoenicurus-release/ -q
