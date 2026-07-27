@@ -4255,13 +4255,15 @@ def test_open_implementation_pr_returns_url_from_cicada_stdout(monkeypatch):
         )
     monkeypatch.setattr("swarm_dispatch.run_skill", fake_run_skill)
     d = SwarmDispatcher(_StubNotifier(), _config())
-    url = asyncio.run(d._open_implementation_pr(_issue_trigger(), _empty_spec_state()))
-    assert url == "https://github.com/owner/repo/pull/1910"
+    handoff = asyncio.run(d._open_implementation_pr(_issue_trigger(), _empty_spec_state()))
+    assert handoff.pr_url == "https://github.com/owner/repo/pull/1910"
+    assert handoff.failure_class is None
 
 
 def test_open_implementation_pr_returns_none_when_no_pr(monkeypatch):
     """The #1882 false-green: Cicada exits 0 with no PR URL and no PR on GitHub;
-    the handoff must return None (so the caller notifies 'no PR opened')."""
+    the handoff must return a None pr_url (so the caller notifies 'no PR opened'),
+    classified as no_op_build."""
     async def fake_run_skill(skill, prompt, **kwargs):
         return SkillResult(skill, True, 0, "I have completed the build.", "")
     monkeypatch.setattr("swarm_dispatch.run_skill", fake_run_skill)
@@ -4270,14 +4272,367 @@ def test_open_implementation_pr_returns_none_when_no_pr(monkeypatch):
         return None
     monkeypatch.setattr(SwarmDispatcher, "_find_open_pr_for_issue", fake_find)
 
+    async def fake_store_build_attempt(self, trigger, **kwargs):
+        return "ent_synthetic"
+    monkeypatch.setattr(SwarmDispatcher, "_store_build_attempt", fake_store_build_attempt)
+
     d = SwarmDispatcher(_StubNotifier(), _config())
-    url = asyncio.run(d._open_implementation_pr(_issue_trigger(), _empty_spec_state()))
-    assert url is None
+    handoff = asyncio.run(d._open_implementation_pr(_issue_trigger(), _empty_spec_state()))
+    assert handoff.pr_url is None
+    assert handoff.failure_class == "no_op_build"
 
 
 def _empty_spec_state():
     from issue_spec import SpecState
     return SpecState(repo="markmhendrickson/neotoma", issue_number=1882, title="t")
+
+
+# ── classify_build_failure (ateles#256 failure-classification taxonomy) ─────
+
+
+def test_classify_build_failure_cli_allowlist_rejection():
+    from swarm_dispatch import classify_build_failure
+
+    stdout = "Error: --allowedTools rejected pattern 'bash:gh pr*': unknown option"
+    failure_class, hint = classify_build_failure(1, stdout, "")
+    assert failure_class == "cli_allowlist_rejection"
+    assert "wildcard tool-allowlist" in hint
+
+
+def test_classify_build_failure_auth_failure():
+    from swarm_dispatch import classify_build_failure
+
+    stderr = "401 Invalid authentication credentials — oauth token has expired"
+    failure_class, hint = classify_build_failure(1, "", stderr)
+    assert failure_class == "auth_failure"
+    assert "authenticate" in hint
+
+
+def test_classify_build_failure_git_worktree_setup():
+    from swarm_dispatch import classify_build_failure
+
+    stdout = "Setting up worktree...\nfatal: could not fetch origin\nfetch failed"
+    failure_class, hint = classify_build_failure(128, stdout, "")
+    assert failure_class == "git_worktree_setup"
+    assert "worktree" in hint.lower()
+
+
+def test_classify_build_failure_git_worktree_setup_with_repo_context():
+    from swarm_dispatch import classify_build_failure
+
+    stdout = "fatal: not a git repository"
+    _, hint_with_repo = classify_build_failure(128, stdout, "", repo="owner/repo")
+    _, hint_without_repo = classify_build_failure(128, stdout, "")
+    assert "owner/repo" in hint_with_repo
+    assert "owner/repo" not in hint_without_repo
+
+
+def test_classify_build_failure_gh_pr_create_failure():
+    from swarm_dispatch import classify_build_failure
+
+    stderr = "gh: Bad credentials (HTTP 401) — could not create pull request"
+    failure_class, hint = classify_build_failure(1, "", stderr)
+    assert failure_class == "gh_pr_create_failure"
+    assert "gh pr create" in hint
+
+
+def test_classify_build_failure_gh_pr_create_failure_with_agent_login():
+    from swarm_dispatch import classify_build_failure
+
+    stderr = "gh: Bad credentials"
+    _, hint_with_login = classify_build_failure(
+        1, "", stderr, agent_github_login="cicada-agent"
+    )
+    _, hint_without_login = classify_build_failure(1, "", stderr)
+    assert "cicada-agent" in hint_with_login
+    assert "cicada-agent" not in hint_without_login
+
+
+def test_classify_build_failure_unclassified():
+    from swarm_dispatch import classify_build_failure
+
+    failure_class, hint = classify_build_failure(1, "some random output", "boom")
+    assert failure_class == "unclassified"
+    assert "Unrecognized failure" in hint
+
+
+def test_classify_build_failure_does_not_false_positive_on_gh_substring():
+    """"gh:" must not bare-substring-match prose ending in an unrelated word
+    like "though:" — the signature requires the trailing space ("gh: ")."""
+    from swarm_dispatch import classify_build_failure
+
+    stdout = "The build failed, though: the root cause is unrelated to GitHub."
+    failure_class, _ = classify_build_failure(1, stdout, "")
+    assert failure_class == "unclassified"
+
+
+def test_classify_build_failure_empty_input_does_not_raise():
+    from swarm_dispatch import classify_build_failure
+
+    failure_class, hint = classify_build_failure(None, "", "")
+    assert failure_class == "unclassified"
+    assert hint
+
+
+def test_classify_build_failure_detection_order_allowlist_wins_over_auth():
+    """A fixture matching BOTH cli_allowlist_rejection and auth_failure
+    signatures must classify as cli_allowlist_rejection (detection order)."""
+    from swarm_dispatch import classify_build_failure
+
+    blob = (
+        "Error: --allowedTools rejected pattern: unknown option\n"
+        "401 Invalid authentication credentials"
+    )
+    failure_class, _ = classify_build_failure(1, blob, "")
+    assert failure_class == "cli_allowlist_rejection"
+
+
+# ── _open_implementation_pr failure path: build_attempt full-fidelity store ─
+
+
+def test_open_implementation_pr_failure_stores_build_attempt_with_full_output(monkeypatch):
+    long_stderr = "line of error detail " * 20  # > 200 chars
+    assert len(long_stderr) > 200
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, False, 1, "some stdout", long_stderr, duration_ms=1234)
+    monkeypatch.setattr("swarm_dispatch.run_skill", fake_run_skill)
+
+    captured = {}
+
+    async def fake_store_build_attempt(self, trigger, **kwargs):
+        captured.update(kwargs)
+        return "ent_captured"
+    monkeypatch.setattr(SwarmDispatcher, "_store_build_attempt", fake_store_build_attempt)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    handoff = asyncio.run(d._open_implementation_pr(_issue_trigger(), _empty_spec_state()))
+
+    assert captured["stderr"] == long_stderr
+    assert captured["returncode"] == 1
+    assert captured["failure_class"] not in (None, "none")
+    assert handoff.pr_url is None
+    assert handoff.build_attempt_entity_id == "ent_captured"
+
+
+def test_dispatcher_log_line_includes_failure_class_and_entity_id(monkeypatch, caplog):
+    long_stderr = "x" * 2500  # > 2KB
+    assert len(long_stderr) > 2000
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, False, 1, "", long_stderr, duration_ms=42)
+    monkeypatch.setattr("swarm_dispatch.run_skill", fake_run_skill)
+
+    async def fake_store_build_attempt(self, trigger, **kwargs):
+        return "ent_logtest"
+    monkeypatch.setattr(SwarmDispatcher, "_store_build_attempt", fake_store_build_attempt)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    with caplog.at_level("ERROR", logger="apis.swarm_dispatch"):
+        handoff = asyncio.run(
+            d._open_implementation_pr(_issue_trigger(), _empty_spec_state())
+        )
+
+    log_text = "\n".join(r.message for r in caplog.records)
+    assert f"[{handoff.failure_class}]" in log_text
+    assert handoff.hint in log_text
+    assert "build_attempt ent_logtest" in log_text
+    assert "rc=1" in log_text
+
+
+def test_dispatcher_log_line_uses_store_failed_when_entity_id_none(monkeypatch, caplog):
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, False, 1, "", "boom", duration_ms=1)
+    monkeypatch.setattr("swarm_dispatch.run_skill", fake_run_skill)
+
+    async def fake_store_build_attempt(self, trigger, **kwargs):
+        return None
+    monkeypatch.setattr(SwarmDispatcher, "_store_build_attempt", fake_store_build_attempt)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    with caplog.at_level("ERROR", logger="apis.swarm_dispatch"):
+        asyncio.run(d._open_implementation_pr(_issue_trigger(), _empty_spec_state()))
+
+    log_text = "\n".join(r.message for r in caplog.records)
+    assert "build_attempt STORE_FAILED" in log_text
+
+
+# ── no_op_build parity: same entity shape as a failure-branch entity ────────
+
+
+def test_open_implementation_pr_no_op_build_parity(monkeypatch):
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "I have completed the build.", "", duration_ms=99)
+    monkeypatch.setattr("swarm_dispatch.run_skill", fake_run_skill)
+
+    async def fake_find(self, trigger):
+        return None
+    monkeypatch.setattr(SwarmDispatcher, "_find_open_pr_for_issue", fake_find)
+
+    captured = {}
+
+    async def fake_store_build_attempt(self, trigger, **kwargs):
+        captured.update(kwargs)
+        return "ent_noop"
+    monkeypatch.setattr(SwarmDispatcher, "_store_build_attempt", fake_store_build_attempt)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    handoff = asyncio.run(d._open_implementation_pr(_issue_trigger(), _empty_spec_state()))
+
+    assert handoff.failure_class == "no_op_build"
+    assert handoff.pr_url is None
+    assert captured["returncode"] == 0
+    assert captured["failure_class"] == "no_op_build"
+    # Same field set (kwargs) as the failure-branch call — parity requirement.
+    assert set(captured.keys()) == {
+        "returncode", "stdout", "stderr", "failure_class", "hint", "duration_ms",
+    }
+
+
+# ── _store_entities bool return ──────────────────────────────────────────────
+
+
+def test_store_entities_returns_true_on_success(monkeypatch):
+    class _FakeResp:
+        def raise_for_status(self):
+            pass
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **kw):
+            return _FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _FakeClient())
+    d = SwarmDispatcher(_StubNotifier(), DispatchConfig(neotoma_token="tok", github_token=""))
+    ok = asyncio.run(d._store_entities([{"entity_type": "harness_event"}], idempotency_key="k"))
+    assert ok is True
+
+
+def test_store_entities_returns_false_on_exception(monkeypatch):
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **kw):
+            raise RuntimeError("network down")
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _FakeClient())
+    d = SwarmDispatcher(_StubNotifier(), DispatchConfig(neotoma_token="tok", github_token=""))
+    ok = asyncio.run(d._store_entities([{"entity_type": "harness_event"}], idempotency_key="k"))
+    assert ok is False
+
+
+def test_store_entities_returns_false_when_token_unset():
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    ok = asyncio.run(d._store_entities([{"entity_type": "harness_event"}], idempotency_key="k"))
+    assert ok is False
+
+
+# ── attempt_seq sequencing ───────────────────────────────────────────────────
+
+
+def test_store_build_attempt_attempt_seq_increments_from_prior_count(monkeypatch):
+    async def fake_count(self, trigger):
+        return 2
+    monkeypatch.setattr(SwarmDispatcher, "_count_prior_build_attempts", fake_count)
+
+    captured = {}
+
+    async def fake_store_entities(self, entities, idempotency_key):
+        captured["entities"] = entities
+        captured["idempotency_key"] = idempotency_key
+        return True
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store_entities)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    entity_id = asyncio.run(
+        d._store_build_attempt(
+            _issue_trigger(),
+            returncode=1,
+            stdout="out",
+            stderr="err",
+            failure_class="unclassified",
+            hint="hint text",
+            duration_ms=10,
+        )
+    )
+    assert captured["entities"][0]["attempt_seq"] == 3
+    assert entity_id is not None
+
+
+def test_store_build_attempt_attempt_seq_starts_at_one_with_no_prior(monkeypatch):
+    async def fake_count(self, trigger):
+        return 0
+    monkeypatch.setattr(SwarmDispatcher, "_count_prior_build_attempts", fake_count)
+
+    captured = {}
+
+    async def fake_store_entities(self, entities, idempotency_key):
+        captured["entities"] = entities
+        return True
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store_entities)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(
+        d._store_build_attempt(
+            _issue_trigger(),
+            returncode=1,
+            stdout="out",
+            stderr="err",
+            failure_class="unclassified",
+            hint="hint text",
+            duration_ms=10,
+        )
+    )
+    assert captured["entities"][0]["attempt_seq"] == 1
+    assert "relationships" not in captured["entities"][0]
+
+
+def test_store_build_attempt_supersedes_immediately_prior_attempt(monkeypatch):
+    """With >=1 prior attempt, the new build_attempt links SUPERSEDES to the
+    immediately prior attempt (attempt_seq - 1), not an older one."""
+    async def fake_count(self, trigger):
+        return 2  # two priors exist -> this one is attempt_seq 3, prior is 2
+    monkeypatch.setattr(SwarmDispatcher, "_count_prior_build_attempts", fake_count)
+
+    captured = {}
+
+    async def fake_store_entities(self, entities, idempotency_key):
+        captured["entities"] = entities
+        return True
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store_entities)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    trigger = _issue_trigger()
+    asyncio.run(
+        d._store_build_attempt(
+            trigger,
+            returncode=1,
+            stdout="out",
+            stderr="err",
+            failure_class="unclassified",
+            hint="hint text",
+            duration_ms=10,
+        )
+    )
+    entity = captured["entities"][0]
+    assert entity["attempt_seq"] == 3
+    assert entity["relationships"] == [
+        {
+            "type": "SUPERSEDES",
+            "target_entity_id": (
+                f"build-attempt-{trigger.repository}-{trigger.number}-2"
+            ),
+        }
+    ]
 
 
 # ── issue-pipeline resume after restart (ateles#230 follow-up) ───────────────

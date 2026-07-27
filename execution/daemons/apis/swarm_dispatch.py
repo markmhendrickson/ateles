@@ -799,6 +799,122 @@ def compose_auth_failure_comment(agent: str) -> str:
     )
 
 
+# Signatures of the Claude CLI wildcard tool-allowlist rejection bug (seen on
+# CLI 2.1.204): a `bash:gh pr*`-style glob entry in --allowed-tools is rejected
+# by the CLI itself before the build can even start. Best-effort; refine
+# against a real repro when available — these are our best guess at the
+# CLI's error phrasing, not confirmed live strings.
+_CLI_ALLOWLIST_REJECTION_SIGNATURES = (
+    "--allowedtools",
+    "unknown option",
+    "invalid tool pattern",
+    "unrecognized tool",
+)
+
+
+def detect_cli_allowlist_rejection(*texts: str) -> bool:
+    """True when any text carries a Claude CLI allowlist-rejection signature.
+
+    Mirrors detect_auth_failure's shape: lowercase the blob, substring match."""
+    blob = " ".join(t for t in texts if t).lower()
+    return any(sig in blob for sig in _CLI_ALLOWLIST_REJECTION_SIGNATURES)
+
+
+# git subprocess failure markers (fetch/worktree add/branch create gone wrong)
+# seen in stdout/stderr of a build-handoff dispatch.
+_GIT_WORKTREE_FAILURE_SIGNATURES = (
+    "fatal:",
+    "error: pathspec",
+    "fetch failed",
+    "not a git repository",
+)
+
+# `gh pr create` failure markers. Presence alone is enough signal for this
+# classifier — we don't require "gh pr create" to also appear in the blob,
+# since these substrings are specific enough on their own.
+_GH_PR_CREATE_FAILURE_SIGNATURES = (
+    "bad credentials",
+    "httperror",
+    "pull request create failed",
+    "could not create pull request",
+)
+
+# The `gh` CLI's own error-prefix format is "gh: <message>" at the start of a
+# line/sentence — matched with a word boundary so this never false-positives
+# on prose containing an unrelated word ending in "...gh:" (e.g. "though:").
+_GH_CLI_ERROR_PREFIX_RE = re.compile(r"(?<![a-z])gh:\s")
+
+
+def classify_build_failure(
+    returncode: int | None,
+    stdout: str,
+    stderr: str,
+    *,
+    repo: str = "",
+    agent_github_login: str = "",
+) -> tuple[str, str]:
+    """Classify a failed Cicada build-handoff dispatch. Returns (failure_class, hint).
+
+    Detection order (first match wins): cli_allowlist_rejection -> auth_failure
+    -> git_worktree_setup -> gh_pr_create_failure -> unclassified. Pure function
+    of (returncode, stdout, stderr) plus optional repo/agent_github_login context
+    used only to fill in the hint text for the two classes whose hint template
+    references them (choice (a) from the design: extend the signature with
+    keyword-only optional context rather than leave the hint text generic).
+    Never raises on None/empty inputs.
+    """
+    stdout = stdout or ""
+    stderr = stderr or ""
+
+    if detect_cli_allowlist_rejection(stdout, stderr):
+        return (
+            "cli_allowlist_rejection",
+            "The Claude CLI rejected a wildcard tool-allowlist entry (known "
+            "CLI 2.1.204 bug). This is NOT a build defect — check whether the "
+            "allowlist-wildcard fix (see linked issue) has landed, then "
+            "re-run `/swarm-run` on this issue.",
+        )
+
+    if detect_auth_failure(stdout, stderr):
+        return (
+            "auth_failure",
+            "Cicada's build child could not authenticate to the Anthropic "
+            "API. This is an infra issue — operator must re-auth or check "
+            "API credit balance, then re-run.",
+        )
+
+    blob = f"{stdout} {stderr}".lower()
+
+    if any(sig in blob for sig in _GIT_WORKTREE_FAILURE_SIGNATURES):
+        repo_phrase = f"{repo} access" if repo else "repo access"
+        return (
+            "git_worktree_setup",
+            f"Branch/worktree setup failed before the build could start. "
+            f"Check {repo_phrase} and disk space on the daemon host; full "
+            "git error in the stored build_attempt.",
+        )
+
+    if _GH_CLI_ERROR_PREFIX_RE.search(blob) or any(
+        sig in blob for sig in _GH_PR_CREATE_FAILURE_SIGNATURES
+    ):
+        login_phrase = (
+            f"the agent's GitHub token scope/expiry for {agent_github_login}"
+            if agent_github_login
+            else "the agent's GitHub token scope/expiry"
+        )
+        return (
+            "gh_pr_create_failure",
+            "Cicada could not open the PR via `gh pr create` — check "
+            f"{login_phrase}. Full error in the stored build_attempt.",
+        )
+
+    return (
+        "unclassified",
+        "Unrecognized failure — read the full output at the stored "
+        "build_attempt before assuming a known cause.",
+    )
+
+
 def lenses_missing_comments(
     comment_bodies: list[str], lenses: list[str]
 ) -> list[str]:
@@ -911,6 +1027,21 @@ class DispatchConfig:
         ).split(",")
         if r.strip()
     )
+
+
+@dataclass
+class BuildHandoffResult:
+    """Outcome of `_open_implementation_pr`'s Cicada build handoff.
+
+    `pr_url` is set only when a PR was actually confirmed open. On any failure
+    or no-op outcome, `failure_class`/`hint` carry the classification and
+    `build_attempt_entity_id` references the full-fidelity diagnostics entity
+    (None when the store itself failed — see the STORE_FAILED fallback)."""
+
+    pr_url: str | None
+    failure_class: str | None
+    hint: str | None
+    build_attempt_entity_id: str | None
 
 
 class SwarmDispatcher:
@@ -1282,19 +1413,28 @@ class SwarmDispatcher:
         #    STOP and notify that the spec is ready awaiting `build` approval.
         gates_green = self._gates_green(lanius)
         if self.config.auto_build and gates_green:
-            pr_url = await self._open_implementation_pr(trigger, state)
+            handoff = await self._open_implementation_pr(trigger, state)
+            if handoff.pr_url:
+                detail = (
+                    f"auto-build ON — implementation PR opened "
+                    f"({handoff.pr_url}); the PR gate pipeline now owns it "
+                    "(merge stays operator-gated)."
+                )
+            else:
+                attempt_ref = (
+                    f" (build_attempt {handoff.build_attempt_entity_id})"
+                    if handoff.build_attempt_entity_id
+                    else " (diagnostics entity could not be stored — see "
+                    "daemon log for full output)"
+                )
+                detail = (
+                    "auto-build ON, but the Cicada build handoff did not "
+                    f"produce a PR — [{handoff.failure_class}] {handoff.hint}"
+                    f"{attempt_ref}"
+                )
             self.notifier.send(
                 f"Issue {ref}: additive spec assembled ("
-                f"{', '.join(completed) or 'none'}); "
-                + (
-                    f"auto-build ON — implementation PR opened ({pr_url}); the "
-                    "PR gate pipeline now owns it (merge stays operator-gated)."
-                    if pr_url
-                    else "auto-build ON, but the Cicada build handoff opened NO "
-                    "PR (spec may be incomplete or the build produced nothing). "
-                    "Spec is ready; open the build manually or re-run once the "
-                    "spec is implementable."
-                ),
+                f"{', '.join(completed) or 'none'}); " + detail,
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
             )
@@ -1418,7 +1558,7 @@ class SwarmDispatcher:
 
     async def _open_implementation_pr(
         self, trigger: SwarmTrigger, state: SpecState
-    ) -> str | None:
+    ) -> BuildHandoffResult:
         """Chain into implementation: dispatch Cicada to open a build PR.
 
         Only reached when ``ATELES_SWARM_AUTO_BUILD`` is ON and gates are green.
@@ -1427,13 +1567,20 @@ class SwarmDispatcher:
         issue (`Closes #<n>`) so the existing ``_handle_pr`` gate pipeline takes
         over.  This method NEVER merges anything.
 
-        Returns the opened PR URL when a PR was ACTUALLY opened, else None.
-        A successful dispatch (exit 0) is NOT sufficient: on #1882 Cicada
-        returned ok in ~30s with no PR (it had a narration-only Engineering
-        section to build from). We therefore CONFIRM a real PR exists — first
-        from a URL in Cicada's stdout, then by querying GitHub for an open PR
-        referencing this issue — so the caller can notify honestly instead of a
-        false "PR gate pipeline now owns it".
+        Returns a ``BuildHandoffResult`` whose ``pr_url`` is set only when a PR
+        was ACTUALLY opened. A successful dispatch (exit 0) is NOT sufficient:
+        on #1882 Cicada returned ok in ~30s with no PR (it had a narration-only
+        Engineering section to build from). We therefore CONFIRM a real PR
+        exists — first from a URL in Cicada's stdout, then by querying GitHub
+        for an open PR referencing this issue — so the caller can notify
+        honestly instead of a false "PR gate pipeline now owns it".
+
+        On any failure (dispatch rc != 0) or the no-PR outcome, the full
+        untruncated stdout/stderr is classified via ``classify_build_failure``
+        and persisted as a ``build_attempt`` Neotoma entity (full-fidelity
+        diagnostics, not just an `rc=1` log line) via ``_store_build_attempt``.
+        ``BuildHandoffResult.failure_class``/``.hint``/``.build_attempt_entity_id``
+        carry that classification back to the caller for operator notification.
         """
         result = await run_skill(
             "cicada",
@@ -1442,17 +1589,40 @@ class SwarmDispatcher:
             include_github_contract=True,
         )
         if not result.ok:
+            failure_class, hint = classify_build_failure(
+                result.returncode,
+                result.stdout,
+                result.stderr,
+                repo=trigger.repository,
+            )
+            entity_id = await self._store_build_attempt(
+                trigger,
+                returncode=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                failure_class=failure_class,
+                hint=hint,
+                duration_ms=result.duration_ms,
+            )
             log.error(
                 f"[{DAEMON_NAME}] Cicada build handoff failed for "
-                f"{trigger.repository}#{trigger.number}: "
-                f"{result.error or f'rc={result.returncode}'}"
+                f"{trigger.repository}#{trigger.number}: rc={result.returncode} "
+                f"[{failure_class}] — {hint}. Full output: build_attempt "
+                f"{entity_id or 'STORE_FAILED'}."
             )
-            return None
+            return BuildHandoffResult(
+                pr_url=None,
+                failure_class=failure_class,
+                hint=hint,
+                build_attempt_entity_id=entity_id,
+            )
 
         # 1. A PR URL in Cicada's stdout (the happy path — it reports the link).
         url = _extract_pr_url(result.stdout or "", trigger.repository)
         if url:
-            return url
+            return BuildHandoffResult(
+                pr_url=url, failure_class=None, hint=None, build_attempt_entity_id=None
+            )
 
         # 2. No URL in stdout — confirm against GitHub. Query open PRs that
         #    reference this issue (Closes #<n> in the body). If Cicada actually
@@ -1460,13 +1630,36 @@ class SwarmDispatcher:
         #    this returns None and the caller reports "handoff ran but no PR".
         found = await self._find_open_pr_for_issue(trigger)
         if not found:
+            failure_class = "no_op_build"
+            hint = (
+                "Build ran successfully but produced no PR — spec may still "
+                "be non-actionable. Read the Engineering section for gaps "
+                "before re-running."
+            )
+            entity_id = await self._store_build_attempt(
+                trigger,
+                returncode=0,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                failure_class=failure_class,
+                hint=hint,
+                duration_ms=result.duration_ms,
+            )
             log.warning(
                 f"[{DAEMON_NAME}] Cicada build handoff for "
                 f"{trigger.repository}#{trigger.number} returned ok but NO PR "
                 f"was opened ({len(result.stdout or '')}B stdout) — reporting "
                 "no-PR so the operator can build manually."
             )
-        return found
+            return BuildHandoffResult(
+                pr_url=None,
+                failure_class=failure_class,
+                hint=hint,
+                build_attempt_entity_id=entity_id,
+            )
+        return BuildHandoffResult(
+            pr_url=found, failure_class=None, hint=None, build_attempt_entity_id=None
+        )
 
     async def _find_open_pr_for_issue(self, trigger: SwarmTrigger) -> str | None:
         """Return the URL of an open PR referencing this issue, or None.
@@ -3860,10 +4053,10 @@ class SwarmDispatcher:
 
     # ── Neotoma helpers ──────────────────────────────────────────────────────
 
-    async def _store_entities(self, entities: list[dict], idempotency_key: str) -> None:
+    async def _store_entities(self, entities: list[dict], idempotency_key: str) -> bool:
         if not self.config.neotoma_token:
             log.warning(f"[{DAEMON_NAME}] NEOTOMA_BEARER_TOKEN unset — store skipped")
-            return
+            return False
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
@@ -3874,8 +4067,139 @@ class SwarmDispatcher:
                     },
                 )
                 resp.raise_for_status()
+            return True
         except Exception as exc:
             log.error(f"[{DAEMON_NAME}] Neotoma store failed ({idempotency_key}): {exc}")
+            return False
+
+    async def _prior_build_attempts(self, trigger: SwarmTrigger) -> list[dict]:
+        """Best-effort list of prior `build_attempt` entities for this issue,
+        ordered as returned by Neotoma (assumed creation order).
+
+        There is no existing query-by-type-and-filters helper wired in this
+        file for a new entity type, so this makes a minimal best-effort HTTP
+        call to Neotoma's /retrieve_entities endpoint, mirroring the
+        try/except-log-and-degrade style of `_store_entities`. Returns an
+        empty list on any failure (including an unset token) so a query
+        failure never blocks the build handoff. Cleanly mockable via
+        monkeypatch in tests.
+        """
+        if not self.config.neotoma_token:
+            return []
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"{self.config.neotoma_base_url}/retrieve_entities",
+                    json={
+                        "entity_type": "build_attempt",
+                        "filters": {
+                            "repository": trigger.repository,
+                            "issue_number": trigger.number,
+                        },
+                    },
+                    headers={
+                        "Authorization": f"Bearer {self.config.neotoma_token}"
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                entities = data.get("entities", data if isinstance(data, list) else [])
+                return list(entities)
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] prior build_attempt lookup failed for "
+                f"{trigger.repository}#{trigger.number} (defaulting to none): {exc}"
+            )
+            return []
+
+    async def _count_prior_build_attempts(self, trigger: SwarmTrigger) -> int:
+        """Best-effort count of prior `build_attempt` entities for this issue."""
+        return len(await self._prior_build_attempts(trigger))
+
+    async def _store_build_attempt(
+        self,
+        trigger: SwarmTrigger,
+        *,
+        returncode: int | None,
+        stdout: str,
+        stderr: str,
+        failure_class: str | None,
+        hint: str | None,
+        duration_ms: int | None,
+    ) -> str | None:
+        """Persist a `build_attempt` entity with full untruncated stdout/stderr.
+
+        Returns a synthetic entity id (the idempotency key) on success, since
+        `_store_entities` does not parse a created-entity id out of the
+        Neotoma /store response (no other call site in this file does either —
+        verified by grep). On store failure, returns None and logs the FULL
+        untruncated stdout+stderr at ERROR level so the detail isn't lost
+        twice (fallback per the design's empty/error-states section).
+
+        When at least one prior `build_attempt` exists for this issue (per
+        `_count_prior_build_attempts`), this attempt's entity carries a
+        SUPERSEDES relationship to the immediately-prior attempt. The prior
+        attempt's id is derived deterministically from its own
+        `attempt_seq - 1` (the same idempotency-key-as-id convention this
+        method uses for itself) rather than re-parsing a lookup response,
+        since the key is fully determined by (repository, issue_number,
+        attempt_seq).
+        """
+        stdout = stdout or ""
+        stderr = stderr or ""
+
+        def _excerpt(text: str) -> str:
+            if len(text) <= 4000:
+                return text
+            return f"{text[:2000]}...{text[-2000:]}"
+
+        attempt_seq = await self._count_prior_build_attempts(trigger) + 1
+        idempotency_key = (
+            f"build-attempt-{trigger.repository}-{trigger.number}-{attempt_seq}"
+        )
+        entity: dict = {
+            "entity_type": "build_attempt",
+            "repository": trigger.repository,
+            "issue_number": trigger.number,
+            "attempt_seq": attempt_seq,
+            "returncode": returncode,
+            "failure_class": failure_class,
+            "hint": hint,
+            "stdout_excerpt": _excerpt(stdout),
+            "stderr_excerpt": _excerpt(stderr),
+            "stdout_full": stdout,
+            "stderr_full": stderr,
+            "attempted_at": datetime.now(timezone.utc).isoformat(),
+            "duration_ms": duration_ms,
+        }
+        if attempt_seq > 1:
+            prior_attempt_entity_id = (
+                f"build-attempt-{trigger.repository}-{trigger.number}-"
+                f"{attempt_seq - 1}"
+            )
+            # SUPERSEDES relationship shape — no existing "relationship" payload
+            # convention found elsewhere in this file (grepped), so this is a
+            # locally-defined, additive shape scoped to build_attempt entities.
+            entity["relationships"] = [
+                {
+                    "type": "SUPERSEDES",
+                    "target_entity_id": prior_attempt_entity_id,
+                }
+            ]
+
+        ok = await self._store_entities([entity], idempotency_key=idempotency_key)
+        if not ok:
+            log.error(
+                f"[{DAEMON_NAME}] build_attempt store failed for "
+                f"{trigger.repository}#{trigger.number} (attempt {attempt_seq}) — "
+                f"full stdout: {stdout}\nfull stderr: {stderr}"
+            )
+            return None
+        # Synthetic id surrogate: _store_entities does not return the created
+        # entity's id (no /store response parsing exists in this file), so the
+        # idempotency key — unique per (repo, issue, attempt_seq) — stands in
+        # as a stable, locally-meaningful reference to this build_attempt.
+        return idempotency_key
 
     async def _log_harness_event(self, t: SwarmTrigger) -> None:
         entities = [

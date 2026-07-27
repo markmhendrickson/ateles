@@ -192,6 +192,47 @@ class TestRunSkill:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
+    def test_successful_run_returns_duration_ms(self, MockLoader, mock_write_harness) -> None:
+        """A successful run_skill call returns a SkillResult with duration_ms
+        populated as a non-negative int (ateles#256 — threaded through from the
+        locally-computed duration so the build-attempt entity can record it)."""
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        instance = MagicMock()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+
+        async def fake_exec(*cmd, **kwargs):
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "work prompt",
+                    role="gryllus",
+                    task_entity_id="ent_abc",
+                )
+            )
+
+        assert result.ok
+        assert result.duration_ms is not None
+        assert isinstance(result.duration_ms, int)
+        assert result.duration_ms >= 0
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
     def test_skill_md_only_when_no_definition(self, MockLoader, mock_write_harness) -> None:
         """When prompt_markdown is empty, the system prompt is SKILL.md alone."""
         stub = _stub_def()
