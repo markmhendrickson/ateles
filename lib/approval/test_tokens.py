@@ -95,3 +95,50 @@ class TestParseVerdict:
 
     def test_case_insensitive(self):
         assert parse_verdict("approve", "TOK") is True
+
+
+class TestParseVerdictVerbPrefix:
+    """The verb-with-trailing-content line form and token case-normalization —
+    needed so a natural `approve <version>` reply (the release-approval UX) is
+    recognized, and so a lowercase-bearing token still matches its APPROVE-<token>
+    form. Both are additive; the bare/exact-token forms above still hold.
+    """
+
+    def test_approve_with_named_version(self):
+        # The release UX: operator types `approve v0.20.0` on one line.
+        assert parse_verdict("approve v0.20.0", "v0.20.0") is True
+        assert parse_verdict("approve 0.20.0", "v0.20.0") is True
+
+    def test_skip_with_named_version_blocks(self):
+        assert parse_verdict("skip v0.20.0", "v0.20.0") is False
+
+    def test_skip_with_trailing_content_still_wins(self):
+        # A skip line with trailing words is still decisive over an approve line.
+        assert parse_verdict("approve v0.20.0\nskip this one", "v0.20.0") is False
+
+    def test_lowercase_bearing_token_matches(self):
+        # Token case-normalization: text is uppercased internally, so the token
+        # must be too — a lowercase-bearing token used to silently never match.
+        assert parse_verdict("APPROVE-abc123", "abc123") is True
+        assert parse_verdict("approve abc123", "abc123") is True
+
+    def test_verb_prefix_requires_leading_verb_not_mid_sentence(self):
+        # "i approve this" does NOT start with the verb → not a verdict, so a
+        # chatty sentence that merely contains the word never publishes.
+        assert parse_verdict("i approve this release", "TOK") is None
+
+    def test_quoted_named_version_still_ignored(self):
+        # The verb-prefix form must NOT resurrect a quoted instruction as a verdict.
+        reply = (
+            "not yet\n"
+            "On Mon Ateles wrote:\n"
+            "> approve v0.20.0 to publish\n"
+        )
+        assert parse_verdict(reply, "v0.20.0") is None
+
+    def test_bare_forms_unchanged(self):
+        # Regression guard: the pre-existing exact forms still behave.
+        assert parse_verdict("APPROVE", "TOK") is True
+        assert parse_verdict("SKIP", "TOK") is False
+        assert parse_verdict("APPROVE TOK", "TOK") is True
+        assert parse_verdict("thanks", "TOK") is None
