@@ -157,6 +157,31 @@ Low-level harness lifecycle events (gate open, artifact emit, gate close).
 ### `escalation`
 Escalation entities are created by any daemon or agent when a condition requires operator attention. Anthus forwards all escalations to Ateles via Telegram.
 
+### `build_attempt`
+
+Full-fidelity diagnostics record of one Cicada auto-build handoff attempt (`SwarmDispatcher._open_implementation_pr` in `execution/daemons/apis/swarm_dispatch.py`). Written on every failed or no-op ("ran ok but opened no PR") attempt so the operator/developer never has to guess why a handoff failed from a bare `rc=1` log line — the complete stdout/stderr is stored untruncated. See [ateles#256](https://github.com/markmhendrickson/ateles/issues/256).
+
+**`guest_access_policy`: not guest-readable.** `stdout_full`/`stderr_full` carry raw subprocess output from a build child; `_redact_secrets` scrubs known GitHub-token and auth-in-URL shapes before storage, but this entity type is not a reviewed public-read surface and must NOT be given `read_only` guest access — link it in prose (`build_attempt ent_...`), never as a bare guest-accessible URL.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `repository` | string | ✓ | `owner/repo` slug the handoff targeted |
+| `issue_number` | integer | ✓ | The issue the build was chained off |
+| `attempt_seq` | integer | ✓ | 1-based sequence of this attempt for this issue (`_count_prior_build_attempts(...) + 1`) |
+| `returncode` | integer | | Cicada dispatch exit code (`0` for the `no_op_build` case) |
+| `failure_class` | string | ✓ | One of: `cli_allowlist_rejection`, `auth_failure`, `git_worktree_setup`, `gh_pr_create_failure`, `no_op_build`, `unclassified` |
+| `hint` | string | ✓ | Actionable, class-specific remediation text (see `classify_build_failure`) |
+| `stdout_excerpt` | string | | First 2000 + last 2000 chars when stdout > 4000 chars, else the full stdout |
+| `stderr_excerpt` | string | | Same excerpt logic as `stdout_excerpt` |
+| `stdout_full` | string | ✓ | Complete, untruncated stdout |
+| `stderr_full` | string | ✓ | Complete, untruncated stderr |
+| `attempted_at` | string | ✓ | ISO 8601 timestamp |
+| `duration_ms` | integer | | Wall-clock duration of the Cicada dispatch, from `SkillResult.duration_ms` |
+| `pr_url` | string | | Omitted/None for failure and no-op attempts |
+| `relationships` | array | | Present only when superseding a prior attempt on the same issue: `[{"type": "SUPERSEDES", "target_entity_id": <prior build_attempt id>}]` |
+
+Idempotency key: `build-attempt-{repository}-{issue_number}-{attempt_seq}` — also used as the synthetic entity-id surrogate returned by `_store_build_attempt` (the Neotoma `/store` response is not parsed for a created-entity id anywhere in this file).
+
 ---
 
 ## Strategy hierarchy schemas

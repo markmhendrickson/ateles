@@ -328,6 +328,7 @@ class SkillResult:
     stdout: str
     stderr: str
     error: str = ""  # non-process failure: missing binary / SKILL.md / timeout
+    duration_ms: int | None = None
 
 
 # ── Main runner ────────────────────────────────────────────────────────────────
@@ -631,6 +632,7 @@ async def run_skill(
             returncode=proc.returncode,
             stdout=stdout.decode("utf-8", errors="replace"),
             stderr=stderr.decode("utf-8", errors="replace"),
+            duration_ms=duration_ms,
         )
 
         # ── Stage 2: harness_event at completion ──────────────────────────────────
