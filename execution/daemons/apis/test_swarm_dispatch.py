@@ -439,6 +439,20 @@ def _lens_agent(lens):
     return "gryllus"
 
 
+def _fake_fetch_pr_advancing_head():
+    """`_fetch_pr` stub simulating a head SHA that advances between the
+    pre-dispatch and post-dispatch reads (the happy-path fix-round outcome).
+    """
+    calls = {"n": 0}
+
+    async def fake_fetch_pr(self, repo, num):
+        calls["n"] += 1
+        sha = "sha-before" if calls["n"] == 1 else "sha-after"
+        return {"number": num, "head": {"sha": sha}, "base": {"ref": "main"}}
+
+    return fake_fetch_pr
+
+
 def test_route_findings_groups_by_lens_then_dispatches_cicada(monkeypatch):
     dispatched = []
 
@@ -455,6 +469,9 @@ def test_route_findings_groups_by_lens_then_dispatches_cicada(monkeypatch):
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
     monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_fetch_pr", _fake_fetch_pr_advancing_head()
+    )
 
     d = SwarmDispatcher(_StubNotifier(), _config())
     reviews = [
@@ -498,6 +515,9 @@ def _route_capture_cicada_guidance(monkeypatch, *, lens_result_for):
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
     monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_fetch_pr", _fake_fetch_pr_advancing_head()
+    )
 
     d = SwarmDispatcher(_StubNotifier(), _config())
     reviews = [("ux", "[BLOCKING] naming: the flag is undiscoverable\nraw-ux-detail")]
@@ -555,6 +575,9 @@ def test_route_findings_mixed_lens_outcomes_include_both_sections(monkeypatch):
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
     monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_fetch_pr", _fake_fetch_pr_advancing_head()
+    )
 
     d = SwarmDispatcher(_StubNotifier(), _config())
     reviews = [
@@ -587,6 +610,12 @@ def test_route_findings_escalates_at_retry_cap(monkeypatch):
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
     monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+    async def fake_stranded(self, trigger):
+        return False  # no stranded fix on the last round — plain exhaustion
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_last_round_stranded", fake_stranded)
 
     notifier = _StubNotifier()
     d = SwarmDispatcher(notifier, _config())
@@ -655,6 +684,9 @@ def test_route_findings_cicada_auth_failure_pages_infra(monkeypatch):
     monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
     monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
     monkeypatch.setattr(SwarmDispatcher, "_handle_panel_auth_failure", fake_auth_page)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_fetch_pr", _fake_fetch_pr_advancing_head()
+    )
 
     d = SwarmDispatcher(_StubNotifier(), _config())
     asyncio.run(
@@ -707,6 +739,528 @@ def test_route_findings_unparseable_dedup_suppresses_renotify(monkeypatch):
     assert not any(
         "no blocking findings could be parsed" in m for m in notifier.sent
     )
+# ── fix-round head-SHA verification gate (ateles#263) ────────────────────────
+#
+# Auto-fix rounds must confirm the PR head SHA actually advanced after
+# Cicada's dispatch before the round is counted done (_record_fix_round) and
+# the panel is re-run. A Cicada turn that edits the worktree but never
+# commits/pushes must not be treated as a landed fix.
+
+
+def _fake_fetch_pr_same_sha(sha="stale-sha"):
+    async def fake_fetch_pr(self, repo, num):
+        return {"number": num, "head": {"sha": sha}, "base": {"ref": "main"}}
+
+    return fake_fetch_pr
+
+
+def _fake_fetch_pr_fails():
+    async def fake_fetch_pr(self, repo, num):
+        return None
+
+    return fake_fetch_pr
+
+
+def _mute_stranded_marker_io(monkeypatch, *, existing_markers=None):
+    """Stub the stranded-fix-marker GitHub I/O so tests don't hit the network.
+
+    `existing_markers` simulates markers already posted on the PR (for
+    dedup tests); defaults to none.
+    """
+    markers = list(existing_markers or [])
+
+    async def fake_find(self, trigger):
+        return list(markers)
+
+    async def fake_record(self, trigger, n, state_token):
+        markers.append((n, state_token))
+
+    monkeypatch.setattr(SwarmDispatcher, "_find_stranded_fix_markers", fake_find)
+    monkeypatch.setattr(SwarmDispatcher, "_record_stranded_fix_round", fake_record)
+    return markers
+
+
+def test_route_blocking_findings_reviews_new_sha_not_stale_after_fix_round(monkeypatch):
+    # Reproduces PR #258: Cicada "succeeds" (exit 0, plausible stdout) but the
+    # PR head SHA is identical before and after its dispatch — no commit
+    # landed. The round must NOT be counted done, and the operator must be
+    # notified with the fix_round_uncommitted state token.
+    dispatched = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        dispatched.append(skill)
+        return SkillResult(skill, True, 0, "applied the fix", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    record_calls = []
+
+    async def fake_record(self, trigger, n):
+        record_calls.append(n)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", _fake_fetch_pr_same_sha())
+    _mute_stranded_marker_io(monkeypatch)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    # Cicada WAS dispatched (it ran), but the round is not counted done.
+    assert "cicada" in dispatched
+    assert record_calls == []
+    assert any("fix_round_uncommitted" in m for m in notifier.sent)
+
+
+def test_route_ci_failure_reviews_new_sha_not_stale_after_fix_round(monkeypatch):
+    dispatched = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        dispatched.append(skill)
+        return SkillResult(skill, True, 0, "applied the fix", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    record_calls = []
+
+    async def fake_record(self, trigger, n):
+        record_calls.append(n)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", _fake_fetch_pr_same_sha())
+    _mute_stranded_marker_io(monkeypatch)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    asyncio.run(d._route_ci_failure(_trigger(), parent=80))
+
+    assert "cicada" in dispatched
+    assert record_calls == []
+    assert any("fix_round_uncommitted" in m for m in notifier.sent)
+
+
+def test_fix_round_head_advanced_proceeds_to_panel(monkeypatch):
+    # Happy path: post-dispatch head SHA differs from pre-dispatch. The round
+    # is recorded done and no operator notification fires (guards against
+    # over-blocking a genuinely-fixed round).
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "applied", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    record_calls = []
+
+    async def fake_record(self, trigger, n):
+        record_calls.append(n)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_fetch_pr", _fake_fetch_pr_advancing_head()
+    )
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    assert record_calls == [1]
+    assert notifier.sent == []
+
+
+def test_fix_round_no_op_cicada_reports_ok_head_unchanged(monkeypatch):
+    # Mirrors test_open_implementation_pr_returns_none_when_no_pr: Cicada
+    # returncode 0, plausible-looking stdout, but no effect landed. The
+    # no-commit case must be classified, not silently accepted.
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "cicada":
+            return SkillResult(skill, True, 0, "Done! Fix applied and pushed.", "")
+        return SkillResult(skill, True, 0, "guidance", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    record_calls = []
+
+    async def fake_record(self, trigger, n):
+        record_calls.append(n)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", _fake_fetch_pr_same_sha())
+    _mute_stranded_marker_io(monkeypatch)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    assert record_calls == []
+    assert any("fix_round_uncommitted" in m for m in notifier.sent)
+
+
+def test_fix_round_push_rejected(monkeypatch):
+    # Head-sha fetch errors post-dispatch (simulated push failure) — distinct
+    # classification from "no commit at all".
+    calls = {"n": 0}
+
+    async def fake_fetch_pr(self, repo, num):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"number": num, "head": {"sha": "before"}, "base": {"ref": "main"}}
+        return None  # post-dispatch fetch fails — push rejected/unverifiable
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "applied", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    record_calls = []
+
+    async def fake_record(self, trigger, n):
+        record_calls.append(n)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    _mute_stranded_marker_io(monkeypatch)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    assert record_calls == []
+    assert any("fix_round_push_failed" in m for m in notifier.sent)
+    # Distinct message from the no-commit-at-all case.
+    assert not any("fix_round_uncommitted" in m for m in notifier.sent)
+
+
+def test_fix_round_cicada_dispatch_timeout_then_respawn_no_duplicate_round_count(monkeypatch):
+    # Reproduces the #258 timeline: Cicada is spawned, times out with no
+    # completion line, then a respawn re-enters the same logical round. The
+    # pre-dispatch SHA must be re-fetched fresh for the respawn attempt (not
+    # reused from a hoisted/stale capture), and a respawn that DOES land a
+    # commit must not double-count against max_fix_rounds.
+    fetch_calls = []
+
+    async def fake_fetch_pr(self, repo, num):
+        fetch_calls.append(num)
+        # First attempt (timed-out spawn): pre-read only, dispatch never
+        # completes so no post-read happens for it. Respawn: pre + post reads
+        # show an advanced SHA.
+        if len(fetch_calls) == 1:
+            return {"number": num, "head": {"sha": "before"}, "base": {"ref": "main"}}
+        return {"number": num, "head": {"sha": "after-respawn"}, "base": {"ref": "main"}}
+
+    dispatch_count = {"n": 0}
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "cicada":
+            dispatch_count["n"] += 1
+        return SkillResult(skill, True, 0, "applied", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    record_calls = []
+
+    async def fake_record(self, trigger, n):
+        record_calls.append(n)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
+
+    # Simulate the respawn as a second, independent call into the same
+    # routing function (the dispatcher re-enters _route_blocking_findings on
+    # the next webhook delivery after the timed-out spawn is detected).
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    # Exactly one round recorded — the respawn's fresh pre/post comparison
+    # confirms the landed commit without a duplicate _record_fix_round call
+    # from a stale hoisted SHA.
+    assert record_calls == [1]
+
+
+def test_fix_round_head_sha_fetch_itself_fails(monkeypatch):
+    # The SHA-fetch itself errors (network error, 404 repo/PR gone) both
+    # pre- and post-dispatch. Must fail CLOSED to a loud operator
+    # notification — never silently "assume advanced" or "assume stale".
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "applied", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    record_calls = []
+
+    async def fake_record(self, trigger, n):
+        record_calls.append(n)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", _fake_fetch_pr_fails())
+    _mute_stranded_marker_io(monkeypatch)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    assert record_calls == []  # never assume success on an unverifiable fetch
+    assert any("fix_round_push_failed" in m for m in notifier.sent)
+
+
+def test_fix_loop_exhausted_with_stranded_uncommitted_work(monkeypatch):
+    # Round cap reached AND the last round's head-sha check showed no
+    # advancement (a stranded-fix marker was posted for the last round) →
+    # the exhaustion notification is the stranded-fix variant, distinct from
+    # plain cap-exhaustion, and names the state.
+    async def fake_count(self, trigger):
+        return 2  # == default max_fix_rounds
+
+    async def fake_stranded(self, trigger):
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_last_round_stranded", fake_stranded)
+    _mute_stranded_marker_io(monkeypatch)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        raise AssertionError("should not dispatch at the cap")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    assert any(
+        "fix_loop_exhausted_with_stranded_fix" in m for m in notifier.sent
+    )
+    # Not merely "round cap reached" — the plain-exhaustion phrase should be
+    # absent since the stranded variant fired instead.
+    assert not any("did not clear review" in m for m in notifier.sent)
+
+
+def test_fix_loop_exhausted_stranded_sends_exactly_one_page(monkeypatch):
+    """A stranded exhaustion must send ONE page, not both it and the plain one.
+
+    The rebase of this branch onto #262 initially evaluated the generic
+    `auto-fix-exhausted` escalation BEFORE the stranded check, so a stranded
+    round paged the operator twice for a single event — reintroducing the
+    duplicate-notification class #262 exists to prevent. Ordering the more
+    specific stranded check first is what fixes it, and nothing else pinned
+    that ordering.
+    """
+    async def fake_count(self, trigger):
+        return 2  # == default max_fix_rounds
+
+    async def fake_stranded(self, trigger):
+        return True  # a fix WAS left uncommitted
+
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_last_round_stranded", fake_stranded)
+    _mute_stranded_marker_io(monkeypatch)
+
+    # Fail-open guard: if the generic escalation were still consulted on this
+    # path, it would return True here and the duplicate page would appear.
+    async def fake_claim(self, trigger, kind):
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        raise AssertionError("should not dispatch at the cap")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+
+    stranded = [m for m in notifier.sent if "fix_loop_exhausted_with_stranded_fix" in m]
+    plain = [m for m in notifier.sent if "auto-fix rounds did not clear" in m]
+    assert len(stranded) == 1, f"expected exactly one stranded page: {notifier.sent}"
+    assert plain == [], f"the generic page must NOT also fire: {notifier.sent}"
+
+
+def test_fix_loop_exhausted_no_fix_present_uses_existing_message(monkeypatch):
+    # Round cap reached but NO stranded-fix marker exists for the last round
+    # (a genuine non-fix, not a stranding case) → existing plain-exhaustion
+    # notifier path is unchanged. Guards against regressing today's behavior
+    # for the case that ISN'T this bug.
+    async def fake_count(self, trigger):
+        return 2
+
+    async def fake_stranded(self, trigger):
+        return False
+
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_last_round_stranded", fake_stranded)
+
+    # Stub the escalation guard as the other dedup tests do — unstubbed it makes
+    # a real GitHub call, and a first-caller-wins claim is not what this test is
+    # about (it pins WHICH message the non-stranded path sends).
+    async def fake_claim(self, trigger, kind):
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        raise AssertionError("should not dispatch at the cap")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    assert any("auto-fix rounds did not clear" in m for m in notifier.sent)
+    assert not any(
+        "fix_loop_exhausted_with_stranded_fix" in m for m in notifier.sent
+    )
+
+
+def test_fix_round_blocker_notification_priority_and_fields(monkeypatch):
+    # Contract test: the new notifier call uses OPERATOR_DECISION priority and
+    # the message contains, at minimum, the PR number, round number, and one
+    # of the four UX-defined state tokens — asserted structurally, not with a
+    # loose "was called" check.
+    seen_priority = {}
+
+    class _PriorityCapturingNotifier(_StubNotifier):
+        def send(self, message, priority=None, handler=None):
+            self.sent.append(message)
+            seen_priority["last"] = priority
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "applied", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        raise AssertionError("must not be called when the round is uncommitted")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", _fake_fetch_pr_same_sha())
+    _mute_stranded_marker_io(monkeypatch)
+
+    notifier = _PriorityCapturingNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    trigger = _trigger(number=258)
+    reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
+    asyncio.run(
+        d._route_blocking_findings(trigger, parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    from lib.notify import Priority
+    assert seen_priority["last"] == Priority.OPERATOR_DECISION
+    msg = notifier.sent[-1]
+    assert "258" in msg  # PR number
+    assert "round 1" in msg or "round1" in msg.replace(" ", "").lower() or "1" in msg
+    state_tokens = (
+        "fix_round_uncommitted",
+        "fix_round_no_changes",
+        "fix_round_push_failed",
+        "fix_loop_exhausted_with_stranded_fix",
+    )
+    assert any(tok in msg for tok in state_tokens)
+
+
+def test_notify_fix_round_blocker_is_idempotent_on_respawn(monkeypatch):
+    # A killed/respawned dispatch that re-enters the same logical round and
+    # hits the SAME (round, state_token) blocker must NOT send a second
+    # operator page — the marker already posted for that exact key is the
+    # idempotency check.
+    async def fake_diff(self, worktree):
+        return ""
+
+    monkeypatch.setattr(SwarmDispatcher, "_diff_stat_summary", fake_diff)
+    markers = _mute_stranded_marker_io(
+        monkeypatch, existing_markers=[(1, "fix_round_uncommitted")]
+    )
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    asyncio.run(
+        d._notify_fix_round_blocker(
+            _trigger(), round_n=1, state_token="fix_round_uncommitted",
+            detail="respawned dispatch re-hit the same blocker",
+        )
+    )
+    # No page sent — this (round, token) was already flagged.
+    assert notifier.sent == []
+    # No duplicate marker posted either.
+    assert markers == [(1, "fix_round_uncommitted")]
+
+
+def test_notify_fix_round_blocker_sends_for_new_state_token_same_round(monkeypatch):
+    # A DIFFERENT state token for the same round is a distinct event and
+    # must still page — idempotency is keyed on (round, token), not round
+    # alone.
+    async def fake_diff(self, worktree):
+        return ""
+
+    monkeypatch.setattr(SwarmDispatcher, "_diff_stat_summary", fake_diff)
+    markers = _mute_stranded_marker_io(
+        monkeypatch, existing_markers=[(1, "fix_round_uncommitted")]
+    )
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    asyncio.run(
+        d._notify_fix_round_blocker(
+            _trigger(), round_n=1, state_token="fix_round_push_failed",
+            detail="a different failure mode on the same round",
+        )
+    )
+    assert len(notifier.sent) == 1
+    assert (1, "fix_round_push_failed") in markers
 
 
 # ── _gate_merge_readiness (verdict-clear AND CI-green) ───────────────────────
