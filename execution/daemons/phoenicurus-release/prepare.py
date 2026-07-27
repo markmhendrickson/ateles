@@ -230,6 +230,19 @@ def email_send(subject: str, body: str) -> bool:
         return False
 
 
+def notify_operator(text: str, *, subject: str | None = None) -> None:
+    """
+    Send an operator notification on BOTH channels: Telegram always, email too
+    when OPERATOR_EMAIL is configured. Used for the synchronous hard-block /
+    error notices prepare.py sends directly (agent couldn't spawn, main CI red,
+    crash) — the rich prepared-RC notification is sent by the spawned agent,
+    which owns the rendered notes. Both sends are best-effort and independent;
+    neither failure blocks the other.
+    """
+    telegram_send(text)
+    email_send(subject or (text.strip().splitlines() or ["Phoenicurus"])[0][:80], text)
+
+
 # ---------------------------------------------------------------------------
 # Git / CI preflight (read-only — runs in the Neotoma repo)
 # ---------------------------------------------------------------------------
@@ -412,7 +425,7 @@ def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool
     claude = shutil.which("claude")
     if not claude:
         log.error("claude CLI not found — cannot spawn prepare agent")
-        telegram_send(
+        notify_operator(
             "🔴 Phoenicurus: claude CLI not found — cannot prepare release."
         )
         return False
@@ -436,7 +449,7 @@ def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool
         return True
     except Exception as exc:  # noqa: BLE001
         log.error(f"failed to spawn prepare agent: {exc}")
-        telegram_send(f"🔴 Phoenicurus: failed to spawn prepare agent — {exc}")
+        notify_operator(f"🔴 Phoenicurus: failed to spawn prepare agent — {exc}")
         return False
 
 
@@ -501,7 +514,7 @@ def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
     ci = main_ci_green()
     if ci is False:
         log.warning("main CI is RED — refusing to prepare a release.")
-        telegram_send(
+        notify_operator(
             f"⚠️ Phoenicurus: {count} unreleased commit(s) since {tag}, but main "
             "CI is RED. Not preparing a release until CI is green."
         )
@@ -547,7 +560,7 @@ def main() -> int:
         return run_prepare(args.dry_run, args.force, on_merge=args.on_merge)
     except Exception as exc:  # noqa: BLE001
         log.exception(f"prepare fatal error: {exc}")
-        telegram_send(f"🔴 Phoenicurus prepare crashed — {exc}")
+        notify_operator(f"🔴 Phoenicurus prepare crashed — {exc}")
         return 1
 
 

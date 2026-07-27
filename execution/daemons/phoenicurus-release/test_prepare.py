@@ -141,3 +141,33 @@ def test_agent_prompt_notes_skip_when_email_unconfigured(monkeypatch):
     p = prepare._build_agent_prompt("v0.19.0", 3)
     assert "Email notification skipped" in p
     assert "gws gmail +send" not in p
+
+
+def test_notify_operator_sends_both_channels(monkeypatch):
+    # The synchronous hard-block notices (CI red, spawn failure, crash) go to
+    # BOTH Telegram and email — this is where email_send() is wired into the
+    # run flow (the rich RC email is sent by the spawned agent separately).
+    sent = {}
+    monkeypatch.setattr(prepare, "telegram_send", lambda t: sent.setdefault("tg", t))
+    monkeypatch.setattr(prepare, "email_send",
+                        lambda subj, body: sent.setdefault("email", (subj, body)) or True)
+    prepare.notify_operator("🔴 something broke\nmore detail")
+    assert sent["tg"] == "🔴 something broke\nmore detail"
+    # email subject defaults to the first line; body is the full text
+    assert sent["email"][0] == "🔴 something broke"
+    assert "more detail" in sent["email"][1]
+
+
+def test_notify_operator_email_failure_does_not_block_telegram(monkeypatch):
+    order = []
+    monkeypatch.setattr(prepare, "telegram_send", lambda t: order.append("tg"))
+    def boom(subj, body):
+        order.append("email")
+        raise RuntimeError("email exploded")
+    monkeypatch.setattr(prepare, "email_send", boom)
+    # email_send is itself fail-open, but even if it raised, Telegram already ran
+    try:
+        prepare.notify_operator("msg")
+    except RuntimeError:
+        pass
+    assert "tg" in order  # Telegram fired first, regardless of email outcome
