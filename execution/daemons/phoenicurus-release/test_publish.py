@@ -662,3 +662,68 @@ def test_npm_publish_local_mode_publishes_from_host():
             with patch.object(publish, "npm_publish_local") as local:
                 publish.npm_publish("v0.19.0", dry_run=False)
                 assert local.called and not ci.called
+
+
+# ── --from-email-approval state gate (email-reply approval, ateles) ──────────
+#
+# The email-approval path flips pending_approval -> approved then publishes. It
+# MUST refuse any other starting state so a duplicate/stale email reply can't
+# re-publish or publish an un-prepared version. These pin that gate; publish
+# steps are stubbed so no irreversible action runs.
+
+
+def _release(status: str, version: str = "v0.20.0") -> dict:
+    return {"snapshot": {"version": version, "status": status,
+                         "rc_branch": f"release/{version}"}}
+
+
+def _stub_publish_steps(mp):
+    # neutralize every irreversible step + the status writer so we test only the gate
+    for name in ("preflight", "merge_rc_pr", "preflight_post_merge", "tag_and_push",
+                 "npm_publish", "github_release", "deploy_sandbox",
+                 "publish_github_release_draft", "post_release", "set_release_status",
+                 "telegram_send"):
+        if hasattr(publish, name):
+            mp.setattr(publish, name, MagicMock(return_value="" if name == "post_release" else None))
+
+
+def test_email_approval_publishes_from_pending_approval(monkeypatch):
+    _stub_publish_steps(monkeypatch)
+    flips = []
+    monkeypatch.setattr(publish, "set_release_status",
+                        lambda v, s, extra=None: flips.append((v, s)))
+    # should flip to approved, then run (no raise)
+    publish.publish_release(_release("pending_approval"), "v0.20.0",
+                            dry_run=False, force=False, email_approval=True)
+    assert ("v0.20.0", "approved") in flips
+
+
+def test_email_approval_refuses_already_published(monkeypatch):
+    _stub_publish_steps(monkeypatch)
+    try:
+        publish.publish_release(_release("published"), "v0.20.0",
+                                dry_run=False, force=False, email_approval=True)
+        raise AssertionError("expected StepError refusing to re-publish")
+    except publish.StepError as exc:
+        assert "not 'pending_approval'" in str(exc)
+
+
+def test_email_approval_refuses_publishing_state(monkeypatch):
+    # a reply arriving mid-publish must not kick off a second publish
+    _stub_publish_steps(monkeypatch)
+    try:
+        publish.publish_release(_release("publishing"), "v0.20.0",
+                                dry_run=False, force=False, email_approval=True)
+        raise AssertionError("expected StepError")
+    except publish.StepError as exc:
+        assert "not 'pending_approval'" in str(exc)
+
+
+def test_email_approval_dry_run_does_not_flip_status(monkeypatch):
+    _stub_publish_steps(monkeypatch)
+    flips = []
+    monkeypatch.setattr(publish, "set_release_status",
+                        lambda v, s, extra=None: flips.append((v, s)))
+    publish.publish_release(_release("pending_approval"), "v0.20.0",
+                            dry_run=True, force=False, email_approval=True)
+    assert flips == []  # dry-run makes no state change

@@ -355,12 +355,17 @@ def _build_agent_prompt(last_tag: str, commit_count: int) -> str:
     from_flag = f' --from "{SWARM_EMAIL}"' if SWARM_EMAIL else ""
     email_note = (
         f"""12. ALSO email the operator the SAME notification (release goes to the
-    inbox, not just Telegram). Run exactly:
-    `gws gmail +send --to "{OPERATOR_EMAIL}"{from_flag} --subject "🚀 Release <TAG> ready to approve" --body "<the full notification text: version, the FULL rendered release notes, the RC PR URL, advisory flags, and the exact line: Reply approve <TAG> to publish, or skip <TAG> to discard>"`
-    The email subject MUST start with 🚀 and name the version. The body MUST
-    contain the approve/skip instruction verbatim. If the gws send fails, log it
-    and continue — Telegram (step 11) is the guaranteed channel; do NOT abort the
-    run over an email failure."""
+    inbox, not just Telegram — and the operator can approve BY EMAIL REPLY). Run
+    exactly:
+    `gws gmail +send --to "{OPERATOR_EMAIL}"{from_flag} --subject "🚀 Release <TAG> ready to approve" --body "<the full notification text: version, the FULL rendered release notes, the RC PR URL, advisory flags. Then, on their OWN lines: the exact line: Reply approve <TAG> to publish, or skip <TAG> to discard   AND the exact correlation token line: release-approve: <TAG>>"`
+    The email subject MUST start with 🚀 and contain the phrase "ready to
+    approve" and name the version. The body MUST contain BOTH (a) the
+    approve/skip instruction verbatim and (b) a line reading exactly
+    `release-approve: <TAG>` (with the real tag, e.g. `release-approve: v0.20.0`)
+    — Turdus keys off that token to route an `approve <TAG>` reply to the publish
+    gate, so it MUST be present and exact. If the gws send fails, log it and
+    continue — Telegram (step 11) is the guaranteed channel; do NOT abort the run
+    over an email failure."""
         if OPERATOR_EMAIL
         else "12. (Email notification skipped: OPERATOR_EMAIL is not configured.)"
     )

@@ -49,6 +49,7 @@ import hmac
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -133,6 +134,8 @@ class SwarmTrigger:
     # this is the trigger the release daemon keys off.
     push_ref: str = ""
     push_after: str = ""
+    # release_approve extras: the version the operator approved by email reply.
+    release_version: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -439,11 +442,64 @@ def make_app(
         task.add_done_callback(request.app["inflight"].discard)
         return web.json_response({"status": "accepted", "kind": "email_approve"})
 
+    async def handle_approve_release(request: web.Request) -> web.Response:
+        """Internal route: Turdus POSTs an operator release-approval here.
+
+        Body JSON: {"version": "vX.Y.Z", "sender": "<verified operator email>"}
+        Header: X-Approve-Secret: <shared secret>
+
+        Same trust model as /approve-email — Turdus already verified the reply
+        came from the operator's address AND carried `approve <exact version>`
+        plus the release-approve token; this route trusts that only because the
+        shared secret authenticates the caller as our own Turdus. It emits a
+        `release_approve` trigger; the dispatcher runs the SAME publish path as a
+        Telegram approve (verify release_result is pending_approval → approved →
+        publish.py), so this endpoint adds a channel, not a new bypass.
+
+        Fails closed: unset secret → 503; wrong secret → 401; bad version → 400.
+        """
+        if not approve_email_secret:
+            log.error("[apis] /approve-release hit but APPROVE secret unset — 503")
+            return web.Response(status=503, text="approve-release not configured")
+        if request.headers.get("X-Approve-Secret", "") != approve_email_secret:
+            log.warning("[apis] /approve-release secret mismatch — 401")
+            return web.Response(status=401, text="bad secret")
+        try:
+            payload = json.loads(await request.read())
+        except json.JSONDecodeError:
+            return web.Response(status=400, text="invalid JSON")
+        version = str(payload.get("version", "")).strip()
+        # A release tag: leading v + digits. Reject anything else so a malformed
+        # POST can never reach the publish path.
+        if not re.match(r"^v[0-9][0-9A-Za-z.\-+]*$", version):
+            return web.Response(status=400, text="valid version (vX.Y.Z) required")
+        trigger = SwarmTrigger(
+            kind="release_approve",
+            repository="",
+            number=0,
+            title="",
+            body="",
+            author="",
+            html_url="",
+            delivery_id=f"release-approve-{version}",
+            action="approved",
+            release_version=version,
+        )
+        log.info(
+            f"[apis] release-approve accepted for {version} "
+            f"(sender={payload.get('sender', '?')})"
+        )
+        task = asyncio.create_task(handler(trigger))
+        request.app["inflight"].add(task)
+        task.add_done_callback(request.app["inflight"].discard)
+        return web.json_response({"status": "accepted", "kind": "release_approve"})
+
     app = web.Application()
     app["inflight"] = set()
     app.router.add_post("/github/webhook", handle_webhook)
     app.router.add_get("/health", handle_health)
     app.router.add_post("/approve-email", handle_approve_email)
+    app.router.add_post("/approve-release", handle_approve_release)
     return app
 
 

@@ -144,20 +144,44 @@ uses — so release mail matches every other swarm daemon. Email is **fail-open*
 if `OPERATOR_EMAIL` is unset or the send fails, the run logs it and continues;
 Telegram is the guaranteed channel and the release is never blocked on email.
 
-## Approval routing (Ateles)
+## Approval routing — two channels
 
-`publish.py` is invoked by Ateles when the operator replies `approve <version>`
-**on Telegram**: Ateles flips the `release_result` to `approved`, then runs
-`python3 publish.py --version <version>`. See the Ateles SOUL.md
-"Release approval" section.
+A prepared release can be approved on **either channel**:
 
-**The email is notify-only, not a reply channel.** Riparia routes operator email
-replies back to the swarm only when the subject carries a `[#ent_<task_id>]`
-token (or a matching `run-<task_id>` References chain); a plain `gws +send`
-release email has neither, so **replying to the release email does not approve
-it** — approve on Telegram. Wiring the release email into the reply-routing loop
-(so a `approve <version>` email reply works) is a possible follow-up: it would
-need the send to carry a routable token and Ateles to recognize a release-reply.
+**Telegram** — the operator replies `approve <version>`; Ateles flips the
+`release_result` to `approved` and runs `python3 publish.py --version <version>`.
+See the Ateles SOUL.md "Release approval" section.
+
+**Email reply** — the operator replies `approve <version>` to the RC email. The
+routing mirrors the swarm PR-approve flow:
+
+```
+reply "approve <version>" to the RC email
+  → Turdus (Gmail poll) verifies: sender == operator, subject has "ready to
+    approve", body has `release-approve: <version>` token AND unquoted
+    `approve <that exact version>`
+  → POST /approve-release (Apis, loopback + X-Approve-Secret)
+  → swarm_dispatch._handle_release_approve
+  → publish.py --version <version> --from-email-approval
+     (flips pending_approval → approved, refusing any other state, then ships)
+```
+
+Safety properties (match the PR-approve flow + one extra):
+- **Operator-sender check** — only replies from `OPERATOR_EMAIL` count.
+- **Loopback + shared secret** — `/approve-release` is 127.0.0.1-only and
+  requires `APIS_APPROVE_EMAIL_SECRET`; unset → 503, wrong → 401. An email alone
+  can't drive a publish without the secret on both daemons.
+- **Unquoted-text guard** — the word `approve` must be the operator's own text,
+  not the quoted `Reply approve …` from the original email.
+- **Exact-version match** (operator ruling 2026-07-27) — the reply must name
+  *this* release's version, so a stale `approve` from an old release thread can
+  never trigger the wrong publish.
+- **State gate** — `--from-email-approval` publishes only from
+  `pending_approval`; a duplicate or stale reply on an already-published version
+  is refused.
+
+Config: set `APIS_APPROVE_EMAIL_SECRET` (shared, Turdus + Apis) and
+`APIS_APPROVE_RELEASE_URL` (default `http://127.0.0.1:8742/approve-release`).
 
 ## Troubleshooting
 

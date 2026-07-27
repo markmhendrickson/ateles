@@ -98,6 +98,20 @@ APIS_APPROVE_EMAIL_SECRET = os.environ.get("APIS_APPROVE_EMAIL_SECRET", "")
 _MERGE_READY_SUBJECT_MARKER = "READY TO MERGE"
 _APPROVE_TOKEN_PREFIX = "swarm-approve:"
 
+# ── Release email-approval (mirrors the PR swarm-approve flow) ────────────────
+# A prepared release RC email (from phoenicurus prepare) carries a stable token
+# `release-approve: <version>` and the subject marker below. When the operator
+# replies `approve <version>`, Turdus POSTs the version to the Apis
+# /approve-release loopback route, which drives publish.py — the same effect as
+# a Telegram `approve <version>`. Exact-version-token matching (operator ruling
+# 2026-07-27) prevents a stale reply from an old release thread ever triggering
+# the wrong publish.
+APIS_APPROVE_RELEASE_URL = os.environ.get(
+    "APIS_APPROVE_RELEASE_URL", "http://127.0.0.1:8742/approve-release"
+)
+_RELEASE_READY_SUBJECT_MARKER = "ready to approve"  # matches "🚀 Release <TAG> ready to approve"
+_RELEASE_APPROVE_TOKEN_PREFIX = "release-approve:"
+
 GWS_CREDENTIALS_PATH = Path(
     os.environ.get(
         "GWS_CREDENTIALS_PATH",
@@ -660,6 +674,133 @@ async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
     return ok
 
 
+# ── Release email-approval ───────────────────────────────────────────────────
+
+
+def _parse_release_approve_token(text: str) -> str | None:
+    """Extract the version from a `release-approve: v1.2.3` correlation line.
+
+    Returns the version string (with its leading `v`) or None. The version shape
+    is a normal semver-ish tag so it can be matched exactly against the operator
+    reply — a stale `approve` from an old release thread must not approve a
+    different version.
+    """
+    m = re.search(
+        rf"{re.escape(_RELEASE_APPROVE_TOKEN_PREFIX)}\s*(v[0-9][0-9A-Za-z.\-+]*)",
+        text or "",
+    )
+    return m.group(1) if m else None
+
+
+def _reply_approves_version(body: str, version: str) -> bool:
+    """True when the operator's own (unquoted) text says `approve <version>`.
+
+    Exact-version match (operator ruling 2026-07-27): the reply must name THIS
+    release's version, so a bare `approve` or an `approve` for a different
+    version never triggers this publish. The `v` prefix is optional in the
+    operator's reply (`approve 0.20.0` and `approve v0.20.0` both count).
+    """
+    want = version.lstrip("v")
+    # word-boundaried version, optional leading v, must sit after an `approve`.
+    pat = re.compile(
+        rf"\bapprove\b[^\n]*\bv?{re.escape(want)}\b", re.IGNORECASE
+    )
+    for line in (body or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(">"):
+            continue  # skip blank + quoted-original lines
+        if pat.search(stripped):
+            return True
+    return False
+
+
+async def _post_release_approval(version: str, sender: str) -> bool:
+    """POST an operator release approval to the Apis /approve-release route.
+
+    Fail-open (returns False, never raises) so a transient Apis outage never
+    crashes the Turdus poll loop. Fails CLOSED when the shared secret is unset —
+    an email must never drive an irreversible publish without the secret
+    configured on both daemons.
+    """
+    if not APIS_APPROVE_EMAIL_SECRET:
+        log.warning(
+            f"[{DAEMON_NAME}] release-approve for {version} skipped — "
+            "APIS_APPROVE_EMAIL_SECRET unset (fail closed)"
+        )
+        return False
+    if DRY_RUN:
+        log.info(f"[{DAEMON_NAME}] DRY_RUN — would POST release-approve for {version}")
+        return True
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                APIS_APPROVE_RELEASE_URL,
+                headers={"X-Approve-Secret": APIS_APPROVE_EMAIL_SECRET},
+                json={"version": version, "sender": sender},
+            )
+            if 200 <= resp.status_code < 300:
+                return True
+            log.warning(
+                f"[{DAEMON_NAME}] release-approve POST returned {resp.status_code} "
+                f"for {version}: {(resp.text or '')[:160]}"
+            )
+            return False
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[{DAEMON_NAME}] release-approve POST error: {exc}")
+        return False
+
+
+async def _maybe_handle_release_approval(msg: dict, notifier: Notifier) -> bool:
+    """If ``msg`` is an operator `approve <version>` reply to a release RC email,
+    POST the approval to Apis. Returns True when handled (caller skips normal
+    task creation).
+
+    Guards, all must hold:
+      1. OPERATOR_EMAIL configured AND the sender matches it (bare address).
+      2. Subject carries the release-ready marker (cheap pre-filter).
+      3. Body carries the `release-approve: <version>` token AND the operator's
+         own unquoted text says `approve <that exact version>`.
+    """
+    if not OPERATOR_EMAIL:
+        return False
+    sender_addr = _extract_sender_address(msg.get("sender", msg.get("from", "")))
+    if sender_addr != OPERATOR_EMAIL:
+        return False
+    subject = msg.get("subject", "") or ""
+    if _RELEASE_READY_SUBJECT_MARKER.lower() not in subject.lower():
+        return False
+
+    body = _read_message_body(msg.get("id", ""))
+    version = _parse_release_approve_token(body) or _parse_release_approve_token(subject)
+    if not version:
+        log.info(
+            f"[{DAEMON_NAME}] operator reply matched release subject but carried no "
+            "release-approve token — treating as a normal reply"
+        )
+        return False
+    if not _reply_approves_version(body, version):
+        log.info(
+            f"[{DAEMON_NAME}] operator reply to release {version} did not say "
+            f"`approve {version}` — not publishing (a bare/other-version approve "
+            "or a hold is ignored)"
+        )
+        return False
+
+    ok = await _post_release_approval(version, sender_addr)
+    if ok:
+        _label_gmail_message(msg.get("id", ""), "Turdus/processed")
+        notifier.send(
+            f"{DAEMON_NAME}: operator emailed `approve {version}` → routed to the "
+            "Apis release-publish gate.",
+            priority=Priority.INFO,
+            handler=DAEMON_NAME,
+        )
+        log.info(f"[{DAEMON_NAME}] release-approve routed for {version}")
+    return ok
+
+
 # ── Poll cycle ────────────────────────────────────────────────────────────────
 
 
@@ -696,6 +837,17 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
     invoice_count = 0
     approval_count = 0
     for msg in new_messages:
+        # Release-approval reply takes precedence: an operator `approve <version>`
+        # reply to a release RC email is routed to the Apis publish gate and the
+        # message is then done (no task created). Checked before swarm-approval
+        # because the two use distinct subject markers, so at most one matches.
+        try:
+            if await _maybe_handle_release_approval(msg, notifier):
+                approval_count += 1
+                continue
+        except Exception as exc:  # never let approval detection break the poll
+            log.error(f"[{DAEMON_NAME}] release-approval check failed: {exc}")
+
         # Swarm PR-approval reply takes precedence over normal classification:
         # an operator "APPROVE" reply to a merge-ready email is routed to Apis
         # and this message is then done (no task created for it).

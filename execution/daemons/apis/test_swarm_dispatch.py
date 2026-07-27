@@ -4806,3 +4806,84 @@ def test_ci_status_non_release_repo_main_does_not_retry(monkeypatch):
     )
     asyncio.run(d._handle_ci_status(trig))
     assert seen == [], "non-release repo main must not prepare a release"
+
+
+# ── _handle_release_approve (email-reply release publish) ───────────────────
+#
+# This is the one handler that drives an irreversible publish. Guards: refuse a
+# malformed version outright; invoke publish.py --from-email-approval for a
+# valid one; never raise into the dispatcher.
+
+
+def _release_approve_trigger(version="v0.20.0"):
+    return SwarmTrigger(
+        kind="release_approve", repository="", number=0, title="", body="",
+        author="", html_url="", delivery_id=f"release-approve-{version}",
+        action="approved", release_version=version,
+    )
+
+
+def test_release_approve_invalid_version_never_publishes(monkeypatch):
+    spawned = []
+
+    async def fake_exec(*a, **k):
+        spawned.append(a)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: True)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    for bad in ["", "0.20.0", "latest", "v; rm -rf /"]:
+        asyncio.run(d._handle_release_approve(_release_approve_trigger(bad)))
+    assert spawned == [], "a malformed version must never invoke publish.py"
+
+
+def test_release_approve_valid_version_invokes_publish(monkeypatch):
+    spawned = []
+
+    async def fake_exec(*args, **kwargs):
+        spawned.append(args)
+
+        class _P:
+            returncode = 0
+
+            async def communicate(self):
+                return (b"Release v0.20.0 PUBLISHED.", b"")
+
+        return _P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: True)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(d._handle_release_approve(_release_approve_trigger("v0.20.0")))
+    assert len(spawned) == 1
+    argv = spawned[0]
+    assert argv[1].endswith("publish.py")
+    assert "--version" in argv and "v0.20.0" in argv
+    assert "--from-email-approval" in argv
+
+
+def test_release_approve_publish_failure_notifies(monkeypatch):
+    async def fake_exec(*args, **kwargs):
+        class _P:
+            returncode = 1
+
+            async def communicate(self):
+                return (b"StepError: npm publish failed", b"")
+
+        return _P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: True)
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    asyncio.run(d._handle_release_approve(_release_approve_trigger("v0.20.0")))
+    # a failed publish must page the operator (BLOCKER), not fail silently
+    assert any("publish FAILED" in str(m) for m in notifier.sent), notifier.sent
+
+
+def test_release_approve_missing_script_notifies(monkeypatch):
+    monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: False)
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    asyncio.run(d._handle_release_approve(_release_approve_trigger("v0.20.0")))
+    assert any("missing" in str(m).lower() for m in notifier.sent), notifier.sent

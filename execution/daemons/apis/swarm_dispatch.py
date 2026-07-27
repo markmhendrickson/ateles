@@ -562,6 +562,12 @@ PHOENICURUS_RELEASE_BRANCH = os.environ.get("PHOENICURUS_RELEASE_BRANCH", "main"
 PHOENICURUS_PREPARE_TIMEOUT_S = int(
     os.environ.get("PHOENICURUS_PREPARE_TIMEOUT_S", "300")
 )
+# Cap on publish.py invoked from an email approval. Publish is the whole
+# irreversible sequence (merge RC, tag, await npm, GitHub Release, deploys), so
+# this is generous — well above the npm-publish wait.
+PHOENICURUS_PUBLISH_TIMEOUT_S = int(
+    os.environ.get("PHOENICURUS_PUBLISH_TIMEOUT_S", "1800")
+)
 
 
 async def _git(args: list[str], cwd: str, timeout: int = 60) -> tuple[int, str, str]:
@@ -962,6 +968,8 @@ class SwarmDispatcher:
                 await self._handle_ci_status(trigger)
             elif trigger.kind == "push_main":
                 await self._handle_push_main(trigger)
+            elif trigger.kind == "release_approve":
+                await self._handle_release_approve(trigger)
             elif trigger.is_pr:
                 await self._handle_pr(trigger)
             elif trigger.kind == "issue_comment":
@@ -2847,6 +2855,100 @@ class SwarmDispatcher:
             )
         except Exception as exc:  # noqa: BLE001 - best-effort
             log.error(f"[{DAEMON_NAME}] release prepare failed for {sha}: {exc}")
+
+    async def _handle_release_approve(self, trigger: SwarmTrigger) -> None:
+        """Publish a release the operator approved by email reply.
+
+        Turdus verified the reply came from the operator's address and carried
+        `approve <exact version>` + the release-approve token, then POSTed to the
+        Apis /approve-release route (shared-secret gated). This runs the SAME
+        irreversible publish path as a Telegram approve: `publish.py --version
+        <v> --from-email-approval`, which itself flips the release_result
+        pending_approval -> approved (refusing any other starting state, so a
+        duplicate/stale reply can't re-publish) and then ships it.
+
+        This is the ONE handler that drives an irreversible publish, so it is
+        deliberately strict and loud: it never runs publish for a malformed
+        version, it bounds the subprocess, and it Telegrams the outcome (success
+        or failure) so the operator always learns what their reply did.
+        """
+        version = (trigger.release_version or "").strip()
+        if not re.match(r"^v[0-9][0-9A-Za-z.\-+]*$", version):
+            log.error(
+                f"[{DAEMON_NAME}] release_approve with invalid version "
+                f"{version!r} — refusing to publish"
+            )
+            return
+
+        script = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "phoenicurus-release",
+            "publish.py",
+        )
+        if not os.path.exists(script):
+            log.error(f"[{DAEMON_NAME}] publish script missing: {script}")
+            self.notifier.send(
+                f"🔴 Release {version} email-approved but publish.py is missing "
+                f"at {script} — publish did NOT run.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+            return
+
+        log.info(
+            f"[{DAEMON_NAME}] operator email-approved release {version} — "
+            "invoking publish.py --from-email-approval"
+        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                script,
+                "--version",
+                version,
+                "--from-email-approval",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=PHOENICURUS_PUBLISH_TIMEOUT_S
+            )
+            tail = (out or b"").decode(errors="replace").strip().splitlines()
+            last = tail[-1] if tail else ""
+            if proc.returncode == 0:
+                log.info(f"[{DAEMON_NAME}] publish {version} succeeded: {last}")
+                # publish.py sends its own rich success Telegram; keep this short.
+            else:
+                log.error(
+                    f"[{DAEMON_NAME}] publish {version} FAILED rc="
+                    f"{proc.returncode}: {last}"
+                )
+                self.notifier.send(
+                    f"🔴 Release {version} email-approved but publish FAILED "
+                    f"(rc={proc.returncode}): {last[:300]}. See "
+                    "phoenicurus-release.log.",
+                    priority=Priority.BLOCKER,
+                    handler=DAEMON_NAME,
+                )
+        except asyncio.TimeoutError:
+            log.error(
+                f"[{DAEMON_NAME}] publish {version} timed out after "
+                f"{PHOENICURUS_PUBLISH_TIMEOUT_S}s"
+            )
+            self.notifier.send(
+                f"🔴 Release {version} publish TIMED OUT after "
+                f"{PHOENICURUS_PUBLISH_TIMEOUT_S}s — it may be partially done; "
+                "check phoenicurus-release.log and the registry before retrying.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error(f"[{DAEMON_NAME}] publish {version} error: {exc}")
+            self.notifier.send(
+                f"🔴 Release {version} email-approved but publish errored: "
+                f"{exc}. Publish may not have run.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
 
     async def _handle_approve(self, trigger: SwarmTrigger) -> None:
         """Execute the /approve operator command (Phase H1 HITL checkpoint).
