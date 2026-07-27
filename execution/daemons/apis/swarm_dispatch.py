@@ -1019,8 +1019,31 @@ class SwarmDispatcher:
         Restart-safe: records an in-flight marker before the first agent spawn
         and clears it on completion, so a restart mid-pipeline leaves a durable
         trace the startup sweep can resume (ateles#230 follow-up).
+
+        Queue-visible: when the single-slot pipeline semaphore is already held,
+        the acquire below can block for many minutes with no signal, so the
+        issue looks acknowledged (its /swarm-run or open confirmation is posted)
+        while it is actually parked (ateles#259). We emit a queued signal BEFORE
+        blocking and a started signal once the slot is acquired, so the wait is
+        visible in the log even absent any GitHub comment.
         """
-        async with self._issue_pipeline_semaphore():
+        ref = f"{trigger.repository}#{trigger.number}"
+        sem = self._issue_pipeline_semaphore()
+        if sem.locked():
+            log.info(
+                f"[{DAEMON_NAME}] issue pipeline for {ref} QUEUED — waiting for "
+                "the issue-pipeline slot (another pipeline is running)"
+            )
+            _queued_at = datetime.now(timezone.utc)
+        else:
+            _queued_at = None
+        async with sem:
+            if _queued_at is not None:
+                waited_s = (datetime.now(timezone.utc) - _queued_at).total_seconds()
+                log.info(
+                    f"[{DAEMON_NAME}] issue pipeline for {ref} STARTED — "
+                    f"acquired the issue-pipeline slot after {waited_s:.1f}s queued"
+                )
             await self._mark_pipeline_inflight(trigger)
             try:
                 await self._run_issue_spec_pipeline(trigger)

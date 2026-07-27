@@ -9,6 +9,7 @@ Also covers the checkbox definition-of-done changes:
 
 import asyncio
 import json
+import logging
 
 import httpx
 import swarm_dispatch
@@ -4043,6 +4044,61 @@ def test_issue_pipeline_semaphore_caps_concurrency(monkeypatch):
 
     asyncio.run(burst())
     assert peak <= 2, f"concurrency exceeded cap: peak={peak}"
+
+
+def test_queued_pipeline_emits_visible_queued_and_started_signals(monkeypatch, caplog):
+    """ateles#259: when the single-slot issue-pipeline semaphore is held, a
+    second pipeline must log a QUEUED signal before blocking and a STARTED
+    signal once it acquires the slot — so a parked pipeline is not invisible.
+
+    Two pipelines run concurrently with a 1-slot cap; the first holds the slot
+    (its lanius dispatch sleeps), forcing the second to queue. We assert both
+    the QUEUED and STARTED log lines appear for the queued issue.
+    """
+    first_in_slot = asyncio.Event()
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "lanius":
+            # First pipeline to reach lanius holds the slot long enough that the
+            # second must queue on the semaphore.
+            if not first_in_slot.is_set():
+                first_in_slot.set()
+                await asyncio.sleep(0.05)
+        return SkillResult(skill, True, 0, "text", "")
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    cfg = DispatchConfig(
+        neotoma_token="", github_token="", max_concurrent_issue_pipelines=1
+    )
+    dispatcher = SwarmDispatcher(_StubNotifier(), cfg)
+
+    async def run_two():
+        # Start the slot-holder first, let it enter, then start the one forced
+        # to queue.
+        t1 = asyncio.create_task(
+            dispatcher._handle_issue_opened(_issue_trigger(number=241))
+        )
+        await first_in_slot.wait()
+        t2 = asyncio.create_task(
+            dispatcher._handle_issue_opened(_issue_trigger(number=999))
+        )
+        await asyncio.gather(t1, t2)
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(run_two())
+
+    text = caplog.text
+    assert "#999 QUEUED" in text, (
+        "the pipeline forced to wait on the busy slot must log a QUEUED signal; "
+        f"log was:\n{text}"
+    )
+    assert "#999 STARTED" in text, (
+        "the queued pipeline must log a STARTED signal once it acquires the "
+        f"slot; log was:\n{text}"
+    )
 
 
 # ── Mirror splices only the managed region ────────────────────────────────────
