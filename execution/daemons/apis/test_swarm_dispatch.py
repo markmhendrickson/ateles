@@ -47,6 +47,7 @@ from swarm_dispatch import (
     parse_review_verdict,
     prepare_pr_worktree,
     review_verdict_is_clear,
+    verdict_to_review_event,
     vanellus_comment_missing,
 )
 
@@ -153,6 +154,41 @@ def test_review_verdict_is_clear_only_for_approve_or_comment():
     assert review_verdict_is_clear(None) is False
 
 
+# ── verdict → native GitHub review event (ateles#241) ────────────────────────
+
+
+def test_verdict_maps_to_review_event_one_row_per_verdict():
+    assert verdict_to_review_event("approve") == "APPROVE"
+    assert verdict_to_review_event("request_changes") == "REQUEST_CHANGES"
+    assert verdict_to_review_event("comment") == "COMMENT"
+
+
+def test_blocked_verdict_maps_to_comment_not_request_changes():
+    """BLOCKED routes findings back for a fix; it must not additionally hard-block
+    merge via GitHub review state — merge stays operator-gated."""
+    assert verdict_to_review_event("blocked") == "COMMENT"
+
+
+def test_unparseable_verdict_maps_to_comment():
+    """Never escalate on a guess: an unparseable verdict must land on the inert
+    COMMENT, not REQUEST_CHANGES (which blocks merge under branch protection)."""
+    assert verdict_to_review_event(None) == "COMMENT"
+    assert verdict_to_review_event("") == "COMMENT"
+    assert verdict_to_review_event("nonsense") == "COMMENT"
+
+
+def test_request_changes_is_the_only_escalating_mapping():
+    """The asymmetry IS the safety property: exactly one input may produce the
+    merge-blocking event. A mapping bug that escalates silently blocks good PRs;
+    one that de-escalates defeats the feature."""
+    escalating = [
+        v
+        for v in ("approve", "request_changes", "comment", "blocked", None, "", "wat")
+        if verdict_to_review_event(v) == "REQUEST_CHANGES"
+    ]
+    assert escalating == ["request_changes"], escalating
+
+
 # ── _handle_pr verdict branching ─────────────────────────────────────────────
 
 
@@ -182,6 +218,12 @@ def _pr_dispatcher_with_stubs(monkeypatch, *, vanellus_stdout, calls):
     async def fake_post_missing_vanellus(self, trigger, result):
         return None
 
+    async def fake_emit_review(self, trigger, verdict, body):
+        # ateles#241: record the native review emission so tests can assert the
+        # event fired (and with which verdict) without real GitHub I/O.
+        calls.append(("review", verdict_to_review_event(verdict)))
+        return "rev-1"
+
     async def fake_persist(self, *a, **k):
         return None
 
@@ -192,6 +234,7 @@ def _pr_dispatcher_with_stubs(monkeypatch, *, vanellus_stdout, calls):
     monkeypatch.setattr(
         SwarmDispatcher, "_post_missing_vanellus_comment", fake_post_missing_vanellus
     )
+    monkeypatch.setattr(SwarmDispatcher, "_emit_formal_review", fake_emit_review)
     monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_persist)
     monkeypatch.setattr(SwarmDispatcher, "_post_missing_panel_comments", fake_persist)
     monkeypatch.setattr(SwarmDispatcher, "_preregistered_expectations",
@@ -223,6 +266,52 @@ def test_handle_pr_clear_verdict_gates_readiness(monkeypatch):
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
     assert ("gate", None) in calls
     assert not any(c[0] == "route" for c in calls)
+
+
+def test_handle_pr_emits_formal_review_on_blocking_path(monkeypatch):
+    """ateles#241: a REQUEST_CHANGES verdict must reach GitHub's review state,
+    not just route findings internally."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**REQUEST_CHANGES**\n1 blocking", calls=calls
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+
+
+def test_handle_pr_emits_formal_review_on_clear_path(monkeypatch):
+    """An APPROVE must also land as a native review — that is what lets branch
+    protection see the swarm's verdict."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("review", "APPROVE") in calls, calls
+
+
+def test_formal_review_emitted_before_routing_decision(monkeypatch):
+    """Emission happens on BOTH paths, so it must precede the branch — and must
+    fire exactly once per handled PR (not duplicated across retry paths)."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**REQUEST_CHANGES**\nx", calls=calls
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    kinds = [c[0] for c in calls]
+    assert kinds.count("review") == 1, f"expected exactly one review emission: {calls}"
+    assert kinds.index("review") < kinds.index("route"), kinds
+
+
+def test_handle_pr_unparseable_verdict_emits_comment_review(monkeypatch):
+    """An unparseable verdict still records a review, as the inert COMMENT —
+    never REQUEST_CHANGES, which would block merge on a parse failure."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="the panel had thoughts", calls=calls
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("review", "COMMENT") in calls, calls
 
 
 def test_handle_pr_unparseable_verdict_routes_not_gates(monkeypatch):
