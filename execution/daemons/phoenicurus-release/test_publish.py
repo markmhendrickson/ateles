@@ -784,3 +784,71 @@ def test_rc_name_wins_over_plain_when_both_present(monkeypatch):
     cap = _capture_rc_fields(rel, monkeypatch)
     assert cap["rc_pr_url"] == "https://x/pr/RC"
     assert cap["rc_branch"] == "release/RC"
+
+
+# ── Transient-failure retry for Neotoma reads (auto-recover from 403 blips) ──
+#
+# A transient 403 (loopback prod during a server restart) stranded the first
+# live release-approval: neotoma_query returned [], publish saw "no release
+# record", and gave up. The query layer now retries transient failures so a
+# blip self-recovers without a human re-running an approved release.
+
+import io as _io
+import urllib.error as _uerr
+import urllib.request as _ureq
+
+
+def _http_error(code):
+    return _uerr.HTTPError("u", code, "x", {}, _io.BytesIO(b""))
+
+
+def test_retry_recovers_from_transient_403(monkeypatch):
+    monkeypatch.setattr(publish, "_NEOTOMA_MAX_ATTEMPTS", 4)
+    monkeypatch.setattr(publish, "_NEOTOMA_RETRY_BASE_S", 0.0)
+    monkeypatch.setattr(publish.time, "sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    class _R:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def read(self): return b'{"entities":[{"ok":1}]}'
+
+    def flaky(req, timeout=20):
+        calls["n"] += 1
+        if calls["n"] < 3:  # 403 twice, then OK
+            raise _http_error(403)
+        return _R()
+
+    monkeypatch.setattr(_ureq, "urlopen", flaky)
+    out = publish.neotoma_query("release_result")
+    assert out == [{"ok": 1}], "must recover after transient 403s"
+    assert calls["n"] == 3
+
+
+def test_404_is_not_retried(monkeypatch):
+    monkeypatch.setattr(publish, "_NEOTOMA_MAX_ATTEMPTS", 4)
+    monkeypatch.setattr(publish.time, "sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    def not_found(req, timeout=20):
+        calls["n"] += 1
+        raise _http_error(404)
+
+    monkeypatch.setattr(_ureq, "urlopen", not_found)
+    assert publish.neotoma_fetch_entity("ent_x") is None
+    assert calls["n"] == 1, "404 is a real answer, not a blip — no retry"
+
+
+def test_gives_up_after_max_attempts(monkeypatch):
+    monkeypatch.setattr(publish, "_NEOTOMA_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(publish, "_NEOTOMA_RETRY_BASE_S", 0.0)
+    monkeypatch.setattr(publish.time, "sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    def always_503(req, timeout=20):
+        calls["n"] += 1
+        raise _http_error(503)
+
+    monkeypatch.setattr(_ureq, "urlopen", always_503)
+    assert publish.neotoma_query("release_result") == []
+    assert calls["n"] == 3, "bounded — does not retry forever"
