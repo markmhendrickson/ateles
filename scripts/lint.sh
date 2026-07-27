@@ -75,6 +75,25 @@ find ./strategy/operations -name "*.md" | \
 echo "  - Checking config sourcing (no hardcoded operator config)..."
 python scripts/linters/check_hardcoded_config.py || ERRORS=$((ERRORS + 1))
 
+# tool_allowlist grant grammar (ateles#255 — bash: prefix is silently dropped
+# by the CLI's --allowedTools parser; only Bash(<command>:*) is honored).
+# Requires live Neotoma; skipped (not failed) when NEOTOMA_BASE_URL is unset
+# so this stays runnable on a machine without Neotoma access.
+if [ -n "$NEOTOMA_BASE_URL" ]; then
+    echo "  - Checking agent_definition tool_allowlist grant grammar..."
+    python scripts/linters/validate_tool_allowlist.py || ERRORS=$((ERRORS + 1))
+
+    # Generated agent-doc mirrors must be fresh (docs/agents/*.md,
+    # .claude/skills/*/SKILL.md are rendered FROM Neotoma agent_definition
+    # entities — never hand-edited). Informational only for now: pre-existing
+    # drift unrelated to any one PR currently fails this check repo-wide (see
+    # .github/workflows/agent-config-validation.yml for the tracking note).
+    echo "  - Checking agent-doc mirrors are in sync with Neotoma (informational)..."
+    python execution/scripts/render_agent_docs.py --check || true
+else
+    echo "  - Skipping tool_allowlist + agent-doc-mirror checks (NEOTOMA_BASE_URL unset)"
+fi
+
 echo ""
 if [ $ERRORS -eq 0 ]; then
     echo "✅ All linters passed!"
