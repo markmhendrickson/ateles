@@ -226,16 +226,13 @@ def test_stale_session_token_not_in_matcher_map(monkeypatch):
 # silently dropped while the daemon logged success.
 
 def test_set_task_approved_false_when_value_did_not_land(monkeypatch):
-    """CLI says success, but the field never changes → must report failure."""
-    import shutil
-    monkeypatch.setattr(shutil, "which", lambda _n: "/usr/bin/neotoma")
+    """MCP correct submit succeeds, but the field never changes → report failure.
 
-    class _OK:
-        returncode = 0
-        stdout = '{"success": true}'
-        stderr = ""
-
-    monkeypatch.setattr(monedula.subprocess, "run", lambda *a, **k: _OK())
+    This is the neotoma#1991 replay guard: a `correct` can succeed at the wire
+    and still write nothing, so _set_task_approved must trust the read-back, not
+    the submit result."""
+    import handlers.neotoma_cli as ncli
+    monkeypatch.setattr(ncli, "correct_field", lambda *a, **k: True)
     # The read-back still shows the OLD value — the correction was dropped.
     monkeypatch.setattr(monedula, "_fetch_entity_by_id",
                         lambda _tid: {"snapshot": {"payment_approved": False}})
@@ -243,18 +240,20 @@ def test_set_task_approved_false_when_value_did_not_land(monkeypatch):
 
 
 def test_set_task_approved_true_when_value_landed(monkeypatch):
-    import shutil
-    monkeypatch.setattr(shutil, "which", lambda _n: "/usr/bin/neotoma")
-
-    class _OK:
-        returncode = 0
-        stdout = '{"success": true}'
-        stderr = ""
-
-    monkeypatch.setattr(monedula.subprocess, "run", lambda *a, **k: _OK())
+    import handlers.neotoma_cli as ncli
+    monkeypatch.setattr(ncli, "correct_field", lambda *a, **k: True)
     monkeypatch.setattr(monedula, "_fetch_entity_by_id",
                         lambda _tid: {"snapshot": {"payment_approved": True}})
     assert monedula._set_task_approved("ent_task", True) is True
+
+
+def test_set_task_approved_false_when_submit_fails(monkeypatch):
+    """If the MCP correct submit itself fails, report failure without read-back."""
+    import handlers.neotoma_cli as ncli
+    monkeypatch.setattr(ncli, "correct_field", lambda *a, **k: False)
+    monkeypatch.setattr(monedula, "_fetch_entity_by_id",
+                        lambda _tid: {"snapshot": {"payment_approved": True}})
+    assert monedula._set_task_approved("ent_task", True) is False
 
 
 def test_verify_accepts_stringified_boolean():

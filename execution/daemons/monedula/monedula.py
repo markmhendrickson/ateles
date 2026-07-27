@@ -473,43 +473,33 @@ def _verify_task_field(task_id: str, field: str, expected: Any) -> bool:
 
 
 def _set_task_approved(task_id: str, approved: bool) -> bool:
-    """Set payment_approved on a task via `neotoma corrections create`.
+    """Set payment_approved on a task via the Neotoma MCP `correct` tool.
 
-    Returns True only when the value is confirmed to have landed — see
-    _verify_task_field() and neotoma#1991.
+    The REST `corrections create` CLI path is dead (POST /corrections 404s on the
+    bare HTTP server), so this goes through handlers.neotoma_cli.correct_field,
+    which speaks MCP. Returns True only when the value is confirmed to have landed
+    — a correction can still be dropped as an idempotency replay (neotoma#1991),
+    and this field alternates true/false, so the read-back is mandatory.
     """
-    import shutil
-
-    neotoma = shutil.which("neotoma")
-    if not neotoma:
-        log.warning("[approve] neotoma CLI not found — cannot set approval")
-        return False
     try:
-        r = subprocess.run(
-            [neotoma, "--api-only", "corrections", "create", task_id,
-             "--entity-type", "task", "--field-name", "payment_approved",
-             "--corrected-value", "true" if approved else "false"],
-            capture_output=True, text=True, timeout=30, env=os.environ,
-        )
-        if r.returncode != 0:
-            log.warning(f"[approve] corrections create failed (rc={r.returncode}): "
-                        f"{(r.stderr or '').strip()[:160]}")
-            return False
-        # rc=0 is NOT proof the correction applied. The CLI derives its
-        # idempotency key from (entity, field, value), so re-submitting a value
-        # this field has held before is treated as a replay: HTTP success, a
-        # correction_id, and no observation written (neotoma#1991). Because this
-        # field alternates true/false, every approval after the first would be
-        # silently dropped while we logged success. Read the value back.
-        if not _verify_task_field(task_id, "payment_approved", approved):
-            log.error(f"[approve] corrections create reported success but "
-                      f"payment_approved did not become {approved} on {task_id} "
-                      f"— treating as NOT approved (see neotoma#1991).")
-            return False
-        return True
-    except Exception as exc:  # noqa: BLE001
-        log.warning(f"[approve] corrections create error: {exc}")
+        from handlers.neotoma_cli import correct_field
+    except ImportError:  # pragma: no cover
+        from .handlers.neotoma_cli import correct_field  # type: ignore[no-redef]
+
+    ok = correct_field(
+        task_id, "payment_approved", "true" if approved else "false",
+        entity_type="task", label="approve",
+    )
+    if not ok:
+        log.warning(f"[approve] correct(payment_approved) submit failed on {task_id}")
         return False
+    # Submit success is NOT proof it landed (idempotency replay — neotoma#1991).
+    if not _verify_task_field(task_id, "payment_approved", approved):
+        log.error(f"[approve] correct reported success but payment_approved did "
+                  f"not become {approved} on {task_id} — treating as NOT approved "
+                  f"(see neotoma#1991).")
+        return False
+    return True
 
 
 def _build_approval_email(task: dict, handler) -> tuple[str, str]:
@@ -1010,15 +1000,13 @@ def _mark_tasks_paid(task_results: list[tuple], due_tasks: list[dict]) -> None:
     never-complete recurring obligation, callers should not route it here — this
     helper is for the one-off vendor/reimbursement tasks that DO complete.
     """
-    import shutil
-
     if _dryrun_enabled():
         return  # never mutate task lifecycle during dry-run
 
-    neotoma = shutil.which("neotoma")
-    if not neotoma:
-        log.warning("[autoexec] neotoma CLI not found — cannot mark tasks paid.")
-        return
+    try:
+        from handlers.neotoma_cli import correct_field
+    except ImportError:  # pragma: no cover
+        from .handlers.neotoma_cli import correct_field  # type: ignore[no-redef]
 
     # Map handler.name -> its task entity_id via due_tasks + profile link.
     by_handler_task = {}
@@ -1039,25 +1027,12 @@ def _mark_tasks_paid(task_results: list[tuple], due_tasks: list[dict]) -> None:
         ref = (result.get("transfer_id") or result.get("txid")
                or result.get("reference") or "")
 
-        # Use `neotoma corrections create` (one high-priority correction per
-        # field) — the CLI has no `entities update` verb. Set status=done and
-        # record the payment reference in payment_event_id for idempotency.
+        # Write each field via the MCP `correct` tool (the REST corrections CLI
+        # path is dead — POST /corrections 404s). Set status=done / record the
+        # payment reference in payment_event_id for idempotency.
         def _correct(field: str, value: str) -> bool:
-            try:
-                r = subprocess.run(
-                    [neotoma, "--api-only", "corrections", "create", tid,
-                     "--entity-type", "task",
-                     "--field-name", field, "--corrected-value", value],
-                    capture_output=True, text=True, timeout=30, env=os.environ,
-                )
-                if r.returncode != 0:
-                    log.warning(f"[autoexec] corrections create {field} failed "
-                                f"(rc={r.returncode}): {(r.stderr or '').strip()[:160]}")
-                    return False
-                return True
-            except Exception as exc:  # noqa: BLE001
-                log.warning(f"[autoexec] corrections create {field} error: {exc}")
-                return False
+            return correct_field(tid, field, value, entity_type="task",
+                                  label="autoexec")
 
         # Recurring-obligation rule: a per-session obligation (yoga, therapy, …)
         # is NEVER completed — the task is the standing obligation, not one
