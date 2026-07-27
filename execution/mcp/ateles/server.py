@@ -198,8 +198,9 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
     best_agent: str | None = None
 
     desc_lower = task_description.lower()
-    # Ordered most-specific first: multi-word keywords must match before
-    # single-word substrings (e.g. "review pr" → pr_steward, not code).
+    # Declaration order is cosmetic — the longest matching keyword wins (see
+    # the selection loop below), so specificity is decided by keyword length,
+    # not by position in this table. Grouping here is for readability only.
     role_keywords: dict[str, list[str]] = {
         "pr_steward": ["review pr", "merge pr", "pull request review"],
         "issue_triage": ["issue", "bug report", "github issue", "triage issue"],
