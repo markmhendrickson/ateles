@@ -28,6 +28,7 @@ from swarm_dispatch import (
     _REJECT_CMD,
     _SWARM_RUN_CMD,
     _VANELLUS_COMMENT_MARKER,
+    BuildHandoffResult,
     DispatchConfig,
     SwarmDispatcher,
     _agent_prompt_instruction,
@@ -4947,3 +4948,202 @@ def test_ci_status_non_release_repo_main_does_not_retry(monkeypatch):
     )
     asyncio.run(d._handle_ci_status(trig))
     assert seen == [], "non-release repo main must not prepare a release"
+# ── _prior_build_attempts direct Neotoma /retrieve_entities coverage ─────────
+#
+# `_count_prior_build_attempts` is a thin wrapper; every attempt_seq test above
+# monkeypatches the wrapper, not `_prior_build_attempts` itself, so the actual
+# HTTP call (and its unverified /retrieve_entities request/response shape) had
+# zero direct coverage. These mock httpx.AsyncClient the same way the
+# _store_entities tests above do, but drive `_prior_build_attempts` directly.
+
+
+def test_prior_build_attempts_parses_entities_list_response(monkeypatch):
+    """The documented Neotoma response shape is {"entities": [...]}; assert
+    that shape is the one actually parsed (not just a truthy/falsy check)."""
+    captured_payload = {}
+
+    class _FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "entities": [
+                    {"entity_id": "ent_a", "attempt_seq": 1},
+                    {"entity_id": "ent_b", "attempt_seq": 2},
+                ]
+            }
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            captured_payload["url"] = url
+            captured_payload["json"] = json
+            return _FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _FakeClient())
+    d = SwarmDispatcher(_StubNotifier(), DispatchConfig(neotoma_token="tok", github_token=""))
+    result = asyncio.run(d._prior_build_attempts(_issue_trigger()))
+
+    assert result == [
+        {"entity_id": "ent_a", "attempt_seq": 1},
+        {"entity_id": "ent_b", "attempt_seq": 2},
+    ]
+    assert captured_payload["url"].endswith("/retrieve_entities")
+    assert captured_payload["json"]["entity_type"] == "build_attempt"
+
+
+def test_prior_build_attempts_degrades_to_empty_list_on_http_failure(monkeypatch):
+    """Documents the degrade behavior explicitly: an HTTP failure must not
+    propagate — it must return [] so a query failure never blocks handoff."""
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **kw):
+            raise RuntimeError("network down")
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _FakeClient())
+    d = SwarmDispatcher(_StubNotifier(), DispatchConfig(neotoma_token="tok", github_token=""))
+    result = asyncio.run(d._prior_build_attempts(_issue_trigger()))
+    assert result == []
+
+
+def test_prior_build_attempts_short_circuits_when_token_unset(monkeypatch):
+    """Mirrors test_store_entities_returns_false_when_token_unset: no token ->
+    no HTTP call attempted, and [] is the documented no-token contract."""
+    called = {"post": False}
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **kw):
+            called["post"] = True
+            raise AssertionError("must not call Neotoma when token is unset")
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _FakeClient())
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    result = asyncio.run(d._prior_build_attempts(_issue_trigger()))
+    assert result == []
+    assert called["post"] is False
+
+
+# ── _run_issue_spec_pipeline operator-facing notification string ────────────
+#
+# PR #258 fixes the operator only ever seeing a bare `rc=1`. The acceptance
+# evidence for that fix IS the notification string sent via self.notifier —
+# these tests drive the real pipeline method (not just _open_implementation_pr's
+# return value) and assert on the literal composed text the operator receives.
+
+
+def test_issue_spec_pipeline_notifies_pr_gate_owns_it_on_success(monkeypatch):
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        return SkillResult(skill, True, 0, "text", "")
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    async def fake_open_pr(self, trigger, state):
+        return BuildHandoffResult(
+            pr_url="https://github.com/owner/repo/pull/999",
+            failure_class=None,
+            hint=None,
+            build_attempt_entity_id=None,
+        )
+
+    monkeypatch.setattr(SwarmDispatcher, "_open_implementation_pr", fake_open_pr)
+
+    notifier = _StubNotifier()
+    cfg = DispatchConfig(neotoma_token="", github_token="", auto_build=True)
+    dispatcher = SwarmDispatcher(notifier, cfg)
+    asyncio.run(dispatcher._run_issue_spec_pipeline(_issue_trigger()))
+
+    assert any(
+        "implementation PR opened" in m
+        and "https://github.com/owner/repo/pull/999" in m
+        and "the PR gate pipeline now owns it" in m
+        for m in notifier.sent
+    )
+
+
+def test_issue_spec_pipeline_notifies_failure_with_build_attempt_ref(monkeypatch):
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        return SkillResult(skill, True, 0, "text", "")
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    async def fake_open_pr(self, trigger, state):
+        return BuildHandoffResult(
+            pr_url=None,
+            failure_class="no_op_build",
+            hint="Cicada made no changes",
+            build_attempt_entity_id="build-attempt-owner-repo-100-1",
+        )
+
+    monkeypatch.setattr(SwarmDispatcher, "_open_implementation_pr", fake_open_pr)
+
+    notifier = _StubNotifier()
+    cfg = DispatchConfig(neotoma_token="", github_token="", auto_build=True)
+    dispatcher = SwarmDispatcher(notifier, cfg)
+    asyncio.run(dispatcher._run_issue_spec_pipeline(_issue_trigger()))
+
+    assert any(
+        "[no_op_build] Cicada made no changes" in m
+        and "(build_attempt build-attempt-owner-repo-100-1)" in m
+        for m in notifier.sent
+    )
+
+
+def test_issue_spec_pipeline_notifies_failure_when_diagnostics_store_failed(monkeypatch):
+    """The doubly-degraded path: build fails AND the diagnostics store also
+    failed. This is the exact original-bug failure mode (losing failure detail
+    twice, silently) and is the highest-value case in the whole PR."""
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        return SkillResult(skill, True, 0, "text", "")
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    async def fake_open_pr(self, trigger, state):
+        return BuildHandoffResult(
+            pr_url=None,
+            failure_class="unclassified",
+            hint="rc=1, see log",
+            build_attempt_entity_id=None,
+        )
+
+    monkeypatch.setattr(SwarmDispatcher, "_open_implementation_pr", fake_open_pr)
+
+    notifier = _StubNotifier()
+    cfg = DispatchConfig(neotoma_token="", github_token="", auto_build=True)
+    dispatcher = SwarmDispatcher(notifier, cfg)
+    asyncio.run(dispatcher._run_issue_spec_pipeline(_issue_trigger()))
+
+    assert any(
+        "diagnostics entity could not be stored — see daemon log for full output" in m
+        for m in notifier.sent
+    )
