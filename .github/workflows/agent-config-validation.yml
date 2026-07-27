@@ -40,7 +40,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Validate tool_allowlist grant grammar (no bash: prefix)
+      - name: "Validate tool_allowlist grant grammar (no bash: prefix)"
         run: python3 scripts/linters/validate_tool_allowlist.py
 
       # NOTE: non-blocking for now. As of ateles#255 the checked-in mirrors
