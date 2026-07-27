@@ -1847,7 +1847,19 @@ class SwarmDispatcher:
         #        max_fix_rounds; a Cicada push re-runs this whole handler.
         #      APPROVE/COMMENT → readiness gate: only signal merge-ready when
         #        required CI is also green.
-        verdict = parse_review_verdict(vanellus_result.stdout)
+        #    The verdict is read from stdout when present, else recovered from
+        #    the durable aggregation comment on the PR (ateles#292) — Vanellus
+        #    posts the verdict reliably but repeats it in stdout only ~25% of
+        #    the time, and a missed token silently downgrades a REQUEST_CHANGES
+        #    to an inert COMMENT on GitHub.
+        verdict, used_comment_fallback = await self._resolve_review_verdict(
+            trigger, vanellus_result.stdout
+        )
+        if used_comment_fallback:
+            log.info(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: verdict "
+                f"recovered via comment fallback (stdout omitted it) — {verdict!r}"
+            )
 
         # 5a. Emit the verdict as a NATIVE GitHub Review (ateles#241) before
         #     branching, so it lands on BOTH paths — a REQUEST_CHANGES that
@@ -2843,6 +2855,82 @@ class SwarmDispatcher:
         log.info(f"[{DAEMON_NAME}] {ref}: CI green + review clear — gating readiness")
         # Pass the CI state we already computed so the gate does not re-fetch it.
         await self._gate_merge_readiness(pr_trigger, parent, panel=[], ci_state=ci)
+
+    async def _resolve_review_verdict(
+        self, t: SwarmTrigger, stdout: str
+    ) -> tuple[str | None, bool]:
+        """Resolve the panel verdict: stdout first, the PR comment as fallback.
+
+        ateles#292: `parse_review_verdict` reads Vanellus's stdout, but Vanellus
+        posts its aggregated verdict to GitHub without reliably repeating it
+        inline (observed: 3 of 4 production emissions parsed as None). A missed
+        token downgrades a real REQUEST_CHANGES to the inert COMMENT on the
+        native review — precisely the state ateles#241 exists to record. So when
+        stdout carries no token, re-read the durable artifact: the Vanellus
+        aggregation comment already on the PR, marked with
+        ``_VANELLUS_COMMENT_MARKER``.
+
+        Returns ``(verdict, used_fallback)``. ``verdict`` is None when neither
+        source carries a valid token — the caller still treats None as not-clear
+        (``review_verdict_is_clear(None)`` is False), so behaviour on total
+        failure is unchanged from before this fallback existed.
+
+        Best-effort — NEVER raises. A GitHub hiccup falls through to
+        ``(None, False)`` rather than breaking ``_handle_pr``.
+
+        Ordering note: this runs after ``_post_missing_vanellus_comment``, which
+        reposts Vanellus's stdout when no aggregation comment landed. So the
+        comment section has already settled — this is not a race against
+        comment-posting latency.
+        """
+        verdict = parse_review_verdict(stdout)
+        if verdict is not None:
+            return verdict, False
+
+        url = (
+            f"https://api.github.com/repos/{t.repository}/issues/"
+            f"{t.number}/comments"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    url,
+                    params={"per_page": 100, "sort": "created", "direction": "desc"},
+                    headers=self._github_headers(t.repository),
+                )
+                resp.raise_for_status()
+                # Newest-first, mirroring _pr_review_is_clear: honour the LATEST
+                # aggregation, and scan past non-Vanellus comments to find it.
+                for comment in resp.json():
+                    body = comment.get("body", "")
+                    if _VANELLUS_COMMENT_MARKER not in body:
+                        continue
+                    fallback_verdict = parse_review_verdict(body)
+                    if fallback_verdict is None:
+                        # Marker present but no token — a prose-only aggregation.
+                        # Do not loosen the regex; report no verdict.
+                        log.warning(
+                            f"[{DAEMON_NAME}] {t.repository}#{t.number}: Vanellus "
+                            "aggregation comment carries no verdict token either "
+                            "— no verdict recovered"
+                        )
+                        return None, False
+                    log.info(
+                        f"[{DAEMON_NAME}] {t.repository}#{t.number}: stdout had no "
+                        f"verdict token — recovered {fallback_verdict!r} from the "
+                        "Vanellus aggregation comment (fallback fired)"
+                    )
+                    return fallback_verdict, True
+                log.warning(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: no Vanellus "
+                    "aggregation comment found — no verdict recovered"
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: comment fallback read "
+                f"failed ({exc}) — falling back to no-verdict"
+            )
+        return None, False
 
     async def _pr_review_is_clear(self, repository: str, pr_number: int) -> bool:
         """True when the latest Vanellus aggregation on the PR is a clear verdict.

@@ -4976,3 +4976,183 @@ def test_release_approve_missing_script_notifies(monkeypatch):
     d = SwarmDispatcher(notifier, _config())
     asyncio.run(d._handle_release_approve(_release_approve_trigger("v0.20.0")))
     assert any("missing" in str(m).lower() for m in notifier.sent), notifier.sent
+
+
+# ── verdict comment fallback (ateles#292) ────────────────────────────────────
+#
+# Vanellus posts its aggregated verdict to GitHub reliably but repeats it in
+# stdout only sometimes. When stdout has no token, the dispatcher must recover
+# the verdict from the durable aggregation comment rather than defaulting to
+# the inert COMMENT review.
+
+
+def _comments_client(monkeypatch, bodies, *, calls=None, raises=None):
+    """Mock httpx.AsyncClient so a comments GET returns `bodies`.
+
+    `calls` (when given) records each GET, so a test can assert the happy path
+    makes no request at all. `raises` makes the GET blow up.
+    """
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def get(self, url, **kwargs):
+            if calls is not None:
+                calls.append((url, kwargs.get("params", {})))
+            if raises is not None:
+                raise raises
+
+            class _Resp:
+                def raise_for_status(self_inner):
+                    pass
+
+                def json(self_inner):
+                    return [{"body": b} for b in bodies]
+
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _Client())
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+
+def _resolver(monkeypatch):
+    return SwarmDispatcher(_StubNotifier(), _config())
+
+
+def test_resolve_verdict_prefers_stdout_and_skips_fetch(monkeypatch):
+    """T1 — stdout carries the token: unchanged behaviour, and no GitHub GET."""
+    calls = []
+    _comments_client(monkeypatch, [], calls=calls)
+    d = _resolver(monkeypatch)
+    verdict, used_fallback = asyncio.run(
+        d._resolve_review_verdict(_trigger(), "## Verdict\n**REQUEST_CHANGES**\nx")
+    )
+    assert (verdict, used_fallback) == ("request_changes", False)
+    assert calls == [], f"happy path must not fetch comments: {calls}"
+
+
+def test_resolve_verdict_falls_back_to_aggregation_comment(monkeypatch, caplog):
+    """T2 — stdout empty, marked comment has the token: fallback recovers it."""
+    _comments_client(
+        monkeypatch,
+        [f"{_VANELLUS_COMMENT_MARKER}\n**REQUEST_CHANGES**\n1 blocking"],
+    )
+    d = _resolver(monkeypatch)
+    with caplog.at_level(logging.INFO):
+        verdict, used_fallback = asyncio.run(
+            d._resolve_review_verdict(_trigger(), "")
+        )
+    assert (verdict, used_fallback) == ("request_changes", True)
+    # The fallback-fire log is what makes stdout-repeat compliance measurable.
+    assert any(
+        "fallback fired" in r.message
+        and "owner/repo#87" in r.message
+        and "request_changes" in r.message
+        for r in caplog.records
+    ), [r.message for r in caplog.records]
+
+
+def test_resolve_verdict_none_when_neither_source_has_token(monkeypatch):
+    """T3 — no token anywhere: still no verdict, and still treated as not-clear."""
+    _comments_client(monkeypatch, ["just a drive-by comment"])
+    d = _resolver(monkeypatch)
+    verdict, used_fallback = asyncio.run(d._resolve_review_verdict(_trigger(), ""))
+    assert (verdict, used_fallback) == (None, False)
+    assert review_verdict_is_clear(verdict) is False
+
+
+def test_resolve_verdict_survives_comment_fetch_failure(monkeypatch):
+    """T3b — a failed GET must not raise out of the resolver."""
+    _comments_client(monkeypatch, [], raises=httpx.ConnectError("boom"))
+    d = _resolver(monkeypatch)
+    verdict, used_fallback = asyncio.run(d._resolve_review_verdict(_trigger(), ""))
+    assert (verdict, used_fallback) == (None, False)
+
+
+def test_resolve_verdict_scans_past_unmarked_comments(monkeypatch):
+    """T4 — the marked comment is not always comments[0]."""
+    _comments_client(
+        monkeypatch,
+        [
+            "a human chimed in first",
+            f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nlgtm",
+        ],
+    )
+    d = _resolver(monkeypatch)
+    assert asyncio.run(d._resolve_review_verdict(_trigger(), "")) == ("approve", True)
+
+
+def test_resolve_verdict_requires_real_token_in_comment(monkeypatch):
+    """T5 — a marked but token-less comment must not produce a false match."""
+    _comments_client(
+        monkeypatch,
+        [f"{_VANELLUS_COMMENT_MARKER}\nthe panel had thoughts but no token"],
+    )
+    d = _resolver(monkeypatch)
+    assert asyncio.run(d._resolve_review_verdict(_trigger(), "")) == (None, False)
+
+
+def test_resolve_verdict_reads_comments_newest_first(monkeypatch):
+    """The fallback must honour the LATEST aggregation, as _pr_review_is_clear does."""
+    calls = []
+    _comments_client(
+        monkeypatch,
+        [
+            f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nnewest",
+            f"{_VANELLUS_COMMENT_MARKER}\n**REQUEST_CHANGES**\nstale",
+        ],
+        calls=calls,
+    )
+    d = _resolver(monkeypatch)
+    assert asyncio.run(d._resolve_review_verdict(_trigger(), "")) == ("approve", True)
+    assert calls and calls[0][1].get("direction") == "desc", calls
+
+
+def test_handle_pr_recovers_blocking_verdict_from_comment(monkeypatch):
+    """T6 (effect-level) — the bug itself: stdout omits REQUEST_CHANGES, but the
+    PR must still be routed as blocking AND get a native REQUEST_CHANGES review,
+    not an inert COMMENT."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="the panel had thoughts", calls=calls
+    )
+    _comments_client(
+        monkeypatch,
+        [f"{_VANELLUS_COMMENT_MARKER}\n**REQUEST_CHANGES**\n1 blocking"],
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("route", "request_changes") in calls, calls
+    assert ("gate", None) not in calls, calls
+    # The whole point of #241/#284: GitHub's review state carries the verdict.
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+
+
+def test_handle_pr_recovered_approve_gates_readiness(monkeypatch):
+    """T7 — the fallback must not over-trigger blocking: a recovered APPROVE
+    proceeds to the readiness gate."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="the panel had thoughts", calls=calls
+    )
+    _comments_client(monkeypatch, [f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nlgtm"])
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("gate", None) in calls, calls
+    assert not any(c[0] == "route" for c in calls), calls
+    assert ("review", "APPROVE") in calls, calls
+
+
+def test_handle_pr_still_comments_when_no_verdict_anywhere(monkeypatch):
+    """Regression guard: with neither stdout nor comment carrying a token, the
+    dispatcher behaves exactly as before — inert COMMENT review, blocking route."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="the panel had thoughts", calls=calls
+    )
+    _comments_client(monkeypatch, ["nothing useful here"])
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("review", "COMMENT") in calls, calls
+    assert any(c[0] == "route" for c in calls), calls
