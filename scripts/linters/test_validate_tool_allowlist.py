@@ -13,6 +13,7 @@ Run with: pytest scripts/linters/test_validate_tool_allowlist.py -v
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -198,3 +199,28 @@ class TestFixtureCLI:
         assert result.returncode == 0
         assert "WARN" in result.stdout
         assert "gh pr*" in result.stdout
+
+
+class TestUnreachableNeotomaDegradesToSkip:
+    """Live (non-fixture) path: Neotoma unreachable/unauthorized must SKIP with
+    exit 0, not fail the build — this is an infra gap (missing/invalid
+    NEOTOMA_BEARER_TOKEN in the running environment), not a grant-grammar
+    defect. Regression test for the CI failure where this lint step hard-
+    failed with 'Neotoma unreachable after 5 tries: HTTP Error 401:
+    Unauthorized' because NEOTOMA_BEARER_TOKEN was unset in GitHub Actions."""
+
+    def test_live_path_skips_cleanly_when_neotoma_unauthorized(self, tmp_path) -> None:
+        env = dict(os.environ)
+        env["NEOTOMA_BASE_URL"] = "https://neotoma.markmhendrickson.com"
+        env["NEOTOMA_BEARER_TOKEN"] = "invalid-token-for-regression-test"
+        env["HOME"] = str(tmp_path)  # no ~/.config/neotoma/.env fallback
+        result = subprocess.run(
+            [sys.executable, str(_SCRIPT)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "SKIP" in result.stdout
+        assert "FAIL" not in result.stdout
