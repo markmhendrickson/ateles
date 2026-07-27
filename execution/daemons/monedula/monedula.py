@@ -211,7 +211,7 @@ def fetch_yesterday_events() -> list[dict]:
 
 def _fetch_entity_by_id(entity_id: str) -> dict | None:
     """Fetch a single entity (with snapshot) by ID from Neotoma. None on error."""
-    base_url = (NEOTOMA_BASE_URL or "http://localhost:3180").rstrip("/")
+    base_url = (NEOTOMA_BASE_URL or "http://localhost:9180").rstrip("/")
     is_loopback = "localhost" in base_url or "127.0.0.1" in base_url
     try:
         url = f"{base_url}/entities/{entity_id}"

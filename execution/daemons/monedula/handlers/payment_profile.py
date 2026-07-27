@@ -97,7 +97,7 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
 
     bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "").strip()
     base_url = os.environ.get(
-        "NEOTOMA_BASE_URL", "http://localhost:3180"
+        "NEOTOMA_BASE_URL", "http://localhost:9180"
     ).rstrip("/")
 
     # On a loopback target the server trusts localhost (NEOTOMA_TRUST_PROD_LOOPBACK)

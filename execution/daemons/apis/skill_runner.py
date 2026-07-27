@@ -267,7 +267,7 @@ def _write_harness_event(
     Uses the same /store endpoint and pattern as lib/activity/_store_activity_log.
     Never raises — a harness_event failure must not crash dispatch.
     """
-    base_url = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180").rstrip("/")
+    base_url = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180").rstrip("/")
     token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     if not token:
         return
