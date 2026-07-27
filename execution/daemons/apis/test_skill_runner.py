@@ -1741,7 +1741,29 @@ class TestRunSkillDroppedAllowlistNotification:
     def setup_method(self) -> None:
         skill_runner._agent_def_cache.clear()
 
-    def _run_with_stderr(self, stderr_bytes: bytes, notifier):
+    @staticmethod
+    def _allowlist_alerts(notifier) -> list[str]:
+        """The subset of notifier messages that are ateles#255 dropped-rule
+        alerts.
+
+        A FAILING dispatch also raises the independent ateles#257
+        dispatch-failure alert on the same notifier, so a bare
+        ``send.call_count`` no longer isolates this feature. Select by content
+        instead: the assertions below are about the dropped-rule alert being
+        emitted exactly ONCE per dispatch (batched, never one per rule), which
+        is what #255 is actually specifying.
+
+        Matched on this alert's own wording rather than on ``--allowedTools
+        rule``: the #257 alert embeds a stderr preview, so on these fixtures
+        the raw CLI phrase appears in BOTH messages.
+        """
+        return [
+            c.args[0]
+            for c in notifier.send.call_args_list
+            if "silently dropped by the CLI" in c.args[0]
+        ]
+
+    def _run_with_stderr(self, stderr_bytes: bytes, notifier, tmp_path):
         fake_def = _make_def(prompt_markdown="Role prompt.")
         instance = MagicMock()
         instance.load.return_value = fake_def
@@ -1756,9 +1778,14 @@ class TestRunSkillDroppedAllowlistNotification:
             proc.communicate = _communicate
             return proc
 
+        # A failing dispatch now also writes an ateles#257 diagnostics file;
+        # keep it inside tmp_path so these tests never touch ~/Library/Logs.
+        failure_dir = tmp_path / "dispatch-failures"
+
         with (
             patch("skill_runner.AgentLoader", return_value=instance),
             patch("skill_runner._write_harness_event"),
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", failure_dir),
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
             patch.object(Path, "exists", return_value=True),
             patch.object(Path, "read_text", return_value="Skill instructions."),
@@ -1774,7 +1801,7 @@ class TestRunSkillDroppedAllowlistNotification:
                 )
             )
 
-    def test_notification_fires_on_dropped_rule(self) -> None:
+    def test_notification_fires_on_dropped_rule(self, tmp_path) -> None:
         """Uses the REAL CLI line-wrapped format (newline, not space, between
         "Ignoring" and "--allowedTools") — the exact text from ateles#255's
         repro — so this e2e test actually exercises the wrap the regex must
@@ -1784,25 +1811,436 @@ class TestRunSkillDroppedAllowlistNotification:
             b"ERROR apis.skill_runner [apis] cicada dispatch failed (rc=1): Ignoring\n"
             b'--allowedTools rule "pr*": Wildcard tool name "pr*" is not supported.'
         )
-        result = self._run_with_stderr(stderr, notifier)
+        result = self._run_with_stderr(stderr, notifier, tmp_path)
         assert not result.ok
-        assert notifier.send.call_count == 1
+        assert len(self._allowlist_alerts(notifier)) == 1
 
-    def test_no_notification_on_clean_dispatch(self) -> None:
+    def test_no_notification_on_clean_dispatch(self, tmp_path) -> None:
         notifier = MagicMock()
-        result = self._run_with_stderr(b"", notifier)
+        result = self._run_with_stderr(b"", notifier, tmp_path)
         assert result.ok
+        # A clean dispatch raises neither the #255 nor the #257 alert.
         notifier.send.assert_not_called()
 
-    def test_multi_rule_drop_in_one_dispatch_batches_single_notification(self) -> None:
+    def test_multi_rule_drop_in_one_dispatch_batches_single_notification(
+        self, tmp_path
+    ) -> None:
         notifier = MagicMock()
         stderr = (
             b'Ignoring --allowedTools rule "pr*": ...\n'
             b'Ignoring --allowedTools rule "issue*": ...\n'
         )
-        result = self._run_with_stderr(stderr, notifier)
+        result = self._run_with_stderr(stderr, notifier, tmp_path)
         assert not result.ok
+        alerts = self._allowlist_alerts(notifier)
+        assert len(alerts) == 1
+        assert "pr*" in alerts[0]
+        assert "issue*" in alerts[0]
+
+
+# ── ateles#257: dispatch-failure diagnostics capture + operator notification ───
+
+
+class TestDispatchFailureDiagnostics:
+    """
+    ateles#257 — a failed dispatch must persist the COMPLETE child stdout AND
+    stderr to a file, surface that path in the ERROR log line and in the
+    harness_event, notify the operator (rate-limited), and never let a
+    diagnostics failure break the dispatch itself.
+    """
+
+    def setup_method(self) -> None:
+        skill_runner._agent_def_cache.clear()
+        skill_runner._dispatch_failure_notified_at.clear()
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _run_dispatch(
+        self,
+        tmp_path,
+        *,
+        stdout: bytes = b"",
+        stderr: bytes = b"",
+        returncode: int = 1,
+        notifier=None,
+        log_dir=None,
+    ):
+        """Run run_skill against a fake child with the given exit status.
+
+        Returns (result, harness_calls, log_dir).
+        """
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        loader_instance = MagicMock()
+        loader_instance.load.return_value = fake_def
+
+        async def fake_exec(*cmd, **kwargs):
+            proc = MagicMock()
+            proc.returncode = returncode
+
+            async def _communicate(input=None):
+                return stdout, stderr
+
+            proc.communicate = _communicate
+            return proc
+
+        harness_calls: list = []
+
+        def fake_harness(**kwargs):
+            harness_calls.append(kwargs)
+
+        target_dir = log_dir if log_dir is not None else tmp_path / "dispatch-failures"
+
+        with (
+            patch("skill_runner.AgentLoader", return_value=loader_instance),
+            patch("skill_runner._write_harness_event", side_effect=fake_harness),
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", target_dir),
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill body"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = asyncio.run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "work prompt",
+                    role="gryllus",
+                    task_entity_id="ent_fail",
+                    notifier=notifier,
+                )
+            )
+        return result, harness_calls, target_dir
+
+    @staticmethod
+    def _logs(log_dir) -> list:
+        d = Path(log_dir)
+        return sorted(d.glob("*.log")) if d.is_dir() else []
+
+    # ── A. full stdout + stderr persisted on failure ──────────────────────────
+
+    def test_failed_dispatch_writes_file_with_full_stdout_and_stderr(
+        self, tmp_path
+    ) -> None:
+        """Both streams must survive in full — past every old truncation point.
+
+        Before this fix the log kept stderr[:500], the harness_event kept
+        stderr[:200], and stdout was discarded outright.
+        """
+        long_stdout = "S" * 3000 + "REAL_CAUSE_IN_STDOUT"
+        long_stderr = (
+            "warning: --allowedTools wildcard ignored\n" * 40
+        ) + "REAL_CAUSE_IN_STDERR"
+
+        result, _, log_dir = self._run_dispatch(
+            tmp_path, stdout=long_stdout.encode(), stderr=long_stderr.encode()
+        )
+
+        assert result.ok is False
+        files = self._logs(log_dir)
+        assert len(files) == 1, "exactly one diagnostics file per failed dispatch"
+
+        body = files[0].read_text(encoding="utf-8")
+        assert long_stdout in body, (
+            "full stdout must be persisted (it was dropped before)"
+        )
+        assert long_stderr in body, "full stderr must be persisted, not stderr[:500]"
+        assert "REAL_CAUSE_IN_STDOUT" in body
+        assert "REAL_CAUSE_IN_STDERR" in body
+
+    def test_failure_log_delimits_streams_and_records_context(self, tmp_path) -> None:
+        _, _, log_dir = self._run_dispatch(
+            tmp_path, stdout=b"the stdout", stderr=b"the stderr"
+        )
+        body = self._logs(log_dir)[0].read_text(encoding="utf-8")
+
+        # Clearly delimited streams
+        assert "===== STDOUT (complete) =====" in body
+        assert "===== END STDOUT =====" in body
+        assert "===== STDERR (complete) =====" in body
+        assert "===== END STDERR =====" in body
+        # Dispatch context
+        assert "skill: gryllus" in body
+        assert "role: gryllus" in body
+        assert "returncode: 1" in body
+        assert "task_entity_id: ent_fail" in body
+
+    def test_failure_log_records_command_without_system_prompt_blob(
+        self, tmp_path
+    ) -> None:
+        """Command context is captured, but the multi-KB system prompt is elided."""
+        _, _, log_dir = self._run_dispatch(tmp_path, stdout=b"o", stderr=b"e")
+        body = self._logs(log_dir)[0].read_text(encoding="utf-8")
+        header = body.split("===== STDOUT")[0]
+
+        assert "command:" in header
+        assert "--append-system-prompt" in header
+        assert "system-prompt elided" in header
+        assert "skill body" not in header, "the system prompt must not be inlined"
+
+    def test_successful_dispatch_writes_no_failure_log(self, tmp_path) -> None:
+        result, _, log_dir = self._run_dispatch(tmp_path, stdout=b"fine", returncode=0)
+        assert result.ok is True
+        assert self._logs(log_dir) == []
+
+    def test_each_failure_gets_its_own_file(self, tmp_path) -> None:
+        for i in range(3):
+            self._run_dispatch(tmp_path, stderr=f"boom {i}".encode())
+        assert len(self._logs(tmp_path / "dispatch-failures")) == 3
+
+    # ── B. path surfaces in the harness_event and the ERROR log ───────────────
+
+    def test_failure_path_appears_in_harness_event_summary(self, tmp_path) -> None:
+        _, harness_calls, log_dir = self._run_dispatch(
+            tmp_path, stdout=b"stdout body", stderr=b"stderr body"
+        )
+        written = self._logs(log_dir)
+        assert written, "a diagnostics file must have been written"
+        expected_path = str(written[0])
+
+        failures = [c for c in harness_calls if c.get("success") == "false"]
+        assert failures, "a failure harness_event must be written"
+        summary = failures[-1]["output_summary"]
+
+        assert expected_path in summary, (
+            "the harness_event must carry the diagnostics path so a failure is "
+            "traceable from Neotoma without log-diving"
+        )
+        assert "rc=1" in summary
+        assert "stderr body" in summary, "inline preview retained for triage"
+
+    def test_failure_path_appears_in_error_log_line(self, tmp_path, caplog) -> None:
+        import logging as _logging
+
+        with caplog.at_level(_logging.ERROR, logger="apis.skill_runner"):
+            _, _, log_dir = self._run_dispatch(tmp_path, stdout=b"o", stderr=b"e")
+
+        expected_path = str(self._logs(log_dir)[0])
+        errors = [r.getMessage() for r in caplog.records if r.levelno >= _logging.ERROR]
+        assert any(expected_path in m for m in errors), (
+            f"the ERROR log must name the diagnostics file; got {errors}"
+        )
+
+    # ── C. a diagnostics failure must NOT break dispatch ──────────────────────
+
+    def test_write_helper_returns_empty_string_instead_of_raising(self) -> None:
+        with patch.object(Path, "mkdir", side_effect=OSError("read-only filesystem")):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="gryllus",
+                role="gryllus",
+                returncode=1,
+                stdout="out",
+                stderr="err",
+            )
+        assert path == "", "a failed diagnostics write returns '' rather than raising"
+
+    def test_diagnostics_write_failure_does_not_break_dispatch(self, tmp_path) -> None:
+        """An unwritable diagnostics dir must still yield a normal SkillResult."""
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("I am a file, so mkdir beneath me fails")
+
+        result, harness_calls, _ = self._run_dispatch(
+            tmp_path,
+            stdout=b"stdout body",
+            stderr=b"stderr body",
+            log_dir=blocker / "sub",
+        )
+
+        assert result.ok is False
+        assert result.returncode == 1
+        assert result.stdout == "stdout body"
+        assert result.stderr == "stderr body"
+
+        failures = [c for c in harness_calls if c.get("success") == "false"]
+        assert failures, "the harness_event is still written when diagnostics fail"
+        assert "diagnostics file unavailable" in failures[-1]["output_summary"]
+
+    def test_diagnostics_failure_still_notifies_operator(self, tmp_path) -> None:
+        blocker = tmp_path / "not-a-dir-2"
+        blocker.write_text("x")
+        notifier = MagicMock()
+
+        self._run_dispatch(
+            tmp_path, stderr=b"boom", notifier=notifier, log_dir=blocker / "sub"
+        )
+
         assert notifier.send.call_count == 1
-        msg = notifier.send.call_args[0][0]
-        assert "pr*" in msg
-        assert "issue*" in msg
+        assert "diagnostics file unavailable" in notifier.send.call_args.args[0]
+
+    # ── D. operator notification + dedup ──────────────────────────────────────
+
+    def test_failed_dispatch_notifies_operator(self, tmp_path) -> None:
+        notifier = MagicMock()
+        _, _, log_dir = self._run_dispatch(
+            tmp_path, stdout=b"o", stderr=b"boom", notifier=notifier
+        )
+
+        assert notifier.send.call_count == 1, (
+            "a dispatch failure must reach the operator"
+        )
+        message = notifier.send.call_args.args[0]
+        assert "gryllus" in message
+        assert "rc=1" in message
+        assert "ent_fail" in message
+        assert str(self._logs(log_dir)[0]) in message, (
+            "the notification must point at the full-output file"
+        )
+
+    def test_notification_priority_is_blocker(self, tmp_path) -> None:
+        from lib.notify import Priority
+
+        notifier = MagicMock()
+        self._run_dispatch(tmp_path, stderr=b"boom", notifier=notifier)
+        assert notifier.send.call_args.kwargs["priority"] == Priority.BLOCKER
+        assert notifier.send.call_args.kwargs["handler"] == "apis"
+
+    def test_identical_failures_are_deduped(self, tmp_path) -> None:
+        notifier = MagicMock()
+        for _ in range(5):
+            self._run_dispatch(tmp_path, stderr=b"same boom", notifier=notifier)
+        assert notifier.send.call_count == 1, (
+            "a burst of identical failures must produce one signal, not five"
+        )
+
+    def test_different_failures_still_notify(self, tmp_path) -> None:
+        notifier = MagicMock()
+        self._run_dispatch(tmp_path, stderr=b"auth token expired", notifier=notifier)
+        self._run_dispatch(
+            tmp_path, stderr=b"worktree checkout conflict", notifier=notifier
+        )
+        assert notifier.send.call_count == 2, (
+            "dedup must key on the failure signature, not suppress everything"
+        )
+
+    def test_dedup_ignores_volatile_ids_and_numbers(self, tmp_path) -> None:
+        notifier = MagicMock()
+        self._run_dispatch(
+            tmp_path,
+            stderr=b"failed at 2026-07-23T10:00:00 run abc123def456",
+            notifier=notifier,
+        )
+        self._run_dispatch(
+            tmp_path,
+            stderr=b"failed at 2026-07-24T11:22:33 run fed654cba321",
+            notifier=notifier,
+        )
+        assert notifier.send.call_count == 1, (
+            "timestamps/run ids must not defeat dedup for the same systemic failure"
+        )
+
+    def test_dedup_window_expiry_allows_renotification(self) -> None:
+        skill_runner._dispatch_failure_notified_at.clear()
+        sig = skill_runner._failure_signature("gryllus", 1, "boom")
+        assert skill_runner._should_notify_dispatch_failure(sig, now=1000.0) is True
+        assert skill_runner._should_notify_dispatch_failure(sig, now=1010.0) is False
+        later = 1000.0 + skill_runner.DISPATCH_FAILURE_NOTIFY_WINDOW_SECONDS + 1
+        assert skill_runner._should_notify_dispatch_failure(sig, now=later) is True
+
+    def test_notifier_exception_does_not_break_dispatch(self, tmp_path) -> None:
+        notifier = MagicMock()
+        notifier.send.side_effect = RuntimeError("telegram down")
+        result, _, _ = self._run_dispatch(
+            tmp_path, stdout=b"o", stderr=b"boom", notifier=notifier
+        )
+        assert result.ok is False, (
+            "a notifier blowup must not change the dispatch outcome"
+        )
+
+    def test_no_notifier_is_a_no_op_but_diagnostics_still_written(
+        self, tmp_path
+    ) -> None:
+        result, _, log_dir = self._run_dispatch(
+            tmp_path, stdout=b"o", stderr=b"boom", notifier=None
+        )
+        assert result.ok is False
+        assert self._logs(log_dir), "diagnostics are written even without a notifier"
+
+    def test_successful_dispatch_does_not_notify(self, tmp_path) -> None:
+        notifier = MagicMock()
+        self._run_dispatch(tmp_path, stdout=b"fine", returncode=0, notifier=notifier)
+        assert notifier.send.call_count == 0
+
+    def test_timeout_notifies_operator(self, tmp_path) -> None:
+        """A timed-out dispatch is the same silent-failure class."""
+        fake_def = _make_def(prompt_markdown="Role: Gryllus.")
+        loader_instance = MagicMock()
+        loader_instance.load.return_value = fake_def
+        notifier = MagicMock()
+
+        async def fake_exec(*cmd, **kwargs):
+            proc = MagicMock()
+            proc.returncode = None
+            calls = {"n": 0}
+
+            async def _communicate(input=None):
+                # First call (inside wait_for) hangs past the timeout; the
+                # second is the post-kill drain, which must return normally.
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    await asyncio.sleep(5)
+                return b"", b""
+
+            proc.communicate = _communicate
+            proc.kill = MagicMock()
+            return proc
+
+        with (
+            patch("skill_runner.AgentLoader", return_value=loader_instance),
+            patch("skill_runner._write_harness_event"),
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "df"),
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill body"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            result = asyncio.run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "p",
+                    role="gryllus",
+                    task_entity_id="ent_to",
+                    timeout=1,
+                    notifier=notifier,
+                )
+            )
+
+        assert result.ok is False
+        assert "timed out" in result.error
+        assert notifier.send.call_count == 1
+        assert "timed out" in notifier.send.call_args.args[0]
+
+    # ── E. secret redaction in persisted output ───────────────────────────────
+
+    def test_secrets_are_redacted_from_the_failure_log(self, tmp_path) -> None:
+        # Deliberately not a real token shape, and not bound to a name the
+        # repo's gitleaks `protected-patterns` rule treats as a credential.
+        fake_value = "FAKE-TEST-TOKEN-VALUE-0000"
+        with (
+            patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"),
+            patch.dict("os.environ", {"GITHUB_TOKEN": fake_value}, clear=False),
+        ):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="gryllus",
+                role="gryllus",
+                returncode=1,
+                stdout=f"leaked {fake_value} in stdout",
+                stderr=f"leaked {fake_value} in stderr",
+            )
+
+        assert path
+        body = Path(path).read_text(encoding="utf-8")
+        assert fake_value not in body
+        assert body.count("<redacted:GITHUB_TOKEN>") == 2
+
+    def test_skill_name_is_slugified_into_the_filename(self, tmp_path) -> None:
+        with patch("skill_runner.DISPATCH_FAILURE_LOG_DIR", tmp_path / "d"):
+            path = skill_runner.write_dispatch_failure_log(
+                skill="weird/../name with spaces",
+                role="gryllus",
+                returncode=1,
+                stdout="",
+                stderr="",
+            )
+        assert path
+        name = Path(path).name
+        assert "/" not in name
+        assert ".." not in name
+        assert Path(path).parent == tmp_path / "d"
