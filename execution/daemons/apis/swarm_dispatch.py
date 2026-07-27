@@ -1894,7 +1894,11 @@ class SwarmDispatcher:
                 result = await run_skill(
                     lens.agent,
                     self._panelist_prompt(
-                        trigger, lens, expectations.get(lens.agent, ""), parent
+                        trigger,
+                        lens,
+                        expectations.get(lens.agent, ""),
+                        parent,
+                        has_worktree=bool(qa_worktree),
                     ),
                     github_token=_token_for_agent_on_repo(
                         lens.agent, trigger.repository
@@ -3872,8 +3876,20 @@ class SwarmDispatcher:
 
     @staticmethod
     def _panelist_prompt(
-        t: SwarmTrigger, lens: Lens, expectation: str, parent: int | None = None
+        t: SwarmTrigger,
+        lens: Lens,
+        expectation: str,
+        parent: int | None = None,
+        has_worktree: bool = False,
     ) -> str:
+        """Build a lens panelist's prompt.
+
+        `has_worktree` reflects whether this panelist actually got a writable PR
+        checkout as its cwd. It gates the evidence bar: telling a lens to "run
+        the code" when it is reviewing diff-only would be a lie that either
+        wastes its turn or invites invented output (#254 / plan
+        ent_ccd6660fc28800a2ae3a5623).
+        """
         expectation_block = (
             "Your pre-registered expectations on the parent issue were:\n"
             f"{expectation}\n\nReview against them first: did the change meet "
@@ -3881,6 +3897,32 @@ class SwarmDispatcher:
             if expectation
             else "You did not pre-register expectations for this issue; review "
             "against your standing lens criteria."
+        )
+        # The evidence bar for a [BLOCKING] verdict. Motivated by neotoma PR
+        # #1946: 0 of 11 blocking findings across 3 rounds cited executing
+        # anything, and both wrong findings came from a lens with no checkout.
+        # Reading the code is a hypothesis; running it is evidence.
+        evidence_bar = (
+            "EVIDENCE BAR FOR BLOCKING. Your cwd is a writable checkout of the "
+            "PR branch, and you have Bash. A finding may be `[BLOCKING]` ONLY "
+            "if you RAN something that demonstrates it — a failing test, a "
+            "command whose output contradicts what the code claims, a "
+            "reproduction of the defect. Quote the command and its ACTUAL "
+            "output in the finding's detail. If you cannot reproduce it, or you "
+            "only reasoned from reading the diff, file it `[NON-BLOCKING]` and "
+            "say what you could not verify. This is the standard "
+            "`fixed_means_behavior_verified_not_contract_accepted` "
+            "(ent_db0b7855d47012084477fb00) already imposes on the implementer; "
+            "it binds you too. Do not block a merge on a hypothesis."
+            if has_worktree
+            else "EVIDENCE BAR FOR BLOCKING. You are reviewing DIFF-ONLY this "
+            "run: no PR checkout could be prepared, so you cannot execute the "
+            "code. Findings you cannot demonstrate by running something are "
+            "hypotheses. Prefer `[NON-BLOCKING]`, and state plainly that the "
+            "concern is unverified and what would confirm it. Reserve "
+            "`[BLOCKING]` for defects evident from the diff itself (a missing "
+            "declaration, a contradicted invariant, an absent required artifact) "
+            "— never for a claim about runtime behaviour you could not observe."
         )
         blocking_rules = (
             "Your output is FORWARD-LOOKING and non-blocking: do not request "
@@ -3891,7 +3933,7 @@ class SwarmDispatcher:
             "`[BLOCKING] <category>: <summary>` followed by detail and file "
             "references. Non-blocking suggestions: `[NON-BLOCKING] <category>: "
             "<summary>`. Cite the standing rule or guardrail doc when one "
-            "applies — that marks the finding as systemic."
+            "applies — that marks the finding as systemic.\n\n" + evidence_bar
         )
         # Build the check-off instruction only when there is a parent issue AND
         # this panelist pre-registered expectations (so there is a comment to edit).

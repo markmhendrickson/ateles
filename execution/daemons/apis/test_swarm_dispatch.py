@@ -4819,3 +4819,41 @@ def test_no_deferral_marker_is_ignored(monkeypatch):
     now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
     r = _run_deferral_scan(monkeypatch, [{"number": 9}], {9: [_verdict()]}, now)
     assert r["scanned"] == 0 and r["due"] == []
+
+
+def test_panelist_prompt_evidence_bar_tracks_worktree_availability():
+    # The evidence bar must tell the truth about what the lens can do. Claiming
+    # "your cwd is a writable checkout" to a diff-only lens would either waste
+    # its turn or invite it to invent command output (#254).
+    lens = Lens(agent="waxwing", lens="arch", gate="arch", checks="contracts")
+    trigger = _trigger(repository="markmhendrickson/neotoma")
+
+    with_wt = SwarmDispatcher._panelist_prompt(
+        trigger, lens, "", None, has_worktree=True
+    )
+    assert "writable checkout" in with_wt
+    assert "ONLY if you RAN something" in with_wt
+    assert "DIFF-ONLY" not in with_wt
+
+    without_wt = SwarmDispatcher._panelist_prompt(
+        trigger, lens, "", None, has_worktree=False
+    )
+    assert "DIFF-ONLY" in without_wt
+    assert "unverified" in without_wt
+    assert "writable checkout" not in without_wt
+
+
+def test_forward_looking_lens_has_no_evidence_bar():
+    # Forward-looking lenses never block, so the blocking evidence bar is noise.
+    lens = Lens(
+        agent="corvus", lens="content", gate="", checks="x", forward_looking=True
+    )
+    prompt = SwarmDispatcher._panelist_prompt(
+        _trigger(repository="markmhendrickson/neotoma"),
+        lens,
+        "",
+        None,
+        has_worktree=True,
+    )
+    assert "EVIDENCE BAR" not in prompt
+    assert "FORWARD-LOOKING" in prompt

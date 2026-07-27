@@ -8,6 +8,8 @@ on:
     paths:
       - "ateles/**"
       - ".claude/hooks/**"
+      - "execution/daemons/apis/**"
+      - "lib/daemon_runtime/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/ateles-tests.yml"
@@ -26,3 +28,11 @@ jobs:
           python-version: "3.13"
       - name: Run ateles package tests
         run: uv run --extra dev python -m pytest ateles/ .claude/hooks/ -q
+      # Swarm daemon tests (qa #254 finding): test_swarm_dispatch.py and the
+      # rest of the Apis daemon suite never ran in CI — the lane above is scoped
+      # to ateles/**, so a daemon regression (e.g. a dangling call from a stale
+      # branch) shipped uncaught. Run them as their own step so a daemon-dep
+      # failure is attributable, and so the path trigger above actually gates
+      # execution/daemons/apis/** changes.
+      - name: Run swarm daemon (apis) tests
+        run: uv run --extra dev python -m pytest execution/daemons/apis/ -q
