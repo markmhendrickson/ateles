@@ -809,8 +809,15 @@ def parse_limit_reset_delay(*texts: str, now: "datetime | None" = None) -> int:
     Parses shapes like "resets 7:30pm", "resets at 19:30", "resets 7pm
     (Europe/Madrid)". Returns a conservative default when no time is found, and
     always at least a small floor so a mis-parse can't busy-loop. The clock is
-    injected for testability; timezone in the message is ignored (we resume a
-    little late rather than early, which is safe)."""
+    injected for testability; timezone in the message is ignored.
+
+    TZ ASSUMPTION (Loxia #264 review): `now` defaults to naive `datetime.now()`,
+    so the "resume late, not early" guarantee holds only when the daemon's local
+    clock is at or behind the reset time's zone. The Apis daemon runs
+    `Europe/Madrid` (the plist sets TZ), which is the zone the Anthropic reset
+    messages quote, so this holds in practice. Even if it did not, the
+    still-limited re-defer path re-arms with a fresh reset, so an early resume
+    self-corrects rather than failing."""
     import re
 
     default = int(os.environ.get("APIS_LIMIT_RESET_DEFAULT_SECONDS", str(3 * 3600)))
@@ -1356,13 +1363,22 @@ class SwarmDispatcher:
                     cresp.raise_for_status()
                 except Exception:
                     continue
-                # Latest deferral marker wins (a re-defer posts a newer one).
-                latest_iso = None
+                # Walk comments in order. A deferral is LIVE only if it is the
+                # latest terminal marker — i.e. no aggregation verdict was posted
+                # AFTER it. Once a real verdict (or a newer deferral) lands, the
+                # old deferral is superseded and the PR stops being "due", so a
+                # resolved PR is not re-dispatched forever (Loxia #264 review).
+                latest_iso = None  # ISO of the most-recent still-live deferral
                 for c in cresp.json():
-                    m = self._REVIEW_DEFERRED_RE.search(c.get("body", ""))
+                    body = c.get("body", "")
+                    m = self._REVIEW_DEFERRED_RE.search(body)
                     if m:
-                        latest_iso = m.group(1)
+                        latest_iso = m.group(1)  # a newer deferral supersedes
+                    elif _VANELLUS_COMMENT_MARKER in body:
+                        latest_iso = None  # a verdict after a deferral clears it
                 if latest_iso is None:
+                    # No live deferral: either never deferred, or a verdict has
+                    # since superseded it. Not a candidate.
                     continue
                 result["scanned"] += 1
                 try:
@@ -4292,21 +4308,34 @@ class SwarmDispatcher:
         url = f"https://api.github.com/repos/{t.repository}/issues/{t.number}/comments"
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                # Idempotent: skip if a deferral marker is already present.
+                # ADVANCE, don't skip: a still-limited re-run must move the reset
+                # time forward, or the sweep would keep re-dispatching every pass
+                # (Loxia #264 review). Delete any prior deferral markers, then
+                # post the fresh one carrying the NEW reset ISO. Deleting first
+                # also keeps the "latest live marker" invariant the sweep relies
+                # on unambiguous.
                 resp = await client.get(
                     url, params={"per_page": 100},
                     headers=self._github_headers(t.repository),
                 )
                 resp.raise_for_status()
-                if any(
-                    self._REVIEW_DEFERRED_RE.search(c.get("body", ""))
-                    for c in resp.json()
-                ):
-                    log.info(
-                        f"[{DAEMON_NAME}] deferral marker already present on "
-                        f"{t.repository}#{t.number}; not re-posting"
-                    )
-                    return
+                for c in resp.json():
+                    if self._REVIEW_DEFERRED_RE.search(c.get("body", "")):
+                        del_url = (
+                            f"https://api.github.com/repos/{t.repository}/issues/"
+                            f"comments/{c.get('id')}"
+                        )
+                        try:
+                            d = await client.delete(
+                                del_url, headers=self._github_headers(t.repository)
+                            )
+                            d.raise_for_status()
+                        except Exception as exc:
+                            log.warning(
+                                f"[{DAEMON_NAME}] could not delete stale deferral "
+                                f"marker {c.get('id')} on {t.repository}#{t.number} "
+                                f"({exc}); posting fresh marker anyway"
+                            )
                 post = await client.post(
                     url, json={"body": body},
                     headers=self._github_headers(t.repository),

@@ -4719,3 +4719,103 @@ def test_deferred_review_sweep_is_fail_open_per_repo(monkeypatch):
     )
     assert resumed == [5]  # the good repo still ran
     assert summary["resumed"] == 1
+
+
+class _FakeDeferralHttpxClient:
+    """Serves a fixed PR list and per-PR comment thread to
+    _prs_with_matured_deferral, so its marker-lifecycle logic runs for real
+    (Loxia #264: the sweep tests monkeypatched this method, missing the bug)."""
+
+    def __init__(self, prs, comments_by_pr):
+        self._prs = prs
+        self._comments = comments_by_pr
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        pass
+
+    async def get(self, url, **kwargs):
+        prs = self._prs
+        comments = self._comments
+
+        class _Resp:
+            def raise_for_status(self_inner):
+                pass
+
+            def json(self_inner):
+                if url.endswith("/pulls"):
+                    return prs
+                # /issues/{n}/comments
+                import re as _re
+                m = _re.search(r"/issues/(\d+)/comments", url)
+                return comments.get(int(m.group(1)), []) if m else []
+
+        return _Resp()
+
+
+def _run_deferral_scan(monkeypatch, prs, comments, now):
+    monkeypatch.setattr(
+        httpx, "AsyncClient",
+        lambda **k: _FakeDeferralHttpxClient(prs, comments),
+    )
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    return asyncio.run(d._prs_with_matured_deferral("owner/repo", now))
+
+
+def _defer(iso):
+    return {"id": 1, "body": f"<!-- review-deferred-until:{iso} -->\ndeferred"}
+
+
+def _verdict():
+    return {"id": 2, "body": "<!-- vanellus-aggregation -->\n**APPROVE**"}
+
+
+def test_matured_deferral_is_due(monkeypatch):
+    from datetime import datetime, timezone
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    prs = [{"number": 254}]
+    comments = {254: [_defer("2026-07-27T10:00:00Z")]}  # past
+    r = _run_deferral_scan(monkeypatch, prs, comments, now)
+    assert [p["number"] for p in r["due"]] == [254]
+
+
+def test_unmatured_deferral_is_not_due(monkeypatch):
+    from datetime import datetime, timezone
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    prs = [{"number": 254}]
+    comments = {254: [_defer("2026-07-27T18:00:00Z")]}  # future
+    r = _run_deferral_scan(monkeypatch, prs, comments, now)
+    assert r["due"] == [] and r["not_yet"] == 1
+
+
+def test_verdict_after_deferral_supersedes_it(monkeypatch):
+    # THE Loxia bug: a resolved PR (verdict posted AFTER a past-due deferral)
+    # must NOT be re-dispatched. Comment order: deferral, then verdict.
+    from datetime import datetime, timezone
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    prs = [{"number": 254}]
+    comments = {254: [_defer("2026-07-27T10:00:00Z"), _verdict()]}
+    r = _run_deferral_scan(monkeypatch, prs, comments, now)
+    assert r["due"] == [], "resolved PR must not be re-dispatched"
+    assert r["scanned"] == 0, "superseded deferral is not even a candidate"
+
+
+def test_redefer_after_verdict_is_live_again(monkeypatch):
+    # verdict then a NEW deferral (re-throttled on a later run) -> due again.
+    from datetime import datetime, timezone
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    prs = [{"number": 254}]
+    comments = {254: [_defer("2026-07-26T10:00:00Z"), _verdict(),
+                      _defer("2026-07-27T09:00:00Z")]}
+    r = _run_deferral_scan(monkeypatch, prs, comments, now)
+    assert [p["number"] for p in r["due"]] == [254]
+
+
+def test_no_deferral_marker_is_ignored(monkeypatch):
+    from datetime import datetime, timezone
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    r = _run_deferral_scan(monkeypatch, [{"number": 9}], {9: [_verdict()]}, now)
+    assert r["scanned"] == 0 and r["due"] == []
