@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-swarm_harness — MCP server for Ateles swarm routing and checkpoint management.
+ateles — MCP server for Ateles swarm routing and checkpoint management.
 
 Provides four tools that wrap multi-step Neotoma query patterns into single
 calls, so any connected agent gets reliable swarm interaction without
@@ -36,7 +36,7 @@ from mcp.types import (
     Tool,
 )
 
-log = logging.getLogger("swarm_harness")
+log = logging.getLogger("ateles")
 
 NEOTOMA_BASE_URL = os.environ.get(
     "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
@@ -58,7 +58,7 @@ CHECKPOINT_APPROVED_STATES = frozenset({"approved", "approve", "accepted"})
 CHECKPOINT_REJECTED_STATES = frozenset({"rejected", "reject", "declined", "denied"})
 
 SERVER_INSTRUCTIONS = """\
-You are connected to the Ateles swarm harness. Follow these operating rules:
+You are connected to Ateles. Follow these operating rules:
 
 1. **Dispatch, don't do inline.** When route_task identifies an owning agent, \
 delegate to that agent rather than doing the work yourself.
@@ -477,7 +477,7 @@ TOOL_HANDLERS = {
 
 
 async def main():
-    server = Server("swarm_harness", instructions=SERVER_INSTRUCTIONS)
+    server = Server("ateles", instructions=SERVER_INSTRUCTIONS)
 
     @server.list_tools()
     async def handle_list_tools() -> list[Tool]:
