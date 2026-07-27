@@ -1893,28 +1893,133 @@ def _comment_trigger(**overrides):
     return SwarmTrigger(**base)
 
 
-def test_confirm_gates_clear_from_operator_calls_lanius(monkeypatch):
-    """Operator /confirm-gates-clear triggers Lanius gate-waive and notifier."""
+class _FakeGateStore:
+    """In-memory stand-in for IssueGateStore with a real waive/verify loop.
+
+    ``gate_status`` starts from *initial* and is mutated by ``waive`` exactly as
+    the real store does, so the sweep semantics (waive all unsigned, leave the
+    cleared alone) are exercised end to end. ``verify_returns`` lets a test
+    simulate a write that does NOT persist — the verification-failure path.
+    """
+
+    def __init__(
+        self,
+        initial: dict | None = None,
+        *,
+        entity_found: bool = True,
+        verify_returns: dict | None = None,
+    ):
+        self.gate_status = dict(initial or {})
+        self.entity_found = entity_found
+        self.verify_returns = verify_returns
+        self.owner_history: list[dict] = []
+        self.waive_calls: list[tuple] = []
+
+    async def waive(self, repo, issue_number, pre_impl_gates):
+        from gate_waive import (
+            WaiveOutcome,
+            gates_needing_waive,
+            verify_waived,
+            waive_history_entries,
+        )
+
+        self.waive_calls.append((repo, issue_number, tuple(pre_impl_gates)))
+        outcome = WaiveOutcome()
+        if not self.entity_found:
+            return outcome
+        outcome.entity_found = True
+        targeted = gates_needing_waive(self.gate_status, tuple(pre_impl_gates))
+        outcome.targeted = list(targeted)
+        outcome.already_clear = [g for g in pre_impl_gates if g not in targeted]
+        if not targeted:
+            outcome.verified = True
+            return outcome
+        for gate in targeted:
+            self.gate_status[gate] = "waived"
+        self.owner_history.extend(waive_history_entries(targeted, "2026-07-27T00:00:00Z"))
+        # Verification re-read: either the real mutated state, or an injected
+        # state simulating a write that did not persist.
+        observed = (
+            self.verify_returns
+            if self.verify_returns is not None
+            else self.gate_status
+        )
+        still_open = verify_waived(observed, targeted)
+        outcome.failed = still_open
+        outcome.waived = [g for g in targeted if g not in still_open]
+        outcome.verified = not still_open
+        return outcome
+
+
+def _install_fake_gate_store(monkeypatch, store):
+    """Patch IssueGateStore so the dispatcher uses *store*."""
+    monkeypatch.setattr(
+        swarm_dispatch, "IssueGateStore", lambda base_url, token: store
+    )
+    return store
+
+
+def _capture_waive_comments(monkeypatch):
+    """Capture gate-waive result comment bodies instead of hitting GitHub."""
+    bodies: list[str] = []
+
+    async def fake_post(self, trigger, outcome):
+        from gate_waive import format_waive_comment
+
+        bodies.append(
+            format_waive_comment(
+                marker="<!-- swarm-gate-waive-result -->",
+                header="hdr",
+                waived=outcome.waived,
+                already_clear=outcome.already_clear,
+                failed=outcome.failed,
+                entity_found=outcome.entity_found,
+            )
+        )
+
+    monkeypatch.setattr(SwarmDispatcher, "_post_gate_waive_comment", fake_post)
+    return bodies
+
+
+def test_confirm_gates_clear_performs_dispatcher_side_write(monkeypatch):
+    """Operator /confirm-gates-clear must waive DISPATCHER-SIDE, not via an agent.
+
+    ateles#285: the waive used to be prompted to Lanius, which silently no-opped
+    (agent spawned, wrote nothing, posted nothing). A gate waive is a mechanical
+    state transition, so the dispatcher performs it directly. This test pins
+    that contract: the sweep runs WITHOUT any agent turn.
+    """
     calls = []
 
     async def fake_run_skill(skill, prompt, **kwargs):
         calls.append((skill, prompt))
-        return SkillResult(skill, True, 0, "Gates waived.", "")
+        return SkillResult(skill, True, 0, "", "")
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    store = _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    _install_fake_gate_store(monkeypatch, store)
+    comments = _capture_waive_comments(monkeypatch)
+
     notifier = _StubNotifier()
     dispatcher = SwarmDispatcher(notifier, _config())
 
     asyncio.run(dispatcher._handle_issue_comment(_comment_trigger()))
 
-    assert any(c[0] == "lanius" for c in calls), "Lanius must be called to waive gates"
-    # Prompt must mention the command and the pre-impl gates.
-    lanius_prompt = next(c[1] for c in calls if c[0] == "lanius")
-    assert _CONFIRM_GATES_CLEAR_CMD in lanius_prompt
+    # The waive must NOT depend on an agent turn.
+    assert not [c for c in calls if c[0] == "lanius"], (
+        "the gate waive must be a dispatcher-side write, not a Lanius prompt "
+        "(ateles#285)"
+    )
+    assert store.waive_calls, "the dispatcher must call the gate store"
+    # Every pre-impl gate must be waived.
     for gate in PRE_IMPL_GATES:
-        assert gate in lanius_prompt, f"Prompt must mention gate '{gate}'"
+        assert store.gate_status[gate] == "waived", (
+            f"gate {gate!r} must be waived by the dispatcher-side sweep"
+        )
     # Notifier must be called to inform the operator.
     assert any("cleared" in m or "waiv" in m for m in notifier.sent)
+    # And GitHub must see it.
+    assert comments, "a gate-waive result comment must be posted"
 
 
 def test_confirm_gates_clear_from_non_operator_is_ignored(monkeypatch):
@@ -2003,6 +2108,10 @@ def test_confirm_gates_clear_on_pr_comment_retriggers_pr_pipeline(monkeypatch):
     monkeypatch.setattr(SwarmDispatcher, "_post_missing_panel_comments", fake_post_missing)
     monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_persist)
     monkeypatch.setattr(SwarmDispatcher, "_store_merge_checkpoint", fake_merge_checkpoint)
+    store = _install_fake_gate_store(
+        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    )
+    _capture_waive_comments(monkeypatch)
 
     notifier = _StubNotifier()
     dispatcher = SwarmDispatcher(notifier, _config())
@@ -2018,7 +2127,7 @@ def test_confirm_gates_clear_on_pr_comment_retriggers_pr_pipeline(monkeypatch):
     )
 
     # Lanius must be called at minimum (for gate waive + PR pipeline).
-    assert "lanius" in calls
+    assert store.waive_calls, "the dispatcher-side gate waive must have run"
 
 
 def test_confirm_gates_clear_is_case_insensitive_for_operator_login(monkeypatch):
@@ -2030,6 +2139,10 @@ def test_confirm_gates_clear_is_case_insensitive_for_operator_login(monkeypatch)
         return SkillResult(skill, True, 0, "", "")
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    store = _install_fake_gate_store(
+        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    )
+    _capture_waive_comments(monkeypatch)
     dispatcher = SwarmDispatcher(_StubNotifier(), _config())
 
     # Mix case: MARKMHENDRICKSON vs markmhendrickson.
@@ -2038,7 +2151,7 @@ def test_confirm_gates_clear_is_case_insensitive_for_operator_login(monkeypatch)
             _comment_trigger(comment_author=_OPERATOR_LOGIN.upper())
         )
     )
-    assert "lanius" in calls
+    assert store.waive_calls, "the dispatcher-side gate waive must have run"
 
 
 # ── Part B — Pavo pm self-sign-off prompt ──────────────────────────────────
@@ -2106,8 +2219,15 @@ def test_lanius_pr_prompt_blocked_comment_specifies_operator_only():
 
 
 def test_pre_impl_gates_constant_includes_expected_gates():
-    """PRE_IMPL_GATES must include pm and arch (the two pre-impl gates)."""
+    """PRE_IMPL_GATES must include pm, ux and arch (the three pre-impl gates).
+
+    ateles#285: `ux` was missing, which is why the 2026-07-23 waive on
+    ateles#241 cleared `arch` and left `ux` pending. The Lanius skill's Phase 2
+    (Accipiter `ux` + Bombycilla `arch`) and _lanius_pr_prompt both treat `ux`
+    as a pre-impl gate, so the constant must agree.
+    """
     assert "pm" in PRE_IMPL_GATES
+    assert "ux" in PRE_IMPL_GATES
     assert "arch" in PRE_IMPL_GATES
 
 
@@ -2116,6 +2236,265 @@ def test_operator_login_defaults_to_repo_owner():
     # This is the env-based default; the actual value depends on env.
     # We verify the constant is non-empty (not blank).
     assert _OPERATOR_LOGIN, "_OPERATOR_LOGIN must not be empty"
+
+
+# ── ateles#285 — dispatcher-side gate waive ──────────────────────────────────
+#
+# Regression coverage for the three failures recorded on ateles#241:
+#   * 2026-07-23 PARTIAL apply (waived `arch`, left `ux` pending),
+#   * 2026-07-27T17:08 rc=1,
+#   * 2026-07-27T17:37 SILENT no-op (no write, no error, no comment).
+
+
+def test_waive_sweeps_all_unsigned_gates_not_just_one():
+    """ALL unsigned pre-impl gates are waived — the 2026-07-23 partial regression.
+
+    That run waived `arch` and left `ux` pending, so the issue LOOKED cleared
+    while PR gate inheritance kept blocking. `gates_needing_waive` is a total
+    function over PRE_IMPL_GATES, so a partial sweep is structurally impossible.
+    """
+    from gate_waive import apply_waives, gates_needing_waive
+
+    # Exactly the state of ateles#241 before the 2026-07-23 attempt.
+    gate_status = {
+        "pm": "signed_off",
+        "ux": "pending",
+        "arch": "pending",
+        "impl": "pending",
+        "pr_review": "pending",
+        "qa": "pending",
+        "legal": "not_required",
+    }
+
+    targeted = gates_needing_waive(gate_status, PRE_IMPL_GATES)
+    assert set(targeted) == {"ux", "arch"}, (
+        f"both unsigned pre-impl gates must be targeted, got {targeted}"
+    )
+
+    merged = apply_waives(gate_status, targeted)
+    assert merged["ux"] == "waived", "ux must be waived (the 2026-07-23 miss)"
+    assert merged["arch"] == "waived"
+    # Signed-off and non-pre-impl gates are untouched.
+    assert merged["pm"] == "signed_off"
+    assert merged["impl"] == "pending"
+    assert merged["legal"] == "not_required"
+
+
+def test_waive_sweep_covers_gates_absent_from_gate_status():
+    """A gate MISSING from gate_status is unsigned, not cleared."""
+    from gate_waive import gates_needing_waive
+
+    targeted = gates_needing_waive({"pm": "signed_off"}, PRE_IMPL_GATES)
+    assert set(targeted) == {"ux", "arch"}, (
+        f"absent gates must be treated as unsigned, got {targeted}"
+    )
+
+
+def test_already_cleared_gates_are_left_alone():
+    """Gates already signed_off / waived / not_required are never re-waived."""
+    from gate_waive import gates_needing_waive
+
+    gate_status = {
+        "pm": "signed_off",
+        "ux": "waived",
+        "arch": "not_required",
+    }
+    assert gates_needing_waive(gate_status, PRE_IMPL_GATES) == [], (
+        "no gate should be targeted when all pre-impl gates are already cleared"
+    )
+
+
+def test_all_cleared_waive_is_a_reported_noop(monkeypatch):
+    """An all-clear sweep still reports to the operator — silence is the bug."""
+    store = _install_fake_gate_store(
+        monkeypatch,
+        _FakeGateStore({"pm": "signed_off", "ux": "waived", "arch": "signed_off"}),
+    )
+    comments = _capture_waive_comments(monkeypatch)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    asyncio.run(dispatcher._handle_issue_comment(_comment_trigger()))
+
+    assert store.waive_calls
+    assert comments, "a no-op sweep must STILL post an operator-visible comment"
+    assert "No gates needed waiving" in comments[0]
+
+
+def test_gate_status_parses_json_string_form():
+    """gate_status round-trips as a JSON STRING in prod — it must still parse.
+
+    Read off the live entity ent_4c1f77bc5fc86a2bad2025d6: Neotoma's schema
+    inference typed the field as a string, so a naive dict access sees nothing
+    to waive and the sweep no-ops.
+    """
+    from gate_waive import parse_gate_status
+
+    raw = '{"pm": "signed_off", "ux": "pending", "arch": "waived"}'
+    parsed = parse_gate_status(raw)
+    assert parsed["pm"] == "signed_off"
+    assert parsed["ux"] == "pending"
+    assert parsed["arch"] == "waived"
+    # Dict form works too, and junk degrades to empty rather than raising.
+    assert parse_gate_status({"pm": "pending"}) == {"pm": "pending"}
+    assert parse_gate_status("not json") == {}
+    assert parse_gate_status(None) == {}
+
+
+def test_verification_failure_is_reported_not_swallowed(monkeypatch):
+    """A write that does NOT persist must report loudly, never continue silently.
+
+    This is the 2026-07-27T17:37 failure: the transition never landed and the
+    operator saw nothing. Now the re-read detects it, the outcome is not ok,
+    the operator is notified at BLOCKER priority, and GitHub gets a failure
+    comment naming the still-unsigned gates.
+    """
+    # The write "succeeds" but the verification re-read still shows ux pending.
+    store = _install_fake_gate_store(
+        monkeypatch,
+        _FakeGateStore(
+            {"pm": "signed_off", "ux": "pending", "arch": "pending"},
+            verify_returns={"pm": "signed_off", "ux": "pending", "arch": "waived"},
+        ),
+    )
+    comments = _capture_waive_comments(monkeypatch)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+
+    asyncio.run(dispatcher._handle_issue_comment(_comment_trigger()))
+
+    assert store.waive_calls
+    # The failure must reach GitHub, naming the gate that did not land.
+    assert comments, "a verification failure must still post a comment"
+    body = comments[0]
+    assert "FAILED" in body, f"failure must be stated plainly: {body}"
+    assert "`ux`" in body, f"the still-unsigned gate must be named: {body}"
+    # And the operator must be notified.
+    assert any("FAILED" in m or "failed" in m for m in notifier.sent), (
+        f"operator must be notified of the verification failure: {notifier.sent}"
+    )
+
+
+def test_missing_issue_entity_is_reported(monkeypatch):
+    """No Neotoma issue entity → report it; never claim the gates are clear."""
+    store = _install_fake_gate_store(
+        monkeypatch, _FakeGateStore(entity_found=False)
+    )
+    comments = _capture_waive_comments(monkeypatch)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+
+    asyncio.run(dispatcher._handle_issue_comment(_comment_trigger()))
+
+    assert store.waive_calls
+    assert comments and "could not be applied" in comments[0]
+    assert any("FAILED" in m or "failed" in m for m in notifier.sent)
+
+
+def test_waive_outcome_ok_semantics():
+    """WaiveOutcome.ok: found + no failures. A missing entity is NOT ok."""
+    from gate_waive import WaiveOutcome
+
+    assert WaiveOutcome(entity_found=True, waived=["ux"]).ok
+    # A genuine no-op on a found entity is fine.
+    assert WaiveOutcome(entity_found=True, already_clear=["pm"]).ok
+    assert not WaiveOutcome(entity_found=False).ok
+    assert not WaiveOutcome(entity_found=True, failed=["ux"]).ok
+
+
+def test_owner_history_append_preserves_existing_entries():
+    """The waive APPENDS to owner_history — it never rebuilds the list."""
+    from gate_waive import waive_history_entries
+
+    existing = [
+        {"agent": "lanius", "action": "triaged", "at": "2026-07-21T00:00:00Z"},
+        {"agent": "pavo", "gate": "pm", "action": "signed_off"},
+    ]
+    appended = waive_history_entries(["ux", "arch"], "2026-07-27T18:00:00Z")
+    merged = existing + appended
+
+    assert merged[:2] == existing, "prior history must be preserved verbatim"
+    assert len(appended) == 2
+    for entry in appended:
+        assert entry["action"] == "waived"
+        assert entry["actor"] == "operator"
+        assert entry["reason"] == "operator /confirm-gates-clear override"
+        assert entry["timestamp"] == "2026-07-27T18:00:00Z"
+    assert {e["gate"] for e in appended} == {"ux", "arch"}
+
+
+def test_waive_comment_never_contains_a_command_token():
+    """The dispatcher's own comment must not re-trigger the command detector.
+
+    Same self-trigger defence as _post_swarm_run_comment (neotoma#1686): a body
+    containing the literal command token would re-fire the handler via the
+    bot's own webhook.
+    """
+    from gate_waive import format_waive_comment
+
+    bodies = [
+        format_waive_comment("<!-- m -->", "h", ["ux", "arch"], ["pm"], [], True),
+        format_waive_comment("<!-- m -->", "h", [], ["pm", "ux", "arch"], [], True),
+        format_waive_comment("<!-- m -->", "h", ["arch"], [], ["ux"], True),
+        format_waive_comment("<!-- m -->", "h", [], [], [], False),
+    ]
+    for body in bodies:
+        assert _CONFIRM_GATES_CLEAR_CMD not in body, (
+            f"comment must carry no command token: {body}"
+        )
+        assert body.strip(), "every path must produce a non-empty comment"
+
+
+def test_waive_comment_names_the_gates_in_every_outcome():
+    """Success, failure, and no-op comments all name the gates involved."""
+    from gate_waive import format_waive_comment
+
+    success = format_waive_comment("<!-- m -->", "h", ["ux", "arch"], ["pm"], [], True)
+    assert "`ux`" in success and "`arch`" in success
+    assert "`pm`" in success, "already-cleared gates should be listed too"
+
+    failure = format_waive_comment("<!-- m -->", "h", ["arch"], [], ["ux"], True)
+    assert "`ux`" in failure and "FAILED" in failure
+    assert "`arch`" in failure, "gates that DID land must still be named"
+
+    noop = format_waive_comment("<!-- m -->", "h", [], ["pm", "ux", "arch"], [], True)
+    assert "`pm`" in noop and "already" in noop.lower()
+
+
+def test_gate_store_matches_entity_on_repo_and_number():
+    """Entity matching tolerates repo/repository and issue_number/github_number."""
+    from gate_waive import IssueGateStore
+
+    match = IssueGateStore._matches
+    # The live ateles#241 shape carries all four fields.
+    live = {
+        "repo": "markmhendrickson/ateles",
+        "repository": "markmhendrickson/ateles",
+        "issue_number": 241,
+        "github_number": "241",
+    }
+    assert match(live, "markmhendrickson/ateles", 241)
+    assert not match(live, "markmhendrickson/ateles", 242)
+    assert not match(live, "markmhendrickson/neotoma", 241)
+    # Only `repository` + only `github_number` (string) still matches.
+    assert match({"repository": "o/r", "github_number": "7"}, "o/r", 7)
+    # Only `repo` + int issue_number.
+    assert match({"repo": "o/r", "issue_number": 7}, "o/r", 7)
+    assert not match({"repo": "o/r"}, "o/r", 7)
 
 
 # ── Phase 1 / Layer A: include_github_contract=True at GitHub-trigger call sites
@@ -2246,28 +2625,35 @@ def test_github_trigger_pr_pipeline_passes_contract(monkeypatch):
         )
 
 
-def test_github_trigger_gate_waive_passes_contract(monkeypatch):
-    """_lanius_waive_gates (called from _handle_issue_comment) must pass
-    include_github_contract=True to its run_skill call."""
+def test_gate_waive_spawns_no_agent(monkeypatch):
+    """The gate waive must spawn NO agent at all (ateles#285).
+
+    Replaces the old ``include_github_contract`` assertion: there is no longer
+    a ``run_skill`` call to carry a contract, because the waive no longer goes
+    through an agent turn. An agent spawn here would reintroduce exactly the
+    silent-no-op failure mode this issue records.
+    """
     captured_kwargs: list[dict] = []
 
     async def spy_run_skill(skill, prompt, **kwargs):
         captured_kwargs.append({"skill": skill, **kwargs})
-        return SkillResult(skill, True, 0, "Gates waived.", "")
+        return SkillResult(skill, True, 0, "", "")
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", spy_run_skill)
+    store = _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    _install_fake_gate_store(monkeypatch, store)
+    _capture_waive_comments(monkeypatch)
+
     notifier = _StubNotifier()
     dispatcher = SwarmDispatcher(notifier, _config())
 
     asyncio.run(dispatcher._handle_issue_comment(_comment_trigger()))
 
-    lanius_calls = [c for c in captured_kwargs if c["skill"] == "lanius"]
-    assert lanius_calls, "Lanius must be called in _lanius_waive_gates"
-    for call in lanius_calls:
-        assert call.get("include_github_contract") is True, (
-            "Lanius run_skill call in _lanius_waive_gates must pass "
-            "include_github_contract=True"
-        )
+    assert not captured_kwargs, (
+        "the gate waive must not spawn any agent — it is a dispatcher-side "
+        f"write (ateles#285); spawned: {captured_kwargs}"
+    )
+    assert store.waive_calls, "the dispatcher-side waive must have run"
 
 
 # ── /swarm-run operator command (new) ─────────────────────────────────────────
@@ -2412,22 +2798,26 @@ def test_comment_with_neither_command_is_no_op(monkeypatch):
 
 
 def test_confirm_gates_clear_still_works_after_swarm_run_added(monkeypatch):
-    """/confirm-gates-clear must still invoke Lanius gate-waive after the refactor."""
+    """/confirm-gates-clear must still run the gate waive after the refactor."""
     calls = []
 
     async def fake_run_skill(skill, prompt, **kwargs):
         calls.append((skill, prompt))
-        return SkillResult(skill, True, 0, "Gates waived.", "")
+        return SkillResult(skill, True, 0, "", "")
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    store = _install_fake_gate_store(
+        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    )
+    _capture_waive_comments(monkeypatch)
     notifier = _StubNotifier()
     dispatcher = SwarmDispatcher(notifier, _config())
 
     asyncio.run(dispatcher._handle_issue_comment(_comment_trigger()))
 
-    assert any(c[0] == "lanius" for c in calls), "Lanius must still be called for /confirm-gates-clear"
-    lanius_prompt = next(c[1] for c in calls if c[0] == "lanius")
-    assert _CONFIRM_GATES_CLEAR_CMD in lanius_prompt
+    assert store.waive_calls, (
+        "the dispatcher-side gate waive must still run for /confirm-gates-clear"
+    )
     assert any("cleared" in m or "waiv" in m for m in notifier.sent)
 
 
@@ -2445,6 +2835,10 @@ def test_both_commands_prefers_confirm_gates_clear(monkeypatch):
 
     monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle_issue_opened)
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    store = _install_fake_gate_store(
+        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    )
+    _capture_waive_comments(monkeypatch)
 
     notifier = _StubNotifier()
     dispatcher = SwarmDispatcher(notifier, _config())
@@ -2457,9 +2851,10 @@ def test_both_commands_prefers_confirm_gates_clear(monkeypatch):
         )
     )
 
-    # /confirm-gates-clear path: Lanius must be called, issue pipeline must NOT.
-    assert any(c == "lanius" for c in skill_calls), (
-        "Lanius must be called when /confirm-gates-clear is present"
+    # /confirm-gates-clear path: the waive runs, the issue pipeline must NOT.
+    assert store.waive_calls, (
+        "the dispatcher-side gate waive must run when /confirm-gates-clear "
+        "is present"
     )
     assert opened_calls == [], (
         "_handle_issue_opened must NOT be called when /confirm-gates-clear takes priority"
@@ -2705,11 +3100,17 @@ def test_operator_confirm_gates_clear_still_dispatches_after_bot_guard(monkeypat
         return SkillResult(skill, True, 0, "Gates waived.", "")
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    store = _install_fake_gate_store(
+        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    )
+    _capture_waive_comments(monkeypatch)
     dispatcher = SwarmDispatcher(_StubNotifier(), _config())
 
     asyncio.run(dispatcher._handle_issue_comment(_comment_trigger()))
 
-    assert "lanius" in calls, "Lanius must still be called for /confirm-gates-clear"
+    assert store.waive_calls, (
+        "the dispatcher-side gate waive must still run for /confirm-gates-clear"
+    )
 
 
 # ── Fix 3: _post_swarm_run_comment edits instead of posting a duplicate ────────
@@ -3546,13 +3947,19 @@ def test_confirm_gates_clear_still_dispatches_after_h1_commands_added(monkeypatc
         return SkillResult(skill, True, 0, "Gates waived.", "")
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    store = _install_fake_gate_store(
+        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    )
+    _capture_waive_comments(monkeypatch)
     asyncio.run(
         SwarmDispatcher(_StubNotifier(), _config())._handle_issue_comment(
             _comment_trigger()
         )
     )
 
-    assert "lanius" in calls, f"Lanius must still be called for /confirm-gates-clear: {calls}"
+    assert store.waive_calls, (
+        "the dispatcher-side gate waive must still run for /confirm-gates-clear"
+    )
 
 
 def test_swarm_run_still_dispatches_after_h1_commands_added(monkeypatch):
@@ -3592,6 +3999,10 @@ def test_confirm_gates_clear_wins_over_approve_when_both_present(monkeypatch):
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    store = _install_fake_gate_store(
+        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    )
+    _capture_waive_comments(monkeypatch)
 
     asyncio.run(
         SwarmDispatcher(_StubNotifier(), _config())._handle_issue_comment(
@@ -3602,7 +4013,9 @@ def test_confirm_gates_clear_wins_over_approve_when_both_present(monkeypatch):
     )
 
     # gates-clear wins: Lanius called, no checkpoint_brief stored.
-    assert "lanius" in calls, "Lanius must be called when /confirm-gates-clear is present"
+    assert store.waive_calls, (
+        "the dispatcher-side gate waive must run when /confirm-gates-clear is present"
+    )
     approved_entities = [
         e for e in stored
         if e.get("entity_type") == "checkpoint_brief" and e.get("status") == "approved"
