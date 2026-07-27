@@ -140,9 +140,19 @@ def read_replies(
                                   "--format", "json"], timeout=30)
             body = ""
             if isinstance(body_data, dict):
+                # Prefer plaintext (where the operator's verdict + the quoted
+                # token live) and fall back to the HTML part only if that is all
+                # gws returns — an HTML-only reply must not read as an empty body
+                # and silently drop the approval (the ateles#286 failure mode: a
+                # live release approval was lost because the reader missed the
+                # plaintext key). HTML is passed raw as a last resort; verdict
+                # parsing tolerates the tags.
                 body = str(body_data.get("body_text")
                            or body_data.get("body")
-                           or body_data.get("text") or "")
+                           or body_data.get("text")
+                           or body_data.get("plain")
+                           or body_data.get("body_html")
+                           or body_data.get("snippet") or "")
             if on_reply_message is not None:
                 try:
                     on_reply_message(token, mid)

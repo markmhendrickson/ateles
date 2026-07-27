@@ -139,6 +139,35 @@ class TestReadReplies:
         with patch.object(ec, "gws_json", return_value=None):
             assert ec.read_replies(["TOK"]) == []
 
+    def test_prefers_body_text_over_html(self, monkeypatch):
+        # The operator's verdict + quoted token live in the plaintext part; the
+        # HTML part must never win when plaintext is present (ateles#286).
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+
+        def fake_gws_json(args, timeout=45):
+            if "+triage" in args:
+                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]"}]}
+            return {"body_text": "approve v0.20.0", "body_html": "<p>ignored</p>"}
+
+        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+            texts = ec.read_replies(["TOK"])
+        assert "approve v0.20.0" in texts[0]
+        assert "ignored" not in texts[0]
+
+    def test_falls_back_to_body_html_when_no_plaintext(self, monkeypatch):
+        # An HTML-only reply must not read as an empty body and silently drop the
+        # approval — the ateles#286 live-release failure mode. HTML passes raw.
+        monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+
+        def fake_gws_json(args, timeout=45):
+            if "+triage" in args:
+                return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]"}]}
+            return {"body_html": "<p>approve v0.20.0</p>"}
+
+        with patch.object(ec, "gws_json", side_effect=fake_gws_json):
+            texts = ec.read_replies(["TOK"])
+        assert "approve v0.20.0" in texts[0]  # tags tolerated; body is non-empty
+
 
 class TestReplyInThread:
     def test_passes_explicit_to_operator(self, monkeypatch, tmp_path):
