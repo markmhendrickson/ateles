@@ -78,6 +78,12 @@ class PaymentProfile:
     neotoma_task_id: str = ""
     task_keywords: list[str] = field(default_factory=list)
 
+    # Calendar identity — the precise recurring-series id for this profile's
+    # sessions. When set, matches() keys on it (via an event's recurringEventId)
+    # instead of substring-matching the title, so an unrelated event that merely
+    # mentions the payee ("Manel work session") can never trigger a payment.
+    calendar_recurring_event_id: str = ""
+
     @property
     def name(self) -> str:
         """Unique slug used as handler name and in Telegram replies."""
@@ -275,6 +281,9 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
                 btc_address=snap.get("btc_address", ""),
                 neotoma_task_id=snap.get("neotoma_task_id", ""),
                 task_keywords=task_keywords,
+                calendar_recurring_event_id=str(
+                    snap.get("calendar_recurring_event_id", "") or ""
+                ),
             )
         )
 

@@ -50,14 +50,9 @@ class BtcTransferHandler(PaymentHandler):
         return self.profile.name
 
     def matches(self, events: list[dict]) -> list[dict]:
-        matched = []
-        for event in events:
-            summary = event.get("summary", "") or ""
-            low = summary.lower()
-            if any(kw in low for kw in self.profile.calendar_keywords):
-                log.info(f"[{self.name}] Matched event: {summary!r}")
-                matched.append({"event": event, "summary": summary})
-        return matched
+        # Delegates to the shared matcher (recurring-event-id first, all-keywords
+        # fallback, deduped to one payment per obligation). See handler_base.
+        return self.match_events(events)
 
     def preview(self, match: dict) -> str:
         summary = match.get("summary", self.profile.label)
