@@ -8,7 +8,7 @@ Define the data model and runtime behavior by which Anthus (the swarm coordinato
 
 ## Scope
 
-Covers the orchestrator's input data (workflow_definition, agent_definition), evaluation logic (phase ordering, parallel groups, fast paths), dispatch surface (`claude --print --skill`), and persistence model. Does not cover individual agent prompts or the github_harness MCP server — see those projects for their respective concerns.
+Covers the orchestrator's input data (workflow_definition, agent_definition), evaluation logic (phase ordering, parallel groups, fast paths), quota-aware harness dispatch, and persistence model. Does not cover individual agent prompts or the github_harness MCP server — see those projects for their respective concerns.
 
 ## Two models
 
@@ -90,6 +90,51 @@ Why this is better:
 | `quality_signal` | New entity type: optional but recommended. `{work_entity_id, signal: "impact_score" | "risk_score" | "audience", value, source_agent}`. Lets triggers reference signals other agents have written. |
 
 Issue: [ateles#TBD — emergent participation Phase 6 evolution](https://github.com/markmhendrickson/ateles/issues).
+
+## Quota-aware execution in Apis
+
+All Apis task and GitHub-pipeline runs pass through
+`execution/daemons/apis/skill_runner.py`. Its router selects among the
+subscription-backed Claude Code, Codex, and Cursor Agent CLIs:
+
+- Equal headroom rotates work Claude → Codex → Cursor.
+- `APIS_HARNESS_HEADROOM` weights the rotation from 0.0–1.0 per provider.
+- `APIS_HARNESS_HEADROOM_FILE` points at a JSON file read before every
+  dispatch, so a monitor or operator can refresh estimates without restarting
+  Apis. The default path is `~/.config/ateles/harness-headroom.json`.
+- Providers at or below `APIS_HARNESS_MIN_HEADROOM` (default `0.05`) are held
+  out.
+- A quota, auth, or process-launch failure immediately retries the task on the
+  next eligible provider and cools the failing provider down for
+  `APIS_HARNESS_COOLDOWN_SECONDS` (default one hour).
+- Ordinary task failures and timeouts do not replay on another provider,
+  avoiding duplicate side effects. The task lifecycle watchdog owns those
+  retries.
+- `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `CURSOR_API_KEY` are removed from
+  child environments by default. This enforces the plan's no-metered-spend
+  boundary: if all bundled plans are unavailable, the task fails into the
+  existing retry queue instead of silently billing API usage. The operator-only
+  escape hatch is `APIS_ALLOW_METERED_HARNESS=1`.
+
+Example headroom file:
+
+```json
+{
+  "claude": 0.15,
+  "codex": 0.85,
+  "cursor": 0.55
+}
+```
+
+The selected adapter receives the same composite agent-definition + SKILL.md
+instructions and work prompt. Harness events include the provider in
+`tool_name` (`claude:<skill>`, `codex:<skill>`, or `cursor:<skill>`) so actual
+usage can be audited.
+
+Anthus, Formica, and neotoma-agent still have older direct-Claude spawn paths.
+Migrating those residual paths onto the shared runner remains part of the
+larger cross-harness plan; the slice above covers the Apis task dispatcher and
+GitHub swarm pipeline, where provider caps currently block the most work.
 
 ## How dispatch happens
 

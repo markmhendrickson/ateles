@@ -51,6 +51,12 @@
         <string>8742</string>
         <key>APIS_AUTONOMY_AUTO_MERGE</key>
         <string>0</string>
+        <!-- Subscription-backed harness router. Headroom can be adjusted live
+             through ~/.config/ateles/harness-headroom.json without restart. -->
+        <key>APIS_HARNESS_PROVIDERS</key>
+        <string>claude,codex,cursor</string>
+        <key>APIS_ALLOW_METERED_HARNESS</key>
+        <string>0</string>
     </dict>
 </dict>
 </plist>
