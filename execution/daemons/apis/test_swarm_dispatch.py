@@ -5502,6 +5502,70 @@ def test_handle_pr_stale_round_skips_merge_gate_end_to_end(monkeypatch, caplog):
     ), [r.message for r in caplog.records]
 
 
+def test_handle_pr_clear_verdict_matching_sha_still_gates_merge_readiness(
+    monkeypatch, caplog
+):
+    """QA lens finding (review round 1 on ateles#239, auto-fix round 1): the
+    stale-round guard added in `96b0478` has a sibling `_route_blocking_findings`
+    match-case covered by `test_current_findings_still_consume_a_fix_round`, but
+    the merge-gate guard's own match-case (reviewed_sha == current_sha, the
+    common non-stale path) had no equivalent — every existing test here only
+    drove the mismatch/skip side. A regression that made this guard always
+    skip (e.g. `!=` accidentally inverted to `==`, or `current_sha` always
+    read as truthy-but-different) would pass every existing test green.
+
+    Drives `_handle_pr` with a clear verdict (`**APPROVE**`) and `_pr_head_sha`
+    returning the SAME sha across both `_handle_pr`-level calls, and asserts
+    `_gate_merge_readiness` IS invoked — the inverse of the skip test above.
+    """
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+
+    async def fake_head(self, t):
+        return "aaa111"
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+    assert ("gate", None) in calls, calls
+    assert not any(
+        "skipping merge-readiness gate" in r.message for r in caplog.records
+    ), [r.message for r in caplog.records]
+
+
+def test_unstamped_approve_still_reaches_merge_gate(monkeypatch, caplog):
+    """QA lens finding (review round 1 on ateles#239, auto-fix round 1): the
+    ateles#239 APPROVE-branch guard in `_handle_pr` has tests for
+    reviewed_sha != current_sha (skip) and reviewed_sha == current_sha
+    (proceed), but no test for the unstamped case, where `_pr_head_sha`
+    fails open and returns "" on either side. The guard's
+    `reviewed_sha and current_sha` condition must be False in that case, and
+    `_gate_merge_readiness` must still run — an unstamped round is not the
+    same as a confirmed-stale round, and must not be blocked from merging.
+    """
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+
+    async def fake_head(self, t):
+        return ""  # _pr_head_sha failed open on both calls
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+    assert ("gate", None) in calls, calls
+    assert not any(
+        "skipping merge-readiness gate" in r.message for r in caplog.records
+    ), [r.message for r in caplog.records]
+
+
 def _routing_dispatcher(monkeypatch, head_now, calls):
     """Dispatcher whose fix-round machinery is stubbed except the SHA guard."""
     d = SwarmDispatcher.__new__(SwarmDispatcher)
