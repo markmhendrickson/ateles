@@ -6,7 +6,9 @@ Tyto genus: barn owls. T3 daemon in the Ateles swarm.
 
 Tyto watches two directories:
   1. TYTO_SCREENSHOTS_DIR — new image files (PNG/JPG/etc.), stored as
-     `screenshot` entities in Neotoma. Phase 3: OCR dispatch.
+     `screenshot` entities in Neotoma. A second in-process consumer
+     (OcrConsumer) then polls Neotoma for `status:"pending_ocr"` screenshots
+     and dispatches OCR + entity extraction (Phase 3, this consumer).
   2. TYTO_RECORDINGS_DIR — new meeting recording files (*remote*.aac/.m4a),
      auto-transcribed via transcribe_audio.py --diarize immediately on
      detection (with --no-diarize fallback). Optionally also
@@ -44,12 +46,19 @@ Environment variables:
   TYTO_ANALYZE_ENABLED      Set to 0 to disable post-transcription meeting analysis (default: 1)
   TYTO_ANALYZE_MEETING_SKILL  Path to analyze-meeting/SKILL.md (auto-detected from repo root)
   TYTO_ANALYZE_NEOTOMA_SKILL  Path to analyze-neotoma-feedback/SKILL.md (auto-detected)
+  TYTO_OCR_ENABLED          Set to 0 to disable the pending_ocr screenshot consumer (default: 1)
+  TYTO_OCR_SKILL            Path to tyto-ocr/SKILL.md (auto-detected from repo root)
+  TYTO_OCR_CLAUDE_BIN       Absolute path to `claude` binary (default: auto-detect on PATH)
+  TYTO_OCR_DISPATCH_TIMEOUT Per-screenshot OCR dispatch timeout in seconds (default: 300)
+  TYTO_OCR_POLL_INTERVAL    Interval (s) between pending_ocr polls (default: TYTO_POLL_INTERVAL)
+  TYTO_OCR_BATCH_SIZE       Max pending_ocr screenshots processed per poll cycle (default: 10)
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import subprocess
@@ -179,6 +188,16 @@ _default_analyze_neotoma_skill = str(
 ANALYZE_NEOTOMA_SKILL_PATH = Path(
     os.environ.get("TYTO_ANALYZE_NEOTOMA_SKILL", _default_analyze_neotoma_skill)
 )
+
+# ── OCR consumer config ───────────────────────────────────────────────────────
+OCR_ENABLED = os.environ.get("TYTO_OCR_ENABLED", "1") != "0"
+_default_ocr_skill = str(_REPO_ROOT / ".claude" / "skills" / "tyto-ocr" / "SKILL.md")
+OCR_SKILL_PATH = Path(os.environ.get("TYTO_OCR_SKILL", _default_ocr_skill))
+OCR_CLAUDE_BIN = os.environ.get("TYTO_OCR_CLAUDE_BIN") or None  # resolved lazily via _find_claude_bin()
+OCR_DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("TYTO_OCR_DISPATCH_TIMEOUT", "300"))
+OCR_POLL_INTERVAL = int(os.environ.get("TYTO_OCR_POLL_INTERVAL", str(POLL_INTERVAL)))
+OCR_BATCH_SIZE = int(os.environ.get("TYTO_OCR_BATCH_SIZE", "10"))
+OCR_RESULT_PREFIX = "TYTO_OCR_RESULT="
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -485,6 +504,416 @@ class ScreenshotWatcher:
         except Exception as exc:
             log.warning(f"[{DAEMON_NAME}] Store error for {path.name}: {exc}")
         return None
+
+
+# ── OCR consumer ──────────────────────────────────────────────────────────────
+
+
+class OcrConsumer:
+    """
+    Polls Neotoma for `screenshot` entities with status:"pending_ocr" and
+    dispatches OCR + entity extraction for each, via the tyto-ocr invocable
+    agent (Formica-style `claude --print` subprocess dispatch).
+
+    Drains the backlog: every poll cycle queries Neotoma directly (not local
+    filesystem state), so pre-existing pending_ocr screenshots are picked up
+    exactly like newly-arrived ones. Status transitions (pending_ocr →
+    ocr_complete | ocr_failed) are the idempotency backstop — a screenshot
+    already at a terminal status is excluded by the query filter and never
+    re-dispatched.
+    """
+
+    def __init__(self, notifier: Notifier) -> None:
+        self._notifier = notifier
+        self._last_run_monotonic: float = 0.0
+
+    async def poll_once(self) -> None:
+        if not OCR_ENABLED:
+            return
+        # OCR_POLL_INTERVAL may be configured independently of the daemon's
+        # base POLL_INTERVAL (e.g. to throttle OCR dispatch cost separately
+        # from screenshot/recording detection, which stay on POLL_INTERVAL).
+        now = asyncio.get_event_loop().time()
+        if now - self._last_run_monotonic < OCR_POLL_INTERVAL:
+            return
+        self._last_run_monotonic = now
+
+        screenshots = await asyncio.to_thread(_retrieve_pending_ocr_screenshots)
+        if not screenshots:
+            return
+        # Fetched once per poll cycle, not once per screenshot — the candidate
+        # task list doesn't change mid-cycle and a batch of 10 screenshots
+        # would otherwise re-fetch up to 200 tasks 10 times over.
+        candidate_tasks = await asyncio.to_thread(_retrieve_candidate_tasks)
+        for entity_id, snapshot in screenshots:
+            await self._process_screenshot(entity_id, snapshot, candidate_tasks)
+
+    async def _process_screenshot(
+        self, entity_id: str, snapshot: dict, candidate_tasks: list[dict]
+    ) -> None:
+        source_path = snapshot.get("source_path", "")
+        log.info(f"[{DAEMON_NAME}] OCR dispatch starting: {entity_id} ({source_path})")
+        try:
+            result = await asyncio.to_thread(
+                self._run_ocr, entity_id, source_path, candidate_tasks
+            )
+        except Exception as exc:
+            log.error(
+                f"[{DAEMON_NAME}] OCR dispatch error for {entity_id}: {exc}",
+                exc_info=True,
+            )
+            result = {"ok": False, "error": str(exc)}
+
+        if not result.get("ok"):
+            error = result.get("error", "unknown error")
+            log.warning(f"[{DAEMON_NAME}] OCR failed for {entity_id}: {error}")
+            await asyncio.to_thread(_set_screenshot_status, entity_id, "ocr_failed")
+            self._notifier.send(
+                f"OCR failed for screenshot {entity_id}: {error}",
+                priority=Priority.WARN,
+                handler=DAEMON_NAME,
+            )
+            return
+
+        ocr_text = result.get("ocr_text", "") or ""
+        extracted_entities = result.get("extracted_entities", []) or []
+        matched_task_entity_id = result.get("matched_task_entity_id")
+
+        stored_ok = await asyncio.to_thread(
+            _store_ocr_results, entity_id, ocr_text, extracted_entities
+        )
+        if not stored_ok:
+            log.warning(f"[{DAEMON_NAME}] Failed to store OCR results for {entity_id}")
+            await asyncio.to_thread(_set_screenshot_status, entity_id, "ocr_failed")
+            self._notifier.send(
+                f"OCR result store failed for screenshot {entity_id}",
+                priority=Priority.WARN,
+                handler=DAEMON_NAME,
+            )
+            return
+
+        if matched_task_entity_id:
+            linked_ok = await asyncio.to_thread(
+                _link_screenshot_to_task, entity_id, matched_task_entity_id
+            )
+            if not linked_ok:
+                # A failed task link is not an OCR failure — per PM acceptance
+                # criteria, screenshots still complete when no link is made.
+                # Surface it (rather than only debug-logging inside
+                # _link_screenshot_to_task) since it's otherwise a silent,
+                # unrecoverable miss once status reaches a terminal value.
+                log.warning(
+                    f"[{DAEMON_NAME}] REFERS_TO link failed for {entity_id} -> "
+                    f"{matched_task_entity_id}; completing without the link"
+                )
+                self._notifier.send(
+                    f"Screenshot {entity_id} OCR'd but task link failed "
+                    f"(-> {matched_task_entity_id})",
+                    priority=Priority.WARN,
+                    handler=DAEMON_NAME,
+                )
+
+        await asyncio.to_thread(_set_screenshot_status, entity_id, "ocr_complete")
+        log.info(
+            f"[{DAEMON_NAME}] OCR complete for {entity_id} "
+            f"({len(extracted_entities)} entities extracted"
+            + (f", linked task {matched_task_entity_id}" if matched_task_entity_id else "")
+            + ")"
+        )
+        self._notifier.send(
+            f"Screenshot OCR'd: {snapshot.get('filename', entity_id)}",
+            priority=Priority.INFO,
+            handler=DAEMON_NAME,
+        )
+
+    def _run_ocr(self, entity_id: str, source_path: str, candidate_tasks: list[dict]) -> dict:
+        """
+        Dispatch the tyto-ocr skill via `claude --print` and parse its
+        TYTO_OCR_RESULT= stdout line. Returns a dict with at least {"ok": bool}.
+        Raises on subprocess-level failures the caller should treat as ocr_failed.
+        """
+        claude_bin = OCR_CLAUDE_BIN or _find_claude_bin()
+        if not claude_bin:
+            return {"ok": False, "error": "claude binary not found on PATH"}
+        if not OCR_SKILL_PATH.exists():
+            return {"ok": False, "error": f"tyto-ocr SKILL.md not found: {OCR_SKILL_PATH}"}
+
+        if not source_path or not Path(source_path).exists():
+            return {"ok": False, "error": f"source image missing: {source_path}"}
+        try:
+            if Path(source_path).stat().st_size == 0:
+                return {"ok": False, "error": f"source image is zero-byte: {source_path}"}
+        except OSError as exc:
+            return {"ok": False, "error": f"source image unreadable: {exc}"}
+
+        skill_md = OCR_SKILL_PATH.read_text(encoding="utf-8")
+        prompt = (
+            f"Image path: {source_path}\n"
+            f"Screenshot entity_id: {entity_id}\n"
+            f"Candidate tasks (id, title) to match against:\n"
+            + "\n".join(f"- {t['entity_id']}: {t['title']}" for t in candidate_tasks)
+        )
+
+        subprocess_env = _ocr_subprocess_env()
+
+        try:
+            proc = subprocess.run(
+                [claude_bin, "--print", "--append-system-prompt", skill_md],
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=OCR_DISPATCH_TIMEOUT_SECONDS,
+                env=subprocess_env,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "error": f"OCR dispatch timed out after {OCR_DISPATCH_TIMEOUT_SECONDS}s",
+            }
+
+        if proc.returncode != 0:
+            stderr_text = (proc.stderr or "").strip()[:500]
+            return {
+                "ok": False,
+                "error": f"OCR dispatch failed (rc={proc.returncode}): {stderr_text}",
+            }
+
+        return self._parse_result(proc.stdout or "")
+
+    @staticmethod
+    def _parse_result(stdout: str) -> dict:
+        for line in stdout.splitlines():
+            if line.startswith(OCR_RESULT_PREFIX):
+                raw = line[len(OCR_RESULT_PREFIX):].strip()
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict) and "ok" in parsed:
+                        return parsed
+                except (ValueError, TypeError):
+                    pass
+                return {"ok": False, "error": "malformed TYTO_OCR_RESULT JSON"}
+        return {"ok": False, "error": "no TYTO_OCR_RESULT line in OCR output"}
+
+
+def _ocr_subprocess_env() -> dict[str, str]:
+    """
+    Environment for the headless `claude --print` OCR subprocess.
+
+    Starts from the full parent environment — matching every other `claude
+    --print` dispatch site in this repo (formica.py, apis/skill_runner.py,
+    phoenicurus-release/prepare.py). A narrow allowlist was tried and reverted:
+    `claude` needs more than PATH/HOME to authenticate and run (config dirs,
+    OAuth/API-key env vars), and phoenicurus-release's prepare.py docstring
+    records a production incident from exactly this kind of narrower assumption.
+
+    Prefer the operator's Claude subscription (CLAUDE_CODE_OAUTH_TOKEN) over a
+    pay-per-token API key, matching the same precedent (both set → API key
+    wins and can silently fail on an unfunded account).
+
+    NEOTOMA_BEARER_TOKEN is explicitly dropped: the OCR skill only reads an
+    image and returns structured JSON on stdout — it has no need to call
+    Neotoma directly (Tyto performs all Neotoma writes itself), so the
+    credential is not extended to a subprocess reading arbitrary,
+    potentially-sensitive screenshot content. See ateles#302 Security/Arch review.
+    """
+    env = dict(os.environ)
+    if env.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
+        env.pop("ANTHROPIC_API_KEY", None)
+    env.pop("NEOTOMA_BEARER_TOKEN", None)
+    return env
+
+
+def _neotoma_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}
+
+
+def _retrieve_pending_ocr_screenshots() -> list[tuple[str, dict]]:
+    """
+    Query Neotoma for screenshot entities with status:"pending_ocr", server-side
+    filtered (not fetched-then-filtered), so the query stays scoped and drains
+    the full backlog rather than only newly-arrived screenshots.
+    """
+    if not NEOTOMA_BEARER_TOKEN:
+        return []
+    try:
+        resp = httpx.post(
+            f"{NEOTOMA_BASE_URL}/entities/query",
+            json={
+                "entity_type": "screenshot",
+                "snapshot_filters": {"status": {"op": "eq", "value": "pending_ocr"}},
+                "limit": OCR_BATCH_SIZE,
+                "include_snapshots": True,
+            },
+            headers=_neotoma_headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        log.warning(f"[{DAEMON_NAME}] pending_ocr query failed: {exc}")
+        return []
+
+    results: list[tuple[str, dict]] = []
+    for entity in data.get("entities", []):
+        entity_id = entity.get("entity_id") or entity.get("id")
+        snapshot = (entity.get("snapshot") or {}).get("snapshot")
+        if not isinstance(snapshot, dict):
+            snapshot = entity.get("snapshot") if isinstance(entity.get("snapshot"), dict) else {}
+        if entity_id and snapshot:
+            results.append((entity_id, snapshot))
+    return results
+
+
+def _retrieve_candidate_tasks() -> list[dict]:
+    """Fetch a bounded set of open task entities to match OCR'd text against."""
+    if not NEOTOMA_BEARER_TOKEN:
+        return []
+    try:
+        resp = httpx.post(
+            f"{NEOTOMA_BASE_URL}/entities/query",
+            json={"entity_type": "task", "limit": 200, "include_snapshots": True},
+            headers=_neotoma_headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        log.warning(f"[{DAEMON_NAME}] candidate task query failed: {exc}")
+        return []
+
+    candidates: list[dict] = []
+    for entity in data.get("entities", []):
+        entity_id = entity.get("entity_id") or entity.get("id")
+        snapshot = (entity.get("snapshot") or {}).get("snapshot")
+        if not isinstance(snapshot, dict):
+            snapshot = entity.get("snapshot") if isinstance(entity.get("snapshot"), dict) else {}
+        title = snapshot.get("title") if isinstance(snapshot, dict) else None
+        if entity_id and title:
+            candidates.append({"entity_id": entity_id, "title": title})
+    return candidates
+
+
+def _set_screenshot_status(entity_id: str, status: str) -> bool:
+    """Transition a screenshot entity's status via /correct. Fail-open (False)."""
+    if not NEOTOMA_BEARER_TOKEN:
+        return False
+    try:
+        resp = httpx.post(
+            f"{NEOTOMA_BASE_URL}/correct",
+            json={
+                "entity_id": entity_id,
+                "entity_type": "screenshot",
+                "field": "status",
+                "value": status,
+                "idempotency_key": f"tyto-ocr-status-{entity_id}-{status}",
+            },
+            headers=_neotoma_headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception as exc:
+        log.warning(f"[{DAEMON_NAME}] status transition to {status} failed for {entity_id}: {exc}")
+        return False
+
+
+def _store_ocr_results(entity_id: str, ocr_text: str, extracted_entities: list[dict]) -> bool:
+    """
+    Persist OCR text + extracted entities onto the screenshot entity via
+    /store, keyed with a deterministic idempotency_key so a re-poll after a
+    partial failure does not create a duplicate write.
+    """
+    if not NEOTOMA_BEARER_TOKEN:
+        return False
+    try:
+        resp = httpx.post(
+            f"{NEOTOMA_BASE_URL}/store",
+            json={
+                "entities": [
+                    {
+                        "entity_type": "screenshot",
+                        "entity_id": entity_id,
+                        "ocr_text": ocr_text,
+                        "ocr_extracted_entities": extracted_entities,
+                        "ocr_completed_at": datetime.now(tz=UTC).isoformat(),
+                    }
+                ],
+                "idempotency_key": f"tyto-ocr-{entity_id}",
+                "observation_source": "workflow_state",
+            },
+            headers=_neotoma_headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception as exc:
+        log.warning(f"[{DAEMON_NAME}] OCR result store failed for {entity_id}: {exc}")
+        return False
+
+
+def _refers_to_exists(source_entity_id: str, target_entity_id: str) -> bool:
+    """
+    Check for an existing REFERS_TO edge before creating a new one (re-poll
+    safety). Uses GET /entities/:id/relationships — the documented read path
+    (see docs/developer/neotoma_finances_dashboard_neotoma_side_diagnostics.md)
+    — rather than a standalone query endpoint, which does not exist.
+    """
+    if not NEOTOMA_BEARER_TOKEN:
+        return False
+    try:
+        resp = httpx.get(
+            f"{NEOTOMA_BASE_URL}/entities/{source_entity_id}/relationships",
+            headers=_neotoma_headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        relationships = data.get("relationships", [])
+    except Exception as exc:
+        log.debug(f"[{DAEMON_NAME}] relationship existence check failed (assuming absent): {exc}")
+        return False
+
+    for rel in relationships:
+        if (
+            rel.get("relationship_type") == "REFERS_TO"
+            and rel.get("target_entity_id") == target_entity_id
+        ):
+            return True
+    return False
+
+
+def _link_screenshot_to_task(screenshot_entity_id: str, task_entity_id: str) -> bool:
+    """
+    Create a REFERS_TO edge screenshot -> task, unless one already exists.
+    Uses POST /create_relationship (matching the create_relationship MCP tool
+    and turdus.py's existing precedent), not a fabricated /relationships path.
+    """
+    if not NEOTOMA_BEARER_TOKEN:
+        return False
+    if _refers_to_exists(screenshot_entity_id, task_entity_id):
+        log.info(
+            f"[{DAEMON_NAME}] REFERS_TO already exists: {screenshot_entity_id} -> {task_entity_id}"
+        )
+        return True
+    try:
+        resp = httpx.post(
+            f"{NEOTOMA_BASE_URL}/create_relationship",
+            json={
+                "relationship_type": "REFERS_TO",
+                "source_entity_id": screenshot_entity_id,
+                "target_entity_id": task_entity_id,
+            },
+            headers=_neotoma_headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception as exc:
+        log.warning(
+            f"[{DAEMON_NAME}] REFERS_TO create failed {screenshot_entity_id} -> "
+            f"{task_entity_id}: {exc}"
+        )
+        return False
 
 
 # ── Recording watcher ─────────────────────────────────────────────────────────
@@ -820,6 +1249,7 @@ async def main() -> None:
 
     # 6. Poll loop
     screenshot_watcher = ScreenshotWatcher(SCREENSHOTS_DIR, notifier)
+    ocr_consumer = OcrConsumer(notifier)
     recording_watchers: list[RecordingWatcher] = []
     if TRANSCRIBE_ENABLED:
         recording_watchers.append(
@@ -836,10 +1266,17 @@ async def main() -> None:
     while True:
         try:
             await screenshot_watcher.poll_once()
-            for rw in recording_watchers:
-                await rw.poll_once()
         except Exception as exc:
-            log.error(f"[{DAEMON_NAME}] Poll error: {exc}", exc_info=True)
+            log.error(f"[{DAEMON_NAME}] Screenshot poll error: {exc}", exc_info=True)
+        try:
+            await ocr_consumer.poll_once()
+        except Exception as exc:
+            log.error(f"[{DAEMON_NAME}] OCR consumer poll error: {exc}", exc_info=True)
+        for rw in recording_watchers:
+            try:
+                await rw.poll_once()
+            except Exception as exc:
+                log.error(f"[{DAEMON_NAME}] Recording poll error: {exc}", exc_info=True)
         await asyncio.sleep(POLL_INTERVAL)
 
 

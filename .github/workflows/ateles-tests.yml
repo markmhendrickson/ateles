@@ -13,6 +13,7 @@ on:
       - "ateles/**"
       - ".claude/hooks/**"
       - "execution/daemons/phoenicurus-release/**"
+      - "execution/daemons/tyto/**"
       - "execution/mcp/**"
       - "lib/approval/**"
       - "pyproject.toml"
@@ -35,6 +36,8 @@ jobs:
         run: uv run --extra dev python -m pytest ateles/ .claude/hooks/ -q
       - name: Run phoenicurus-release daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/phoenicurus-release/ -q
+      - name: Run tyto daemon tests
+        run: uv run --extra dev python -m pytest execution/daemons/tyto/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
 
