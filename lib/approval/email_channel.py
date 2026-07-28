@@ -18,12 +18,40 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
 log = logging.getLogger("ateles.approval.email")
+
+
+def _strip_html(html: str) -> str:
+    """Reduce an HTML email part to plain text good enough for verdict parsing.
+
+    Only used for the HTML-only fallback (a reply with no plaintext part). Drops
+    <script>/<style> blocks, turns block-level tag boundaries into newlines so a
+    verb keeps leading its line, removes the remaining tags, and unescapes the
+    handful of entities that show up in real replies. Not a general HTML
+    sanitizer — just enough that `<p>approve v0.20.0</p>` reads as
+    `approve v0.20.0`.
+    """
+    if not html:
+        return ""
+    # Remove script/style content entirely.
+    html = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", html)
+    # Block-level boundaries → newlines so lines don't run together.
+    html = re.sub(r"(?i)<\s*(br|/p|/div|/li|/tr|/h[1-6])\s*/?>", "\n", html)
+    # Drop all remaining tags.
+    html = re.sub(r"<[^>]+>", "", html)
+    # Unescape the common entities seen in plain replies.
+    for ent, ch in (("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"),
+                    ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'")):
+        html = html.replace(ent, ch)
+    # Collapse runs of blank lines / trailing spaces.
+    lines = [ln.strip() for ln in html.splitlines()]
+    return "\n".join(ln for ln in lines if ln)
 
 
 def email_enabled() -> bool:
@@ -141,18 +169,26 @@ def read_replies(
             body = ""
             if isinstance(body_data, dict):
                 # Prefer plaintext (where the operator's verdict + the quoted
-                # token live) and fall back to the HTML part only if that is all
-                # gws returns — an HTML-only reply must not read as an empty body
-                # and silently drop the approval (the ateles#286 failure mode: a
-                # live release approval was lost because the reader missed the
-                # plaintext key). HTML is passed raw as a last resort; verdict
-                # parsing tolerates the tags.
+                # token live). Fall back to the HTML part only if that is all gws
+                # returns — an HTML-only reply must not read as an empty body and
+                # silently drop the approval (the ateles#286 failure mode: a live
+                # release approval was lost because the reader missed the
+                # plaintext key).
                 body = str(body_data.get("body_text")
                            or body_data.get("body")
                            or body_data.get("text")
-                           or body_data.get("plain")
-                           or body_data.get("body_html")
-                           or body_data.get("snippet") or "")
+                           or body_data.get("plain") or "")
+                if not body:
+                    # HTML-only: strip tags so the verb leads its line, otherwise
+                    # parse_verdict (which keys off the FIRST word of a line) sees
+                    # "<p>approve" and returns None — a non-empty-but-unparseable
+                    # body would still drop the approval. Tag-strip makes an
+                    # HTML-only `approve <version>` reply actually register.
+                    raw_html = str(body_data.get("body_html") or "")
+                    if raw_html:
+                        body = _strip_html(raw_html)
+                    else:
+                        body = str(body_data.get("snippet") or "")
             if on_reply_message is not None:
                 try:
                     on_reply_message(token, mid)

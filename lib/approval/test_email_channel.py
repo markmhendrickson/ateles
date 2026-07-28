@@ -156,17 +156,22 @@ class TestReadReplies:
 
     def test_falls_back_to_body_html_when_no_plaintext(self, monkeypatch):
         # An HTML-only reply must not read as an empty body and silently drop the
-        # approval — the ateles#286 live-release failure mode. HTML passes raw.
+        # approval — the ateles#286 live-release failure mode. Tags are stripped
+        # so the verdict actually PARSES, not merely so the body is non-empty
+        # (Loxia #298: `<p>approve` would leave parse_verdict returning None).
+        from lib.approval import parse_verdict
         monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
 
         def fake_gws_json(args, timeout=45):
             if "+triage" in args:
                 return {"messages": [{"id": "m1", "subject": "RE: x [APPROVE-TOK]"}]}
-            return {"body_html": "<p>approve v0.20.0</p>"}
+            return {"body_html": "<div dir=\"ltr\">approve v0.20.0</div>"}
 
         with patch.object(ec, "gws_json", side_effect=fake_gws_json):
             texts = ec.read_replies(["TOK"])
-        assert "approve v0.20.0" in texts[0]  # tags tolerated; body is non-empty
+        assert "approve v0.20.0" in texts[0]
+        # The real end-to-end guarantee: this HTML-only reply registers as APPROVE.
+        assert parse_verdict(texts[0], "v0.20.0") is True
 
 
 class TestReplyInThread:
@@ -217,3 +222,24 @@ class TestGwsJson:
         with patch.object(ec.shutil, "which", return_value="/bin/gws"), \
              patch.object(ec.subprocess, "run", return_value=_fail()):
             assert ec.gws_json(["gmail", "+triage"]) is None
+
+
+class TestStripHtml:
+    def test_verb_leads_line_after_strip(self):
+        # The core requirement: the verb must lead its line so parse_verdict sees it.
+        assert ec._strip_html("<p>approve v0.20.0</p>") == "approve v0.20.0"
+        assert ec._strip_html('<div dir="ltr">approve v0.20.0</div>') == "approve v0.20.0"
+
+    def test_block_boundaries_become_newlines(self):
+        out = ec._strip_html("<p>approve v0.20.0</p><p>thanks</p>")
+        assert out.splitlines()[0] == "approve v0.20.0"
+
+    def test_scripts_and_styles_dropped(self):
+        html = "<style>.x{}</style><p>approve v0.20.0</p><script>x()</script>"
+        assert ec._strip_html(html).strip() == "approve v0.20.0"
+
+    def test_entities_unescaped(self):
+        assert "&" in ec._strip_html("<p>a &amp; b</p>")
+
+    def test_empty_and_none_safe(self):
+        assert ec._strip_html("") == ""
