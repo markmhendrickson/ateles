@@ -525,7 +525,7 @@ class OcrConsumer:
 
     def __init__(self, notifier: Notifier) -> None:
         self._notifier = notifier
-        self._last_run_monotonic: float = 0.0
+        self._last_run_monotonic: float | None = None
 
     async def poll_once(self) -> None:
         if not OCR_ENABLED:
@@ -533,8 +533,12 @@ class OcrConsumer:
         # OCR_POLL_INTERVAL may be configured independently of the daemon's
         # base POLL_INTERVAL (e.g. to throttle OCR dispatch cost separately
         # from screenshot/recording detection, which stay on POLL_INTERVAL).
+        # _last_run_monotonic starts as None (not 0.0) so the first poll always
+        # runs — loop.time() is anchored to the system monotonic clock, which
+        # can be under OCR_POLL_INTERVAL on a freshly-booted CI runner and would
+        # otherwise wrongly gate the very first call.
         now = asyncio.get_event_loop().time()
-        if now - self._last_run_monotonic < OCR_POLL_INTERVAL:
+        if self._last_run_monotonic is not None and now - self._last_run_monotonic < OCR_POLL_INTERVAL:
             return
         self._last_run_monotonic = now
 
