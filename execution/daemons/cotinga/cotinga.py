@@ -605,6 +605,8 @@ def spawn_deep_prep_agent(event: dict, attendees: list[dict], event_dt: datetime
     """
     import shutil
 
+    from lib.daemon_runtime import claude_subprocess_env
+
     claude = shutil.which("claude")
     if not claude:
         log.warning("claude CLI not found — cannot spawn deep-prep agent")
@@ -770,7 +772,7 @@ Work through all steps, then stop.
         log_path = LOG_DIR / f"cotinga_deepprep_{event_date}_{safe_title}.log"
         subprocess.Popen(
             [claude, "--print", "--dangerously-skip-permissions", prompt],
-            env=os.environ,
+            env=claude_subprocess_env(),
             stdout=open(log_path, "w"),
             stderr=subprocess.STDOUT,
             start_new_session=True,

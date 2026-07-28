@@ -99,6 +99,7 @@ from .session_finalize import (
     finalize_session,
     load_end_skill,
 )
+from .claude_auth import claude_subprocess_env
 from .sse_client import NeotomaEvent, SSEClient, hydrate_snapshot
 from .task_lifecycle import (
     MAX_ATTEMPTS,
@@ -115,6 +116,7 @@ __all__ = [
     "SSEClient",
     "NeotomaEvent",
     "hydrate_snapshot",
+    "claude_subprocess_env",
     "AAuthSigner",
     "GrantChecker",
     "AgentGrant",

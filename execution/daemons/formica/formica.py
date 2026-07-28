@@ -204,9 +204,13 @@ async def _spawn_claude_skill(
 
     # Pass ATELES_PARTICIPATION_REF so the mcpsrv_neotoma MCP server can stamp
     # retrieval_event entities keyed to this dispatch (#23 — auto retrieval attribution).
-    subprocess_env = {**os.environ}
-    if participation_ref:
-        subprocess_env["ATELES_PARTICIPATION_REF"] = participation_ref
+    # claude_subprocess_env() prefers the operator's Claude subscription over
+    # metered API credits (drops ANTHROPIC_API_KEY when CLAUDE_CODE_OAUTH_TOKEN
+    # is set).
+    from lib.daemon_runtime import claude_subprocess_env
+
+    _extra = {"ATELES_PARTICIPATION_REF": participation_ref} if participation_ref else None
+    subprocess_env = claude_subprocess_env(_extra)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
