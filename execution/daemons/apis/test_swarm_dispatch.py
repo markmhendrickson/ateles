@@ -71,10 +71,12 @@ def _trigger(**overrides):
 class _StubNotifier:
     def __init__(self):
         self.sent = []
-        self.sent_full = []  # (message, priority) — for priority assertions
+        self.priorities = []  # HEAD-side: priority-only assertions
+        self.sent_full = []  # main-side: (message, priority) assertions
 
     def send(self, message, priority=None, handler=None):
         self.sent.append(message)
+        self.priorities.append(priority)
         self.sent_full.append((message, priority))
 
 
@@ -3286,6 +3288,19 @@ class _FakeResp:
         return {}
 
 
+class _FakeListResp(_FakeResp):
+    """A 200 response whose .json() returns a caller-supplied list — for the
+    GitHub comments GET, which the deferral/session-limit paths list before
+    posting."""
+
+    def __init__(self, items, status_code=200):
+        super().__init__(status_code)
+        self._items = items
+
+    def json(self):
+        return self._items
+
+
 # ── /approve command ─────────────────────────────────────────────────────────
 
 
@@ -5310,6 +5325,343 @@ def test_ci_status_non_release_repo_main_does_not_retry(monkeypatch):
     assert seen == [], "non-release repo main must not prepare a release"
 
 
+# ── Session/usage-limit detection + auto-resume (feat/swarm-resume-after-limit) ──
+
+
+def test_detect_session_limit_matches_real_message():
+    # The exact stub text seen on ateles PR #254.
+    msg = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    assert swarm_dispatch.detect_session_limit(msg) is True
+
+
+def test_detect_session_limit_variants():
+    for m in [
+        "usage limit reached, resets at 19:30",
+        "rate limit exceeded — resets in a bit",
+        "You've reached your usage limit.",
+    ]:
+        assert swarm_dispatch.detect_session_limit(m) is True, m
+
+
+def test_detect_session_limit_ignores_unrelated_prose():
+    # Must not misfire on a normal verdict that merely mentions "rate" etc.
+    for m in [
+        "VERDICT: APPROVE — no findings",
+        "the rate of false positives is low",  # 'rate' but no limit/reset cue
+        "",
+    ]:
+        assert swarm_dispatch.detect_session_limit(m) is False, m
+
+
+def test_session_limit_is_distinct_from_auth_failure():
+    # A pure limit message is NOT an auth failure (different remediation).
+    limit = "you've hit your session limit · resets 7:30pm"
+    assert swarm_dispatch.detect_session_limit(limit) is True
+    assert swarm_dispatch.detect_auth_failure(limit) is False
+    # And a 401 is not a session limit.
+    auth = "API Error: 401 invalid authentication credentials"
+    assert swarm_dispatch.detect_auth_failure(auth) is True
+    assert swarm_dispatch.detect_session_limit(auth) is False
+
+
+def test_handle_panel_session_limit_notifies_at_info_not_digest(monkeypatch):
+    # Regression for the live AttributeError: Priority.DIGEST doesn't exist on
+    # the Priority enum (lib/notify/notifier.py), so the notifier.send() call
+    # raised and was swallowed by the surrounding `except Exception`, meaning
+    # the operator got NO notification at all for a throttled review. INFO is
+    # the enum's existing "always digest, nothing to fix" priority.
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())  # no github_token -> comment post short-circuits
+    trig = _trigger(number=264, repository="owner/repo")
+    asyncio.run(
+        d._handle_panel_session_limit(
+            trig, None, "vanellus",
+            "You've hit your session limit · resets 7:30pm", "",
+        )
+    )
+    assert len(notifier.sent) == 1
+    assert notifier.priorities == [swarm_dispatch.Priority.INFO]
+    assert "paused on a usage limit" in notifier.sent[0]
+
+
+def test_handle_panel_session_limit_attributes_to_apis_dispatcher(monkeypatch):
+    # Regression: the deferral comment carried
+    # attribution_header('vanellus', 'PR steward') while its own body says
+    # "Posted by the Apis dispatcher" — a dispatcher-originated infra notice
+    # must use attribution_header('apis', 'swarm dispatcher'), matching the
+    # sibling _handle_panel_auth_failure.
+    comment_bodies: list[str] = []
+
+    class _CapturingClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def get(self, url, **kwargs):
+            return _FakeListResp([])
+        async def post(self, url, **kwargs):
+            comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+            return _FakeResp(201)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    d = SwarmDispatcher(_StubNotifier(), DispatchConfig(neotoma_token="", github_token="x"))
+    trig = _trigger(number=264, repository="owner/repo")
+    asyncio.run(
+        d._handle_panel_session_limit(
+            trig, None, "vanellus",
+            "You've hit your session limit · resets 7:30pm", "",
+        )
+    )
+    assert len(comment_bodies) == 1
+    assert attribution_header("apis", "swarm dispatcher") in comment_bodies[0]
+    assert attribution_header("vanellus", "PR steward") not in comment_bodies[0]
+
+
+def test_parse_limit_reset_delay_reads_the_clock():
+    from datetime import datetime
+    now = datetime(2026, 7, 23, 16, 45, 0)  # 4:45pm
+    # "resets 7:30pm" -> 19:30 same day -> 2h45m + 120s pad
+    delay = swarm_dispatch.parse_limit_reset_delay(
+        "resets 7:30pm (Europe/Madrid)", now=now
+    )
+    assert 2 * 3600 + 45 * 60 <= delay <= 2 * 3600 + 45 * 60 + 130
+
+
+def test_parse_limit_reset_delay_rolls_to_next_day_when_past():
+    from datetime import datetime
+    now = datetime(2026, 7, 23, 20, 0, 0)  # 8pm, after a 7:30pm reset
+    delay = swarm_dispatch.parse_limit_reset_delay("resets 7:30pm", now=now)
+    # target rolls to tomorrow 19:30 -> ~23.5h away, not negative
+    assert delay > 23 * 3600
+
+
+def test_parse_limit_reset_delay_default_when_no_time():
+    d = swarm_dispatch.parse_limit_reset_delay("you've hit your session limit")
+    assert d >= 300  # a sane, non-zero default
+
+
+def test_deferred_review_sweep_redispatches_matured_pr(monkeypatch):
+    # A PR whose deferral time has passed is re-dispatched through _handle_pr.
+    resumed = []
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_scan(self, repository, now):
+        return {
+            "due": [{"number": 254, "title": "evidence bar", "body": "b",
+                     "user": {"login": "x"}, "html_url": "u",
+                     "head": {"ref": "feat/x"}, "base": {"ref": "main"}}],
+            "scanned": 1, "not_yet": 0,
+        }
+
+    async def fake_handle(self, trigger):
+        resumed.append((trigger.number, trigger.kind))
+
+    monkeypatch.setattr(SwarmDispatcher, "_prs_with_matured_deferral", fake_scan)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle)
+    summary = asyncio.run(d.resume_deferred_reviews(["owner/repo"]))
+    assert resumed == [(254, "pr_synchronize")]
+    assert summary["resumed"] == 1 and summary["failed"] == 0
+
+
+def test_deferred_review_sweep_leaves_unmatured_pr_alone(monkeypatch):
+    # A PR whose deferral is still in the future must NOT be re-dispatched.
+    resumed = []
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_scan(self, repository, now):
+        return {"due": [], "scanned": 1, "not_yet": 1}
+
+    async def fake_handle(self, trigger):
+        resumed.append(trigger.number)
+
+    monkeypatch.setattr(SwarmDispatcher, "_prs_with_matured_deferral", fake_scan)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle)
+    summary = asyncio.run(d.resume_deferred_reviews(["owner/repo"]))
+    assert resumed == []
+    assert summary["not_yet"] == 1 and summary["resumed"] == 0
+
+
+def test_deferred_review_sweep_is_fail_open_per_repo(monkeypatch):
+    # One repo failing to scan must not stop the others.
+    resumed = []
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_scan(self, repository, now):
+        if repository == "owner/broken":
+            raise RuntimeError("scan boom")
+        return {"due": [{"number": 5, "title": "t", "body": "", "user": {},
+                         "html_url": "", "head": {}, "base": {}}],
+                "scanned": 1, "not_yet": 0}
+
+    async def fake_handle(self, trigger):
+        resumed.append(trigger.number)
+
+    monkeypatch.setattr(SwarmDispatcher, "_prs_with_matured_deferral", fake_scan)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle)
+    summary = asyncio.run(
+        d.resume_deferred_reviews(["owner/broken", "owner/good"])
+    )
+    assert resumed == [5]  # the good repo still ran
+    assert summary["resumed"] == 1
+
+
+class _FakeDeferralHttpxClient:
+    """Serves a fixed PR list and per-PR comment thread to
+    _prs_with_matured_deferral, so its marker-lifecycle logic runs for real
+    (Loxia #264: the sweep tests monkeypatched this method, missing the bug)."""
+
+    def __init__(self, prs, comments_by_pr):
+        self._prs = prs
+        self._comments = comments_by_pr
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        pass
+
+    async def get(self, url, **kwargs):
+        prs = self._prs
+        comments = self._comments
+
+        class _Resp:
+            def raise_for_status(self_inner):
+                pass
+
+            def json(self_inner):
+                if url.endswith("/pulls"):
+                    return prs
+                # /issues/{n}/comments
+                import re as _re
+                m = _re.search(r"/issues/(\d+)/comments", url)
+                return comments.get(int(m.group(1)), []) if m else []
+
+        return _Resp()
+
+
+def _run_deferral_scan(monkeypatch, prs, comments, now):
+    monkeypatch.setattr(
+        httpx, "AsyncClient",
+        lambda **k: _FakeDeferralHttpxClient(prs, comments),
+    )
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    return asyncio.run(d._prs_with_matured_deferral("owner/repo", now))
+
+
+def _defer(iso):
+    return {"id": 1, "body": f"<!-- review-deferred-until:{iso} -->\ndeferred"}
+
+
+def _verdict():
+    return {"id": 2, "body": "<!-- vanellus-aggregation -->\n**APPROVE**"}
+
+
+def test_matured_deferral_is_due(monkeypatch):
+    from datetime import datetime, timezone
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    prs = [{"number": 254}]
+    comments = {254: [_defer("2026-07-27T10:00:00Z")]}  # past
+    r = _run_deferral_scan(monkeypatch, prs, comments, now)
+    assert [p["number"] for p in r["due"]] == [254]
+
+
+def test_unmatured_deferral_is_not_due(monkeypatch):
+    from datetime import datetime, timezone
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    prs = [{"number": 254}]
+    comments = {254: [_defer("2026-07-27T18:00:00Z")]}  # future
+    r = _run_deferral_scan(monkeypatch, prs, comments, now)
+    assert r["due"] == [] and r["not_yet"] == 1
+
+
+def test_verdict_after_deferral_supersedes_it(monkeypatch):
+    # THE Loxia bug: a resolved PR (verdict posted AFTER a past-due deferral)
+    # must NOT be re-dispatched. Comment order: deferral, then verdict.
+    from datetime import datetime, timezone
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    prs = [{"number": 254}]
+    comments = {254: [_defer("2026-07-27T10:00:00Z"), _verdict()]}
+    r = _run_deferral_scan(monkeypatch, prs, comments, now)
+    assert r["due"] == [], "resolved PR must not be re-dispatched"
+    assert r["scanned"] == 0, "superseded deferral is not even a candidate"
+
+
+def test_redefer_after_verdict_is_live_again(monkeypatch):
+    # verdict then a NEW deferral (re-throttled on a later run) -> due again.
+    from datetime import datetime, timezone
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    prs = [{"number": 254}]
+    comments = {254: [_defer("2026-07-26T10:00:00Z"), _verdict(),
+                      _defer("2026-07-27T09:00:00Z")]}
+    r = _run_deferral_scan(monkeypatch, prs, comments, now)
+    assert [p["number"] for p in r["due"]] == [254]
+
+
+def test_no_deferral_marker_is_ignored(monkeypatch):
+    from datetime import datetime, timezone
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    r = _run_deferral_scan(monkeypatch, [{"number": 9}], {9: [_verdict()]}, now)
+    assert r["scanned"] == 0 and r["due"] == []
+
+
+def test_panelist_prompt_evidence_bar_tracks_worktree_availability():
+    # The evidence bar must tell the truth about what the lens can do. Claiming
+    # "your cwd is a writable checkout" to a diff-only lens would either waste
+    # its turn or invite it to invent command output (#254).
+    lens = Lens(agent="waxwing", lens="arch", gate="arch", checks="contracts")
+    trigger = _trigger(repository="markmhendrickson/neotoma")
+
+    with_wt = SwarmDispatcher._panelist_prompt(
+        trigger, lens, "", None, has_worktree=True
+    )
+    assert "writable checkout" in with_wt
+    assert "ONLY if you RAN something" in with_wt
+    assert "DIFF-ONLY" not in with_wt
+
+    without_wt = SwarmDispatcher._panelist_prompt(
+        trigger, lens, "", None, has_worktree=False
+    )
+    assert "DIFF-ONLY" in without_wt
+    assert "unverified" in without_wt
+    assert "writable checkout" not in without_wt
+
+
+def test_forward_looking_lens_has_no_evidence_bar():
+    # Forward-looking lenses never block, so the blocking evidence bar is noise.
+    lens = Lens(
+        agent="corvus", lens="content", gate="", checks="x", forward_looking=True
+    )
+    prompt = SwarmDispatcher._panelist_prompt(
+        _trigger(repository="markmhendrickson/neotoma"),
+        lens,
+        "",
+        None,
+        has_worktree=True,
+    )
+    assert "EVIDENCE BAR" not in prompt
+    assert "FORWARD-LOOKING" in prompt
+
+
+def test_auth_failure_comment_not_headed_as_a_verdict():
+    # #264 ux: a "not a review verdict" notice must not open with the
+    # vanellus/PR-steward header — at a skim that reads as the verdict it
+    # disclaims. Header must agree with the footer (dispatcher-posted).
+    from swarm_dispatch import compose_auth_failure_comment
+    body = compose_auth_failure_comment("waxwing")
+    header = body.split("\n")[1]
+    assert "swarm dispatcher" in header
+    assert "PR steward" not in header
+    assert "not** a review verdict" in body  # body still disclaims
+
+
+def test_real_vanellus_fallback_keeps_the_steward_header():
+    # The genuine aggregation fallback IS a verdict, so its vanellus/PR-steward
+    # header is correct — don't over-correct it along with the notice above.
+    from swarm_dispatch import compose_vanellus_fallback_comment
+    body = compose_vanellus_fallback_comment("**APPROVE**")
+    assert "PR steward" in body.split("\n")[1]
 # ── _handle_release_approve (email-reply release publish) ───────────────────
 #
 # This is the one handler that drives an irreversible publish. Guards: refuse a
