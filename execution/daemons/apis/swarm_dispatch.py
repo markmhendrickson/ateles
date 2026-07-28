@@ -1644,8 +1644,7 @@ class SwarmDispatcher:
         human-written body above them (never clobbers the reporter's text).
         Re-running replaces only the marked block.  Best-effort, never raises.
         """
-        repo_token = _token_for_repo(trigger.repository)
-        if not repo_token:
+        if not _token_for_repo(trigger.repository) and not self.config.github_token:
             log.warning(
                 f"[{DAEMON_NAME}] no GitHub token — spec mirror skipped for "
                 f"{trigger.repository}#{trigger.number}"
