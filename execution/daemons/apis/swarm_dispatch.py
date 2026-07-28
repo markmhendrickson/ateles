@@ -4439,12 +4439,28 @@ class SwarmDispatcher:
                     "generated_at": now,
                 }
             )
+        # `generated_at` is deliberately EXCLUDED from the idempotency key: it
+        # changes every run, so including it would make a same-head re-run mint
+        # a fresh key and defeat the idempotency this method depends on. The key
+        # is derived from the identity + review content only (Loxia review).
+        digest_basis = [
+            {k: v for k, v in e.items() if k != "generated_at"} for e in entities
+        ]
         await self._store_entities(
             entities,
             idempotency_key=(
                 f"pr-review-{t.repository}-{t.number}-{sha[:12]}-"
-                f"{content_digest(entities)}"
+                f"{content_digest(digest_basis)}"
             ),
+        )
+
+        # Supersede prior reviews for the same (repo, pr, lens) at OTHER heads.
+        # Without this, every round's review reads as `live` and a consumer
+        # cannot tell the current verdict from a stale one — the exact defect
+        # ateles#269 exists to fix. Runs after the store so a failure here can
+        # never cost us the new record.
+        await self._supersede_prior_reviews(
+            t, [e["review_lens"] for e in entities], sha
         )
 
         # Audit row (unchanged shape) — dispatch history, not review state.
@@ -4470,6 +4486,103 @@ class SwarmDispatcher:
                 f"{t.delivery_id}-{content_digest(audit)}"
             ),
         )
+
+    async def _neotoma_post(self, path: str, payload: dict) -> dict | None:
+        """POST to Neotoma; None on any failure (best-effort, never crashes).
+
+        NOTE: the prod REST surface exposes the entity read as
+        ``POST /entities/query`` — ``/retrieve_entities`` 404s, and that 404
+        silently degraded every ``issue_spec`` load to empty state until it was
+        caught (issue_spec.py:253). Use ``entities/query`` here for the same
+        reason.
+        """
+        if not self.config.neotoma_token:
+            log.warning(
+                f"[{DAEMON_NAME}] NEOTOMA_BEARER_TOKEN unset — {path} skipped"
+            )
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"{self.config.neotoma_base_url}/{path}",
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {self.config.neotoma_token}"
+                    },
+                )
+                resp.raise_for_status()
+                return resp.json() if resp.content else {}
+        except Exception as exc:  # noqa: BLE001 — best-effort, never crash
+            log.warning(f"[{DAEMON_NAME}] Neotoma {path} failed: {exc}")
+            return None
+
+    async def _supersede_prior_reviews(
+        self,
+        t: SwarmTrigger,
+        lenses: list[str],
+        current_sha: str,
+    ) -> None:
+        """Flip prior same-(repo, pr, lens) reviews at other heads to superseded.
+
+        This is what makes "the live verdict" a queryable fact rather than an
+        inference from max(head_sha) — re-deriving currency by scanning would be
+        exactly the comment-scraping shape ateles#269 exists to remove.
+
+        Entities at the CURRENT head are left alone: a same-head re-run dedupes
+        onto the same record, so superseding it would mark the live review stale.
+        Reviews already `superseded` are skipped so repeat runs are idempotent.
+        Best-effort throughout — a Neotoma failure must not cost the new record,
+        which is already stored by the time this runs.
+        """
+        data = await self._neotoma_post(
+            "entities/query",
+            {"entity_type": "pr_review", "limit": 200, "include_snapshots": True},
+        )
+        if not data:
+            return
+
+        for entity in data.get("entities", []):
+            snap = entity.get("snapshot") or {}
+            if (
+                snap.get("repository") != t.repository
+                or str(snap.get("pr_number")) != str(t.number)
+                or snap.get("review_lens") not in lenses
+                or snap.get("head_sha") == current_sha
+                or snap.get("status") == "superseded"
+            ):
+                continue
+            entity_id = entity.get("entity_id", "")
+            if not entity_id:
+                continue
+            await self._neotoma_post(
+                "correct",
+                {
+                    "entity_id": entity_id,
+                    "entity_type": "pr_review",
+                    "field": "status",
+                    "value": "superseded",
+                    "idempotency_key": (
+                        f"pr-review-supersede-{entity_id}-{current_sha[:12]}"
+                    ),
+                },
+            )
+            await self._neotoma_post(
+                "correct",
+                {
+                    "entity_id": entity_id,
+                    "entity_type": "pr_review",
+                    "field": "superseded_by",
+                    "value": current_sha,
+                    "idempotency_key": (
+                        f"pr-review-superseded-by-{entity_id}-{current_sha[:12]}"
+                    ),
+                },
+            )
+            log.info(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: superseded "
+                f"{snap.get('review_lens')} review at "
+                f"{str(snap.get('head_sha'))[:9]} → {current_sha[:9]}"
+            )
 
     async def _post_missing_panel_comments(
         self,
