@@ -1900,6 +1900,20 @@ class SwarmDispatcher:
             )
             return
 
+        # ateles#239: a clear verdict is just as capable of being stale as a
+        # blocking one — an APPROVE on code that no longer exists at HEAD must
+        # not proceed to the merge-readiness gate any more than a blocking
+        # verdict proceeds to a fix round. Mirrors the guard in
+        # _route_blocking_findings; the push that moved the head re-runs this
+        # handler, so returning here drops nothing.
+        if reviewed_sha and current_sha and reviewed_sha != current_sha:
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: skipping merge-readiness gate — verdict "
+                f"is against {reviewed_sha[:9]}, head is now {current_sha[:9]}; "
+                "the newer push re-runs the panel"
+            )
+            return
+
         await self._gate_merge_readiness(trigger, parent, panel)
 
     async def _emit_formal_review(
@@ -4257,10 +4271,13 @@ class SwarmDispatcher:
                 f"\n⚠️ STALE ROUND — the panel reviewed `{reviewed_sha[:9]}` but the "
                 f"PR head is now `{current_sha[:9]}`. The reviews below judged code "
                 "that has since changed.\n"
-                "Do NOT assert a blocking verdict on this round. Report that the "
-                "head moved, state both SHAs, and note that the push which moved it "
-                "re-runs the panel against the new commit. Carry forward only "
-                "findings you can re-verify against the CURRENT head.\n"
+                "Do NOT assert a blocking verdict on this round, and do NOT assert "
+                "an APPROVE either — an approval is just as wrong as a block when "
+                "it is issued against code that no longer exists at HEAD. Report "
+                "that the head moved, state both SHAs, and note that the push "
+                "which moved it re-runs the panel against the new commit. Carry "
+                "forward only findings you can re-verify against the CURRENT "
+                "head.\n"
             )
         elif reviewed_sha:
             sha_block = (

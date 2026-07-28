@@ -1231,6 +1231,67 @@ def test_lanius_verdict_on_first_try_not_retried(monkeypatch):
     assert calls == ["lanius"]
 
 
+def test_lanius_verdict_still_missing_after_retry_proceeds_fail_open(monkeypatch):
+    """Third Lanius outcome: verdict is still None after the retry. This is
+    the fail-open branch (`if not verdict:` in `_handle_pr`) — the panel must
+    still be spawned and no "blocked by Lanius" notification must fire, which
+    distinguishes this from the retried-then-blocked case above."""
+    calls = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        calls.append((skill, prompt))
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "still no verdict", "")
+        return SkillResult(skill, True, 0, "ok", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+
+    # Stub out the GitHub API helpers so the panel stage runs without network,
+    # mirroring test_github_trigger_pr_pipeline_passes_contract.
+    async def fake_changed_files(self, t):
+        return []
+
+    async def fake_preregistered(self, repo, number):
+        return {}
+
+    async def fake_store(self, entities, idempotency_key):
+        pass
+
+    async def fake_post_missing(self, t, reviews, agents_by_lens):
+        pass
+
+    async def fake_persist(self, t, reviews, agents_by_lens):
+        pass
+
+    async def fake_merge_checkpoint(self, t, parent, lenses):
+        pass
+
+    monkeypatch.setattr(SwarmDispatcher, "_changed_files", fake_changed_files)
+    monkeypatch.setattr(SwarmDispatcher, "_preregistered_expectations", fake_preregistered)
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_post_missing_panel_comments", fake_post_missing)
+    monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_persist)
+    monkeypatch.setattr(SwarmDispatcher, "_store_merge_checkpoint", fake_merge_checkpoint)
+
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+
+    asyncio.run(dispatcher._handle_pr(_trigger()))
+
+    lanius_calls = [c for c in calls if c[0] == "lanius"]
+    assert len(lanius_calls) == 2, "no verdict on either try must still retry once"
+
+    # Fail-open must fall through to the panel — phoenicurus (qa) is
+    # always=True, so it is guaranteed a seat regardless of diff/gate cues.
+    panel_calls = [c[0] for c in calls if c[0] != "lanius"]
+    assert "phoenicurus" in panel_calls, (
+        "fail-open must still spawn the review panel, not stop after Lanius"
+    )
+
+    # Must NOT be treated as a Lanius block — that's the other branch's contract.
+    assert not any("blocked by Lanius" in m for m in notifier.sent)
+
+
 def test_lanius_pr_prompt_gate_inheritance_contract_snapshot():
     """Golden snapshot of the gate-inheritance instruction block (ateles#195).
 
@@ -5326,21 +5387,58 @@ def test_handle_pr_stale_round_skips_fix_budget_end_to_end(monkeypatch, caplog):
     branch is genuinely exercised.
     """
     calls = []
+    # Capture the REAL routing function BEFORE the harness replaces it.
+    # Reading SwarmDispatcher._route_blocking_findings after
+    # _pr_dispatcher_with_stubs runs returns the stub, so re-setting it from
+    # that read is a no-op: the guard under test never executes and the
+    # "skipping fix-round routing" log never fires.
+    real_route = SwarmDispatcher._route_blocking_findings
     d = _pr_dispatcher_with_stubs(
         monkeypatch,
         vanellus_stdout="**REQUEST_CHANGES**\n[BLOCKING] test-coverage: missing case",
         calls=calls,
     )
-    # _pr_dispatcher_with_stubs stubs _route_blocking_findings — let the real
-    # implementation run for this test.
-    monkeypatch.setattr(
-        SwarmDispatcher, "_route_blocking_findings", SwarmDispatcher._route_blocking_findings
-    )
+    monkeypatch.setattr(SwarmDispatcher, "_route_blocking_findings", real_route)
 
-    head_shas = iter(["aaa111", "bbb222"])
+    # _route_blocking_findings groups by [BLOCKING] findings in the PANEL
+    # LENS reviews (not vanellus's aggregation) — _pr_dispatcher_with_stubs's
+    # default fake_run_skill returns a bare "**COMMENT**\nlgtm" for panel
+    # lenses, which parses to zero findings and would hit the unrelated
+    # "unparseable verdict" early-return instead of the SHA guard. Override so
+    # the qa lens actually raises one. run_skill is invoked with the T4 SKILL
+    # NAME (Lens.agent, e.g. "phoenicurus"), not the short lens label ("qa") —
+    # reviews are keyed by lens label only after the fact in `_handle_pr`.
+    async def fake_run_skill_with_blocking_finding(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "vanellus":
+            return SkillResult(
+                skill,
+                True,
+                0,
+                "**REQUEST_CHANGES**\n[BLOCKING] test-coverage: missing case",
+                "",
+            )
+        if skill == "phoenicurus":  # qa lens
+            return SkillResult(
+                skill,
+                True,
+                0,
+                "**REQUEST_CHANGES**\n[BLOCKING] test-coverage: missing case",
+                "",
+            )
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill_with_blocking_finding)
+
+    # _handle_pr calls _pr_head_sha twice (pre-panel reviewed_sha, post-panel
+    # current_sha); _route_blocking_findings's own guard then calls it a third
+    # time. The head only moves once, so every call from the third onward sees
+    # the same (moved) head as the second.
+    head_shas = iter(["aaa111", "bbb222", "bbb222"])
 
     async def fake_head(self, t):
-        return next(head_shas)
+        return next(head_shas, "bbb222")
 
     async def fake_count(self, t):
         calls.append("counted_budget")
@@ -5359,9 +5457,48 @@ def test_handle_pr_stale_round_skips_fix_budget_end_to_end(monkeypatch, caplog):
     # The guard inside the REAL _route_blocking_findings must fire and return
     # before the fix-round budget is ever consulted.
     assert "counted_budget" not in calls, calls
-    assert not any(c.startswith("round_") for c in calls), calls
+    assert not any(
+        isinstance(c, str) and c.startswith("round_") for c in calls
+    ), calls
     assert any(
         "skipping fix-round routing" in r.message for r in caplog.records
+    ), [r.message for r in caplog.records]
+
+
+def test_handle_pr_stale_round_skips_merge_gate_end_to_end(monkeypatch, caplog):
+    """QA lens finding (review round 1 on ateles#239): the REQUEST_CHANGES
+    branch has a stale-round guard (test above) but the APPROVE/COMMENT branch
+    had none — a panel that approves code which no longer exists at HEAD (the
+    author force-pushed mid-panel) proceeded straight to
+    `_gate_merge_readiness` and would have filed a merge-ready checkpoint on
+    a commit nobody reviewed. Same ateles#288/neotoma#1946 failure shape as
+    the blocking path, just unfixed on this sibling branch until now.
+
+    Drives `_handle_pr` with a clear verdict (`**APPROVE**`) and `_pr_head_sha`
+    returning two DISTINCT SHAs across its two `_handle_pr`-level calls
+    (pre-panel reviewed_sha, post-panel current_sha), and asserts
+    `_gate_merge_readiness` is never invoked — mirroring the existing pattern
+    of asserting `counted_budget`/`round_` never fire on the blocking path.
+    """
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+
+    head_shas = iter(["aaa111", "bbb222"])
+
+    async def fake_head(self, t):
+        return next(head_shas, "bbb222")
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+    assert ("gate", None) not in calls, calls
+    assert not any(c[0] == "route" for c in calls), calls
+    assert any(
+        "skipping merge-readiness gate" in r.message for r in caplog.records
     ), [r.message for r in caplog.records]
 
 
@@ -5381,9 +5518,13 @@ def _routing_dispatcher(monkeypatch, head_now, calls):
     async def fake_record(self, t, n):
         calls.append(f"round_{n}")
 
-    async def fake_guidance(self, *a, **k):
-        calls.append("routed")
+    # run_skill spawns real swarm agent subprocesses. Stub it or the
+    # "findings are current" path dispatches live agents at a real PR.
+    async def fake_run_skill(skill, prompt, **kwargs):
+        calls.append(f"ran_skill:{skill}")
+        return SkillResult(skill, True, 0, "stub guidance", "")
 
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
     monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
     monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
@@ -5432,6 +5573,26 @@ def test_unstamped_round_still_consumes_a_fix_round(monkeypatch):
         d._route_blocking_findings(
             _trigger(body="Closes #80."), 80, reviews, "REQUEST_CHANGES",
             reviewed_sha="",
+        )
+    )
+    assert "counted_budget" in calls, calls
+
+
+def test_reviewed_sha_present_but_recheck_fails_still_consumes_a_fix_round(monkeypatch):
+    """
+    Distinct from the unstamped case above: here the pre-panel stamp DID
+    succeed (reviewed_sha is non-empty), but _route_blocking_findings's own
+    internal re-check call to _pr_head_sha fails (e.g. a transient GitHub API
+    hiccup between the pre-panel stamp and this post-aggregation check).
+    head_now="" must fail open — routing must proceed, not silently skip.
+    """
+    calls = []
+    d = _routing_dispatcher(monkeypatch, head_now="", calls=calls)
+    reviews = [("qa", "**REQUEST_CHANGES**\n[BLOCKING] test-coverage: missing case")]
+    asyncio.run(
+        d._route_blocking_findings(
+            _trigger(body="Closes #80."), 80, reviews, "REQUEST_CHANGES",
+            reviewed_sha="oldsha000000",
         )
     )
     assert "counted_budget" in calls, calls
