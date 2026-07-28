@@ -2289,6 +2289,7 @@ class TestCrossHarnessRouting:
             "--sandbox",
             "workspace-write",
             "--ephemeral",
+            "--skip-git-repo-check",
             "--color",
             "never",
             "--cd",

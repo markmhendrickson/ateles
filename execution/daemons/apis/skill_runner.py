@@ -716,6 +716,7 @@ def _provider_command(
                 "--sandbox",
                 "workspace-write",
                 "--ephemeral",
+                "--skip-git-repo-check",
                 "--color",
                 "never",
                 *(["--cd", cwd] if cwd else []),
