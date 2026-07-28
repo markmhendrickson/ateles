@@ -41,6 +41,7 @@ from lib.daemon_runtime import (  # noqa: E402
     AgentLoader,
     NeotomaEvent,
     SSEClient,
+    hydrate_snapshot,
 )
 from lib.notify import Notifier, Priority  # noqa: E402
 from lib.activity import ActivityLogger  # noqa: E402
@@ -98,6 +99,16 @@ async def handle_event(event: NeotomaEvent) -> None:
         # Phase 6: detect conflicting tasks, stale work-in-flight, etc.
         log.debug(f"[{DAEMON_NAME}] task created: {event.entity_id}")
     elif event.entity_type in ("issue", "pull_request"):
+        # The SSE stream carries only event metadata — no snapshot. Workflow
+        # selection routes on snapshot fields (repository, labels), so fetch
+        # the entity before orchestrating or _project_from_repo sees "" and
+        # silently drops every issue/PR event.
+        await hydrate_snapshot(event)
+        log.info(
+            f"[{DAEMON_NAME}] {event.entity_type} {event.action} "
+            f"{event.entity_id} repo="
+            f"{event.snapshot.get('repository') or event.snapshot.get('repo') or '?'}"
+        )
         await _orchestrate_workflow_for(event)
 
 
@@ -301,7 +312,16 @@ async def _spawn_agent(
     title = snapshot.get("title", "")
     body = snapshot.get("body", "")
     repo = snapshot.get("repository") or snapshot.get("repo") or ""
-    number = snapshot.get("number") or snapshot.get("issue_number") or ""
+    # Neotoma `issue`/`pull_request` entities store the GitHub number as
+    # `github_number`; keep `number`/`issue_number` as fallbacks for other
+    # snapshot shapes. Without github_number the agent gets `#` and can't
+    # locate the GitHub issue to post its artifact.
+    number = (
+        snapshot.get("github_number")
+        or snapshot.get("number")
+        or snapshot.get("issue_number")
+        or ""
+    )
     # NOTE: do NOT prefix the prompt with `/<agent>`. In `claude --print` mode
     # a leading slash is interpreted as a slash-command and consumed silently,
     # producing zero-token output. The agent's identity comes from the
