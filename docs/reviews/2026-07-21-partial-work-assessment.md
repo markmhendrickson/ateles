@@ -207,4 +207,70 @@ across 23 docs. Cross-referenced against the plan mirrors and CLAUDE.md.
 5. **Finish the skeletons in dependency order**: Anthus coordinator (needs #172 +
    neotoma#1749) → smoke tiers 2→5; Formica Node→Python migration (#1); Turdus
    classifier; Tyto OCR.
+
+---
+
+## 6. Follow-through (applied 2026-07-28, once Neotoma access became available)
+
+Before writing any corrections, live state was re-checked against the 07-21 data
+collection — a full week had passed and the swarm had kept working. Confirmed
+resolved in the interim: issues **#241** (formal GitHub Reviews) and **#246**
+(sibling-repo guard) closed; PRs **#245, #233, #242, #218** no longer open. Open
+issues actually grew **47→54** and open PRs **26→29** over that week despite this
+activity — a throughput problem, not a stalled queue (§5 point 1's framing still
+holds, but see the plan decision `merge_queue_is_primary_bottleneck` for the
+current numbers). Issues **#211, #239, #235, #240** were re-checked live and are
+still open, each already carrying a full swarm-authored spec (PM/UX/Eng/QA/Arch
+sections) — spec'd but not built. In-flight attempts at the same problems: PR
+**#296** (pr_review entities anchored to head_sha) and PR **#268** (stale-SHA
+fix-round guard), neither merged yet.
+
+Also caught and corrected: the plan's `next_steps` field carried a 2026-06-23 claim
+that PR #172 (commit `f4b9581`) had landed and produced "the first live autonomous
+swarm dispatch." Git confirms `f4b9581` is **not** an ancestor of `origin/main`
+(re-verified 2026-07-28: still not merged, PR #172 still open at 25 days) — that
+claim described a pre-merge dev verification, not a shipped fact. Corrected in the
+plan's `decisions` (`anthus_hydrate_fix_pr172_unmerged`) and `next_steps`.
+
+**Neotoma plan `ent_99ace4dd6673aa36ed08b1fe` corrected** (merged, not overwritten —
+prior fields preserved): `todos`, `decisions`, `next_steps`, `taxonomy_markdown`,
+`phases_markdown`. Taxonomy fixes: Pavo/Waxwing/Sturnus/Corvus flipped
+planned→active to match their real `agent_definition` status (verified against
+`docs/agents/*.md`); Sturnus's one-liner corrected from "feedback digester" to its
+actual current scope (full relationship-management/CRM agent — a substantive
+redefinition, not just a status flip); Corvus corrected from "outbound poster" to
+"content writer & social voice"; added missing Piculet + Riparia T3 rows; marked
+Cyphorhinus deprecated (break-glass only); moved Aquila from a stale T4-planned
+"quarterly portfolio review" line to a corrected T3/T4 dual-mode active "monthly
+cofounder report + on-demand strategic consult" row (`quarterly-portfolio-review`
+is a distinct, unrelated skill). `docs/taxonomy.md` and `docs/phases.md` updated
+to match (the render script needs live `NEOTOMA_BASE_URL`/REST access this session
+didn't have, so the mirrors were hand-synced to the exact corrected field content
+and diffed to confirm an exact match).
+
+**12 `task` entities created** PART_OF the plan for §4's uncaptured work, and **12
+GitHub issues filed** (#302–#313), one per task, each task's `related_url`
+corrected to point at its issue:
+
+| Task | Issue |
+|---|---|
+| Tyto OCR consumer | [#302](https://github.com/markmhendrickson/ateles/issues/302) |
+| Turdus LLM classifier | [#303](https://github.com/markmhendrickson/ateles/issues/303) |
+| Parquet MCP audit/embeddings re-enable | [#304](https://github.com/markmhendrickson/ateles/issues/304) |
+| A2A gateway activation | [#305](https://github.com/markmhendrickson/ateles/issues/305) |
+| Session-integrity BLOCK-mode rollout | [#306](https://github.com/markmhendrickson/ateles/issues/306) |
+| Monedula payment-handler tests | [#307](https://github.com/markmhendrickson/ateles/issues/307) |
+| `/reject` → review_learning wiring | [#308](https://github.com/markmhendrickson/ateles/issues/308) |
+| Phantom/stale-doc reconciliation | [#309](https://github.com/markmhendrickson/ateles/issues/309) |
+| Missing launchd plists (riparia, apis-a2a) | [#310](https://github.com/markmhendrickson/ateles/issues/310) |
+| Orphan-branch triage | [#311](https://github.com/markmhendrickson/ateles/issues/311) |
+| GitHub Layer C templates/labels | [#312](https://github.com/markmhendrickson/ateles/issues/312) |
+| Merge-queue drain | [#313](https://github.com/markmhendrickson/ateles/issues/313) |
+
+One correction to this process: the first `store()` call for the 12 tasks omitted
+`entity_type` inside each entity payload and landed as `generic` instead of
+`task` (schema mismatch, 4 unknown fields each). Caught immediately from the
+store warnings, all 12 were deleted (`delete_entity`, reversible) and recreated
+correctly with zero unknown-field warnings before the GitHub issues were filed
+against them.
 6. **Test debt**: monedula handlers first (risk), then the CI-dark suites (#229).

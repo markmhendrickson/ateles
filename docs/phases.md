@@ -113,6 +113,9 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 - [ ] Input attribution: retrieval_event auto-stamping + inputs_consulted population — [ateles#19](https://github.com/markmhendrickson/ateles/issues/19), remaining sub-issues [#23–#25](https://github.com/markmhendrickson/ateles/issues/23)
 - [x] Tool-level authorization: agent_grant extended to MCP tool calls + parameter constraints, enforced via grant proxy ([ateles#26](https://github.com/markmhendrickson/ateles/issues/26))
 - [ ] Webhook signing-key quarterly rotation with 7-day grace period
+- [x] Swarm PR panel emits formal GitHub Reviews (verdict vocabulary mapped to Review events) — [ateles#241](https://github.com/markmhendrickson/ateles/issues/241), closed 2026-07-27
+- [x] Guard against mutating a sibling repo's shared main clone (PreToolUse hook) — [ateles#246](https://github.com/markmhendrickson/ateles/issues/246), closed 2026-07-23
+- [ ] Note (2026-07-28 audit): the review-panel's own state-integrity problems remain open and are actively being worked — gate state forking across duplicate issue entities ([#240](https://github.com/markmhendrickson/ateles/issues/240)), stale-head re-verification ([#239](https://github.com/markmhendrickson/ateles/issues/239)), CONFLICTING-PR silent stall ([#235](https://github.com/markmhendrickson/ateles/issues/235)), and the arch pre-impl gate dead-end ([#211](https://github.com/markmhendrickson/ateles/issues/211)); in-flight fixes are PR [#296](https://github.com/markmhendrickson/ateles/pull/296) (pr_review entities anchored to head_sha) and PR [#268](https://github.com/markmhendrickson/ateles/pull/268) (stale-SHA fix-round guard), neither merged yet
 
 ---
 
@@ -134,8 +137,8 @@ Covers Phase 0–9 goals and task checklists. Each phase has a defined goal and 
 
 **Goal:** Product perspective agents operational for product development workflows.
 
-- [ ] Wire Sturnus to `product_feedback.created` subscription
-- [ ] Build product role panel: Pavo (PM), Manucode (designer), Waxwing (architect), Phoenicurus (QA)
+- [ ] Wire Sturnus to `product_feedback.created` subscription — note (2026-07-28 audit): Sturnus shipped, but its scope evolved into a full relationship-management/CRM agent (`docs/agents/sturnus.md`) rather than a `product_feedback` digester; this wiring may be superseded — needs an operator/Waxwing decision on keep/rescope/split
+- [x] Pavo (PM) and Waxwing (architect) are live (`status: active`, real prompts — see `docs/agents/pavo.md`, `docs/agents/waxwing.md`); Manucode (designer) and Phoenicurus (QA) remain design-only
 
 ---
 

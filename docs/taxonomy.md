@@ -50,14 +50,18 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 | **Anthus** | *Anthus* (pipit) | Python | Swarm coordinator — SSE-driven workflow dispatch, gate tracking via `participation_record`, conflict surfacing to Ateles | active (Tier 2–5 smoke validation in flight) |
 | **Apis** | *Apis* (honeybee) | Python | Universal task dispatcher; subscribes to task events, routes to T4 agents by domain, executes autonomously behind a confidence × blast-radius gate; A2A inbound gateway | active |
 | **Apus** | *Apus* (swift) | Python | HTTPS webhook receiver; Neotoma→git mirror pipeline; commits via `ateles-agent` GitHub identity | active |
+| **Aquila** | *Aquila* (eagle) | Python | Cofounder & strategic adversary — scheduled monthly cofounder report (T3) + on-demand strategic consult (T4); adversarial, evidence-or-silence critique grounded in the operator's Neotoma record | active |
 | **Cotinga** | *Cotinga* (cotinga) | Python | Daily event-prep briefings — fetches calendar events, cross-references Neotoma contacts, spawns meeting-prep agents | active |
-| **Cyphorhinus** | *Cyphorhinus* (musician wren) | Python | Audio-import watcher — Voice Memos + meeting recording imports, transcription + entity extraction | active |
+| **Cyphorhinus** | *Cyphorhinus* (musician wren) | Python | Telegram reply-routing daemon (E3 of the execution loop); deprecated in favor of Riparia (email) — kept only as an optional break-glass channel | deprecated |
 | **Formica** | *Formica* (wood ant) | Python | GitHub issue/PR automation; dispatches issues and PRs to Cicada/Vanellus | active |
 | **Gorilla** | *Gorilla* (gorilla) | Python | Health & fitness daemon; proactive weekly training summaries + inactivity nudges from `workout_session` data (companion to the invocable Gorilla agent) | active |
 | **Monedula** | *Corvus monedula* (jackdaw) | Python | Recurring payment daemon; Wise IBAN + BTC transfers triggered by calendar events and Neotoma task due dates, operator-approved via Telegram | active |
 | **Morning-brief** | — (utility daemon) | Python | 05:30 operator digest — reads Cotinga's `checkpoint_brief` entities, composes Ateles-voice digest to Telegram | active |
 | **neotoma-agent** | *neotoma-agent* | Python | Neotoma-repo automation; processes issues and PRs against the neotoma repo | active |
+| **Piculet** | *Piculet* (small woodpecker) | Python | Audio-import watcher — macOS Voice Memos + meeting-recording imports (`imports/audio/`), transcription + entity extraction via Claude | active |
+| **Riparia** | *Riparia* (sand martin) | Python | Email reply-routing daemon (E3 of the execution loop) — successor to Cyphorhinus; polls the swarm Gmail inbox for operator replies to a task's execution-run thread | active |
 | **Strix** | *Strix* (wood owl) | Python | Meeting/ambient audio recorder (menu bar toggle app) | active |
+| **Sturnus** | *Sturnus* (starling) | Python | Relationship-management (CRM) agent — full contact lifecycle across investors/advisors/customers/prospects/vendors/press/personal; hybrid event-driven (Turdus/Tyto/Cotinga/Hirundo signals) + weekly health sweep; dispatched by Apis, invocable via /sturnus | active |
 | **Sylvia** | *Sylvia* (typical warbler) | Python | Recurring-task lifecycle — rolls due dates on completion, syncs Neotoma ↔ Google Calendar, due-date reminders | active |
 | **Turdus** | *Turdus* (thrush) | Python | Email triage daemon; Gmail poll → Neotoma entities + tasks for Apis; invoice detection routed to Monedula | active |
 | **Tyto** | *Tyto* (barn owl) | Python | Screenshot watcher + meeting-recording transcription; visual counterpart to Strix | active |
@@ -71,12 +75,10 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 | **Cicada** | *Gryllus* (field cricket) — common insect name adopted for voice/ASR robustness (was Gryllus) | Issue worker — fixes issues, opens PRs across repos via passed-in identity | active (dispatched by Formica / Apis / neotoma-agent) |
 | **Vanellus** | *Vanellus* (lapwing) | PR steward — triages and merges eligible PRs | active (dispatched by Formica / neotoma-agent) |
 | **Loxia** | *Loxia* (crossbill) | Baseline PR reviewer on every PR (GHA-invoked), with per-domain specialist fan-out (Monedula on finance paths, Gorilla on health paths) | active (GHA) |
-| **Sturnus** | *Sturnus* (starling) | Feedback digester — extracts entities from `product_feedback` | planned (Phase 6) |
 | **Strigops** | *Strigops* (kakapo) | Analytics gatherer — pluggable backends: Umami, GA4, GSC, X, Typefully, LinkedIn, Instagram | planned (Phase 7) |
-| **Corvus** | *Corvus* (crow) | Outbound poster — sends drafts to social platforms after operator approval | planned |
+| **Corvus** | *Corvus* (crow) | Content writer & social voice — long-form technical posts, build-in-public threads, changelog narratives, retrospectives, platform-adapted social content | active |
 | **Lanius** | *Lanius* (shrike) | GitHub workflow coordinator — GHA cron; full lifecycle: issues → workflow gates → PR creation → review chain → Struthio release trigger | active (GHA + schema; Phase 6 full) |
 | **Anas** | *Anas* (duck) | Receipt extractor — Amazon, restaurant, hotel | planned |
-| **Aquila** | *Aquila* (eagle) | Quarterly portfolio review | planned |
 | **Falco** | *Falco* (falcon) | Deployment monitor — GitHub Actions polling | planned |
 | **Tachornis** | *Tachornis* (swift) | Deploy watchdog — post-merge sanity, distinct from Falco | planned |
 | **Pica** | *Pica* (magpie) | Disk cleanup | active (skill) |
@@ -105,9 +107,9 @@ Covers all Ateles agents: T1 hosts, T2 resident agents, T3 daemons, and T4 invoc
 
 | Name | Genus | Role | Status |
 |---|---|---|---|
-| **Pavo** | *Pavo* (peacock) | Product manager — prioritisation synthesiser, tagging governance | planned (Phase 8) |
+| **Pavo** | *Pavo* (peacock) | Product manager — prioritisation synthesis, tradeoff analysis, sequencing recommendations | active |
 | **Manucode** | *Manucodia* (manucode, a bird-of-paradise) — adopted for voice/ASR robustness (was Paradisaea) | Designer — UI/copy review, visual consistency | planned (Phase 8) |
-| **Waxwing** | *Bombycilla* (waxwing) — common name adopted as agent name for voice/ASR robustness (was Bombycilla) | Technical architect — layered architecture, schema review | planned (Phase 8) |
+| **Waxwing** | *Bombycilla* (waxwing) — common name adopted as agent name for voice/ASR robustness (was Bombycilla) | Technical architect — architecture reviews, schema design, interface contracts, ADRs | active |
 | **Phoenicurus** | *Phoenicurus* (redstart) | QA — test coverage, regression, scorecard | planned (Phase 8) |
 | **Accipiter** | *Accipiter* (hawk) | UX & product design — user flows, information architecture, interaction specs | planned (Phase 8) |
 | **Mimus** | *Mimus* (mockingbird) | Growth / go-to-market — ICP research, launch announcements, distribution channels | planned (Phase 8) |
