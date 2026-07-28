@@ -69,9 +69,11 @@ def _trigger(**overrides):
 class _StubNotifier:
     def __init__(self):
         self.sent = []
+        self.priorities = []
 
     def send(self, message, priority=None, handler=None):
         self.sent.append(message)
+        self.priorities.append(priority)
 
 
 def _config():
@@ -4633,6 +4635,60 @@ def test_session_limit_is_distinct_from_auth_failure():
     assert swarm_dispatch.detect_session_limit(auth) is False
 
 
+def test_handle_panel_session_limit_notifies_at_info_not_digest(monkeypatch):
+    # Regression for the live AttributeError: Priority.DIGEST doesn't exist on
+    # the Priority enum (lib/notify/notifier.py), so the notifier.send() call
+    # raised and was swallowed by the surrounding `except Exception`, meaning
+    # the operator got NO notification at all for a throttled review. INFO is
+    # the enum's existing "always digest, nothing to fix" priority.
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())  # no github_token -> comment post short-circuits
+    trig = _trigger(number=264, repository="owner/repo")
+    asyncio.run(
+        d._handle_panel_session_limit(
+            trig, None, "vanellus",
+            "You've hit your session limit · resets 7:30pm", "",
+        )
+    )
+    assert len(notifier.sent) == 1
+    assert notifier.priorities == [swarm_dispatch.Priority.INFO]
+    assert "paused on a usage limit" in notifier.sent[0]
+
+
+def test_handle_panel_session_limit_attributes_to_apis_dispatcher(monkeypatch):
+    # Regression: the deferral comment carried
+    # attribution_header('vanellus', 'PR steward') while its own body says
+    # "Posted by the Apis dispatcher" — a dispatcher-originated infra notice
+    # must use attribution_header('apis', 'swarm dispatcher'), matching the
+    # sibling _handle_panel_auth_failure.
+    comment_bodies: list[str] = []
+
+    class _CapturingClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def get(self, url, **kwargs):
+            return _FakeListResp([])
+        async def post(self, url, **kwargs):
+            comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+            return _FakeResp(201)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    d = SwarmDispatcher(_StubNotifier(), DispatchConfig(neotoma_token="", github_token="x"))
+    trig = _trigger(number=264, repository="owner/repo")
+    asyncio.run(
+        d._handle_panel_session_limit(
+            trig, None, "vanellus",
+            "You've hit your session limit · resets 7:30pm", "",
+        )
+    )
+    assert len(comment_bodies) == 1
+    assert attribution_header("apis", "swarm dispatcher") in comment_bodies[0]
+    assert attribution_header("vanellus", "PR steward") not in comment_bodies[0]
+
+
 def test_parse_limit_reset_delay_reads_the_clock():
     from datetime import datetime
     now = datetime(2026, 7, 23, 16, 45, 0)  # 4:45pm
@@ -4857,3 +4913,23 @@ def test_forward_looking_lens_has_no_evidence_bar():
     )
     assert "EVIDENCE BAR" not in prompt
     assert "FORWARD-LOOKING" in prompt
+
+
+def test_auth_failure_comment_not_headed_as_a_verdict():
+    # #264 ux: a "not a review verdict" notice must not open with the
+    # vanellus/PR-steward header — at a skim that reads as the verdict it
+    # disclaims. Header must agree with the footer (dispatcher-posted).
+    from swarm_dispatch import compose_auth_failure_comment
+    body = compose_auth_failure_comment("waxwing")
+    header = body.split("\n")[1]
+    assert "swarm dispatcher" in header
+    assert "PR steward" not in header
+    assert "not** a review verdict" in body  # body still disclaims
+
+
+def test_real_vanellus_fallback_keeps_the_steward_header():
+    # The genuine aggregation fallback IS a verdict, so its vanellus/PR-steward
+    # header is correct — don't over-correct it along with the notice above.
+    from swarm_dispatch import compose_vanellus_fallback_comment
+    body = compose_vanellus_fallback_comment("**APPROVE**")
+    assert "PR steward" in body.split("\n")[1]

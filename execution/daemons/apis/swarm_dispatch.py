@@ -861,7 +861,12 @@ def compose_auth_failure_comment(agent: str) -> str:
     than a bare 'could not post' that reads like the agent's verdict."""
     return (
         f"{_VANELLUS_COMMENT_MARKER}\n"
-        f"{attribution_header('vanellus', 'PR steward')}\n\n"
+        # Attribute to the dispatcher, not Vanellus: this is NOT a Vanellus
+        # verdict, and its own body + footer say so. A vanellus/PR-steward header
+        # on a "not a verdict" notice reads, at a skim, exactly like the verdict
+        # it is disclaiming — the same "looked like a verdict" bug this PR's
+        # deferral marker was written to avoid, at the header level (#264 ux).
+        f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
         f"⚠️ **Panel review unavailable — agent credential failure.** The `{agent}` "
         "panel agent (spawned as `claude --print` by the Apis dispatcher) could "
         "not authenticate to the Anthropic API (401). This is an infrastructure "
@@ -4320,24 +4325,25 @@ class SwarmDispatcher:
             f"[{DAEMON_NAME}] {agent} panel on {t.repository}#{t.number} hit a "
             f"usage limit; deferring review resume until {iso} (~{delay}s)"
         )
-        # Notify at DIGEST, not BLOCKER: nothing for the operator to fix — it
-        # self-resolves. (An operator who wants it sooner can top up / wait.)
+        # Notify at INFO (always-digest), not BLOCKER: nothing for the operator
+        # to fix — it self-resolves. (An operator who wants it sooner can top
+        # up / wait.)
         try:
             self.notifier.send(
                 f"⏳ Swarm review on {t.repository}#{t.number} paused on a usage "
                 f"limit; auto-resumes at {iso}. No action needed.",
-                priority=Priority.DIGEST,
+                priority=Priority.INFO,
                 handler=DAEMON_NAME,
             )
         except Exception as exc:
-            log.error(f"[{DAEMON_NAME}] session-limit notice failed: {exc}")
+            log.error(f"[{DAEMON_NAME}] session-limit notice failed: {exc}", exc_info=True)
 
         repo_token = _token_for_repo(t.repository)
         if not repo_token:
             return
         body = (
             f"{self._REVIEW_DEFERRED_MARKER.format(iso=iso)}\n"
-            f"{attribution_header('vanellus', 'PR steward')}\n\n"
+            f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
             "⏳ **Review incomplete — panel throttled by a usage limit.** The "
             f"`{agent}` aggregation could not run because the model call hit a "
             "session/usage limit. This is **not** a verdict — the PR has not been "
