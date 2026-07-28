@@ -427,6 +427,29 @@ Be precise and terse in the Telegram/email messages. No motivational filler.
 """
 
 
+def _agent_env() -> dict:
+    """Environment for the headless `claude --print` prepare agent.
+
+    Prefer the Claude Code Max-subscription OAuth token over a pay-per-token
+    API key: when BOTH CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are set,
+    `claude --print` uses the API key — and if that account has no credits the
+    agent dies immediately with "Credit balance is too low", producing no RC and
+    no notification (observed 2026-07-27, the first live prepare run). Dropping
+    ANTHROPIC_API_KEY from the CHILD env only (never the daemon's own) routes the
+    agent through the subscription, so releases don't depend on a funded API
+    account. If only the API key is present, we leave it untouched.
+    """
+    env = dict(os.environ)
+    if env.get("CLAUDE_CODE_OAUTH_TOKEN") and env.get("ANTHROPIC_API_KEY"):
+        env.pop("ANTHROPIC_API_KEY", None)
+        log.info(
+            "prepare agent: using CLAUDE_CODE_OAUTH_TOKEN (dropped ANTHROPIC_API_KEY "
+            "from the child env so the agent bills the Max subscription, not the "
+            "pay-per-token API account)"
+        )
+    return env
+
+
 def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool:
     import shutil
 
@@ -448,7 +471,7 @@ def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool
         subprocess.Popen(
             [claude, "--print", "--dangerously-skip-permissions", prompt],
             cwd=str(NEOTOMA_REPO_ROOT),
-            env=os.environ,
+            env=_agent_env(),
             stdout=open(AGENT_LOG, "a"),
             stderr=subprocess.STDOUT,
             start_new_session=True,
