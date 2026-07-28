@@ -2003,6 +2003,7 @@ class SwarmDispatcher:
                         expectations.get(lens.agent, ""),
                         parent,
                         has_worktree=bool(qa_worktree),
+                        owns_pending_gate=lens.lens in pending_gates,
                     ),
                     github_token=_token_for_agent_on_repo(
                         lens.agent, trigger.repository
@@ -4472,6 +4473,7 @@ class SwarmDispatcher:
         expectation: str,
         parent: int | None = None,
         has_worktree: bool = False,
+        owns_pending_gate: bool = False,
     ) -> str:
         """Build a lens panelist's prompt.
 
@@ -4548,6 +4550,40 @@ class SwarmDispatcher:
                 f"(`**{EXPECTATION_MARKER} ({lens.lens})**`) and all item text "
                 f"exactly; only toggle the checkboxes from `[ ]` to `[x]`."
             )
+        # Gate-writeback (ateles: PR-panel sign-off never reached gate_status).
+        # A lens seated because it OWNS a pending pre-impl gate (arch/ux/pm) must
+        # transcribe its own non-blocking verdict into the parent issue's
+        # `gate_status` — otherwise the panel re-runs the lens, the lens signs off
+        # in a PR comment, but `gate_status.<gate>` stays `pending`, so Lanius
+        # re-blocks next round and the PR loops forever (observed on #1944: arch
+        # SIGNED_OFF in comments across multiple rounds while gate_status.arch
+        # stayed pending). This is the missing writeback: the panelist owns its
+        # own gate_status mutation (the dispatcher never writes gate state).
+        gate_writeback_block = ""
+        if parent and owns_pending_gate and not lens.forward_looking:
+            gate_writeback_block = (
+                f"\n\nGATE WRITEBACK — you own the pre-impl `{lens.lens}` gate on "
+                f"parent issue #{parent}, which is currently `pending`. Your PR "
+                "comment is NOT sufficient to clear it; the gate lives on the "
+                "issue entity and Lanius reads it as authoritative. After you post "
+                "your review, you MUST reconcile `gate_status` yourself:\n"
+                f"  1. Retrieve the parent issue entity: "
+                f"`retrieve_entity_by_identifier(entity_type='issue', "
+                f"identifier='{parent}', by='github_number')` and read its "
+                "`gate_status`.\n"
+                f"  2. If — and ONLY if — your verdict on THIS PR is a clean "
+                f"sign-off (no `[BLOCKING]` findings from your `{lens.lens}` "
+                f"lens), `correct()` the issue entity so `gate_status.{lens.lens}` "
+                "→ `\"signed_off\"`. MERGE the existing map: preserve every other "
+                "gate's value exactly (never downgrade another gate), change only "
+                f"your own `{lens.lens}` key. Use idempotency_key "
+                f"`gate-signoff-{lens.lens}-{t.number}`.\n"
+                "  3. If your verdict has any blocking finding, LEAVE the gate "
+                "`pending` (do not sign off) — the block stands until the author "
+                "resolves it and you re-review.\n"
+                "Do this even though this is a PR-panel review, not the issue "
+                "pipeline: the sign-off only counts once it is in `gate_status`."
+            )
         _panelist_role = f"{lens.lens} lens panelist"
         if is_provisioned(lens.agent):
             comment_identity_block = (
@@ -4579,6 +4615,7 @@ class SwarmDispatcher:
             f"{comment_identity_block}\n\n"
             f"{blocking_rules}"
             f"{checkoff_block}"
+            f"{gate_writeback_block}"
         )
 
     @staticmethod
