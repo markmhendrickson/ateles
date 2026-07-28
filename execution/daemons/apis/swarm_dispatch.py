@@ -4335,10 +4335,15 @@ class SwarmDispatcher:
 
     # ── Neotoma helpers ──────────────────────────────────────────────────────
 
-    async def _store_entities(self, entities: list[dict], idempotency_key: str) -> None:
+    async def _store_entities(
+        self, entities: list[dict], idempotency_key: str
+    ) -> dict | None:
+        """Store entities; returns the parsed response (with created entity_ids)
+        so callers that need to link the new record (e.g. a SUPERSEDES edge)
+        can do so, or None on any failure — best-effort, never crashes."""
         if not self.config.neotoma_token:
             log.warning(f"[{DAEMON_NAME}] NEOTOMA_BEARER_TOKEN unset — store skipped")
-            return
+            return None
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
@@ -4349,8 +4354,10 @@ class SwarmDispatcher:
                     },
                 )
                 resp.raise_for_status()
+                return resp.json() if resp.content else {}
         except Exception as exc:
             log.error(f"[{DAEMON_NAME}] Neotoma store failed ({idempotency_key}): {exc}")
+            return None
 
     async def _log_harness_event(self, t: SwarmTrigger) -> None:
         entities = [
@@ -4400,6 +4407,13 @@ class SwarmDispatcher:
         sha = head_sha or "head_sha_unresolved"
         now = datetime.now(timezone.utc).isoformat()
 
+        # Prior live reviews for these lenses, fetched once up front: their
+        # `review_round` seeds the new entity's round number, and their
+        # entity_id is what the post-store SUPERSEDES edge points at.
+        priors = await self._prior_live_reviews(
+            t, [lens for lens, _ in reviews], sha
+        )
+
         entities: list[dict] = []
         for lens, text in reviews:
             # Reuse the structured parser the learning pass already relies on
@@ -4417,6 +4431,9 @@ class SwarmDispatcher:
                     "files": f.files,
                 }
 
+            prior = priors.get(lens)
+            prior_round = (prior or {}).get("snapshot", {}).get("review_round") or 0
+
             entities.append(
                 {
                     "entity_type": "pr_review",
@@ -4428,6 +4445,7 @@ class SwarmDispatcher:
                     "head_sha": sha,
                     "verdict": parse_review_verdict(text) or "unparseable",
                     "status": "live",
+                    "review_round": prior_round + 1,
                     "content": text,
                     "blocking_findings": [_shape(f) for f in blocking],
                     "nonblocking_findings": [_shape(f) for f in non_blocking],
@@ -4446,13 +4464,14 @@ class SwarmDispatcher:
         digest_basis = [
             {k: v for k, v in e.items() if k != "generated_at"} for e in entities
         ]
-        await self._store_entities(
+        store_result = await self._store_entities(
             entities,
             idempotency_key=(
                 f"pr-review-{t.repository}-{t.number}-{sha[:12]}-"
                 f"{content_digest(digest_basis)}"
             ),
         )
+        new_ids_by_lens = self._new_pr_review_ids_by_lens(entities, store_result)
 
         # Supersede prior reviews for the same (repo, pr, lens) at OTHER heads.
         # Without this, every round's review reads as `live` and a consumer
@@ -4460,7 +4479,11 @@ class SwarmDispatcher:
         # ateles#269 exists to fix. Runs after the store so a failure here can
         # never cost us the new record.
         await self._supersede_prior_reviews(
-            t, [e["review_lens"] for e in entities], sha
+            t,
+            [e["review_lens"] for e in entities],
+            sha,
+            priors=priors,
+            new_ids_by_lens=new_ids_by_lens,
         )
 
         # Audit row (unchanged shape) — dispatch history, not review state.
@@ -4516,11 +4539,103 @@ class SwarmDispatcher:
             log.warning(f"[{DAEMON_NAME}] Neotoma {path} failed: {exc}")
             return None
 
+    async def _matching_prior_reviews(
+        self,
+        t: SwarmTrigger,
+        lenses: list[str],
+        current_sha: str,
+    ) -> list[dict]:
+        """Live `pr_review` entities for (repo, pr, lens) at a head OTHER than
+        `current_sha`, one per lens at most (already-superseded rows excluded).
+
+        Shared by `_persist_panel_reviews` (round-number lookup, before the new
+        entities are built) and `_supersede_prior_reviews` (the supersede pass,
+        after they're stored) so both read the identical prior-round record
+        instead of two queries risking a different snapshot between them.
+        """
+        # Filter server-side on (repository, pr_number) rather than scanning a
+        # capped page client-side (qa lens, ateles#296): `pr_review` grows
+        # without bound — one row per lens per head per PR, forever — so any
+        # fixed client-side cap eventually silently stops finding prior rounds
+        # and leaves two "live" reviews for one lens, the exact pathology
+        # ateles#269 exists to eliminate. Scoping the query to a single PR keeps
+        # the result set inherently small (lenses x heads on ONE PR).
+        data = await self._neotoma_post(
+            "entities/query",
+            {
+                "entity_type": "pr_review",
+                "snapshot_filters": {
+                    "repository": {"op": "eq", "value": t.repository},
+                    "pr_number": {"op": "eq", "value": t.number},
+                },
+                "limit": 200,
+                "include_snapshots": True,
+            },
+        )
+        if not data:
+            return []
+        matches = []
+        for entity in data.get("entities", []):
+            snap = entity.get("snapshot") or {}
+            if (
+                snap.get("repository") != t.repository
+                or str(snap.get("pr_number")) != str(t.number)
+                or snap.get("review_lens") not in lenses
+                or snap.get("head_sha") == current_sha
+                or snap.get("status") == "superseded"
+            ):
+                continue
+            if entity.get("entity_id"):
+                matches.append(entity)
+        return matches
+
+    async def _prior_live_reviews(
+        self,
+        t: SwarmTrigger,
+        lenses: list[str],
+        current_sha: str,
+    ) -> dict[str, dict]:
+        """Map lens -> its prior live review entity (for `review_round` seeding).
+
+        Best-effort: an empty map (e.g. Neotoma unavailable) just means every
+        new entity starts at round 1, which is correct for a first-ever review.
+        """
+        by_lens: dict[str, dict] = {}
+        for entity in await self._matching_prior_reviews(t, lenses, current_sha):
+            lens = (entity.get("snapshot") or {}).get("review_lens")
+            if lens:
+                by_lens[lens] = entity
+        return by_lens
+
+    def _new_pr_review_ids_by_lens(
+        self, entities: list[dict], store_result: dict | None
+    ) -> dict[str, str]:
+        """Map review_lens -> newly-stored entity_id from a `/store` response.
+
+        `store` echoes back one result per input entity in the same order
+        (by `observation_index`), so zipping the request list against the
+        response gives the new id for each lens without a second round trip.
+        """
+        if not store_result:
+            return {}
+        by_index = {
+            r.get("observation_index"): r.get("entity_id")
+            for r in store_result.get("entities", [])
+            if r.get("entity_id")
+        }
+        return {
+            e["review_lens"]: by_index[i]
+            for i, e in enumerate(entities)
+            if i in by_index
+        }
+
     async def _supersede_prior_reviews(
         self,
         t: SwarmTrigger,
         lenses: list[str],
         current_sha: str,
+        priors: dict[str, dict] | None = None,
+        new_ids_by_lens: dict[str, str] | None = None,
     ) -> None:
         """Flip prior same-(repo, pr, lens) reviews at other heads to superseded.
 
@@ -4533,24 +4648,24 @@ class SwarmDispatcher:
         Reviews already `superseded` are skipped so repeat runs are idempotent.
         Best-effort throughout — a Neotoma failure must not cost the new record,
         which is already stored by the time this runs.
-        """
-        data = await self._neotoma_post(
-            "entities/query",
-            {"entity_type": "pr_review", "limit": 200, "include_snapshots": True},
-        )
-        if not data:
-            return
 
-        for entity in data.get("entities", []):
+        `priors` lets a caller that already fetched the matching prior entities
+        (e.g. `_persist_panel_reviews`, for `review_round`) pass them in instead
+        of triggering a second identical query; omitted, this method queries for
+        itself so it remains independently callable (as the existing tests do).
+        When `new_ids_by_lens` is supplied, a `SUPERSEDES` edge is created from
+        the new entity to each prior it demotes — the queryable graph trail
+        acceptance criterion #2 on ateles#269 asks for, distinct from `status`.
+        """
+        entities = (
+            list(priors.values())
+            if priors is not None
+            else await self._matching_prior_reviews(t, lenses, current_sha)
+        )
+        new_ids_by_lens = new_ids_by_lens or {}
+
+        for entity in entities:
             snap = entity.get("snapshot") or {}
-            if (
-                snap.get("repository") != t.repository
-                or str(snap.get("pr_number")) != str(t.number)
-                or snap.get("review_lens") not in lenses
-                or snap.get("head_sha") == current_sha
-                or snap.get("status") == "superseded"
-            ):
-                continue
             entity_id = entity.get("entity_id", "")
             if not entity_id:
                 continue
@@ -4578,6 +4693,16 @@ class SwarmDispatcher:
                     ),
                 },
             )
+            new_id = new_ids_by_lens.get(snap.get("review_lens"))
+            if new_id:
+                await self._neotoma_post(
+                    "create_relationship",
+                    {
+                        "source_entity_id": new_id,
+                        "target_entity_id": entity_id,
+                        "relationship_type": "SUPERSEDES",
+                    },
+                )
             log.info(
                 f"[{DAEMON_NAME}] {t.repository}#{t.number}: superseded "
                 f"{snap.get('review_lens')} review at "
