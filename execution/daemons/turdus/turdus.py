@@ -561,7 +561,14 @@ def _read_message_body(message_id: str) -> str:
             return ""
         data = json.loads(_strip_keyring_preamble(result.stdout))
         # gws returns the body under a few possible keys depending on version.
-        for key in ("body", "text", "plain", "snippet"):
+        # Current gws `+read` uses `body_text` (plaintext) / `body_html`. The
+        # older names are kept as fallbacks. `body_text` MUST be checked — its
+        # absence here silently returned "" and made the release/PR approval
+        # handlers see no body, so an operator `approve <version>` reply matched
+        # the subject but "carried no token" and was never routed (observed on
+        # the first live release-approval, 2026-07-27). Prefer plaintext; fall
+        # back to HTML only if that's all that's present.
+        for key in ("body_text", "body", "text", "plain", "body_html", "snippet"):
             val = data.get(key)
             if isinstance(val, str) and val:
                 return val

@@ -218,3 +218,37 @@ def test_reply_approves_version_among_quoted_lines():
         "> release-approve: v0.20.0\n"
     )
     assert turdus._reply_approves_version(body, "v0.20.0")
+
+
+# ── _read_message_body must read gws's `body_text` key ──────────────────────
+#
+# Regression: gws `+read` returns the plaintext under `body_text`, but the
+# reader only looked for body/text/plain/snippet — so it returned "" and every
+# email `approve <version>` reply "carried no token" and was never routed
+# (first live release-approval, 2026-07-27).
+
+
+def test_read_body_prefers_body_text(monkeypatch):
+    import subprocess as _sp
+
+    class _R:
+        returncode = 0
+        stderr = ""
+        stdout = '{"body_text":"approve v0.20.0\\n> release-approve: v0.20.0","body_html":"<p>x</p>"}'
+
+    monkeypatch.setattr(_sp, "run", lambda *a, **k: _R())
+    body = turdus._read_message_body("msg-1")
+    assert "release-approve: v0.20.0" in body
+    assert body.startswith("approve v0.20.0")
+
+
+def test_read_body_falls_back_to_html_when_no_text(monkeypatch):
+    import subprocess as _sp
+
+    class _R:
+        returncode = 0
+        stderr = ""
+        stdout = '{"body_html":"<p>only html</p>"}'
+
+    monkeypatch.setattr(_sp, "run", lambda *a, **k: _R())
+    assert turdus._read_message_body("msg-2") == "<p>only html</p>"
