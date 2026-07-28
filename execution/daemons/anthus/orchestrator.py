@@ -356,8 +356,11 @@ async def resolve_unmet_preconditions(
             if not entity_type:
                 continue
             try:
+                # POST /entities/query — /retrieve_entities is 404 on the bare
+                # HTTP server (see the note on the workflow-load call above);
+                # same response shape, entity_type filtered server-side.
                 resp = await client.post(
-                    f"{NEOTOMA_BASE_URL}/retrieve_entities",
+                    f"{NEOTOMA_BASE_URL}/entities/query",
                     json={
                         "entity_type": entity_type,
                         "limit": 50,

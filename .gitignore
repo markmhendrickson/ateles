@@ -82,6 +82,10 @@ execution/daemons/*/*.plist
 # Daemon runtime state
 execution/daemons/**/.monedula_last_run
 execution/daemons/**/.monedula_tg_offset
+execution/daemons/**/.monedula_pending.json
+execution/daemons/**/.monedula_receipts_tmp/
+execution/daemons/**/.monedula_reply_ids.json
+execution/daemons/**/.monedula_approvals_sent.json
 
 # Private docs submodule (not part of public repo)
 docs/private/

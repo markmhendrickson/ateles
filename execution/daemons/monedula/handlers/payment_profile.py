@@ -59,10 +59,17 @@ class PaymentProfile:
     amount_eur: int
 
     # Wise-specific
-    contact_id: str = ""  # Neotoma contact_id prefix for IBAN lookup
-    contact_category: str = ""  # fallback: contacts.parquet category
-    contact_platform: str = ""  # fallback: contacts.parquet platform
+    contact_id: str = ""  # Neotoma contact entity id — payee resolved from its snapshot
+    contact_category: str = ""  # (legacy, unused since parquet removal)
+    contact_platform: str = ""  # (legacy, unused since parquet removal)
     wise_reference: str = ""  # Wise transfer reference
+    # Direct recipient resolution (preferred over contacts.parquet when set):
+    # a verified Wise recipient/account id reuses an already name-checked payee;
+    # iban + recipient_name let the profile carry the payee without parquet.
+    wise_recipient_id: str = ""  # verified Wise account id (skips recipient creation)
+    wise_iban: str = ""  # payee IBAN carried on the profile
+    wise_recipient_name: str = ""  # payee legal name for a profile-carried IBAN
+    wise_legal_type: str = ""  # "PRIVATE" (default) | "BUSINESS" for company payees
 
     # BTC-specific
     btc_address: str = ""
@@ -71,10 +78,61 @@ class PaymentProfile:
     neotoma_task_id: str = ""
     task_keywords: list[str] = field(default_factory=list)
 
+    # Calendar identity — the precise recurring-series id for this profile's
+    # sessions. When set, matches() keys on it (via an event's recurringEventId)
+    # instead of substring-matching the title, so an unrelated event that merely
+    # mentions the payee ("Manel work session") can never trigger a payment.
+    calendar_recurring_event_id: str = ""
+
     @property
     def name(self) -> str:
         """Unique slug used as handler name and in Telegram replies."""
         return self.prefix.lower()
+
+
+def effective_amount_eur(profile: "PaymentProfile", match: dict | None = None) -> int:
+    """Resolve the amount to charge for THIS payment.
+
+    A recurring obligation normally pays its profile's standing rate. A single
+    session can deviate (a group class, a double session, a partial refund)
+    without editing the standing rate: the task snapshot carries
+    `amount_eur_override`, which execute_approved_tasks() copies onto the match
+    dict as `amount_eur_override`.
+
+    The override is SESSION-SCOPED by construction: it lives on the task
+    alongside due_date, and the operator clears it when the session is paid (see
+    monedula._clear_amount_override). It is deliberately NOT persisted onto the
+    profile, so a one-off can never silently become the standing rate.
+
+    Invalid or non-positive overrides are ignored (fall back to the standing
+    rate) rather than raising — a malformed override must never send €0 or crash
+    the daemon mid-payment.
+    """
+    if not match:
+        return profile.amount_eur
+    raw = match.get("amount_eur_override")
+    if raw is None or str(raw).strip() == "":
+        return profile.amount_eur
+    try:
+        override = int(raw)
+    except (TypeError, ValueError):
+        log.warning(
+            f"payment_profile {profile.label!r} invalid amount_eur_override="
+            f"{raw!r} — using standing rate €{profile.amount_eur}"
+        )
+        return profile.amount_eur
+    if override <= 0:
+        log.warning(
+            f"payment_profile {profile.label!r} amount_eur_override={override} "
+            f"must be positive — using standing rate €{profile.amount_eur}"
+        )
+        return profile.amount_eur
+    if override != profile.amount_eur:
+        log.info(
+            f"payment_profile {profile.label!r} one-off override: "
+            f"€{override} (standing rate €{profile.amount_eur})"
+        )
+    return override
 
 
 def load_profiles_from_neotoma() -> list[PaymentProfile]:
@@ -159,8 +217,17 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
                 keywords_raw = [k.strip() for k in keywords_raw.split(",") if k.strip()]
         calendar_keywords = [str(k).strip().lower() for k in keywords_raw if k]
 
-        if not calendar_keywords:
-            log.warning(f"payment_profile {label!r} has no calendar_keywords — skipped")
+        # A profile is triggerable two ways (mirrors monedula.py): by a matching
+        # calendar event (needs calendar_keywords) OR by a linked due Neotoma task
+        # (needs neotoma_task_id). One-off / invoice payments have no recurring
+        # calendar event, so keep task-linked profiles even without keywords —
+        # only skip a profile that has neither trigger.
+        has_task_link = bool(str(snap.get("neotoma_task_id", "")).strip())
+        if not calendar_keywords and not has_task_link:
+            log.warning(
+                f"payment_profile {label!r} has no calendar_keywords and no "
+                f"neotoma_task_id — untriggerable, skipped"
+            )
             continue
 
         payment_type_raw = str(snap.get("payment_type", "wise")).lower()
@@ -207,9 +274,16 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
                 contact_category=snap.get("contact_category", ""),
                 contact_platform=snap.get("contact_platform", ""),
                 wise_reference=snap.get("wise_reference", ""),
+                wise_recipient_id=str(snap.get("wise_recipient_id", "") or ""),
+                wise_iban=str(snap.get("wise_iban", "") or ""),
+                wise_recipient_name=str(snap.get("wise_recipient_name", "") or ""),
+                wise_legal_type=str(snap.get("wise_legal_type", "") or ""),
                 btc_address=snap.get("btc_address", ""),
                 neotoma_task_id=snap.get("neotoma_task_id", ""),
                 task_keywords=task_keywords,
+                calendar_recurring_event_id=str(
+                    snap.get("calendar_recurring_event_id", "") or ""
+                ),
             )
         )
 
@@ -313,6 +387,10 @@ def _load_profile(prefix: str) -> PaymentProfile | None:
         contact_category=env("CONTACT_CATEGORY"),
         contact_platform=env("CONTACT_PLATFORM"),
         wise_reference=env("WISE_REFERENCE"),
+        wise_recipient_id=env("WISE_RECIPIENT_ID"),
+        wise_iban=env("WISE_IBAN"),
+        wise_recipient_name=env("WISE_RECIPIENT_NAME"),
+        wise_legal_type=env("WISE_LEGAL_TYPE"),
         # btc
         btc_address=env("BTC_ADDRESS"),
         # neotoma

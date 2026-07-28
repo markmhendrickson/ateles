@@ -110,8 +110,13 @@ async def load_state_for(work_entity_id: str) -> dict[str, dict[str, Any]]:
     }
     try:
         async with httpx.AsyncClient(headers=headers, timeout=15) as client:
+            # Read via POST /entities/query — the bare prod HTTP server does NOT
+            # expose /retrieve_entities (404; that path only exists behind the
+            # MCP layer). /entities/query returns the same {entities, total, ...}
+            # shape with the entity_type filter applied and snapshots included.
+            # (Matches the migration already done in orchestrator.py.)
             resp = await client.post(
-                f"{NEOTOMA_BASE_URL}/retrieve_entities",
+                f"{NEOTOMA_BASE_URL}/entities/query",
                 json={
                     "entity_type": "participation_record",
                     "limit": 200,

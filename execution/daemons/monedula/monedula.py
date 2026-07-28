@@ -307,15 +307,873 @@ def _task_to_preview_item(task: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Task-based auto-execute (approval-gated, idempotent, dry-run-safe)
+# ---------------------------------------------------------------------------
+#
+# Approval model (operator chose "Neotoma approval flag", 2026-07-13): a due
+# payment task executes only when its snapshot carries `payment_approved: true`.
+# The operator sets that field (via Inspector / CLI / the Ateles agent) after
+# reviewing the emailed preview. This replaces the interactive Telegram reply
+# for the email-primary channel, and is fully auditable in Neotoma.
+#
+# Idempotency: a task whose status is already "done" (or already carries a
+# `payment_event_id`) is never re-executed — no double-pay.
+#
+# Dry-run safety: MONEDULA_DRYRUN defaults to "1" (on). While on, handlers are
+# invoked with a dry_run flag / no real broadcast, so wiring can be verified
+# without moving money. The operator flips MONEDULA_DRYRUN=0 to arm real sends.
+
+
+def _dryrun_enabled() -> bool:
+    """True unless the operator has explicitly armed real sends (MONEDULA_DRYRUN=0)."""
+    return os.environ.get("MONEDULA_DRYRUN", "1") != "0"
+
+
+def _task_fields(task: dict) -> dict:
+    return task.get("snapshot") or task.get("fields") or task
+
+
+def _task_is_approved(task: dict) -> bool:
+    """True iff the task snapshot explicitly flags payment_approved truthy."""
+    val = _task_fields(task).get("payment_approved")
+    return str(val).strip().lower() in ("true", "1", "yes")
+
+
+def _session_paid_marker(task: dict) -> str:
+    """Durable per-session idempotency key for a recurring payment.
+
+    Keyed to the task's current due_date (the session being paid), so a paid
+    session stays blocked across polls/restarts, while the NEXT session — which
+    carries a rolled due_date — gets a different key and is not wrongly blocked.
+    This is why we SET payment_event_id to this marker on success rather than
+    clearing it: clearing relied on a single companion write (payment_approved
+    reset) succeeding, and a failed write re-paid the session.
+    """
+    fields = _task_fields(task)
+    session = str(fields.get("due_date") or "").strip()
+    return f"paid:{session}" if session else ""
+
+
+def _task_already_paid(task: dict) -> bool:
+    """True iff the task is already settled for THIS session.
+
+    - status == 'done' → settled (one-off tasks).
+    - Any non-empty payment_event_id blocks a one-off task (never re-pay).
+    - For a recurring obligation, a session-scoped marker (paid:<due_date>)
+      blocks only the session it names; once due_date rolls to the next session
+      the marker no longer matches, so the next session is payable. A non-marker
+      payment_event_id (legacy real reference) still blocks, conservatively.
+    """
+    fields = _task_fields(task)
+    if str(fields.get("status") or "").strip().lower() == "done":
+        return True
+    pe = str(fields.get("payment_event_id") or "").strip()
+    if not pe:
+        return False
+    if pe.startswith("paid:"):
+        # Session marker: blocks only its own session. If it names a different
+        # (older) session than the current due_date, this session is unpaid.
+        return pe == _session_paid_marker(task)
+    return True
+
+
+def _effective_task_amount(task: dict, handler) -> Any:
+    """The amount this task will actually charge (one-off override, else standing rate).
+
+    Mirrors handlers.payment_profile.effective_amount_eur() so the daemon's
+    logging and approval email quote the SAME figure the handler will send —
+    an override must never be invisible at the moment the operator approves.
+    """
+    profile = getattr(handler, "profile", None)
+    standing = getattr(profile, "amount_eur", None)
+    if profile is None:
+        return standing
+    try:
+        from handlers.payment_profile import effective_amount_eur
+    except ImportError:  # package-relative import when run as a module
+        from .handlers.payment_profile import effective_amount_eur  # type: ignore[no-redef]
+    fields = _task_fields(task)
+    return effective_amount_eur(
+        profile, {"amount_eur_override": fields.get("amount_eur_override")}
+    )
+
+
+def _handler_for_task(task: dict, handlers: list) -> Any | None:
+    """Return the handler whose profile.neotoma_task_id points at this task."""
+    tid = str(task.get("entity_id") or task.get("id") or "").strip()
+    if not tid:
+        return None
+    for h in handlers:
+        prof_tid = str(getattr(getattr(h, "profile", None), "neotoma_task_id", "") or "").strip()
+        if prof_tid and prof_tid == tid:
+            return h
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Email reply-to-approve (operator approves a payment by replying to its email)
+# ---------------------------------------------------------------------------
+#
+# Each due, unapproved payment gets one email whose subject carries a stable
+# per-payment token: "[APPROVE-<token>]". The operator replies APPROVE (to pay)
+# or SKIP (to decline); the body also asks them to confirm attendance for
+# session-gated payments. On the next run, process_email_approvals() scans the
+# inbox, and any message containing "APPROVE <token>" flips payment_approved=true
+# on that task (SKIP sets it false). Matching is by the exact token, so a reply
+# can never approve the wrong payment.
+
+
+def _payment_token(task_id: str, session: str = "") -> str:
+    """Short token identifying ONE session's payment.
+
+    Stable across runs for the same session (so a re-sent request matches the
+    operator's earlier reply), but DIFFERENT for the next session.
+
+    The session component is essential for a recurring obligation. Hashing the
+    task id alone yields one token for all time, and because replies are matched
+    from the inbox over a rolling window, a prior session's "APPROVE" reply
+    still sitting in the inbox re-approves the NEXT session — a payment the
+    operator never consented to, potentially at a different amount. Observed
+    2026-07-22: the Jul 16 reply (token 628BBAC3) re-approved the Jul 21
+    session, which carried a €70 one-off override rather than the €60 the
+    operator had actually approved.
+
+    Callers should pass the task's due_date as `session`. Omitting it preserves
+    the legacy task-only token (used only where no session is in scope).
+    """
+    import hashlib
+
+    basis = f"{task_id}|{session}" if session else task_id
+    h = hashlib.sha256(basis.encode()).hexdigest()[:8].upper()
+    return h
+
+
+def _task_payment_token(task: dict) -> str:
+    """Session-scoped approval token for a task (keyed to its current due_date)."""
+    tid = str(task.get("entity_id") or task.get("id") or "")
+    session = str(_task_fields(task).get("due_date") or "").strip()
+    return _payment_token(tid, session)
+
+
+def _verify_task_field(task_id: str, field: str, expected: Any) -> bool:
+    """Re-read a task field and report whether it now holds `expected`.
+
+    Write-verification for corrections: a `corrections create` that returns
+    success may still have been dropped as an idempotency replay (neotoma#1991),
+    so a payment-gating field must be read back rather than assumed.
+
+    Compared as lowercased strings, since booleans round-trip through the
+    snapshot as either real booleans or their string forms.
+    """
+    entity = _fetch_entity_by_id(task_id)
+    if not entity:
+        return False  # cannot verify -> do not claim success
+    actual = _task_fields(entity).get(field)
+    return str(actual).strip().lower() == str(expected).strip().lower()
+
+
+def _set_task_approved(task_id: str, approved: bool) -> bool:
+    """Set payment_approved on a task via the Neotoma MCP `correct` tool.
+
+    The REST `corrections create` CLI path is dead (POST /corrections 404s on the
+    bare HTTP server), so this goes through handlers.neotoma_cli.correct_field,
+    which speaks MCP. Returns True only when the value is confirmed to have landed
+    — a correction can still be dropped as an idempotency replay (neotoma#1991),
+    and this field alternates true/false, so the read-back is mandatory.
+    """
+    try:
+        from handlers.neotoma_cli import correct_field
+    except ImportError:  # pragma: no cover
+        from .handlers.neotoma_cli import correct_field  # type: ignore[no-redef]
+
+    ok = correct_field(
+        task_id, "payment_approved", "true" if approved else "false",
+        entity_type="task", label="approve",
+    )
+    if not ok:
+        log.warning(f"[approve] correct(payment_approved) submit failed on {task_id}")
+        return False
+    # Submit success is NOT proof it landed (idempotency replay — neotoma#1991).
+    if not _verify_task_field(task_id, "payment_approved", approved):
+        log.error(f"[approve] correct reported success but payment_approved did "
+                  f"not become {approved} on {task_id} — treating as NOT approved "
+                  f"(see neotoma#1991).")
+        return False
+    return True
+
+
+def _build_approval_email(task: dict, handler) -> tuple[str, str]:
+    """Return (subject, body) for a per-payment approval request email."""
+    fields = _task_fields(task)
+    tid = str(task.get("entity_id") or task.get("id") or "")
+    token = _task_payment_token(task)
+    title = str(fields.get("title") or fields.get("name") or "payment")
+    profile = getattr(handler, "profile", None)
+    standing = getattr(profile, "amount_eur", fields.get("amount") or fields.get("amount_eur") or "?")
+    amount = _effective_task_amount(task, handler)
+    if amount is None:
+        amount = standing
+    # A one-off must be visible at the moment of consent, not silently charged.
+    override_note = ""
+    if amount != standing:
+        override_note = (
+            f"\n⚠ ONE-OFF AMOUNT: €{amount} for this session only "
+            f"(standing rate is €{standing}). The standing rate is unchanged; "
+            f"the next session reverts to €{standing}.\n"
+        )
+    rail = getattr(profile, "payment_type", "?")
+    due = str(fields.get("due_date") or "")
+    ref = getattr(profile, "wise_reference", "") or ""
+
+    # Recipient (rail-specific, no secrets beyond what the operator already has).
+    if rail == "wise":
+        payee = (getattr(profile, "wise_recipient_name", "")
+                 or getattr(profile, "label", "") or "recipient")
+        dest = getattr(profile, "wise_iban", "") or getattr(profile, "wise_recipient_id", "") or ""
+    else:
+        payee = getattr(profile, "label", "") or "recipient"
+        dest = getattr(profile, "btc_address", "") or ""
+
+    subject = f"[Ateles] Approve payment: {title} €{amount} [APPROVE-{token}]"
+
+    # Session-gated payments (yoga/therapy) ask for attendance confirmation.
+    session_note = ""
+    low = (title + " " + str(fields.get("notes") or "")).lower()
+    if any(k in low for k in ("yoga", "therapy", "terapia", "session", "sesión")):
+        session_note = (
+            "\nThis is a per-session payment. Only approve if you ATTENDED the "
+            f"session on {due or 'the due date'}.\n"
+        )
+
+    dest_label = "IBAN/acct" if rail == "wise" else "Address"
+    dest_line = f"  {dest_label}: {dest}\n" if dest else ""
+
+    body = (
+        f"Payment awaiting your approval:\n\n"
+        f"  What:      {title}\n"
+        f"  Amount:    €{amount} ({rail.upper()})\n"
+        f"  To:        {payee}\n"
+        + dest_line
+        + f"  Due:       {due}\n"
+        + (f"  Reference: {ref}\n" if ref else "")
+        + override_note
+        + session_note
+        + "\nJust hit Reply and send:\n"
+        "    APPROVE      — to pay it\n"
+        "    SKIP         — to decline\n\n"
+        f"Monedula executes approved payments on its next run "
+        f"(currently {'DRY-RUN' if _dryrun_enabled() else 'LIVE'}).\n"
+        f"(Your reply is matched to this payment automatically via the subject "
+        f"line — you don't need to type any code.)\n"
+    )
+    return subject, body
+
+
+APPROVAL_SENT_FILE = Path(__file__).parent / ".monedula_approvals_sent.json"
+
+
+def _approval_sent_state() -> dict:
+    try:
+        return json.loads(APPROVAL_SENT_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _record_approval_sent(task_id: str) -> None:
+    state = _approval_sent_state()
+    state[task_id] = date.today().isoformat()
+    try:
+        APPROVAL_SENT_FILE.write_text(json.dumps(state))
+    except OSError as exc:  # noqa: BLE001
+        log.warning(f"[approve] could not record approval-sent state: {exc}")
+
+
+def send_approval_requests(due_tasks: list[dict], handlers: list) -> int:
+    """Email one approval request per due, unapproved, unpaid payment.
+
+    Asks at most ONCE PER DAY per task: Monedula polls every ~15 min to read
+    replies, and without this guard every poll would re-email the same request.
+    Returns the number of requests sent.
+    """
+    sent = 0
+    today = date.today().isoformat()
+    state = _approval_sent_state()
+    for task in due_tasks:
+        if _task_already_paid(task) or _task_is_approved(task):
+            continue
+        tid = str(task.get("entity_id") or task.get("id") or "")
+        if state.get(tid) == today:
+            continue  # already asked today — waiting on the operator's reply
+        handler = _handler_for_task(task, handlers)
+        if handler is None:
+            continue
+        subject, body = _build_approval_email(task, handler)
+        if _email_send_with_subject(subject, body):
+            sent += 1
+            _record_approval_sent(tid)
+            fields = _task_fields(task)
+            log.info(f"[approve] Sent approval request for "
+                     f"{fields.get('title')!r} (token in subject).")
+    return sent
+
+
+def process_email_approvals(due_tasks: list[dict]) -> int:
+    """Scan the inbox for APPROVE/SKIP <token> replies; apply to matching tasks.
+
+    Returns the number of tasks whose approval state was changed. Only tasks in
+    `due_tasks` are eligible, and matching is by exact per-payment token.
+    """
+    if os.environ.get("ATELES_NOTIFY_EMAIL", "0") != "1":
+        return 0
+    token_to_task = {}
+    for task in due_tasks:
+        tid = str(task.get("entity_id") or task.get("id") or "")
+        if tid and not _task_already_paid(task):
+            # Session-scoped: a PRIOR session's reply must not approve this one.
+            token_to_task[_task_payment_token(task)] = tid
+    if not token_to_task:
+        return 0
+
+    replies = _read_reply_texts(list(token_to_task.keys()))
+    changed = 0
+    for text in replies:
+        up = text.upper()
+        for token, tid in token_to_task.items():
+            # The token rides along in the quoted subject of the reply
+            # ("Re: … [APPROVE-<token>]"), so the operator never types it.
+            if token not in up:
+                continue
+            verdict = _reply_verdict(up, token)
+            if verdict is None:
+                continue
+            if _set_task_approved(tid, verdict):
+                log.info(f"[approve] Email {'APPROVE' if verdict else 'SKIP'} "
+                         f"for token {token} → task {tid}")
+                changed += 1
+    return changed
+
+
+def _reply_verdict(up: str, token: str) -> bool | None:
+    """Return True (approve), False (skip), or None (no verdict) for a reply.
+
+    Accepts a bare "APPROVE"/"SKIP" (the token is matched separately from the
+    subject line), and the explicit "APPROVE <token>" form. SKIP wins if both
+    appear, so an ambiguous reply never pays by accident.
+    """
+    # Strip the quoted original: Gmail plain-text replies put the operator's own
+    # words FIRST, then "On <date> ... wrote:" followed by the quoted request
+    # (which itself contains the words APPROVE and SKIP). Only read the part the
+    # operator actually typed, or a quoted instruction would count as a verdict.
+    body = up
+    for marker in ("\nON ", "\n-----ORIGINAL", "\n________"):
+        idx = body.find(marker)
+        if idx > 0:
+            body = body[:idx]
+            break
+
+    verdict = None
+    for line in body.splitlines():
+        s = line.strip().rstrip(".!")
+        if s.startswith(">") or "JUST HIT REPLY" in s or "TO DECLINE" in s:
+            continue
+        # Ignore the subject line itself (it always contains "APPROVE-<token>").
+        if s.startswith("RE:") or s.startswith("[ATELES]"):
+            continue
+        if s in ("SKIP", f"SKIP {token}", f"SKIP-{token}"):
+            return False  # SKIP is decisive — never pay on an ambiguous reply
+        if s in ("APPROVE", "YES", f"APPROVE {token}", f"APPROVE-{token}"):
+            verdict = True
+    return verdict
+
+
+def _gws_json(args: list[str], timeout: int = 45) -> Any:
+    """Run a gws command and parse its JSON, tolerating banner/warning preamble."""
+    import shutil
+
+    gws = shutil.which("gws")
+    if not gws:
+        return None
+    try:
+        r = subprocess.run([gws, *args], capture_output=True, text=True,
+                           timeout=timeout, env=os.environ)
+        if r.returncode != 0:
+            log.warning(f"[approve] gws {args[:2]} failed: {(r.stderr or '').strip()[:160]}")
+            return None
+        out = r.stdout or ""
+        # gws prints a keyring/format banner before the JSON — start at the first
+        # '{' or '[' so json.loads doesn't choke on it.
+        start = min([i for i in (out.find("{"), out.find("[")) if i >= 0] or [-1])
+        if start < 0:
+            return None
+        return json.loads(out[start:])
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[approve] gws json error: {exc}")
+        return None
+
+
+# Maps payment token -> the Gmail message id of the operator's APPROVE reply, so
+# the payment confirmation can be sent as a reply IN THAT THREAD (rather than as
+# a new standalone "results" email, which is what the operator saw before).
+#
+# Persisted: a payment can be approved on one poll and execute on a later one (or
+# the daemon may restart in between). Keeping this only in memory silently lost
+# the thread and downgraded the confirmation to a standalone digest.
+REPLY_IDS_FILE = Path(__file__).parent / ".monedula_reply_ids.json"
+
+
+def _load_reply_ids() -> dict[str, str]:
+    try:
+        data = json.loads(REPLY_IDS_FILE.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _remember_reply_id(token: str, message_id: str) -> None:
+    ids = _load_reply_ids()
+    if ids.get(token) == message_id:
+        return
+    ids[token] = message_id
+    try:
+        REPLY_IDS_FILE.write_text(json.dumps(ids))
+    except OSError as exc:  # noqa: BLE001
+        log.warning(f"[approve] could not persist reply id: {exc}")
+
+
+_REPLY_MSG_IDS: dict[str, str] = _load_reply_ids()
+
+
+def _read_reply_texts(tokens: list[str], max_msgs: int = 40) -> list[str]:
+    """Return full text (subject + body) of recent replies carrying any token.
+
+    `gws gmail +triage` returns only date/from/id/subject — NOT the body — so the
+    operator's verdict ("approve") is invisible there. We therefore triage to find
+    candidate message ids whose subject carries a token, then `+read --id` each to
+    pull the actual body. Fail-open (returns []).
+    """
+    if not tokens:
+        return []
+    texts: list[str] = []
+    seen_ids: set[str] = set()
+
+    for token in tokens:
+        data = _gws_json(["gmail", "+triage", "--format", "json", "--max",
+                          str(max_msgs), "--query", f"newer_than:3d {token}"])
+        msgs = []
+        if isinstance(data, dict):
+            msgs = data.get("messages") or data.get("results") or []
+        elif isinstance(data, list):
+            msgs = data
+        for m in msgs:
+            mid = str(m.get("id") or "")
+            subject = str(m.get("subject") or "")
+            # Only the operator's REPLY can carry a verdict; our own request can't.
+            if not mid or mid in seen_ids or not subject.upper().startswith("RE:"):
+                continue
+            seen_ids.add(mid)
+            body_data = _gws_json(["gmail", "+read", "--id", mid, "--headers",
+                                   "--format", "json"], timeout=30)
+            body = ""
+            if isinstance(body_data, dict):
+                # gws +read returns the plain-text body under `body_text`.
+                body = str(body_data.get("body_text")
+                           or body_data.get("body")
+                           or body_data.get("text") or "")
+            # Remember which message to reply to, so the payment confirmation
+            # lands in this same thread — persisted, since the payment may
+            # execute on a later poll or after a restart.
+            _REPLY_MSG_IDS[token] = mid
+            _remember_reply_id(token, mid)
+            texts.append(f"{subject}\n{body}")
+    return texts
+
+
+def _email_reply_in_thread(message_id: str, body: str,
+                           attachments: list[str] | None = None) -> bool:
+    """Reply to `message_id` so the confirmation lands in the SAME thread as the
+    operator's approval. Uses `gws gmail +reply`, which handles threading.
+
+    Verifies the resolved recipient is the operator: `+reply` can misaddress when
+    replying to a message the operator themselves sent (a known gws quirk), so we
+    pass --to explicitly rather than trusting the inferred recipient.
+    Fail-open: returns False so the caller can fall back to a standalone email.
+    """
+    import shutil
+
+    if os.environ.get("ATELES_NOTIFY_EMAIL", "0") != "1":
+        return False
+    operator_email = os.environ.get("OPERATOR_EMAIL", "").strip()
+    gws = shutil.which("gws")
+    if not gws or not message_id or not operator_email:
+        return False
+
+    cmd = [gws, "gmail", "+reply", "--message-id", message_id,
+           "--body", body, "--to", operator_email]
+    swarm_email = os.environ.get("ATELES_SWARM_EMAIL", "").strip()
+    if swarm_email:
+        cmd += ["--from", swarm_email]
+
+    staged: list[Path] = []
+    stage_dir = PROJECT_ROOT / ".monedula_receipts_tmp"
+    for src in (attachments or []):
+        try:
+            if not os.path.exists(src):
+                continue
+            stage_dir.mkdir(parents=True, exist_ok=True)
+            dst = stage_dir / Path(src).name
+            shutil.copyfile(src, dst)
+            staged.append(dst)
+            cmd += ["--attach", str(dst.relative_to(PROJECT_ROOT))]
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[notify] could not stage attachment {src}: {exc}")
+
+    try:
+        r = subprocess.run(cmd, timeout=60, capture_output=True, text=True,
+                           cwd=str(PROJECT_ROOT), env=os.environ)
+        if r.returncode != 0:
+            log.warning(f"[notify] +reply failed (rc={r.returncode}): "
+                        f"{(r.stderr or '').strip()[:160]}")
+            return False
+        log.info(f"[notify] Confirmation replied in thread ({message_id}).")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[notify] +reply error: {exc}")
+        return False
+    finally:
+        for p in staged:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+def _email_send_with_subject(subject: str, body: str) -> bool:
+    """Send an email with an explicit subject (approval requests need the token
+    in the subject). Mirrors _email_send but does not derive subject from body."""
+    import shutil
+
+    if os.environ.get("ATELES_NOTIFY_EMAIL", "0") != "1":
+        return False
+    operator_email = os.environ.get("OPERATOR_EMAIL", "").strip()
+    if not operator_email:
+        return False
+    gws = shutil.which("gws")
+    if not gws:
+        return False
+    cmd = [gws, "gmail", "+send", "--to", operator_email,
+           "--subject", subject, "--body", body]
+    swarm_email = os.environ.get("ATELES_SWARM_EMAIL", "").strip()
+    if swarm_email:
+        cmd += ["--from", swarm_email]
+    try:
+        r = subprocess.run(cmd, timeout=60, capture_output=True, text=True,
+                           cwd=str(PROJECT_ROOT), env=os.environ)
+        if r.returncode != 0:
+            log.warning(f"[approve] approval email send failed (rc={r.returncode}): "
+                        f"{(r.stderr or '').strip()[:160]}")
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[approve] approval email error: {exc}")
+        return False
+
+
+def execute_approved_tasks(due_tasks: list[dict], handlers: list) -> list[tuple]:
+    """
+    Execute the due payment tasks that are operator-approved and not already paid.
+
+    Returns a list of (handler, result) tuples for tasks that were acted on.
+    Respects MONEDULA_DRYRUN (default on): while dry-run, the handler is asked to
+    build-but-not-broadcast where it supports a dry_run flag, and the result is
+    tagged status="dry_run" so no confirmation implies a real send.
+    """
+    results: list[tuple] = []
+    dry = _dryrun_enabled()
+    # Run-local guard: task ids paid earlier in THIS call. Protects against two
+    # distinct row objects for the same task id appearing in due_tasks (the
+    # in-memory snapshot stamp only covers the same object).
+    paid_this_run: set[str] = set()
+
+    for task in due_tasks:
+        fields = _task_fields(task)
+        title = str(fields.get("title") or fields.get("name") or "(unnamed task)")
+        tid_local = str(task.get("entity_id") or task.get("id") or "").strip()
+
+        if tid_local and tid_local in paid_this_run:
+            log.info(f"[autoexec] Skipping {title!r} — already paid earlier this run.")
+            continue
+        if _task_already_paid(task):
+            log.info(f"[autoexec] Skipping already-paid task {title!r}.")
+            continue
+        if not _task_is_approved(task):
+            log.info(f"[autoexec] Task {title!r} not approved (payment_approved) — skipping.")
+            continue
+
+        handler = _handler_for_task(task, handlers)
+        if handler is None:
+            log.warning(f"[autoexec] No handler resolves task {title!r} — skipping.")
+            continue
+
+        # Carry any one-off per-session amount from the task onto the match, so
+        # the handler charges it instead of the profile's standing rate. See
+        # handlers/payment_profile.effective_amount_eur().
+        synthetic_match = {"summary": title, "source": "task",
+                           "entity_id": task.get("entity_id") or task.get("id"),
+                           "amount_eur_override": fields.get("amount_eur_override")}
+        charged = _effective_task_amount(task, handler)
+
+        if dry:
+            log.info(f"[autoexec] DRY-RUN — would execute {handler.name} for {title!r} "
+                     f"(€{charged}).")
+            results.append((handler, {
+                "status": "dry_run", "handler": handler.name,
+                "amount_eur": charged,
+                "task": title,
+            }))
+            continue
+
+        log.info(f"[autoexec] Executing {handler.name} for approved task {title!r}...")
+        try:
+            result = handler.execute(synthetic_match)
+        except Exception as exc:  # noqa: BLE001 — never crash the daemon
+            log.error(f"[autoexec] {handler.name} execution error: {exc}")
+            result = {"status": "failed", "handler": handler.name, "error": str(exc)}
+
+        # Defense-in-depth: the instant a payment EXISTS (a real send, or a
+        # transfer created but not yet confirmed), stamp the in-memory task
+        # snapshot with the session paid-marker so no later iteration in THIS
+        # same run — and no later poll — can re-enter execute() and create a
+        # SECOND payment. "created_unconfirmed" counts: the transfer already
+        # exists at the rail, so re-executing would double-pay.
+        if result.get("status") in ("sent", "created_unconfirmed"):
+            if tid_local:
+                paid_this_run.add(tid_local)
+            marker = _session_paid_marker(task)
+            if marker:
+                snap = task.get("snapshot")
+                if isinstance(snap, dict):
+                    snap["payment_event_id"] = marker
+                else:
+                    fields["payment_event_id"] = marker
+
+        results.append((handler, result))
+
+    return results
+
+
+def task_for(task_id: str, due_tasks: list[dict]) -> dict:
+    """Return the due-task dict with this entity id (empty dict if absent)."""
+    for t in due_tasks:
+        if str(t.get("entity_id") or t.get("id") or "") == task_id:
+            return t
+    return {}
+
+
+def _is_recurring_obligation(task: dict, handler=None) -> bool:
+    """True when a task is a standing per-session obligation that must NEVER be
+    marked completed — only have its due_date rolled (operator standing rule for
+    yoga / therapy and similar recurring wellness commitments).
+
+    Signals, cheapest first: an explicit `recurrence` field on the task, or a
+    session-payment keyword in the title/notes.
+    """
+    fields = task.get("snapshot") or task.get("fields") or task or {}
+    if str(fields.get("recurrence") or "").strip():
+        return True
+    hay = " ".join([
+        str(fields.get("title") or ""),
+        str(fields.get("notes") or ""),
+        str(getattr(getattr(handler, "profile", None), "label", "") or ""),
+    ]).lower()
+    return any(k in hay for k in
+               ("yoga", "therapy", "terapia", "osteopat", "per-session",
+                "pay only for attended"))
+
+
+def _mark_tasks_paid(task_results: list[tuple], due_tasks: list[dict]) -> None:
+    """
+    After a REAL successful send, mark the corresponding task done in Neotoma
+    with a payment note. No-op for dry-run results and for non-'sent' statuses,
+    so a task is only ever marked paid when money actually moved.
+
+    Follows a recurring-obligation exception: if the task/profile is flagged as a
+    never-complete recurring obligation, callers should not route it here — this
+    helper is for the one-off vendor/reimbursement tasks that DO complete.
+    """
+    if _dryrun_enabled():
+        return  # never mutate task lifecycle during dry-run
+
+    try:
+        from handlers.neotoma_cli import correct_field
+    except ImportError:  # pragma: no cover
+        from .handlers.neotoma_cli import correct_field  # type: ignore[no-redef]
+
+    # Map handler.name -> its task entity_id via due_tasks + profile link.
+    by_handler_task = {}
+    for t in due_tasks:
+        tid = str(t.get("entity_id") or t.get("id") or "")
+        by_handler_task[tid] = t
+
+    for handler, result in task_results:
+        # Durably mark for a confirmed send AND for a created-but-unconfirmed
+        # transfer: in both cases a payment exists at the rail, so the task must
+        # never be re-executed. Only genuinely-not-attempted statuses (failed,
+        # manual_required, dry_run) are left unmarked for a legitimate re-try.
+        if result.get("status") not in ("sent", "created_unconfirmed"):
+            continue
+        tid = str(getattr(getattr(handler, "profile", None), "neotoma_task_id", "") or "")
+        if not tid:
+            continue
+        ref = (result.get("transfer_id") or result.get("txid")
+               or result.get("reference") or "")
+
+        # Write each field via the MCP `correct` tool (the REST corrections CLI
+        # path is dead — POST /corrections 404s). Set status=done / record the
+        # payment reference in payment_event_id for idempotency.
+        def _correct(field: str, value: str) -> bool:
+            return correct_field(tid, field, value, entity_type="task",
+                                  label="autoexec")
+
+        # Recurring-obligation rule: a per-session obligation (yoga, therapy, …)
+        # is NEVER completed — the task is the standing obligation, not one
+        # payment. Only record the payment reference; the due_date rolls to the
+        # next session separately. One-off tasks (vendor invoices,
+        # reimbursements) do complete.
+        if _is_recurring_obligation(task_for(tid, due_tasks), handler):
+            # A recurring obligation is never completed, so `status` cannot mark
+            # it settled. The handler's _update_task records the payment in
+            # `notes` and rolls `due_date` to the next session.
+            #
+            # DURABLE per-session idempotency: SET payment_event_id to a
+            # session-scoped marker (paid:<due_date>) rather than clearing it.
+            # _task_already_paid() treats this marker as "paid for THIS session"
+            # only — once the handler rolls due_date to the next session the
+            # marker no longer matches, so the next session is payable. This
+            # survives a failed approval-reset write: previously the sole guard
+            # against an immediate re-pay was payment_approved=false landing, and
+            # a single failed Neotoma write re-paid the session.
+            marker = _session_paid_marker(task_for(tid, due_tasks)) or f"paid:{ref}"
+            ok_mark = _correct("payment_event_id", marker)
+            # Reset the approval gate too: a new session is a NEW decision.
+            # Leaving payment_approved=true would let the next session auto-pay
+            # without the operator approving it. This is now belt-and-braces —
+            # the session marker already blocks re-pay for the current session.
+            ok_clear_appr = _correct("payment_approved", "false")
+            # Clear any one-off amount override: it applied to THIS session only.
+            # Leaving it set would silently charge the one-off rate again on the
+            # next session — the exact failure mode the override exists to avoid.
+            fields_now = _task_fields(task_for(tid, due_tasks))
+            if str(fields_now.get("amount_eur_override") or "").strip():
+                if _correct("amount_eur_override", ""):
+                    log.info(f"[autoexec] Cleared one-off amount override on {tid} "
+                             f"— next session uses the standing rate.")
+                else:
+                    log.error(f"[autoexec] Task {tid} paid but the one-off amount "
+                              f"override could NOT be cleared — the next session "
+                              f"would re-use it. MANUAL CHECK REQUIRED.")
+            if ok_mark and ok_clear_appr:
+                log.info(f"[autoexec] Recurring task {tid} ({handler.name}) paid "
+                         f"ref={ref}, marker={marker} — left open, approval reset "
+                         f"for next session.")
+            elif ok_mark:
+                log.warning(f"[autoexec] Recurring task {tid} paid marker set "
+                            f"({marker}) but approval NOT reset — session is "
+                            f"safe from re-pay; approval will be re-evaluated "
+                            f"when due_date rolls. Needs no manual action.")
+            else:
+                log.error(f"[autoexec] Recurring task {tid} paid (ref={ref}) but "
+                          f"the durable paid-marker write FAILED — re-pay guard "
+                          f"depends on payment_approved reset "
+                          f"(cleared={ok_clear_appr}). MANUAL CHECK REQUIRED.")
+            continue
+
+        ok_ref = _correct("payment_event_id", str(ref)) if ref else True
+
+        ok_status = _correct("status", "done")
+        if ok_status and ok_ref:
+            log.info(f"[autoexec] Marked task {tid} done ({handler.name}), ref={ref}.")
+        else:
+            log.warning(f"[autoexec] Task {tid} NOT fully marked paid "
+                        f"(status_ok={ok_status}, ref_ok={ok_ref}) — needs manual close.")
+
+
+# ---------------------------------------------------------------------------
 # Telegram helpers
 # ---------------------------------------------------------------------------
 
 
-def telegram_send(text: str) -> None:
+def _email_send(text: str, attachments: list[str] | None = None) -> bool:
+    """Send an operator notification by email via `gws gmail +send`. Fail-open.
+
+    Subject = "[Monedula] " + the message's first line; body = full message.
+    `attachments` are file paths (e.g. Wise receipt PDFs); gws requires them
+    under the current directory, so they are copied into a repo-local temp dir
+    for the send and removed after. Uses an argv list (no shell). Returns True
+    on success. Gated by ATELES_NOTIFY_EMAIL / OPERATOR_EMAIL.
     """
-    Send a Telegram message via the shared Node.js send.mjs helper,
-    falling back to telegram-send CLI.
-    """
+    import shutil
+
+    if os.environ.get("ATELES_NOTIFY_EMAIL", "0") != "1":
+        return False
+    operator_email = os.environ.get("OPERATOR_EMAIL", "").strip()
+    if not operator_email:
+        return False
+    gws = shutil.which("gws")
+    if not gws:
+        log.warning("[notify] gws not found — cannot send email, falling back")
+        return False
+
+    first = (text.strip().splitlines() or ["notification"])[0]
+    subject = f"[Monedula] {first[:80]}"
+    cmd = [gws, "gmail", "+send", "--to", operator_email,
+           "--subject", subject, "--body", text]
+    swarm_email = os.environ.get("ATELES_SWARM_EMAIL", "").strip()
+    if swarm_email:
+        cmd += ["--from", swarm_email]
+
+    # gws only attaches files under CWD — stage copies in a repo-local temp dir.
+    staged: list[Path] = []
+    stage_dir = PROJECT_ROOT / ".monedula_receipts_tmp"
+    for src in (attachments or []):
+        try:
+            if not os.path.exists(src):
+                continue
+            stage_dir.mkdir(parents=True, exist_ok=True)
+            dst = stage_dir / Path(src).name
+            shutil.copyfile(src, dst)
+            staged.append(dst)
+            cmd += ["--attach", str(dst.relative_to(PROJECT_ROOT))]
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[notify] could not stage attachment {src}: {exc}")
+
+    try:
+        r = subprocess.run(cmd, timeout=60, capture_output=True, text=True,
+                           cwd=str(PROJECT_ROOT), env=os.environ)
+        if r.returncode != 0:
+            log.warning("[notify] gws +send failed (rc=%s): %s",
+                        r.returncode, (r.stderr or "").strip()[:200])
+            return False
+        log.info("[notify] Operator notified by email (%s)%s.", operator_email,
+                 f" with {len(staged)} receipt(s)" if staged else "")
+        return True
+    except Exception as exc:  # noqa: BLE001 — never crash the caller
+        log.warning("[notify] email send error: %s", exc)
+        return False
+    finally:
+        for p in staged:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        try:
+            if stage_dir.exists() and not any(stage_dir.iterdir()):
+                stage_dir.rmdir()
+        except OSError:
+            pass
+
+
+def _telegram_only(text: str) -> None:
+    """Deliver via Telegram (send.mjs helper, falling back to telegram-send CLI)."""
     import shutil
 
     node = shutil.which("node")
@@ -338,6 +1196,31 @@ def telegram_send(text: str) -> None:
             )
         except Exception as exc:
             log.warning(f"telegram-send fallback failed: {exc}")
+
+
+def telegram_send(text: str, attachments: list[str] | None = None) -> None:
+    """
+    Deliver an operator notification.
+
+    Operator prefers email (2026-07-13): when ATELES_NOTIFY_EMAIL=1, deliver via
+    `gws gmail +send` and only fall through to Telegram (break-glass) if email
+    delivery fails. When the flag is off, behaviour is unchanged (Telegram only).
+    Name kept as `telegram_send` so existing call sites are untouched.
+
+    `attachments` (e.g. Wise receipt PDFs) ride the email path; the Telegram
+    fallback is text-only, so a note is appended listing what didn't attach.
+
+    NOTE: the interactive approval poll (`telegram_long_poll_once`) still reads
+    replies from Telegram, so calendar-triggered payments that wait for a reply
+    require Telegram for the *reply* channel. Task-reminder previews (the common
+    path here) are one-way and are satisfied by email alone.
+    """
+    if _email_send(text, attachments=attachments):
+        return
+    if attachments:
+        names = ", ".join(Path(a).name for a in attachments)
+        text = f"{text}\n\n(📎 receipts available but not attachable via Telegram: {names})"
+    _telegram_only(text)
 
 
 def telegram_long_poll_once(timeout_sec: int = 120) -> str | None:
@@ -538,8 +1421,15 @@ def _build_preview_message(
         lines.append(f"  attended {name:<9} — confirm & pay {name} only")
     lines.append("  no / skipped       — skip all (no payment)")
     if due_tasks:
+        lines.append("")
         lines.append(
-            "  (task reminders above are FYI — reply to approve calendar payments)"
+            "  Task payments auto-execute once approved: set payment_approved=true"
+        )
+        lines.append(
+            "  on the task in Neotoma (Inspector / CLI / ask Ateles). Monedula runs"
+        )
+        lines.append(
+            "  them on its next poll (dry-run until MONEDULA_DRYRUN=0 is set)."
         )
 
     return "\n".join(lines)
@@ -553,18 +1443,25 @@ def _build_preview_message(
 def main() -> None:
     log.info("Monedula starting.")
 
-    # Idempotency: exit immediately if already ran today
-    if _check_already_ran_today():
-        log.info("Already ran today — exiting.")
-        return
-
-    # Mark as started immediately to prevent concurrent launchd re-launches.
-    # We clear this at the very end if something goes wrong before completion,
-    # but keep it on successful runs to prevent double-payment.
-    _mark_ran_today()
+    # The once-daily guard applies to the CALENDAR-triggered path only: that path
+    # pays for yesterday's sessions and must fire exactly once per day.
+    #
+    # The task/approval path must run on EVERY poll — it reads the operator's
+    # emailed APPROVE/SKIP replies, which can arrive at any time. Gating the whole
+    # run on "already ran today" made every scheduled poll a no-op after the first,
+    # so replies were never processed. That path is independently idempotent
+    # (payment_approved gate + _task_already_paid), so polling it is safe.
+    calendar_leg_done_today = _check_already_ran_today()
+    if calendar_leg_done_today:
+        log.info("Calendar leg already ran today — task/approval leg still polling.")
+    else:
+        # Mark as started immediately to prevent concurrent launchd re-launches
+        # from double-paying the calendar leg.
+        _mark_ran_today()
 
     yesterday = _yesterday()
     yesterday_str = yesterday.isoformat()
+    today_str = date.today().isoformat()
     log.info(f"Checking calendar for yesterday: {yesterday_str}")
 
     # Load handlers from env-var-defined payment profiles.
@@ -573,18 +1470,20 @@ def main() -> None:
 
     all_handlers = load_handlers()
 
-    # Fetch yesterday's events
-    events = fetch_yesterday_events()
-
-    # Find triggered handlers from calendar
+    # Calendar leg — skipped once it has already run today (it pays for
+    # yesterday's sessions and must not fire twice).
     triggered: list[tuple] = []  # [(handler, [match, ...]), ...]
-    for handler in all_handlers:
-        matches = handler.matches(events)
-        if matches:
-            triggered.append((handler, matches))
+    if calendar_leg_done_today:
+        log.info("Skipping calendar leg (already ran today).")
+    else:
+        events = fetch_yesterday_events()
+        for handler in all_handlers:
+            matches = handler.matches(events)
+            if matches:
+                triggered.append((handler, matches))
 
-    if triggered:
-        log.info(f"Triggered handlers: {[h.name for h, _ in triggered]}")
+        if triggered:
+            log.info(f"Triggered handlers: {[h.name for h, _ in triggered]}")
 
     # Fetch due payment tasks from Neotoma, scoped to profile-linked task IDs only.
     due_tasks = fetch_due_payment_tasks(all_handlers)
@@ -601,14 +1500,88 @@ def main() -> None:
             "No calendar-triggered payments, but due payment tasks found — sending reminder only."
         )
 
-    # Build and send preview
-    preview_msg = _build_preview_message(triggered, yesterday_str, due_tasks=due_tasks)
-    log.info("Sending payment preview to Telegram...")
-    telegram_send(preview_msg)
+    # Build and send the daily preview/digest — only on the calendar leg's
+    # once-daily run. On the 15-min approval polls this would re-send every
+    # cycle, so it is suppressed there.
+    if not calendar_leg_done_today:
+        preview_msg = _build_preview_message(triggered, yesterday_str,
+                                             due_tasks=due_tasks)
+        log.info("Sending payment preview...")
+        telegram_send(preview_msg)
+
+    # Email reply-to-approve: first apply any APPROVE/SKIP <token> replies the
+    # operator sent since the last run (flips payment_approved on matching tasks).
+    if due_tasks:
+        applied = process_email_approvals(due_tasks)
+        if applied:
+            log.info(f"[approve] Applied {applied} email approval(s); re-fetching tasks.")
+            due_tasks = fetch_due_payment_tasks(all_handlers)
+
+    # Task-based auto-execute (approval-gated). Runs independently of the
+    # calendar-triggered interactive path: any due task carrying
+    # payment_approved=true is executed via its linked handler (dry-run unless
+    # MONEDULA_DRYRUN=0). Then a per-payment confirmation is emailed.
+    if due_tasks:
+        task_results = execute_approved_tasks(due_tasks, all_handlers)
+
+        # Only REAL outcomes are worth an email. A dry-run is a rehearsal, and
+        # this leg polls every ~15 min — emailing dry-run results notified the
+        # operator every cycle (and, worse, rendered them as "payment failed:
+        # unknown error"). Report only actually-attempted payments.
+        reportable = [(h, r) for h, r in task_results
+                      if r.get("status") != "dry_run"]
+        if task_results and not reportable:
+            log.info(f"[autoexec] {len(task_results)} dry-run result(s) — "
+                     f"not emailing (rehearsal only).")
+
+        if reportable:
+            # Confirm each payment as a REPLY in its own approval thread, so the
+            # receipt lands in the conversation the operator approved from.
+            # Anything without a known thread falls back to a standalone digest.
+            unthreaded: list[tuple] = []
+            for handler, result in reportable:
+                text = (handler.format_confirmation(result)
+                        if hasattr(handler, "format_confirmation")
+                        else f"{handler.name}: {result.get('status')}")
+                rp = result.get("receipt_path")
+                receipts = [rp] if rp and os.path.exists(rp) else []
+
+                tid = str(getattr(getattr(handler, "profile", None),
+                                  "neotoma_task_id", "") or "")
+                # Session-scoped token, matching the one the request was sent
+                # under, so the confirmation lands in that session's thread.
+                msg_id = (_REPLY_MSG_IDS.get(_task_payment_token(task_for(tid, due_tasks)))
+                          if tid else None)
+                if msg_id and _email_reply_in_thread(msg_id, text,
+                                                     attachments=receipts):
+                    continue
+                unthreaded.append((handler, result))
+
+            if unthreaded:
+                conf_lines = [f"📋 Monedula task-payment results for {today_str}:", ""]
+                receipts = []
+                for handler, result in unthreaded:
+                    conf_lines.append(
+                        handler.format_confirmation(result)
+                        if hasattr(handler, "format_confirmation")
+                        else f"{handler.name}: {result.get('status')}")
+                    rp = result.get("receipt_path")
+                    if rp and os.path.exists(rp):
+                        receipts.append(rp)
+                    conf_lines.append("")
+                telegram_send("\n".join(conf_lines).rstrip(), attachments=receipts)
+
+            _mark_tasks_paid(reportable, due_tasks)
+
+        # For any tasks still awaiting approval, email a per-payment approval
+        # request (with its token) so the operator can approve by replying.
+        requested = send_approval_requests(due_tasks, all_handlers)
+        if requested:
+            log.info(f"[approve] Emailed {requested} approval request(s).")
 
     # If there are only task reminders (no actionable calendar payments), don't wait for approval.
     if not triggered:
-        log.info("Task reminders sent — no calendar payments to approve. Done.")
+        log.info("Task auto-execute complete — no calendar payments to approve. Done.")
         return
 
     # Wait for operator reply (2 minutes)
@@ -630,6 +1603,26 @@ def main() -> None:
         if handler.name not in approved:
             log.info(f"Skipping {handler.name} (not approved).")
             continue
+
+        # Idempotency guard for the legacy calendar/Telegram leg. The task-based
+        # path (execute_approved_tasks) checks _task_already_paid; this leg
+        # historically did NOT, so a stale .monedula_last_run plus a Telegram
+        # reply could re-pay. Apply the SAME durable per-session guard here: if
+        # the handler's linked task already carries this session's paid-marker,
+        # the payment exists — never re-execute.
+        linked_tid = str(getattr(getattr(handler, "profile", None),
+                                 "neotoma_task_id", "") or "").strip()
+        linked_task = None
+        if linked_tid:
+            for _t in (due_tasks or []):
+                if str(_t.get("entity_id") or _t.get("id") or "") == linked_tid:
+                    linked_task = _t
+                    break
+        if linked_task is not None and _task_already_paid(linked_task):
+            log.info(f"[calendar-leg] Skipping {handler.name} — linked task "
+                     f"{linked_tid} already paid this session (idempotency guard).")
+            continue
+
         for match in matches:
             log.info(f"Executing {handler.name} payment...")
             _job = _activity.started(f"executing {handler.name} payment") if _activity else None

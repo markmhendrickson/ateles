@@ -1,0 +1,275 @@
+"""
+test_amount_override.py — Tests for Monedula's one-off per-session amount override.
+
+A recurring obligation pays its profile's standing rate. A single session can
+deviate (a group class, a double session) without editing that standing rate:
+the task snapshot carries `amount_eur_override`, which the daemon copies onto
+the match dict and the handler resolves via effective_amount_eur().
+
+Covers the safety properties of that override:
+  1. Resolution    — a valid override wins; absent/blank falls back to standing.
+  2. Fail-safe     — invalid/zero/negative overrides fall back, never send €0.
+  3. Non-mutation  — resolving an override NEVER edits the profile's standing
+                     rate (the failure mode the override exists to prevent).
+  4. Propagation   — the daemon puts the task's override on the match dict, so
+                     the handler charges it.
+  5. Visibility    — an override is disclosed in the approval email, so the
+                     operator never approves a one-off amount unknowingly.
+
+No real payment code runs: handlers are fakes that record calls.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import monedula  # noqa: E402
+from handlers.payment_profile import PaymentProfile, effective_amount_eur  # noqa: E402
+
+STANDING = 60
+ONE_OFF = 70
+
+
+def _profile(amount=STANDING):
+    return PaymentProfile(
+        prefix="YOGA", label="Yoga con Manel", calendar_keywords=["yoga"],
+        payment_type="btc", amount_eur=amount, neotoma_task_id="ent_task",
+    )
+
+
+# --- 1. Resolution ---------------------------------------------------------
+
+def test_valid_override_wins():
+    assert effective_amount_eur(_profile(), {"amount_eur_override": ONE_OFF}) == ONE_OFF
+
+
+def test_override_accepts_string_form():
+    """Neotoma snapshots can stringify numerics — a string override must work."""
+    assert effective_amount_eur(_profile(), {"amount_eur_override": str(ONE_OFF)}) == ONE_OFF
+
+
+def test_no_match_falls_back_to_standing():
+    assert effective_amount_eur(_profile(), None) == STANDING
+
+
+def test_absent_or_blank_override_falls_back():
+    for blank in ({}, {"amount_eur_override": None}, {"amount_eur_override": ""}):
+        assert effective_amount_eur(_profile(), blank) == STANDING
+
+
+# --- 2. Fail-safe ----------------------------------------------------------
+
+def test_nonpositive_override_falls_back_never_sends_zero():
+    """A €0 or negative override must never reach the wire."""
+    for bad in (0, -5):
+        assert effective_amount_eur(_profile(), {"amount_eur_override": bad}) == STANDING
+
+
+def test_garbage_override_falls_back_without_raising():
+    """A malformed override must not crash the daemon mid-payment."""
+    for bad in ("abc", [], {}, object()):
+        assert effective_amount_eur(_profile(), {"amount_eur_override": bad}) == STANDING
+
+
+# --- 3. Non-mutation -------------------------------------------------------
+
+def test_resolving_override_never_mutates_standing_rate():
+    """The whole point: a one-off must not become the standing rate."""
+    prof = _profile()
+    effective_amount_eur(prof, {"amount_eur_override": ONE_OFF})
+    assert prof.amount_eur == STANDING
+
+
+# --- 4. Propagation --------------------------------------------------------
+
+class _FakeProfile:
+    def __init__(self, task_id, amount=STANDING):
+        self.neotoma_task_id = task_id
+        self.amount_eur = amount
+        self.payment_type = "btc"
+        self.label = "Yoga con Manel"
+        self.btc_address = "bc1qexample"
+
+
+class _FakeHandler:
+    def __init__(self, name, task_id, amount=STANDING):
+        self.name = name
+        self.profile = _FakeProfile(task_id, amount)
+        self.executed_with = []
+
+    def execute(self, match):
+        self.executed_with.append(match)
+        return {"status": "sent", "handler": self.name, "txid": "deadbeef"}
+
+
+def _task(tid, override=None, approved=True, due="2026-07-21"):
+    snap = {
+        "title": "Private yoga payment — Manel",
+        "due_date": due,
+        "payment_approved": approved,
+        "status": "open",
+        "payment_event_id": "",
+    }
+    if override is not None:
+        snap["amount_eur_override"] = override
+    return {"entity_id": tid, "snapshot": snap}
+
+
+def test_daemon_puts_override_on_match(monkeypatch):
+    """execute_approved_tasks must carry the task's override to the handler."""
+    monkeypatch.setenv("MONEDULA_DRYRUN", "0")
+    h = _FakeHandler("yoga", "ent_task")
+    monedula.execute_approved_tasks([_task("ent_task", override=ONE_OFF)], [h])
+    assert h.executed_with, "handler was never executed"
+    assert h.executed_with[0].get("amount_eur_override") == ONE_OFF
+
+
+def test_daemon_reports_override_amount_in_dry_run(monkeypatch):
+    """Dry-run must quote the amount that WOULD be charged, not the standing rate."""
+    monkeypatch.setenv("MONEDULA_DRYRUN", "1")
+    h = _FakeHandler("yoga", "ent_task")
+    results = monedula.execute_approved_tasks([_task("ent_task", override=ONE_OFF)], [h])
+    assert results and results[0][1]["amount_eur"] == ONE_OFF
+    assert not h.executed_with, "dry-run must not execute"
+
+
+def test_task_without_override_charges_standing_rate(monkeypatch):
+    monkeypatch.setenv("MONEDULA_DRYRUN", "1")
+    h = _FakeHandler("yoga", "ent_task")
+    results = monedula.execute_approved_tasks([_task("ent_task")], [h])
+    assert results and results[0][1]["amount_eur"] == STANDING
+
+
+# --- 5. Visibility ---------------------------------------------------------
+
+def test_approval_email_discloses_one_off_amount():
+    """The operator must see BOTH the one-off and the standing rate."""
+    h = _FakeHandler("yoga", "ent_task")
+    subject, body = monedula._build_approval_email(
+        _task("ent_task", override=ONE_OFF, approved=False), h
+    )
+    assert f"€{ONE_OFF}" in subject, "subject must quote the charged amount"
+    assert "ONE-OFF AMOUNT" in body
+    assert f"standing rate is €{STANDING}" in body
+
+
+def test_approval_email_has_no_override_note_for_normal_payment():
+    """No override → no scary one-off warning."""
+    h = _FakeHandler("yoga", "ent_task")
+    subject, body = monedula._build_approval_email(_task("ent_task", approved=False), h)
+    assert f"€{STANDING}" in subject
+    assert "ONE-OFF AMOUNT" not in body
+
+
+# --- 6. Session-scoped approval tokens -------------------------------------
+#
+# Regression for a real incident (2026-07-22): _payment_token hashed only the
+# task id, so a recurring obligation had ONE token for all time. Replies are
+# matched from the inbox over a rolling window, so the previous session's
+# "APPROVE" reply re-approved the NEXT session — at a different amount than the
+# operator had consented to.
+
+def test_token_differs_across_sessions():
+    """The core fix: one task, two sessions → two distinct tokens."""
+    jul16 = monedula._task_payment_token(_task("ent_task", due="2026-07-16"))
+    jul21 = monedula._task_payment_token(_task("ent_task", due="2026-07-21"))
+    assert jul16 != jul21, "a prior session's reply could re-approve this one"
+
+
+def test_token_stable_within_a_session():
+    """Re-sending a request for the SAME session must reuse the same token."""
+    a = monedula._task_payment_token(_task("ent_task", due="2026-07-21"))
+    b = monedula._task_payment_token(_task("ent_task", due="2026-07-21"))
+    assert a == b
+
+
+def test_token_differs_across_tasks_in_same_session():
+    """Distinct obligations on the same date must not share a token."""
+    yoga = monedula._task_payment_token(_task("ent_yoga", due="2026-07-21"))
+    therapy = monedula._task_payment_token(_task("ent_therapy", due="2026-07-21"))
+    assert yoga != therapy
+
+
+def test_approval_email_carries_session_scoped_token():
+    """The emailed token must be the session token the matcher will look for."""
+    h = _FakeHandler("yoga", "ent_task")
+    task = _task("ent_task", approved=False, due="2026-07-21")
+    subject, _ = monedula._build_approval_email(task, h)
+    assert f"[APPROVE-{monedula._task_payment_token(task)}]" in subject
+
+
+def test_stale_session_token_not_in_matcher_map(monkeypatch):
+    """A reply carrying LAST session's token must not resolve to this session."""
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+    current = _task("ent_task", due="2026-07-21", approved=False)
+    stale_token = monedula._task_payment_token(_task("ent_task", due="2026-07-16"))
+
+    captured = {}
+
+    def _fake_read(tokens, max_msgs=40):
+        captured["tokens"] = list(tokens)
+        return []  # no replies; we only care which tokens are searched for
+
+    monkeypatch.setattr(monedula, "_read_reply_texts", _fake_read)
+    monedula.process_email_approvals([current])
+    assert stale_token not in captured.get("tokens", []), \
+        "daemon still searches for the previous session's approval token"
+
+
+# --- 7. Correction write-verification --------------------------------------
+#
+# Regression for neotoma#1991: `corrections create` derives its idempotency key
+# from (entity, field, value), so re-submitting a value the field has held
+# before returns HTTP success while writing nothing. payment_approved
+# alternates true/false, so from the second cycle on, every approval was
+# silently dropped while the daemon logged success.
+
+def test_set_task_approved_false_when_value_did_not_land(monkeypatch):
+    """MCP correct submit succeeds, but the field never changes → report failure.
+
+    This is the neotoma#1991 replay guard: a `correct` can succeed at the wire
+    and still write nothing, so _set_task_approved must trust the read-back, not
+    the submit result."""
+    import handlers.neotoma_cli as ncli
+    monkeypatch.setattr(ncli, "correct_field", lambda *a, **k: True)
+    # The read-back still shows the OLD value — the correction was dropped.
+    monkeypatch.setattr(monedula, "_fetch_entity_by_id",
+                        lambda _tid: {"snapshot": {"payment_approved": False}})
+    assert monedula._set_task_approved("ent_task", True) is False
+
+
+def test_set_task_approved_true_when_value_landed(monkeypatch):
+    import handlers.neotoma_cli as ncli
+    monkeypatch.setattr(ncli, "correct_field", lambda *a, **k: True)
+    monkeypatch.setattr(monedula, "_fetch_entity_by_id",
+                        lambda _tid: {"snapshot": {"payment_approved": True}})
+    assert monedula._set_task_approved("ent_task", True) is True
+
+
+def test_set_task_approved_false_when_submit_fails(monkeypatch):
+    """If the MCP correct submit itself fails, report failure without read-back."""
+    import handlers.neotoma_cli as ncli
+    monkeypatch.setattr(ncli, "correct_field", lambda *a, **k: False)
+    monkeypatch.setattr(monedula, "_fetch_entity_by_id",
+                        lambda _tid: {"snapshot": {"payment_approved": True}})
+    assert monedula._set_task_approved("ent_task", True) is False
+
+
+def test_verify_accepts_stringified_boolean():
+    """Snapshots round-trip booleans as real bools OR their string forms."""
+    import types
+    for stored in (True, "true", "True"):
+        mod_fetch = lambda _tid, s=stored: {"snapshot": {"payment_approved": s}}
+        orig = monedula._fetch_entity_by_id
+        monedula._fetch_entity_by_id = mod_fetch
+        try:
+            assert monedula._verify_task_field("ent_task", "payment_approved", True)
+        finally:
+            monedula._fetch_entity_by_id = orig
+
+
+def test_verify_fails_closed_when_entity_unreadable(monkeypatch):
+    """If we cannot read it back, we must NOT claim the write succeeded."""
+    monkeypatch.setattr(monedula, "_fetch_entity_by_id", lambda _tid: None)
+    assert monedula._verify_task_field("ent_task", "payment_approved", True) is False

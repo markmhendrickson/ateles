@@ -1,10 +1,19 @@
 """
 handlers/btc_transfer.py — Generic BTC transfer handler for Monedula.
 
-Executes a BTC payment for any PaymentProfile with payment_type="btc".
-Uses claude --print with the btc-wallet MCP to execute the transfer.
-All profile-specific values (address, amount, task ID) are loaded from env
-via PaymentProfile — no hardcoded business data here.
+Executes a BTC payment for any PaymentProfile with payment_type="btc" by calling
+the bitcoin wallet library's functions DIRECTLY (BTCConfig.from_env +
+send_transfer_multi), mirroring how wise_transfer.py calls the Wise REST API.
+
+This deliberately does NOT shell out to `claude --print` with a scripted payment
+prompt: a headless sub-agent correctly refuses to move funds from a context-free
+"send X to address Y" script (it reads as prompt-injection), so that path never
+executes. A direct library call has no such ambiguity and honours dry_run.
+
+The wallet module is imported from BTC_WALLET_MODULE_PATH (default
+~/repos/mcp-server-bitcoin). Wallet secrets (BTC_MNEMONIC, BTC_NETWORK, …) must
+be present in the daemon env. All profile-specific values (address, amount, task
+ID) come from PaymentProfile — no hardcoded business data here.
 """
 
 from __future__ import annotations
@@ -21,7 +30,9 @@ try:
     from ..handler_base import PaymentHandler
 except ImportError:
     from handler_base import PaymentHandler  # type: ignore[no-redef]
-from .payment_profile import PaymentProfile
+from .neotoma_cli import correct_field
+from .payment_profile import PaymentProfile, effective_amount_eur
+from .share_message import build_share_message
 
 log = logging.getLogger(__name__)
 
@@ -39,14 +50,9 @@ class BtcTransferHandler(PaymentHandler):
         return self.profile.name
 
     def matches(self, events: list[dict]) -> list[dict]:
-        matched = []
-        for event in events:
-            summary = event.get("summary", "") or ""
-            low = summary.lower()
-            if any(kw in low for kw in self.profile.calendar_keywords):
-                log.info(f"[{self.name}] Matched event: {summary!r}")
-                matched.append({"event": event, "summary": summary})
-        return matched
+        # Delegates to the shared matcher (recurring-event-id first, all-keywords
+        # fallback, deduped to one payment per obligation). See handler_base.
+        return self.match_events(events)
 
     def preview(self, match: dict) -> str:
         summary = match.get("summary", self.profile.label)
@@ -61,7 +67,10 @@ class BtcTransferHandler(PaymentHandler):
         )
 
     def execute(self, match: dict) -> dict[str, Any]:
-        log.info(f"[{self.name}] Executing BTC payment via claude --print...")
+        dry_run = os.environ.get("MONEDULA_DRYRUN", "1") != "0"
+        amount_eur = effective_amount_eur(self.profile, match)
+        log.info(f"[{self.name}] Executing BTC payment via wallet lib "
+                 f"(€{amount_eur}, dry_run={dry_run})...")
 
         if not self.profile.btc_address:
             return {
@@ -70,61 +79,75 @@ class BtcTransferHandler(PaymentHandler):
                 "error": f"{self.profile.prefix}_BTC_ADDRESS not set",
             }
 
-        prompt = _build_claude_prompt(self.profile)
-        claude_path = _find_claude()
-        if not claude_path:
+        missing = _key_material_missing()
+        if missing:
+            # Surface as a CONFIG error, not a failed payment: nothing was
+            # attempted, and the operator's approval is still valid once the
+            # wallet is reachable. Reported before any broadcast is possible.
+            log.error(f"[{self.name}] {missing}")
             return {
-                "status": "failed",
+                "status": "manual_required",
                 "handler": self.name,
-                "error": "claude CLI not found in PATH",
+                "error": missing,
+                "amount_eur": amount_eur,
             }
 
+        # Invoke the deterministic runner using the WALLET's own venv python
+        # (it has bip_utils etc., which the daemon venv does not). The runner is
+        # a pure function call — no LLM, nothing to refuse — and honours dry_run.
+        py = _wallet_python()
+        runner = Path(__file__).parent / "btc_send_runner.py"
+        req = json.dumps({
+            "address": self.profile.btc_address,
+            "amount_eur": amount_eur,
+            "dry_run": dry_run,
+        })
         try:
-            result = subprocess.run(
-                [claude_path, "--print", "--dangerously-skip-permissions", prompt],
-                capture_output=True,
-                text=True,
-                timeout=300,
-                env=os.environ,
+            proc = subprocess.run(
+                [py, str(runner), req],
+                capture_output=True, text=True, timeout=180, env=os.environ,
             )
         except subprocess.TimeoutExpired:
-            return {
-                "status": "failed",
-                "handler": self.name,
-                "error": "claude subprocess timed out after 300s",
-            }
-        except Exception as exc:
-            return {
-                "status": "failed",
-                "handler": self.name,
-                "error": f"claude subprocess error: {exc}",
-            }
+            return {"status": "failed", "handler": self.name,
+                    "error": "btc_send_runner timed out after 180s"}
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "failed", "handler": self.name,
+                    "error": f"btc_send_runner invocation error: {exc}"}
 
-        output = result.stdout or ""
-        log.debug(
-            f"[{self.name}] claude stdout ({len(output)} chars):\n{output[:2000]}"
-        )
-
-        payment_result = _parse_payment_result(output)
-        if payment_result is None:
-            log.error(
-                f"[{self.name}] No PAYMENT_RESULT line found in output:\n{output[:1000]}"
-            )
-            return {
-                "status": "failed",
-                "handler": self.name,
-                "error": "No PAYMENT_RESULT line in claude output",
-                "raw_output": output[:500],
-            }
+        out = (proc.stdout or "").strip()
+        try:
+            payment_result = json.loads(out) if out else {}
+        except json.JSONDecodeError:
+            log.error(f"[{self.name}] runner stdout not JSON: {out[:300]!r} "
+                      f"stderr={(proc.stderr or '')[:300]!r}")
+            return {"status": "failed", "handler": self.name,
+                    "error": "btc_send_runner returned non-JSON",
+                    "raw_output": out[:300]}
 
         payment_result["handler"] = self.name
+        payment_result.setdefault("amount_eur", amount_eur)
+
+        if payment_result.get("status") == "dry_run":
+            log.info(f"[{self.name}] DRY-RUN built tx (not broadcast): "
+                     f"{payment_result.get('txid')}")
+            return payment_result
 
         if payment_result.get("status") == "sent":
             txid = payment_result.get("txid", "")
-            mempool_url = f"https://mempool.space/tx/{txid}"
-            copy_paste_line = f"{self.profile.amount_eur} € 📤 {mempool_url}"
-            payment_result["copy_paste_line"] = copy_paste_line
-            log.info(f"[{self.name}] Payment sent. txid={txid}")
+            network = str(payment_result.get("network")
+                          or os.environ.get("BTC_NETWORK", "mainnet"))
+            explorer_url = _explorer_url(txid, network)
+            payment_result["explorer_url"] = explorer_url
+            # receipt_kind mirrors the Wise handler's proof-of-payment surface:
+            # for BTC the on-chain explorer page IS the receipt.
+            payment_result["receipt_kind"] = "btc_explorer"
+            # Payee copy-paste line — "[AMOUNT] € [LINK TO EXPLORER]".
+            payment_result["copy_paste_line"] = build_share_message(
+                amount_eur=amount_eur,
+                rail="btc",
+                explorer_url=explorer_url,
+            )
+            log.info(f"[{self.name}] Payment sent. txid={txid} {explorer_url}")
             _update_task(self.profile, txid)
 
         return payment_result
@@ -132,13 +155,17 @@ class BtcTransferHandler(PaymentHandler):
     def format_confirmation(self, result: dict) -> str:
         if result.get("status") == "sent":
             txid = result.get("txid", "unknown")
-            copy_paste = result.get(
-                "copy_paste_line",
-                f"{self.profile.amount_eur} € 📤 https://mempool.space/tx/{txid}",
-            )
+            explorer = result.get("explorer_url") or _explorer_url(
+                txid, str(result.get("network") or "mainnet"))
+            # Prefer the amount actually charged (carries any one-off override);
+            # the profile's standing rate is only a last-resort fallback.
+            copy_paste = result.get("copy_paste_line") or build_share_message(
+                amount_eur=result.get("amount_eur", self.profile.amount_eur),
+                rail="btc", explorer_url=explorer)
             return (
                 f"✅ {self.profile.label} payment sent!\n"
-                f"  txid: {txid}\n\n"
+                f"  txid: {txid}\n"
+                f"  Blockchain explorer: {explorer}\n\n"
                 f"Copy-paste line:\n"
                 f"  {copy_paste}"
             )
@@ -147,67 +174,75 @@ class BtcTransferHandler(PaymentHandler):
             return f"❌ {self.profile.label} payment failed: {error}"
 
 
-def _find_claude() -> str | None:
-    import shutil
+def _key_material_missing() -> str:
+    """Return a diagnostic if BTC key material is unreachable, else "".
 
-    return shutil.which("claude")
-
-
-def _build_claude_prompt(profile: PaymentProfile) -> str:
-    today_str = date.today().isoformat()
-    address = profile.btc_address
-    amount = profile.amount_eur
-    label = profile.label
-    return f"""You are executing a Bitcoin payment for {label}.
-
-Today is {today_str}.
-
-INSTRUCTIONS:
-1. First call btc_wallet_preview_transfer with these arguments:
-   {{ "to_address": "{address}", "amount_eur": {amount} }}
-
-2. Review the preview. If it looks reasonable (correct address, amount ~€{amount}), proceed.
-
-3. Call btc_wallet_send_transfer with these arguments (do NOT pass memo or OP_RETURN):
-   {{ "to_address": "{address}", "amount_eur": {amount} }}
-
-4. After sending, output exactly one line in this format (no other text after it):
-PAYMENT_RESULT: {{"status": "sent", "txid": "<actual txid>", "amount_eur": {amount}}}
-
-If anything fails, output:
-PAYMENT_RESULT: {{"status": "failed", "txid": "", "amount_eur": {amount}, "error": "<description>"}}
-
-Important constraints:
-- Do NOT pass a memo field (no OP_RETURN on-chain)
-- The PAYMENT_RESULT line must be the very last line of your response
-- Do not include any extra text after the PAYMENT_RESULT line
-"""
+    Checks the same two sources the runner does — the process environment and
+    the wallet checkout's own `.env` — WITHOUT reading any value. Lets a
+    misconfigured wallet be reported as a config problem up front rather than
+    as a failed payment after the operator has already approved it.
+    """
+    if os.environ.get("BTC_MNEMONIC") or os.environ.get("BTC_PRIVATE_KEY"):
+        return ""
+    wallet_path = Path(
+        os.environ.get("BTC_WALLET_MODULE_PATH",
+                       str(Path.home() / "repos" / "mcp-server-bitcoin"))
+    ).expanduser()
+    env_file = wallet_path / ".env"
+    try:
+        if env_file.is_file():
+            for raw in env_file.read_text().splitlines():
+                stripped = raw.strip()
+                if stripped.startswith("export "):
+                    stripped = stripped[len("export "):].lstrip()
+                if stripped.startswith(("BTC_MNEMONIC=", "BTC_PRIVATE_KEY=")):
+                    return ""
+    except OSError:
+        pass
+    return (f"No BTC key material: neither BTC_MNEMONIC nor BTC_PRIVATE_KEY in "
+            f"the environment, and none found in {env_file}. Payment not attempted.")
 
 
-def _parse_payment_result(output: str) -> dict | None:
-    for line in reversed(output.splitlines()):
-        line = line.strip()
-        if line.startswith("PAYMENT_RESULT:"):
-            json_str = line[len("PAYMENT_RESULT:") :].strip()
-            try:
-                return json.loads(json_str)
-            except json.JSONDecodeError as exc:
-                log.error(
-                    f"Failed to parse PAYMENT_RESULT JSON: {exc}\n  line={line!r}"
-                )
-                return None
-    return None
+def _wallet_python() -> str:
+    """Path to the bitcoin wallet's own venv python (has bip_utils etc.).
+
+    BTC_WALLET_PYTHON overrides; otherwise <BTC_WALLET_MODULE_PATH>/venv13/bin/
+    python3, else the wallet module dir's venv, else plain 'python3'.
+    """
+    override = os.environ.get("BTC_WALLET_PYTHON", "").strip()
+    if override:
+        return override
+    module_path = Path(
+        os.environ.get("BTC_WALLET_MODULE_PATH",
+                       str(Path.home() / "repos" / "mcp-server-bitcoin"))
+    ).expanduser()
+    for cand in (module_path / "venv13" / "bin" / "python3",
+                 module_path / "venv" / "bin" / "python3"):
+        if cand.exists():
+            return str(cand)
+    return "python3"
+
+
+def _explorer_url(txid: str, network: str = "mainnet") -> str:
+    """Return a mempool.space explorer URL for a txid, network-aware.
+
+    BTC_EXPLORER_BASE overrides the base (default https://mempool.space). Testnet
+    / signet get their path prefix so a non-mainnet txid never links to a wrong
+    mainnet page.
+    """
+    base = os.environ.get("BTC_EXPLORER_BASE", "https://mempool.space").rstrip("/")
+    net = (network or "mainnet").lower()
+    prefix = {
+        "mainnet": "",
+        "testnet": "/testnet",
+        "testnet3": "/testnet",
+        "signet": "/signet",
+    }.get(net, "")
+    return f"{base}{prefix}/tx/{txid}"
 
 
 def _update_task(profile: PaymentProfile, txid: str) -> None:
-    """Update Neotoma task with payment note and rolled due_date."""
-    import shutil
-
-    neotoma = shutil.which("neotoma")
-    if not neotoma:
-        log.warning(f"[{profile.name}] neotoma CLI not found — skipping task update")
-        return
-
+    """Append a payment note to the Neotoma task and roll its due_date."""
     task_id = profile.neotoma_task_id
     if not task_id:
         log.warning(
@@ -216,55 +251,16 @@ def _update_task(profile: PaymentProfile, txid: str) -> None:
         return
 
     today = date.today()
-    mempool_url = f"https://mempool.space/tx/{txid}"
+    explorer = _explorer_url(txid, os.environ.get("BTC_NETWORK", "mainnet"))
     note = (
         f"Payment sent {today.isoformat()}: "
-        f"{profile.amount_eur} EUR BTC txid={txid} {mempool_url}"
+        f"{profile.amount_eur} EUR BTC txid={txid} {explorer}"
     )
-
-    try:
-        res = subprocess.run(
-            [neotoma, "--api-only", "entities", "update", task_id, "--notes", note],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=os.environ,
-        )
-        if res.returncode != 0:
-            log.warning(
-                f"[{profile.name}] neotoma notes update failed: {res.stderr.strip()[:200]}"
-            )
-        else:
-            log.info(f"[{profile.name}] Neotoma task notes updated.")
-    except Exception as exc:
-        log.warning(f"[{profile.name}] neotoma update error: {exc}")
+    correct_field(task_id, "notes", note, label=profile.name)
 
     next_due = _find_next_event_due_date(profile)
     if next_due:
-        try:
-            res = subprocess.run(
-                [
-                    neotoma,
-                    "--api-only",
-                    "entities",
-                    "update",
-                    task_id,
-                    "--due-date",
-                    next_due,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=os.environ,
-            )
-            if res.returncode != 0:
-                log.warning(
-                    f"[{profile.name}] neotoma due_date update failed: {res.stderr.strip()[:200]}"
-                )
-            else:
-                log.info(f"[{profile.name}] Neotoma task due_date set to {next_due}.")
-        except Exception as exc:
-            log.warning(f"[{profile.name}] neotoma due_date update error: {exc}")
+        correct_field(task_id, "due_date", next_due, label=profile.name)
     else:
         log.warning(
             f"[{profile.name}] Could not find next event date — due_date not updated."

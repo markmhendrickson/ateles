@@ -1,18 +1,19 @@
 name: ateles package tests
 
 # Enforces the W0/W1+ package test suite plus the Claude Code hook tests, the
-# phoenicurus-release daemon's regression tests, the shared approval lib tests,
-# and the ateles MCP server tests on every PR that touches any of them — the
-# regression lane the QA gate asked for. The daemon/lib paths are included so
-# changes there actually get their tests run in CI, rather than silently
-# skipping the lane.
+# full daemon test surface, the shared approval lib tests, and the ateles MCP
+# server tests on every PR that touches any of them — the regression lane the
+# QA gate asked for. The daemon/lib paths are included so changes there
+# actually get their tests run in CI, rather than silently skipping the lane
+# (ateles#206: the daemon path filter was missing entirely, so daemon
+# regression tests never ran in CI).
 
 on:
   pull_request:
     paths:
       - "ateles/**"
       - ".claude/hooks/**"
-      - "execution/daemons/phoenicurus-release/**"
+      - "execution/daemons/**"
       - "execution/mcp/**"
       - "lib/approval/**"
       - "pyproject.toml"
@@ -33,8 +34,8 @@ jobs:
           python-version: "3.13"
       - name: Run ateles package tests
         run: uv run --extra dev python -m pytest ateles/ .claude/hooks/ -q
-      - name: Run phoenicurus-release daemon tests
-        run: uv run --extra dev python -m pytest execution/daemons/phoenicurus-release/ -q
+      - name: Run daemon tests
+        run: uv run --extra dev python -m pytest execution/daemons/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
 
