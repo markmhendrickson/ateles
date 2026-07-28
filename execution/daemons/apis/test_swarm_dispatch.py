@@ -1608,6 +1608,80 @@ def test_panelist_prompt_review_comment_instruction_still_present():
     assert "Post your review as a PR comment" in prompt
 
 
+# ── Gate writeback: a lens seated as a pending-gate owner must transcribe its
+#    own sign-off into gate_status (fixes the #1944 arch-signs-off-in-comments-
+#    but-gate_status.arch-stays-pending loop) ─────────────────────────────────
+
+def _arch_lens() -> Lens:
+    return Lens(
+        agent="waxwing",
+        lens="arch",
+        gate="arch",
+        checks="architecture, tenant isolation, idempotency",
+        forward_looking=False,
+    )
+
+
+def test_panelist_prompt_gate_writeback_when_owns_pending_gate():
+    """A pending-gate owner is told to correct gate_status.<gate> → signed_off."""
+    t = _trigger()
+    expectation = "- [ ] arch check\n"
+    prompt = SwarmDispatcher._panelist_prompt(
+        t, _arch_lens(), expectation, parent=80, owns_pending_gate=True
+    )
+    assert "GATE WRITEBACK" in prompt
+    assert "gate_status.arch" in prompt
+    assert '"signed_off"' in prompt
+    # Must be conditional on a clean verdict and must preserve the rest of the map.
+    assert "ONLY if" in prompt
+    assert "MERGE the existing map" in prompt
+    assert "gate-signoff-arch-" in prompt  # idempotency key stem
+
+
+def test_panelist_prompt_no_gate_writeback_when_not_owner():
+    """A lens NOT seated as a pending-gate owner gets no writeback instruction."""
+    t = _trigger()
+    expectation = "- [ ] arch check\n"
+    prompt = SwarmDispatcher._panelist_prompt(
+        t, _arch_lens(), expectation, parent=80, owns_pending_gate=False
+    )
+    assert "GATE WRITEBACK" not in prompt
+
+
+def test_panelist_prompt_no_gate_writeback_when_no_parent():
+    """No parent issue → no gate_status to write, even if flagged as owner."""
+    t = _trigger()
+    prompt = SwarmDispatcher._panelist_prompt(
+        t, _arch_lens(), "- [ ] x\n", parent=None, owns_pending_gate=True
+    )
+    assert "GATE WRITEBACK" not in prompt
+
+
+def test_panelist_prompt_no_gate_writeback_for_forward_looking_lens():
+    """Forward-looking lenses are non-blocking and don't own blocking gates."""
+    t = _trigger()
+    lens = Lens(
+        agent="corvus",
+        lens="forward",
+        gate="forward",
+        checks="downstream enablement",
+        forward_looking=True,
+    )
+    prompt = SwarmDispatcher._panelist_prompt(
+        t, lens, "- [ ] x\n", parent=80, owns_pending_gate=True
+    )
+    assert "GATE WRITEBACK" not in prompt
+
+
+def test_panelist_prompt_gate_writeback_defaults_off():
+    """owns_pending_gate defaults False — existing callers are unaffected."""
+    t = _trigger()
+    prompt = SwarmDispatcher._panelist_prompt(
+        t, _arch_lens(), "- [ ] x\n", parent=80
+    )
+    assert "GATE WRITEBACK" not in prompt
+
+
 # ── ateles#109 — per-agent GitHub identity (NO-OP until provisioned) ─────────
 # These tests cover the three-tier token resolution, attribution_header gating,
 # prompt instruction blocks, and native assignment.  They explicitly assert the
