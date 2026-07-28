@@ -1,7 +1,10 @@
 name: ateles package tests
 
-# Enforces the W0/W1+ package test suite plus the daemon test surface on every
-# PR that touches either — the regression lane the QA gate asked for
+# Enforces the W0/W1+ package test suite plus the Claude Code hook tests, the
+# full daemon test surface, the shared approval lib tests, and the ateles MCP
+# server tests on every PR that touches any of them — the regression lane the
+# QA gate asked for. The daemon/lib paths are included so changes there
+# actually get their tests run in CI, rather than silently skipping the lane
 # (ateles#206: the daemon path filter was missing entirely, so daemon
 # regression tests never ran in CI).
 
@@ -9,7 +12,10 @@ on:
   pull_request:
     paths:
       - "ateles/**"
+      - ".claude/hooks/**"
       - "execution/daemons/**"
+      - "execution/mcp/**"
+      - "lib/approval/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/ateles-tests.yml"
@@ -27,6 +33,24 @@ jobs:
         with:
           python-version: "3.13"
       - name: Run ateles package tests
-        run: uv run --extra dev python -m pytest ateles/ -q
+        run: uv run --extra dev python -m pytest ateles/ .claude/hooks/ -q
       - name: Run daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/ -q
+      - name: Run shared approval lib tests
+        run: uv run --extra dev python -m pytest lib/approval/ -q
+
+  mcp-server-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Install MCP server deps
+        run: |
+          uv venv .mcp-venv
+          VIRTUAL_ENV=.mcp-venv uv pip install mcp httpx
+      - name: Run ateles MCP server tests
+        run: .mcp-venv/bin/python execution/mcp/ateles/test_server.py
+      - name: Run ateles MCP server smoke tests
+        run: .mcp-venv/bin/python execution/mcp/ateles/test_server_smoke.py

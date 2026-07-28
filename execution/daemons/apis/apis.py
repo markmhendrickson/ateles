@@ -852,11 +852,30 @@ async def main() -> None:
     async def watchdog_dispatch(task_id: str, snapshot: dict, trigger: str) -> None:
         await dispatch_task(task_id, snapshot, trigger, notifier=notifier)
 
+    # 7. Issue-pipeline resume sweep: the task watchdog above resumes `task`
+    #    work left mid-flight by a restart, but the GitHub issue pipeline
+    #    creates no task entity, so it was invisible to that sweeper — a
+    #    restart silently voided in-flight pipeline runs with no retry. This
+    #    scans for the hidden in-flight marker and re-runs those pipelines.
+    #    Fire-and-forget: it must never delay the SSE loop or the webhook
+    #    gateway coming up, and never prevent boot on failure.
+    async def resume_sweep() -> None:
+        try:
+            await dispatcher.resume_interrupted_pipelines(
+                list(dispatcher.config.resume_repositories)
+            )
+        except Exception as exc:  # never let a resume failure kill startup
+            log.error(
+                f"[{DAEMON_NAME}] issue-pipeline resume sweep failed: {exc}",
+                exc_info=True,
+            )
+
     log.info(f"[{DAEMON_NAME}] Subscribing to SSE: {SUBSCRIBE_ENTITY_TYPES}")
     await asyncio.gather(
         sse.stream(dispatch),
         github_gateway.serve(gateway_app, GITHUB_WEBHOOK_PORT),
         watchdog.run(notifier, watchdog_dispatch),
+        resume_sweep(),
     )
 
 

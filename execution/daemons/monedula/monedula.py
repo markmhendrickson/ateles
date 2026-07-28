@@ -211,7 +211,7 @@ def fetch_yesterday_events() -> list[dict]:
 
 def _fetch_entity_by_id(entity_id: str) -> dict | None:
     """Fetch a single entity (with snapshot) by ID from Neotoma. None on error."""
-    base_url = (NEOTOMA_BASE_URL or "http://localhost:3180").rstrip("/")
+    base_url = (NEOTOMA_BASE_URL or "http://localhost:9180").rstrip("/")
     is_loopback = "localhost" in base_url or "127.0.0.1" in base_url
     try:
         url = f"{base_url}/entities/{entity_id}"
@@ -1313,27 +1313,56 @@ def _parse_reply(reply: str | None, handler_names: list[str]) -> set[str]:
     Parse the operator's Telegram reply and return the set of handler names
     to execute.
 
-    "yes all"      → all handlers
-    "yes yoga"     → {"yoga"}
-    "yes therapy"  → {"therapy"}
-    "no"           → empty set (skip all)
-    None/timeout   → empty set (skip all)
+    Payments are ATTENDANCE-GATED: every recurring payment (yoga, therapy)
+    pays for a session the operator was meant to attend. A calendar event is
+    NOT proof of attendance — sessions get skipped. So approval requires an
+    affirmative that names attendance, and a bare "yes" no longer blanket-
+    approves. Accepted forms:
+
+    "attended all"      / "paid all"        → all handlers
+    "attended yoga"     / "yes yoga"        → {"yoga"}
+    "attended therapy"  / "yes therapy"     → {"therapy"}
+    "no" / "skipped"    / None/timeout      → empty set (skip all)
+
+    Per-handler "yes <name>" / "y <name>" / "<name>" still work as an
+    affirmation that the named session was attended. A naked "yes"/"yes all"
+    with no session named is REJECTED (returns empty set) so the operator
+    can't reflexively approve a skipped session.
     """
     if not reply:
         return set()
 
     low = reply.lower().strip()
 
-    if low in ("no", "no all", "skip", "skip all", "n"):
+    if low in ("no", "no all", "skip", "skip all", "skipped", "n", "didn't go", "did not attend"):
         return set()
 
-    if low in ("yes", "yes all", "y", "y all"):
+    # Blanket approval requires an explicit "attended"/"paid"/"all" token —
+    # a naked "yes"/"yes all" is intentionally NOT enough.
+    if low in ("attended all", "paid all", "yes attended", "attended", "all attended"):
         return set(handler_names)
 
-    # "yes yoga", "yes therapy", "y yoga", etc.
+    # Per-handler attendance confirmation.
+    approved: set[str] = set()
     for name in handler_names:
-        if low in (f"yes {name}", f"y {name}", name):
-            return {name}
+        if low in (
+            f"attended {name}",
+            f"paid {name}",
+            f"yes {name}",
+            f"y {name}",
+            f"{name} attended",
+            name,
+        ):
+            approved.add(name)
+    if approved:
+        return approved
+
+    if low in ("yes", "yes all", "y", "y all"):
+        log.warning(
+            "Bare 'yes' received but payments are attendance-gated — "
+            "need 'attended all' or 'attended <session>'. Treating as skip."
+        )
+        return set()
 
     log.warning(f"Unrecognised reply: {reply!r} — treating as skip all")
     return set()
@@ -1350,6 +1379,11 @@ def _build_preview_message(
     # Calendar-triggered payments
     if triggered:
         lines.append("📅 *Calendar-triggered payments*")
+        lines.append("")
+        lines.append(
+            "⚠️ These are scheduled from the calendar — a calendar event is "
+            "NOT proof you attended. Only confirm sessions you actually went to."
+        )
         lines.append("")
         for handler, matches in triggered:
             for match in matches:
@@ -1376,15 +1410,16 @@ def _build_preview_message(
                 lines.append(f"    {short_desc}")
         lines.append("")
 
-    # Reply instructions
+    # Reply instructions — attendance-gated. A bare "yes" is intentionally
+    # not accepted; the operator must confirm attendance per session.
     handler_names = list(dict.fromkeys([h.name for h, _ in triggered]))
     lines += [
-        "Reply:",
-        "  yes all     — pay all calendar payments",
+        "Reply (confirm attendance — pays only for sessions you attended):",
+        "  attended all       — confirm & pay all",
     ]
     for name in handler_names:
-        lines.append(f"  yes {name:<10} — pay {name} only")
-    lines.append("  no          — skip all")
+        lines.append(f"  attended {name:<9} — confirm & pay {name} only")
+    lines.append("  no / skipped       — skip all (no payment)")
     if due_tasks:
         lines.append("")
         lines.append(

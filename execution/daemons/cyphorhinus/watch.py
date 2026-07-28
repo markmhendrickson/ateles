@@ -357,7 +357,7 @@ class NeotomaUnavailableError(Exception):
 
 # Base URL resolved from env at startup. The plist also sets NEOTOMA_BASE_URL
 # so this will always resolve to prod (3180), never auto-detect dev (3080).
-_NEOTOMA_BASE_URL: str = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180")
+_NEOTOMA_BASE_URL: str = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180")
 
 # Canonical "Neotoma, Inc." company entity, referenced in the extraction prompt
 # so product mentions get related to it. Env-overridable so a different graph /

@@ -20,12 +20,19 @@ This daemon NEVER tags, publishes, or deploys. That is publish.py's job, invoked
 only after the operator approves on Telegram (routed by Ateles).
 
 The schedule (Mon–Thu) is set in the launchd plist via four StartCalendarInterval
-dicts with Weekday 1..4.
+dicts with Weekday 1..4. That scheduled run is now a SAFETY NET: the primary
+trigger is a merge to Neotoma's main, which reaches this daemon as a GitHub
+`push` webhook -> the Apis gateway (github_gateway.parse_github_event ->
+swarm_dispatch._handle_push_main) -> `prepare.py --on-merge`. Merge-mode runs are
+rate-limited per main commit rather than per day, so several merges in one day
+each get a prepare attempt; the two locks are independent, so a merge run never
+suppresses the day's scheduled sweep.
 
 Usage:
   python3 prepare.py            # normal scheduled run
   python3 prepare.py --dry-run  # preflight only; print what it WOULD do, no spawn
   python3 prepare.py --force    # skip the "already-ran-today" guard
+  python3 prepare.py --on-merge # merge-triggered; rate-limit per commit, not per day
 
 Exit codes:
   0  ran (prepared / spawned, or nothing to do)
@@ -65,6 +72,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent  # ateles ro
 LOG_DIR = Path.home() / "Library" / "Logs" / "ateles"
 LOG_FILE = LOG_DIR / "phoenicurus-release.log"
 STATE_FILE = Path(__file__).parent / ".phoenicurus_prepare_last_run"
+# On-merge mode keys idempotency off the main commit it last considered rather
+# than the calendar day, so a merge can trigger a prepare run the same day an
+# earlier one already ran (the scheduled path's daily lock would swallow it).
+MERGE_STATE_FILE = Path(__file__).parent / ".phoenicurus_prepare_last_sha"
 AGENT_LOG = LOG_DIR / "phoenicurus-prepare-agent.log"
 
 NEOTOMA_REPO_ROOT = Path(
@@ -77,6 +88,13 @@ TELEGRAM_TOPIC = os.environ.get("TELEGRAM_TOPIC_PHOENICURUS", "") or os.environ.
 # Minimum unreleased commits before a release is worth preparing (avoid churning
 # a 1-commit patch every weekday). Override with PHOENICURUS_MIN_COMMITS.
 MIN_COMMITS = int(os.environ.get("PHOENICURUS_MIN_COMMITS", "1"))
+
+# Email notification (release RCs also go to the operator's inbox, not just
+# Telegram — mirrors the rest of the swarm, which emails via gws +send). The
+# operator + swarm addresses are the same env vars the shared lib/notify
+# Notifier reads, so release mail matches every other daemon's From/To.
+OPERATOR_EMAIL = os.environ.get("OPERATOR_EMAIL", "").strip()
+SWARM_EMAIL = os.environ.get("ATELES_SWARM_EMAIL", "").strip()
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -112,6 +130,46 @@ def _mark_ran_today() -> None:
     STATE_FILE.write_text(date.today().isoformat())
 
 
+def _head_sha() -> str:
+    return _git(["rev-parse", "origin/main"])
+
+
+def _already_ran_for_sha(sha: str) -> bool:
+    return (
+        bool(sha)
+        and MERGE_STATE_FILE.exists()
+        and MERGE_STATE_FILE.read_text().strip() == sha
+    )
+
+
+def _mark_ran_for_sha(sha: str) -> None:
+    if sha:
+        MERGE_STATE_FILE.write_text(sha)
+
+
+def _mark_ran(on_merge: bool, head: str, *, transient: bool = False) -> None:
+    """
+    Stamp whichever idempotency lock applies to this run's mode. On-merge runs
+    stamp the SHA only, so they never suppress the day's scheduled safety-net
+    run (and vice versa).
+
+    ``transient`` marks a deferral on a state that is expected to change for the
+    SAME head — CI still in progress, or CI red that may go green. In on-merge
+    mode we must NOT stamp the SHA for these: the merge webhook fires before that
+    merge's CI finishes, so stamping here would burn the per-commit lock on a run
+    that did nothing and block the `check_suite`-completion retry from ever
+    preparing this head (the immediacy the auto-release exists to provide would
+    be lost until the next merge or the scheduled sweep). The SCHEDULED path
+    still stamps — its once-a-day deferral is intentional, and a same-day retry
+    there is not wanted.
+    """
+    if on_merge:
+        if not transient:
+            _mark_ran_for_sha(head)
+    else:
+        _mark_ran_today()
+
+
 # ---------------------------------------------------------------------------
 # Telegram (outbound; only used for hard-block notices — the spawned agent
 # sends the rich prepared-release notification itself)
@@ -131,6 +189,58 @@ def telegram_send(text: str) -> None:
             subprocess.run(args, timeout=20, capture_output=True, env=os.environ)
         except Exception as exc:
             log.warning(f"telegram send failed: {exc}")
+
+
+def email_send(subject: str, body: str) -> bool:
+    """
+    Send a release notification to the operator's inbox via `gws gmail +send`.
+
+    Mirrors the shared lib/notify Notifier's email transport (same OPERATOR_EMAIL
+    To / ATELES_SWARM_EMAIL From, same gws argv-list send) so release mail matches
+    every other swarm daemon. Fail-open: any missing config or send error logs and
+    returns False so the caller keeps Telegram as the guaranteed channel — release
+    notification must never be blocked on email.
+
+    Returns True only if gws reports a successful send.
+    """
+    import shutil
+
+    if not OPERATOR_EMAIL:
+        log.info("OPERATOR_EMAIL unset — skipping release email (Telegram only)")
+        return False
+    gws = shutil.which("gws")
+    if not gws:
+        log.warning("gws CLI not found — cannot email release notification")
+        return False
+    cmd = [gws, "gmail", "+send", "--to", OPERATOR_EMAIL,
+           "--subject", subject, "--body", body]
+    if SWARM_EMAIL:
+        cmd += ["--from", SWARM_EMAIL]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
+                           env=os.environ)
+        if r.returncode != 0:
+            log.warning(f"gws +send failed (rc={r.returncode}): "
+                        f"{(r.stderr or '').strip()[:200]}")
+            return False
+        log.info(f"release email sent to {OPERATOR_EMAIL}")
+        return True
+    except Exception as exc:  # noqa: BLE001 — never block the release on email
+        log.warning(f"release email send error: {exc}")
+        return False
+
+
+def notify_operator(text: str, *, subject: str | None = None) -> None:
+    """
+    Send an operator notification on BOTH channels: Telegram always, email too
+    when OPERATOR_EMAIL is configured. Used for the synchronous hard-block /
+    error notices prepare.py sends directly (agent couldn't spawn, main CI red,
+    crash) — the rich prepared-RC notification is sent by the spawned agent,
+    which owns the rendered notes. Both sends are best-effort and independent;
+    neither failure blocks the other.
+    """
+    telegram_send(text)
+    email_send(subject or (text.strip().splitlines() or ["Phoenicurus"])[0][:80], text)
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +315,7 @@ def existing_release_status(next_version_hint: str) -> str | None:
     Return the status of any release_result already tracking work since the last
     tag, so we don't re-prepare on top of a pending_approval release.
     """
-    base = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180").rstrip("/")
+    base = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180").rstrip("/")
     is_loopback = "localhost" in base or "127.0.0.1" in base
     bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
@@ -241,6 +351,39 @@ def _build_agent_prompt(last_tag: str, commit_count: int) -> str:
         f"Use Telegram topic id {TELEGRAM_TOPIC} for the notification."
         if TELEGRAM_TOPIC
         else "Send the Telegram notification to the default chat."
+    )
+    from_flag = f' --from "{SWARM_EMAIL}"' if SWARM_EMAIL else ""
+    email_note = (
+        f"""12. ALSO email the operator the SAME notification (release goes to the
+    inbox, not just Telegram — and the operator can approve BY EMAIL REPLY).
+
+    SEND AS HTML, not raw markdown. The release notes are markdown; if sent as a
+    plain --body they render as a literal wall of `##` and `-` characters in
+    Gmail. Convert the notes to clean, well-formed HTML and pass `--html`:
+      - Write the HTML to a temp file and send with:
+        `gws gmail +send --to "{OPERATOR_EMAIL}"{from_flag} --subject "🚀 Release <TAG> ready to approve" --html --body "$(cat /tmp/release-<TAG>-email.html)"`
+        (or pass the HTML string directly to --body). ALWAYS include `--html`.
+      - Convert markdown → HTML properly: `##` headings → <h2>, `-` lists → <ul><li>,
+        `**bold**` → <strong>, code/backticks → <code>, blank lines → paragraph
+        breaks. Do NOT inline a tiny font-size; let the client default apply
+        (normal size). Keep it simple and readable — headings, paragraphs, lists.
+      - Put the RC PR URL as a real <a href> link.
+
+    The email MUST still contain, as VISIBLE TEXT the operator (and their reply
+    quote) will carry:
+      (a) the subject starting 🚀 with the phrase "ready to approve" + the version;
+      (b) an approve/skip instruction, e.g. a line: Reply <code>approve &lt;TAG&gt;</code>
+          to publish, or <code>skip &lt;TAG&gt;</code> to discard;
+      (c) a line reading exactly `release-approve: <TAG>` (real tag, e.g.
+          `release-approve: v0.20.0`) — Turdus parses this token from the reply
+          body to route an `approve <TAG>` reply to the publish gate, so it MUST be
+          present, exact, and in a form that survives as plain text in a quoted
+          reply (put it in its own <p> or <code> line, NOT only inside an href).
+
+    If the gws send fails, log it and continue — Telegram (step 11) is the
+    guaranteed channel; do NOT abort the run over an email failure."""
+        if OPERATOR_EMAIL
+        else "12. (Email notification skipped: OPERATOR_EMAIL is not configured.)"
     )
     return f"""You are Phoenicurus, the Neotoma release-preparation agent.
 
@@ -282,18 +425,45 @@ release-candidate PR, then HALT:
    `npm run -s release-notes:render -- --tag <TAG> --head-ref HEAD --supplement <path>`.
 
 Then record + notify:
-10. Store a Neotoma `release_result` entity (POST {os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180")}/store)
-    with fields: version=<TAG>, status="pending_approval", branch="release/<TAG>",
-    and put the RC PR URL in the `release_url` field. Use idempotency_key
+10. Store a Neotoma `release_result` entity (POST {os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180")}/store)
+    with fields: version=<TAG>, status="pending_approval". Set BOTH branch-name
+    fields to "release/<TAG>": `rc_branch` AND `branch`. Set BOTH PR-URL fields
+    to the RC PR URL: `rc_pr_url` AND `release_url`. (publish.py reads the `rc_*`
+    names; the plain names are kept for continuity — write both so either reader
+    resolves.) Use idempotency_key
     "release-<TAG>-pending_approval-{date.today().isoformat()}".
 11. Send a Telegram notification with: the version, the FULL rendered release
     notes, the RC PR URL, and any advisory flags (security sensitive=true,
     /review findings, CI status). End with: "Reply `approve <TAG>` to publish, or
     `skip <TAG>` to discard." {topic_note}
+{email_note}
 
 If preflight shows nothing to release, send a one-line Telegram saying so and stop.
-Be precise and terse in the Telegram message. No motivational filler.
+Be precise and terse in the Telegram/email messages. No motivational filler.
 """
+
+
+def _agent_env() -> dict:
+    """Environment for the headless `claude --print` prepare agent.
+
+    Prefer the Claude Code Max-subscription OAuth token over a pay-per-token
+    API key: when BOTH CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are set,
+    `claude --print` uses the API key — and if that account has no credits the
+    agent dies immediately with "Credit balance is too low", producing no RC and
+    no notification (observed 2026-07-27, the first live prepare run). Dropping
+    ANTHROPIC_API_KEY from the CHILD env only (never the daemon's own) routes the
+    agent through the subscription, so releases don't depend on a funded API
+    account. If only the API key is present, we leave it untouched.
+    """
+    env = dict(os.environ)
+    if env.get("CLAUDE_CODE_OAUTH_TOKEN") and env.get("ANTHROPIC_API_KEY"):
+        env.pop("ANTHROPIC_API_KEY", None)
+        log.info(
+            "prepare agent: using CLAUDE_CODE_OAUTH_TOKEN (dropped ANTHROPIC_API_KEY "
+            "from the child env so the agent bills the Max subscription, not the "
+            "pay-per-token API account)"
+        )
+    return env
 
 
 def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool:
@@ -302,7 +472,7 @@ def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool
     claude = shutil.which("claude")
     if not claude:
         log.error("claude CLI not found — cannot spawn prepare agent")
-        telegram_send(
+        notify_operator(
             "🔴 Phoenicurus: claude CLI not found — cannot prepare release."
         )
         return False
@@ -317,7 +487,7 @@ def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool
         subprocess.Popen(
             [claude, "--print", "--dangerously-skip-permissions", prompt],
             cwd=str(NEOTOMA_REPO_ROOT),
-            env=os.environ,
+            env=_agent_env(),
             stdout=open(AGENT_LOG, "a"),
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -326,7 +496,7 @@ def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool
         return True
     except Exception as exc:  # noqa: BLE001
         log.error(f"failed to spawn prepare agent: {exc}")
-        telegram_send(f"🔴 Phoenicurus: failed to spawn prepare agent — {exc}")
+        notify_operator(f"🔴 Phoenicurus: failed to spawn prepare agent — {exc}")
         return False
 
 
@@ -335,12 +505,15 @@ def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool
 # ---------------------------------------------------------------------------
 
 
-def run_prepare(dry_run: bool, force: bool) -> int:
+def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
     if not (NEOTOMA_REPO_ROOT / "package.json").exists():
         log.error(f"NEOTOMA_REPO_ROOT has no package.json: {NEOTOMA_REPO_ROOT}")
         return 1
 
-    if _already_ran_today() and not force and not dry_run:
+    # The scheduled path is rate-limited to one run per calendar day. On-merge
+    # runs are rate-limited per main commit instead (checked after the fetch
+    # below), so several merges in a day each get a prepare attempt.
+    if not on_merge and _already_ran_today() and not force and not dry_run:
         log.info("Already ran today — exiting.")
         return 0
 
@@ -351,6 +524,11 @@ def run_prepare(dry_run: bool, force: bool) -> int:
         capture_output=True,
         timeout=120,
     )
+
+    head = _head_sha() if on_merge else ""
+    if on_merge and _already_ran_for_sha(head) and not force and not dry_run:
+        log.info(f"Already ran for origin/main {head[:9]} — exiting.")
+        return 0
 
     tag = latest_tag()
     if not tag:
@@ -365,7 +543,7 @@ def run_prepare(dry_run: bool, force: bool) -> int:
             "nothing to prepare. Exiting."
         )
         if not dry_run:
-            _mark_ran_today()
+            _mark_ran(on_merge, head)
         return 0
 
     # Don't re-prepare if a release is already in flight awaiting approval.
@@ -376,24 +554,24 @@ def run_prepare(dry_run: bool, force: bool) -> int:
             "(Approve or skip the pending one first.)"
         )
         if not dry_run:
-            _mark_ran_today()
+            _mark_ran(on_merge, head)
         return 0
 
     # CI gate.
     ci = main_ci_green()
     if ci is False:
         log.warning("main CI is RED — refusing to prepare a release.")
-        telegram_send(
+        notify_operator(
             f"⚠️ Phoenicurus: {count} unreleased commit(s) since {tag}, but main "
             "CI is RED. Not preparing a release until CI is green."
         )
         if not dry_run:
-            _mark_ran_today()
+            _mark_ran(on_merge, head, transient=True)
         return 0
     if ci is None:
         log.warning("main CI status unknown / in progress — deferring to next run.")
         if not dry_run:
-            _mark_ran_today()
+            _mark_ran(on_merge, head, transient=True)
         return 0
 
     log.info(
@@ -402,7 +580,7 @@ def run_prepare(dry_run: bool, force: bool) -> int:
     )
     ok = spawn_prepare_agent(tag, count, dry_run)
     if not dry_run:
-        _mark_ran_today()
+        _mark_ran(on_merge, head)
     return 0 if ok else 1
 
 
@@ -416,12 +594,20 @@ def main() -> int:
     ap.add_argument(
         "--force", action="store_true", help="skip the already-ran-today guard"
     )
+    ap.add_argument(
+        "--on-merge",
+        action="store_true",
+        help=(
+            "merge-triggered run: rate-limit per origin/main commit instead of "
+            "per calendar day (all other gates unchanged)"
+        ),
+    )
     args = ap.parse_args()
     try:
-        return run_prepare(args.dry_run, args.force)
+        return run_prepare(args.dry_run, args.force, on_merge=args.on_merge)
     except Exception as exc:  # noqa: BLE001
         log.exception(f"prepare fatal error: {exc}")
-        telegram_send(f"🔴 Phoenicurus prepare crashed — {exc}")
+        notify_operator(f"🔴 Phoenicurus prepare crashed — {exc}")
         return 1
 
 

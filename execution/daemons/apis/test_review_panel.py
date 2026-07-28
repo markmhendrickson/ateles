@@ -55,6 +55,54 @@ def test_panel_cap_prioritizes_blocking_lenses():
     assert all(not lens.forward_looking for lens in panel)
 
 
+def test_pending_gate_lens_gets_a_seat_under_the_cap():
+    # ateles#230 regression: with a full diff and max_panel=2, the arch lens
+    # (waxwing) would normally be at risk of being dropped. When arch is a
+    # pending gate, its owning lens MUST be seated — otherwise the gate can
+    # never clear because no re-review of it ever runs.
+    big_diff = ["src/a.py", "src/b.py", "src/c.py", "server/openapi.yaml"]
+    panel = select_panel(
+        gate_contributors=set(),
+        changed_files=big_diff,
+        max_panel=2,
+        pending_gates={"arch"},
+    )
+    assert "arch" in [lens.gate for lens in panel], "arch gate owner must be seated"
+    # And it's prioritized first among the capped seats.
+    assert panel[0].gate == "arch"
+
+
+def test_pending_gate_pulls_in_a_lens_the_diff_would_not_match():
+    # A gate can be pending even when the diff doesn't match that lens's
+    # patterns and it didn't pre-register — the owning lens must still run.
+    panel = select_panel(
+        gate_contributors=set(),
+        changed_files=["README.md"],  # matches nothing arch-y
+        max_panel=6,
+        pending_gates={"arch"},
+    )
+    assert "waxwing" in [lens.agent for lens in panel]
+
+
+def test_no_pending_gates_preserves_prior_behavior():
+    # Backward compat: omitting pending_gates behaves exactly as before.
+    diff = ["server/openapi.yaml", "src/handler.py"]
+    assert select_panel(set(), diff, max_panel=4) == select_panel(
+        set(), diff, max_panel=4, pending_gates=set()
+    )
+
+
+def test_multiple_pending_gates_all_seated_before_cap():
+    panel = select_panel(
+        gate_contributors=set(),
+        changed_files=["src/a.py"],
+        max_panel=2,
+        pending_gates={"arch", "ux"},
+    )
+    seated = {lens.gate for lens in panel}
+    assert "arch" in seated and "ux" in seated
+
+
 def test_panel_agents_have_skills_registered():
     # Every lens must point at a real T4 skill name (panel spawns by skill).
     from pathlib import Path

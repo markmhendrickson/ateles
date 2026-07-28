@@ -88,7 +88,7 @@ log = logging.getLogger("cyphorhinus")
 # ── Config ──────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("CYPHORHINUS_TELEGRAM_BOT_TOKEN", "").strip()
 CHAT_ID = os.environ.get("CYPHORHINUS_TELEGRAM_CHAT_ID", "").strip()
-NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180").rstrip("/")
+NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180").rstrip("/")
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 POLL_TIMEOUT = int(os.environ.get("CYPHORHINUS_POLL_TIMEOUT", "50"))
 

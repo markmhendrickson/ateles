@@ -163,3 +163,92 @@ def test_operator_email_unset_disables_path(monkeypatch):
     monkeypatch.setattr(turdus, "OPERATOR_EMAIL", "")
     handled = _run(turdus._maybe_handle_swarm_approval(_op_msg(), _StubNotifier()))
     assert handled is False
+
+
+# ── Release email-approval parsing + version matching ───────────────────────
+#
+# The version guards are security-critical: a stale `approve` from an old
+# release thread must NEVER approve a different version, and the quoted original
+# email ("Reply approve <TAG>…") must never count as the operator's approval.
+
+
+def test_parse_release_token_ok():
+    assert turdus._parse_release_approve_token("release-approve: v0.20.0") == "v0.20.0"
+
+
+def test_parse_release_token_in_body_line():
+    body = "Notes...\n\nrelease-approve: v1.2.3-rc1\n"
+    assert turdus._parse_release_approve_token(body) == "v1.2.3-rc1"
+
+
+def test_parse_release_token_absent():
+    assert turdus._parse_release_approve_token("no token here") is None
+
+
+def test_reply_approves_exact_version():
+    assert turdus._reply_approves_version("approve v0.20.0", "v0.20.0")
+    # v-prefix optional in the reply
+    assert turdus._reply_approves_version("approve 0.20.0", "v0.20.0")
+
+
+def test_reply_rejects_different_version():
+    # the stale-token bug: an approve for a DIFFERENT version must not match
+    assert not turdus._reply_approves_version("approve v0.19.0", "v0.20.0")
+
+
+def test_reply_rejects_bare_approve():
+    # a bare "approve" with no version must not approve a specific release
+    assert not turdus._reply_approves_version("approve", "v0.20.0")
+    assert not turdus._reply_approves_version("looks good, approve it", "v0.20.0")
+
+
+def test_reply_ignores_quoted_original():
+    # the quoted original email carries "Reply approve v0.20.0 to publish" — it
+    # must NOT count as the operator's own approval (Gmail prefixes quotes '>')
+    quoted = "> Reply approve v0.20.0 to publish, or skip v0.20.0 to discard"
+    assert not turdus._reply_approves_version(quoted, "v0.20.0")
+
+
+def test_reply_approves_version_among_quoted_lines():
+    # operator's own line approves; the quoted block below must be ignored either way
+    body = (
+        "approve v0.20.0\n"
+        "\n"
+        "> 🚀 Release v0.20.0 ready to approve\n"
+        "> release-approve: v0.20.0\n"
+    )
+    assert turdus._reply_approves_version(body, "v0.20.0")
+
+
+# ── _read_message_body must read gws's `body_text` key ──────────────────────
+#
+# Regression: gws `+read` returns the plaintext under `body_text`, but the
+# reader only looked for body/text/plain/snippet — so it returned "" and every
+# email `approve <version>` reply "carried no token" and was never routed
+# (first live release-approval, 2026-07-27).
+
+
+def test_read_body_prefers_body_text(monkeypatch):
+    import subprocess as _sp
+
+    class _R:
+        returncode = 0
+        stderr = ""
+        stdout = '{"body_text":"approve v0.20.0\\n> release-approve: v0.20.0","body_html":"<p>x</p>"}'
+
+    monkeypatch.setattr(_sp, "run", lambda *a, **k: _R())
+    body = turdus._read_message_body("msg-1")
+    assert "release-approve: v0.20.0" in body
+    assert body.startswith("approve v0.20.0")
+
+
+def test_read_body_falls_back_to_html_when_no_text(monkeypatch):
+    import subprocess as _sp
+
+    class _R:
+        returncode = 0
+        stderr = ""
+        stdout = '{"body_html":"<p>only html</p>"}'
+
+    monkeypatch.setattr(_sp, "run", lambda *a, **k: _R())
+    assert turdus._read_message_body("msg-2") == "<p>only html</p>"

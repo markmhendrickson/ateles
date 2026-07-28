@@ -9,6 +9,7 @@ Also covers the checkbox definition-of-done changes:
 
 import asyncio
 import json
+import logging
 
 import httpx
 import swarm_dispatch
@@ -42,9 +43,11 @@ from swarm_dispatch import (
     is_provisioned,
     lenses_missing_comments,
     parse_gate_verdict,
+    parse_pending_gates,
     parse_review_verdict,
     prepare_pr_worktree,
     review_verdict_is_clear,
+    verdict_to_review_event,
     vanellus_comment_missing,
 )
 
@@ -68,9 +71,11 @@ def _trigger(**overrides):
 class _StubNotifier:
     def __init__(self):
         self.sent = []
+        self.sent_full = []  # (message, priority) — for priority assertions
 
     def send(self, message, priority=None, handler=None):
         self.sent.append(message)
+        self.sent_full.append((message, priority))
 
 
 def _config():
@@ -106,6 +111,24 @@ def test_parse_gate_verdict_none_when_absent():
     assert parse_gate_verdict(None) is None
 
 
+# ── parse_pending_gates (ateles#230 panel-assembly fix) ─────────────────────
+
+
+def test_parse_pending_gates_extracts_comma_list():
+    out = "GATE_INHERITANCE: blocked\nGATE_PENDING: arch, ux"
+    assert parse_pending_gates(out) == {"arch", "ux"}
+
+
+def test_parse_pending_gates_case_and_whitespace_insensitive():
+    assert parse_pending_gates("gate_pending:  Arch ,QA ") == {"arch", "qa"}
+
+
+def test_parse_pending_gates_empty_when_absent():
+    assert parse_pending_gates("GATE_INHERITANCE: clear") == set()
+    assert parse_pending_gates("") == set()
+    assert parse_pending_gates(None) == set()
+
+
 # ── parse_review_verdict / review_verdict_is_clear (loop closure) ────────────
 
 
@@ -129,6 +152,41 @@ def test_review_verdict_is_clear_only_for_approve_or_comment():
     assert review_verdict_is_clear("blocked") is False
     # Unparseable verdict is NOT clear — never silently proceed to merge-ready.
     assert review_verdict_is_clear(None) is False
+
+
+# ── verdict → native GitHub review event (ateles#241) ────────────────────────
+
+
+def test_verdict_maps_to_review_event_one_row_per_verdict():
+    assert verdict_to_review_event("approve") == "APPROVE"
+    assert verdict_to_review_event("request_changes") == "REQUEST_CHANGES"
+    assert verdict_to_review_event("comment") == "COMMENT"
+
+
+def test_blocked_verdict_maps_to_comment_not_request_changes():
+    """BLOCKED routes findings back for a fix; it must not additionally hard-block
+    merge via GitHub review state — merge stays operator-gated."""
+    assert verdict_to_review_event("blocked") == "COMMENT"
+
+
+def test_unparseable_verdict_maps_to_comment():
+    """Never escalate on a guess: an unparseable verdict must land on the inert
+    COMMENT, not REQUEST_CHANGES (which blocks merge under branch protection)."""
+    assert verdict_to_review_event(None) == "COMMENT"
+    assert verdict_to_review_event("") == "COMMENT"
+    assert verdict_to_review_event("nonsense") == "COMMENT"
+
+
+def test_request_changes_is_the_only_escalating_mapping():
+    """The asymmetry IS the safety property: exactly one input may produce the
+    merge-blocking event. A mapping bug that escalates silently blocks good PRs;
+    one that de-escalates defeats the feature."""
+    escalating = [
+        v
+        for v in ("approve", "request_changes", "comment", "blocked", None, "", "wat")
+        if verdict_to_review_event(v) == "REQUEST_CHANGES"
+    ]
+    assert escalating == ["request_changes"], escalating
 
 
 # ── _handle_pr verdict branching ─────────────────────────────────────────────
@@ -160,6 +218,12 @@ def _pr_dispatcher_with_stubs(monkeypatch, *, vanellus_stdout, calls):
     async def fake_post_missing_vanellus(self, trigger, result):
         return None
 
+    async def fake_emit_review(self, trigger, verdict, body):
+        # ateles#241: record the native review emission so tests can assert the
+        # event fired (and with which verdict) without real GitHub I/O.
+        calls.append(("review", verdict_to_review_event(verdict)))
+        return "rev-1"
+
     async def fake_persist(self, *a, **k):
         return None
 
@@ -170,6 +234,7 @@ def _pr_dispatcher_with_stubs(monkeypatch, *, vanellus_stdout, calls):
     monkeypatch.setattr(
         SwarmDispatcher, "_post_missing_vanellus_comment", fake_post_missing_vanellus
     )
+    monkeypatch.setattr(SwarmDispatcher, "_emit_formal_review", fake_emit_review)
     monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_persist)
     monkeypatch.setattr(SwarmDispatcher, "_post_missing_panel_comments", fake_persist)
     monkeypatch.setattr(SwarmDispatcher, "_preregistered_expectations",
@@ -203,6 +268,52 @@ def test_handle_pr_clear_verdict_gates_readiness(monkeypatch):
     assert not any(c[0] == "route" for c in calls)
 
 
+def test_handle_pr_emits_formal_review_on_blocking_path(monkeypatch):
+    """ateles#241: a REQUEST_CHANGES verdict must reach GitHub's review state,
+    not just route findings internally."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**REQUEST_CHANGES**\n1 blocking", calls=calls
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+
+
+def test_handle_pr_emits_formal_review_on_clear_path(monkeypatch):
+    """An APPROVE must also land as a native review — that is what lets branch
+    protection see the swarm's verdict."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("review", "APPROVE") in calls, calls
+
+
+def test_formal_review_emitted_before_routing_decision(monkeypatch):
+    """Emission happens on BOTH paths, so it must precede the branch — and must
+    fire exactly once per handled PR (not duplicated across retry paths)."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**REQUEST_CHANGES**\nx", calls=calls
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    kinds = [c[0] for c in calls]
+    assert kinds.count("review") == 1, f"expected exactly one review emission: {calls}"
+    assert kinds.index("review") < kinds.index("route"), kinds
+
+
+def test_handle_pr_unparseable_verdict_emits_comment_review(monkeypatch):
+    """An unparseable verdict still records a review, as the inert COMMENT —
+    never REQUEST_CHANGES, which would block merge on a parse failure."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="the panel had thoughts", calls=calls
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("review", "COMMENT") in calls, calls
+
+
 def test_handle_pr_unparseable_verdict_routes_not_gates(monkeypatch):
     calls = []
     d = _pr_dispatcher_with_stubs(
@@ -212,6 +323,107 @@ def test_handle_pr_unparseable_verdict_routes_not_gates(monkeypatch):
     # Unparseable → treated as not-clear → route (never silently gate ready).
     assert any(c[0] == "route" for c in calls)
     assert ("gate", None) not in calls
+
+
+# ── auto re-review on push against open gates (ateles#230) ───────────────────
+
+
+def _gate_blocked_dispatcher(monkeypatch, *, calls, auto_rereview):
+    """Dispatcher whose Lanius returns GATE_INHERITANCE: blocked, recording
+    which lens skills actually run so we can assert panel-skip vs re-review."""
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: blocked", "")
+        if skill == "vanellus":
+            return SkillResult(skill, True, 0, "**REQUEST_CHANGES**\nstill blocked", "")
+        calls.append(("lens", skill))
+        return SkillResult(skill, True, 0, "**COMMENT**\nre-reviewed", "")
+
+    async def fake_changed_files(self, trigger):
+        return ["src/x.ts"]
+
+    async def fake_route(self, trigger, parent, reviews, verdict):
+        calls.append(("route", verdict))
+
+    async def fake_gate(self, trigger, parent, panel):
+        calls.append(("gate", None))
+
+    async def fake_noop(self, *a, **k):
+        return None
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_changed_files", fake_changed_files)
+    monkeypatch.setattr(SwarmDispatcher, "_route_blocking_findings", fake_route)
+    monkeypatch.setattr(SwarmDispatcher, "_gate_merge_readiness", fake_gate)
+    monkeypatch.setattr(SwarmDispatcher, "_post_missing_vanellus_comment", fake_noop)
+    monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_noop)
+    monkeypatch.setattr(SwarmDispatcher, "_post_missing_panel_comments", fake_noop)
+    monkeypatch.setattr(
+        SwarmDispatcher,
+        "_preregistered_expectations",
+        lambda self, repo, parent: _async_return({}),
+    )
+    cfg = DispatchConfig(
+        neotoma_token="", github_token="", auto_rereview_on_push=auto_rereview
+    )
+    return SwarmDispatcher(_StubNotifier(), cfg)
+
+
+def test_gate_blocked_first_look_skips_panel_even_with_rereview_on(monkeypatch):
+    """A gate-blocked PR on its FIRST look still skips the panel: nothing has
+    been reviewed yet, so there is no finding to re-evaluate."""
+    calls = []
+    d = _gate_blocked_dispatcher(monkeypatch, calls=calls, auto_rereview=True)
+    asyncio.run(d._handle_pr(_trigger(kind="pr_opened", action="opened")))
+    assert not any(c[0] == "lens" for c in calls)
+    assert not any(c[0] == "route" for c in calls)
+
+
+def test_gate_blocked_repush_skips_panel_when_flag_off(monkeypatch):
+    """Flag OFF (default) preserves today's behaviour exactly: a re-push to a
+    gate-blocked PR is still a panel skip."""
+    calls = []
+    d = _gate_blocked_dispatcher(monkeypatch, calls=calls, auto_rereview=False)
+    asyncio.run(d._handle_pr(_trigger(kind="pr_synchronize", action="synchronize")))
+    assert not any(c[0] == "lens" for c in calls)
+    assert not any(c[0] == "route" for c in calls)
+
+
+def test_gate_blocked_repush_auto_rereviews_when_flag_on(monkeypatch):
+    """Flag ON: a re-push to a gate-blocked PR re-invokes the lens agents
+    against the new head instead of waiting for a manual /swarm-run."""
+    calls = []
+    d = _gate_blocked_dispatcher(monkeypatch, calls=calls, auto_rereview=True)
+    asyncio.run(d._handle_pr(_trigger(kind="pr_synchronize", action="synchronize")))
+    assert any(c[0] == "lens" for c in calls), "lens agents must re-review the new head"
+
+
+def test_gate_blocked_reopen_auto_rereviews_when_flag_on(monkeypatch):
+    """Flag ON: reopening a gate-blocked PR re-invokes the lens agents against
+    the new head too — github_gateway.py maps `reopened` to kind
+    "pr_reopened", a distinct string from "pr_synchronize", so this must be
+    checked explicitly rather than assumed covered by the synchronize case."""
+    calls = []
+    d = _gate_blocked_dispatcher(monkeypatch, calls=calls, auto_rereview=True)
+    asyncio.run(d._handle_pr(_trigger(kind="pr_reopened", action="reopened")))
+    assert any(c[0] == "lens" for c in calls), "lens agents must re-review the new head"
+
+
+def test_auto_rereview_never_gates_merge_readiness(monkeypatch):
+    """Self-certification boundary (ateles#230 arch §4): an auto-re-review of a
+    gate-blocked PR must never reach merge-readiness — a push is not a sign-off.
+    The lens verdict (REQUEST_CHANGES here) routes findings instead."""
+    calls = []
+    d = _gate_blocked_dispatcher(monkeypatch, calls=calls, auto_rereview=True)
+    asyncio.run(d._handle_pr(_trigger(kind="pr_synchronize", action="synchronize")))
+    assert not any(c[0] == "gate" for c in calls), "a push must never gate merge-ready"
+    assert any(c[0] == "route" for c in calls)
+
+
+def test_auto_rereview_flag_defaults_off():
+    """Default OFF — autonomy expansions are opt-in (ateles#80 rollout rule)."""
+    assert DispatchConfig(neotoma_token="", github_token="").auto_rereview_on_push is False
 
 
 # ── _route_blocking_findings (per-lens → Cicada, bounded) ────────────────────
@@ -367,8 +579,12 @@ def test_route_findings_escalates_at_retry_cap(monkeypatch):
     async def fake_count(self, trigger):
         return 2  # == default max_fix_rounds
 
+    async def fake_claim(self, trigger, kind):
+        return True  # first escalation → notify
+
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
 
     notifier = _StubNotifier()
     d = SwarmDispatcher(notifier, _config())
@@ -380,6 +596,36 @@ def test_route_findings_escalates_at_retry_cap(monkeypatch):
     # At the cap: no agents dispatched; operator escalated instead.
     assert dispatched == []
     assert any("auto-fix rounds did not clear" in m for m in notifier.sent)
+
+
+def test_route_findings_exhausted_dedup_suppresses_renotify(monkeypatch):
+    """A re-review after the cap must not re-page the operator.
+
+    Regression for the duplicate-fire bug (ateles#262 sent four identical
+    auto-fix-exhausted pings): when _claim_escalation reports the condition was
+    already escalated (returns False), the notification is suppressed.
+    """
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "x", "")
+
+    async def fake_count(self, trigger):
+        return 2  # == default max_fix_rounds
+
+    async def fake_claim(self, trigger, kind):
+        return False  # already escalated → suppress
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    assert not any("auto-fix rounds did not clear" in m for m in notifier.sent)
 
 
 def test_route_findings_cicada_auth_failure_pages_infra(monkeypatch):
@@ -423,7 +669,11 @@ def test_route_findings_no_parseable_blocking_escalates(monkeypatch):
     async def fake_run_skill(skill, prompt, **kwargs):
         raise AssertionError("should not dispatch when nothing parses")
 
+    async def fake_claim(self, trigger, kind):
+        return True  # first escalation → notify
+
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
     notifier = _StubNotifier()
     d = SwarmDispatcher(notifier, _config())
     # BLOCKED verdict with no [BLOCKING] blocks → escalate, don't guess.
@@ -433,6 +683,28 @@ def test_route_findings_no_parseable_blocking_escalates(monkeypatch):
                                    verdict="blocked")
     )
     assert any("no blocking findings could be parsed" in m for m in notifier.sent)
+
+
+def test_route_findings_unparseable_dedup_suppresses_renotify(monkeypatch):
+    """A re-review of the same unparseable verdict must not re-page the operator."""
+    async def fake_run_skill(skill, prompt, **kwargs):
+        raise AssertionError("should not dispatch when nothing parses")
+
+    async def fake_claim(self, trigger, kind):
+        return False  # already escalated → suppress
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80,
+                                   reviews=[("pm", "cannot proceed")],
+                                   verdict="blocked")
+    )
+    assert not any(
+        "no blocking findings could be parsed" in m for m in notifier.sent
+    )
 
 
 # ── _gate_merge_readiness (verdict-clear AND CI-green) ───────────────────────
@@ -1010,12 +1282,17 @@ def test_touches_product_code_mixed_diff_flags_when_any_product_file():
     )
 
 
-def _stub_bypass_dispatcher(monkeypatch, *, changed_files, posted):
+def _stub_bypass_dispatcher(monkeypatch, *, changed_files, posted, newly=True):
     """Wire a dispatcher whose _handle_pr short-circuits after the bypass guard.
 
     Lanius returns `blocked` so the panel never spawns (keeps the test focused on
     the guard), _changed_files is stubbed, and _post_pipeline_bypass_comment is
     replaced with a recorder so we assert the comment attempt without HTTP.
+
+    `newly` is the value the stubbed _post_pipeline_bypass_comment returns —
+    True means the bypass was surfaced for the first time (operator should be
+    notified), False means an existing marker was merely re-edited (duplicate
+    PR event; notification must be suppressed).
     """
 
     async def fake_run_skill(skill, prompt, **kwargs):
@@ -1026,6 +1303,7 @@ def _stub_bypass_dispatcher(monkeypatch, *, changed_files, posted):
 
     async def fake_post_bypass(self, trigger):
         posted.append(trigger.number)
+        return newly
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_changed_files", fake_changed_files)
@@ -1047,6 +1325,91 @@ def test_pr_no_parent_product_code_surfaces_bypass_loudly(monkeypatch):
     # A visible PR comment was attempted and the operator was notified.
     assert posted == [87]
     assert any("bypassed the gated" in m for m in notifier.sent)
+
+
+def test_pr_bypass_duplicate_event_does_not_renotify(monkeypatch):
+    """A repeat PR event for an already-surfaced bypass must not re-notify.
+
+    Regression for the duplicate-fire bug: ateles#242 received four identical
+    'touched product code' pings. When _post_pipeline_bypass_comment reports the
+    marker already existed (returns False), the operator notification is skipped
+    even though the guard path still runs.
+    """
+    posted = []
+    dispatcher, notifier = _stub_bypass_dispatcher(
+        monkeypatch,
+        changed_files=["src/cli/mcp_config_scan.ts"],
+        posted=posted,
+        newly=False,
+    )
+    asyncio.run(dispatcher._handle_pr(_trigger(body="A fix, no issue link.")))
+
+    # The guard still ran (comment attempted) but no duplicate ping was sent.
+    assert posted == [87]
+    assert not any("bypassed the gated" in m for m in notifier.sent)
+
+
+def test_post_bypass_comment_fail_open_when_new_post_errors(monkeypatch):
+    """A first-time bypass whose comment POST fails transiently must still
+    return True (fail-open), so the operator is notified — aligning with
+    _claim_escalation. Loxia review observation on PR #271."""
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return []  # no existing marker → this is a first surfacing
+
+    class _FailPostClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def get(self, url, **kwargs):
+            return _Resp()
+
+        async def post(self, url, **kwargs):
+            raise httpx.HTTPError("transient boom")
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _FailPostClient())
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    result = asyncio.run(d._post_pipeline_bypass_comment(_trigger()))
+    assert result is True  # fail-open → caller will notify
+
+
+def test_post_bypass_comment_fail_closed_when_duplicate_patch_errors(monkeypatch):
+    """A confirmed-duplicate bypass whose PATCH fails must return False — the
+    bypass is already surfaced, so never re-notify even on a transient error."""
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return [{"id": 5, "body": "<!-- pipeline-bypass-notice -->"}]
+
+    class _FailPatchClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def get(self, url, **kwargs):
+            return _Resp()
+
+        async def patch(self, url, **kwargs):
+            raise httpx.HTTPError("transient boom")
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _FailPatchClient())
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    result = asyncio.run(d._post_pipeline_bypass_comment(_trigger()))
+    assert result is False  # fail-closed → known bypass, no re-notify
 
 
 def test_pr_with_parent_does_not_trigger_bypass(monkeypatch):
@@ -1530,28 +1893,133 @@ def _comment_trigger(**overrides):
     return SwarmTrigger(**base)
 
 
-def test_confirm_gates_clear_from_operator_calls_lanius(monkeypatch):
-    """Operator /confirm-gates-clear triggers Lanius gate-waive and notifier."""
+class _FakeGateStore:
+    """In-memory stand-in for IssueGateStore with a real waive/verify loop.
+
+    ``gate_status`` starts from *initial* and is mutated by ``waive`` exactly as
+    the real store does, so the sweep semantics (waive all unsigned, leave the
+    cleared alone) are exercised end to end. ``verify_returns`` lets a test
+    simulate a write that does NOT persist — the verification-failure path.
+    """
+
+    def __init__(
+        self,
+        initial: dict | None = None,
+        *,
+        entity_found: bool = True,
+        verify_returns: dict | None = None,
+    ):
+        self.gate_status = dict(initial or {})
+        self.entity_found = entity_found
+        self.verify_returns = verify_returns
+        self.owner_history: list[dict] = []
+        self.waive_calls: list[tuple] = []
+
+    async def waive(self, repo, issue_number, pre_impl_gates):
+        from gate_waive import (
+            WaiveOutcome,
+            gates_needing_waive,
+            verify_waived,
+            waive_history_entries,
+        )
+
+        self.waive_calls.append((repo, issue_number, tuple(pre_impl_gates)))
+        outcome = WaiveOutcome()
+        if not self.entity_found:
+            return outcome
+        outcome.entity_found = True
+        targeted = gates_needing_waive(self.gate_status, tuple(pre_impl_gates))
+        outcome.targeted = list(targeted)
+        outcome.already_clear = [g for g in pre_impl_gates if g not in targeted]
+        if not targeted:
+            outcome.verified = True
+            return outcome
+        for gate in targeted:
+            self.gate_status[gate] = "waived"
+        self.owner_history.extend(waive_history_entries(targeted, "2026-07-27T00:00:00Z"))
+        # Verification re-read: either the real mutated state, or an injected
+        # state simulating a write that did not persist.
+        observed = (
+            self.verify_returns
+            if self.verify_returns is not None
+            else self.gate_status
+        )
+        still_open = verify_waived(observed, targeted)
+        outcome.failed = still_open
+        outcome.waived = [g for g in targeted if g not in still_open]
+        outcome.verified = not still_open
+        return outcome
+
+
+def _install_fake_gate_store(monkeypatch, store):
+    """Patch IssueGateStore so the dispatcher uses *store*."""
+    monkeypatch.setattr(
+        swarm_dispatch, "IssueGateStore", lambda base_url, token: store
+    )
+    return store
+
+
+def _capture_waive_comments(monkeypatch):
+    """Capture gate-waive result comment bodies instead of hitting GitHub."""
+    bodies: list[str] = []
+
+    async def fake_post(self, trigger, outcome):
+        from gate_waive import format_waive_comment
+
+        bodies.append(
+            format_waive_comment(
+                marker="<!-- swarm-gate-waive-result -->",
+                header="hdr",
+                waived=outcome.waived,
+                already_clear=outcome.already_clear,
+                failed=outcome.failed,
+                entity_found=outcome.entity_found,
+            )
+        )
+
+    monkeypatch.setattr(SwarmDispatcher, "_post_gate_waive_comment", fake_post)
+    return bodies
+
+
+def test_confirm_gates_clear_performs_dispatcher_side_write(monkeypatch):
+    """Operator /confirm-gates-clear must waive DISPATCHER-SIDE, not via an agent.
+
+    ateles#285: the waive used to be prompted to Lanius, which silently no-opped
+    (agent spawned, wrote nothing, posted nothing). A gate waive is a mechanical
+    state transition, so the dispatcher performs it directly. This test pins
+    that contract: the sweep runs WITHOUT any agent turn.
+    """
     calls = []
 
     async def fake_run_skill(skill, prompt, **kwargs):
         calls.append((skill, prompt))
-        return SkillResult(skill, True, 0, "Gates waived.", "")
+        return SkillResult(skill, True, 0, "", "")
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    store = _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    _install_fake_gate_store(monkeypatch, store)
+    comments = _capture_waive_comments(monkeypatch)
+
     notifier = _StubNotifier()
     dispatcher = SwarmDispatcher(notifier, _config())
 
     asyncio.run(dispatcher._handle_issue_comment(_comment_trigger()))
 
-    assert any(c[0] == "lanius" for c in calls), "Lanius must be called to waive gates"
-    # Prompt must mention the command and the pre-impl gates.
-    lanius_prompt = next(c[1] for c in calls if c[0] == "lanius")
-    assert _CONFIRM_GATES_CLEAR_CMD in lanius_prompt
+    # The waive must NOT depend on an agent turn.
+    assert not [c for c in calls if c[0] == "lanius"], (
+        "the gate waive must be a dispatcher-side write, not a Lanius prompt "
+        "(ateles#285)"
+    )
+    assert store.waive_calls, "the dispatcher must call the gate store"
+    # Every pre-impl gate must be waived.
     for gate in PRE_IMPL_GATES:
-        assert gate in lanius_prompt, f"Prompt must mention gate '{gate}'"
+        assert store.gate_status[gate] == "waived", (
+            f"gate {gate!r} must be waived by the dispatcher-side sweep"
+        )
     # Notifier must be called to inform the operator.
     assert any("cleared" in m or "waiv" in m for m in notifier.sent)
+    # And GitHub must see it.
+    assert comments, "a gate-waive result comment must be posted"
 
 
 def test_confirm_gates_clear_from_non_operator_is_ignored(monkeypatch):
@@ -1640,6 +2108,10 @@ def test_confirm_gates_clear_on_pr_comment_retriggers_pr_pipeline(monkeypatch):
     monkeypatch.setattr(SwarmDispatcher, "_post_missing_panel_comments", fake_post_missing)
     monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_persist)
     monkeypatch.setattr(SwarmDispatcher, "_store_merge_checkpoint", fake_merge_checkpoint)
+    store = _install_fake_gate_store(
+        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    )
+    _capture_waive_comments(monkeypatch)
 
     notifier = _StubNotifier()
     dispatcher = SwarmDispatcher(notifier, _config())
@@ -1655,7 +2127,7 @@ def test_confirm_gates_clear_on_pr_comment_retriggers_pr_pipeline(monkeypatch):
     )
 
     # Lanius must be called at minimum (for gate waive + PR pipeline).
-    assert "lanius" in calls
+    assert store.waive_calls, "the dispatcher-side gate waive must have run"
 
 
 def test_confirm_gates_clear_is_case_insensitive_for_operator_login(monkeypatch):
@@ -1667,6 +2139,10 @@ def test_confirm_gates_clear_is_case_insensitive_for_operator_login(monkeypatch)
         return SkillResult(skill, True, 0, "", "")
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    store = _install_fake_gate_store(
+        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    )
+    _capture_waive_comments(monkeypatch)
     dispatcher = SwarmDispatcher(_StubNotifier(), _config())
 
     # Mix case: MARKMHENDRICKSON vs markmhendrickson.
@@ -1675,7 +2151,7 @@ def test_confirm_gates_clear_is_case_insensitive_for_operator_login(monkeypatch)
             _comment_trigger(comment_author=_OPERATOR_LOGIN.upper())
         )
     )
-    assert "lanius" in calls
+    assert store.waive_calls, "the dispatcher-side gate waive must have run"
 
 
 # ── Part B — Pavo pm self-sign-off prompt ──────────────────────────────────
@@ -1743,8 +2219,15 @@ def test_lanius_pr_prompt_blocked_comment_specifies_operator_only():
 
 
 def test_pre_impl_gates_constant_includes_expected_gates():
-    """PRE_IMPL_GATES must include pm and arch (the two pre-impl gates)."""
+    """PRE_IMPL_GATES must include pm, ux and arch (the three pre-impl gates).
+
+    ateles#285: `ux` was missing, which is why the 2026-07-23 waive on
+    ateles#241 cleared `arch` and left `ux` pending. The Lanius skill's Phase 2
+    (Accipiter `ux` + Bombycilla `arch`) and _lanius_pr_prompt both treat `ux`
+    as a pre-impl gate, so the constant must agree.
+    """
     assert "pm" in PRE_IMPL_GATES
+    assert "ux" in PRE_IMPL_GATES
     assert "arch" in PRE_IMPL_GATES
 
 
@@ -1753,6 +2236,265 @@ def test_operator_login_defaults_to_repo_owner():
     # This is the env-based default; the actual value depends on env.
     # We verify the constant is non-empty (not blank).
     assert _OPERATOR_LOGIN, "_OPERATOR_LOGIN must not be empty"
+
+
+# ── ateles#285 — dispatcher-side gate waive ──────────────────────────────────
+#
+# Regression coverage for the three failures recorded on ateles#241:
+#   * 2026-07-23 PARTIAL apply (waived `arch`, left `ux` pending),
+#   * 2026-07-27T17:08 rc=1,
+#   * 2026-07-27T17:37 SILENT no-op (no write, no error, no comment).
+
+
+def test_waive_sweeps_all_unsigned_gates_not_just_one():
+    """ALL unsigned pre-impl gates are waived — the 2026-07-23 partial regression.
+
+    That run waived `arch` and left `ux` pending, so the issue LOOKED cleared
+    while PR gate inheritance kept blocking. `gates_needing_waive` is a total
+    function over PRE_IMPL_GATES, so a partial sweep is structurally impossible.
+    """
+    from gate_waive import apply_waives, gates_needing_waive
+
+    # Exactly the state of ateles#241 before the 2026-07-23 attempt.
+    gate_status = {
+        "pm": "signed_off",
+        "ux": "pending",
+        "arch": "pending",
+        "impl": "pending",
+        "pr_review": "pending",
+        "qa": "pending",
+        "legal": "not_required",
+    }
+
+    targeted = gates_needing_waive(gate_status, PRE_IMPL_GATES)
+    assert set(targeted) == {"ux", "arch"}, (
+        f"both unsigned pre-impl gates must be targeted, got {targeted}"
+    )
+
+    merged = apply_waives(gate_status, targeted)
+    assert merged["ux"] == "waived", "ux must be waived (the 2026-07-23 miss)"
+    assert merged["arch"] == "waived"
+    # Signed-off and non-pre-impl gates are untouched.
+    assert merged["pm"] == "signed_off"
+    assert merged["impl"] == "pending"
+    assert merged["legal"] == "not_required"
+
+
+def test_waive_sweep_covers_gates_absent_from_gate_status():
+    """A gate MISSING from gate_status is unsigned, not cleared."""
+    from gate_waive import gates_needing_waive
+
+    targeted = gates_needing_waive({"pm": "signed_off"}, PRE_IMPL_GATES)
+    assert set(targeted) == {"ux", "arch"}, (
+        f"absent gates must be treated as unsigned, got {targeted}"
+    )
+
+
+def test_already_cleared_gates_are_left_alone():
+    """Gates already signed_off / waived / not_required are never re-waived."""
+    from gate_waive import gates_needing_waive
+
+    gate_status = {
+        "pm": "signed_off",
+        "ux": "waived",
+        "arch": "not_required",
+    }
+    assert gates_needing_waive(gate_status, PRE_IMPL_GATES) == [], (
+        "no gate should be targeted when all pre-impl gates are already cleared"
+    )
+
+
+def test_all_cleared_waive_is_a_reported_noop(monkeypatch):
+    """An all-clear sweep still reports to the operator — silence is the bug."""
+    store = _install_fake_gate_store(
+        monkeypatch,
+        _FakeGateStore({"pm": "signed_off", "ux": "waived", "arch": "signed_off"}),
+    )
+    comments = _capture_waive_comments(monkeypatch)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    asyncio.run(dispatcher._handle_issue_comment(_comment_trigger()))
+
+    assert store.waive_calls
+    assert comments, "a no-op sweep must STILL post an operator-visible comment"
+    assert "No gates needed waiving" in comments[0]
+
+
+def test_gate_status_parses_json_string_form():
+    """gate_status round-trips as a JSON STRING in prod — it must still parse.
+
+    Read off the live entity ent_4c1f77bc5fc86a2bad2025d6: Neotoma's schema
+    inference typed the field as a string, so a naive dict access sees nothing
+    to waive and the sweep no-ops.
+    """
+    from gate_waive import parse_gate_status
+
+    raw = '{"pm": "signed_off", "ux": "pending", "arch": "waived"}'
+    parsed = parse_gate_status(raw)
+    assert parsed["pm"] == "signed_off"
+    assert parsed["ux"] == "pending"
+    assert parsed["arch"] == "waived"
+    # Dict form works too, and junk degrades to empty rather than raising.
+    assert parse_gate_status({"pm": "pending"}) == {"pm": "pending"}
+    assert parse_gate_status("not json") == {}
+    assert parse_gate_status(None) == {}
+
+
+def test_verification_failure_is_reported_not_swallowed(monkeypatch):
+    """A write that does NOT persist must report loudly, never continue silently.
+
+    This is the 2026-07-27T17:37 failure: the transition never landed and the
+    operator saw nothing. Now the re-read detects it, the outcome is not ok,
+    the operator is notified at BLOCKER priority, and GitHub gets a failure
+    comment naming the still-unsigned gates.
+    """
+    # The write "succeeds" but the verification re-read still shows ux pending.
+    store = _install_fake_gate_store(
+        monkeypatch,
+        _FakeGateStore(
+            {"pm": "signed_off", "ux": "pending", "arch": "pending"},
+            verify_returns={"pm": "signed_off", "ux": "pending", "arch": "waived"},
+        ),
+    )
+    comments = _capture_waive_comments(monkeypatch)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+
+    asyncio.run(dispatcher._handle_issue_comment(_comment_trigger()))
+
+    assert store.waive_calls
+    # The failure must reach GitHub, naming the gate that did not land.
+    assert comments, "a verification failure must still post a comment"
+    body = comments[0]
+    assert "FAILED" in body, f"failure must be stated plainly: {body}"
+    assert "`ux`" in body, f"the still-unsigned gate must be named: {body}"
+    # And the operator must be notified.
+    assert any("FAILED" in m or "failed" in m for m in notifier.sent), (
+        f"operator must be notified of the verification failure: {notifier.sent}"
+    )
+
+
+def test_missing_issue_entity_is_reported(monkeypatch):
+    """No Neotoma issue entity → report it; never claim the gates are clear."""
+    store = _install_fake_gate_store(
+        monkeypatch, _FakeGateStore(entity_found=False)
+    )
+    comments = _capture_waive_comments(monkeypatch)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    notifier = _StubNotifier()
+    dispatcher = SwarmDispatcher(notifier, _config())
+
+    asyncio.run(dispatcher._handle_issue_comment(_comment_trigger()))
+
+    assert store.waive_calls
+    assert comments and "could not be applied" in comments[0]
+    assert any("FAILED" in m or "failed" in m for m in notifier.sent)
+
+
+def test_waive_outcome_ok_semantics():
+    """WaiveOutcome.ok: found + no failures. A missing entity is NOT ok."""
+    from gate_waive import WaiveOutcome
+
+    assert WaiveOutcome(entity_found=True, waived=["ux"]).ok
+    # A genuine no-op on a found entity is fine.
+    assert WaiveOutcome(entity_found=True, already_clear=["pm"]).ok
+    assert not WaiveOutcome(entity_found=False).ok
+    assert not WaiveOutcome(entity_found=True, failed=["ux"]).ok
+
+
+def test_owner_history_append_preserves_existing_entries():
+    """The waive APPENDS to owner_history — it never rebuilds the list."""
+    from gate_waive import waive_history_entries
+
+    existing = [
+        {"agent": "lanius", "action": "triaged", "at": "2026-07-21T00:00:00Z"},
+        {"agent": "pavo", "gate": "pm", "action": "signed_off"},
+    ]
+    appended = waive_history_entries(["ux", "arch"], "2026-07-27T18:00:00Z")
+    merged = existing + appended
+
+    assert merged[:2] == existing, "prior history must be preserved verbatim"
+    assert len(appended) == 2
+    for entry in appended:
+        assert entry["action"] == "waived"
+        assert entry["actor"] == "operator"
+        assert entry["reason"] == "operator /confirm-gates-clear override"
+        assert entry["timestamp"] == "2026-07-27T18:00:00Z"
+    assert {e["gate"] for e in appended} == {"ux", "arch"}
+
+
+def test_waive_comment_never_contains_a_command_token():
+    """The dispatcher's own comment must not re-trigger the command detector.
+
+    Same self-trigger defence as _post_swarm_run_comment (neotoma#1686): a body
+    containing the literal command token would re-fire the handler via the
+    bot's own webhook.
+    """
+    from gate_waive import format_waive_comment
+
+    bodies = [
+        format_waive_comment("<!-- m -->", "h", ["ux", "arch"], ["pm"], [], True),
+        format_waive_comment("<!-- m -->", "h", [], ["pm", "ux", "arch"], [], True),
+        format_waive_comment("<!-- m -->", "h", ["arch"], [], ["ux"], True),
+        format_waive_comment("<!-- m -->", "h", [], [], [], False),
+    ]
+    for body in bodies:
+        assert _CONFIRM_GATES_CLEAR_CMD not in body, (
+            f"comment must carry no command token: {body}"
+        )
+        assert body.strip(), "every path must produce a non-empty comment"
+
+
+def test_waive_comment_names_the_gates_in_every_outcome():
+    """Success, failure, and no-op comments all name the gates involved."""
+    from gate_waive import format_waive_comment
+
+    success = format_waive_comment("<!-- m -->", "h", ["ux", "arch"], ["pm"], [], True)
+    assert "`ux`" in success and "`arch`" in success
+    assert "`pm`" in success, "already-cleared gates should be listed too"
+
+    failure = format_waive_comment("<!-- m -->", "h", ["arch"], [], ["ux"], True)
+    assert "`ux`" in failure and "FAILED" in failure
+    assert "`arch`" in failure, "gates that DID land must still be named"
+
+    noop = format_waive_comment("<!-- m -->", "h", [], ["pm", "ux", "arch"], [], True)
+    assert "`pm`" in noop and "already" in noop.lower()
+
+
+def test_gate_store_matches_entity_on_repo_and_number():
+    """Entity matching tolerates repo/repository and issue_number/github_number."""
+    from gate_waive import IssueGateStore
+
+    match = IssueGateStore._matches
+    # The live ateles#241 shape carries all four fields.
+    live = {
+        "repo": "markmhendrickson/ateles",
+        "repository": "markmhendrickson/ateles",
+        "issue_number": 241,
+        "github_number": "241",
+    }
+    assert match(live, "markmhendrickson/ateles", 241)
+    assert not match(live, "markmhendrickson/ateles", 242)
+    assert not match(live, "markmhendrickson/neotoma", 241)
+    # Only `repository` + only `github_number` (string) still matches.
+    assert match({"repository": "o/r", "github_number": "7"}, "o/r", 7)
+    # Only `repo` + int issue_number.
+    assert match({"repo": "o/r", "issue_number": 7}, "o/r", 7)
+    assert not match({"repo": "o/r"}, "o/r", 7)
 
 
 # ── Phase 1 / Layer A: include_github_contract=True at GitHub-trigger call sites
@@ -1788,6 +2530,48 @@ def test_github_trigger_lanius_issue_passes_contract(monkeypatch):
             f"run_skill call for skill={call['skill']!r} in _handle_issue_opened "
             "must pass include_github_contract=True"
         )
+
+
+def test_additive_spec_pr_opened_is_info_priority(monkeypatch):
+    """A successfully auto-built spec (PR opened) notifies at INFO, not
+    OPERATOR_DECISION — it is FYI and belongs in the digest, since the PR gate
+    pipeline now owns the work and stops at the operator's merge approval."""
+    from lib.notify import Priority
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "ok", "")
+
+    async def fake_open_pr(self, trigger, state):
+        return "https://github.com/markmhendrickson/ateles/pull/999"
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(swarm_dispatch, "select_expectation_agents",
+                        lambda *a, **kw: [])
+    monkeypatch.setattr(SwarmDispatcher, "_gates_green", lambda self, lanius: True)
+    monkeypatch.setattr(SwarmDispatcher, "_open_implementation_pr", fake_open_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_mark_pipeline_inflight",
+                        lambda self, t: _async_none())
+    monkeypatch.setattr(SwarmDispatcher, "_clear_pipeline_inflight",
+                        lambda self, t: _async_none())
+
+    notifier = _StubNotifier()
+    cfg = _config()
+    cfg.auto_build = True
+    dispatcher = SwarmDispatcher(notifier, cfg)
+    t = _trigger(kind="issue_opened", number=1, title="New issue", body="Body.")
+    asyncio.run(dispatcher._handle_issue_opened(t))
+
+    opened = [
+        (m, p) for (m, p) in notifier.sent_full if "implementation PR opened" in m
+    ]
+    assert opened, "expected a PR-opened notification"
+    assert all(p == Priority.INFO for _, p in opened), (
+        "auto-build-succeeded notice must be INFO (digest), not immediate"
+    )
+
+
+async def _async_none():
+    return None
 
 
 def test_github_trigger_pr_pipeline_passes_contract(monkeypatch):
@@ -1841,28 +2625,35 @@ def test_github_trigger_pr_pipeline_passes_contract(monkeypatch):
         )
 
 
-def test_github_trigger_gate_waive_passes_contract(monkeypatch):
-    """_lanius_waive_gates (called from _handle_issue_comment) must pass
-    include_github_contract=True to its run_skill call."""
+def test_gate_waive_spawns_no_agent(monkeypatch):
+    """The gate waive must spawn NO agent at all (ateles#285).
+
+    Replaces the old ``include_github_contract`` assertion: there is no longer
+    a ``run_skill`` call to carry a contract, because the waive no longer goes
+    through an agent turn. An agent spawn here would reintroduce exactly the
+    silent-no-op failure mode this issue records.
+    """
     captured_kwargs: list[dict] = []
 
     async def spy_run_skill(skill, prompt, **kwargs):
         captured_kwargs.append({"skill": skill, **kwargs})
-        return SkillResult(skill, True, 0, "Gates waived.", "")
+        return SkillResult(skill, True, 0, "", "")
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", spy_run_skill)
+    store = _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    _install_fake_gate_store(monkeypatch, store)
+    _capture_waive_comments(monkeypatch)
+
     notifier = _StubNotifier()
     dispatcher = SwarmDispatcher(notifier, _config())
 
     asyncio.run(dispatcher._handle_issue_comment(_comment_trigger()))
 
-    lanius_calls = [c for c in captured_kwargs if c["skill"] == "lanius"]
-    assert lanius_calls, "Lanius must be called in _lanius_waive_gates"
-    for call in lanius_calls:
-        assert call.get("include_github_contract") is True, (
-            "Lanius run_skill call in _lanius_waive_gates must pass "
-            "include_github_contract=True"
-        )
+    assert not captured_kwargs, (
+        "the gate waive must not spawn any agent — it is a dispatcher-side "
+        f"write (ateles#285); spawned: {captured_kwargs}"
+    )
+    assert store.waive_calls, "the dispatcher-side waive must have run"
 
 
 # ── /swarm-run operator command (new) ─────────────────────────────────────────
@@ -2007,22 +2798,26 @@ def test_comment_with_neither_command_is_no_op(monkeypatch):
 
 
 def test_confirm_gates_clear_still_works_after_swarm_run_added(monkeypatch):
-    """/confirm-gates-clear must still invoke Lanius gate-waive after the refactor."""
+    """/confirm-gates-clear must still run the gate waive after the refactor."""
     calls = []
 
     async def fake_run_skill(skill, prompt, **kwargs):
         calls.append((skill, prompt))
-        return SkillResult(skill, True, 0, "Gates waived.", "")
+        return SkillResult(skill, True, 0, "", "")
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    store = _install_fake_gate_store(
+        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    )
+    _capture_waive_comments(monkeypatch)
     notifier = _StubNotifier()
     dispatcher = SwarmDispatcher(notifier, _config())
 
     asyncio.run(dispatcher._handle_issue_comment(_comment_trigger()))
 
-    assert any(c[0] == "lanius" for c in calls), "Lanius must still be called for /confirm-gates-clear"
-    lanius_prompt = next(c[1] for c in calls if c[0] == "lanius")
-    assert _CONFIRM_GATES_CLEAR_CMD in lanius_prompt
+    assert store.waive_calls, (
+        "the dispatcher-side gate waive must still run for /confirm-gates-clear"
+    )
     assert any("cleared" in m or "waiv" in m for m in notifier.sent)
 
 
@@ -2040,6 +2835,10 @@ def test_both_commands_prefers_confirm_gates_clear(monkeypatch):
 
     monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle_issue_opened)
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    store = _install_fake_gate_store(
+        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    )
+    _capture_waive_comments(monkeypatch)
 
     notifier = _StubNotifier()
     dispatcher = SwarmDispatcher(notifier, _config())
@@ -2052,9 +2851,10 @@ def test_both_commands_prefers_confirm_gates_clear(monkeypatch):
         )
     )
 
-    # /confirm-gates-clear path: Lanius must be called, issue pipeline must NOT.
-    assert any(c == "lanius" for c in skill_calls), (
-        "Lanius must be called when /confirm-gates-clear is present"
+    # /confirm-gates-clear path: the waive runs, the issue pipeline must NOT.
+    assert store.waive_calls, (
+        "the dispatcher-side gate waive must run when /confirm-gates-clear "
+        "is present"
     )
     assert opened_calls == [], (
         "_handle_issue_opened must NOT be called when /confirm-gates-clear takes priority"
@@ -2300,11 +3100,17 @@ def test_operator_confirm_gates_clear_still_dispatches_after_bot_guard(monkeypat
         return SkillResult(skill, True, 0, "Gates waived.", "")
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    store = _install_fake_gate_store(
+        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    )
+    _capture_waive_comments(monkeypatch)
     dispatcher = SwarmDispatcher(_StubNotifier(), _config())
 
     asyncio.run(dispatcher._handle_issue_comment(_comment_trigger()))
 
-    assert "lanius" in calls, "Lanius must still be called for /confirm-gates-clear"
+    assert store.waive_calls, (
+        "the dispatcher-side gate waive must still run for /confirm-gates-clear"
+    )
 
 
 # ── Fix 3: _post_swarm_run_comment edits instead of posting a duplicate ────────
@@ -3141,13 +3947,19 @@ def test_confirm_gates_clear_still_dispatches_after_h1_commands_added(monkeypatc
         return SkillResult(skill, True, 0, "Gates waived.", "")
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    store = _install_fake_gate_store(
+        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    )
+    _capture_waive_comments(monkeypatch)
     asyncio.run(
         SwarmDispatcher(_StubNotifier(), _config())._handle_issue_comment(
             _comment_trigger()
         )
     )
 
-    assert "lanius" in calls, f"Lanius must still be called for /confirm-gates-clear: {calls}"
+    assert store.waive_calls, (
+        "the dispatcher-side gate waive must still run for /confirm-gates-clear"
+    )
 
 
 def test_swarm_run_still_dispatches_after_h1_commands_added(monkeypatch):
@@ -3187,6 +3999,10 @@ def test_confirm_gates_clear_wins_over_approve_when_both_present(monkeypatch):
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    store = _install_fake_gate_store(
+        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    )
+    _capture_waive_comments(monkeypatch)
 
     asyncio.run(
         SwarmDispatcher(_StubNotifier(), _config())._handle_issue_comment(
@@ -3197,7 +4013,9 @@ def test_confirm_gates_clear_wins_over_approve_when_both_present(monkeypatch):
     )
 
     # gates-clear wins: Lanius called, no checkpoint_brief stored.
-    assert "lanius" in calls, "Lanius must be called when /confirm-gates-clear is present"
+    assert store.waive_calls, (
+        "the dispatcher-side gate waive must run when /confirm-gates-clear is present"
+    )
     approved_entities = [
         e for e in stored
         if e.get("entity_type") == "checkpoint_brief" and e.get("status") == "approved"
@@ -3944,6 +4762,61 @@ def test_issue_pipeline_semaphore_caps_concurrency(monkeypatch):
     assert peak <= 2, f"concurrency exceeded cap: peak={peak}"
 
 
+def test_queued_pipeline_emits_visible_queued_and_started_signals(monkeypatch, caplog):
+    """ateles#259: when the single-slot issue-pipeline semaphore is held, a
+    second pipeline must log a QUEUED signal before blocking and a STARTED
+    signal once it acquires the slot — so a parked pipeline is not invisible.
+
+    Two pipelines run concurrently with a 1-slot cap; the first holds the slot
+    (its lanius dispatch sleeps), forcing the second to queue. We assert both
+    the QUEUED and STARTED log lines appear for the queued issue.
+    """
+    first_in_slot = asyncio.Event()
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "lanius":
+            # First pipeline to reach lanius holds the slot long enough that the
+            # second must queue on the semaphore.
+            if not first_in_slot.is_set():
+                first_in_slot.set()
+                await asyncio.sleep(0.05)
+        return SkillResult(skill, True, 0, "text", "")
+
+    _install_pipeline_stubs(
+        monkeypatch, fake_run_skill, select_agents=lambda *a, **kw: []
+    )
+
+    cfg = DispatchConfig(
+        neotoma_token="", github_token="", max_concurrent_issue_pipelines=1
+    )
+    dispatcher = SwarmDispatcher(_StubNotifier(), cfg)
+
+    async def run_two():
+        # Start the slot-holder first, let it enter, then start the one forced
+        # to queue.
+        t1 = asyncio.create_task(
+            dispatcher._handle_issue_opened(_issue_trigger(number=241))
+        )
+        await first_in_slot.wait()
+        t2 = asyncio.create_task(
+            dispatcher._handle_issue_opened(_issue_trigger(number=999))
+        )
+        await asyncio.gather(t1, t2)
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(run_two())
+
+    text = caplog.text
+    assert "#999 QUEUED" in text, (
+        "the pipeline forced to wait on the busy slot must log a QUEUED signal; "
+        f"log was:\n{text}"
+    )
+    assert "#999 STARTED" in text, (
+        "the queued pipeline must log a STARTED signal once it acquires the "
+        f"slot; log was:\n{text}"
+    )
+
+
 # ── Mirror splices only the managed region ────────────────────────────────────
 
 
@@ -4129,3 +5002,578 @@ def test_open_implementation_pr_returns_none_when_no_pr(monkeypatch):
 def _empty_spec_state():
     from issue_spec import SpecState
     return SpecState(repo="markmhendrickson/neotoma", issue_number=1882, title="t")
+
+
+# ── issue-pipeline resume after restart (ateles#230 follow-up) ───────────────
+
+
+def _resume_dispatcher(monkeypatch, *, calls):
+    """Dispatcher with the pipeline body and marker I/O stubbed, recording the
+    marker lifecycle so we can assert start/clear ordering."""
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_pipeline(self, trigger):
+        calls.append(("pipeline", trigger.number))
+
+    async def fake_mark(self, trigger):
+        calls.append(("mark", trigger.number))
+
+    async def fake_clear(self, trigger):
+        calls.append(("clear", trigger.number))
+
+    monkeypatch.setattr(SwarmDispatcher, "_run_issue_spec_pipeline", fake_pipeline)
+    monkeypatch.setattr(SwarmDispatcher, "_mark_pipeline_inflight", fake_mark)
+    monkeypatch.setattr(SwarmDispatcher, "_clear_pipeline_inflight", fake_clear)
+    return d
+
+
+def test_pipeline_marks_inflight_then_clears_on_success(monkeypatch):
+    calls = []
+    d = _resume_dispatcher(monkeypatch, calls=calls)
+    asyncio.run(d._handle_issue_opened(_trigger(kind="issue_opened", number=230)))
+    # Marker must be written BEFORE the run and cleared after — that ordering is
+    # what makes an interrupted run detectable.
+    assert calls == [("mark", 230), ("pipeline", 230), ("clear", 230)]
+
+
+def test_pipeline_clears_inflight_marker_even_when_pipeline_raises(monkeypatch):
+    """A pipeline that fails for a real reason already reports itself; it must
+    NOT be left marked in-flight or the sweep would resurrect it every boot."""
+    calls = []
+    d = _resume_dispatcher(monkeypatch, calls=calls)
+
+    async def boom(self, trigger):
+        calls.append(("pipeline", trigger.number))
+        raise RuntimeError("lens exploded")
+
+    monkeypatch.setattr(SwarmDispatcher, "_run_issue_spec_pipeline", boom)
+    try:
+        asyncio.run(d._handle_issue_opened(_trigger(kind="issue_opened", number=230)))
+    except RuntimeError:
+        pass
+    assert ("clear", 230) in calls
+
+
+def test_resume_sweep_reruns_pipelines_with_inflight_marker(monkeypatch):
+    resumed = []
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_scan(self, repository):
+        assert repository == "owner/repo"
+        return [{"number": 230, "title": "stranded", "body": "b", "user": {"login": "x"},
+                 "html_url": "u", "labels": [{"name": "enhancement"}]}]
+
+    async def fake_handle(self, trigger):
+        resumed.append((trigger.repository, trigger.number, trigger.kind))
+
+    monkeypatch.setattr(SwarmDispatcher, "_issues_with_inflight_marker", fake_scan)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle)
+    summary = asyncio.run(d.resume_interrupted_pipelines(["owner/repo"]))
+    assert resumed == [("owner/repo", 230, "issue_opened")]
+    assert summary == {"scanned": 1, "resumed": 1, "failed": 0}
+
+
+def test_resume_sweep_skips_issues_without_marker(monkeypatch):
+    """No marker → the pipeline either never started or finished cleanly."""
+    resumed = []
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_scan(self, repository):
+        return []
+
+    async def fake_handle(self, trigger):
+        resumed.append(trigger.number)
+
+    monkeypatch.setattr(SwarmDispatcher, "_issues_with_inflight_marker", fake_scan)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle)
+    summary = asyncio.run(d.resume_interrupted_pipelines(["owner/repo"]))
+    assert resumed == []
+    assert summary["resumed"] == 0
+
+
+def test_resume_sweep_survives_a_repo_that_fails_to_scan(monkeypatch):
+    """A broken repo must not stop the other repos, nor kill daemon startup."""
+    resumed = []
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_scan(self, repository):
+        if repository == "owner/broken":
+            raise RuntimeError("GitHub 500")
+        return [{"number": 7, "title": "t", "body": "", "user": {"login": "x"},
+                 "html_url": "u", "labels": []}]
+
+    async def fake_handle(self, trigger):
+        resumed.append(trigger.number)
+
+    monkeypatch.setattr(SwarmDispatcher, "_issues_with_inflight_marker", fake_scan)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle)
+    summary = asyncio.run(
+        d.resume_interrupted_pipelines(["owner/broken", "owner/good"])
+    )
+    assert resumed == [7]
+    assert summary["resumed"] == 1
+
+
+def test_resume_sweep_counts_a_failed_resume_without_raising(monkeypatch):
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_scan(self, repository):
+        return [{"number": 9, "title": "t", "body": "", "user": {"login": "x"},
+                 "html_url": "u", "labels": []}]
+
+    async def fake_handle(self, trigger):
+        raise RuntimeError("pipeline died again")
+
+    monkeypatch.setattr(SwarmDispatcher, "_issues_with_inflight_marker", fake_scan)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle)
+    summary = asyncio.run(d.resume_interrupted_pipelines(["owner/repo"]))
+    assert summary == {"scanned": 1, "resumed": 0, "failed": 1}
+
+
+def test_inflight_marker_regex_roundtrip():
+    marker = SwarmDispatcher._PIPELINE_INFLIGHT_MARKER.format(
+        started_at="2026-07-17T12:25:53.123456+00:00"
+    )
+    assert SwarmDispatcher._PIPELINE_INFLIGHT_RE.search(marker)
+    # Must not match the sibling fix-round marker.
+    assert not SwarmDispatcher._PIPELINE_INFLIGHT_RE.search("<!-- apis-fix-round:2 -->")
+
+
+# ── push_main → release prepare (auto-release trigger) ─────────────────────
+
+
+def _push_main_trigger(repository="markmhendrickson/neotoma"):
+    return SwarmTrigger(
+        kind="push_main",
+        repository=repository,
+        number=0,
+        title="feat: thing",
+        body="",
+        author="someone",
+        html_url="",
+        delivery_id="d-1",
+        action="push",
+        push_ref="refs/heads/main",
+        push_after="a" * 40,
+    )
+
+
+def test_push_main_invokes_release_prepare(monkeypatch):
+    """A merge to the release repo's main shells out to prepare.py --on-merge."""
+    spawned = []
+
+    async def fake_exec(*args, **kwargs):
+        spawned.append(args)
+
+        class _P:
+            returncode = 0
+
+            async def communicate(self):
+                return (b"nothing to prepare", b"")
+
+        return _P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: True)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(d._handle_push_main(_push_main_trigger()))
+
+    assert len(spawned) == 1, "expected exactly one prepare.py invocation"
+    argv = spawned[0]
+    assert argv[1].endswith("prepare.py")
+    # The --on-merge flag is what swaps the daily lock for the per-commit lock.
+    assert "--on-merge" in argv
+
+
+def test_push_main_ignores_non_release_repo(monkeypatch):
+    """Only the repo with a publishable pipeline prepares a release."""
+    spawned = []
+
+    async def fake_exec(*args, **kwargs):
+        spawned.append(args)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(d._handle_push_main(_push_main_trigger(repository="o/other")))
+    assert spawned == []
+
+
+def test_push_main_survives_prepare_failure(monkeypatch):
+    """A failing prepare must never raise into the dispatcher."""
+
+    async def boom(*args, **kwargs):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", boom)
+    monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: True)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(d._handle_push_main(_push_main_trigger()))  # must not raise
+
+
+def test_push_main_prepare_timeout(monkeypatch, caplog):
+    """A wedged prepare.py subprocess must be bounded, swallowed, and logged.
+
+    ``_handle_push_main`` is documented as "Fully best-effort; never raises" -
+    a hung git/gh call inside prepare.py must not wedge the dispatcher, and
+    the failure must surface as a diagnosable log line instead of silently
+    vanishing.
+    """
+
+    class _P:
+        returncode = None
+
+        async def communicate(self):
+            # Never actually awaited by fake_wait_for below (that's the point
+            # of the timeout), but must be a real coroutine to avoid an
+            # "unawaited coroutine" warning when wait_for() is called on it.
+            await asyncio.sleep(0)
+            return (b"", b"")
+
+    async def fake_exec(*args, **kwargs):
+        return _P()
+
+    async def fake_wait_for(coro, timeout):
+        coro.close()
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
+    monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: True)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    trigger = _push_main_trigger()
+    with caplog.at_level("ERROR", logger="apis.swarm_dispatch"):
+        asyncio.run(d._handle_push_main(trigger))  # must not raise
+
+    sha = trigger.push_after[:9]
+    assert any(
+        sha in rec.message and str(swarm_dispatch.PHOENICURUS_PREPARE_TIMEOUT_S) in rec.message
+        for rec in caplog.records
+    ), "timeout must be logged with the SHA and the configured timeout for diagnosis"
+
+
+# ── auto-release retry: main CI completion re-drives release prep ────────────
+#
+# A push_main that fires while its merge's CI is still running defers WITHOUT
+# stamping the SHA lock (prepare.py transient deferral). The check_suite:completed
+# on main is the retry: on success it must re-invoke _handle_push_main; on failure
+# or a non-release branch/repo it must NOT.
+
+
+def test_ci_status_main_success_retries_release_prep(monkeypatch):
+    seen = []
+
+    async def fake_push_main(self, trigger):
+        seen.append(trigger)
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_push_main", fake_push_main)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    trig = _ci_status_trigger(
+        repository="markmhendrickson/neotoma", ci_head_branch="main",
+        ci_conclusion="success", ci_head_sha="f" * 40, ci_pr_numbers=[],
+    )
+    asyncio.run(d._handle_ci_status(trig))
+    assert len(seen) == 1, "main CI success must retry release prep"
+    assert seen[0].kind == "push_main"
+    assert seen[0].push_after == "f" * 40
+    assert seen[0].push_ref == "refs/heads/main"
+
+
+def test_ci_status_main_failure_does_not_retry(monkeypatch):
+    seen = []
+
+    async def fake_push_main(self, trigger):
+        seen.append(trigger)
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_push_main", fake_push_main)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    trig = _ci_status_trigger(
+        repository="markmhendrickson/neotoma", ci_head_branch="main",
+        ci_conclusion="failure", ci_pr_numbers=[],
+    )
+    asyncio.run(d._handle_ci_status(trig))
+    assert seen == [], "a red main build must not prepare a release"
+
+
+def test_ci_status_non_release_repo_main_does_not_retry(monkeypatch):
+    """Only the release repo's main drives release prep; other repos fall through
+    to the normal PR-oriented ci_status path (here: no PR → ignored)."""
+    seen = []
+
+    async def fake_push_main(self, trigger):
+        seen.append(trigger)
+
+    async def fake_fetch_pr(self, repo, num):  # not reached with no PR, but safe
+        return None
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_push_main", fake_push_main)
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    trig = _ci_status_trigger(
+        repository="owner/other", ci_head_branch="main",
+        ci_conclusion="success", number=0, ci_pr_numbers=[],
+    )
+    asyncio.run(d._handle_ci_status(trig))
+    assert seen == [], "non-release repo main must not prepare a release"
+
+
+# ── _handle_release_approve (email-reply release publish) ───────────────────
+#
+# This is the one handler that drives an irreversible publish. Guards: refuse a
+# malformed version outright; invoke publish.py --from-email-approval for a
+# valid one; never raise into the dispatcher.
+
+
+def _release_approve_trigger(version="v0.20.0"):
+    return SwarmTrigger(
+        kind="release_approve", repository="", number=0, title="", body="",
+        author="", html_url="", delivery_id=f"release-approve-{version}",
+        action="approved", release_version=version,
+    )
+
+
+def test_release_approve_invalid_version_never_publishes(monkeypatch):
+    spawned = []
+
+    async def fake_exec(*a, **k):
+        spawned.append(a)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: True)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    for bad in ["", "0.20.0", "latest", "v; rm -rf /"]:
+        asyncio.run(d._handle_release_approve(_release_approve_trigger(bad)))
+    assert spawned == [], "a malformed version must never invoke publish.py"
+
+
+def test_release_approve_valid_version_invokes_publish(monkeypatch):
+    spawned = []
+
+    async def fake_exec(*args, **kwargs):
+        spawned.append(args)
+
+        class _P:
+            returncode = 0
+
+            async def communicate(self):
+                return (b"Release v0.20.0 PUBLISHED.", b"")
+
+        return _P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: True)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(d._handle_release_approve(_release_approve_trigger("v0.20.0")))
+    assert len(spawned) == 1
+    argv = spawned[0]
+    assert argv[1].endswith("publish.py")
+    assert "--version" in argv and "v0.20.0" in argv
+    assert "--from-email-approval" in argv
+
+
+def test_release_approve_publish_failure_notifies(monkeypatch):
+    async def fake_exec(*args, **kwargs):
+        class _P:
+            returncode = 1
+
+            async def communicate(self):
+                return (b"StepError: npm publish failed", b"")
+
+        return _P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: True)
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    asyncio.run(d._handle_release_approve(_release_approve_trigger("v0.20.0")))
+    # a failed publish must page the operator (BLOCKER), not fail silently
+    assert any("publish FAILED" in str(m) for m in notifier.sent), notifier.sent
+
+
+def test_release_approve_missing_script_notifies(monkeypatch):
+    monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: False)
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    asyncio.run(d._handle_release_approve(_release_approve_trigger("v0.20.0")))
+    assert any("missing" in str(m).lower() for m in notifier.sent), notifier.sent
+
+
+# ── verdict comment fallback (ateles#292) ────────────────────────────────────
+#
+# Vanellus posts its aggregated verdict to GitHub reliably but repeats it in
+# stdout only sometimes. When stdout has no token, the dispatcher must recover
+# the verdict from the durable aggregation comment rather than defaulting to
+# the inert COMMENT review.
+
+
+def _comments_client(monkeypatch, bodies, *, calls=None, raises=None):
+    """Mock httpx.AsyncClient so a comments GET returns `bodies`.
+
+    `calls` (when given) records each GET, so a test can assert the happy path
+    makes no request at all. `raises` makes the GET blow up.
+    """
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def get(self, url, **kwargs):
+            if calls is not None:
+                calls.append((url, kwargs.get("params", {})))
+            if raises is not None:
+                raise raises
+
+            class _Resp:
+                def raise_for_status(self_inner):
+                    pass
+
+                def json(self_inner):
+                    return [{"body": b} for b in bodies]
+
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _Client())
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+
+def _resolver(monkeypatch):
+    return SwarmDispatcher(_StubNotifier(), _config())
+
+
+def test_resolve_verdict_prefers_stdout_and_skips_fetch(monkeypatch):
+    """T1 — stdout carries the token: unchanged behaviour, and no GitHub GET."""
+    calls = []
+    _comments_client(monkeypatch, [], calls=calls)
+    d = _resolver(monkeypatch)
+    verdict, used_fallback = asyncio.run(
+        d._resolve_review_verdict(_trigger(), "## Verdict\n**REQUEST_CHANGES**\nx")
+    )
+    assert (verdict, used_fallback) == ("request_changes", False)
+    assert calls == [], f"happy path must not fetch comments: {calls}"
+
+
+def test_resolve_verdict_falls_back_to_aggregation_comment(monkeypatch, caplog):
+    """T2 — stdout empty, marked comment has the token: fallback recovers it."""
+    _comments_client(
+        monkeypatch,
+        [f"{_VANELLUS_COMMENT_MARKER}\n**REQUEST_CHANGES**\n1 blocking"],
+    )
+    d = _resolver(monkeypatch)
+    with caplog.at_level(logging.INFO):
+        verdict, used_fallback = asyncio.run(
+            d._resolve_review_verdict(_trigger(), "")
+        )
+    assert (verdict, used_fallback) == ("request_changes", True)
+    # The fallback-fire log is what makes stdout-repeat compliance measurable.
+    assert any(
+        "fallback fired" in r.message
+        and "owner/repo#87" in r.message
+        and "request_changes" in r.message
+        for r in caplog.records
+    ), [r.message for r in caplog.records]
+
+
+def test_resolve_verdict_none_when_neither_source_has_token(monkeypatch):
+    """T3 — no token anywhere: still no verdict, and still treated as not-clear."""
+    _comments_client(monkeypatch, ["just a drive-by comment"])
+    d = _resolver(monkeypatch)
+    verdict, used_fallback = asyncio.run(d._resolve_review_verdict(_trigger(), ""))
+    assert (verdict, used_fallback) == (None, False)
+    assert review_verdict_is_clear(verdict) is False
+
+
+def test_resolve_verdict_survives_comment_fetch_failure(monkeypatch):
+    """T3b — a failed GET must not raise out of the resolver."""
+    _comments_client(monkeypatch, [], raises=httpx.ConnectError("boom"))
+    d = _resolver(monkeypatch)
+    verdict, used_fallback = asyncio.run(d._resolve_review_verdict(_trigger(), ""))
+    assert (verdict, used_fallback) == (None, False)
+
+
+def test_resolve_verdict_scans_past_unmarked_comments(monkeypatch):
+    """T4 — the marked comment is not always comments[0]."""
+    _comments_client(
+        monkeypatch,
+        [
+            "a human chimed in first",
+            f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nlgtm",
+        ],
+    )
+    d = _resolver(monkeypatch)
+    assert asyncio.run(d._resolve_review_verdict(_trigger(), "")) == ("approve", True)
+
+
+def test_resolve_verdict_requires_real_token_in_comment(monkeypatch):
+    """T5 — a marked but token-less comment must not produce a false match."""
+    _comments_client(
+        monkeypatch,
+        [f"{_VANELLUS_COMMENT_MARKER}\nthe panel had thoughts but no token"],
+    )
+    d = _resolver(monkeypatch)
+    assert asyncio.run(d._resolve_review_verdict(_trigger(), "")) == (None, False)
+
+
+def test_resolve_verdict_reads_comments_newest_first(monkeypatch):
+    """The fallback must honour the LATEST aggregation, as _pr_review_is_clear does."""
+    calls = []
+    _comments_client(
+        monkeypatch,
+        [
+            f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nnewest",
+            f"{_VANELLUS_COMMENT_MARKER}\n**REQUEST_CHANGES**\nstale",
+        ],
+        calls=calls,
+    )
+    d = _resolver(monkeypatch)
+    assert asyncio.run(d._resolve_review_verdict(_trigger(), "")) == ("approve", True)
+    assert calls and calls[0][1].get("direction") == "desc", calls
+
+
+def test_handle_pr_recovers_blocking_verdict_from_comment(monkeypatch):
+    """T6 (effect-level) — the bug itself: stdout omits REQUEST_CHANGES, but the
+    PR must still be routed as blocking AND get a native REQUEST_CHANGES review,
+    not an inert COMMENT."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="the panel had thoughts", calls=calls
+    )
+    _comments_client(
+        monkeypatch,
+        [f"{_VANELLUS_COMMENT_MARKER}\n**REQUEST_CHANGES**\n1 blocking"],
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("route", "request_changes") in calls, calls
+    assert ("gate", None) not in calls, calls
+    # The whole point of #241/#284: GitHub's review state carries the verdict.
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+
+
+def test_handle_pr_recovered_approve_gates_readiness(monkeypatch):
+    """T7 — the fallback must not over-trigger blocking: a recovered APPROVE
+    proceeds to the readiness gate."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="the panel had thoughts", calls=calls
+    )
+    _comments_client(monkeypatch, [f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nlgtm"])
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("gate", None) in calls, calls
+    assert not any(c[0] == "route" for c in calls), calls
+    assert ("review", "APPROVE") in calls, calls
+
+
+def test_handle_pr_still_comments_when_no_verdict_anywhere(monkeypatch):
+    """Regression guard: with neither stdout nor comment carrying a token, the
+    dispatcher behaves exactly as before — inert COMMENT review, blocking route."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="the panel had thoughts", calls=calls
+    )
+    _comments_client(monkeypatch, ["nothing useful here"])
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("review", "COMMENT") in calls, calls
+    assert any(c[0] == "route" for c in calls), calls
