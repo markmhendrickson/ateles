@@ -398,22 +398,26 @@ def test_invoice_notifies_once_then_deduped(monkeypatch):
 
 
 def test_dedup_set_guards_when_watermark_does_not_short_circuit(monkeypatch):
-    # Exercises the processed_ids mechanism DIRECTLY (not the last_message_id
-    # break): a NEWER message accompanies the repeated inv1, so inv1 is not at
-    # the list head and the watermark walk does not stop before reaching it.
-    # Only the dedup set can prevent the second invoice notification for inv1.
+    # Exercises the processed_ids skip (turdus.py: the `msg_id in
+    # processed_id_set` continue) DIRECTLY, not the last_message_id break.
+    # We null out last_message_id on the second poll so the watermark walk
+    # does NOT stop early — every message enters new_messages, and inv1's
+    # suppression can therefore come ONLY from the dedup set. If that skip
+    # were deleted, inv1 would notify a second time and this test would fail.
     _wire_poll(monkeypatch, messages=[_invoice_msg("inv1")])
     notifier = _StubNotifier()
     state = _run(turdus.poll_once(notifier, {"last_message_id": None}))
     assert len([m for m in notifier.sent if "invoice(s)" in m]) == 1
     assert "inv1" in state.get("processed_ids", [])
 
-    # Next poll: a newer invoice (inv2) ahead of the still-returned inv1.
+    # Second poll: inv2 (new) + inv1 (repeat). Force the watermark OFF so it
+    # cannot short-circuit inv1 — only processed_ids can.
+    state["last_message_id"] = None
     _wire_poll(monkeypatch, messages=[_invoice_msg("inv2"), _invoice_msg("inv1")])
     notifier2 = _StubNotifier()
     state2 = _run(turdus.poll_once(notifier2, state))
     # Exactly one invoice notified this cycle — inv2, the genuinely new one.
-    # inv1 is suppressed by processed_ids despite not being at the list head.
+    # inv1 reached the loop body but was suppressed purely by the dedup set.
     notes = [m for m in notifier2.sent if "invoice(s)" in m]
     assert len(notes) == 1
     assert "1 invoice(s)" in notes[0]

@@ -1060,6 +1060,12 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
             _mark_handled(msg_id)
         else:
             # informational (stored, no task) — still terminally handled.
+            # Intentional asymmetry vs. the actionable/invoice branch: we do
+            # NOT apply PROCESSED_LABEL or mark-read here, so informational mail
+            # stays is:unread and re-enters the poll query until it ages out of
+            # the bounded dedup set. Harmless — informational mail never
+            # notifies — and it avoids Turdus silently marking the operator's
+            # ordinary unread mail as read.
             _mark_handled(msg_id)
 
     # Update state with newest processed message ID and the bounded dedup set.
