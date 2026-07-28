@@ -5537,6 +5537,44 @@ def test_handle_pr_clear_verdict_matching_sha_still_gates_merge_readiness(
     ), [r.message for r in caplog.records]
 
 
+def test_handle_pr_clear_verdict_current_sha_fetch_fails_still_gates_merge_readiness(
+    monkeypatch, caplog
+):
+    """QA lens finding (review round 1 on ateles#239, auto-fix round 1):
+    distinct from the fully-unstamped case below (both calls fail), here the
+    PRE-panel `_pr_head_sha` call succeeds (`reviewed_sha` is captured), but
+    the POST-panel re-fetch (`current_sha`) fails open to "" — e.g. a
+    transient GitHub API hiccup between the two calls. The guard's
+    `reviewed_sha and current_sha` truthiness check must still short-circuit
+    False so `_gate_merge_readiness` runs; a refactor that dropped the
+    `current_sha` truthiness check (e.g. comparing only `!=`) would silently
+    skip merge-readiness gating on every such hiccup, and every other test
+    here would still pass green since they don't drive this asymmetric case.
+
+    Mirrors `test_reviewed_sha_present_but_recheck_fails_still_consumes_a_fix_round`
+    (routing-side guard), but for the merge-readiness guard in `_handle_pr`.
+    """
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+
+    head_shas = iter(["aaa111", ""])
+
+    async def fake_head(self, t):
+        return next(head_shas, "")
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+    assert ("gate", None) in calls, calls
+    assert not any(
+        "skipping merge-readiness gate" in r.message for r in caplog.records
+    ), [r.message for r in caplog.records]
+
+
 def test_unstamped_approve_still_reaches_merge_gate(monkeypatch, caplog):
     """QA lens finding (review round 1 on ateles#239, auto-fix round 1): the
     ateles#239 APPROVE-branch guard in `_handle_pr` has tests for
