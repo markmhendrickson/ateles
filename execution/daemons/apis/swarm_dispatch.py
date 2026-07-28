@@ -22,6 +22,13 @@ The orchestration layer behind the GitHub webhook gateway (ateles#80):
                      blocking checkpoint_brief before merge (autonomy
                      guardrail)
 
+Mechanical state transitions are DISPATCHER-SIDE WRITES, not agent-prompt work
+(ateles#285). A deterministic mutation with no judgement in it — the
+`/confirm-gates-clear` gate waive being the canonical case — is performed
+directly by the dispatcher and then VERIFIED by re-reading the entity, because
+an LLM turn asked to persist a mechanical mutation can silently no-op or
+partially apply (and did, three times, on ateles#241). See `gate_waive.py`.
+
 Autonomy guardrail (ateles#80): read-only gates run unattended — they only
 write Neotoma metadata and GitHub comments, both reversible. Side-effecting
 steps stay operator-gated by default: Vanellus reviews and aggregates but
@@ -48,6 +55,11 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
+from gate_waive import (
+    IssueGateStore,
+    WaiveOutcome,
+    format_waive_comment,
+)
 from github_gateway import SwarmTrigger
 from issue_spec import (
     SECTIONS,
@@ -193,7 +205,14 @@ def parse_approve_token(text: str) -> tuple[str, int] | None:
 
 # Pre-impl gates that must be signed off before the PR review panel runs.
 # These are the gates Lanius checks for GATE_INHERITANCE.
-PRE_IMPL_GATES = ("pm", "arch")
+#
+# ateles#285: `ux` was MISSING from this tuple even though the Lanius skill,
+# the workflow phase table (Phase 2 = Accipiter `ux` + Bombycilla `arch`), and
+# _lanius_pr_prompt ("If pm/ux/arch are all satisfied there …") all treat it as
+# a pre-impl gate. That omission is the mechanical cause of the 2026-07-23
+# PARTIAL waive on ateles#241: the sweep waived `arch`, left `ux` pending, and
+# PR gate inheritance kept blocking on a gate the operator believed cleared.
+PRE_IMPL_GATES = ("pm", "ux", "arch")
 
 # Operator GitHub login — only this login may waive gates via the comment
 # command.  Defaults to the repo owner; override with APIS_OPERATOR_LOGIN.
@@ -2762,10 +2781,12 @@ class SwarmDispatcher:
             handler=DAEMON_NAME,
         )
 
-        # Delegate gate-waiving to Lanius (it owns gate_status mutations).
-        # Lanius will correct each unsigned pre-impl gate to "waived", record
-        # the waive in owner_history, and advance current_owner.
-        await self._lanius_waive_gates(trigger)
+        # Perform the waive DISPATCHER-SIDE (ateles#285). This is a mechanical
+        # state transition with no judgement in it, so it does not go through
+        # an agent turn: the dispatcher corrects each unsigned pre-impl gate to
+        # "waived", appends to owner_history, RE-READS to verify the write
+        # landed, and posts an operator-visible comment either way.
+        await self._waive_gates(trigger)
 
         # If the comment is on a PR, re-run the PR pipeline immediately.
         # If it's on the parent issue, the operator needs to re-push or
@@ -3975,13 +3996,33 @@ class SwarmDispatcher:
             )
             return None
 
-    async def _lanius_waive_gates(self, trigger: SwarmTrigger) -> None:
-        """Ask Lanius to waive all unsigned pre-impl gates on the issue entity.
+    async def _waive_gates(self, trigger: SwarmTrigger) -> WaiveOutcome:
+        """Waive all unsigned pre-impl gates DISPATCHER-SIDE, then verify.
 
-        Mirrors the gate-waive mechanics in the Lanius SKILL.md (lines 48-52):
-        correct gate_status.<gate> → "waived", append to owner_history, advance
-        current_owner to the next phase.  Best-effort: logs on failure but does
-        not raise.
+        ateles#285 — root cause and fix.  This used to prompt Lanius to perform
+        the ``correct()`` calls.  That silently no-opped (2026-07-27T17:37: the
+        agent spawned, produced nothing, wrote nothing, and posted nothing) and
+        before that PARTIALLY applied (2026-07-23: waived ``arch``, left ``ux``
+        pending).  Because the helper was documented "best-effort — logs on
+        failure but does not raise", the operator saw the command acknowledged
+        and had no reason to think it had not worked, while PR gate inheritance
+        kept blocking correctly on the still-pending gate.
+
+        A gate waive is a DETERMINISTIC STATE TRANSITION: ``gate_status.<gate>``
+        → ``waived`` for each unsigned pre-impl gate, plus one ``owner_history``
+        append.  There is no judgement in it, so it must not depend on an agent
+        turn (same lesson as ateles#263 — do not rely on an LLM to persist a
+        mechanical mutation).  The dispatcher now:
+
+          1. reads the issue entity,
+          2. sweeps ALL of :data:`PRE_IMPL_GATES` (a total function — the
+             partial-apply mode is structurally impossible),
+          3. writes ``gate_status`` + ``owner_history``,
+          4. RE-READS and asserts every targeted gate is now cleared,
+          5. reports the outcome to the operator on GitHub either way.
+
+        Returns the :class:`WaiveOutcome` so the caller can decide whether to
+        re-trigger the PR pipeline.  Never raises.
         """
         ref = f"{trigger.repository}#{trigger.number}"
         issue_number = trigger.number
@@ -3990,46 +4031,144 @@ class SwarmDispatcher:
         if trigger.comment_on_pr:
             issue_number = self._parent_issue_number(trigger.body) or trigger.number
 
-        prompt = (
-            "Invoke the lanius agent per your appended system prompt.\n\n"
-            f"The operator has issued `{_CONFIRM_GATES_CLEAR_CMD}` on "
-            f"{trigger.repository}#{trigger.number} "
-            f"({trigger.comment_html_url or trigger.html_url}).\n\n"
-            f"Parent issue (where gates live): #{issue_number} in "
-            f"{trigger.repository}.\n\n"
-            "ACTION REQUIRED — operator override, execute immediately:\n"
-            f"For each gate in {list(PRE_IMPL_GATES)} that is currently "
-            "`pending` or `blocked` on the parent issue entity (not already "
-            "`signed_off` or `waived`), do ALL of the following:\n"
-            "  1. `correct()` the issue entity: set `gate_status.<gate>` → "
-            "`\"waived\"`.\n"
-            "  2. Append to `owner_history`: "
-            '`{"gate": "<gate>", "action": "waived", '
-            '"actor": "operator", "reason": "operator /confirm-gates-clear '
-            'override", "timestamp": "<now>"}`.\n'
-            "  3. After waiving all unsigned gates, set `current_owner` to "
-            "the next phase (e.g. `pr_review` if pm and arch are now done).\n"
-            "  4. Post ONE GitHub comment on the PR (or issue) confirming which "
-            "gates were waived and that the review pipeline will now proceed.\n\n"
-            "Do NOT waive gates that are already `signed_off` or `waived`.\n"
-            "If ALL gates are already signed_off/waived, post a comment saying "
-            "the pipeline is already clear.\n\n"
-            f"{_agent_prompt_instruction('lanius', 'gate admin')}"
+        store = IssueGateStore(
+            self.config.neotoma_base_url, self.config.neotoma_token
         )
-        result = await run_skill(
-            "lanius",
-            prompt,
-            github_token=_token_for_agent_on_repo("lanius", trigger.repository),
-            include_github_contract=True,
-            notifier=self.notifier,
-        )
-        if not result.ok:
+        try:
+            outcome = await store.waive(
+                trigger.repository, issue_number, PRE_IMPL_GATES
+            )
+        except Exception as exc:  # noqa: BLE001 — never crash the pipeline
             log.error(
-                f"[{DAEMON_NAME}] Lanius gate-waive failed on {ref}: "
-                f"{result.error or f'rc={result.returncode}'}"
+                f"[{DAEMON_NAME}] gate waive raised on {ref}: {exc} — "
+                "reporting failure to the operator"
+            )
+            outcome = WaiveOutcome(
+                entity_found=True, targeted=list(PRE_IMPL_GATES),
+                failed=list(PRE_IMPL_GATES),
+            )
+
+        # ALWAYS surface the result on GitHub — success, no-op, and failure.
+        # The 2026-07-27 failure produced ZERO GitHub-visible output, which is
+        # a core part of the bug (#285 point 3).
+        try:
+            await self._post_gate_waive_comment(trigger, outcome)
+        except Exception as exc:  # noqa: BLE001 — comment is best-effort
+            log.warning(
+                f"[{DAEMON_NAME}] could not post gate-waive comment on {ref}: "
+                f"{exc}"
+            )
+
+        if not outcome.entity_found:
+            log.error(
+                f"[{DAEMON_NAME}] gate waive on {ref}: no Neotoma issue entity "
+                f"for {trigger.repository}#{issue_number} — nothing waived"
+            )
+            self.notifier.send(
+                f"Gate waive on {ref} FAILED — no Neotoma issue entity for "
+                f"{trigger.repository}#{issue_number}. The pipeline stays "
+                "blocked; the issue may never have been triaged.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+        elif outcome.failed:
+            log.error(
+                f"[{DAEMON_NAME}] gate waive on {ref} VERIFICATION FAILED — "
+                f"still unsigned: {', '.join(outcome.failed)}"
+            )
+            self.notifier.send(
+                f"Gate waive on {ref} FAILED verification — these gates are "
+                f"still unsigned after the write: {', '.join(outcome.failed)}. "
+                "The review pipeline will keep blocking.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+        elif outcome.waived:
+            log.info(
+                f"[{DAEMON_NAME}] gate waive on {ref}: waived and verified "
+                f"{', '.join(outcome.waived)}"
             )
         else:
-            log.info(f"[{DAEMON_NAME}] Lanius gate-waive completed for {ref}")
+            log.info(
+                f"[{DAEMON_NAME}] gate waive on {ref}: no gates needed waiving "
+                "(all pre-impl gates already clear)"
+            )
+        return outcome
+
+    async def _post_gate_waive_comment(
+        self, trigger: SwarmTrigger, outcome: WaiveOutcome
+    ) -> None:
+        """Post (or edit) the operator-visible gate-waive result comment.
+
+        Follows the SWARM_GITHUB_CONTRACT edit-not-duplicate rule via a stable
+        marker, and — like _post_swarm_run_comment — the body carries NO command
+        token so the dispatcher's own comment cannot re-trigger the command
+        detector (neotoma#1686 self-trigger defence).
+        """
+        _WAIVE_MARKER = "<!-- swarm-gate-waive-result -->"
+
+        if not _token_for_repo(trigger.repository):
+            log.warning(
+                f"[{DAEMON_NAME}] no GitHub token — gate-waive result comment "
+                f"skipped for {trigger.repository}#{trigger.number}"
+            )
+            return
+
+        body = format_waive_comment(
+            marker=_WAIVE_MARKER,
+            header=attribution_header("apis", "swarm dispatcher"),
+            waived=outcome.waived,
+            already_clear=outcome.already_clear,
+            failed=outcome.failed,
+            entity_found=outcome.entity_found,
+        )
+
+        list_url = (
+            f"https://api.github.com/repos/{trigger.repository}/issues/"
+            f"{trigger.number}/comments"
+        )
+        headers = self._github_headers(trigger.repository)
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            existing_id: int | None = None
+            try:
+                resp = await client.get(
+                    list_url, params={"per_page": 100}, headers=headers
+                )
+                resp.raise_for_status()
+                for comment in resp.json():
+                    if _WAIVE_MARKER in comment.get("body", ""):
+                        existing_id = comment["id"]
+                        break
+            except Exception as exc:
+                log.warning(
+                    f"[{DAEMON_NAME}] could not list comments for gate-waive "
+                    f"dedup on {trigger.repository}#{trigger.number}: {exc} — "
+                    "will post new"
+                )
+
+            if existing_id is not None:
+                patch_url = (
+                    f"https://api.github.com/repos/{trigger.repository}/"
+                    f"issues/comments/{existing_id}"
+                )
+                resp = await client.patch(
+                    patch_url, json={"body": body}, headers=headers
+                )
+                resp.raise_for_status()
+                log.info(
+                    f"[{DAEMON_NAME}] edited gate-waive result comment "
+                    f"#{existing_id} on {trigger.repository}#{trigger.number}"
+                )
+            else:
+                resp = await client.post(
+                    list_url, json={"body": body}, headers=headers
+                )
+                resp.raise_for_status()
+                log.info(
+                    f"[{DAEMON_NAME}] posted gate-waive result comment on "
+                    f"{trigger.repository}#{trigger.number}"
+                )
 
     # ── prompts ──────────────────────────────────────────────────────────────
 
@@ -4306,7 +4445,8 @@ class SwarmDispatcher:
             "BLOCKED COMMENT REQUIREMENTS (ateles#112): when you post a "
             "blocking comment, it MUST include:\n"
             "  1. A list of WHICH pre-impl gates are unsigned and who owns "
-            "each (e.g. `pm` owned by Pavo, `arch` owned by Waxwing).\n"
+            "each (e.g. `pm` owned by Pavo, `ux` owned by Accipiter, `arch` "
+            "owned by Waxwing).\n"
             "  2. The exact operator-override command: "
             f"`/confirm-gates-clear` — only @{operator_login} may issue this "
             "command; it waives all unsigned pre-impl gates and re-triggers "

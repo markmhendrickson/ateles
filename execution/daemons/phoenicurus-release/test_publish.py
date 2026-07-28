@@ -852,3 +852,61 @@ def test_gives_up_after_max_attempts(monkeypatch):
     monkeypatch.setattr(_ureq, "urlopen", always_503)
     assert publish.neotoma_query("release_result") == []
     assert calls["n"] == 3, "bounded — does not retry forever"
+# ── Duplicate-RC guard: refuse to guess between concurrent RCs ───────────────
+#
+# Two concurrent prepare runs cut two RCs for v0.20.0 (release/v0.20.0 and
+# release/v0.20.0-a) → two pending_approval release_results. find_release must
+# HALT rather than silently publish "the newest" for an irreversible release.
+
+def _rr(branch, pr, status="pending_approval", eid="ent_x", obs="2026-07-27T15:00:00Z"):
+    return {"entity_id": eid, "last_observation_at": obs,
+            "snapshot": {"version": "v0.20.0", "status": status,
+                         "rc_branch": branch, "rc_pr_url": pr}}
+
+
+def test_find_release_single_rc_resolves(monkeypatch):
+    monkeypatch.setattr(publish, "neotoma_query",
+                        lambda *a, **k: [_rr("release/v0.20.0", "pr/29")])
+    r = publish.find_release("v0.20.0", None)
+    assert r is not None and publish._entity_fields(r)["rc_branch"] == "release/v0.20.0"
+
+
+def test_find_release_refuses_two_distinct_rcs(monkeypatch):
+    monkeypatch.setattr(publish, "neotoma_query", lambda *a, **k: [
+        _rr("release/v0.20.0", "pr/29", eid="ent_A"),
+        _rr("release/v0.20.0-a", "pr/28", eid="ent_B", obs="2026-07-27T15:22:00Z"),
+    ])
+    try:
+        publish.find_release("v0.20.0", None)
+        raise AssertionError("expected StepError refusing to guess")
+    except publish.StepError as exc:
+        assert "distinct in-flight release candidates" in str(exc)
+        assert "--entity-id" in str(exc)  # tells the operator how to disambiguate
+
+
+def test_find_release_entity_id_bypasses_duplicate_guard(monkeypatch):
+    # naming the exact entity IS the disambiguation — never blocked
+    monkeypatch.setattr(publish, "neotoma_fetch_entity",
+                        lambda eid: _rr("release/v0.20.0-a", "pr/28", eid=eid))
+    r = publish.find_release("v0.20.0", "ent_B")
+    assert publish._entity_fields(r)["rc_branch"] == "release/v0.20.0-a"
+
+
+def test_find_release_ignores_terminal_duplicate(monkeypatch):
+    # a PUBLISHED record for the same version number is history, not a rival RC
+    monkeypatch.setattr(publish, "neotoma_query", lambda *a, **k: [
+        _rr("release/v0.20.0", "pr/29", status="pending_approval", eid="ent_A"),
+        _rr("release/v0.20.0-old", "pr/1", status="published", eid="ent_old"),
+    ])
+    r = publish.find_release("v0.20.0", None)  # must NOT raise
+    assert publish._entity_fields(r)["rc_branch"] == "release/v0.20.0"
+
+
+def test_find_release_same_rc_reobserved_is_one_candidate(monkeypatch):
+    # same branch/PR twice (re-observation) collapses to one — no false refusal
+    monkeypatch.setattr(publish, "neotoma_query", lambda *a, **k: [
+        _rr("release/v0.20.0", "pr/29", eid="ent_A", obs="2026-07-27T15:00:00Z"),
+        _rr("release/v0.20.0", "pr/29", eid="ent_A", obs="2026-07-27T15:47:00Z"),
+    ])
+    r = publish.find_release("v0.20.0", None)  # must NOT raise
+    assert r["last_observation_at"] == "2026-07-27T15:47:00Z"  # newest obs
