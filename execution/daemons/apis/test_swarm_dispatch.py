@@ -43,9 +43,11 @@ from swarm_dispatch import (
     is_provisioned,
     lenses_missing_comments,
     parse_gate_verdict,
+    parse_pending_gates,
     parse_review_verdict,
     prepare_pr_worktree,
     review_verdict_is_clear,
+    verdict_to_review_event,
     vanellus_comment_missing,
 )
 
@@ -69,11 +71,13 @@ def _trigger(**overrides):
 class _StubNotifier:
     def __init__(self):
         self.sent = []
-        self.priorities = []
+        self.priorities = []  # HEAD-side: priority-only assertions
+        self.sent_full = []  # main-side: (message, priority) assertions
 
     def send(self, message, priority=None, handler=None):
         self.sent.append(message)
         self.priorities.append(priority)
+        self.sent_full.append((message, priority))
 
 
 def _config():
@@ -109,6 +113,24 @@ def test_parse_gate_verdict_none_when_absent():
     assert parse_gate_verdict(None) is None
 
 
+# ── parse_pending_gates (ateles#230 panel-assembly fix) ─────────────────────
+
+
+def test_parse_pending_gates_extracts_comma_list():
+    out = "GATE_INHERITANCE: blocked\nGATE_PENDING: arch, ux"
+    assert parse_pending_gates(out) == {"arch", "ux"}
+
+
+def test_parse_pending_gates_case_and_whitespace_insensitive():
+    assert parse_pending_gates("gate_pending:  Arch ,QA ") == {"arch", "qa"}
+
+
+def test_parse_pending_gates_empty_when_absent():
+    assert parse_pending_gates("GATE_INHERITANCE: clear") == set()
+    assert parse_pending_gates("") == set()
+    assert parse_pending_gates(None) == set()
+
+
 # ── parse_review_verdict / review_verdict_is_clear (loop closure) ────────────
 
 
@@ -132,6 +154,41 @@ def test_review_verdict_is_clear_only_for_approve_or_comment():
     assert review_verdict_is_clear("blocked") is False
     # Unparseable verdict is NOT clear — never silently proceed to merge-ready.
     assert review_verdict_is_clear(None) is False
+
+
+# ── verdict → native GitHub review event (ateles#241) ────────────────────────
+
+
+def test_verdict_maps_to_review_event_one_row_per_verdict():
+    assert verdict_to_review_event("approve") == "APPROVE"
+    assert verdict_to_review_event("request_changes") == "REQUEST_CHANGES"
+    assert verdict_to_review_event("comment") == "COMMENT"
+
+
+def test_blocked_verdict_maps_to_comment_not_request_changes():
+    """BLOCKED routes findings back for a fix; it must not additionally hard-block
+    merge via GitHub review state — merge stays operator-gated."""
+    assert verdict_to_review_event("blocked") == "COMMENT"
+
+
+def test_unparseable_verdict_maps_to_comment():
+    """Never escalate on a guess: an unparseable verdict must land on the inert
+    COMMENT, not REQUEST_CHANGES (which blocks merge under branch protection)."""
+    assert verdict_to_review_event(None) == "COMMENT"
+    assert verdict_to_review_event("") == "COMMENT"
+    assert verdict_to_review_event("nonsense") == "COMMENT"
+
+
+def test_request_changes_is_the_only_escalating_mapping():
+    """The asymmetry IS the safety property: exactly one input may produce the
+    merge-blocking event. A mapping bug that escalates silently blocks good PRs;
+    one that de-escalates defeats the feature."""
+    escalating = [
+        v
+        for v in ("approve", "request_changes", "comment", "blocked", None, "", "wat")
+        if verdict_to_review_event(v) == "REQUEST_CHANGES"
+    ]
+    assert escalating == ["request_changes"], escalating
 
 
 # ── _handle_pr verdict branching ─────────────────────────────────────────────
@@ -163,6 +220,12 @@ def _pr_dispatcher_with_stubs(monkeypatch, *, vanellus_stdout, calls):
     async def fake_post_missing_vanellus(self, trigger, result):
         return None
 
+    async def fake_emit_review(self, trigger, verdict, body):
+        # ateles#241: record the native review emission so tests can assert the
+        # event fired (and with which verdict) without real GitHub I/O.
+        calls.append(("review", verdict_to_review_event(verdict)))
+        return "rev-1"
+
     async def fake_persist(self, *a, **k):
         return None
 
@@ -173,6 +236,7 @@ def _pr_dispatcher_with_stubs(monkeypatch, *, vanellus_stdout, calls):
     monkeypatch.setattr(
         SwarmDispatcher, "_post_missing_vanellus_comment", fake_post_missing_vanellus
     )
+    monkeypatch.setattr(SwarmDispatcher, "_emit_formal_review", fake_emit_review)
     monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_persist)
     monkeypatch.setattr(SwarmDispatcher, "_post_missing_panel_comments", fake_persist)
     monkeypatch.setattr(SwarmDispatcher, "_preregistered_expectations",
@@ -204,6 +268,52 @@ def test_handle_pr_clear_verdict_gates_readiness(monkeypatch):
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
     assert ("gate", None) in calls
     assert not any(c[0] == "route" for c in calls)
+
+
+def test_handle_pr_emits_formal_review_on_blocking_path(monkeypatch):
+    """ateles#241: a REQUEST_CHANGES verdict must reach GitHub's review state,
+    not just route findings internally."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**REQUEST_CHANGES**\n1 blocking", calls=calls
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+
+
+def test_handle_pr_emits_formal_review_on_clear_path(monkeypatch):
+    """An APPROVE must also land as a native review — that is what lets branch
+    protection see the swarm's verdict."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("review", "APPROVE") in calls, calls
+
+
+def test_formal_review_emitted_before_routing_decision(monkeypatch):
+    """Emission happens on BOTH paths, so it must precede the branch — and must
+    fire exactly once per handled PR (not duplicated across retry paths)."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**REQUEST_CHANGES**\nx", calls=calls
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    kinds = [c[0] for c in calls]
+    assert kinds.count("review") == 1, f"expected exactly one review emission: {calls}"
+    assert kinds.index("review") < kinds.index("route"), kinds
+
+
+def test_handle_pr_unparseable_verdict_emits_comment_review(monkeypatch):
+    """An unparseable verdict still records a review, as the inert COMMENT —
+    never REQUEST_CHANGES, which would block merge on a parse failure."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="the panel had thoughts", calls=calls
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("review", "COMMENT") in calls, calls
 
 
 def test_handle_pr_unparseable_verdict_routes_not_gates(monkeypatch):
@@ -471,8 +581,12 @@ def test_route_findings_escalates_at_retry_cap(monkeypatch):
     async def fake_count(self, trigger):
         return 2  # == default max_fix_rounds
 
+    async def fake_claim(self, trigger, kind):
+        return True  # first escalation → notify
+
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
 
     notifier = _StubNotifier()
     d = SwarmDispatcher(notifier, _config())
@@ -484,6 +598,36 @@ def test_route_findings_escalates_at_retry_cap(monkeypatch):
     # At the cap: no agents dispatched; operator escalated instead.
     assert dispatched == []
     assert any("auto-fix rounds did not clear" in m for m in notifier.sent)
+
+
+def test_route_findings_exhausted_dedup_suppresses_renotify(monkeypatch):
+    """A re-review after the cap must not re-page the operator.
+
+    Regression for the duplicate-fire bug (ateles#262 sent four identical
+    auto-fix-exhausted pings): when _claim_escalation reports the condition was
+    already escalated (returns False), the notification is suppressed.
+    """
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "x", "")
+
+    async def fake_count(self, trigger):
+        return 2  # == default max_fix_rounds
+
+    async def fake_claim(self, trigger, kind):
+        return False  # already escalated → suppress
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    reviews = [("qa", "[BLOCKING] coverage: no test\nadd one")]
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+                                   verdict="request_changes")
+    )
+    assert not any("auto-fix rounds did not clear" in m for m in notifier.sent)
 
 
 def test_route_findings_cicada_auth_failure_pages_infra(monkeypatch):
@@ -527,7 +671,11 @@ def test_route_findings_no_parseable_blocking_escalates(monkeypatch):
     async def fake_run_skill(skill, prompt, **kwargs):
         raise AssertionError("should not dispatch when nothing parses")
 
+    async def fake_claim(self, trigger, kind):
+        return True  # first escalation → notify
+
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
     notifier = _StubNotifier()
     d = SwarmDispatcher(notifier, _config())
     # BLOCKED verdict with no [BLOCKING] blocks → escalate, don't guess.
@@ -537,6 +685,28 @@ def test_route_findings_no_parseable_blocking_escalates(monkeypatch):
                                    verdict="blocked")
     )
     assert any("no blocking findings could be parsed" in m for m in notifier.sent)
+
+
+def test_route_findings_unparseable_dedup_suppresses_renotify(monkeypatch):
+    """A re-review of the same unparseable verdict must not re-page the operator."""
+    async def fake_run_skill(skill, prompt, **kwargs):
+        raise AssertionError("should not dispatch when nothing parses")
+
+    async def fake_claim(self, trigger, kind):
+        return False  # already escalated → suppress
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80,
+                                   reviews=[("pm", "cannot proceed")],
+                                   verdict="blocked")
+    )
+    assert not any(
+        "no blocking findings could be parsed" in m for m in notifier.sent
+    )
 
 
 # ── _gate_merge_readiness (verdict-clear AND CI-green) ───────────────────────
@@ -1114,12 +1284,17 @@ def test_touches_product_code_mixed_diff_flags_when_any_product_file():
     )
 
 
-def _stub_bypass_dispatcher(monkeypatch, *, changed_files, posted):
+def _stub_bypass_dispatcher(monkeypatch, *, changed_files, posted, newly=True):
     """Wire a dispatcher whose _handle_pr short-circuits after the bypass guard.
 
     Lanius returns `blocked` so the panel never spawns (keeps the test focused on
     the guard), _changed_files is stubbed, and _post_pipeline_bypass_comment is
     replaced with a recorder so we assert the comment attempt without HTTP.
+
+    `newly` is the value the stubbed _post_pipeline_bypass_comment returns —
+    True means the bypass was surfaced for the first time (operator should be
+    notified), False means an existing marker was merely re-edited (duplicate
+    PR event; notification must be suppressed).
     """
 
     async def fake_run_skill(skill, prompt, **kwargs):
@@ -1130,6 +1305,7 @@ def _stub_bypass_dispatcher(monkeypatch, *, changed_files, posted):
 
     async def fake_post_bypass(self, trigger):
         posted.append(trigger.number)
+        return newly
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_changed_files", fake_changed_files)
@@ -1151,6 +1327,91 @@ def test_pr_no_parent_product_code_surfaces_bypass_loudly(monkeypatch):
     # A visible PR comment was attempted and the operator was notified.
     assert posted == [87]
     assert any("bypassed the gated" in m for m in notifier.sent)
+
+
+def test_pr_bypass_duplicate_event_does_not_renotify(monkeypatch):
+    """A repeat PR event for an already-surfaced bypass must not re-notify.
+
+    Regression for the duplicate-fire bug: ateles#242 received four identical
+    'touched product code' pings. When _post_pipeline_bypass_comment reports the
+    marker already existed (returns False), the operator notification is skipped
+    even though the guard path still runs.
+    """
+    posted = []
+    dispatcher, notifier = _stub_bypass_dispatcher(
+        monkeypatch,
+        changed_files=["src/cli/mcp_config_scan.ts"],
+        posted=posted,
+        newly=False,
+    )
+    asyncio.run(dispatcher._handle_pr(_trigger(body="A fix, no issue link.")))
+
+    # The guard still ran (comment attempted) but no duplicate ping was sent.
+    assert posted == [87]
+    assert not any("bypassed the gated" in m for m in notifier.sent)
+
+
+def test_post_bypass_comment_fail_open_when_new_post_errors(monkeypatch):
+    """A first-time bypass whose comment POST fails transiently must still
+    return True (fail-open), so the operator is notified — aligning with
+    _claim_escalation. Loxia review observation on PR #271."""
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return []  # no existing marker → this is a first surfacing
+
+    class _FailPostClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def get(self, url, **kwargs):
+            return _Resp()
+
+        async def post(self, url, **kwargs):
+            raise httpx.HTTPError("transient boom")
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _FailPostClient())
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    result = asyncio.run(d._post_pipeline_bypass_comment(_trigger()))
+    assert result is True  # fail-open → caller will notify
+
+
+def test_post_bypass_comment_fail_closed_when_duplicate_patch_errors(monkeypatch):
+    """A confirmed-duplicate bypass whose PATCH fails must return False — the
+    bypass is already surfaced, so never re-notify even on a transient error."""
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return [{"id": 5, "body": "<!-- pipeline-bypass-notice -->"}]
+
+    class _FailPatchClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def get(self, url, **kwargs):
+            return _Resp()
+
+        async def patch(self, url, **kwargs):
+            raise httpx.HTTPError("transient boom")
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _FailPatchClient())
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    result = asyncio.run(d._post_pipeline_bypass_comment(_trigger()))
+    assert result is False  # fail-closed → known bypass, no re-notify
 
 
 def test_pr_with_parent_does_not_trigger_bypass(monkeypatch):
@@ -1894,6 +2155,48 @@ def test_github_trigger_lanius_issue_passes_contract(monkeypatch):
         )
 
 
+def test_additive_spec_pr_opened_is_info_priority(monkeypatch):
+    """A successfully auto-built spec (PR opened) notifies at INFO, not
+    OPERATOR_DECISION — it is FYI and belongs in the digest, since the PR gate
+    pipeline now owns the work and stops at the operator's merge approval."""
+    from lib.notify import Priority
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "ok", "")
+
+    async def fake_open_pr(self, trigger, state):
+        return "https://github.com/markmhendrickson/ateles/pull/999"
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(swarm_dispatch, "select_expectation_agents",
+                        lambda *a, **kw: [])
+    monkeypatch.setattr(SwarmDispatcher, "_gates_green", lambda self, lanius: True)
+    monkeypatch.setattr(SwarmDispatcher, "_open_implementation_pr", fake_open_pr)
+    monkeypatch.setattr(SwarmDispatcher, "_mark_pipeline_inflight",
+                        lambda self, t: _async_none())
+    monkeypatch.setattr(SwarmDispatcher, "_clear_pipeline_inflight",
+                        lambda self, t: _async_none())
+
+    notifier = _StubNotifier()
+    cfg = _config()
+    cfg.auto_build = True
+    dispatcher = SwarmDispatcher(notifier, cfg)
+    t = _trigger(kind="issue_opened", number=1, title="New issue", body="Body.")
+    asyncio.run(dispatcher._handle_issue_opened(t))
+
+    opened = [
+        (m, p) for (m, p) in notifier.sent_full if "implementation PR opened" in m
+    ]
+    assert opened, "expected a PR-opened notification"
+    assert all(p == Priority.INFO for _, p in opened), (
+        "auto-build-succeeded notice must be INFO (digest), not immediate"
+    )
+
+
+async def _async_none():
+    return None
+
+
 def test_github_trigger_pr_pipeline_passes_contract(monkeypatch):
     """All run_skill calls in _handle_pr must pass include_github_contract=True."""
     captured_kwargs: list[dict] = []
@@ -2582,6 +2885,19 @@ class _FakeResp:
 
     def json(self):
         return {}
+
+
+class _FakeListResp(_FakeResp):
+    """A 200 response whose .json() returns a caller-supplied list — for the
+    GitHub comments GET, which the deferral/session-limit paths list before
+    posting."""
+
+    def __init__(self, items, status_code=200):
+        super().__init__(status_code)
+        self._items = items
+
+    def json(self):
+        return self._items
 
 
 # ── /approve command ─────────────────────────────────────────────────────────
@@ -4933,3 +5249,262 @@ def test_real_vanellus_fallback_keeps_the_steward_header():
     from swarm_dispatch import compose_vanellus_fallback_comment
     body = compose_vanellus_fallback_comment("**APPROVE**")
     assert "PR steward" in body.split("\n")[1]
+# ── _handle_release_approve (email-reply release publish) ───────────────────
+#
+# This is the one handler that drives an irreversible publish. Guards: refuse a
+# malformed version outright; invoke publish.py --from-email-approval for a
+# valid one; never raise into the dispatcher.
+
+
+def _release_approve_trigger(version="v0.20.0"):
+    return SwarmTrigger(
+        kind="release_approve", repository="", number=0, title="", body="",
+        author="", html_url="", delivery_id=f"release-approve-{version}",
+        action="approved", release_version=version,
+    )
+
+
+def test_release_approve_invalid_version_never_publishes(monkeypatch):
+    spawned = []
+
+    async def fake_exec(*a, **k):
+        spawned.append(a)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: True)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    for bad in ["", "0.20.0", "latest", "v; rm -rf /"]:
+        asyncio.run(d._handle_release_approve(_release_approve_trigger(bad)))
+    assert spawned == [], "a malformed version must never invoke publish.py"
+
+
+def test_release_approve_valid_version_invokes_publish(monkeypatch):
+    spawned = []
+
+    async def fake_exec(*args, **kwargs):
+        spawned.append(args)
+
+        class _P:
+            returncode = 0
+
+            async def communicate(self):
+                return (b"Release v0.20.0 PUBLISHED.", b"")
+
+        return _P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: True)
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(d._handle_release_approve(_release_approve_trigger("v0.20.0")))
+    assert len(spawned) == 1
+    argv = spawned[0]
+    assert argv[1].endswith("publish.py")
+    assert "--version" in argv and "v0.20.0" in argv
+    assert "--from-email-approval" in argv
+
+
+def test_release_approve_publish_failure_notifies(monkeypatch):
+    async def fake_exec(*args, **kwargs):
+        class _P:
+            returncode = 1
+
+            async def communicate(self):
+                return (b"StepError: npm publish failed", b"")
+
+        return _P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: True)
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    asyncio.run(d._handle_release_approve(_release_approve_trigger("v0.20.0")))
+    # a failed publish must page the operator (BLOCKER), not fail silently
+    assert any("publish FAILED" in str(m) for m in notifier.sent), notifier.sent
+
+
+def test_release_approve_missing_script_notifies(monkeypatch):
+    monkeypatch.setattr(swarm_dispatch.os.path, "exists", lambda p: False)
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    asyncio.run(d._handle_release_approve(_release_approve_trigger("v0.20.0")))
+    assert any("missing" in str(m).lower() for m in notifier.sent), notifier.sent
+
+
+# ── verdict comment fallback (ateles#292) ────────────────────────────────────
+#
+# Vanellus posts its aggregated verdict to GitHub reliably but repeats it in
+# stdout only sometimes. When stdout has no token, the dispatcher must recover
+# the verdict from the durable aggregation comment rather than defaulting to
+# the inert COMMENT review.
+
+
+def _comments_client(monkeypatch, bodies, *, calls=None, raises=None):
+    """Mock httpx.AsyncClient so a comments GET returns `bodies`.
+
+    `calls` (when given) records each GET, so a test can assert the happy path
+    makes no request at all. `raises` makes the GET blow up.
+    """
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def get(self, url, **kwargs):
+            if calls is not None:
+                calls.append((url, kwargs.get("params", {})))
+            if raises is not None:
+                raise raises
+
+            class _Resp:
+                def raise_for_status(self_inner):
+                    pass
+
+                def json(self_inner):
+                    return [{"body": b} for b in bodies]
+
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _Client())
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+
+def _resolver(monkeypatch):
+    return SwarmDispatcher(_StubNotifier(), _config())
+
+
+def test_resolve_verdict_prefers_stdout_and_skips_fetch(monkeypatch):
+    """T1 — stdout carries the token: unchanged behaviour, and no GitHub GET."""
+    calls = []
+    _comments_client(monkeypatch, [], calls=calls)
+    d = _resolver(monkeypatch)
+    verdict, used_fallback = asyncio.run(
+        d._resolve_review_verdict(_trigger(), "## Verdict\n**REQUEST_CHANGES**\nx")
+    )
+    assert (verdict, used_fallback) == ("request_changes", False)
+    assert calls == [], f"happy path must not fetch comments: {calls}"
+
+
+def test_resolve_verdict_falls_back_to_aggregation_comment(monkeypatch, caplog):
+    """T2 — stdout empty, marked comment has the token: fallback recovers it."""
+    _comments_client(
+        monkeypatch,
+        [f"{_VANELLUS_COMMENT_MARKER}\n**REQUEST_CHANGES**\n1 blocking"],
+    )
+    d = _resolver(monkeypatch)
+    with caplog.at_level(logging.INFO):
+        verdict, used_fallback = asyncio.run(
+            d._resolve_review_verdict(_trigger(), "")
+        )
+    assert (verdict, used_fallback) == ("request_changes", True)
+    # The fallback-fire log is what makes stdout-repeat compliance measurable.
+    assert any(
+        "fallback fired" in r.message
+        and "owner/repo#87" in r.message
+        and "request_changes" in r.message
+        for r in caplog.records
+    ), [r.message for r in caplog.records]
+
+
+def test_resolve_verdict_none_when_neither_source_has_token(monkeypatch):
+    """T3 — no token anywhere: still no verdict, and still treated as not-clear."""
+    _comments_client(monkeypatch, ["just a drive-by comment"])
+    d = _resolver(monkeypatch)
+    verdict, used_fallback = asyncio.run(d._resolve_review_verdict(_trigger(), ""))
+    assert (verdict, used_fallback) == (None, False)
+    assert review_verdict_is_clear(verdict) is False
+
+
+def test_resolve_verdict_survives_comment_fetch_failure(monkeypatch):
+    """T3b — a failed GET must not raise out of the resolver."""
+    _comments_client(monkeypatch, [], raises=httpx.ConnectError("boom"))
+    d = _resolver(monkeypatch)
+    verdict, used_fallback = asyncio.run(d._resolve_review_verdict(_trigger(), ""))
+    assert (verdict, used_fallback) == (None, False)
+
+
+def test_resolve_verdict_scans_past_unmarked_comments(monkeypatch):
+    """T4 — the marked comment is not always comments[0]."""
+    _comments_client(
+        monkeypatch,
+        [
+            "a human chimed in first",
+            f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nlgtm",
+        ],
+    )
+    d = _resolver(monkeypatch)
+    assert asyncio.run(d._resolve_review_verdict(_trigger(), "")) == ("approve", True)
+
+
+def test_resolve_verdict_requires_real_token_in_comment(monkeypatch):
+    """T5 — a marked but token-less comment must not produce a false match."""
+    _comments_client(
+        monkeypatch,
+        [f"{_VANELLUS_COMMENT_MARKER}\nthe panel had thoughts but no token"],
+    )
+    d = _resolver(monkeypatch)
+    assert asyncio.run(d._resolve_review_verdict(_trigger(), "")) == (None, False)
+
+
+def test_resolve_verdict_reads_comments_newest_first(monkeypatch):
+    """The fallback must honour the LATEST aggregation, as _pr_review_is_clear does."""
+    calls = []
+    _comments_client(
+        monkeypatch,
+        [
+            f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nnewest",
+            f"{_VANELLUS_COMMENT_MARKER}\n**REQUEST_CHANGES**\nstale",
+        ],
+        calls=calls,
+    )
+    d = _resolver(monkeypatch)
+    assert asyncio.run(d._resolve_review_verdict(_trigger(), "")) == ("approve", True)
+    assert calls and calls[0][1].get("direction") == "desc", calls
+
+
+def test_handle_pr_recovers_blocking_verdict_from_comment(monkeypatch):
+    """T6 (effect-level) — the bug itself: stdout omits REQUEST_CHANGES, but the
+    PR must still be routed as blocking AND get a native REQUEST_CHANGES review,
+    not an inert COMMENT."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="the panel had thoughts", calls=calls
+    )
+    _comments_client(
+        monkeypatch,
+        [f"{_VANELLUS_COMMENT_MARKER}\n**REQUEST_CHANGES**\n1 blocking"],
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("route", "request_changes") in calls, calls
+    assert ("gate", None) not in calls, calls
+    # The whole point of #241/#284: GitHub's review state carries the verdict.
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+
+
+def test_handle_pr_recovered_approve_gates_readiness(monkeypatch):
+    """T7 — the fallback must not over-trigger blocking: a recovered APPROVE
+    proceeds to the readiness gate."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="the panel had thoughts", calls=calls
+    )
+    _comments_client(monkeypatch, [f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nlgtm"])
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("gate", None) in calls, calls
+    assert not any(c[0] == "route" for c in calls), calls
+    assert ("review", "APPROVE") in calls, calls
+
+
+def test_handle_pr_still_comments_when_no_verdict_anywhere(monkeypatch):
+    """Regression guard: with neither stdout nor comment carrying a token, the
+    dispatcher behaves exactly as before — inert COMMENT review, blocking route."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="the panel had thoughts", calls=calls
+    )
+    _comments_client(monkeypatch, ["nothing useful here"])
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    assert ("review", "COMMENT") in calls, calls
+    assert any(c[0] == "route" for c in calls), calls

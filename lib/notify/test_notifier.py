@@ -55,7 +55,12 @@ def test_all_daemon_used_priorities_route():
 # ── E6: email-primary transport (flag-gated) ─────────────────────────────────
 
 
-def test_email_primary_off_by_default():
+def test_email_primary_off_by_default(monkeypatch):
+    # Hermetic: another test module (execution/daemons/apis/apis.py) loads the
+    # real .env via os.environ.setdefault at import, which can leak
+    # ATELES_NOTIFY_EMAIL=1 into the process env and cross-contaminate this
+    # default-behaviour assertion. Clear it so we test the code default.
+    monkeypatch.delenv("ATELES_NOTIFY_EMAIL", raising=False)
     n = Notifier(rubric=NO_SILENCE)
     assert n._email_primary is False
 
@@ -65,6 +70,7 @@ def test_email_primary_delivers_via_gws(monkeypatch):
     n._email_primary = True
     n._operator_email = "op@test"
     n._swarm_email = "swarm@test"
+    n._notify_to = "op@test"
     calls = {}
 
     class _P:
@@ -80,6 +86,37 @@ def test_email_primary_delivers_via_gws(monkeypatch):
     assert ok is True
     assert calls["cmd"][:3] == ["gws", "gmail", "+send"]
     assert "op@test" in calls["cmd"] and "swarm@test" in calls["cmd"]
+
+
+def test_notify_to_overrides_recipient(monkeypatch):
+    """ATELES_NOTIFY_TO routes notifications to a distinct address so they
+    arrive as received mail (inbox) rather than a self-addressed SENT copy."""
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
+    monkeypatch.setenv("OPERATOR_EMAIL", "self@test")
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "self+swarm@test")
+    monkeypatch.setenv("ATELES_NOTIFY_TO", "alerts@test")
+    n = Notifier(rubric=NO_SILENCE)
+    assert n._notify_to == "alerts@test"
+    calls = {}
+
+    class _P:
+        returncode = 0
+        stderr = ""
+
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run",
+                        lambda cmd, **k: calls.setdefault("cmd", cmd) or _P())
+    n.send("blocker", priority=Priority.BLOCKER, handler="apis")
+    # Delivered TO the dedicated alert address, FROM the swarm alias.
+    to_idx = calls["cmd"].index("--to")
+    assert calls["cmd"][to_idx + 1] == "alerts@test"
+
+
+def test_notify_to_defaults_to_operator_email(monkeypatch):
+    """Unset ATELES_NOTIFY_TO → behaviour unchanged (defaults to OPERATOR_EMAIL)."""
+    monkeypatch.delenv("ATELES_NOTIFY_TO", raising=False)
+    monkeypatch.setenv("OPERATOR_EMAIL", "op@test")
+    n = Notifier(rubric=NO_SILENCE)
+    assert n._notify_to == "op@test"
 
 
 def test_email_failure_falls_back_to_telegram(monkeypatch):
@@ -100,6 +137,7 @@ def test_email_skipped_when_no_operator_address(monkeypatch):
     n = Notifier(rubric=NO_SILENCE)
     n._email_primary = True
     n._operator_email = ""  # unset → email helper returns False immediately
+    n._notify_to = ""  # no recipient at all
     called = {"n": 0}
 
     def fake_run(cmd, **k):

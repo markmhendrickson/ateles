@@ -10,6 +10,7 @@ Falls back gracefully if Neotoma is unreachable (returns minimal default).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -79,10 +80,25 @@ class AgentDefinition:
         if isinstance(raw, (list, tuple)):
             items = [str(t).strip() for t in raw if str(t).strip()]
             return items or ["*"]
-        # String shape: "*" / empty -> wildcard; else split on commas.
+        # String shape: "*" / empty -> wildcard.
         text = str(raw).strip()
         if not text or text == "*":
             return ["*"]
+        # Neotoma stores tool_allowlist as a JSON-array STRING (e.g.
+        # '["Bash", "Bash(gh pr:*)", ...]'). Parse that shape FIRST — a naive
+        # comma-split would keep the surrounding brackets/quotes on each token,
+        # yielding garbage like '"Bash(gh pr:*)"' that the CLI rejects as a
+        # malformed --allowedTools rule and fails the whole dispatch (the
+        # Bash(...:*) grammar makes the rejection fatal, not silently ignored).
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, (list, tuple)):
+                    items = [str(t).strip() for t in parsed if str(t).strip()]
+                    return items or ["*"]
+            except (ValueError, TypeError):
+                pass  # fall through to comma-split for a non-JSON bracketed string
+        # Legacy / hand-authored comma-separated shape.
         return [t.strip() for t in text.split(",") if t.strip()]
 
     @property

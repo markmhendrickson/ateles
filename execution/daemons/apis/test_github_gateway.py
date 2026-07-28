@@ -496,3 +496,60 @@ def test_push_override_ref_accepts_configured_ref(monkeypatch):
     assert t is not None
     assert t.kind == "push_main"
     assert t.push_ref == "refs/heads/other"
+
+
+# ── /approve-release internal route (email-reply release approval) ──────────
+
+
+def _post_approve_release(app_secret, header_secret, body_obj):
+    """POST to /approve-release; return (status, captured_trigger_or_None)."""
+    captured = {}
+
+    async def run():
+        async def handler(trigger):
+            captured["trigger"] = trigger
+
+        app = make_app(TEST_HMAC_KEY, handler, approve_email_secret=app_secret)
+        headers = {}
+        if header_secret is not None:
+            headers["X-Approve-Secret"] = header_secret
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/approve-release", data=json.dumps(body_obj), headers=headers
+            )
+            await asyncio.sleep(0)
+            return resp.status
+
+    status = asyncio.run(run())
+    return status, captured.get("trigger")
+
+
+def test_approve_release_unset_secret_fails_closed():
+    status, trig = _post_approve_release("", "anything", {"version": "v0.20.0"})
+    assert status == 503
+    assert trig is None
+
+
+def test_approve_release_wrong_secret_rejected():
+    status, trig = _post_approve_release("right", "wrong", {"version": "v0.20.0"})
+    assert status == 401
+    assert trig is None
+
+
+def test_approve_release_invalid_version_rejected():
+    # anything not a vX.Y.Z tag must never reach the publish path
+    for bad in ["", "0.20.0", "latest", "v; rm -rf /", "main"]:
+        status, trig = _post_approve_release("s", "s", {"version": bad})
+        assert status == 400, f"expected 400 for {bad!r}, got {status}"
+        assert trig is None
+
+
+def test_approve_release_accepted_builds_trigger():
+    status, trig = _post_approve_release(
+        "s", "s", {"version": "v0.20.0", "sender": "op@example.com"}
+    )
+    assert status == 200
+    assert trig is not None
+    assert trig.kind == "release_approve"
+    assert trig.release_version == "v0.20.0"
+    assert trig.action == "approved"

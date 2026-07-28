@@ -130,13 +130,58 @@ and re-running it would be redundant or unsafe.
 | `NEOTOMA_SANDBOX_URL` | Sandbox host to verify (default `https://neotoma-sandbox.fly.dev`). |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram push (via shared `send.mjs`). |
 | `TELEGRAM_TOPIC_PHOENICURUS` | Optional Telegram topic/thread id for release messages. |
+| `OPERATOR_EMAIL` | Where release RC notifications are emailed (in addition to Telegram). Unset → email is skipped, Telegram only. |
+| `ATELES_SWARM_EMAIL` | Optional `From:` for release email (the shared swarm address, matching the other daemons). |
 
-## Approval routing (Ateles)
+## Notification channels
 
-`publish.py` is invoked by Ateles when the operator replies `approve <version>`
-on Telegram: Ateles flips the `release_result` to `approved`, then runs
-`python3 publish.py --version <version>`. See the Ateles SOUL.md
-"Release approval" section.
+A prepared release candidate is sent to the operator on **both Telegram and
+email**. The spawned prepare agent (step 11–12 of its prompt) posts the full
+rendered notes + RC PR link + `approve/skip` instruction to Telegram, and emails
+the same via `gws gmail +send` (subject `🚀 Release <TAG> ready to approve`) using
+the same `OPERATOR_EMAIL`/`ATELES_SWARM_EMAIL` the shared `lib/notify` Notifier
+uses — so release mail matches every other swarm daemon. Email is **fail-open**:
+if `OPERATOR_EMAIL` is unset or the send fails, the run logs it and continues;
+Telegram is the guaranteed channel and the release is never blocked on email.
+
+## Approval routing — two channels
+
+A prepared release can be approved on **either channel**:
+
+**Telegram** — the operator replies `approve <version>`; Ateles flips the
+`release_result` to `approved` and runs `python3 publish.py --version <version>`.
+See the Ateles SOUL.md "Release approval" section.
+
+**Email reply** — the operator replies `approve <version>` to the RC email. The
+routing mirrors the swarm PR-approve flow:
+
+```
+reply "approve <version>" to the RC email
+  → Turdus (Gmail poll) verifies: sender == operator, subject has "ready to
+    approve", body has `release-approve: <version>` token AND unquoted
+    `approve <that exact version>`
+  → POST /approve-release (Apis, loopback + X-Approve-Secret)
+  → swarm_dispatch._handle_release_approve
+  → publish.py --version <version> --from-email-approval
+     (flips pending_approval → approved, refusing any other state, then ships)
+```
+
+Safety properties (match the PR-approve flow + one extra):
+- **Operator-sender check** — only replies from `OPERATOR_EMAIL` count.
+- **Loopback + shared secret** — `/approve-release` is 127.0.0.1-only and
+  requires `APIS_APPROVE_EMAIL_SECRET`; unset → 503, wrong → 401. An email alone
+  can't drive a publish without the secret on both daemons.
+- **Unquoted-text guard** — the word `approve` must be the operator's own text,
+  not the quoted `Reply approve …` from the original email.
+- **Exact-version match** (operator ruling 2026-07-27) — the reply must name
+  *this* release's version, so a stale `approve` from an old release thread can
+  never trigger the wrong publish.
+- **State gate** — `--from-email-approval` publishes only from
+  `pending_approval`; a duplicate or stale reply on an already-published version
+  is refused.
+
+Config: set `APIS_APPROVE_EMAIL_SECRET` (shared, Turdus + Apis) and
+`APIS_APPROVE_RELEASE_URL` (default `http://127.0.0.1:8742/approve-release`).
 
 ## Troubleshooting
 

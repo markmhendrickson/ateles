@@ -1631,7 +1631,7 @@ def transcribe_audio_file(
                 pass
 
 
-_NEOTOMA_PROD_BASE_URL_DEFAULT = "http://localhost:3180"
+_NEOTOMA_PROD_BASE_URL_DEFAULT = "http://localhost:9180"
 
 
 def _neotoma_prod_base_url() -> str:
