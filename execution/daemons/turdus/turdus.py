@@ -109,7 +109,9 @@ _APPROVE_TOKEN_PREFIX = "swarm-approve:"
 APIS_APPROVE_RELEASE_URL = os.environ.get(
     "APIS_APPROVE_RELEASE_URL", "http://127.0.0.1:8742/approve-release"
 )
-_RELEASE_READY_SUBJECT_MARKER = "ready to approve"  # matches "🚀 Release <TAG> ready to approve"
+_RELEASE_READY_SUBJECT_MARKER = (
+    "ready to approve"  # matches "🚀 Release <TAG> ready to approve"
+)
 _RELEASE_APPROVE_TOKEN_PREFIX = "release-approve:"
 
 GWS_CREDENTIALS_PATH = Path(
@@ -121,6 +123,19 @@ GWS_CREDENTIALS_PATH = Path(
 
 # State file to track last processed message ID across restarts
 _STATE_FILE = Path(__file__).parent / ".turdus_state.json"
+
+# Gmail label applied to messages Turdus has fully handled. Used both to tag
+# processed mail and to exclude it from the poll query, so an already-handled
+# invoice never re-enters the unread set and re-notifies the operator.
+PROCESSED_LABEL = "Turdus/processed"
+
+# Cap on how many processed Gmail message IDs we retain in state for
+# notification dedup. Bounds the state file; older IDs age out (they are also
+# excluded by the poll label filter, so aging out is safe).
+_MAX_PROCESSED_IDS = 500
+
+# Gmail label NAME -> label ID, resolved lazily. messages.modify takes IDs.
+_LABEL_ID_CACHE: dict[str, str] = {}
 
 # ── Classification rules (Phase 4: keyword-based; Phase 7: LLM) ───────────────
 
@@ -279,6 +294,11 @@ def _poll_gmail_messages(max_count: int) -> list[dict]:
                 str(max_count),
                 "--format",
                 "json",
+                # Exclude messages Turdus has already handled. Without this the
+                # default `is:unread` set keeps returning the same still-unread
+                # invoice every poll, re-notifying the operator each cycle.
+                "--query",
+                f"is:unread in:inbox -label:{PROCESSED_LABEL}",
             ],
             capture_output=True,
             text=True,
@@ -302,14 +322,16 @@ def _poll_gmail_messages(max_count: int) -> list[dict]:
         # Normalise field names to internal shape
         messages = []
         for msg in raw_messages:
-            messages.append({
-                "id": msg.get("id", ""),
-                "sender": msg.get("from", ""),
-                "subject": msg.get("subject", "(no subject)"),
-                "snippet": "",  # +triage does not expose snippet
-                "date_iso": msg.get("date", ""),
-                "labels": msg.get("labels", []),
-            })
+            messages.append(
+                {
+                    "id": msg.get("id", ""),
+                    "sender": msg.get("from", ""),
+                    "subject": msg.get("subject", "(no subject)"),
+                    "snippet": "",  # +triage does not expose snippet
+                    "date_iso": msg.get("date", ""),
+                    "labels": msg.get("labels", []),
+                }
+            )
         return messages
 
     except FileNotFoundError:
@@ -326,25 +348,135 @@ def _poll_gmail_messages(max_count: int) -> list[dict]:
         return []
 
 
-def _label_gmail_message(message_id: str, label: str) -> bool:
+def _gws_json(args: list[str], timeout: int = 15) -> dict | None:
     """
-    Apply a Gmail label to a processed message via gws CLI.
+    Run a `gws` command expected to emit JSON on stdout and parse it.
 
-    Phase 4: skeleton — label with 'Turdus/processed'.
+    The CLI prefixes stdout with a keyring banner line, so drop any leading
+    lines before the first '{'. Returns None on any failure (fail-open: the
+    caller degrades rather than crashing the poll loop).
     """
-    if DRY_RUN:
-        log.info(f"[{DAEMON_NAME}] DRY RUN — would label {message_id} with {label!r}")
-        return True
     try:
         result = subprocess.run(
-            ["gws", "gmail", "messages", "label", message_id, "--add", label],
-            capture_output=True,
-            text=True,
-            timeout=15,
+            ["gws", *args], capture_output=True, text=True, timeout=timeout
         )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        if result.returncode != 0:
+            log.warning(
+                f"[{DAEMON_NAME}] gws {' '.join(args[:3])} failed "
+                f"(rc={result.returncode}): {(result.stderr or '').strip()[:200]}"
+            )
+            return None
+        out = result.stdout
+        brace = out.find("{")
+        if brace == -1:
+            return None
+        return json.loads(out[brace:])
+    except (
+        FileNotFoundError,
+        subprocess.TimeoutExpired,
+        OSError,
+        json.JSONDecodeError,
+    ) as exc:
+        log.warning(f"[{DAEMON_NAME}] gws {' '.join(args[:3])} error: {exc}")
+        return None
+
+
+def _resolve_label_id(label_name: str) -> str | None:
+    """
+    Resolve a Gmail label NAME to its label ID, creating the label if absent.
+
+    Gmail's messages.modify takes label IDs, not names. Cached per process.
+    Returns None if the label can neither be found nor created.
+    """
+    cached = _LABEL_ID_CACHE.get(label_name)
+    if cached:
+        return cached
+
+    listing = _gws_json(
+        ["gmail", "users", "labels", "list", "--params", '{"userId":"me"}']
+    )
+    if listing:
+        for lbl in listing.get("labels", []):
+            if lbl.get("name") == label_name:
+                label_id = lbl.get("id")
+                if label_id:
+                    _LABEL_ID_CACHE[label_name] = label_id
+                    return label_id
+
+    # Absent — create it. This is why the label never stuck before: nothing
+    # ever created 'Turdus/processed', so no message could carry it.
+    created = _gws_json(
+        [
+            "gmail",
+            "users",
+            "labels",
+            "create",
+            "--params",
+            '{"userId":"me"}',
+            "--json",
+            json.dumps(
+                {
+                    "name": label_name,
+                    "labelListVisibility": "labelShow",
+                    "messageListVisibility": "show",
+                }
+            ),
+        ]
+    )
+    label_id = (created or {}).get("id")
+    if label_id:
+        log.info(f"[{DAEMON_NAME}] created Gmail label {label_name!r} (id={label_id})")
+        _LABEL_ID_CACHE[label_name] = label_id
+        return label_id
+
+    log.warning(f"[{DAEMON_NAME}] could not resolve or create label {label_name!r}")
+    return None
+
+
+def _label_gmail_message(message_id: str, label: str) -> bool:
+    """
+    Mark a processed message as handled: add the processed label AND remove the
+    UNREAD label, via Gmail's messages.modify.
+
+    Both are required to stop the re-notification loop. The label is what the
+    poll query filters on (`-label:Turdus/processed`); removing UNREAD keeps the
+    default `is:unread` basis truthful so a handled invoice cannot reappear even
+    if label propagation lags.
+
+    Failures are logged rather than swallowed: this call previously shelled out
+    to `gws gmail messages label`, a subcommand that does not exist, so every
+    label write failed silently and the processed label was never applied — the
+    mechanical root cause of the re-notification loop.
+    """
+    if not message_id:
         return False
+    if DRY_RUN:
+        log.info(
+            f"[{DAEMON_NAME}] DRY RUN — would label {message_id} with {label!r} "
+            "and mark read"
+        )
+        return True
+
+    label_id = _resolve_label_id(label)
+    if not label_id:
+        return False
+
+    modified = _gws_json(
+        [
+            "gmail",
+            "users",
+            "messages",
+            "modify",
+            "--params",
+            json.dumps({"userId": "me", "id": message_id}),
+            "--json",
+            json.dumps({"addLabelIds": [label_id], "removeLabelIds": ["UNREAD"]}),
+        ]
+    )
+    if modified is None:
+        log.warning(f"[{DAEMON_NAME}] failed to label/mark-read {message_id}")
+        return False
+    return True
 
 
 # ── Neotoma writes ────────────────────────────────────────────────────────────
@@ -675,9 +807,7 @@ async def _maybe_handle_swarm_approval(msg: dict, notifier: Notifier) -> bool:
             priority=Priority.INFO,
             handler=DAEMON_NAME,
         )
-        log.info(
-            f"[{DAEMON_NAME}] email-approve routed for {repository}#{pr_number}"
-        )
+        log.info(f"[{DAEMON_NAME}] email-approve routed for {repository}#{pr_number}")
     return ok
 
 
@@ -709,9 +839,7 @@ def _reply_approves_version(body: str, version: str) -> bool:
     """
     want = version.lstrip("v")
     # word-boundaried version, optional leading v, must sit after an `approve`.
-    pat = re.compile(
-        rf"\bapprove\b[^\n]*\bv?{re.escape(want)}\b", re.IGNORECASE
-    )
+    pat = re.compile(rf"\bapprove\b[^\n]*\bv?{re.escape(want)}\b", re.IGNORECASE)
     for line in (body or "").splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith(">"):
@@ -780,7 +908,9 @@ async def _maybe_handle_release_approval(msg: dict, notifier: Notifier) -> bool:
         return False
 
     body = _read_message_body(msg.get("id", ""))
-    version = _parse_release_approve_token(body) or _parse_release_approve_token(subject)
+    version = _parse_release_approve_token(body) or _parse_release_approve_token(
+        subject
+    )
     if not version:
         log.info(
             f"[{DAEMON_NAME}] operator reply matched release subject but carried no "
@@ -840,10 +970,41 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
 
     log.info(f"[{DAEMON_NAME}] Processing {len(new_messages)} new message(s)")
 
+    # Per-message-ID dedup for the operator-facing notification. Even with the
+    # poll label filter, a transient label-write failure could let a message
+    # reappear; the notification must never fire twice for the same Gmail ID.
+    # `processed_ids` is an ordered list (used as a bounded set) persisted in
+    # state. Only genuinely-new IDs count toward the notification totals.
+    processed_ids: list[str] = list(state.get("processed_ids", []))
+    processed_id_set = set(processed_ids)
+
+    def _mark_handled(mid: str) -> None:
+        """Record a message ID as terminally handled for cross-cycle dedup.
+
+        Covers EVERY disposition that `continue`s out of the loop — approval
+        routing and noise included, not just the task path — so that if the
+        positional `last_message_id` gate ever resets or messages reorder, a
+        message can never be re-routed. This matters most for the approval
+        branches: re-routing an operator `approve <version>` reply to the Apis
+        publish gate a second time is more consequential than a duplicate
+        invoice notification.
+        """
+        if mid and mid not in processed_id_set:
+            processed_id_set.add(mid)
+            processed_ids.append(mid)
+
     actionable_count = 0
     invoice_count = 0
     approval_count = 0
     for msg in new_messages:
+        msg_id = msg.get("id", "")
+
+        # Already handled in a prior cycle — skip entirely so we neither
+        # re-create tasks nor re-notify the operator. Checked first so dedup
+        # short-circuits even the approval paths below.
+        if msg_id and msg_id in processed_id_set:
+            continue
+
         # Release-approval reply takes precedence: an operator `approve <version>`
         # reply to a release RC email is routed to the Apis publish gate and the
         # message is then done (no task created). Checked before swarm-approval
@@ -851,6 +1012,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         try:
             if await _maybe_handle_release_approval(msg, notifier):
                 approval_count += 1
+                _mark_handled(msg_id)
                 continue
         except Exception as exc:  # never let approval detection break the poll
             log.error(f"[{DAEMON_NAME}] release-approval check failed: {exc}")
@@ -861,6 +1023,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         try:
             if await _maybe_handle_swarm_approval(msg, notifier):
                 approval_count += 1
+                _mark_handled(msg_id)
                 continue
         except Exception as exc:  # never let approval detection break the poll
             log.error(f"[{DAEMON_NAME}] swarm-approval check failed: {exc}")
@@ -875,11 +1038,11 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
 
         label = "INVOICE→monedula" if is_invoice else classification.upper()
         log.info(
-            f"[{DAEMON_NAME}] {label}: from={sender[:40]!r} "
-            f"subject={subject[:60]!r}"
+            f"[{DAEMON_NAME}] {label}: from={sender[:40]!r} subject={subject[:60]!r}"
         )
 
         if classification == "noise":
+            _mark_handled(msg_id)
             continue
 
         # Store email entity in Neotoma
@@ -891,13 +1054,26 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
             else:
                 actionable_count += 1
             await _create_task_for_email(msg, email_entity_id)
-            _label_gmail_message(msg.get("id", ""), "Turdus/processed")
+            _label_gmail_message(msg_id, PROCESSED_LABEL)
+            # Record only after the message is fully handled, so a mid-message
+            # crash lets it be retried next cycle rather than silently dropped.
+            _mark_handled(msg_id)
+        else:
+            # informational (stored, no task) — still terminally handled.
+            # Intentional asymmetry vs. the actionable/invoice branch: we do
+            # NOT apply PROCESSED_LABEL or mark-read here, so informational mail
+            # stays is:unread and re-enters the poll query until it ages out of
+            # the bounded dedup set. Harmless — informational mail never
+            # notifies — and it avoids Turdus silently marking the operator's
+            # ordinary unread mail as read.
+            _mark_handled(msg_id)
 
-    # Update state with newest processed message ID
+    # Update state with newest processed message ID and the bounded dedup set.
     if new_messages:
         state["last_message_id"] = new_messages[0].get("id")
         state["processed_count"] = state.get("processed_count", 0) + len(new_messages)
         state["last_poll_at"] = datetime.now(UTC).isoformat()
+        state["processed_ids"] = processed_ids[-_MAX_PROCESSED_IDS:]
 
     if invoice_count > 0:
         notifier.send(

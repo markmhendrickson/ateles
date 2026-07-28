@@ -10,6 +10,7 @@ Apis POST + gws +read stubbed out. The security-critical properties under test:
 """
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -252,3 +253,188 @@ def test_read_body_falls_back_to_html_when_no_text(monkeypatch):
 
     monkeypatch.setattr(_sp, "run", lambda *a, **k: _R())
     assert turdus._read_message_body("msg-2") == "<p>only html</p>"
+
+
+# ── notification loop regression (invoice re-notify bug) ─────────────────────
+#
+# The bug: an unread invoice was re-detected and re-notified on every ~5-min
+# poll because (a) the poll query never excluded processed mail and (b) the
+# notification fired on a per-cycle count with no per-message-ID dedup.
+
+
+def _invoice_msg(mid="inv1"):
+    return {
+        "id": mid,
+        "from": "billing@vendor.example",
+        "subject": "Factura 2026-07 — payment due",
+        "date": "2026-07-15T09:00:00Z",
+        "labels": [],
+    }
+
+
+def _wire_poll(monkeypatch, *, messages):
+    """Stub the poll cycle's side effects so only classification/notify runs."""
+    monkeypatch.setattr(turdus, "DRY_RUN", False)
+    monkeypatch.setattr(turdus, "_poll_gmail_messages", lambda *_: list(messages))
+
+    async def _noop_store(_msg):
+        return "ent_email_stub"
+
+    async def _noop_task(*_a, **_k):
+        return "ent_task_stub"
+
+    async def _no_approval(_msg, _notifier):
+        return False
+
+    monkeypatch.setattr(turdus, "_store_email_entity", _noop_store)
+    monkeypatch.setattr(turdus, "_create_task_for_email", _noop_task)
+    monkeypatch.setattr(turdus, "_maybe_handle_swarm_approval", _no_approval)
+    monkeypatch.setattr(turdus, "_maybe_handle_release_approval", _no_approval)
+    monkeypatch.setattr(turdus, "_label_gmail_message", lambda *a, **k: True)
+
+
+def test_poll_query_excludes_processed_label(monkeypatch):
+    # The poll must ask Gmail to exclude already-processed mail, or the same
+    # unread invoice returns every cycle.
+    captured = {}
+
+    def fake_run(cmd, *a, **k):
+        captured["cmd"] = cmd
+
+        class R:
+            returncode = 0
+            stdout = '{"messages": []}'
+            stderr = ""
+
+        return R()
+
+    monkeypatch.setattr(turdus.subprocess, "run", fake_run)
+    turdus._poll_gmail_messages(5)
+    assert "--query" in captured["cmd"]
+    qi = captured["cmd"].index("--query") + 1
+    assert f"-label:{turdus.PROCESSED_LABEL}" in captured["cmd"][qi]
+
+
+def test_label_uses_real_modify_api_and_marks_read(monkeypatch):
+    # Regression: this used to shell out to `gws gmail messages label`, a
+    # subcommand that does not exist, so every label write failed silently and
+    # `Turdus/processed` was never applied — the mechanical cause of the loop.
+    calls = []
+
+    def fake_run(cmd, *a, **k):
+        calls.append(cmd)
+
+        class R:
+            returncode = 0
+            stderr = ""
+            # labels list → the label already exists; modify → echo an id back
+            stdout = (
+                "Using keyring backend: keyring\n"
+                '{"labels":[{"name":"Turdus/processed","id":"Label_42"}]}'
+                if "labels" in cmd
+                else 'Using keyring backend: keyring\n{"id":"m1"}'
+            )
+
+        return R()
+
+    monkeypatch.setattr(turdus, "DRY_RUN", False)
+    monkeypatch.setattr(turdus, "_LABEL_ID_CACHE", {})
+    monkeypatch.setattr(turdus.subprocess, "run", fake_run)
+
+    assert turdus._label_gmail_message("m1", turdus.PROCESSED_LABEL) is True
+
+    modify = [c for c in calls if "modify" in c]
+    assert modify, "must call the real users/messages/modify endpoint"
+    cmd = modify[0]
+    assert cmd[:5] == ["gws", "gmail", "users", "messages", "modify"]
+    body = json.loads(cmd[cmd.index("--json") + 1])
+    assert body["addLabelIds"] == ["Label_42"]  # resolved ID, not the name
+    assert body["removeLabelIds"] == ["UNREAD"]  # marks read → leaves is:unread
+
+
+def test_label_creates_missing_label(monkeypatch):
+    # 'Turdus/processed' did not exist in the real mailbox; the resolver must
+    # create it rather than silently failing forever.
+    calls = []
+
+    def fake_run(cmd, *a, **k):
+        calls.append(cmd)
+
+        class R:
+            returncode = 0
+            stderr = ""
+            stdout = (
+                '{"labels":[{"name":"Other","id":"L1"}]}'
+                if ("labels" in cmd and "list" in cmd)
+                else '{"id":"Label_new"}'
+            )
+
+        return R()
+
+    monkeypatch.setattr(turdus, "DRY_RUN", False)
+    monkeypatch.setattr(turdus, "_LABEL_ID_CACHE", {})
+    monkeypatch.setattr(turdus.subprocess, "run", fake_run)
+
+    assert turdus._resolve_label_id("Turdus/processed") == "Label_new"
+    assert any("create" in c for c in calls), "must create the absent label"
+
+
+def test_invoice_notifies_once_then_deduped(monkeypatch):
+    # First poll: one invoice → exactly one BLOCKER notification.
+    # Second poll returns the SAME message ID (simulating a label-write lag) →
+    # no second notification, because the ID is recorded in processed_ids.
+    _wire_poll(monkeypatch, messages=[_invoice_msg("inv1")])
+    notifier = _StubNotifier()
+
+    state = _run(turdus.poll_once(notifier, {"last_message_id": None}))
+    invoice_notes = [m for m in notifier.sent if "invoice(s)" in m]
+    assert len(invoice_notes) == 1
+    assert "inv1" in state.get("processed_ids", [])
+
+    # Same message id comes back; state carries the dedup set forward.
+    notifier2 = _StubNotifier()
+    _run(turdus.poll_once(notifier2, state))
+    assert [m for m in notifier2.sent if "invoice(s)" in m] == []
+
+
+def test_dedup_set_guards_when_watermark_does_not_short_circuit(monkeypatch):
+    # Exercises the processed_ids skip (turdus.py: the `msg_id in
+    # processed_id_set` continue) DIRECTLY, not the last_message_id break.
+    # We null out last_message_id on the second poll so the watermark walk
+    # does NOT stop early — every message enters new_messages, and inv1's
+    # suppression can therefore come ONLY from the dedup set. If that skip
+    # were deleted, inv1 would notify a second time and this test would fail.
+    _wire_poll(monkeypatch, messages=[_invoice_msg("inv1")])
+    notifier = _StubNotifier()
+    state = _run(turdus.poll_once(notifier, {"last_message_id": None}))
+    assert len([m for m in notifier.sent if "invoice(s)" in m]) == 1
+    assert "inv1" in state.get("processed_ids", [])
+
+    # Second poll: inv2 (new) + inv1 (repeat). Force the watermark OFF so it
+    # cannot short-circuit inv1 — only processed_ids can.
+    state["last_message_id"] = None
+    _wire_poll(monkeypatch, messages=[_invoice_msg("inv2"), _invoice_msg("inv1")])
+    notifier2 = _StubNotifier()
+    state2 = _run(turdus.poll_once(notifier2, state))
+    # Exactly one invoice notified this cycle — inv2, the genuinely new one.
+    # inv1 reached the loop body but was suppressed purely by the dedup set.
+    notes = [m for m in notifier2.sent if "invoice(s)" in m]
+    assert len(notes) == 1
+    assert "1 invoice(s)" in notes[0]
+    assert "inv2" in state2.get("processed_ids", [])
+
+
+def test_approval_message_recorded_for_dedup(monkeypatch):
+    # An operator approval reply must be recorded in processed_ids so it can
+    # never be re-routed to the Apis publish gate on a later cycle.
+    _wire_poll(monkeypatch, messages=[_invoice_msg("appr1")])
+
+    async def _yes_release(_msg, _notifier):
+        return True
+
+    monkeypatch.setattr(turdus, "_maybe_handle_release_approval", _yes_release)
+    notifier = _StubNotifier()
+    state = _run(turdus.poll_once(notifier, {"last_message_id": None}))
+    assert "appr1" in state.get("processed_ids", [])
+    # No invoice task/notification for an approval reply.
+    assert [m for m in notifier.sent if "invoice(s)" in m] == []
