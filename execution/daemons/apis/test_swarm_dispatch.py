@@ -1046,10 +1046,12 @@ def test_ci_status_green_threads_ci_state_into_gate(monkeypatch):
 
 
 def test_pr_review_is_clear_reads_newest_first(monkeypatch):
-    # Loxia review nit: an unpaginated oldest-first scan misses the latest
-    # Vanellus marker on a >100-comment PR. We now fetch newest-first and take
-    # the FIRST marker — so a stale REQUEST_CHANGES followed by a newer APPROVE
-    # (which GitHub returns first under direction=desc) reads as clear.
+    # The live endpoint IGNORES sort/direction and returns OLDEST-first
+    # (verified against the API on ateles#296), so the fixture below is ordered
+    # oldest-first and the code reverses client-side. The prior fixture
+    # simulated direction=desc being honoured, which encoded the bug: the
+    # unreversed scan returned the FIRST aggregation and pinned the PR to a
+    # superseded REQUEST_CHANGES forever.
     captured = {}
 
     class _Client:
@@ -1061,10 +1063,11 @@ def test_pr_review_is_clear_reads_newest_first(monkeypatch):
 
         async def get(self, url, **kwargs):
             captured["params"] = kwargs.get("params", {})
-            # Simulate direction=desc: newest (APPROVE) first, older one after.
+            # Oldest-first, as the endpoint actually returns: the stale
+            # REQUEST_CHANGES precedes the newer APPROVE.
             bodies = [
-                "<!-- vanellus-aggregation -->\n**APPROVE**\nlgtm",
                 "<!-- vanellus-aggregation -->\n**REQUEST_CHANGES**\nold",
+                "<!-- vanellus-aggregation -->\n**APPROVE**\nlgtm",
             ]
 
             class _Resp:
@@ -5098,19 +5101,24 @@ def test_resolve_verdict_requires_real_token_in_comment(monkeypatch):
 
 
 def test_resolve_verdict_reads_comments_newest_first(monkeypatch):
-    """The fallback must honour the LATEST aggregation, as _pr_review_is_clear does."""
+    """The fallback must honour the LATEST aggregation, as _pr_review_is_clear does.
+
+    Fixture is OLDEST-first because that is what the endpoint actually returns
+    regardless of `direction` (verified live, ateles#296); correctness comes from
+    reversing client-side, not from the query parameter.
+    """
     calls = []
     _comments_client(
         monkeypatch,
         [
-            f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nnewest",
             f"{_VANELLUS_COMMENT_MARKER}\n**REQUEST_CHANGES**\nstale",
+            f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nnewest",
         ],
         calls=calls,
     )
     d = _resolver(monkeypatch)
     assert asyncio.run(d._resolve_review_verdict(_trigger(), "")) == ("approve", True)
-    assert calls and calls[0][1].get("direction") == "desc", calls
+    assert calls, "the fallback must actually hit the comments endpoint"
 
 
 def test_handle_pr_recovers_blocking_verdict_from_comment(monkeypatch):
@@ -5674,7 +5682,10 @@ def test_persist_panel_reviews_two_rounds_leave_exactly_one_live_review(monkeypa
         )
 
     qa_reviews = [
-        e for e in live_store.values() if e["snapshot"]["review_lens"] == "qa"
+        e
+        for e in live_store.values()
+        if e["snapshot"].get("entity_type") == "pr_review"
+        and e["snapshot"].get("review_lens") == "qa"
     ]
     live = [e for e in qa_reviews if e["snapshot"]["status"] == "live"]
     superseded = [e for e in qa_reviews if e["snapshot"]["status"] == "superseded"]
@@ -5839,3 +5850,69 @@ def test_neotoma_post_returns_none_when_token_unset(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", _Boom)
     assert asyncio.run(dispatcher._neotoma_post("entities/query", {})) is None
     assert called == [], "no HTTP client should be constructed without a token"
+
+
+# ── ateles#296: latest-aggregation ordering + verdict punctuation ────────────
+
+
+def test_parse_review_verdict_tolerates_trailing_punctuation():
+    """`**APPROVE.**` is a verdict; unbolded prose still is not.
+
+    Vanellus writes both forms; the stricter regex parsed the punctuated one as
+    no-verdict, silently downgrading a real APPROVE to the inert COMMENT on the
+    native GitHub review (observed on ateles#296).
+    """
+    assert parse_review_verdict("**APPROVE.**") == "approve"
+    assert parse_review_verdict("**APPROVE**") == "approve"
+    assert parse_review_verdict("**COMMENT:**") == "comment"
+    assert parse_review_verdict("**BLOCKED!**") == "blocked"
+    # Vocabulary unchanged: bare prose must NOT parse as a verdict.
+    assert parse_review_verdict("I would APPROVE this") is None
+
+
+def test_resolve_verdict_honours_the_latest_aggregation_not_the_first(monkeypatch):
+    """The LAST aggregation wins even though the API returns oldest-first.
+
+    GitHub's issue-comments endpoint ignores sort/direction (verified live on
+    ateles#296). Scanning unreversed returns the FIRST aggregation ever posted,
+    so a PR whose early round was REQUEST_CHANGES reports that verdict forever
+    even after later rounds approve — which is what happened on #296 itself.
+    """
+    bodies = [  # oldest-first, exactly as the API returns them
+        f"{swarm_dispatch._VANELLUS_COMMENT_MARKER}\n**REQUEST_CHANGES**",
+        f"{swarm_dispatch._VANELLUS_COMMENT_MARKER}\n**APPROVE**",
+    ]
+    _comments_client(monkeypatch, bodies)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    verdict, used_fallback = asyncio.run(
+        dispatcher._resolve_review_verdict(_trigger(), "no token in stdout")
+    )
+    assert verdict == "approve", "must honour the latest aggregation, not the first"
+    assert used_fallback is True
+
+
+def test_pr_review_is_clear_honours_the_latest_aggregation(monkeypatch):
+    """The merge-readiness read must also use the latest, not the first."""
+    _comments_client(
+        monkeypatch,
+        [
+            f"{swarm_dispatch._VANELLUS_COMMENT_MARKER}\n**REQUEST_CHANGES**",
+            f"{swarm_dispatch._VANELLUS_COMMENT_MARKER}\n**APPROVE**",
+        ],
+    )
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    assert asyncio.run(dispatcher._pr_review_is_clear("owner/repo", 87)) is True
+
+
+def test_pr_review_is_clear_latest_request_changes_is_not_clear(monkeypatch):
+    """Reversal must not flip the failing direction: a later REQUEST_CHANGES wins."""
+    _comments_client(
+        monkeypatch,
+        [
+            f"{swarm_dispatch._VANELLUS_COMMENT_MARKER}\n**APPROVE**",
+            f"{swarm_dispatch._VANELLUS_COMMENT_MARKER}\n**REQUEST_CHANGES**",
+        ],
+    )
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    assert asyncio.run(dispatcher._pr_review_is_clear("owner/repo", 87)) is False

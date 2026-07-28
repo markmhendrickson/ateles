@@ -426,8 +426,13 @@ def parse_pending_gates(stdout: str) -> set[str]:
 
 # Vanellus / panelist verdict token (SWARM_GITHUB_CONTRACT, skill_runner.py):
 # a review comment carries exactly one of these bold verdict tokens.
+# Trailing punctuation inside the bold is tolerated: Vanellus writes both
+# `**APPROVE**` and `**APPROVE.**` in practice, and the stricter form silently
+# parsed the latter as no-verdict — which downgraded a real APPROVE to the inert
+# COMMENT on the native review (observed on ateles#296). The vocabulary itself is
+# unchanged; only trailing `.`/`:`/`!` inside the markers is now absorbed.
 _REVIEW_VERDICT = re.compile(
-    r"\*\*(APPROVE|REQUEST_CHANGES|COMMENT|BLOCKED)\*\*", re.I
+    r"\*\*(APPROVE|REQUEST_CHANGES|COMMENT|BLOCKED)[.:!]?\*\*", re.I
 )
 
 
@@ -2927,9 +2932,14 @@ class SwarmDispatcher:
                     headers=self._github_headers(t.repository),
                 )
                 resp.raise_for_status()
-                # Newest-first, mirroring _pr_review_is_clear: honour the LATEST
-                # aggregation, and scan past non-Vanellus comments to find it.
-                for comment in resp.json():
+                # GitHub's ISSUE-comments endpoint IGNORES sort/direction and
+                # always returns oldest-first (verified against the live API on
+                # ateles#296: `direction=desc` still yielded ascending order).
+                # Reverse client-side rather than trusting the parameter — the
+                # unreversed scan returns the FIRST aggregation ever posted, so a
+                # PR whose early round was REQUEST_CHANGES keeps reporting that
+                # verdict forever even after later rounds approve.
+                for comment in reversed(resp.json()):
                     body = comment.get("body", "")
                     if _VANELLUS_COMMENT_MARKER not in body:
                         continue
@@ -2963,12 +2973,11 @@ class SwarmDispatcher:
     async def _pr_review_is_clear(self, repository: str, pr_number: int) -> bool:
         """True when the latest Vanellus aggregation on the PR is a clear verdict.
 
-        Reads the PR's comments NEWEST-FIRST (sort=created&direction=desc) and
-        returns the verdict of the first Vanellus-aggregation marker found — so
-        the latest verdict is honoured even on a PR with >100 comments (the
-        marker would otherwise sit on a later page of an oldest-first scan and be
-        missed). Fail-closed (False) on any error — we must never claim
-        merge-ready off a failed read.
+        Returns the verdict of the LATEST Vanellus-aggregation marker. The
+        issue-comments endpoint ignores sort/direction and returns oldest-first,
+        so the page is reversed client-side; scanning unreversed would honour the
+        FIRST aggregation and pin the PR to a superseded verdict. Fail-closed
+        (False) on any error — we must never claim merge-ready off a failed read.
         """
         url = (
             f"https://api.github.com/repos/{repository}/issues/"
@@ -2982,7 +2991,9 @@ class SwarmDispatcher:
                     headers=self._github_headers(repository),
                 )
                 resp.raise_for_status()
-                for comment in resp.json():  # newest-first
+                # Reversed client-side: the endpoint ignores sort/direction and
+                # returns oldest-first (see _resolve_review_verdict).
+                for comment in reversed(resp.json()):
                     body = comment.get("body", "")
                     if _VANELLUS_COMMENT_MARKER in body:
                         return review_verdict_is_clear(parse_review_verdict(body))
