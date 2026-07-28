@@ -180,55 +180,94 @@ def _neotoma_headers() -> dict:
     return headers
 
 
+# HTTP statuses worth retrying: auth/availability blips that clear on their own.
+# 401/403 are included deliberately — on the loopback-trusted prod path a 403 is
+# almost always a momentary server restart / auth-service warm-up, NOT a real
+# permission denial (a transient 403 stranded the first live release-approval,
+# 2026-07-27). A genuine 404 (record absent) is NOT retried — it is a real answer.
+_NEOTOMA_RETRY_STATUSES = {401, 403, 408, 425, 429, 500, 502, 503, 504}
+_NEOTOMA_MAX_ATTEMPTS = int(os.environ.get("NEOTOMA_HTTP_MAX_ATTEMPTS", "5"))
+_NEOTOMA_RETRY_BASE_S = float(os.environ.get("NEOTOMA_HTTP_RETRY_BASE_S", "1.5"))
+
+
+def _neotoma_request_json(req: urllib.request.Request, what: str):
+    """Perform a Neotoma HTTP request, retrying TRANSIENT failures with backoff.
+
+    Returns the parsed JSON, or None if every attempt failed. Raises nothing —
+    callers keep their empty/None fallbacks for a genuinely-down Neotoma, but a
+    brief blip (transient 5xx / a loopback 403 during a server restart / a
+    timeout) no longer strands an approved release: it retries with exponential
+    backoff before giving up. A non-retryable HTTP error (e.g. 404 not-found) is
+    returned as None immediately — it is a real answer, not a blip.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, _NEOTOMA_MAX_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            last_exc = exc
+            if exc.code not in _NEOTOMA_RETRY_STATUSES:
+                log.warning(f"Neotoma {what}: non-retryable HTTP {exc.code}")
+                return None
+            reason = f"HTTP {exc.code}"
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            last_exc = exc
+            reason = str(exc)
+        except json.JSONDecodeError as exc:
+            # Malformed body — usually a proxy/error page during a restart; retry.
+            last_exc = exc
+            reason = f"bad JSON: {exc}"
+        if attempt < _NEOTOMA_MAX_ATTEMPTS:
+            delay = _NEOTOMA_RETRY_BASE_S * (2 ** (attempt - 1))
+            log.warning(
+                f"Neotoma {what}: transient failure ({reason}) — "
+                f"retry {attempt}/{_NEOTOMA_MAX_ATTEMPTS - 1} in {delay:.1f}s"
+            )
+            time.sleep(delay)
+    log.error(
+        f"Neotoma {what}: gave up after {_NEOTOMA_MAX_ATTEMPTS} attempts "
+        f"(last: {last_exc})"
+    )
+    return None
+
+
 def neotoma_query(entity_type: str, limit: int = 100) -> list[dict]:
-    """Query entities of a type from Neotoma. Empty list on error."""
+    """Query entities of a type from Neotoma. Empty list on error (after retries)."""
     base = NEOTOMA_BASE_URL.rstrip("/")
-    try:
-        body = json.dumps(
-            {"entity_type": entity_type, "limit": limit, "include_snapshots": True}
-        ).encode()
-        req = urllib.request.Request(
-            f"{base}/entities/query", data=body, headers=_neotoma_headers(), method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            data = json.loads(resp.read())
-        if isinstance(data, list):
-            return data
-        return data.get("entities") or data.get("items") or data.get("results") or []
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-        log.warning(f"Neotoma query failed for {entity_type}: {exc}")
+    body = json.dumps(
+        {"entity_type": entity_type, "limit": limit, "include_snapshots": True}
+    ).encode()
+    req = urllib.request.Request(
+        f"{base}/entities/query", data=body, headers=_neotoma_headers(), method="POST"
+    )
+    data = _neotoma_request_json(req, f"query {entity_type}")
+    if data is None:
         return []
+    if isinstance(data, list):
+        return data
+    return data.get("entities") or data.get("items") or data.get("results") or []
 
 
 def neotoma_fetch_entity(entity_id: str) -> dict | None:
-    """Fetch a single entity by id. None on error."""
+    """Fetch a single entity by id. None on error (after retries)."""
     base = NEOTOMA_BASE_URL.rstrip("/")
-    try:
-        req = urllib.request.Request(
-            f"{base}/entities/{entity_id}", headers=_neotoma_headers()
-        )
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            return json.loads(resp.read())
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-        log.warning(f"Neotoma fetch failed for {entity_id}: {exc}")
-        return None
+    req = urllib.request.Request(
+        f"{base}/entities/{entity_id}", headers=_neotoma_headers()
+    )
+    return _neotoma_request_json(req, f"fetch {entity_id}")
 
 
 def neotoma_store(entities: list[dict], idempotency_key: str) -> dict | None:
-    """Store/update entities via POST /store. None on error."""
+    """Store/update entities via POST /store. None on error (after retries)."""
     base = NEOTOMA_BASE_URL.rstrip("/")
-    try:
-        body = json.dumps(
-            {"entities": entities, "idempotency_key": idempotency_key}
-        ).encode()
-        req = urllib.request.Request(
-            f"{base}/store", data=body, headers=_neotoma_headers(), method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            return json.loads(resp.read())
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-        log.warning(f"Neotoma store failed: {exc}")
-        return None
+    body = json.dumps(
+        {"entities": entities, "idempotency_key": idempotency_key}
+    ).encode()
+    req = urllib.request.Request(
+        f"{base}/store", data=body, headers=_neotoma_headers(), method="POST"
+    )
+    return _neotoma_request_json(req, "store")
 
 
 def _entity_fields(entity: dict) -> dict:
