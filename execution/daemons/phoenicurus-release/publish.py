@@ -303,23 +303,80 @@ def set_release_status(version: str, status: str, extra: dict | None = None) -> 
 
 def find_release(version: str | None, entity_id: str | None) -> dict | None:
     """
-    Resolve the release entity to publish. By entity_id if given, else the
-    newest release matching `version`.
+    Resolve the release entity to publish. By entity_id if given, else by
+    `version` — REFUSING when more than one distinct in-flight RC exists.
+
+    Duplicate-RC guard: two concurrent prepare runs can each cut an RC for the
+    same version (different branch/PR — e.g. release/v0.20.0 and release/
+    v0.20.0-a), storing two distinct pending_approval release_results. Silently
+    publishing "the newest" would pick one candidate over another at random for
+    an IRREVERSIBLE publish. Instead we HALT and force disambiguation: the
+    operator (or Ateles) must pass --entity-id to name the exact RC to ship, or
+    close the duplicate PR + its record. `entity_id` always bypasses this guard
+    (it IS the disambiguation).
+
+    "In-flight" = still actionable (prepared / pending_approval / approved).
+    Terminal records (published / failed) for the same version number don't
+    count — they're history, not a competing candidate. Distinctness is by the
+    RC branch (falling back to release_url / entity_id) so the same entity
+    re-observed is one candidate, not two.
     """
     if entity_id:
         ent = neotoma_fetch_entity(entity_id)
         return ent
     if not version:
         return None
-    candidates = neotoma_query("release_result", limit=100)
-    matches = []
-    for c in candidates:
+    want = version.lstrip("v")
+    candidates = []
+    for c in neotoma_query("release_result", limit=100):
         f = _entity_fields(c)
-        if str(f.get("version") or "").lstrip("v") == version.lstrip("v"):
-            matches.append(c)
-    if not matches:
+        if str(f.get("version") or "").lstrip("v") != want:
+            continue
+        status = str(f.get("status") or "").lower()
+        if status in ("published", "failed", "skipped"):
+            continue  # terminal — not a competing in-flight candidate
+        candidates.append(c)
+    if not candidates:
         return None
-    # newest by last_observation_at
+
+    # Collapse to DISTINCT in-flight RCs by their branch/PR identity.
+    def _rc_key(c: dict) -> str:
+        f = _entity_fields(c)
+        return (
+            str(f.get("rc_branch") or f.get("branch") or "")
+            or str(f.get("rc_pr_url") or f.get("release_url") or "")
+            or str(c.get("entity_id") or "")
+        )
+
+    # Collapse per RC key, keeping each RC's NEWEST observation.
+    by_rc: dict[str, dict] = {}
+    for c in candidates:
+        k = _rc_key(c)
+        prev = by_rc.get(k)
+        if prev is None or (c.get("last_observation_at") or "") > (
+            prev.get("last_observation_at") or ""
+        ):
+            by_rc[k] = c
+
+    if len(by_rc) > 1:
+        lines = []
+        for c in by_rc.values():
+            f = _entity_fields(c)
+            lines.append(
+                f"  - {f.get('rc_branch') or f.get('branch') or '?'} "
+                f"({f.get('rc_pr_url') or f.get('release_url') or '?'}) "
+                f"[{c.get('entity_id')}]"
+            )
+        raise StepError(
+            f"{len(by_rc)} distinct in-flight release candidates for {version} — "
+            "refusing to guess which to publish (an irreversible action). "
+            "Two concurrent prepare runs likely each cut an RC. Resolve by "
+            "closing the duplicate PR + its release_result, or re-run with "
+            "--entity-id <the RC to ship>:\n" + "\n".join(lines)
+        )
+
+    # Exactly one distinct in-flight RC (its newest observation).
+    matches = list(by_rc.values())
     matches.sort(key=lambda e: e.get("last_observation_at") or "", reverse=True)
     return matches[0]
 
