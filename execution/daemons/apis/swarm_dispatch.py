@@ -1775,9 +1775,11 @@ class SwarmDispatcher:
         # Resolved BEFORE the lenses run: a push landing mid-panel must not
         # re-anchor reviews onto a commit no lens ever saw. Best-effort — an
         # unresolved head degrades to an explicit sentinel, never a wrong SHA.
-        panel_head_sha = ((await self._fetch_pr(trigger.repository, trigger.number)) or {}).get(
-            "head", {}
-        ).get("sha", "")
+        pr_obj = await self._fetch_pr(trigger.repository, trigger.number)
+        head_obj = pr_obj.get("head") if isinstance(pr_obj, dict) else None
+        panel_head_sha = (
+            head_obj.get("sha", "") if isinstance(head_obj, dict) else ""
+        )
         if not panel_head_sha:
             log.warning(
                 f"[{DAEMON_NAME}] {ref}: could not resolve PR head SHA — "

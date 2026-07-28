@@ -5305,3 +5305,37 @@ def test_persist_panel_reviews_distinct_heads_are_distinct_records(monkeypatch):
     prs = [e for e in stored if e.get("entity_type") == "pr_review"]
     assert [e["head_sha"] for e in prs] == ["sha_round1", "sha_round2"]
     assert [e["verdict"] for e in prs] == ["request_changes", "approve"]
+
+
+def test_persist_panel_reviews_survives_unexpected_pr_payload(monkeypatch):
+    """A non-dict PR payload degrades to the sentinel, never raises.
+
+    `_fetch_pr` is best-effort and its body is not guaranteed to be the object
+    shape (a proxy error page, a list, or None all reach here). Head-SHA
+    resolution must not be able to crash the whole panel — the review is worth
+    persisting unanchored.
+    """
+    stored: list[dict] = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.extend(entities)
+
+    async def fake_fetch_pr(self, repository, pr_number):
+        return [{"not": "an object"}]  # GitHub-shaped list, not a PR object
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fake_fetch_pr)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    pr_obj = asyncio.run(dispatcher._fetch_pr("owner/repo", 87))
+    head_obj = pr_obj.get("head") if isinstance(pr_obj, dict) else None
+    sha = head_obj.get("sha", "") if isinstance(head_obj, dict) else ""
+    assert sha == ""
+
+    asyncio.run(
+        dispatcher._persist_panel_reviews(
+            _trigger(), [("qa", "**APPROVE**")], {"qa": "phoenicurus"}, head_sha=sha
+        )
+    )
+    review = next(e for e in stored if e.get("entity_type") == "pr_review")
+    assert review["head_sha"] == "head_sha_unresolved"
