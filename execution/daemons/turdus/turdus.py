@@ -392,7 +392,9 @@ def _resolve_label_id(label_name: str) -> str | None:
     if cached:
         return cached
 
-    listing = _gws_json(["gmail", "users", "labels", "list", "--params", '{"userId":"me"}'])
+    listing = _gws_json(
+        ["gmail", "users", "labels", "list", "--params", '{"userId":"me"}']
+    )
     if listing:
         for lbl in listing.get("labels", []):
             if lbl.get("name") == label_name:

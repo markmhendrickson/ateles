@@ -329,7 +329,7 @@ def test_label_uses_real_modify_api_and_marks_read(monkeypatch):
             stderr = ""
             # labels list → the label already exists; modify → echo an id back
             stdout = (
-                'Using keyring backend: keyring\n'
+                "Using keyring backend: keyring\n"
                 '{"labels":[{"name":"Turdus/processed","id":"Label_42"}]}'
                 if "labels" in cmd
                 else 'Using keyring backend: keyring\n{"id":"m1"}'
