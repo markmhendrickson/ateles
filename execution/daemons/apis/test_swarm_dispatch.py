@@ -10,6 +10,7 @@ Also covers the checkbox definition-of-done changes:
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
 
 import httpx
 import swarm_dispatch
@@ -209,7 +210,7 @@ def _pr_dispatcher_with_stubs(monkeypatch, *, vanellus_stdout, calls):
     async def fake_changed_files(self, trigger):
         return ["src/x.ts"]
 
-    async def fake_route(self, trigger, parent, reviews, verdict):
+    async def fake_route(self, trigger, parent, reviews, verdict, reviewed_sha=""):
         calls.append(("route", verdict))
 
     async def fake_gate(self, trigger, parent, panel):
@@ -343,7 +344,7 @@ def _gate_blocked_dispatcher(monkeypatch, *, calls, auto_rereview):
     async def fake_changed_files(self, trigger):
         return ["src/x.ts"]
 
-    async def fake_route(self, trigger, parent, reviews, verdict):
+    async def fake_route(self, trigger, parent, reviews, verdict, reviewed_sha=""):
         calls.append(("route", verdict))
 
     async def fake_gate(self, trigger, parent, panel):
@@ -764,11 +765,14 @@ class _FakeCIHttpxClient:
     Any endpoint may be set to raise to exercise the fail-open path."""
 
     def __init__(self, *, head_sha="abc123", status_state="success",
-                 check_runs=None, raise_on=None):
+                 check_runs=None, raise_on=None, head_payload=None):
         self.head_sha = head_sha
         self.status_state = status_state
         self.check_runs = check_runs if check_runs is not None else []
         self.raise_on = raise_on or set()
+        # Overrides the /pulls/{n} body wholesale — for exercising malformed
+        # or missing `head` shapes that head_sha= alone can't express.
+        self.head_payload = head_payload
 
     async def __aenter__(self):
         return self
@@ -783,6 +787,8 @@ class _FakeCIHttpxClient:
             if "/pulls/" in url:
                 if "pulls" in parent.raise_on:
                     raise httpx.HTTPError("boom")
+                if parent.head_payload is not None:
+                    return parent.head_payload
                 return {"head": {"sha": parent.head_sha}}
             if url.endswith("/status"):
                 if "status" in parent.raise_on:
@@ -870,6 +876,36 @@ def test_required_ci_state_unknown_fails_open_on_api_error(monkeypatch):
     assert _ci_state(monkeypatch, raise_on={"status"}) == "unknown"
     assert _ci_state(monkeypatch, raise_on={"checks"}) == "unknown"
     assert _ci_state(monkeypatch, raise_on={"pulls"}) == "unknown"
+
+
+# ── _pr_head_sha (direct — ateles#239 SHA-stamp source of truth) ────────────
+#
+# The consumer tests below (test_stale_findings_do_not_consume_a_fix_round and
+# neighbors) stub _pr_head_sha entirely, so they cover callers but never the
+# function itself: its HTTP call, its handling of a malformed/missing `head`,
+# or its fail-open path on a raised error.
+
+
+def _pr_head_sha(monkeypatch, **kw):
+    client = _FakeCIHttpxClient(**kw)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    return asyncio.run(d._pr_head_sha(_trigger()))
+
+
+def test_pr_head_sha_returns_sha_on_success(monkeypatch):
+    assert _pr_head_sha(monkeypatch, head_sha="deadbeef0000") == "deadbeef0000"
+
+
+def test_pr_head_sha_empty_on_malformed_response(monkeypatch):
+    for payload in ({}, {"head": {}}, {"head": None}):
+        assert _pr_head_sha(monkeypatch, head_payload=payload) == ""
+
+
+def test_pr_head_sha_empty_on_api_error(monkeypatch):
+    # Fails open: a broken read degrades to unstamped, never raises/propagates.
+    assert _pr_head_sha(monkeypatch, raise_on={"pulls"}) == ""
 
 
 # ── _handle_ci_status (check_suite:completed → route/readiness, ateles#197) ──
@@ -5156,3 +5192,246 @@ def test_handle_pr_still_comments_when_no_verdict_anywhere(monkeypatch):
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
     assert ("review", "COMMENT") in calls, calls
     assert any(c[0] == "route" for c in calls), calls
+
+
+# ── ateles#239: SHA-stamped review rounds ────────────────────────────────────
+#
+# A lens judges whatever head it sees when dispatched. Without a stamp, an
+# aggregation minutes later can block on a condition the author already fixed —
+# and spend an APIS_MAX_FIX_ROUNDS budget doing it. Observed twice: neotoma#1946
+# (force-push mid-panel) and ateles#288 (both rounds spent on fixed findings).
+
+
+def test_vanellus_prompt_states_reviewed_sha():
+    """A reader must be able to tell which commit the verdict judged."""
+    prompt = SwarmDispatcher._vanellus_prompt(
+        _trigger(body="Closes #80."),
+        80,
+        ["pm"],
+        [("pm", "**APPROVE**")],
+        reviewed_sha="abc123def456",
+        current_sha="abc123def456",
+    )
+    assert "abc123def456" in prompt
+    assert "STALE ROUND" not in prompt
+
+
+def test_vanellus_prompt_flags_head_moved_mid_panel():
+    """When the head moves underneath the panel, the aggregator is told not to
+    assert a blocking verdict on reviews of superseded code."""
+    prompt = SwarmDispatcher._vanellus_prompt(
+        _trigger(body="Closes #80."),
+        80,
+        ["pm"],
+        [("pm", "**REQUEST_CHANGES**\n[BLOCKING] scope: stray files")],
+        reviewed_sha="aaaaaaaaaaaa",
+        current_sha="bbbbbbbbbbbb",
+    )
+    assert "STALE ROUND" in prompt
+    assert "aaaaaaaaa" in prompt and "bbbbbbbbb" in prompt
+    assert "Do NOT assert a blocking verdict" in prompt
+
+
+def test_vanellus_prompt_omits_sha_block_when_unavailable():
+    """A failed head read degrades to today's unstamped prompt, not a crash."""
+    prompt = SwarmDispatcher._vanellus_prompt(
+        _trigger(body="Closes #80."), 80, ["pm"], [("pm", "**APPROVE**")]
+    )
+    assert "STALE ROUND" not in prompt
+    assert "Reviewed commit" not in prompt
+
+
+def test_handle_pr_wires_both_head_shas_end_to_end(monkeypatch, caplog):
+    """Integration-level guard (qa lens finding, review round 1 on ateles#239):
+    the unit tests above prove `_vanellus_prompt` and `_route_blocking_findings`
+    each do the right thing GIVEN a reviewed_sha/current_sha — but nothing
+    proved `_handle_pr` itself calls `_pr_head_sha` twice and threads the FIRST
+    call's result (not the second) into both downstream call sites. A wiring
+    bug (e.g. swapped args, or `_pr_head_sha` only called once so `head_moved`
+    is always False) would pass every existing test green while silently
+    defeating the whole feature.
+
+    Spies (not stubs) on `_vanellus_prompt` and `_route_blocking_findings` so
+    their actual call kwargs can be asserted, with `_pr_head_sha` monkeypatched
+    to return two DISTINCT SHAs across its two real calls. Also asserts the
+    `head moved during panel` log line fires — currently the only signal an
+    operator watching logs has that this ateles#288-class case is being caught.
+    """
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**REQUEST_CHANGES**\n1 blocking", calls=calls
+    )
+
+    head_shas = iter(["aaa111", "bbb222"])
+
+    async def fake_head(self, t):
+        return next(head_shas)
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+
+    vanellus_prompt_calls = []
+    real_vanellus_prompt = SwarmDispatcher._vanellus_prompt
+
+    def spy_vanellus_prompt(*args, **kwargs):
+        vanellus_prompt_calls.append(kwargs)
+        return real_vanellus_prompt(*args, **kwargs)
+
+    monkeypatch.setattr(SwarmDispatcher, "_vanellus_prompt", staticmethod(spy_vanellus_prompt))
+
+    route_calls = []
+
+    async def spy_route(self, trigger, parent, reviews, verdict, reviewed_sha=""):
+        # Pure spy (not a passthrough): _route_blocking_findings's own internal
+        # behavior (fix-round budgeting, stale-round skip) is covered by its
+        # dedicated unit tests elsewhere in this file. This test's only job is
+        # to prove `_handle_pr` threads the correct SHA into the call.
+        route_calls.append({"reviewed_sha": reviewed_sha})
+
+    monkeypatch.setattr(SwarmDispatcher, "_route_blocking_findings", spy_route)
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+    assert len(vanellus_prompt_calls) == 1, vanellus_prompt_calls
+    assert vanellus_prompt_calls[0]["reviewed_sha"] == "aaa111", vanellus_prompt_calls
+    assert vanellus_prompt_calls[0]["current_sha"] == "bbb222", vanellus_prompt_calls
+
+    assert len(route_calls) == 1, route_calls
+    # The FIRST captured SHA (pre-panel), not the second — the detail most
+    # likely to get flipped by accident since both are just `str`.
+    assert route_calls[0]["reviewed_sha"] == "aaa111", route_calls
+
+    assert any(
+        "head moved during panel" in r.message for r in caplog.records
+    ), [r.message for r in caplog.records]
+
+
+def test_handle_pr_stale_round_skips_fix_budget_end_to_end(monkeypatch, caplog):
+    """QA lens finding (review round 1 on ateles#239): the two tests above prove
+    their own layer in isolation but never together —
+    `test_handle_pr_wires_both_head_shas_end_to_end` stubs out
+    `_route_blocking_findings` entirely (its stale-skip guard never runs), and
+    `test_stale_findings_do_not_consume_a_fix_round` calls
+    `_route_blocking_findings` directly, bypassing `_handle_pr`. Neither proves
+    the full chain — trigger → panel → head moves → the REAL routing function →
+    budget untouched — fires together. A refactor that hoisted the stale check
+    up into `_handle_pr` instead of leaving it inside `_route_blocking_findings`
+    would leave every existing test green while silently breaking the
+    ateles#288 regression this feature exists to prevent.
+
+    Runs `_handle_pr` with the real `_route_blocking_findings`, stubbing only
+    its own dependencies (`_fix_round_count`, `_record_fix_round`) the way
+    `_routing_dispatcher` does, plus `_pr_head_sha` returning two distinct SHAs
+    across its two calls (pre-panel, post-panel) so the guard's "head moved"
+    branch is genuinely exercised.
+    """
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch,
+        vanellus_stdout="**REQUEST_CHANGES**\n[BLOCKING] test-coverage: missing case",
+        calls=calls,
+    )
+    # _pr_dispatcher_with_stubs stubs _route_blocking_findings — let the real
+    # implementation run for this test.
+    monkeypatch.setattr(
+        SwarmDispatcher, "_route_blocking_findings", SwarmDispatcher._route_blocking_findings
+    )
+
+    head_shas = iter(["aaa111", "bbb222"])
+
+    async def fake_head(self, t):
+        return next(head_shas)
+
+    async def fake_count(self, t):
+        calls.append("counted_budget")
+        return 0
+
+    async def fake_record(self, t, n):
+        calls.append(f"round_{n}")
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+    # The guard inside the REAL _route_blocking_findings must fire and return
+    # before the fix-round budget is ever consulted.
+    assert "counted_budget" not in calls, calls
+    assert not any(c.startswith("round_") for c in calls), calls
+    assert any(
+        "skipping fix-round routing" in r.message for r in caplog.records
+    ), [r.message for r in caplog.records]
+
+
+def _routing_dispatcher(monkeypatch, head_now, calls):
+    """Dispatcher whose fix-round machinery is stubbed except the SHA guard."""
+    d = SwarmDispatcher.__new__(SwarmDispatcher)
+    d.config = SimpleNamespace(max_fix_rounds=2)
+    d.notifier = SimpleNamespace(send=lambda *a, **k: None)
+
+    async def fake_head(self, t):
+        return head_now
+
+    async def fake_count(self, t):
+        calls.append("counted_budget")
+        return 0
+
+    async def fake_record(self, t, n):
+        calls.append(f"round_{n}")
+
+    async def fake_guidance(self, *a, **k):
+        calls.append("routed")
+
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+    return d
+
+
+def test_stale_findings_do_not_consume_a_fix_round(monkeypatch):
+    """
+    ateles#288's exact failure: findings raised against an older commit must not
+    spend budget. The push that moved the head re-runs the panel, so skipping
+    here drops nothing.
+    """
+    calls = []
+    d = _routing_dispatcher(monkeypatch, head_now="newsha000000", calls=calls)
+    reviews = [("qa", "**REQUEST_CHANGES**\n[BLOCKING] test-coverage: missing case")]
+    asyncio.run(
+        d._route_blocking_findings(
+            _trigger(body="Closes #80."), 80, reviews, "REQUEST_CHANGES",
+            reviewed_sha="oldsha000000",
+        )
+    )
+    assert "counted_budget" not in calls, calls
+    assert "routed" not in calls, calls
+
+
+def test_current_findings_still_consume_a_fix_round(monkeypatch):
+    """The guard must not disable auto-fix: a current round proceeds normally."""
+    calls = []
+    d = _routing_dispatcher(monkeypatch, head_now="samesha00000", calls=calls)
+    reviews = [("qa", "**REQUEST_CHANGES**\n[BLOCKING] test-coverage: missing case")]
+    asyncio.run(
+        d._route_blocking_findings(
+            _trigger(body="Closes #80."), 80, reviews, "REQUEST_CHANGES",
+            reviewed_sha="samesha00000",
+        )
+    )
+    assert "counted_budget" in calls, calls
+
+
+def test_unstamped_round_still_consumes_a_fix_round(monkeypatch):
+    """A failed head read must fail open to today's behavior, not skip routing."""
+    calls = []
+    d = _routing_dispatcher(monkeypatch, head_now="whatever0000", calls=calls)
+    reviews = [("qa", "**REQUEST_CHANGES**\n[BLOCKING] test-coverage: missing case")]
+    asyncio.run(
+        d._route_blocking_findings(
+            _trigger(body="Closes #80."), 80, reviews, "REQUEST_CHANGES",
+            reviewed_sha="",
+        )
+    )
+    assert "counted_budget" in calls, calls

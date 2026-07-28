@@ -1760,6 +1760,12 @@ class SwarmDispatcher:
             pending_gates=pending_gates,
         )
 
+        # ateles#239: record the commit this round is reviewing. A lens judges
+        # whatever head it sees when dispatched; without this stamp an
+        # aggregation minutes later can block on a condition the author already
+        # fixed, and burn an APIS_MAX_FIX_ROUNDS budget doing it.
+        reviewed_sha = await self._pr_head_sha(trigger)
+
         reviews: list[tuple[str, str]] = []
         for lens in panel:
             # QE3: the qa lens (Phoenicurus) authors + runs an eval, so it needs a
@@ -1819,9 +1825,28 @@ class SwarmDispatcher:
 
         # 4. Vanellus aggregates panel verdicts. Merge is operator-gated
         #    unless APIS_AUTONOMY_AUTO_MERGE=1 (ateles#80 guardrail).
+        # ateles#239: if the head moved while the panel ran, every review above
+        # judged history. Tell the aggregator so it reports the mismatch instead
+        # of asserting a verdict; the push that moved the head re-runs this
+        # handler against the new commit anyway.
+        current_sha = await self._pr_head_sha(trigger)
+        if reviewed_sha and current_sha and reviewed_sha != current_sha:
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: head moved during panel "
+                f"({reviewed_sha[:9]} → {current_sha[:9]}) — aggregation will "
+                "be marked stale"
+            )
+
         vanellus_result = await run_skill(
             "vanellus",
-            self._vanellus_prompt(trigger, parent, [p.lens for p in panel], reviews),
+            self._vanellus_prompt(
+                trigger,
+                parent,
+                [p.lens for p in panel],
+                reviews,
+                reviewed_sha=reviewed_sha,
+                current_sha=current_sha,
+            ),
             github_token=_token_for_agent_on_repo("vanellus", trigger.repository),
             include_github_contract=True,
             notifier=self.notifier,
@@ -1870,7 +1895,9 @@ class SwarmDispatcher:
         await self._emit_formal_review(trigger, verdict, vanellus_result.stdout)
 
         if not review_verdict_is_clear(verdict):
-            await self._route_blocking_findings(trigger, parent, reviews, verdict)
+            await self._route_blocking_findings(
+                trigger, parent, reviews, verdict, reviewed_sha=reviewed_sha
+            )
             return
 
         await self._gate_merge_readiness(trigger, parent, panel)
@@ -2084,6 +2111,7 @@ class SwarmDispatcher:
         parent: int | None,
         reviews: list[tuple[str, str]],
         verdict: str | None,
+        reviewed_sha: str = "",
     ) -> None:
         """Route panel blocking findings back for an automatic fix (bounded).
 
@@ -2118,6 +2146,23 @@ class SwarmDispatcher:
                     handler=DAEMON_NAME,
                 )
             return
+
+        # ateles#239: don't spend a fix round on a round that judged an older
+        # commit. On ateles#288 both rounds were consumed this way — one on a
+        # scope-creep finding the author had already fixed (the pm lens then
+        # withdrew it itself), one on a finding whose cited source line no
+        # longer existed — and the PR escalated `auto-fix-exhausted` without a
+        # real budget ever being spent. The push that moved the head re-runs
+        # this handler, so returning here drops nothing.
+        if reviewed_sha:
+            head_now = await self._pr_head_sha(trigger)
+            if head_now and head_now != reviewed_sha:
+                log.info(
+                    f"[{DAEMON_NAME}] {ref}: skipping fix-round routing — "
+                    f"findings are against {reviewed_sha[:9]}, head is now "
+                    f"{head_now[:9]}; the newer push re-runs the panel"
+                )
+                return
 
         prior_rounds = await self._fix_round_count(trigger)
         if prior_rounds >= self.config.max_fix_rounds:
@@ -4188,6 +4233,8 @@ class SwarmDispatcher:
         parent: int | None,
         lenses: list[str],
         reviews: list[tuple[str, str]] | None = None,
+        reviewed_sha: str = "",
+        current_sha: str = "",
     ) -> str:
         # The captured lens reviews are embedded INLINE below so the aggregator
         # never has to re-fetch them via `gh`. Vanellus runs diff-only
@@ -4201,8 +4248,35 @@ class SwarmDispatcher:
             )
         else:
             panel_block = "(no panel lens reviews captured — GHA baseline only)"
+
+        # ateles#239: state which commit the panel judged, and say so loudly when
+        # the head moved underneath it. A finding that was correct when raised
+        # becomes a wrong verdict once the author has already fixed it.
+        if reviewed_sha and current_sha and reviewed_sha != current_sha:
+            sha_block = (
+                f"\n⚠️ STALE ROUND — the panel reviewed `{reviewed_sha[:9]}` but the "
+                f"PR head is now `{current_sha[:9]}`. The reviews below judged code "
+                "that has since changed.\n"
+                "Do NOT assert a blocking verdict on this round. Report that the "
+                "head moved, state both SHAs, and note that the push which moved it "
+                "re-runs the panel against the new commit. Carry forward only "
+                "findings you can re-verify against the CURRENT head.\n"
+            )
+        elif reviewed_sha:
+            sha_block = (
+                f"\nReviewed commit: `{reviewed_sha}`. State this SHA in your "
+                "aggregation so a reader can tell whether the verdict is current.\n"
+                "Before asserting any [BLOCKING] finding, re-check that its "
+                "predicate still holds at this commit — a mechanically testable "
+                "claim (files changed, a cited source line, a missing test) is "
+                "cheap to re-verify and must not be carried forward on trust.\n"
+            )
+        else:
+            sha_block = ""
+
         return (
             "Invoke the vanellus agent per your appended system prompt.\n\n"
+            f"{sha_block}"
             f"Aggregate the review panel for PR {t.repository}#{t.number}: "
             f"{t.title}\n{t.html_url}\n"
             f"Parent issue: #{parent if parent else 'unknown'}. "
@@ -4270,6 +4344,28 @@ class SwarmDispatcher:
                 "always-on lenses"
             )
             return []
+
+    async def _pr_head_sha(self, t: SwarmTrigger) -> str:
+        """
+        Current head SHA of the PR, or "" when the read fails.
+
+        Used to stamp which commit a panel round reviewed (ateles#239). Returns
+        "" rather than raising so a failed read degrades to today's unstamped
+        behavior instead of stalling the panel.
+        """
+        url = f"https://api.github.com/repos/{t.repository}/pulls/{t.number}"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(url, headers=self._github_headers(t.repository))
+                resp.raise_for_status()
+                return (resp.json().get("head") or {}).get("sha", "") or ""
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] head-SHA fetch failed for "
+                f"{t.repository}#{t.number}: {exc} — review round will not be "
+                "SHA-stamped"
+            )
+            return ""
 
     async def _preregistered_expectations(
         self, repository: str, issue_number: int
