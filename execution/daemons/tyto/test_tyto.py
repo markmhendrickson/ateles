@@ -680,3 +680,29 @@ class TestOcrPollCadence:
             _run(consumer.poll_once())
 
         assert len(query_calls) == 1
+
+    def test_first_poll_fires_even_when_loop_time_is_near_zero(self):
+        """The very first poll_once() must always query, regardless of the event
+        loop's time() value at that instant — a fresh loop's monotonic clock can
+        read anywhere from near-zero to large depending on platform/CI runner.
+        _last_run_monotonic must start as "never run" (None), not 0.0, or a
+        loop time smaller than OCR_POLL_INTERVAL silently skips the first poll."""
+        query_calls = []
+
+        def fake_post(url, json=None, **kwargs):
+            if url.endswith("/entities/query"):
+                query_calls.append(json)
+                return _query_response([])
+            raise AssertionError(f"unexpected POST {url}")
+
+        fake_loop = MagicMock()
+        fake_loop.time.return_value = 1.0  # near-zero loop time, well under OCR_POLL_INTERVAL
+
+        with patch.object(tyto, "NEOTOMA_BEARER_TOKEN", "test-token"), \
+             patch.object(tyto.httpx, "post", side_effect=fake_post), \
+             patch.object(tyto, "OCR_POLL_INTERVAL", 9999), \
+             patch.object(tyto.asyncio, "get_event_loop", return_value=fake_loop):
+            consumer = tyto.OcrConsumer(MagicMock())
+            _run(consumer.poll_once())
+
+        assert len(query_calls) == 1
