@@ -395,3 +395,42 @@ def test_invoice_notifies_once_then_deduped(monkeypatch):
     notifier2 = _StubNotifier()
     _run(turdus.poll_once(notifier2, state))
     assert [m for m in notifier2.sent if "invoice(s)" in m] == []
+
+
+def test_dedup_set_guards_when_watermark_does_not_short_circuit(monkeypatch):
+    # Exercises the processed_ids mechanism DIRECTLY (not the last_message_id
+    # break): a NEWER message accompanies the repeated inv1, so inv1 is not at
+    # the list head and the watermark walk does not stop before reaching it.
+    # Only the dedup set can prevent the second invoice notification for inv1.
+    _wire_poll(monkeypatch, messages=[_invoice_msg("inv1")])
+    notifier = _StubNotifier()
+    state = _run(turdus.poll_once(notifier, {"last_message_id": None}))
+    assert len([m for m in notifier.sent if "invoice(s)" in m]) == 1
+    assert "inv1" in state.get("processed_ids", [])
+
+    # Next poll: a newer invoice (inv2) ahead of the still-returned inv1.
+    _wire_poll(monkeypatch, messages=[_invoice_msg("inv2"), _invoice_msg("inv1")])
+    notifier2 = _StubNotifier()
+    state2 = _run(turdus.poll_once(notifier2, state))
+    # Exactly one invoice notified this cycle — inv2, the genuinely new one.
+    # inv1 is suppressed by processed_ids despite not being at the list head.
+    notes = [m for m in notifier2.sent if "invoice(s)" in m]
+    assert len(notes) == 1
+    assert "1 invoice(s)" in notes[0]
+    assert "inv2" in state2.get("processed_ids", [])
+
+
+def test_approval_message_recorded_for_dedup(monkeypatch):
+    # An operator approval reply must be recorded in processed_ids so it can
+    # never be re-routed to the Apis publish gate on a later cycle.
+    _wire_poll(monkeypatch, messages=[_invoice_msg("appr1")])
+
+    async def _yes_release(_msg, _notifier):
+        return True
+
+    monkeypatch.setattr(turdus, "_maybe_handle_release_approval", _yes_release)
+    notifier = _StubNotifier()
+    state = _run(turdus.poll_once(notifier, {"last_message_id": None}))
+    assert "appr1" in state.get("processed_ids", [])
+    # No invoice task/notification for an approval reply.
+    assert [m for m in notifier.sent if "invoice(s)" in m] == []

@@ -978,6 +978,21 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
     processed_ids: list[str] = list(state.get("processed_ids", []))
     processed_id_set = set(processed_ids)
 
+    def _mark_handled(mid: str) -> None:
+        """Record a message ID as terminally handled for cross-cycle dedup.
+
+        Covers EVERY disposition that `continue`s out of the loop — approval
+        routing and noise included, not just the task path — so that if the
+        positional `last_message_id` gate ever resets or messages reorder, a
+        message can never be re-routed. This matters most for the approval
+        branches: re-routing an operator `approve <version>` reply to the Apis
+        publish gate a second time is more consequential than a duplicate
+        invoice notification.
+        """
+        if mid and mid not in processed_id_set:
+            processed_id_set.add(mid)
+            processed_ids.append(mid)
+
     actionable_count = 0
     invoice_count = 0
     approval_count = 0
@@ -997,6 +1012,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         try:
             if await _maybe_handle_release_approval(msg, notifier):
                 approval_count += 1
+                _mark_handled(msg_id)
                 continue
         except Exception as exc:  # never let approval detection break the poll
             log.error(f"[{DAEMON_NAME}] release-approval check failed: {exc}")
@@ -1007,6 +1023,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         try:
             if await _maybe_handle_swarm_approval(msg, notifier):
                 approval_count += 1
+                _mark_handled(msg_id)
                 continue
         except Exception as exc:  # never let approval detection break the poll
             log.error(f"[{DAEMON_NAME}] swarm-approval check failed: {exc}")
@@ -1025,6 +1042,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         )
 
         if classification == "noise":
+            _mark_handled(msg_id)
             continue
 
         # Store email entity in Neotoma
@@ -1039,9 +1057,10 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
             _label_gmail_message(msg_id, PROCESSED_LABEL)
             # Record only after the message is fully handled, so a mid-message
             # crash lets it be retried next cycle rather than silently dropped.
-            if msg_id and msg_id not in processed_id_set:
-                processed_id_set.add(msg_id)
-                processed_ids.append(msg_id)
+            _mark_handled(msg_id)
+        else:
+            # informational (stored, no task) — still terminally handled.
+            _mark_handled(msg_id)
 
     # Update state with newest processed message ID and the bounded dedup set.
     if new_messages:
