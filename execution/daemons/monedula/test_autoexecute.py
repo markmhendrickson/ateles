@@ -225,3 +225,72 @@ def test_handler_exception_does_not_crash_and_is_recorded(monkeypatch):
     results = monedula.execute_approved_tasks([_task("ent_1", approved=True)], [h])
     assert results and results[0][1]["status"] == "failed"
     assert "wallet down" in results[0][1]["error"]
+
+
+# ── 5. _mark_tasks_paid — one-off override clear on recurring obligations ─────
+#
+# Regression for PR #249 review (qa lens, finding 1): a recurring obligation's
+# one-off amount_eur_override must be cleared after it pays, so the next
+# session does not silently re-charge the one-off rate. If the clear write
+# itself fails, that must surface as an ERROR log (MANUAL CHECK REQUIRED)
+# without blocking the marker/approval-reset corrections already applied.
+
+def _recurring_task(entity_id, *, due_date="2026-07-21", override="70"):
+    snap = {
+        "title": "Private yoga payment — Manel",
+        "status": "open",
+        "due_date": due_date,
+        "recurrence": "weekly",
+        "payment_approved": True,
+        "amount_eur_override": override,
+    }
+    return {"entity_id": entity_id, "snapshot": snap}
+
+
+def test_recurring_task_clears_override_after_paid_send(monkeypatch):
+    """A sent recurring-obligation payment must clear amount_eur_override so the
+    next session bills the standing rate, not the one-off amount again."""
+    import handlers.neotoma_cli as ncli
+
+    calls = []
+
+    def _fake_correct(entity_id, field, value, *, entity_type="task", label="autoexec"):
+        calls.append((field, value))
+        return True
+
+    monkeypatch.setattr(ncli, "correct_field", _fake_correct)
+
+    h = _FakeHandler("btc", "ent_1")
+    task = _recurring_task("ent_1")
+    result = {"status": "sent", "handler": "btc", "txid": "deadbeef"}
+
+    monedula._mark_tasks_paid([(h, result)], [task])
+
+    assert ("amount_eur_override", "") in calls, \
+        "override must be cleared (set to empty) after the one-off session pays"
+
+
+def test_recurring_task_override_clear_failure_logs_manual_check(monkeypatch, caplog):
+    """If the override-clear write fails, the daemon must log an ERROR telling
+    the operator to check manually — silently continuing would let the next
+    session re-use the stale one-off amount."""
+    import handlers.neotoma_cli as ncli
+    import logging
+
+    def _fake_correct(entity_id, field, value, *, entity_type="task", label="autoexec"):
+        # Every write succeeds except the override clear.
+        return field != "amount_eur_override"
+
+    monkeypatch.setattr(ncli, "correct_field", _fake_correct)
+
+    h = _FakeHandler("btc", "ent_1")
+    task = _recurring_task("ent_1")
+    result = {"status": "sent", "handler": "btc", "txid": "deadbeef"}
+
+    with caplog.at_level(logging.ERROR, logger=monedula.log.name):
+        monedula._mark_tasks_paid([(h, result)], [task])
+
+    assert any("MANUAL CHECK REQUIRED" in rec.message for rec in caplog.records), \
+        "a failed override clear must be logged at ERROR for manual follow-up"
+    # The other corrections for this session (marker + approval reset) must
+    # still have been attempted — override-clear failure must not block them.
