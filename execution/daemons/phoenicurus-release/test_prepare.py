@@ -108,7 +108,93 @@ def test_email_send_builds_gws_command_with_from(monkeypatch):
     assert "--to" in cmd and "op@example.com" in cmd
     assert "--from" in cmd and "swarm@example.com" in cmd
     assert "--subject" in cmd and "🚀 subj" in cmd
-    assert "--body" in cmd and "body text" in cmd
+    assert "--body" in cmd
+    body_arg = cmd[cmd.index("--body") + 1]
+    assert "body text" in body_arg
+    assert "--html" in cmd
+
+
+# ── _plain_to_html: markdown-ish daemon notices rendered for email ───────────
+
+def test_plain_to_html_heading_levels_map_one_to_one():
+    assert prepare._plain_to_html("# Title") == "<h1>Title</h1>"
+    assert prepare._plain_to_html("## Section") == "<h2>Section</h2>"
+
+
+def test_plain_to_html_bold_and_code():
+    assert prepare._plain_to_html("**hello**") == "<p><strong>hello</strong></p>"
+    assert prepare._plain_to_html("`gws gmail +send`") == "<p><code>gws gmail +send</code></p>"
+
+
+def test_plain_to_html_code_span_contents_are_literal():
+    # Markdown code spans are not re-interpreted as markdown — `**x**` inside
+    # backticks must stay literal text, not become <strong> nested in <code>.
+    assert prepare._plain_to_html("`**not bold**`") == "<p><code>**not bold**</code></p>"
+
+
+def test_plain_to_html_bullets():
+    assert prepare._plain_to_html("- item one\n- item two") == (
+        "<ul>\n<li>item one</li>\n<li>item two</li>\n</ul>"
+    )
+
+
+def test_plain_to_html_markdown_link():
+    assert prepare._plain_to_html("[here](https://example.com)") == (
+        '<p><a href="https://example.com">here</a></p>'
+    )
+
+
+def test_plain_to_html_escapes_quotes_in_url_no_attribute_injection():
+    # A literal `"` in a URL must not break out of the generated href attribute.
+    out = prepare._plain_to_html('[label](https://example.com/"onmouseover="alert(1))')
+    assert "&quot;" in out
+    assert 'onmouseover="alert' not in out
+
+
+def test_plain_to_html_no_inline_styling():
+    # Semantic tags only — no font-family/font-size/color/style so mail inherits
+    # the client's own typography rather than fighting it.
+    out = prepare._plain_to_html(
+        "# Heading\n\n**bold** and `code` and a bullet:\n- one\n- two\n"
+        "[link](https://example.com)"
+    )
+    assert "font-family" not in out
+    assert "font-size" not in out
+    assert "color" not in out
+    assert "style=" not in out
+
+
+def test_email_send_body_is_html_not_raw_markdown(monkeypatch):
+    # Effect-level check: a realistic daemon notice sent through email_send()
+    # must arrive as converted HTML, not the raw markdown source. Asserting only
+    # "the input string appears in --body" (as the pre-existing test does) would
+    # also pass if --html conversion were silently dropped — this asserts the
+    # actual reported defect (literal `**`/`- ` markers reaching Gmail) cannot
+    # recur.
+    monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(prepare, "SWARM_EMAIL", "")
+    calls = {}
+
+    def fake_run(cmd, **kw):
+        calls["cmd"] = cmd
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    markdown_notice = "## Release blocked\n\n**CI is red** on `origin/main`.\n- retry after fix\n- check the run"
+    with patch("shutil.which", return_value="/usr/bin/gws"), \
+         patch.object(prepare.subprocess, "run", side_effect=fake_run):
+        assert prepare.email_send("🔴 subj", markdown_notice) is True
+    cmd = calls["cmd"]
+    assert "--html" in cmd
+    body_arg = cmd[cmd.index("--body") + 1]
+    assert body_arg == prepare._plain_to_html(markdown_notice)
+    assert "<h2>Release blocked</h2>" in body_arg
+    assert "<strong>CI is red</strong>" in body_arg
+    assert "<code>origin/main</code>" in body_arg
+    assert "<ul>" in body_arg and "<li>retry after fix</li>" in body_arg
+    # The raw markdown markers must not survive into the sent body.
+    assert "**" not in body_arg
+    assert "\n- retry after fix" not in body_arg
+    assert "##" not in body_arg
 
 
 def test_email_send_fail_open_on_nonzero_rc(monkeypatch):
@@ -134,6 +220,35 @@ def test_agent_prompt_includes_email_step_when_configured(monkeypatch):
     assert "gws gmail +send" in p
     assert "op@example.com" in p
     assert "approve" in p.lower() and "skip" in p.lower()
+
+
+def test_agent_prompt_requires_html_flag_and_markdown_conversion(monkeypatch):
+    # The agent-composed RC email is the OTHER half of this bug (5cd6e3c/#283):
+    # the agent builds its own gws command from prompt instructions rather than
+    # calling _plain_to_html, so the prompt itself is the contract. It must
+    # explicitly require --html AND spell out the markdown -> HTML conversion —
+    # a prompt that only says "send nicely" would regress silently.
+    monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(prepare, "SWARM_EMAIL", "swarm@example.com")
+    p = prepare._build_agent_prompt("v0.19.0", 3)
+    assert "--html" in p
+    assert "ALWAYS include `--html`" in p
+    assert "Convert markdown" in p or "markdown → HTML" in p
+    assert "<h2>" in p and "<ul>" in p and "<strong>" in p and "<code>" in p
+
+
+def test_agent_prompt_release_approve_token_survives_quoted_reply(monkeypatch):
+    # Turdus parses `release-approve: <TAG>` back out of the operator's quoted
+    # reply. If the prompt only put the token inside an <a href> (or otherwise
+    # non-visible markup), a plain-text quoted reply from Gmail would drop it
+    # and the approval would never route. The prompt must instruct the token to
+    # land in its own visible <p>/<code> line, not only inside a link.
+    monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(prepare, "SWARM_EMAIL", "")
+    p = prepare._build_agent_prompt("v0.19.0", 3)
+    assert "release-approve: <TAG>" in p
+    assert "NOT only inside an href" in p
+    assert "own <p> or <code> line" in p
 
 
 def test_agent_prompt_notes_skip_when_email_unconfigured(monkeypatch):
