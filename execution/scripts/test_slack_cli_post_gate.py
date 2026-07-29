@@ -85,9 +85,23 @@ def test_yes_reaches_send_path():
     print("ok: --yes reaches chat.postMessage with the right payload")
 
 
+def test_json_flag_accepted_before_and_after_subcommand():
+    # Regression for the argparse bug: a parent-parser --json placed AFTER the
+    # subcommand is not recognized unless each subparser also accepts it. It must
+    # work in both positions, and stay False when absent (a leading --json must
+    # not be clobbered by the subparser default).
+    parse = slack_cli.build_parser().parse_args
+    assert parse(["post", "C", "--text", "x", "--json"]).json is True, "trailing --json"
+    assert parse(["--json", "post", "C", "--text", "x"]).json is True, "leading --json"
+    assert parse(["post", "C", "--text", "x"]).json is False, "absent --json"
+    assert parse(["search", "foo", "--json"]).json is True, "trailing on read cmd"
+    print("ok: --json accepted before and after the subcommand, False when absent")
+
+
 if __name__ == "__main__":
     test_dry_run_without_yes_sends_nothing_and_exits_2()
     test_empty_message_refused()
     test_stdin_body_read_in_dry_run()
     test_yes_reaches_send_path()
+    test_json_flag_accepted_before_and_after_subcommand()
     print("\nALL PASS")

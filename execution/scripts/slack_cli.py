@@ -249,30 +249,48 @@ def cmd_post(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="slack_cli.py", description=__doc__.splitlines()[1])
+    # --json lives on a shared parent parser so it is accepted AFTER the
+    # subcommand (`search foo --json`), which is how the docs/usage show it and
+    # how callers naturally type it. A parent-parser option placed after the
+    # subcommand token is NOT recognized by argparse subparsers, so defining it
+    # only on the top-level parser would make every documented `... --json`
+    # invocation fail with "unrecognized arguments: --json". Also accept it up
+    # front for back-compat.
     p.add_argument("--json", action="store_true", help="Emit raw JSON")
+    common = argparse.ArgumentParser(add_help=False)
+    # default=SUPPRESS: when --json is NOT given after the subcommand, don't set
+    # the attribute at all, so a leading `--json` (from the top-level parser) is
+    # preserved rather than overwritten with False. store_true forces the value
+    # to True when it IS given. Net: --json works before OR after the subcommand.
+    common.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS, help="Emit raw JSON"
+    )
     sub = p.add_subparsers(dest="command", required=True)
 
-    s = sub.add_parser("search", help="Search messages (needs search:read.public)")
+    s = sub.add_parser(
+        "search", parents=[common], help="Search messages (needs search:read.public)"
+    )
     s.add_argument("query")
     s.add_argument("--count", type=int, default=20)
     s.add_argument("--sort", default="timestamp", choices=["score", "timestamp"])
     s.set_defaults(func=cmd_search)
 
-    h = sub.add_parser("history", help="Read a channel's recent messages")
+    h = sub.add_parser("history", parents=[common], help="Read a channel's recent messages")
     h.add_argument("channel", help="Channel ID (e.g. C0123ABC)")
     h.add_argument("--limit", type=int, default=50)
     h.set_defaults(func=cmd_history)
 
-    c = sub.add_parser("channels", help="List channels")
+    c = sub.add_parser("channels", parents=[common], help="List channels")
     c.add_argument("--types", default="public_channel")
     c.add_argument("--limit", type=int, default=200)
     c.set_defaults(func=cmd_channels)
 
-    w = sub.add_parser("whoami", help="Verify the token (auth.test)")
+    w = sub.add_parser("whoami", parents=[common], help="Verify the token (auth.test)")
     w.set_defaults(func=cmd_whoami)
 
     po = sub.add_parser(
         "post",
+        parents=[common],
         help="Post a message / thread reply (OPERATOR-GATED: dry-run unless --yes)",
     )
     po.add_argument("channel", help="Channel ID (e.g. C0123ABC)")
