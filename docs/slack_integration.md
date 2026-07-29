@@ -1,25 +1,20 @@
 # Slack integration
 
-Gives the swarm Slack access — search, channel history, and **operator-gated
-posting** — the way `gws` gives it Google Workspace. Implemented by
+Gives the swarm **read-only** Slack access — search and channel history — the
+way `gws` gives it Google Workspace. Implemented by
 `execution/scripts/slack_cli.py`.
 
 Before this, the only Slack touchpoint was the **outbound** watchdog webhook
 (`OPENCLAW_WATCHDOG_WEBHOOK_URL`). Nothing could read, so material shared in
 Slack (contact exports, decks, screenshots) was invisible to agents and had to
-be relayed by hand. Writing back (e.g. replying in a thread) had to be done by
-the operator pasting by hand.
+be relayed by hand.
 
 ## Posture
 
-- **Reads unrestricted; writes operator-gated.** The `post` subcommand can send
-  a message or thread reply, but posting to a shared team workspace is an
-  outward-facing, non-reversible action. `post` is therefore a **dry-run unless
-  `--yes` is passed**: an agent's default invocation prints exactly what would
-  be sent and exits non-zero, so the operator inspects and approves before it
-  fires. This mirrors how the swarm gates other high-blast outbound actions
-  (Vanellus merges, Monedula payments). Automated alert posts still use the
-  webhook.
+- **Read-only.** Per issue #248, this integration is scoped to search and
+  channel history only — there is no send/post capability. Automated alert
+  posts still use the webhook; a future write path (if ever justified) is a
+  separate, explicitly-scoped issue, not something added quietly here.
 - **Narrowest scope that works.** Prefer `search:read.public`. The legacy
   `search:read` scope also returns **DM content**, and this token reads a
   **shared team workspace** — it can see other people's messages, not just the
@@ -27,11 +22,7 @@ the operator pasting by hand.
   and say so in the `vendor_binding`.
 - **User token, not bot token.** `search.messages` is only available to user
   tokens. That means the token acts as the operator: everything it can read is
-  what the operator can already read — and everything `post` sends is authored
-  **as the operator** (there is no separate bot identity). Because a post is
-  indistinguishable from the operator typing it, the `--yes` gate is the only
-  thing standing between an agent and a message under the operator's name; keep
-  it.
+  what the operator can already read — no privilege expansion.
 
 ## One-time setup (operator)
 
@@ -43,16 +34,8 @@ operations, and the Bottega8 workspace may require admin consent.
 2. Under **OAuth & Permissions → User Token Scopes**, add:
    - `search:read.public` — search public channels
    - `channels:history`, `channels:read` — read/list public channels
-   - `chat:write` — **required for the `post` subcommand.** Posts are authored
-     as the operator's user; the operator must be a member of any channel it
-     posts to (public channels the user is in; invite for private).
    - (only if justified) `groups:history`, `groups:read`,
      `search:read.private` — private channels
-
-   Adding `chat:write` is a scope escalation — it needs a re-install and, in a
-   restricted workspace, admin re-approval. If you want reads live before the
-   write path is approved, install with the read scopes first and add
-   `chat:write` in a later re-install.
 3. **Install to Workspace** and approve. If the workspace restricts app
    installs, this needs a workspace admin.
 4. Copy the **User OAuth Token** (`xoxp-…`).
@@ -81,27 +64,10 @@ python3 execution/scripts/slack_cli.py history C0123ABC --limit 100
 python3 execution/scripts/slack_cli.py search "leads deck" --json
 ```
 
-### Posting (operator-gated)
-
-```bash
-# DRY RUN (default): prints exactly what would be sent, exits non-zero, sends nothing.
-python3 execution/scripts/slack_cli.py post C0123ABC --text "Handling this now."
-
-# Reply within a thread — pass the parent message's ts (from search/history output):
-python3 execution/scripts/slack_cli.py post C0123ABC \
-  --text "Done — 946 new contacts loaded." --thread-ts 1785000000.123456
-
-# Long / multi-line body: read from stdin so shell quoting doesn't fight you.
-cat reply.md | python3 execution/scripts/slack_cli.py post C0123ABC --text - --thread-ts 1785000000.123456
-
-# ACTUALLY SEND: add --yes. This is the operator's approval step.
-python3 execution/scripts/slack_cli.py post C0123ABC --text - --yes
-```
-
-The intended agent flow: draft the message, run `post` **without** `--yes` to
-show the operator the exact payload, and only re-run with `--yes` after the
-operator approves. Agents should treat a `post` as a checkpoint, not a
-free-fire action — the CLI enforces this, but the skill should too.
+There is no `post`/send subcommand — this integration is read-only by design
+(issue #248). Automated outbound posts continue to go through the watchdog
+webhook (`OPENCLAW_WATCHDOG_WEBHOOK_URL`); anything else the operator wants to
+say in Slack, they type themselves.
 
 `history` prints any attached files (name, type, permalink), which is the
 usual way decks and exports surface.

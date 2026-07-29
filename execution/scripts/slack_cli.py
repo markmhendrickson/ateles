@@ -7,11 +7,8 @@ scriptable surface over the endpoints agents actually need, with the token
 sourced from the environment (materialized from `ateles-private` via
 secrets_lib / SOPS) rather than handled here.
 
-Reads are unrestricted; writes are OPERATOR-GATED. The `post` subcommand can
-send a message or thread reply, but posting to a shared team workspace is an
-outward-facing, non-reversible action, so `post` is a dry-run unless `--yes`
-is passed — an agent's default invocation shows exactly what would be sent and
-exits non-zero for the operator to approve. (The watchdog webhook,
+Read-only by design: issue #248 scopes this integration to search + channel
+history, explicitly excluding send capability. (The watchdog webhook,
 OPENCLAW_WATCHDOG_WEBHOOK_URL, remains the path for automated alert posts.)
 
 Scope posture: prefer `search:read.public` (public channels only). Slack's
@@ -24,16 +21,11 @@ Usage:
   python slack_cli.py history <channel_id> [--limit 50] [--json]
   python slack_cli.py channels [--types public_channel] [--json]
   python slack_cli.py whoami
-  python slack_cli.py post <channel_id> --text "..." [--thread-ts <ts>] [--yes]
-    # without --yes: dry-run (prints what would send, exits 2)
-    # --text - reads the body from stdin (best for long/multi-line messages)
 
 Environment variables:
   SLACK_USER_TOKEN   Slack user token (xoxp-...), required.
                      User token — not a bot token — because search.messages
-                     is only available to user tokens. For `post`, the token
-                     also needs the `chat:write` user scope; posts are
-                     authored AS the token's user (the operator).
+                     is only available to user tokens.
   SLACK_BASE_URL     API base (default: https://slack.com/api)
 """
 
@@ -72,39 +64,8 @@ def _call(method: str, params: dict | None = None) -> dict:
     return _check(payload, method)
 
 
-def _post(method: str, body: dict) -> dict:
-    """POST a Slack Web API method with a JSON body. Raises on error.
-
-    Separate from `_call` (which is GET-only) because write methods —
-    chat.postMessage — take a JSON body and must not be sent as query params.
-    """
-    if not TOKEN:
-        raise SystemExit(
-            "SLACK_USER_TOKEN is not set. Materialize it from ateles-private "
-            "(see docs/slack_integration.md) before running."
-        )
-    data = json.dumps({k: v for k, v in body.items() if v is not None}).encode("utf-8")
-    req = urllib.request.Request(
-        f"{BASE_URL}/{method}",
-        data=data,
-        headers={
-            "Authorization": f"Bearer {TOKEN}",
-            "Content-Type": "application/json; charset=utf-8",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:  # pragma: no cover - network path
-        raise SystemExit(f"HTTP {exc.code} calling {method}: {exc.read()[:300]!r}") from exc
-    except urllib.error.URLError as exc:  # pragma: no cover - network path
-        raise SystemExit(f"Network error calling {method}: {exc.reason}") from exc
-    return _check(payload, method)
-
-
 def _check(payload: dict, method: str) -> dict:
-    """Shared Slack API-level error handling for _call and _post."""
+    """Shared Slack API-level error handling for _call."""
     if not payload.get("ok"):
         err = payload.get("error", "unknown_error")
         hint = ""
@@ -194,59 +155,6 @@ def cmd_channels(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_post(args: argparse.Namespace) -> int:
-    """Post a message to a channel or reply in a thread.
-
-    OPERATOR-GATED. Posting to a shared team workspace is an outward-facing,
-    non-reversible action, so this refuses to send unless --yes is passed.
-    Without --yes it prints exactly what WOULD be sent and exits non-zero, so an
-    agent's default invocation is a dry-run the operator can inspect and approve
-    before re-running with --yes. The message is read from --text or, when that
-    is "-", from stdin (so long / multi-line bodies don't fight shell quoting).
-    """
-    text = args.text
-    if text == "-":
-        text = sys.stdin.read()
-    text = text.rstrip("\n")
-    if not text.strip():
-        raise SystemExit("Refusing to post an empty message.")
-
-    where = f"channel {args.channel}"
-    if args.thread_ts:
-        where += f" (reply in thread {args.thread_ts})"
-
-    if not args.yes:
-        # Dry-run: show the exact payload, do not send, signal not-sent via exit code.
-        print("DRY RUN — not sent. This WOULD post to Slack:")
-        print(f"  {where}")
-        print("  as: the SLACK_USER_TOKEN user (posts AS the operator)")
-        print("  ---")
-        for line in text.splitlines() or [""]:
-            print(f"  {line}")
-        print("  ---")
-        print("Re-run with --yes to actually send. (Operator-gated by design.)")
-        return 2
-
-    resp = _post(
-        "chat.postMessage",
-        {
-            "channel": args.channel,
-            "text": text,
-            "thread_ts": args.thread_ts,
-            # Post as authored: no unfurling surprises, message is literal.
-            "unfurl_links": False if args.no_unfurl else None,
-        },
-    )
-    if args.json:
-        print(json.dumps(resp, indent=2))
-    else:
-        print(f"Posted to {where}")
-        print(f"  ts:        {resp.get('ts')}")
-        if resp.get("message", {}).get("permalink"):
-            print(f"  permalink: {resp['message']['permalink']}")
-    return 0
-
-
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="slack_cli.py", description=__doc__.splitlines()[1])
     sub = p.add_subparsers(dest="command", required=True)
@@ -273,26 +181,6 @@ def build_parser() -> argparse.ArgumentParser:
     w = sub.add_parser("whoami", help="Verify the token (auth.test)")
     w.add_argument("--json", action="store_true", help="Emit raw JSON")
     w.set_defaults(func=cmd_whoami)
-
-    po = sub.add_parser(
-        "post",
-        help="Post a message / thread reply (OPERATOR-GATED: dry-run unless --yes)",
-    )
-    po.add_argument("channel", help="Channel ID (e.g. C0123ABC)")
-    po.add_argument(
-        "--text", required=True, help='Message body, or "-" to read from stdin'
-    )
-    po.add_argument(
-        "--thread-ts", dest="thread_ts", default=None,
-        help="Reply within this thread (the parent message ts)",
-    )
-    po.add_argument("--no-unfurl", action="store_true", help="Disable link unfurling")
-    po.add_argument(
-        "--yes", action="store_true",
-        help="Actually send. Without this, prints a dry-run and exits non-zero.",
-    )
-    po.add_argument("--json", action="store_true", help="Emit raw JSON")
-    po.set_defaults(func=cmd_post)
 
     return p
 

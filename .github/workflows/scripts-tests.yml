@@ -1,0 +1,35 @@
+name: execution/scripts tests
+
+# Runs the test suites under execution/scripts/ on every PR that touches that
+# directory. Added alongside the Slack CLI (issue #248): execution/scripts/**
+# had no CI lane at all, so test_slack_cli.py (read-path commands + Slack API
+# error handling) and test_loxia_review.py (pytest-style; a bare `python3
+# test_loxia_review.py` silently runs zero assertions) never actually gated a
+# PR — they only ran if an author remembered to invoke them locally.
+
+on:
+  pull_request:
+    paths:
+      - "execution/scripts/**"
+      - ".github/workflows/scripts-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pytest
+        run: pip install pytest
+
+      - name: Run execution/scripts tests
+        run: python -m pytest execution/scripts/ -q
