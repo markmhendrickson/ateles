@@ -14,6 +14,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
@@ -438,3 +440,109 @@ def test_approval_message_recorded_for_dedup(monkeypatch):
     assert "appr1" in state.get("processed_ids", [])
     # No invoice task/notification for an approval reply.
     assert [m for m in notifier.sent if "invoice(s)" in m] == []
+
+
+# ── Crash-safe approval dedup (ateles#330) ───────────────────────────────────
+#
+# The in-memory dedup set has existed since #223, but it was only written to
+# disk by the single `_save_state` at the END of poll_once. The Apis POST fires
+# much earlier, so a crash (or a launchd kill) in between left a state file that
+# never learned about the message — and the restart re-routed the operator's
+# `approve <version>` a SECOND time, triggering a duplicate publish. Approvals
+# must therefore persist their dedup record BEFORE the branch returns.
+
+
+def _crashing_cycle(monkeypatch, tmp_path, *, approvals):
+    """Wire a poll whose SECOND message crashes, so the end-of-cycle save never
+    runs. The first message is an operator approval; only a synchronous flush in
+    the approval branch can get it onto disk."""
+    state_file = tmp_path / ".turdus_state.json"
+    monkeypatch.setattr(turdus, "_STATE_FILE", state_file)
+    _wire_poll(
+        monkeypatch, messages=[_invoice_msg("appr-once"), _invoice_msg("boom")]
+    )
+
+    async def _route_approval(msg, _notifier):
+        # Only the approval message; the second one falls through to the crash.
+        if msg.get("id") != "appr-once":
+            return False
+        approvals.append(msg.get("id"))
+        return True
+
+    async def _die(*_a, **_k):
+        raise RuntimeError("daemon killed mid-cycle")
+
+    monkeypatch.setattr(turdus, "_maybe_handle_release_approval", _route_approval)
+    monkeypatch.setattr(turdus, "_store_email_entity", _die)
+    return state_file, _route_approval
+
+
+def test_approval_persists_dedup_before_returning(monkeypatch, tmp_path):
+    # The approval's ID must be on disk even though the cycle dies before its
+    # end-of-cycle save.
+    approvals: list[str] = []
+    state_file, _ = _crashing_cycle(monkeypatch, tmp_path, approvals=approvals)
+
+    with pytest.raises(RuntimeError):
+        _run(turdus.poll_once(_StubNotifier(), {"last_message_id": None}))
+
+    assert approvals == ["appr-once"]
+    assert state_file.exists(), "the approval must flush state synchronously"
+    persisted = json.loads(state_file.read_text())
+    assert "appr-once" in persisted.get("processed_ids", [])
+    assert persisted.get("last_message_id") is None, (
+        "the watermark is still an end-of-cycle write — dedup cannot lean on it"
+    )
+
+
+def test_restart_replay_does_not_reroute_approval(monkeypatch, tmp_path):
+    # End-to-end duplicate-publish scenario: cycle 1 routes the approval and
+    # dies; cycle 2 starts from what is ON DISK and must not POST again.
+    approvals: list[str] = []
+    _, route_approval = _crashing_cycle(monkeypatch, tmp_path, approvals=approvals)
+
+    with pytest.raises(RuntimeError):
+        _run(turdus.poll_once(_StubNotifier(), {"last_message_id": None}))
+    assert approvals == ["appr-once"]
+
+    # "Restart": state is whatever survived, and the positional watermark did
+    # not, so the dedup set is the ONLY thing that can suppress the re-route.
+    reloaded = turdus._load_state()
+    assert reloaded.get("last_message_id") is None
+
+    _wire_poll(monkeypatch, messages=[_invoice_msg("appr-once")])
+    monkeypatch.setattr(turdus, "_maybe_handle_release_approval", route_approval)
+    _run(turdus.poll_once(_StubNotifier(), reloaded))
+
+    assert approvals == ["appr-once"], (
+        "a restart must never re-POST the operator's release approval"
+    )
+
+
+def test_swarm_approval_also_persists_before_returning(monkeypatch, tmp_path):
+    # Same crash-safety requirement for the PR-merge approval path.
+    state_file = tmp_path / ".turdus_state.json"
+    monkeypatch.setattr(turdus, "_STATE_FILE", state_file)
+    _wire_poll(monkeypatch, messages=[_invoice_msg("swarm1")])
+
+    async def _yes_swarm(_msg, _notifier):
+        return True
+
+    monkeypatch.setattr(turdus, "_maybe_handle_swarm_approval", _yes_swarm)
+    _run(turdus.poll_once(_StubNotifier(), {"last_message_id": None}))
+
+    assert "swarm1" in json.loads(state_file.read_text()).get("processed_ids", [])
+
+
+def test_non_approval_mail_still_persists_at_end_of_cycle(monkeypatch, tmp_path):
+    # The synchronous flush is scoped to approvals; ordinary mail keeps the
+    # cheaper end-of-cycle write, and must still end up persisted.
+    state_file = tmp_path / ".turdus_state.json"
+    monkeypatch.setattr(turdus, "_STATE_FILE", state_file)
+    _wire_poll(monkeypatch, messages=[_invoice_msg("inv-plain")])
+
+    _run(turdus.poll_once(_StubNotifier(), {"last_message_id": None}))
+
+    persisted = json.loads(state_file.read_text())
+    assert "inv-plain" in persisted.get("processed_ids", [])
+    assert persisted.get("last_message_id") == "inv-plain"

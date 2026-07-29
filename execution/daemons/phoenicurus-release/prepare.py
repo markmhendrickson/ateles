@@ -28,11 +28,22 @@ rate-limited per main commit rather than per day, so several merges in one day
 each get a prepare attempt; the two locks are independent, so a merge run never
 suppresses the day's scheduled sweep.
 
+Spawning the agent is not the end of the run: `--check-agent-outcome` reconciles
+what the spawned agent actually DID. The spawn is wrapped in a shell that appends
+`PHOENICURUS_PREPARE_EXIT=<code>` to the agent log, so a later pass can tell a
+successful prepare from a crash, a credit/usage-limit death, or a silent hang.
+The daily/per-SHA idempotency stamp is only written once that outcome check
+confirms success (stamp-on-success), so a failed prepare is retried instead of
+being locked out for the day. Usage-limit deaths schedule a retry via
+`--retry-if-due`.
+
 Usage:
-  python3 prepare.py            # normal scheduled run
-  python3 prepare.py --dry-run  # preflight only; print what it WOULD do, no spawn
-  python3 prepare.py --force    # skip the "already-ran-today" guard
-  python3 prepare.py --on-merge # merge-triggered; rate-limit per commit, not per day
+  python3 prepare.py                      # normal scheduled run
+  python3 prepare.py --dry-run            # preflight only; print what it WOULD do
+  python3 prepare.py --force              # skip the "already-ran-today" guard
+  python3 prepare.py --on-merge           # merge-triggered; per-commit rate limit
+  python3 prepare.py --check-agent-outcome  # reconcile the last spawned agent
+  python3 prepare.py --retry-if-due       # re-run a usage-limit-deferred prepare
 
 Exit codes:
   0  ran (prepared / spawned, or nothing to do)
@@ -45,12 +56,15 @@ import argparse
 import json
 import logging
 import os
+import re
+import shlex
 import subprocess
 import sys
 import urllib.error
 import urllib.request
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # ---------------------------------------------------------------------------
 # Bootstrap env (launchd does not source profiles)
@@ -77,6 +91,33 @@ STATE_FILE = Path(__file__).parent / ".phoenicurus_prepare_last_run"
 # earlier one already ran (the scheduled path's daily lock would swallow it).
 MERGE_STATE_FILE = Path(__file__).parent / ".phoenicurus_prepare_last_sha"
 AGENT_LOG = LOG_DIR / "phoenicurus-prepare-agent.log"
+
+# Supervision state. The spawn record is what makes the fire-and-forget agent
+# auditable: --check-agent-outcome reads it to find the exit sentinel in
+# AGENT_LOG and decide whether the prepare actually succeeded.
+SPAWN_STATE_FILE = Path(__file__).parent / ".phoenicurus_prepare_last_spawn"
+RETRY_STATE_FILE = Path(__file__).parent / ".phoenicurus_prepare_retry_after"
+AUTH_NOTIFY_STATE_FILE = Path(__file__).parent / ".phoenicurus_prepare_auth_notify"
+# A prepare agent that has neither exited nor produced a release_result within
+# this window is treated as dead (hung / killed / OOM), not merely slow.
+OUTCOME_WINDOW_SECONDS = 45 * 60
+MAX_RETRY_ATTEMPTS = 3
+# existing_release_status() sentinel: the in-flight question could NOT be
+# answered safely (auth failure / no credentials), which is NOT the same as
+# "no release in flight" (None). Fail closed — never prepare on top of it.
+STATUS_UNSAFE = "__unsafe__"
+EXIT_SENTINEL_PREFIX = "PHOENICURUS_PREPARE_EXIT="
+# Re-notify about a persistent auth failure at most this often, so a broken
+# token doesn't Telegram the operator on every scheduled run.
+AUTH_NOTIFY_INTERVAL_SECONDS = 6 * 3600
+# release_result statuses that mean a release is real work in progress or done.
+RELEASE_RESULT_INFLIGHT_STATUSES = (
+    "prepared",
+    "pending_approval",
+    "approved",
+    "publishing",
+)
+RELEASE_RESULT_LIVE_STATUSES = RELEASE_RESULT_INFLIGHT_STATUSES + ("published",)
 
 NEOTOMA_REPO_ROOT = Path(
     os.environ.get("NEOTOMA_REPO_ROOT", str(Path.home() / "repos" / "neotoma"))
@@ -168,6 +209,58 @@ def _mark_ran(on_merge: bool, head: str, *, transient: bool = False) -> None:
             _mark_ran_for_sha(head)
     else:
         _mark_ran_today()
+
+
+def _clear_stamp(on_merge: bool, head: str = "") -> None:
+    """
+    Drop whichever idempotency lock this run's mode uses, unblocking a retry.
+
+    Called when the spawned agent's outcome turns out to be a FAILURE. Under
+    stamp-on-success the lock is normally only written after a confirmed good
+    outcome, but a stamp can still be present from an earlier deferral (or a
+    --force run), and leaving it would lock the release out for the rest of the
+    day / for that head.
+    """
+    target = MERGE_STATE_FILE if on_merge else STATE_FILE
+    try:
+        if target.exists():
+            target.unlink()
+            log.info(f"cleared idempotency stamp {target.name} — retry unblocked")
+    except OSError as exc:
+        log.warning(f"could not clear stamp {target}: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Clock helpers
+# ---------------------------------------------------------------------------
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _now_iso() -> str:
+    return _now().isoformat()
+
+
+def _parse_iso(value: str) -> datetime | None:
+    """Parse an ISO-8601 timestamp into an aware datetime (UTC when naive)."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _age_seconds(iso_timestamp: str) -> float | None:
+    started = _parse_iso(iso_timestamp)
+    if started is None:
+        return None
+    return (_now() - started).total_seconds()
 
 
 # ---------------------------------------------------------------------------
@@ -310,35 +403,245 @@ def main_ci_green() -> bool | None:
 # ---------------------------------------------------------------------------
 
 
-def existing_release_status(next_version_hint: str) -> str | None:
-    """
-    Return the status of any release_result already tracking work since the last
-    tag, so we don't re-prepare on top of a pending_approval release.
-    """
-    base = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180").rstrip("/")
+def _neotoma_base() -> str:
+    return os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180").rstrip("/")
+
+
+def _neotoma_headers() -> dict:
+    base = _neotoma_base()
     is_loopback = "localhost" in base or "127.0.0.1" in base
     bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     if bearer and not is_loopback:
         headers["Authorization"] = f"Bearer {bearer}"
+    return headers
+
+
+def _snapshot(entity: dict) -> dict:
+    return entity.get("snapshot") or entity.get("fields") or entity
+
+
+def _notify_auth_failure_once(text: str) -> None:
+    """
+    Notify the operator about a Neotoma auth failure, at most once per
+    AUTH_NOTIFY_INTERVAL_SECONDS. A misconfigured token blocks EVERY prepare run,
+    so it must be surfaced — but not on every scheduled tick.
+    """
+    last = ""
     try:
-        body = json.dumps(
-            {"entity_type": "release_result", "limit": 50, "include_snapshots": True}
-        ).encode()
-        req = urllib.request.Request(
-            f"{base}/entities/query", data=body, headers=headers, method="POST"
+        if AUTH_NOTIFY_STATE_FILE.exists():
+            last = AUTH_NOTIFY_STATE_FILE.read_text().strip()
+    except OSError:
+        last = ""
+    age = _age_seconds(last)
+    if age is not None and age < AUTH_NOTIFY_INTERVAL_SECONDS:
+        log.info("auth-failure notice already sent recently — not re-notifying")
+        return
+    notify_operator(text)
+    try:
+        AUTH_NOTIFY_STATE_FILE.write_text(_now_iso())
+    except OSError as exc:
+        log.warning(f"could not record auth-notify state: {exc}")
+
+
+def _query_release_results(limit: int = 50) -> tuple[list[dict] | None, str | None]:
+    """
+    Query release_result entities from Neotoma.
+
+    Returns ``(entities, error)`` where ``error`` is:
+      - None       — the query succeeded; ``entities`` is authoritative
+      - "auth"     — credentials are missing or rejected (401/403). The answer is
+                     UNKNOWN and callers must fail closed; an absent
+                     Authorization header made a real pending_approval release
+                     look like "nothing in flight", which is how a duplicate RC
+                     gets prepared on top of one awaiting approval.
+      - "transient" — network/JSON/other HTTP failure; callers keep the existing
+                     lenient behavior (a refused local connection is the common
+                     case on a laptop and must not page the operator).
+    """
+    base = _neotoma_base()
+    is_loopback = "localhost" in base or "127.0.0.1" in base
+    bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
+    # Preflight: a remote Neotoma with no bearer token cannot answer the
+    # in-flight question at all — every query comes back empty or 401. Say so
+    # distinctly instead of issuing a request that looks like "no release".
+    if not is_loopback and not bearer:
+        log.error(
+            f"Neotoma release_result query unsafe: no token configured "
+            f"(NEOTOMA_BEARER_TOKEN unset) for non-loopback {base}"
         )
+        _notify_auth_failure_once(
+            "🔴 Phoenicurus: NEOTOMA_BEARER_TOKEN is not configured for "
+            f"{base} — cannot check whether a release is already in flight, so "
+            "prepare is blocked (fail-closed)."
+        )
+        return None, "auth"
+    body = json.dumps(
+        {"entity_type": "release_result", "limit": limit, "include_snapshots": True}
+    ).encode()
+    req = urllib.request.Request(
+        f"{base}/entities/query", data=body, headers=_neotoma_headers(), method="POST"
+    )
+    try:
         with urllib.request.urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read())
-        entities = data.get("entities") if isinstance(data, dict) else data
-        for e in entities or []:
-            snap = e.get("snapshot") or e.get("fields") or e
-            status = str(snap.get("status") or "")
-            if status in ("prepared", "pending_approval", "approved", "publishing"):
-                return status
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            log.error(
+                f"Neotoma release_result query rejected: HTTP {exc.code} "
+                f"({base}) — treating the in-flight check as UNSAFE"
+            )
+            _notify_auth_failure_once(
+                f"🔴 Phoenicurus: Neotoma returned HTTP {exc.code} for the "
+                f"release_result query at {base}. Cannot tell whether a release "
+                "is already in flight — prepare is blocked (fail-closed) until "
+                "the credentials are fixed."
+            )
+            return None, "auth"
+        log.warning(f"could not check existing release_result: HTTP {exc.code}")
+        return None, "transient"
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
         log.warning(f"could not check existing release_result: {exc}")
+        return None, "transient"
+    entities = data.get("entities") if isinstance(data, dict) else data
+    return list(entities or []), None
+
+
+def existing_release_status(next_version_hint: str) -> str | None:
+    """
+    Return the status of any release_result already tracking work since the last
+    tag, so we don't re-prepare on top of a pending_approval release.
+
+    Three-valued on purpose:
+      - a status string — a release IS in flight; do not prepare another
+      - None            — no release in flight (or a transient read failure)
+      - STATUS_UNSAFE   — the question could not be answered safely (auth); the
+                          caller must defer rather than assume "nothing in flight"
+
+    A record stuck in `publishing` whose tag / GitHub Release already exists is
+    auto-corrected to `published` and does NOT count as in flight: publish.py
+    crashing between the tag push and the status write would otherwise wedge the
+    daemon forever, since nothing else ever revisits that record.
+    """
+    entities, error = _query_release_results()
+    if error == "auth":
+        return STATUS_UNSAFE
+    if error or entities is None:
+        return None
+    for e in entities:
+        snap = _snapshot(e)
+        status = str(snap.get("status") or "")
+        if status not in RELEASE_RESULT_INFLIGHT_STATUSES:
+            continue
+        version = str(snap.get("version") or "")
+        if status == "publishing" and version and _release_already_shipped(version):
+            log.warning(
+                f"release_result {version} is stuck in 'publishing' but its tag / "
+                "GitHub Release already exists — auto-repairing status to "
+                "'published' and not treating it as in flight"
+            )
+            _correct_release_status(
+                version,
+                "published",
+                reason=(
+                    "auto-repair by prepare.py: tag/GitHub Release present while "
+                    "status was still 'publishing' (stale publish.py write)"
+                ),
+            )
+            continue
+        return status
     return None
+
+
+def _release_already_shipped(version: str) -> bool:
+    """True if this version's git tag or GitHub Release already exists."""
+    tag = version if version.startswith("v") else f"v{version}"
+    if _git(["tag", "--list", tag]).strip():
+        log.info(f"git tag {tag} exists — {version} was already tagged")
+        return True
+    try:
+        proc = subprocess.run(
+            ["gh", "release", "view", tag, "--repo", GITHUB_REPO, "--json", "tagName"],
+            cwd=str(NEOTOMA_REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        log.warning(f"could not check GitHub Release for {tag}: {exc}")
+        return False
+    if proc.returncode == 0:
+        log.info(f"GitHub Release {tag} exists — {version} was already published")
+        return True
+    return False
+
+
+def _correct_release_status(version: str, status: str, *, reason: str = "") -> bool:
+    """
+    Append a release_result observation flipping status, mirroring publish.py's
+    set_release_status (same POST /store shape and idempotency-key convention,
+    so the correction coalesces onto the same version-keyed entity).
+    """
+    rec: dict = {"entity_type": "release_result", "version": version, "status": status}
+    if reason:
+        rec["reason"] = reason
+    body = json.dumps(
+        {
+            "entities": [rec],
+            "idempotency_key": f"release-{version}-{status}-{date.today().isoformat()}",
+        }
+    ).encode()
+    req = urllib.request.Request(
+        f"{_neotoma_base()}/store",
+        data=body,
+        headers=_neotoma_headers(),
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            resp.read()
+    except (urllib.error.URLError, OSError) as exc:
+        log.warning(f"could not correct release_result {version} -> {status}: {exc}")
+        return False
+    log.info(f"release_result {version} status auto-corrected -> {status}")
+    return True
+
+
+def has_new_release_result_since(spawned_at: str) -> bool:
+    """
+    True if a release_result exists that this prepare cycle plausibly produced.
+
+    Deliberately monkeypatchable as a single seam: the outcome check needs one
+    yes/no answer ("did the agent actually leave a release behind?"), and tests
+    should be able to answer it without a Neotoma. A record whose observation
+    time can't be read counts as new — better to accept a real RC than to
+    declare a successful prepare a failure and Telegram the operator.
+    """
+    entities, error = _query_release_results()
+    if error or not entities:
+        if error:
+            log.warning(
+                f"could not confirm a release_result after the prepare agent ran "
+                f"({error}) — treating as no result"
+            )
+        return False
+    since = _parse_iso(spawned_at)
+    for e in entities:
+        snap = _snapshot(e)
+        status = str(snap.get("status") or "").lower()
+        if status not in RELEASE_RESULT_LIVE_STATUSES:
+            continue
+        observed = _parse_iso(
+            str(
+                e.get("last_observation_at")
+                or e.get("updated_at")
+                or snap.get("updated_at")
+                or ""
+            )
+        )
+        if since is None or observed is None or observed >= since:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -466,7 +769,107 @@ def _agent_env() -> dict:
     return env
 
 
-def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool:
+def _agent_shell_command(claude: str, prompt: str) -> str:
+    """
+    Wrap the agent invocation so its exit status ALWAYS lands in AGENT_LOG.
+
+    The daemon backgrounds the agent and exits, so it never sees the child's
+    return code — and `claude --print` dying on "Credit balance is too low" or a
+    usage limit looks exactly like a successful spawn. The trailing `echo` runs
+    unconditionally (`;`, not `&&`), so the sentinel is present for every
+    terminal outcome and --check-agent-outcome can read it later.
+    """
+    inner = shlex.join([claude, "--print", "--dangerously-skip-permissions", prompt])
+    return (
+        f'{inner} ; echo "{EXIT_SENTINEL_PREFIX}$?" >> {shlex.quote(str(AGENT_LOG))}'
+    )
+
+
+def _write_spawn_state(
+    *, tag: str, commit_count: int, on_merge: bool, head: str, log_offset: int
+) -> None:
+    """Record enough about this spawn for --check-agent-outcome to reconcile it."""
+    record = {
+        "sha_or_date": head if on_merge else date.today().isoformat(),
+        "spawned_at": _now_iso(),
+        "on_merge": on_merge,
+        "tag": tag,
+        "head": head,
+        "commit_count": commit_count,
+        # Byte offset into AGENT_LOG at spawn time — the exit sentinel search
+        # starts here, so a sentinel from a PREVIOUS run can never be read as
+        # this run's outcome.
+        "log_offset": log_offset,
+    }
+    try:
+        SPAWN_STATE_FILE.write_text(json.dumps(record, indent=2))
+    except OSError as exc:
+        log.warning(f"could not record prepare-agent spawn state: {exc}")
+
+
+def _read_spawn_state() -> dict | None:
+    if not SPAWN_STATE_FILE.exists():
+        return None
+    try:
+        data = json.loads(SPAWN_STATE_FILE.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning(f"could not read prepare-agent spawn state: {exc}")
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _record_spawn_outcome(state: dict, outcome: str) -> None:
+    """Mark the recorded spawn reconciled so later checks are no-ops."""
+    state = dict(state)
+    state["outcome"] = outcome
+    state["checked_at"] = _now_iso()
+    try:
+        SPAWN_STATE_FILE.write_text(json.dumps(state, indent=2))
+    except OSError as exc:
+        log.warning(f"could not record prepare-agent outcome: {exc}")
+
+
+def _agent_log_since(offset: int) -> str:
+    """AGENT_LOG content written after ``offset`` bytes."""
+    if not AGENT_LOG.exists():
+        return ""
+    try:
+        return AGENT_LOG.read_bytes()[max(offset, 0):].decode("utf-8", "replace")
+    except OSError as exc:
+        log.warning(f"could not read agent log: {exc}")
+        return ""
+
+
+def _agent_exit_code(state: dict) -> int | None:
+    """
+    The exit code the sentinel recorded for this spawn, or None if the agent has
+    not terminated (no sentinel written since the spawn offset).
+    """
+    text = _agent_log_since(int(state.get("log_offset") or 0))
+    code: int | None = None
+    for line in text.splitlines():
+        if EXIT_SENTINEL_PREFIX not in line:
+            continue
+        raw = line.split(EXIT_SENTINEL_PREFIX, 1)[1].strip()
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        if digits:
+            code = int(digits)  # last sentinel wins
+    return code
+
+
+def _agent_log_tail(state: dict, lines: int = 30) -> str:
+    text = _agent_log_since(int(state.get("log_offset") or 0))
+    return "\n".join(text.splitlines()[-lines:])
+
+
+def spawn_prepare_agent(
+    last_tag: str,
+    commit_count: int,
+    dry_run: bool,
+    *,
+    on_merge: bool = False,
+    head: str = "",
+) -> bool:
     import shutil
 
     claude = shutil.which("claude")
@@ -483,26 +886,282 @@ def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool
         log.info(prompt)
         return True
 
+    log_offset = AGENT_LOG.stat().st_size if AGENT_LOG.exists() else 0
     try:
         subprocess.Popen(
-            [claude, "--print", "--dangerously-skip-permissions", prompt],
+            ["sh", "-c", _agent_shell_command(claude, prompt)],
             cwd=str(NEOTOMA_REPO_ROOT),
             env=_agent_env(),
             stdout=open(AGENT_LOG, "a"),
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-        log.info("Prepare agent spawned (background). It will Telegram when ready.")
-        return True
     except Exception as exc:  # noqa: BLE001
         log.error(f"failed to spawn prepare agent: {exc}")
         notify_operator(f"🔴 Phoenicurus: failed to spawn prepare agent — {exc}")
         return False
+    _write_spawn_state(
+        tag=last_tag,
+        commit_count=commit_count,
+        on_merge=on_merge,
+        head=head,
+        log_offset=log_offset,
+    )
+    log.info(
+        "Prepare agent spawned (background). It will Telegram when ready; "
+        "--check-agent-outcome reconciles what it actually did."
+    )
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Usage-limit backoff
+# ---------------------------------------------------------------------------
+
+# `claude` reports a hit subscription limit as e.g.
+#   "5-hour limit reached ∙ resets 6:40pm (Europe/Madrid)"
+# That is a WAIT, not a failure: retrying after the stated reset succeeds, while
+# giving up loses the day's release.
+USAGE_LIMIT_RESET_RE = re.compile(
+    r"resets (\d{1,2}:\d{2}(am|pm)) \(([^)]+)\)", re.IGNORECASE
+)
+
+
+def _parse_usage_limit_reset(text: str) -> str | None:
+    """
+    ISO deadline for the usage-limit reset named in ``text``, or None if the text
+    carries no usage-limit notice (i.e. it's an ordinary failure).
+    """
+    match = USAGE_LIMIT_RESET_RE.search(text or "")
+    if not match:
+        return None
+    clock, _, tz_name = match.group(1), match.group(2), match.group(3)
+    try:
+        tz = ZoneInfo(tz_name.strip())
+    except (ZoneInfoNotFoundError, ValueError, KeyError):
+        log.warning(f"unknown timezone {tz_name!r} in usage-limit notice — using UTC")
+        tz = timezone.utc
+    try:
+        reset_time = datetime.strptime(clock.lower(), "%I:%M%p").time()
+    except ValueError:
+        log.warning(f"could not parse usage-limit reset clock {clock!r}")
+        return None
+    now = datetime.now(tz)
+    deadline = datetime.combine(now.date(), reset_time, tzinfo=tz)
+    if deadline <= now:
+        deadline += timedelta(days=1)  # the reset is tomorrow's clock time
+    return deadline.isoformat()
+
+
+def _read_retry_state() -> dict | None:
+    if not RETRY_STATE_FILE.exists():
+        return None
+    try:
+        data = json.loads(RETRY_STATE_FILE.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning(f"could not read retry state: {exc}")
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _clear_retry_state() -> None:
+    try:
+        if RETRY_STATE_FILE.exists():
+            RETRY_STATE_FILE.unlink()
+    except OSError as exc:
+        log.warning(f"could not clear retry state: {exc}")
+
+
+def _schedule_retry(deadline_iso: str, *, on_merge: bool, head: str, tag: str) -> None:
+    previous = _read_retry_state() or {}
+    attempts = int(previous.get("attempts") or 0) + 1
+    record = {
+        "retry_after": deadline_iso,
+        "attempts": attempts,
+        "on_merge": on_merge,
+        "head": head,
+        "tag": tag,
+        "scheduled_at": _now_iso(),
+    }
+    try:
+        RETRY_STATE_FILE.write_text(json.dumps(record, indent=2))
+    except OSError as exc:
+        log.warning(f"could not write retry state: {exc}")
+        return
+    log.info(
+        f"usage limit hit — prepare retry {attempts}/{MAX_RETRY_ATTEMPTS} "
+        f"scheduled for {deadline_iso}"
+    )
+
+
+def retry_if_due(dry_run: bool = False) -> int:
+    """
+    Re-run a prepare that was deferred by a usage limit, once the reset has
+    passed. A no-op when nothing is scheduled or the deadline is still ahead.
+    """
+    state = _read_retry_state()
+    if not state:
+        log.info("No prepare retry scheduled — nothing to do.")
+        return 0
+    deadline = _parse_iso(str(state.get("retry_after") or ""))
+    if deadline is None:
+        log.warning("retry state has no usable deadline — discarding it")
+        _clear_retry_state()
+        return 0
+    if _now() < deadline:
+        log.info(f"Prepare retry not due until {deadline.isoformat()} — exiting.")
+        return 0
+    attempts = int(state.get("attempts") or 0)
+    if attempts >= MAX_RETRY_ATTEMPTS:
+        log.error(
+            f"prepare retry budget exhausted ({attempts}/{MAX_RETRY_ATTEMPTS}) — "
+            "giving up and asking the operator to intervene"
+        )
+        notify_operator(
+            f"🔴 Phoenicurus: prepare failed {attempts} times on usage limits "
+            f"(tag {state.get('tag') or '?'}). Giving up — run "
+            "`prepare.py --force` manually when capacity is available."
+        )
+        _clear_retry_state()
+        return 0
+    on_merge = bool(state.get("on_merge"))
+    log.info(
+        f"Prepare retry due (attempt {attempts}/{MAX_RETRY_ATTEMPTS}, "
+        f"on_merge={on_merge}) — re-running prepare."
+    )
+    _clear_retry_state()
+    return run_prepare(dry_run, True, on_merge=on_merge)
+
+
+# ---------------------------------------------------------------------------
+# Agent-outcome supervision
+# ---------------------------------------------------------------------------
+
+
+def _handle_agent_failure(state: dict, headline: str, tail: str) -> None:
+    """
+    Common failure path: tell the operator with a log tail, unblock the lock, and
+    schedule a retry when the failure was a usage limit rather than a real error.
+    """
+    on_merge = bool(state.get("on_merge"))
+    head = str(state.get("head") or "")
+    tag = str(state.get("tag") or "")
+    reset = _parse_usage_limit_reset(tail)
+    body = headline
+    if tail.strip():
+        body += f"\n\nLast {len(tail.splitlines())} log line(s):\n{tail}"
+    if reset:
+        body += f"\n\nUsage limit detected — retry scheduled for {reset}."
+    notify_operator(body)
+    _clear_stamp(on_merge, head)
+    if reset:
+        _schedule_retry(reset, on_merge=on_merge, head=head, tag=tag)
+    else:
+        # Not a capacity problem: retrying on a schedule would just re-fail.
+        log.info("failure is not a usage limit — notifying only, no retry scheduled")
+
+
+def check_agent_outcome() -> int:
+    """
+    Reconcile the last spawned prepare agent.
+
+    Four outcomes:
+      - still within OUTCOME_WINDOW_SECONDS with no exit sentinel → still running
+      - exit 0 AND a release_result appeared → SUCCESS: stamp the idempotency lock
+        (this is the only place the stamp is written for a spawning run)
+      - exit non-zero, or exit 0 with no release_result, or no sentinel after the
+        window → FAILURE: notify with a log tail, clear the stamp, schedule a
+        retry if the log shows a usage limit
+    """
+    state = _read_spawn_state()
+    if not state:
+        log.info("No prepare-agent spawn recorded — nothing to reconcile.")
+        return 0
+    if state.get("outcome"):
+        log.info(
+            f"Last prepare-agent spawn already reconciled "
+            f"({state['outcome']}) — nothing to do."
+        )
+        return 0
+    spawned_at = str(state.get("spawned_at") or "")
+    on_merge = bool(state.get("on_merge"))
+    head = str(state.get("head") or "")
+    tag = str(state.get("tag") or "?")
+    age = _age_seconds(spawned_at)
+    exit_code = _agent_exit_code(state)
+
+    if exit_code is None:
+        if age is not None and age < OUTCOME_WINDOW_SECONDS:
+            log.info(
+                f"Prepare agent for {tag} still running "
+                f"({age / 60:.0f}m elapsed, no exit sentinel yet) — will check again."
+            )
+            return 0
+        elapsed = f"{age / 60:.0f}m" if age is not None else "unknown time"
+        log.error(f"prepare agent for {tag} never reported an exit after {elapsed}")
+        _handle_agent_failure(
+            state,
+            f"🔴 Phoenicurus: the prepare agent for {tag} never reported an exit "
+            f"({elapsed} elapsed, window {OUTCOME_WINDOW_SECONDS // 60}m). "
+            "Assuming it died; no release was prepared.",
+            _agent_log_tail(state),
+        )
+        _record_spawn_outcome(state, "no_exit")
+        return 0
+
+    if exit_code != 0:
+        log.error(f"prepare agent for {tag} exited {exit_code}")
+        _handle_agent_failure(
+            state,
+            f"🔴 Phoenicurus: the prepare agent for {tag} exited {exit_code} — "
+            "no release was prepared.",
+            _agent_log_tail(state),
+        )
+        _record_spawn_outcome(state, f"exit_{exit_code}")
+        return 0
+
+    if not has_new_release_result_since(spawned_at):
+        log.error(
+            f"prepare agent for {tag} exited 0 but left no release_result behind"
+        )
+        _handle_agent_failure(
+            state,
+            f"⚠️ Phoenicurus: the prepare agent for {tag} exited cleanly but no "
+            "release_result was stored — the RC was NOT prepared.",
+            _agent_log_tail(state),
+        )
+        _record_spawn_outcome(state, "exit_0_no_result")
+        return 0
+
+    log.info(
+        f"Prepare agent for {tag} succeeded (exit 0, release_result present) — "
+        "stamping the idempotency lock."
+    )
+    _mark_ran(on_merge, head)
+    _clear_retry_state()
+    _record_spawn_outcome(state, "success")
+    return 0
 
 
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
+
+
+def _spawn_still_pending() -> bool:
+    """
+    True if a previously spawned agent is still working (or awaiting its outcome
+    check). Under stamp-on-success the idempotency lock is not written at spawn
+    time, so this is what stops a second run from spawning a duplicate agent
+    while the first is mid-flight and has not yet stored its release_result.
+    """
+    state = _read_spawn_state()
+    if not state or state.get("outcome"):
+        return False
+    if _agent_exit_code(state) is not None:
+        return False  # it terminated; --check-agent-outcome owns it now
+    age = _age_seconds(str(state.get("spawned_at") or ""))
+    return age is not None and age < OUTCOME_WINDOW_SECONDS
 
 
 def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
@@ -546,8 +1205,26 @@ def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
             _mark_ran(on_merge, head)
         return 0
 
+    # Don't spawn a second agent on top of one that is still working. The
+    # idempotency stamp is only written on a CONFIRMED good outcome now, so it
+    # can't be what suppresses this.
+    if _spawn_still_pending() and not force and not dry_run:
+        log.info(
+            "A prepare agent spawned recently has not finished — not spawning "
+            "another. (--check-agent-outcome will reconcile it.)"
+        )
+        return 0
+
     # Don't re-prepare if a release is already in flight awaiting approval.
     inflight = existing_release_status(tag)
+    if inflight == STATUS_UNSAFE:
+        log.warning(
+            "Could not determine whether a release is already in flight "
+            "(Neotoma auth) — deferring rather than risking a duplicate RC."
+        )
+        if not dry_run:
+            _mark_ran(on_merge, head, transient=True)
+        return 0
     if inflight:
         log.info(
             f"A release_result is already {inflight!r} — not preparing another. "
@@ -578,9 +1255,12 @@ def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
         f"Preconditions met: {count} commits since {tag}, main CI green. "
         "Spawning prepare agent."
     )
-    ok = spawn_prepare_agent(tag, count, dry_run)
-    if not dry_run:
-        _mark_ran(on_merge, head)
+    # NOTE: no _mark_ran here. Stamping at spawn time locked the release out for
+    # the day even when the agent died seconds later (credit exhausted, usage
+    # limit, crash) — the failure was invisible AND unretryable. The stamp is now
+    # written by check_agent_outcome() only after the agent is confirmed to have
+    # produced a release_result.
+    ok = spawn_prepare_agent(tag, count, dry_run, on_merge=on_merge, head=head)
     return 0 if ok else 1
 
 
@@ -602,8 +1282,25 @@ def main() -> int:
             "per calendar day (all other gates unchanged)"
         ),
     )
+    ap.add_argument(
+        "--check-agent-outcome",
+        action="store_true",
+        help=(
+            "reconcile the last spawned prepare agent: stamp on confirmed "
+            "success, notify + unblock retry on failure"
+        ),
+    )
+    ap.add_argument(
+        "--retry-if-due",
+        action="store_true",
+        help="re-run a prepare that a usage limit deferred, if its reset has passed",
+    )
     args = ap.parse_args()
     try:
+        if args.check_agent_outcome:
+            return check_agent_outcome()
+        if args.retry_if_due:
+            return retry_if_due(args.dry_run)
         return run_prepare(args.dry_run, args.force, on_merge=args.on_merge)
     except Exception as exc:  # noqa: BLE001
         log.exception(f"prepare fatal error: {exc}")

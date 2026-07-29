@@ -993,6 +993,20 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
             processed_id_set.add(mid)
             processed_ids.append(mid)
 
+    def _persist_handled(mid: str) -> None:
+        """Mark handled and FLUSH the dedup set to disk before continuing.
+
+        The end-of-cycle `_save_state` is not crash-safe for the approval paths:
+        the Apis POST has already fired, so if the daemon dies (or launchd kills
+        it) before that final write, the restart re-reads a state file that never
+        learned about this message and routes the operator's `approve <version>`
+        a SECOND time — a duplicate publish trigger. Approvals therefore persist
+        their own dedup record synchronously, before the branch returns.
+        """
+        _mark_handled(mid)
+        state["processed_ids"] = processed_ids[-_MAX_PROCESSED_IDS:]
+        _save_state(state)
+
     actionable_count = 0
     invoice_count = 0
     approval_count = 0
@@ -1012,7 +1026,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         try:
             if await _maybe_handle_release_approval(msg, notifier):
                 approval_count += 1
-                _mark_handled(msg_id)
+                _persist_handled(msg_id)
                 continue
         except Exception as exc:  # never let approval detection break the poll
             log.error(f"[{DAEMON_NAME}] release-approval check failed: {exc}")
@@ -1023,7 +1037,7 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         try:
             if await _maybe_handle_swarm_approval(msg, notifier):
                 approval_count += 1
-                _mark_handled(msg_id)
+                _persist_handled(msg_id)
                 continue
         except Exception as exc:  # never let approval detection break the poll
             log.error(f"[{DAEMON_NAME}] swarm-approval check failed: {exc}")

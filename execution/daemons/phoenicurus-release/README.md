@@ -45,6 +45,67 @@ operator is asked; publishing still requires `approve <version>`.
 Tag pushes are deliberately ignored by the gateway — publishing a release pushes
 a tag, which would otherwise re-trigger prepare in a loop.
 
+## Supervising the spawned prepare agent
+
+Spawning the agent is not the end of the run. `prepare.py` backgrounds the agent
+and exits, so it never sees the child's exit status — and a `claude --print` that
+dies on "Credit balance is too low" or a usage limit looks identical to a healthy
+spawn. Two companion launchd agents close that gap:
+
+| Invocation | Schedule | Job |
+| --- | --- | --- |
+| `prepare.py` | Mon–Thu 07:00 + every merge | preflight, then spawn the agent |
+| `prepare.py --check-agent-outcome` | every 15 min | reconcile the last spawn |
+| `prepare.py --retry-if-due` | every 15 min | re-run a usage-limit deferral |
+
+The spawn is wrapped in `sh -c '<claude …> ; echo "PHOENICURUS_PREPARE_EXIT=$?"
+>> <agent log>'`, so every terminal outcome leaves a sentinel in the agent log,
+and `.phoenicurus_prepare_last_spawn` records the spawn's timestamp, mode, tag
+and log offset. `--check-agent-outcome` then resolves one of four states:
+
+- **still running** — no sentinel yet, inside the 45-minute window: leave it be.
+- **success** — exit 0 AND a `release_result` appeared since the spawn: stamp the
+  idempotency lock. This is **stamp-on-success**: the daily / per-SHA lock is no
+  longer written when the agent is spawned, only when it is confirmed to have
+  produced an RC. A prepare that dies is therefore retried instead of silently
+  burning the day.
+- **failure** — non-zero exit, or exit 0 with no `release_result`, or no sentinel
+  after 45 minutes: notify the operator with a ~30-line log tail and clear the
+  stamp so the next run is unblocked.
+- **usage limit** — a failure whose log says e.g. `resets 6:40pm (Europe/Madrid)`
+  is a wait, not an error: the reset deadline goes into
+  `.phoenicurus_prepare_retry_after` and `--retry-if-due` re-runs the prepare
+  (`--force`) once it passes, up to 3 attempts before asking for help. Ordinary
+  errors notify only — retrying them would just re-fail.
+
+Runtime state files (all gitignored):
+
+| File | Meaning |
+| --- | --- |
+| `.phoenicurus_prepare_last_run` | daily idempotency stamp (scheduled path) |
+| `.phoenicurus_prepare_last_sha` | per-commit idempotency stamp (`--on-merge`) |
+| `.phoenicurus_prepare_last_spawn` | last spawned agent + log offset |
+| `.phoenicurus_prepare_retry_after` | usage-limit deadline + attempt count |
+| `.phoenicurus_prepare_auth_notify` | rate limit for auth-failure notices |
+
+## In-flight checks fail closed
+
+The "is a release already in flight?" query distinguishes three answers, because
+conflating them prepared a duplicate RC on top of one awaiting approval:
+
+- a status string — a release IS in flight; don't prepare another.
+- `None` — nothing in flight. A *refused* connection also maps here: a laptop
+  with Neotoma stopped is the common case and must not page the operator.
+- `STATUS_UNSAFE` — the question could not be answered. Returned for HTTP 401/403
+  and for a non-loopback `NEOTOMA_BASE_URL` with no `NEOTOMA_BEARER_TOKEN`
+  (caught before the request is even issued). The run defers as a transient
+  deferral; the operator is notified at most once per 6 hours.
+
+A `release_result` stuck in `publishing` whose git tag or GitHub Release already
+exists is auto-corrected to `published` and not treated as in flight — otherwise
+`publish.py` crashing between the tag push and the status write wedges prepare
+forever, since nothing else revisits that record.
+
 ## State model (`release_result` entity)
 
 The release moves through `status` values on a single `release_result` entity
@@ -237,6 +298,13 @@ environment:
 
 ```bash
 bash install.sh
+```
+
+`prepare.py` does need launchd agents — three of them (the scheduled run plus the
+outcome-check and retry companions above). One command installs all three:
+
+```bash
+bash install.sh --load-prepare
 ```
 
 ## Logs

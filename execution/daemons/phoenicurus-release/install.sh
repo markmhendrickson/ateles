@@ -72,35 +72,58 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Install the scheduled prepare launchd agent (Mon-Thu). publish.py stays
-# on-demand and is NOT scheduled.
+# Install the scheduled prepare launchd agents. publish.py stays on-demand and
+# is NOT scheduled.
+#
+# THREE agents, not one — spawning the prepare agent is only the first third of
+# the job:
+#   com.ateles.phoenicurus-prepare        Mon-Thu 07:00   spawn the prepare agent
+#   com.ateles.phoenicurus-prepare-check  every 15 min    --check-agent-outcome
+#   com.ateles.phoenicurus-prepare-retry  every 15 min    --retry-if-due
+# The check agent is what turns a silently-dead prepare agent into a notification
+# (and writes the stamp-on-success lock); the retry agent re-runs a prepare that
+# a Claude usage limit deferred. Both are cheap no-ops when idle.
 # ---------------------------------------------------------------------------
-if [ "${1:-}" = "--load-prepare" ]; then
-  PLIST="com.ateles.phoenicurus-prepare.plist"
-  DEST="$HOME/Library/LaunchAgents/$PLIST"
+install_agent() {
+  local plist="$1" label="$2" desc="$3"
+  local dest="$HOME/Library/LaunchAgents/$plist"
   # The live .plist is gitignored (repo convention); render it from the tracked
   # .tmpl if it isn't already present locally.
-  if [ ! -f "$SCRIPT_DIR/$PLIST" ] && [ -f "$SCRIPT_DIR/$PLIST.tmpl" ]; then
-    cp "$SCRIPT_DIR/$PLIST.tmpl" "$SCRIPT_DIR/$PLIST"
-    echo "Rendered $PLIST from template."
+  if [ ! -f "$SCRIPT_DIR/$plist" ] && [ -f "$SCRIPT_DIR/$plist.tmpl" ]; then
+    cp "$SCRIPT_DIR/$plist.tmpl" "$SCRIPT_DIR/$plist"
+    echo "Rendered $plist from template."
   fi
   mkdir -p "$HOME/Library/LaunchAgents"
-  if launchctl list 2>/dev/null | grep -q "com.ateles.phoenicurus-prepare"; then
-    echo "Unloading existing phoenicurus-prepare agent..."
-    launchctl unload "$DEST" 2>/dev/null || true
+  if launchctl list 2>/dev/null | grep -q "$label"; then
+    echo "Unloading existing $label agent..."
+    launchctl unload "$dest" 2>/dev/null || true
   fi
-  cp "$SCRIPT_DIR/$PLIST" "$DEST"
-  launchctl load "$DEST"
-  echo "✓ phoenicurus-prepare scheduled (Mon-Thu 07:00 local)."
+  cp "$SCRIPT_DIR/$plist" "$dest"
+  launchctl load "$dest"
+  echo "✓ $label $desc"
+}
+
+if [ "${1:-}" = "--load-prepare" ]; then
+  install_agent "com.ateles.phoenicurus-prepare.plist" \
+    "com.ateles.phoenicurus-prepare" "scheduled (Mon-Thu 07:00 local)."
+  install_agent "com.ateles.phoenicurus-prepare-check.plist" \
+    "com.ateles.phoenicurus-prepare-check" \
+    "scheduled (--check-agent-outcome every 15 min)."
+  install_agent "com.ateles.phoenicurus-prepare-retry.plist" \
+    "com.ateles.phoenicurus-prepare-retry" \
+    "scheduled (--retry-if-due every 15 min)."
 else
   echo
-  echo "To schedule the Mon-Thu prepare run:  bash install.sh --load-prepare"
+  echo "To schedule the prepare run + its outcome-check and retry companions:"
+  echo "  bash install.sh --load-prepare"
 fi
 
 echo
 echo "prepare.py (scheduled, or run manually):"
 echo "  python3 $SCRIPT_DIR/prepare.py            # normal run"
 echo "  python3 $SCRIPT_DIR/prepare.py --dry-run  # preflight only, no agent spawn"
+echo "  python3 $SCRIPT_DIR/prepare.py --check-agent-outcome  # reconcile last spawn"
+echo "  python3 $SCRIPT_DIR/prepare.py --retry-if-due         # usage-limit retry"
 echo "Ateles invokes publish.py on approval:"
 echo "  python3 $SCRIPT_DIR/publish.py --version <vX.Y.Z>"
 echo "Dry-run a publish anytime:"
