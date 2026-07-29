@@ -20,7 +20,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -46,7 +46,9 @@ STATE_FILE = Path(__file__).parent / ".morning_brief_last_run"
 
 MADRID_TZ = ZoneInfo("Europe/Madrid")
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
-NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com")
+NEOTOMA_BASE_URL = os.environ.get(
+    "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
+)
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TELEGRAM_TOPIC_COTINGA = os.environ.get("TELEGRAM_TOPIC_COTINGA", "")
@@ -92,9 +94,10 @@ def _acquire_lock() -> bool:
     if LOCK_FILE.exists():
         try:
             pid = int(LOCK_FILE.read_text().strip())
-            import signal
             os.kill(pid, 0)
-            log.warning(f"Another morning-brief instance is running (pid {pid}) — exiting.")
+            log.warning(
+                f"Another morning-brief instance is running (pid {pid}) — exiting."
+            )
             return False
         except (ProcessLookupError, ValueError):
             pass
@@ -170,7 +173,9 @@ def wait_for_briefs() -> list[dict]:
             return briefs
         log.info("No checkpoint_briefs yet — waiting for Cotinga...")
         time.sleep(WAIT_POLL_SECONDS)
-    log.warning(f"No checkpoint_briefs after {WAIT_MINUTES}min wait. Proceeding without them.")
+    log.warning(
+        f"No checkpoint_briefs after {WAIT_MINUTES}min wait. Proceeding without them."
+    )
     return []
 
 
@@ -181,6 +186,7 @@ def wait_for_briefs() -> list[dict]:
 
 def telegram_send(text: str) -> None:
     import shutil
+
     node = shutil.which("node")
     send_script = PROJECT_ROOT / "execution" / "lib" / "telegram" / "send.mjs"
     if node and send_script.exists():
@@ -196,7 +202,9 @@ def telegram_send(text: str) -> None:
     telegram_cmd = shutil.which("telegram-send")
     if telegram_cmd:
         try:
-            subprocess.run([telegram_cmd, text], timeout=15, capture_output=True, env=os.environ)
+            subprocess.run(
+                [telegram_cmd, text], timeout=15, capture_output=True, env=os.environ
+            )
         except Exception as exc:
             log.warning(f"telegram-send fallback failed: {exc}")
 
@@ -213,6 +221,8 @@ def build_ateles_digest(briefs: list[dict]) -> str:
     Falls back to a raw brief dump if Claude is unavailable.
     """
     import shutil
+
+    from lib.daemon_runtime import claude_subprocess_env
 
     claude = shutil.which("claude")
     soul_path = PROJECT_ROOT / ".claude" / "skills" / "ateles" / "SKILL.md"
@@ -255,7 +265,7 @@ Output only the Telegram message text. Nothing else."""
             capture_output=True,
             text=True,
             timeout=120,
-            env=os.environ,
+            env=claude_subprocess_env(),
         )
         text = result.stdout.strip()
         if text:

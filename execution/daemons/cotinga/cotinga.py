@@ -58,6 +58,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 try:
     from lib.notify import Notifier
+
     _notifier: "Notifier | None" = Notifier.from_neotoma()
 except Exception:
     _notifier = None
@@ -68,6 +69,7 @@ def _notify(message: str, priority: str = "info") -> None:
         return
     try:
         from lib.notify import Priority
+
         p = getattr(Priority, priority.upper(), Priority.INFO)
         _notifier.send(message, priority=p, handler="cotinga")
     except Exception:
@@ -89,7 +91,9 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TELEGRAM_TOPIC_COTINGA = os.environ.get("TELEGRAM_TOPIC_COTINGA", "")
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
-NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com")
+NEOTOMA_BASE_URL = os.environ.get(
+    "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
+)
 
 # ─── Operator identity & calendars (operator-specific — never hardcode) ──────
 # Per Ateles architecture, operator contact details and calendar IDs are read
@@ -149,7 +153,6 @@ def _acquire_lock() -> bool:
         try:
             pid = int(LOCK_FILE.read_text().strip())
             # Check if that process is still alive
-            import signal
             os.kill(pid, 0)
             log.warning(f"Another Cotinga instance is running (pid {pid}) — exiting.")
             return False
@@ -225,7 +228,9 @@ def fetch_upcoming_events() -> list[dict]:
                 env=os.environ,
             )
             if result.returncode != 0:
-                log.error(f"gws calendar events list failed for {cal_id}: {result.stderr.strip()[:200]}")
+                log.error(
+                    f"gws calendar events list failed for {cal_id}: {result.stderr.strip()[:200]}"
+                )
                 return []
             data = json.loads(result.stdout)
             items = data.get("items") or []
@@ -251,7 +256,9 @@ def fetch_upcoming_events() -> list[dict]:
         return start.get("dateTime") or start.get("date") or ""
 
     merged = sorted(all_events.values(), key=_sort_key)
-    log.info(f"Fetched {len(merged)} unique event(s) across {len(CALENDAR_IDS)} calendars")
+    log.info(
+        f"Fetched {len(merged)} unique event(s) across {len(CALENDAR_IDS)} calendars"
+    )
     return merged
 
 
@@ -304,12 +311,14 @@ def _extract_attendees(event: dict) -> list[dict]:
             or _name_from_event_summary(summary, email)
             or email.split("@")[0]
         )
-        result.append({
-            "name": name,
-            "email": email,
-            "organizer": a.get("organizer", False),
-            "self": a.get("self", False),
-        })
+        result.append(
+            {
+                "name": name,
+                "email": email,
+                "organizer": a.get("organizer", False),
+                "self": a.get("self", False),
+            }
+        )
     return result
 
 
@@ -378,14 +387,20 @@ def _format_time_range(event: dict) -> str:
 # wins; falls back to 📌 when nothing matches. Keep specific terms before generic.
 _EVENT_EMOJI = [
     (("pool", "swim", "piscina", "natación", "natacion"), "🏊"),
-    (("gym", "fitness", "workout", "strength", "lift", "training", "entrenamiento"), "🏋️"),
+    (
+        ("gym", "fitness", "workout", "strength", "lift", "training", "entrenamiento"),
+        "🏋️",
+    ),
     (("yoga",), "🧘"),
     (("run", "running", "jog"), "🏃"),
     (("coffee", "café", "cafe", "espresso"), "☕"),
     (("lunch", "brunch", "almuerzo", "comida"), "🥗"),
     (("dinner", "cena", "supper"), "🍽️"),
     (("breakfast", "desayuno"), "🥐"),
-    (("pickup", "pick up", "pick-up", "recoger", "drop off", "drop-off", "dropoff"), "🚗"),
+    (
+        ("pickup", "pick up", "pick-up", "recoger", "drop off", "drop-off", "dropoff"),
+        "🚗",
+    ),
     (("flight", "fly", "vuelo", "airport", "aeropuerto"), "✈️"),
     (("train", "tren", "renfe"), "🚆"),
     (("doctor", "dentist", "medico", "médico", "clinic", "appointment", "cita"), "🩺"),
@@ -412,17 +427,30 @@ def _event_emoji(event: dict, is_meeting: bool) -> str:
 
 
 _ROUTINE_TITLES = {
-    "wake", "work", "busy", "focus", "lunch", "break",
-    "prepare for bed", "lights out", "fall asleep", "sleep",
-    "walk bimba", "ana bed prep",
+    "wake",
+    "work",
+    "busy",
+    "focus",
+    "lunch",
+    "break",
+    "prepare for bed",
+    "lights out",
+    "fall asleep",
+    "sleep",
+    "walk bimba",
+    "ana bed prep",
 }
+
 
 def _is_routine(event: dict) -> bool:
     """True if the event is a personal routine block that shouldn't appear in the brief."""
     title = (event.get("summary") or "").lower().strip()
     # Strip leading emoji (up to first space after emoji block)
     import re
-    title_clean = re.sub(r"^[\U00010000-\U0010ffff☀-⟿︀-️\U0001f300-\U0001f9ff]+\s*", "", title).strip()
+
+    title_clean = re.sub(
+        r"^[\U00010000-\U0010ffff☀-⟿︀-️\U0001f300-\U0001f9ff]+\s*", "", title
+    ).strip()
     for pattern in _ROUTINE_TITLES:
         if title_clean == pattern or title_clean.startswith(pattern):
             return True
@@ -547,7 +575,9 @@ def telegram_send(text: str, parse_mode: str | None = None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def create_neotoma_task(title: str, description: str, due_date: str, priority: str = "p2") -> str | None:
+def create_neotoma_task(
+    title: str, description: str, due_date: str, priority: str = "p2"
+) -> str | None:
     """
     Create a task entity in Neotoma via the REST API.
     Returns entity_id on success, None on failure.
@@ -555,18 +585,22 @@ def create_neotoma_task(title: str, description: str, due_date: str, priority: s
     if not NEOTOMA_BEARER_TOKEN or not NEOTOMA_BASE_URL:
         return None
 
-    payload = json.dumps({
-        "entities": [{
-            "entity_type": "task",
-            "name": title,
-            "description": description,
-            "due_date": due_date,
-            "priority": priority,
-            "status": "open",
-            "domain": "preparation",
-        }],
-        "idempotency_key": f"cotinga-task-{title[:40].replace(' ', '-')}-{due_date}",
-    }).encode()
+    payload = json.dumps(
+        {
+            "entities": [
+                {
+                    "entity_type": "task",
+                    "name": title,
+                    "description": description,
+                    "due_date": due_date,
+                    "priority": priority,
+                    "status": "open",
+                    "domain": "preparation",
+                }
+            ],
+            "idempotency_key": f"cotinga-task-{title[:40].replace(' ', '-')}-{due_date}",
+        }
+    ).encode()
 
     try:
         url = f"{NEOTOMA_BASE_URL.rstrip('/')}/api/store"
@@ -597,13 +631,17 @@ def create_neotoma_task(title: str, description: str, due_date: str, priority: s
 # ---------------------------------------------------------------------------
 
 
-def spawn_deep_prep_agent(event: dict, attendees: list[dict], event_dt: datetime) -> None:
+def spawn_deep_prep_agent(
+    event: dict, attendees: list[dict], event_dt: datetime
+) -> None:
     """
     Spawn a background Claude agent to do deep participant research,
     agenda generation, and talking points for a meeting.
     The agent sends its own Telegram follow-up when done.
     """
     import shutil
+
+    from lib.daemon_runtime import claude_subprocess_env
 
     claude = shutil.which("claude")
     if not claude:
@@ -631,11 +669,11 @@ Your job is to prepare a deep briefing for this upcoming meeting and send it via
 ## Meeting details
 - Title: {event_title}
 - Date/time: {event_date} at {event_time} Madrid time
-- Location: {location or '(none)'}
-- Description: {description or '(none)'}
+- Location: {location or "(none)"}
+- Description: {description or "(none)"}
 
 ## Attendees (excluding {OPERATOR_FIRST_NAME})
-{attendee_list or '(no external attendees — this is a solo event)'}
+{attendee_list or "(no external attendees — this is a solo event)"}
 
 ## Your tasks (complete all, then send Telegram summary)
 
@@ -766,11 +804,12 @@ Work through all steps, then stop.
     log.info(f"Spawning deep-prep agent for: {event_title!r}")
     try:
         import re
+
         safe_title = re.sub(r"[^A-Za-z0-9_-]", "_", event_title[:20])
         log_path = LOG_DIR / f"cotinga_deepprep_{event_date}_{safe_title}.log"
         subprocess.Popen(
             [claude, "--print", "--dangerously-skip-permissions", prompt],
-            env=os.environ,
+            env=claude_subprocess_env(),
             stdout=open(log_path, "w"),
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -819,6 +858,7 @@ def build_shallow_briefing(
 
         # Deduplicate: skip if a very similar title already shown
         import re as _re
+
         norm_title = _re.sub(r"[^a-z0-9]", "", title.lower())
         if norm_title in seen_titles:
             continue
@@ -842,7 +882,9 @@ def build_shallow_briefing(
                 tail = f" — {esc(context)}" if context else " (known)"
                 body.append(f"    👤 {esc(a['name'])}{tail}")
             else:
-                body.append(f"    👤 {esc(a['name'])} — first meeting (deep prep running)")
+                body.append(
+                    f"    👤 {esc(a['name'])} — first meeting (deep prep running)"
+                )
 
         events_shown += 1
 
@@ -884,7 +926,9 @@ def _main() -> None:
 
     if not events:
         log.info("No upcoming events — sending clear-schedule notice.")
-        telegram_send(f"☀️ Cotinga — {today_str}\nNo events in the next 48 hours. Clear schedule.")
+        telegram_send(
+            f"☀️ Cotinga — {today_str}\nNo events in the next 48 hours. Clear schedule."
+        )
         return
 
     # Phase 1: fast attendee lookup in Neotoma

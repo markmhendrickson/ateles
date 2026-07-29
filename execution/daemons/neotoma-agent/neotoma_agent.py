@@ -345,7 +345,11 @@ async def _spawn_claude_skill(
         f"timeout={DISPATCH_TIMEOUT_SECONDS}s entity={entity_id}"
     )
 
-    subprocess_env = {**os.environ, "ATELES_PARTICIPATION_REF": entity_id}
+    # Prefer the operator's Claude subscription over metered API credits
+    # (drops ANTHROPIC_API_KEY when CLAUDE_CODE_OAUTH_TOKEN is set).
+    from lib.daemon_runtime import claude_subprocess_env
+
+    subprocess_env = claude_subprocess_env({"ATELES_PARTICIPATION_REF": entity_id})
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -409,7 +413,9 @@ def _snapshot_targets_neotoma_repo(snapshot: dict) -> bool:
 # ── Event handler ─────────────────────────────────────────────────────────────
 
 
-async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChecker) -> None:
+async def handle_event(
+    event: NeotomaEvent, notifier: Notifier, grants: GrantChecker
+) -> None:
     """
     Handle a Neotoma SSE event.
 
@@ -456,7 +462,9 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChe
             )
             return
         if grants.is_suspended():
-            log.warning(f"[{DAEMON_NAME}] Grant suspended — skipping Cicada for {entity_id}")
+            log.warning(
+                f"[{DAEMON_NAME}] Grant suspended — skipping Cicada for {entity_id}"
+            )
             return
         if DRY_RUN:
             log.info(
@@ -485,7 +493,9 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChe
             )
             return
         if grants.is_suspended():
-            log.warning(f"[{DAEMON_NAME}] Grant suspended — skipping Vanellus for {entity_id}")
+            log.warning(
+                f"[{DAEMON_NAME}] Grant suspended — skipping Vanellus for {entity_id}"
+            )
             return
         if DRY_RUN:
             log.info(

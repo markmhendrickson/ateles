@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # ── Path bootstrap (mirrors conftest.py) ──────────────────────────────────────
 _DAEMON_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _DAEMON_DIR.parent.parent.parent
@@ -27,9 +29,24 @@ from lib.daemon_runtime import AgentDefinition  # noqa: E402
 
 # Import module-level objects so we can patch them in-place
 import skill_runner  # noqa: E402
+import harness_router  # noqa: E402
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _claude_only_test_router(monkeypatch, tmp_path):
+    """Keep legacy command-shape tests pinned to the Claude adapter."""
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM", '{"claude": 1.0}')
+    monkeypatch.setenv(
+        "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing-headroom.json")
+    )
+    monkeypatch.delenv("APIS_ALLOW_METERED_HARNESS", raising=False)
+    harness_router.reset_state()
+    yield
+    harness_router.reset_state()
 
 
 def _make_def(
@@ -1582,9 +1599,8 @@ class TestSwarmGithubContractAttributionSpec:
         )
 
 
-class TestAnthropicAuthPrecedence:
-    """The spawned `claude --print` must prefer the operator's Claude
-    subscription (CLAUDE_CODE_OAUTH_TOKEN) over metered ANTHROPIC_API_KEY."""
+class TestSubscriptionOnlyAuth:
+    """Spawned harnesses must not silently spill into metered API billing."""
 
     def setup_method(self) -> None:
         skill_runner._agent_def_cache.clear()
@@ -1634,13 +1650,24 @@ class TestAnthropicAuthPrecedence:
             "else claude bills metered credits instead of the Max plan"
         )
 
-    def test_no_oauth_token_keeps_api_key(self) -> None:
+    def test_no_oauth_token_still_drops_api_key_by_default(self) -> None:
         env = self._spawn_and_capture_env(
             {"ANTHROPIC_API_KEY": "sk-ant-metered", "CLAUDE_CODE_OAUTH_TOKEN": ""}
         )
-        assert env.get("ANTHROPIC_API_KEY") == "sk-ant-metered", (
-            "Without a subscription token, fall back to ANTHROPIC_API_KEY (no regression)"
+        assert "ANTHROPIC_API_KEY" not in env, (
+            "Without subscription auth, dispatch must fail/queue instead of billing "
+            "metered Anthropic credits"
         )
+
+    def test_explicit_metered_override_keeps_api_key(self) -> None:
+        env = self._spawn_and_capture_env(
+            {
+                "ANTHROPIC_API_KEY": "sk-ant-metered",
+                "CLAUDE_CODE_OAUTH_TOKEN": "",
+                "APIS_ALLOW_METERED_HARNESS": "1",
+            }
+        )
+        assert env.get("ANTHROPIC_API_KEY") == "sk-ant-metered"
 
 
 # ── Dropped-allowlist-rule notification (ateles#255) ────────────────────────────
@@ -2244,3 +2271,178 @@ class TestDispatchFailureDiagnostics:
         assert "/" not in name
         assert ".." not in name
         assert Path(path).parent == tmp_path / "d"
+
+
+class TestCrossHarnessRouting:
+    def test_codex_adapter_uses_noninteractive_subscription_cli(self) -> None:
+        cmd, stdin = skill_runner._provider_command(
+            "codex",
+            "/bin/codex",
+            "SYSTEM",
+            "WORK",
+            cwd="/repo",
+        )
+        assert cmd == [
+            "/bin/codex",
+            "exec",
+            "--sandbox",
+            "workspace-write",
+            "--ephemeral",
+            "--color",
+            "never",
+            "--cd",
+            "/repo",
+            "-",
+        ]
+        assert stdin is not None
+        assert b"SYSTEM" in stdin
+        assert b"WORK" in stdin
+
+    def test_cursor_adapter_uses_headless_agent(self) -> None:
+        cmd, stdin = skill_runner._provider_command(
+            "cursor",
+            "/bin/cursor-agent",
+            "SYSTEM",
+            "WORK",
+            cwd="/repo",
+        )
+        assert cmd[:7] == [
+            "/bin/cursor-agent",
+            "--print",
+            "--force",
+            "--trust",
+            "--approve-mcps",
+            "--output-format",
+            "text",
+        ]
+        assert "--workspace" in cmd
+        assert "SYSTEM" in cmd[-1]
+        assert "WORK" in cmd[-1]
+        assert stdin is None
+
+    def test_all_metered_credentials_are_removed_by_default(self, monkeypatch) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-metered")
+        monkeypatch.setenv("OPENAI_API_KEY", "openai-metered")
+        monkeypatch.setenv("CURSOR_API_KEY", "cursor-metered")
+        child = skill_runner._subscription_only_env()
+        assert "ANTHROPIC_API_KEY" not in child
+        assert "OPENAI_API_KEY" not in child
+        assert "CURSOR_API_KEY" not in child
+
+    def test_cursor_headless_login_failure_is_safe_to_fail_over(self) -> None:
+        assert (
+            skill_runner._provider_failure_kind(
+                "Authentication required. Please run 'agent login' first"
+            )
+            == "auth"
+        )
+
+    def test_capacity_failure_fails_over_to_next_provider(self, monkeypatch) -> None:
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex,cursor")
+        monkeypatch.setenv(
+            "APIS_HARNESS_HEADROOM",
+            '{"claude": 1.0, "codex": 1.0, "cursor": 1.0}',
+        )
+        harness_router.reset_state()
+        attempts: list[str] = []
+
+        async def fake_once(skill, prompt, *, provider, **kwargs):
+            attempts.append(provider)
+            if provider == "claude":
+                return skill_runner.SkillResult(
+                    skill,
+                    False,
+                    1,
+                    "",
+                    "You've hit your weekly usage limit; resets in 2 hours",
+                    provider=provider,
+                )
+            return skill_runner.SkillResult(
+                skill, True, 0, "done", "", provider=provider
+            )
+
+        with (
+            patch(
+                "skill_runner._provider_binaries",
+                return_value={
+                    "claude": "/bin/claude",
+                    "codex": "/bin/codex",
+                    "cursor": "/bin/cursor-agent",
+                },
+            ),
+            patch("skill_runner._run_skill_once", side_effect=fake_once),
+        ):
+            result = asyncio.run(skill_runner.run_skill("gryllus", "work"))
+
+        assert result.ok
+        assert result.provider == "codex"
+        assert result.attempted_providers == ("claude", "codex")
+        assert attempts == ["claude", "codex"]
+
+    def test_ordinary_task_failure_does_not_replay_on_another_provider(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
+        harness_router.reset_state()
+        attempts: list[str] = []
+
+        async def fake_once(skill, prompt, *, provider, **kwargs):
+            attempts.append(provider)
+            return skill_runner.SkillResult(
+                skill,
+                False,
+                2,
+                "",
+                "tests failed",
+                provider=provider,
+            )
+
+        with (
+            patch(
+                "skill_runner._provider_binaries",
+                return_value={
+                    "claude": "/bin/claude",
+                    "codex": "/bin/codex",
+                    "cursor": None,
+                },
+            ),
+            patch("skill_runner._run_skill_once", side_effect=fake_once),
+        ):
+            result = asyncio.run(skill_runner.run_skill("gryllus", "work"))
+
+        assert not result.ok
+        assert attempts == ["claude"]
+
+    def test_successful_answer_that_mentions_limits_is_not_replayed(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex")
+        harness_router.reset_state()
+        attempts: list[str] = []
+
+        async def fake_once(skill, prompt, *, provider, **kwargs):
+            attempts.append(provider)
+            return skill_runner.SkillResult(
+                skill,
+                True,
+                0,
+                "The implementation documents its usage limit policy.",
+                "",
+                provider=provider,
+            )
+
+        with (
+            patch(
+                "skill_runner._provider_binaries",
+                return_value={
+                    "claude": "/bin/claude",
+                    "codex": "/bin/codex",
+                    "cursor": None,
+                },
+            ),
+            patch("skill_runner._run_skill_once", side_effect=fake_once),
+        ):
+            result = asyncio.run(skill_runner.run_skill("gryllus", "work"))
+
+        assert result.ok
+        assert attempts == ["claude"]

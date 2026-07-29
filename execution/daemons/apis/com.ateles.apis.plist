@@ -51,6 +51,15 @@
         <string>8742</string>
         <key>APIS_AUTONOMY_AUTO_MERGE</key>
         <string>0</string>
+        <!-- Balance bundled subscription usage across all installed harnesses.
+             Runtime headroom overrides can be written atomically to
+             ~/.config/ateles/harness-headroom.json. -->
+        <key>APIS_HARNESS_PROVIDERS</key>
+        <string>claude,codex,cursor</string>
+        <!-- Hard safety boundary: capped plans fail over/queue; never spill
+             into usage-based API billing. -->
+        <key>APIS_ALLOW_METERED_HARNESS</key>
+        <string>0</string>
     </dict>
 </dict>
 </plist>

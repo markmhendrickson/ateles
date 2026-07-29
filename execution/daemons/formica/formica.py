@@ -42,7 +42,6 @@ Environment variables:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import shutil
@@ -204,9 +203,15 @@ async def _spawn_claude_skill(
 
     # Pass ATELES_PARTICIPATION_REF so the mcpsrv_neotoma MCP server can stamp
     # retrieval_event entities keyed to this dispatch (#23 — auto retrieval attribution).
-    subprocess_env = {**os.environ}
-    if participation_ref:
-        subprocess_env["ATELES_PARTICIPATION_REF"] = participation_ref
+    # claude_subprocess_env() prefers the operator's Claude subscription over
+    # metered API credits (drops ANTHROPIC_API_KEY when CLAUDE_CODE_OAUTH_TOKEN
+    # is set).
+    from lib.daemon_runtime import claude_subprocess_env
+
+    _extra = (
+        {"ATELES_PARTICIPATION_REF": participation_ref} if participation_ref else None
+    )
+    subprocess_env = claude_subprocess_env(_extra)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -258,7 +263,9 @@ async def dispatch_cicada(
 ) -> None:
     """Dispatch Cicada (issue worker) for a new issue."""
     if grants.is_suspended():
-        log.warning(f"[{DAEMON_NAME}] Grant suspended — skipping Cicada dispatch for {entity_id}")
+        log.warning(
+            f"[{DAEMON_NAME}] Grant suspended — skipping Cicada dispatch for {entity_id}"
+        )
         return
 
     title = snapshot.get("title", "(untitled)")
@@ -272,9 +279,13 @@ async def dispatch_cicada(
         log.info(f"[{DAEMON_NAME}] DRY RUN — skipping Cicada dispatch for {entity_id}")
         return
 
-    job = _activity.started(f"dispatching Cicada for issue {entity_id} ({repo}): {title[:60]}")
+    job = _activity.started(
+        f"dispatching Cicada for issue {entity_id} ({repo}): {title[:60]}"
+    )
     try:
-        await _spawn_claude_skill(CICADA_SKILL, entity_id, snapshot, notifier, entity_id)
+        await _spawn_claude_skill(
+            CICADA_SKILL, entity_id, snapshot, notifier, entity_id
+        )
         job.finished(f"Cicada dispatched for issue {entity_id}")
     except Exception as exc:
         job.failed(f"Cicada dispatch failed for {entity_id}: {type(exc).__name__}")
@@ -286,7 +297,9 @@ async def dispatch_vanellus(
 ) -> None:
     """Dispatch Vanellus (PR steward) for a new PR."""
     if grants.is_suspended():
-        log.warning(f"[{DAEMON_NAME}] Grant suspended — skipping Vanellus dispatch for {entity_id}")
+        log.warning(
+            f"[{DAEMON_NAME}] Grant suspended — skipping Vanellus dispatch for {entity_id}"
+        )
         return
 
     title = snapshot.get("title", "(untitled)")
@@ -300,7 +313,9 @@ async def dispatch_vanellus(
 
     job = _activity.started(f"dispatching Vanellus for PR {entity_id}: {title[:60]}")
     try:
-        await _spawn_claude_skill(VANELLUS_SKILL, entity_id, snapshot, notifier, entity_id)
+        await _spawn_claude_skill(
+            VANELLUS_SKILL, entity_id, snapshot, notifier, entity_id
+        )
         job.finished(f"Vanellus dispatched for PR {entity_id}")
     except Exception as exc:
         job.failed(f"Vanellus dispatch failed for {entity_id}: {type(exc).__name__}")
@@ -310,7 +325,9 @@ async def dispatch_vanellus(
 # ── Event handler ─────────────────────────────────────────────────────────────
 
 
-async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChecker) -> None:
+async def handle_event(
+    event: NeotomaEvent, notifier: Notifier, grants: GrantChecker
+) -> None:
     """
     Handle a Neotoma SSE event.
 
