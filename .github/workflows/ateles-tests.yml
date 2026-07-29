@@ -65,7 +65,7 @@ jobs:
       - name: Install MCP server deps
         run: |
           uv venv .mcp-venv
-          VIRTUAL_ENV=.mcp-venv uv pip install mcp httpx
+          VIRTUAL_ENV=.mcp-venv uv pip install -r execution/mcp/ateles/requirements.txt
       - name: Run ateles MCP server tests
         run: .mcp-venv/bin/python execution/mcp/ateles/test_server.py
       - name: Run ateles MCP server smoke tests
