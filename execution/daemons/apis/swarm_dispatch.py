@@ -37,6 +37,53 @@ blocking checkpoint_brief plus an operator_decision notification instead.
 The auto-build handoff (issue → implementation PR) is separately gated behind
 ATELES_SWARM_AUTO_BUILD (default OFF); it NEVER auto-merges — merge stays
 behind APIS_AUTONOMY_AUTO_MERGE regardless.
+
+Auto-dispatch of implementation-only review findings (ateles#230):
+ATELES_SWARM_AUTO_ADDRESS_FINDINGS (default OFF) is a third, independent
+autonomy flag alongside the two above. Every [BLOCKING] finding a review
+panelist raises is tagged `(finding_kind: implementation|decision)`
+(review_learning._FINDING_HEADER); an unclassified or invalid tag fails
+CLOSED to "decision" (review_learning.DEFAULT_FINDING_KIND) — it is never
+silently treated as implementation. `_route_blocking_findings` partitions
+every blocking finding by this tag UNCONDITIONALLY (the partition is always
+computed and always surfaces in the operator notification, flag on or off —
+so a human reading the notification always sees what was mechanical vs what
+needs judgment):
+
+  - Flag OFF (default): identical to pre-#230 behavior — every blocking
+    finding, of any kind, is routed to Cicada for a bounded auto-fix round
+    exactly as it always has been.
+  - Flag ON, all findings implementation-kind: routed to Cicada immediately,
+    same mechanics as the flag-off path, no operator wait.
+      Example: qa raises `[BLOCKING] coverage: no rollback test for the new
+      writer (finding_kind: implementation)` → Cicada is dispatched in the
+      same round without an operator having to notice or approve it.
+  - Flag ON, mixed implementation + decision findings: the implementation
+    findings are dispatched to Cicada immediately; the decision findings are
+    excluded from Cicada's prompt entirely and held for the operator, with a
+    notification naming which lens(es) still block.
+      Example: qa raises an implementation finding (auto-dispatched) while
+      security raises `[BLOCKING] tenant-scope: confirm this lookup is still
+      owner-scoped after the conversion (finding_kind: decision)` — Cicada
+      gets the qa work; the operator is told the PR still needs their read
+      on the security finding, and merge stays held.
+  - Flag ON, a finding_kind is missing or invalid: fails closed to decision
+    — held for the operator exactly like the mixed case above, never
+    auto-dispatched.
+      Example: a finding tagged `(finding_kind: fixme)` (not in
+      review_learning.FINDING_KINDS) is treated identically to an
+      untagged finding — decision, gate held, operator notified.
+
+In every ON case, Cicada's dispatch prompt states explicitly that its work
+is "addressed, PENDING LENS SIGN-OFF" — never "auto-resolved" or
+"self-certified". The gate clears only on the review panel's NEXT
+re-review verdict (a fresh Vanellus aggregation via parse_review_verdict),
+never on Cicada's own exit status; this function only ever dispatches or
+notifies, it never writes a gate-clearing signal itself. This is the
+self-certification boundary the issue exists to protect: automation may do
+the mechanical work, but it can never clear its own blocker. Merge is
+unaffected by this flag either way — it always stays behind
+APIS_AUTONOMY_AUTO_MERGE.
 """
 
 from __future__ import annotations
@@ -1037,6 +1084,21 @@ class DispatchConfig:
     # implements + pushes, the push (synchronize) re-runs the panel. Bounds the
     # Cicada↔panel loop so a finding the swarm can't resolve doesn't spin forever.
     max_fix_rounds: int = int(os.environ.get("APIS_MAX_FIX_ROUNDS", "2"))
+    # Auto-dispatch implementation-only findings (ateles#230): when ON, blocking
+    # findings tagged finding_kind=implementation are routed to Cicada exactly
+    # like today's REQUEST_CHANGES flow (lens proposes, Cicada implements,
+    # panel re-reviews) WITHOUT waiting for an operator to kick that off.
+    # Decision/attestation findings (finding_kind=decision, or unclassified —
+    # fail-closed per review_learning.DEFAULT_FINDING_KIND) still stop and
+    # wait for a human, exactly as before. Default OFF, mirrors the
+    # ATELES_SWARM_AUTO_BUILD / APIS_AUTONOMY_AUTO_MERGE naming convention.
+    # Merge stays behind APIS_AUTONOMY_AUTO_MERGE regardless — this flag never
+    # merges; it only unblocks the auto-fix dispatch that already existed.
+    # The gate still clears only on the panel's re-review verdict, never on
+    # Cicada's own exit status (self-certification boundary, ateles#230 §4).
+    auto_address_findings: bool = (
+        os.environ.get("ATELES_SWARM_AUTO_ADDRESS_FINDINGS", "0") == "1"
+    )
     # Auto re-review on push (ateles#230). When a PR's parent issue still has an
     # open pre-impl gate, Lanius returns `blocked` and `_handle_pr` skips the
     # panel — correct on the FIRST look (nothing has been reviewed yet), but on a
@@ -2334,6 +2396,19 @@ class SwarmDispatcher:
         the push (synchronize) re-runs the whole PR handler. Bounded by
         max_fix_rounds so an unresolvable finding escalates to the operator
         instead of looping forever. Merge stays operator-gated throughout.
+
+        ateles#230: when `auto_address_findings` is ON, findings tagged
+        finding_kind=implementation are dispatched to Cicada immediately
+        (same mechanics as above) instead of waiting for an operator to kick
+        off the fix. Findings tagged finding_kind=decision — or unclassified,
+        which fails closed to "decision" per review_learning.parse_findings —
+        still stop and wait for a human; they are never auto-dispatched. This
+        is unconditional in the notification text so a human reading the
+        escalation always sees the implementation/decision partition, whether
+        or not the flag is on (Design/UX: the core fix for humans not
+        noticing a blocker was purely mechanical). The gate clears only on
+        the panel's next re-review verdict — never on Cicada's own exit
+        status — so automation can never certify its own fix.
         """
         ref = f"{trigger.repository}#{trigger.number}"
 
@@ -2360,8 +2435,61 @@ class SwarmDispatcher:
                 )
             return
 
+        # Partition every blocking finding by finding_kind. Computed and
+        # surfaced unconditionally (flag on or off) so a human reading the
+        # escalation always sees which findings were mechanical vs which
+        # need judgment (Design/UX: the core fix for humans not noticing a
+        # blocker was purely mechanical).
+        impl_by_lens: dict[str, list[ReviewFinding]] = {}
+        decision_by_lens: dict[str, list[ReviewFinding]] = {}
+        for lens, findings in by_lens.items():
+            for f in findings:
+                bucket = (
+                    impl_by_lens if f.finding_kind == "implementation" else decision_by_lens
+                )
+                bucket.setdefault(lens, []).append(f)
+
+        if not self.config.auto_address_findings:
+            # Flag off: pre-#230 behavior, unchanged — dispatch every
+            # blocking finding regardless of kind.
+            dispatch_by_lens = by_lens
+        else:
+            # Flag on: only implementation-kind findings are dispatchable.
+            # Decision findings never reach Cicada — they hold the gate on
+            # their own, whether or not any implementation findings exist
+            # alongside them.
+            dispatch_by_lens = impl_by_lens
+            if decision_by_lens:
+                lenses = ", ".join(sorted(decision_by_lens))
+                if impl_by_lens:
+                    n_impl = sum(len(v) for v in impl_by_lens.values())
+                    self.notifier.send(
+                        f"PR {ref}: {n_impl} implementation-only finding(s) "
+                        "auto-dispatched to Cicada; decision/attestation "
+                        f"finding(s) on lens(es) {lenses} still need your "
+                        "read and hold the gate.",
+                        priority=Priority.OPERATOR_DECISION,
+                        handler=DAEMON_NAME,
+                    )
+                else:
+                    self.notifier.send(
+                        f"PR {ref}: review verdict `{verdict}` — all blocking "
+                        f"findings are decision/attestation-kind (lenses: "
+                        f"{lenses}); none are auto-dispatchable. Needs your "
+                        "read. Merge held.",
+                        priority=Priority.OPERATOR_DECISION,
+                        handler=DAEMON_NAME,
+                    )
+
+        if not dispatch_by_lens:
+            return
+
         prior_rounds = await self._fix_round_count(trigger)
         if prior_rounds >= self.config.max_fix_rounds:
+            # Name every still-blocking lens, not just the dispatchable
+            # subset — a decision finding sitting alongside a persistently
+            # failing implementation finding is still part of why the PR is
+            # stuck at the cap and must not be omitted from this message.
             lenses = ", ".join(sorted(by_lens))
             # Once-per-PR: the exhausted-rounds condition is re-evaluated on
             # every subsequent push, so guard the operator ping behind the
@@ -2379,13 +2507,15 @@ class SwarmDispatcher:
         this_round = prior_rounds + 1
         await self._record_fix_round(trigger, this_round)
 
-        # Each lens agent proposes fix guidance for its own findings.
+        # Each lens agent proposes fix guidance for its own dispatchable
+        # findings (implementation-kind only when the flag is on; all
+        # blocking findings when it's off).
         guidance_blocks: list[str] = []
-        for lens in sorted(by_lens):
+        for lens in sorted(dispatch_by_lens):
             agent = self._lens_fix_agent(lens)
             findings_text = "\n".join(
                 f"- [{f.category}] {f.summary}\n  {f.detail}".rstrip()
-                for f in by_lens[lens]
+                for f in dispatch_by_lens[lens]
             )
             result = await run_skill(
                 agent,
@@ -2430,7 +2560,7 @@ class SwarmDispatcher:
             return
         log.info(
             f"[{DAEMON_NAME}] {ref}: dispatched auto-fix round {this_round} "
-            f"({len(by_lens)} lens(es) → Cicada); awaiting its push to re-review"
+            f"({len(dispatch_by_lens)} lens(es) → Cicada); awaiting its push to re-review"
         )
 
     async def _gate_merge_readiness(
@@ -2625,6 +2755,10 @@ class SwarmDispatcher:
             "guidance below on the PR's existing branch, then push. Your push "
             "re-runs the panel automatically — do NOT open a new PR and do NOT "
             "merge.\n\n"
+            "IMPORTANT: your work here is addressed, PENDING LENS SIGN-OFF — "
+            "it is never auto-resolved or self-certified. Only the review "
+            "panel's next re-review verdict clears the gate; your own exit "
+            "status/commit does not.\n\n"
             f"Parent issue: #{parent if parent else 'unknown'}.\n"
             f"Check out and work on the PR branch for {t.repository}#{t.number} "
             f"({t.html_url}); commit with the ateles-agent identity and push to "
@@ -4523,10 +4657,32 @@ class SwarmDispatcher:
             "task in your own queue and say so in the comment."
             if lens.forward_looking
             else "Findings that must block the merge: emit each as a line "
-            "`[BLOCKING] <category>: <summary>` followed by detail and file "
-            "references. Non-blocking suggestions: `[NON-BLOCKING] <category>: "
-            "<summary>`. Cite the standing rule or guardrail doc when one "
-            "applies — that marks the finding as systemic.\n\n" + evidence_bar
+            "`[BLOCKING] <category>: <summary> (finding_kind: implementation|"
+            "decision)` followed by detail and file references. Non-blocking "
+            "suggestions: `[NON-BLOCKING] <category>: <summary>` (no "
+            "finding_kind needed — never auto-dispatched). Cite the standing "
+            "rule or guardrail doc when one applies — that marks the finding "
+            "as systemic.\n\n"
+            "finding_kind is REQUIRED on every [BLOCKING] line and MUST be "
+            "exactly `implementation` or `decision`:\n"
+            "  - `implementation`: a concrete, unambiguous task with no open "
+            "design question — the outcome is objectively checkable (a test "
+            "passes / code exists). Example: \"add a concurrency test\", "
+            "\"this worker has no restart path\". The swarm's implementer may "
+            "be auto-dispatched to address this WITHOUT waiting for a human, "
+            "if that automation is enabled — you still re-review the result; "
+            "your re-review verdict is what clears the gate, never the "
+            "implementer's own output.\n"
+            "  - `decision`: a human judgment or accountable sign-off — "
+            "auto-clearing it would launder that sign-off into automation. "
+            "Example: \"confirm tenant-scoping survived the conversion\", "
+            "\"does this need UX review at all?\", \"accept this risk as a "
+            "follow-up\". Never auto-dispatched; always waits for a human.\n"
+            "If you are not sure which one applies, or the finding mixes "
+            "both, use `decision` — an omitted or invalid finding_kind is "
+            "treated as `decision` by the dispatcher regardless, so there is "
+            "no benefit to guessing `implementation`."
+            + evidence_bar
         )
         # Build the check-off instruction only when there is a parent issue AND
         # this panelist pre-registered expectations (so there is a comment to edit).
