@@ -50,7 +50,7 @@
         <key>APIS_GITHUB_WEBHOOK_PORT</key>
         <string>8742</string>
         <key>APIS_AUTONOMY_AUTO_MERGE</key>
-        <string>0</string>
+        <string>1</string>
     </dict>
 </dict>
 </plist>
