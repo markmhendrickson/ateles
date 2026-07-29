@@ -49,6 +49,7 @@ import hmac
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -76,6 +77,10 @@ PR_REVIEW_ACTIONS = {"submitted"}
 # per-context and would multiply for the same head; check_suite:completed is the
 # single terminal signal per commit.
 CHECK_SUITE_ACTIONS = {"completed"}
+# push events (auto-release): a merge to the default branch is what makes a new
+# release preparable. Only pushes to this ref trigger; branch/tag pushes and
+# branch deletions are ignored. `push` carries no `action` field.
+RELEASE_PUSH_REF = os.environ.get("APIS_RELEASE_PUSH_REF", "refs/heads/main")
 
 
 @dataclass
@@ -118,6 +123,19 @@ class SwarmTrigger:
     ci_head_sha: str = ""
     ci_conclusion: str = ""
     ci_pr_numbers: list[int] = field(default_factory=list)
+    # `ci_head_branch` is the branch the suite ran against (check_suite.
+    # head_branch). Used to recognize a CI completion on the DEFAULT branch —
+    # which carries no associated PR — so the release-prep retry can fire once a
+    # merge's CI settles (the auto-release deferral path).
+    ci_head_branch: str = ""
+    # push extras (auto-release): populated when kind == "push". `push_ref` is
+    # the fully-qualified ref ("refs/heads/main"); `push_after` is the new head
+    # SHA. A push to the default branch is what makes a release preparable, so
+    # this is the trigger the release daemon keys off.
+    push_ref: str = ""
+    push_after: str = ""
+    # release_approve extras: the version the operator approved by email reply.
+    release_version: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -265,6 +283,34 @@ def parse_github_event(
             ci_head_sha=suite.get("head_sha", ""),
             ci_conclusion=(suite.get("conclusion") or "").lower(),
             ci_pr_numbers=[p.get("number", 0) for p in prs if p.get("number")],
+            ci_head_branch=suite.get("head_branch", ""),
+            raw=payload,
+        )
+
+    # push events (auto-release): a merge landed on the default branch, so there
+    # may now be something to release. We normalize to a `push_main` trigger; the
+    # dispatcher hands it to the release daemon, which re-applies its own gates
+    # (unreleased-commit count, main CI green, no release already in flight)
+    # before preparing anything. Deleted branches arrive with an all-zero `after`
+    # SHA and must never trigger a release.
+    if event_type == "push":
+        ref = payload.get("ref", "")
+        after = payload.get("after", "")
+        if ref != RELEASE_PUSH_REF or payload.get("deleted") or set(after) <= {"0"}:
+            return None
+        head_commit = payload.get("head_commit") or {}
+        return SwarmTrigger(
+            kind="push_main",
+            repository=repository,
+            number=0,
+            title=(head_commit.get("message") or "").split("\n")[0],
+            body="",
+            author=(head_commit.get("author") or {}).get("username", ""),
+            html_url=head_commit.get("url", ""),
+            delivery_id=delivery_id,
+            action="push",
+            push_ref=ref,
+            push_after=after,
             raw=payload,
         )
 
@@ -396,11 +442,64 @@ def make_app(
         task.add_done_callback(request.app["inflight"].discard)
         return web.json_response({"status": "accepted", "kind": "email_approve"})
 
+    async def handle_approve_release(request: web.Request) -> web.Response:
+        """Internal route: Turdus POSTs an operator release-approval here.
+
+        Body JSON: {"version": "vX.Y.Z", "sender": "<verified operator email>"}
+        Header: X-Approve-Secret: <shared secret>
+
+        Same trust model as /approve-email — Turdus already verified the reply
+        came from the operator's address AND carried `approve <exact version>`
+        plus the release-approve token; this route trusts that only because the
+        shared secret authenticates the caller as our own Turdus. It emits a
+        `release_approve` trigger; the dispatcher runs the SAME publish path as a
+        Telegram approve (verify release_result is pending_approval → approved →
+        publish.py), so this endpoint adds a channel, not a new bypass.
+
+        Fails closed: unset secret → 503; wrong secret → 401; bad version → 400.
+        """
+        if not approve_email_secret:
+            log.error("[apis] /approve-release hit but APPROVE secret unset — 503")
+            return web.Response(status=503, text="approve-release not configured")
+        if request.headers.get("X-Approve-Secret", "") != approve_email_secret:
+            log.warning("[apis] /approve-release secret mismatch — 401")
+            return web.Response(status=401, text="bad secret")
+        try:
+            payload = json.loads(await request.read())
+        except json.JSONDecodeError:
+            return web.Response(status=400, text="invalid JSON")
+        version = str(payload.get("version", "")).strip()
+        # A release tag: leading v + digits. Reject anything else so a malformed
+        # POST can never reach the publish path.
+        if not re.match(r"^v[0-9][0-9A-Za-z.\-+]*$", version):
+            return web.Response(status=400, text="valid version (vX.Y.Z) required")
+        trigger = SwarmTrigger(
+            kind="release_approve",
+            repository="",
+            number=0,
+            title="",
+            body="",
+            author="",
+            html_url="",
+            delivery_id=f"release-approve-{version}",
+            action="approved",
+            release_version=version,
+        )
+        log.info(
+            f"[apis] release-approve accepted for {version} "
+            f"(sender={payload.get('sender', '?')})"
+        )
+        task = asyncio.create_task(handler(trigger))
+        request.app["inflight"].add(task)
+        task.add_done_callback(request.app["inflight"].discard)
+        return web.json_response({"status": "accepted", "kind": "release_approve"})
+
     app = web.Application()
     app["inflight"] = set()
     app.router.add_post("/github/webhook", handle_webhook)
     app.router.add_get("/health", handle_health)
     app.router.add_post("/approve-email", handle_approve_email)
+    app.router.add_post("/approve-release", handle_approve_release)
     return app
 
 

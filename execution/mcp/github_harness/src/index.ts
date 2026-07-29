@@ -95,6 +95,74 @@ function optStringArray(
   return v.filter((x): x is string => typeof x === "string");
 }
 
+/** One inline review comment anchored to a line of the PR diff. */
+export interface ReviewComment {
+  path: string;
+  body: string;
+  line: number;
+  side?: "LEFT" | "RIGHT";
+  start_line?: number;
+}
+
+/**
+ * Coerce and validate an array of inline review comments.
+ *
+ * Anchors use `line` (a line number in the file) rather than the deprecated
+ * `position` (an offset into the diff hunk), because callers have the file/line
+ * from their findings but would have to recompute hunk offsets for `position`.
+ *
+ * Malformed entries are DROPPED rather than thrown: GitHub rejects the whole
+ * review with 422 if any single anchor is invalid, so silently discarding a bad
+ * anchor degrades one comment instead of losing the entire review. Callers that
+ * need to know use the returned `dropped` count.
+ */
+export function parseReviewComments(
+  params: Record<string, unknown>,
+  key: string
+): { comments: ReviewComment[]; dropped: number } {
+  const v = params[key];
+  if (!Array.isArray(v)) return { comments: [], dropped: 0 };
+
+  const comments: ReviewComment[] = [];
+  let dropped = 0;
+
+  for (const raw of v) {
+    if (typeof raw !== "object" || raw === null) {
+      dropped++;
+      continue;
+    }
+    const o = raw as Record<string, unknown>;
+    const path = typeof o.path === "string" ? o.path.trim() : "";
+    const body = typeof o.body === "string" ? o.body.trim() : "";
+    const line = typeof o.line === "number" ? o.line : NaN;
+
+    // path and body must be non-empty; line must be a positive integer.
+    if (!path || !body || !Number.isInteger(line) || line < 1) {
+      dropped++;
+      continue;
+    }
+
+    const comment: ReviewComment = { path, body, line };
+
+    if (o.side === "LEFT" || o.side === "RIGHT") {
+      comment.side = o.side;
+    }
+    // A multi-line anchor must start at or before the end line.
+    if (
+      typeof o.start_line === "number" &&
+      Number.isInteger(o.start_line) &&
+      o.start_line >= 1 &&
+      o.start_line <= line
+    ) {
+      comment.start_line = o.start_line;
+    }
+
+    comments.push(comment);
+  }
+
+  return { comments, dropped };
+}
+
 // ── MCP server ────────────────────────────────────────────────────────────────
 
 const server = new Server(
@@ -256,6 +324,46 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           body: {
             type: "string",
             description: "Review comment body",
+          },
+          comments: {
+            type: "array",
+            description:
+              "Optional inline review comments anchored to lines of the PR " +
+              "diff. Each anchor MUST reference a line present in the diff, " +
+              "or GitHub rejects the entire review (422). Use a ```suggestion " +
+              "block in `body` to offer a one-click applicable fix.",
+            items: {
+              type: "object",
+              properties: {
+                path: {
+                  type: "string",
+                  description: "File path, relative to the repo root",
+                },
+                body: {
+                  type: "string",
+                  description:
+                    "Comment text; may contain a ```suggestion fenced block",
+                },
+                line: {
+                  type: "number",
+                  description:
+                    "Line number in the file (not a diff position). For a " +
+                    "multi-line anchor this is the END line.",
+                },
+                side: {
+                  type: "string",
+                  enum: ["LEFT", "RIGHT"],
+                  description:
+                    "LEFT = pre-image (deleted/context), RIGHT = post-image " +
+                    "(added/context). Defaults to RIGHT.",
+                },
+                start_line: {
+                  type: "number",
+                  description: "First line of a multi-line anchor",
+                },
+              },
+              required: ["path", "body", "line"],
+            },
           },
         },
         required: ["owner", "repo", "pull_number", "event"],
@@ -506,15 +614,51 @@ async function dispatch(
         | "REQUEST_CHANGES"
         | "COMMENT";
       const body = optString(p, "body");
+      const { comments, dropped } = parseReviewComments(p, "comments");
       const oct = octokit(owner, repo);
-      const { data } = await oct.rest.pulls.createReview({
+
+      const base = {
         owner,
         repo,
         pull_number,
         event,
         body: body || undefined,
-      });
-      return { id: data.id, state: data.state };
+      };
+
+      if (comments.length === 0) {
+        const { data } = await oct.rest.pulls.createReview(base);
+        return { id: data.id, state: data.state, inline_comments: 0, dropped };
+      }
+
+      // GitHub rejects the ENTIRE review with 422 when any anchor falls outside
+      // the diff — and callers often cannot know that ahead of time (a lens
+      // agent reviewing a diff without a checkout is inferring line numbers).
+      // Degrade to a body-only review rather than losing the review outright,
+      // and report which path was taken so a silent fallback is distinguishable
+      // from a successful inline review.
+      try {
+        const { data } = await oct.rest.pulls.createReview({
+          ...base,
+          comments,
+        });
+        return {
+          id: data.id,
+          state: data.state,
+          inline_comments: comments.length,
+          dropped,
+        };
+      } catch (err) {
+        const status = (err as { status?: number })?.status;
+        if (status !== 422) throw err;
+        const { data } = await oct.rest.pulls.createReview(base);
+        return {
+          id: data.id,
+          state: data.state,
+          inline_comments: 0,
+          dropped,
+          degraded: "inline anchors rejected by GitHub (422); posted body-only",
+        };
+      }
     }
 
     case "merge_pr": {

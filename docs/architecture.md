@@ -71,6 +71,18 @@ Each agent's configuration is a Neotoma `agent_definition` entity:
 
 Daemons load their own `agent_definition` at spawn time via the Neotoma API. No config files.
 
+### tool_allowlist bash-command grant grammar
+
+A `tool_allowlist` entry that scopes a bash command to a specific subcommand MUST use the CLI-native `Bash(<command>:*)` form. The undocumented `bash:<command>` prefix is **silently dropped** by Claude Code's `--allowedTools` parser — no error, no warning surfaced to the operator, the grant simply never reaches the effective allowlist (see [ateles#255](https://github.com/markmhendrickson/ateles/issues/255)).
+
+- ✅ `Bash(gh pr:*)` — grants the `gh pr` subcommand family
+- ✅ `Bash(git:*)` — grants all `git` subcommands
+- ✅ `Bash(scripts/generate_cover_image.py:*)` — grants a specific script
+- ❌ `bash:gh pr*` — silently dropped; the agent never actually gets this grant
+- ❌ `bash:git*` — same defect
+
+`scripts/linters/validate_tool_allowlist.py` (wired into `scripts/lint.sh` and the `agent-config-validation` CI workflow) fails the build if a `bash:` prefix reappears in any `agent_definition.tool_allowlist`. Edit the Neotoma entity via `correct()`, then regenerate the `docs/agents/*.md` / `.claude/skills/*/SKILL.md` mirrors with `execution/scripts/render_agent_docs.py` — never hand-edit the mirrored `.md` files.
+
 ### AAuth identity and capability grants
 Each daemon has a per-role AAuth keypair (`sub = <name>@ateles-swarm`). All Neotoma observations carry agent attribution. Capabilities are enforced at the data layer via `agent_grant` entities — Menura cannot write private entities regardless of what code it runs.
 
