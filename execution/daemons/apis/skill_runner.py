@@ -832,19 +832,14 @@ async def run_skill(
     except Exception as exc:
         log.debug(f"[apis] start harness_event write failed (non-fatal): {exc}")
 
-    subprocess_env = {**os.environ, **(env_extra or {})}
+    # claude_subprocess_env() builds the base env and prefers the operator's
+    # Claude subscription over metered API credits: when CLAUDE_CODE_OAUTH_TOKEN
+    # is present it drops ANTHROPIC_API_KEY so the subscription token is used
+    # (both set → API key wins → metered billing, the failure that exhausted
+    # the panel balance). No-op when the token is absent (graceful fallback).
+    from lib.daemon_runtime import claude_subprocess_env
 
-    # Anthropic auth for the spawned `claude --print`: prefer the operator's
-    # Claude subscription (Max plan) over metered pay-as-you-go API credits.
-    # `claude setup-token` mints a long-lived subscription token exposed as
-    # CLAUDE_CODE_OAUTH_TOKEN; when it is present we hand it to the child and
-    # REMOVE ANTHROPIC_API_KEY from the child's env — if both are set the API
-    # key wins and the child bills metered credits (the exact failure that
-    # exhausted the panel's balance). When the OAuth token is absent we leave
-    # ANTHROPIC_API_KEY in place (graceful fallback — child still authenticates,
-    # just on metered credits), so this is a no-op until the token is provisioned.
-    if subprocess_env.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
-        subprocess_env.pop("ANTHROPIC_API_KEY", None)
+    subprocess_env = claude_subprocess_env(env_extra)
 
     # ateles#109 — per-agent GitHub identity: when the caller resolved a
     # per-agent token (e.g. via _token_for_agent_on_repo in swarm_dispatch),

@@ -345,7 +345,11 @@ async def _spawn_claude_skill(
         f"timeout={DISPATCH_TIMEOUT_SECONDS}s entity={entity_id}"
     )
 
-    subprocess_env = {**os.environ, "ATELES_PARTICIPATION_REF": entity_id}
+    # Prefer the operator's Claude subscription over metered API credits
+    # (drops ANTHROPIC_API_KEY when CLAUDE_CODE_OAUTH_TOKEN is set).
+    from lib.daemon_runtime import claude_subprocess_env
+
+    subprocess_env = claude_subprocess_env({"ATELES_PARTICIPATION_REF": entity_id})
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,

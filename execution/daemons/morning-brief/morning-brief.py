@@ -214,6 +214,8 @@ def build_ateles_digest(briefs: list[dict]) -> str:
     """
     import shutil
 
+    from lib.daemon_runtime import claude_subprocess_env
+
     claude = shutil.which("claude")
     soul_path = PROJECT_ROOT / ".claude" / "skills" / "ateles" / "SKILL.md"
 
@@ -255,7 +257,7 @@ Output only the Telegram message text. Nothing else."""
             capture_output=True,
             text=True,
             timeout=120,
-            env=os.environ,
+            env=claude_subprocess_env(),
         )
         text = result.stdout.strip()
         if text:
