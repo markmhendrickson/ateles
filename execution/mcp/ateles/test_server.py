@@ -691,12 +691,13 @@ class TestToolSchemas(unittest.TestCase):
 
     def test_route_task_requires_description(self):
         rt = next(t for t in srv.TOOLS if t.name == "route_task")
-        self.assertIn("task_description", rt.inputSchema["required"])
+        self.assertIn("task_description", rt.model_dump(by_alias=True)["inputSchema"]["required"])
 
     def test_resolve_checkpoint_requires_both_params(self):
         rc = next(t for t in srv.TOOLS if t.name == "resolve_checkpoint")
-        self.assertIn("checkpoint_id", rc.inputSchema["required"])
-        self.assertIn("action", rc.inputSchema["required"])
+        schema = rc.model_dump(by_alias=True)["inputSchema"]
+        self.assertIn("checkpoint_id", schema["required"])
+        self.assertIn("action", schema["required"])
 
     def test_all_handlers_registered(self):
         for tool in srv.TOOLS:
