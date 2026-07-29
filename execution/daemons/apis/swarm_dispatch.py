@@ -1177,12 +1177,19 @@ class SwarmDispatcher:
     # already uses precisely because it "survives daemon restarts". It needs no
     # Neotoma round-trip, which matters: Neotoma was returning 530s during the
     # very outage window this fix addresses.
-    _PIPELINE_INFLIGHT_MARKER = "<!-- apis-pipeline-inflight:{started_at} -->"
+    # ateles#323: the marker now carries a `stage` so a restart between the
+    # QUEUED log line and semaphore acquisition (previously unrecorded — see
+    # _handle_issue_opened) is still durable and visible to the resume sweep.
+    # `stage` defaults to "inflight" in the regex so markers written by an
+    # older daemon build (no stage suffix) still round-trip as before.
+    _PIPELINE_INFLIGHT_MARKER = (
+        "<!-- apis-pipeline-inflight:{started_at}:{stage} -->"
+    )
     # datetime.isoformat() emits "+00:00" (not "Z"), so the timestamp group must
     # accept "+"/":" — a regex that only allowed "Z" would write markers it could
     # never match back, silently breaking both the clear and the resume sweep.
     _PIPELINE_INFLIGHT_RE = re.compile(
-        r"<!-- apis-pipeline-inflight:([0-9T:.+\-]+Z?) -->"
+        r"<!-- apis-pipeline-inflight:([0-9T:.+\-]+Z?)(?::(queued|inflight))? -->"
     )
 
     async def _handle_issue_opened(self, trigger: SwarmTrigger) -> None:
@@ -1191,9 +1198,12 @@ class SwarmDispatcher:
         Concurrency-safe: acquires the bounded issue-pipeline semaphore so a
         burst of issue.opened events cannot stampede the daemon.
 
-        Restart-safe: records an in-flight marker before the first agent spawn
-        and clears it on completion, so a restart mid-pipeline leaves a durable
-        trace the startup sweep can resume (ateles#230 follow-up).
+        Restart-safe: records a "queued" marker BEFORE the semaphore is even
+        attempted, transitions it to "inflight" once acquired, and clears it on
+        completion — so a restart at ANY point (parked on the semaphore, or
+        mid-run) leaves a durable trace the startup sweep can resume
+        (ateles#230 follow-up; ateles#323 closed the gap where a restart while
+        merely queued left no marker at all).
 
         Queue-visible: when the single-slot pipeline semaphore is already held,
         the acquire below can block for many minutes with no signal, so the
@@ -1210,6 +1220,15 @@ class SwarmDispatcher:
                 "the issue-pipeline slot (another pipeline is running)"
             )
             _queued_at = datetime.now(timezone.utc)
+            # ateles#323: mark the pipeline BEFORE the semaphore is acquired,
+            # in the SAME branch that already detects queuing. A restart while
+            # parked here previously left NO durable trace at all, since the
+            # only marker write happened after acquisition; the resume sweep
+            # therefore never saw a queued-but-never-started pipeline. Gated
+            # on the existing `sem.locked()` branch (not written
+            # unconditionally) so the uncontended common case still pays for
+            # exactly one marker write, same as before this fix.
+            await self._mark_pipeline_inflight(trigger, stage="queued")
         else:
             _queued_at = None
         async with sem:
@@ -1219,7 +1238,7 @@ class SwarmDispatcher:
                     f"[{DAEMON_NAME}] issue pipeline for {ref} STARTED — "
                     f"acquired the issue-pipeline slot after {waited_s:.1f}s queued"
                 )
-            await self._mark_pipeline_inflight(trigger)
+            await self._mark_pipeline_inflight(trigger, stage="inflight")
             try:
                 await self._run_issue_spec_pipeline(trigger)
             finally:
@@ -1228,11 +1247,15 @@ class SwarmDispatcher:
                 # and must not be resurrected by the sweep on every boot.
                 await self._clear_pipeline_inflight(trigger)
 
-    async def _mark_pipeline_inflight(self, trigger: SwarmTrigger) -> None:
-        """Post the hidden in-flight marker. Best-effort: a marker we cannot
-        write only costs resumability, so it must never block the pipeline."""
+    async def _mark_pipeline_inflight(
+        self, trigger: SwarmTrigger, *, stage: str = "inflight"
+    ) -> None:
+        """Post the hidden pipeline marker at the given stage ("queued" before
+        the semaphore is acquired, "inflight" once inside it). Best-effort: a
+        marker we cannot write only costs resumability, so it must never block
+        the pipeline."""
         marker = self._PIPELINE_INFLIGHT_MARKER.format(
-            started_at=datetime.now(timezone.utc).isoformat()
+            started_at=datetime.now(timezone.utc).isoformat(), stage=stage
         )
         try:
             async with httpx.AsyncClient(timeout=30) as client:
@@ -1280,9 +1303,12 @@ class SwarmDispatcher:
         """Resume issue pipelines left in flight by a daemon restart.
 
         Called once at startup. Searches each repo for open issues carrying the
-        hidden in-flight marker — the signature of a pipeline that began but
-        never finished, because only a restart can prevent the `finally` that
-        clears it — and re-runs each one.
+        hidden pipeline marker — in either the "queued" stage (parked on the
+        issue-pipeline semaphore when the daemon died, ateles#323) or the
+        "inflight" stage (a lens agent was mid-run) — and re-runs each one
+        through the same `issue_opened` entry point a fresh trigger would use,
+        so a resumed "queued" issue goes through triage exactly as normal
+        rather than a special-cased resume path.
 
         Bounded and fail-open by construction:
           * only OPEN issues with the marker are candidates (a closed issue's
@@ -1294,9 +1320,22 @@ class SwarmDispatcher:
           * every failure path logs and returns — a broken resume must never
             stop the daemon from booting.
 
+        Stall guard (ateles#323): after a resumed pipeline runs, we verify it
+        advanced past triage by checking whether the issue's `updated_at`
+        moved past the moment the resume began — `_mirror_spec_to_issue`
+        PATCHes the issue body on every section including the first, so any
+        real progress bumps this. (Checking for mere PRESENCE of the
+        spec-mirror marker would be wrong: it is spliced in and never
+        removed, so it would already be there from any prior completed run on
+        the same issue, regardless of whether THIS resume made any progress.)
+        A resume that completes without the issue being touched again is NOT
+        silently re-queued for next boot — it is logged at error level and
+        escalated to the operator, since a repeat failure on every restart
+        would otherwise be invisible.
+
         Returns a summary dict for logging/tests.
         """
-        summary = {"scanned": 0, "resumed": 0, "failed": 0}
+        summary = {"scanned": 0, "resumed": 0, "failed": 0, "stalled": 0}
         for repository in repositories:
             try:
                 issues = await self._issues_with_inflight_marker(repository)
@@ -1309,8 +1348,9 @@ class SwarmDispatcher:
             summary["scanned"] += len(issues)
             for issue in issues:
                 ref = f"{repository}#{issue.get('number')}"
+                stage = issue.get("_marker_stage", "inflight")
                 log.info(
-                    f"[{DAEMON_NAME}] resume sweep: {ref} has an in-flight "
+                    f"[{DAEMON_NAME}] resume sweep: {ref} has a '{stage}' "
                     "pipeline marker — the daemon restarted mid-run; re-running"
                 )
                 self.notifier.send(
@@ -1319,6 +1359,7 @@ class SwarmDispatcher:
                     priority=Priority.INFO,
                     handler=DAEMON_NAME,
                 )
+                resume_started_at = datetime.now(timezone.utc)
                 try:
                     await self._handle_issue_opened(
                         SwarmTrigger(
@@ -1339,6 +1380,25 @@ class SwarmDispatcher:
                         )
                     )
                     summary["resumed"] += 1
+                    if not await self._pipeline_advanced_past_triage(
+                        repository, issue.get("number", 0), resume_started_at
+                    ):
+                        summary["stalled"] += 1
+                        log.error(
+                            f"[{DAEMON_NAME}] resume sweep: {ref} resumed but "
+                            "never advanced past triage (the issue was not "
+                            "touched again after the resume began) — this "
+                            "will repeat on every restart; escalating instead "
+                            "of re-queuing"
+                        )
+                        self.notifier.send(
+                            f"Resumed issue pipeline on {ref} completed without "
+                            "advancing past triage — needs manual investigation "
+                            "(the pipeline may be stuck in a way that survives "
+                            "restart).",
+                            priority=Priority.OPERATOR_DECISION,
+                            handler=DAEMON_NAME,
+                        )
                 except Exception as exc:
                     summary["failed"] += 1
                     log.error(
@@ -1349,6 +1409,45 @@ class SwarmDispatcher:
         if summary["scanned"]:
             log.info(f"[{DAEMON_NAME}] resume sweep: {summary}")
         return summary
+
+    async def _pipeline_advanced_past_triage(
+        self, repository: str, number: int, resume_started_at: datetime
+    ) -> bool:
+        """True if the issue was updated AFTER `resume_started_at` — i.e. the
+        resumed pipeline actually touched the issue again (the spec mirror
+        PATCHes the issue body on every section, including the first, which
+        bumps GitHub's `updated_at`).
+
+        Checking for the mere PRESENCE of the spec-mirror marker
+        (`SPEC_MARKER_START`) would be wrong: `_mirror_spec_to_issue` splices
+        into a managed region it never deletes, so that marker is permanent
+        on any issue that ever completed a single mirror in ANY prior run —
+        it would read as "advanced" even when the CURRENT resumed run stalled
+        immediately. Comparing `updated_at` against the moment this resume
+        began is what actually detects "did this resume make an observable
+        step" rather than "did some run, ever, make one."
+
+        Fails OPEN (True) on a fetch/parse error: a stall guard that can't
+        check must not itself manufacture a false escalation.
+        """
+        fields = await self._fetch_issue_fields(repository, number)
+        if fields is None:
+            log.warning(
+                f"[{DAEMON_NAME}] resume sweep: could not verify triage "
+                f"progress for {repository}#{number} (fetch failed) — "
+                "assuming OK"
+            )
+            return True
+        updated_at = fields.get("updated_at")
+        if not updated_at:
+            return True
+        try:
+            updated_dt = datetime.strptime(
+                updated_at, "%Y-%m-%dT%H:%M:%SZ"
+            ).replace(tzinfo=timezone.utc)
+        except ValueError:
+            return True
+        return updated_dt > resume_started_at
 
     async def resume_deferred_reviews(self, repositories: list[str]) -> dict:
         """Re-run PR reviews that were deferred by a usage limit and have matured.
@@ -1477,7 +1576,11 @@ class SwarmDispatcher:
         return result
 
     async def _issues_with_inflight_marker(self, repository: str) -> list[dict]:
-        """Open issues in `repository` carrying the in-flight pipeline marker."""
+        """Open issues in `repository` carrying a pipeline marker, in either
+        the "queued" or "inflight" stage (ateles#323). Each returned issue dict
+        carries an extra `_marker_stage` key set to the LATEST marker's stage
+        (a restart between the queued write and the inflight transition can
+        briefly leave both markers on the issue; the later comment wins)."""
         out: list[dict] = []
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(
@@ -1497,10 +1600,15 @@ class SwarmDispatcher:
                     headers=self._github_headers(repository),
                 )
                 comments.raise_for_status()
-                if any(
-                    self._PIPELINE_INFLIGHT_RE.search(c.get("body", ""))
-                    for c in comments.json()
-                ):
+                stage = None
+                for c in comments.json():
+                    m = self._PIPELINE_INFLIGHT_RE.search(c.get("body", ""))
+                    if m:
+                        # Absent stage group == a marker from an older daemon
+                        # build; treat it as "inflight" (today's behavior).
+                        stage = m.group(2) or "inflight"
+                if stage is not None:
+                    issue["_marker_stage"] = stage
                     out.append(issue)
         return out
 
