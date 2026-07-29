@@ -154,7 +154,7 @@ def move_audio_file_to_imports(audio_file: Path, destination_dir: Path) -> Path:
 
 
 def _neotoma_prod_base_url() -> str:
-    return os.environ.get("NEOTOMA_PROD_BASE_URL", "http://localhost:3180")
+    return os.environ.get("NEOTOMA_PROD_BASE_URL", "http://localhost:9180")
 
 
 def already_imported(original_filename: str) -> bool:

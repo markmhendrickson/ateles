@@ -1,6 +1,6 @@
 ---
 name: analyze-meeting
-description: "General-purpose meeting analysis. Reads a transcript (file path, transcription entity, or pasted text), extracts a structured analysis (summary, decisions, action items, open questions), persists records to Neotoma (meeting_analysis, task, recap_message, proposed_github_issue), drafts recap messages per participant (email via Gmail when address is known, otherwise generic message text), looks up the corresponding Google Calendar event by recording time to resolve participant emails and store a linked calendar_event entity, and (opt-in) opens public follow-up issues in relevant repos with PII scrubbed. Designed to be auto-invoked by /record_meeting on stop, but also runs standalone."
+description: "General-purpose meeting analysis. Reads a transcript (file path, transcription entity, or pasted text), extracts a structured analysis (summary, decisions, action items, open questions), persists records to Neotoma (meeting_analysis, task, recap_message, proposed_github_issue), looks up the corresponding Google Calendar event by recording time to resolve participant emails and store a linked calendar_event entity, (opt-in via --recap) drafts recap messages per participant (email via Gmail when address is known, otherwise generic message text), and (opt-in) opens public follow-up issues in relevant repos with PII scrubbed. Recap drafting is off by default; without --recap no recap_message is created and no Gmail draft is staged. Designed to be auto-invoked by /record_meeting on stop, but also runs standalone."
 triggers:
   - analyze meeting
   - analyze this meeting
@@ -13,7 +13,7 @@ entity_id: ent_c6077840664ee87ae30b7922
 
 # Analyze Meeting
 
-Produce a structured, actionable analysis of a meeting transcript and stage all follow-ups (Neotoma tasks, drafted recap emails, proposed public issues). Complement to [`analyze-neotoma-feedback`](../analyze-neotoma-feedback/SKILL.md): that skill is Neotoma-customer-development-specific; this one handles any meeting type and focuses on follow-through rather than positioning analysis.
+Produce a structured, actionable analysis of a meeting transcript and stage all follow-ups (Neotoma tasks, proposed public issues). Recap messages are drafted only on request (see Step 5). Complement to [`analyze-neotoma-feedback`](../analyze-neotoma-feedback/SKILL.md): that skill is Neotoma-customer-development-specific; this one handles any meeting type and focuses on follow-through rather than positioning analysis.
 
 When both skills fire on the same transcript (typical for a Neotoma evaluator call), this skill produces the operational follow-up; `analyze-neotoma-feedback` produces the customer-development analysis. They do not duplicate each other — they are linked via shared `transcription` and `contact` entities.
 
@@ -28,7 +28,7 @@ When both skills fire on the same transcript (typical for a Neotoma evaluator ca
 ```
 /analyze-meeting <source>
 /analyze-meeting <source> --open-issues          # open real GH issues instead of staging drafts
-/analyze-meeting <source> --no-email             # skip Gmail draft staging
+/analyze-meeting <source> --recap                # ALSO draft recap messages per participant (off by default)
 /analyze-meeting <source> --participants "Alice <alice@x>, Bob <bob@y>"
 ```
 
@@ -39,7 +39,7 @@ When both skills fire on the same transcript (typical for a Neotoma evaluator ca
 
 Flags:
 - `--open-issues` — actually open public issues in relevant repos via the GitHub MCP. Default is **off**: issues are staged as `proposed_github_issue` entities in Neotoma and written to the local report only. Same effect as setting `MEETING_ANALYSIS_OPEN_GH_ISSUES=1` in env.
-- `--no-recap` — skip all recap drafting (neither email nor generic message). `recap_message` entities still go to Neotoma.
+- `--recap` — draft recap messages per participant (email when address is known, otherwise generic message text). Default is **off**: no recap is drafted and no Gmail draft is staged. Same effect as setting `MEETING_ANALYSIS_RECAP=1` in env. Without this flag, Step 5 and Step 8 are skipped entirely and no `recap_message` entities are created.
 - `--participants` — comma-separated `Name <email>` overrides when speaker labels in the transcript are unreliable (diarization missed names, etc.).
 
 ## Step 1: Resolve source + identify participants
@@ -69,6 +69,14 @@ Flags:
    - `other` — anything else; explain.
 
 If classification is ambiguous, pick the most defensible and explain in the report. Do not refuse.
+
+6. **Resolve the meeting's SUBSTANTIVE entities against Neotoma (required — run before Step 2 composition):** a transcript's real subject is rarely in the invoking text ("transcribe and analyze"); it is in the *content*. Before composing any analysis, extract the substantive entities the meeting is *about* — not just its participants — and look each up in Neotoma so the analysis is written against existing memory, not from scratch. For each of these that appears in the transcript, run `retrieve_entity_by_identifier` (concrete names) or `retrieve_entities` (topical search):
+   - **Organizations / vendors / builders / counterparties** named or alluded to (e.g. a contractor, a company, a firm).
+   - **Ongoing disputes, claims, projects, or matters** the meeting advances (search by topic + any proper noun: property address, product, matter name).
+   - **Properties, assets, or locations** central to the discussion.
+   - **Prior meetings / transcriptions / dispute_notes / plans** on the same matter (topical search), so this analysis links into an existing thread instead of forking a parallel one.
+
+   Use the matches to (a) reuse existing entity_ids and link into them via `REFERS_TO`, (b) name entities correctly instead of as generic stand-ins ("the builder" → the actual org), and (c) reconcile your findings against what memory already records (open questions already owned, prescriptions/deadlines already tracked, commitments already logged). **Do NOT treat the source-file dedup lookup (Step 1.2) or participant resolution (Step 1.3) as satisfying this step — those find the recording and the people, not the matter.** If nothing matches, note it and proceed; but the lookup is not optional.
 
 ## Step 2: Extract structured analysis
 
@@ -135,9 +143,11 @@ For each proposed issue capture:
 
 When the signal from Step 2 #7 points clearly to Neotoma, route there; otherwise default to `ateles`. Do not create issues for repos outside this list — note them in the report as `_Out-of-scope repo mentioned: <name> — no issue staged._`.
 
-## Step 5: Draft recap messages
+## Step 5: Draft recap messages (opt-in — only when `--recap` / `MEETING_ANALYSIS_RECAP=1`)
 
-For each external participant, produce one recap. The format depends on whether their email address is known:
+**Skipped by default.** Recap messages are NOT drafted unless the user explicitly opts in with the `--recap` flag or `MEETING_ANALYSIS_RECAP=1` in env. When neither is set, skip this entire step: create no `recap_message` entities, stage no Gmail draft, and render `## Recap messages` in the report as `_Not drafted (pass --recap to draft)._`. If the user later asks for a recap, re-run with `--recap` or draft on request.
+
+When `--recap` is active, for each external participant produce one recap. The format depends on whether their email address is known:
 
 **When email is known** (resolved from Neotoma `contact`, transcript, or Google Calendar in Step 1):
 - Draft a **recap email** with:
@@ -160,8 +170,6 @@ In both cases, group participants from the same organization into a single recap
 Tone matches the meeting tone: warm and direct, no corporate filler. Never invent commitments. Frame tentative items as `Happy to look at X next week if useful`.
 
 Each recap is stored in Neotoma as a `recap_message` entity (not `email_draft`) with fields: `to_name`, `to_email` (or null), `format` (`email` | `message`), `subject` (email only), `body`, `participant_contact_entity_id`, `delivery_channel` (`gmail` | `message`), `delivery_status` (`staged` | `failed:<reason>` | `pending_manual_send`), `gmail_draft_id` (when staged).
-
-Skip all recap drafting when `--no-recap` is passed or `MEETING_ANALYSIS_RECAP=0` is set.
 
 ## Step 6: Write the report
 
@@ -232,6 +240,8 @@ One entry per proposed issue. If none warranted, render `_None._`.
 
 ## Recap messages
 
+Rendered only when `--recap` was passed. Otherwise render `_Not drafted (pass --recap to draft)._`.
+
 One block per participant (or participant group).
 
 - **To:** Name <email or _no email — send via message_> — format: email | message
@@ -263,7 +273,7 @@ Before storing, call `list_entity_types` with keywords `meeting`, `task`, `recap
 
 - `meeting_analysis` (this skill's primary output)
 - `task` (Mark-internal action items)
-- `recap_message` (drafted recap messages — email or generic)
+- `recap_message` (drafted recap messages — only when `--recap`; email or generic)
 - `proposed_github_issue` (drafted public issues)
 - `calendar_event` (matched Google Calendar event)
 - `contact` (participants — reuse existing only; create stubs only when no match)
@@ -272,8 +282,9 @@ Before storing, call `list_entity_types` with keywords `meeting`, `task`, `recap
 
 - `transcription` by audio_file_path (when source is a file produced by `transcribe_audio.py`).
 - `contact` / `person` for each participant by name and email.
+- The **substantive matter entities** resolved in Step 1.6 (org/vendor/counterparty, dispute/claim/project, property/asset, prior meetings/dispute_notes/plans on the same matter) — reuse their entity_ids and `REFERS_TO`-link the `meeting_analysis` into them so the analysis joins the existing thread rather than forking a duplicate.
 - `calendar_event` by `calendar_event_id` (when a match was found in Step 1) — reuse if already stored.
-- Existing open `task` entities for the same repo/topic — to avoid duplicates.
+- Existing open `task` entities for the same repo/topic — to avoid duplicates (including any already-owned follow-up on the matter surfaced in Step 1.6, so you don't create a parallel task).
 
 ### Store
 
@@ -300,7 +311,7 @@ Single `store` (combined entities + relationships) call when batchable. Entities
    - `pii_inventory` (object with `names`, `emails`, `other`)
    - `data_source` (e.g. `analyze-meeting.skill {timestamp} source=<path>`)
 4. One `task` per Mark action item, with `description`, `due_date`, `status: open`, `source: meeting_analysis`, and a `REFERS_TO` edge to the `meeting_analysis`.
-5. One `recap_message` per participant (or group), with `to_name`, `to_email` (or null), `format` (`email` | `message`), `subject` (email only), `body`, `participant_contact_entity_id`, `delivery_channel` (`gmail` | `message`), `delivery_status` (`staged` | `failed:<reason>` | `pending_manual_send`), `gmail_draft_id` (when staged).
+5. One `recap_message` per participant (or group) — **only when `--recap` was passed** (otherwise create none), with `to_name`, `to_email` (or null), `format` (`email` | `message`), `subject` (email only), `body`, `participant_contact_entity_id`, `delivery_channel` (`gmail` | `message`), `delivery_status` (`staged` | `failed:<reason>` | `pending_manual_send`), `gmail_draft_id` (when staged).
 6. One `proposed_github_issue` per drafted issue, with `repo`, `title`, `labels` (array), `body_scrubbed`, `confidence`, `backed_by_quote` (verbatim — private), `opened_url` (null until Step 9 runs).
 7. `calendar_event` — store when a match was found (fields: `title`, `start_time`, `end_time`, `attendees`, `calendar_event_id`). Skip if already retrieved.
 8. `contact` — create stubs only for participants with no existing match; reuse retrieved entity_ids otherwise.
@@ -317,7 +328,7 @@ Batch via `relationships` in the same `store` call where possible:
 - `REFERS_TO`: `meeting_analysis` → `calendar_event` (when matched).
 - `REFERS_TO`: `meeting_analysis` → each participant `contact`.
 - `REFERS_TO`: each `task` → `meeting_analysis` (and to the relevant `contact` when the task is owed to a specific person).
-- `REFERS_TO`: each `recap_message` → `meeting_analysis` + the recipient `contact` + the `transcription`.
+- `REFERS_TO`: each `recap_message` (when `--recap`) → `meeting_analysis` + the recipient `contact` + the `transcription`.
 - `REFERS_TO`: each `proposed_github_issue` → `meeting_analysis` (NOT to `contact` directly, to keep public-issue → person attribution one hop away).
 
 ### Idempotency
@@ -325,9 +336,11 @@ Batch via `relationships` in the same `store` call where possible:
 - Turn idempotency key: `conversation-{conversation_id}-{turn_id}-analyze-meeting-{timestamp_ms}`.
 - Per-meeting idempotency key for `meeting_analysis`: `meeting-<sha256(transcript_path or transcription_entity_id)[:12]>` — prevents duplicate analyses when re-run on the same transcript.
 
-## Step 8: Deliver recap messages
+## Step 8: Deliver recap messages (opt-in — only when `--recap`)
 
-For each `recap_message` not suppressed by `--no-recap`:
+**Skipped by default.** Runs only when Step 5 drafted recaps (i.e. `--recap` / `MEETING_ANALYSIS_RECAP=1`). When not opted in, there are no `recap_message` entities and this step is a no-op.
+
+For each `recap_message` produced in Step 5:
 
 **Email format** (`delivery_channel: gmail` — participant email is known):
 - Run `gws gmail draft create --to "<name> <email>" --subject "<subject>" --body "<body>"` (per the `Always use GWS CLI for Gmail` rule — never use the Gmail MCP directly).
@@ -350,10 +363,10 @@ When opt-in is active, for each `proposed_github_issue`:
 - Verify the target repo is in the allowlist (Step 4). Skip silently otherwise.
 - Re-verify the body has been scrubbed (no participant names, no emails, no internal URLs). If the body fails the scrub check, demote to task and log a warning.
 - Call the GitHub MCP `issue_write` (create) with `owner`, `repo`, `title`, `body`, `labels`. Capture the issue URL.
-- Update the `proposed_github_issue` entity's `opened_url` field and append the URL to the recap email body's `Issue links` section when the recipient is connected to that work item.
+- Update the `proposed_github_issue` entity's `opened_url` field. When `--recap` was also passed and a recap email is connected to that work item, append the URL to the recap email body's `Issue links` section.
 - On failure: leave `opened_url` null and record the error in `open_error`.
 
-When opt-in is **off**: issues stay as drafts. The recap email omits issue links (do not promise links that don't exist).
+When opt-in is **off**: issues stay as drafts. Any recap email (only present under `--recap`) omits issue links (do not promise links that don't exist).
 
 ## Step 10: Close the turn
 
@@ -364,27 +377,30 @@ After producing the user-visible reply, store the assistant `agent_message` per 
 Reply with:
 - One-line headline (e.g. `Meeting with Alice and Bob — 3 decisions, 4 of my action items, 2 issue drafts.`).
 - **My action items** as a short numbered list (max 5) with due dates.
-- **Recap messages** — one line per message: `→ <Name> — email: <staged|failed> | message: pending_manual_send`.
+- **Recap messages** — only when `--recap` was passed: one line per message: `→ <Name> — email: <staged|failed> | message: pending_manual_send`. When not opted in, state once: `Recap: not drafted (pass --recap to draft).`
 - **Proposed issues** — one line per issue: `<owner/repo>: <title> — <opened-URL | draft>`.
 - Absolute report path.
-- `meeting_analysis` entity id and a list of created `task` / `email_draft` / `proposed_github_issue` entity ids.
+- `meeting_analysis` entity id and a list of created `task` / `recap_message` (when `--recap`) / `proposed_github_issue` entity ids.
 
 Render the `Neotoma` section per the `[COMMUNICATION & DISPLAY]` display rule, listing created and retrieved entities.
 
 ## Behavior rules
 
 - **No invented commitments.** Every action item, decision, and quote MUST trace to specific transcript text. Paraphrase is labeled `paraphrase: …`. Never put words in a participant's mouth in the recap email or in a quoted block in the report.
+- **Recap is opt-in.** By default the skill drafts NO recap messages and stages NO Gmail draft. Recap drafting happens only when the user passes `--recap` (or sets `MEETING_ANALYSIS_RECAP=1`). Do not draft a recap "to be helpful" when it wasn't requested.
 - **PII scrubbing is non-negotiable for public issues.** A `proposed_github_issue` body that still contains a participant name, email, internal URL, or unverbalized internal project name is a bug — demote to task. Better to demote than to leak.
-- **Recap messages are never auto-sent.** Email recaps wait in Gmail Drafts for explicit user review. Generic message recaps are surfaced as copy-paste text only.
+- **Recap messages are never auto-sent.** When drafted (`--recap`), email recaps wait in Gmail Drafts for explicit user review. Generic message recaps are surfaced as copy-paste text only.
 - **Email only when address is known.** If a participant's email cannot be resolved from Neotoma, the transcript, or Google Calendar, always fall back to generic message format — never guess an address.
 - **Public issues opt-in.** Default is staging, not opening. The skill writes drafts and waits.
 - **Reuse contacts.** Never create duplicate `contact` entities for participants who already exist in Neotoma. Use `retrieve_entity_by_identifier` first.
 - **Stable shape.** Empty sections render as `_None._` in the report AND as empty arrays in the entity, so cross-meeting queries are reliable.
 - **Skip silently on empty / non-meeting transcripts.** Short solo voice memos and accidental recordings do not get analysis treatment. The auto-invoke from `/record_meeting` checks for at least one of: ≥2 distinct speakers (when diarization present), ≥200 words, or at least one second-person pronoun followed by a verb of commitment. Otherwise: silent skip.
-- **No claims about side effects you didn't perform.** If Gmail staging failed, say so. If issues were not opened (default), say `drafted` not `opened`. The summary line matches reality.
+- **No claims about side effects you didn't perform.** If Gmail staging failed, say so. If issues were not opened (default), say `drafted` not `opened`. If recap wasn't requested, say `not drafted` — never imply a recap exists. The summary line matches reality.
+- **Retrieve the matter, not just the recording.** Composing a meeting analysis before resolving the meeting's substantive entities (Step 1.6 — the org/counterparty, the dispute/claim/project, the property, prior meetings on the same matter) against Neotoma is forbidden. The source-file dedup and participant lookups do not satisfy this. Writing an analysis that invents generic stand-ins ("the builder", "a contractor") or forks a parallel task/claim when memory already holds the named entity and its tracked follow-ups is the failure this rule prevents.
 
 ## Out of scope
 
+- Drafting recap messages by default — recap is opt-in (`--recap`); without it, the skill produces analysis, tasks, and issue drafts only.
 - Sending the recap emails — handled by the user via Gmail review.
 - Closing the loop on action items — handled by other workflows (task completion, follow-up meetings).
 - Producing the customer-development analysis when the meeting is Neotoma feedback — handled by [`analyze-neotoma-feedback`](../analyze-neotoma-feedback/SKILL.md). Both skills run in parallel when the Neotoma heuristic in [`record_meeting`](../record_meeting/SKILL.md) fires; the two analyses cross-link via the shared `transcription` and `contact` entities.

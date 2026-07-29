@@ -22,6 +22,13 @@ The orchestration layer behind the GitHub webhook gateway (ateles#80):
                      blocking checkpoint_brief before merge (autonomy
                      guardrail)
 
+Mechanical state transitions are DISPATCHER-SIDE WRITES, not agent-prompt work
+(ateles#285). A deterministic mutation with no judgement in it — the
+`/confirm-gates-clear` gate waive being the canonical case — is performed
+directly by the dispatcher and then VERIFIED by re-reading the entity, because
+an LLM turn asked to persist a mechanical mutation can silently no-op or
+partially apply (and did, three times, on ateles#241). See `gate_waive.py`.
+
 Autonomy guardrail (ateles#80): read-only gates run unattended — they only
 write Neotoma metadata and GitHub comments, both reversible. Side-effecting
 steps stay operator-gated by default: Vanellus reviews and aggregates but
@@ -88,12 +95,18 @@ import logging
 import os
 import re
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
+from gate_waive import (
+    IssueGateStore,
+    WaiveOutcome,
+    format_waive_comment,
+)
 from github_gateway import SwarmTrigger
 from issue_spec import (
     SECTIONS,
@@ -123,6 +136,12 @@ DAEMON_NAME = "apis"
 
 _PARENT_ISSUE = re.compile(r"\b(?:closes|fixes|resolves)\s+#(\d+)", re.I)
 _GATE_VERDICT = re.compile(r"GATE_INHERITANCE:\s*(clear|blocked)", re.I)
+
+# ateles#232 QA finding: `reopened` (github_gateway.py maps it to kind
+# "pr_reopened", distinct from "pr_synchronize") re-enters the pipeline the
+# same way a re-push does, so it must be eligible for the same auto-re-review
+# treatment as a synchronize push against a gate-blocked PR.
+_AUTO_REREVIEW_TRIGGER_KINDS = ("pr_synchronize", "pr_reopened")
 
 # Product-code path classifier (ateles: harden pipeline-bypass detection).
 # A PR that touches these paths is a product change that SHOULD originate from a
@@ -233,7 +252,14 @@ def parse_approve_token(text: str) -> tuple[str, int] | None:
 
 # Pre-impl gates that must be signed off before the PR review panel runs.
 # These are the gates Lanius checks for GATE_INHERITANCE.
-PRE_IMPL_GATES = ("pm", "arch")
+#
+# ateles#285: `ux` was MISSING from this tuple even though the Lanius skill,
+# the workflow phase table (Phase 2 = Accipiter `ux` + Bombycilla `arch`), and
+# _lanius_pr_prompt ("If pm/ux/arch are all satisfied there …") all treat it as
+# a pre-impl gate. That omission is the mechanical cause of the 2026-07-23
+# PARTIAL waive on ateles#241: the sweep waived `arch`, left `ux` pending, and
+# PR gate inheritance kept blocking on a gate the operator believed cleared.
+PRE_IMPL_GATES = ("pm", "ux", "arch")
 
 # Operator GitHub login — only this login may waive gates via the comment
 # command.  Defaults to the repo owner; override with APIS_OPERATOR_LOGIN.
@@ -449,6 +475,21 @@ def parse_gate_verdict(stdout: str) -> str | None:
     return m.group(1).lower() if m else None
 
 
+# Lanius names the still-unsigned pre-impl gates on a `blocked` verdict, e.g.
+# `GATE_PENDING: arch,ux`. The dispatcher feeds these to select_panel so the
+# owning lenses are guaranteed a panel seat under the cap (ateles#230 gap: a
+# carried-over gate could never clear because its lens was never re-invoked).
+_GATE_PENDING = re.compile(r"GATE_PENDING:\s*([a-z0-9_,\s]+)", re.I)
+
+
+def parse_pending_gates(stdout: str) -> set[str]:
+    """Extract the gates Lanius reported as still-pending; empty when absent."""
+    m = _GATE_PENDING.search(stdout or "")
+    if not m:
+        return set()
+    return {g.strip().lower() for g in m.group(1).split(",") if g.strip()}
+
+
 # Vanellus / panelist verdict token (SWARM_GITHUB_CONTRACT, skill_runner.py):
 # a review comment carries exactly one of these bold verdict tokens.
 _REVIEW_VERDICT = re.compile(
@@ -478,6 +519,40 @@ def review_verdict_is_clear(verdict: str | None) -> bool:
     not merge-ready and blocking findings should route back for a fix.
     """
     return verdict in ("approve", "comment")
+
+
+# GitHub's Reviews API accepts exactly these three events.
+_REVIEW_EVENT_APPROVE = "APPROVE"
+_REVIEW_EVENT_REQUEST_CHANGES = "REQUEST_CHANGES"
+_REVIEW_EVENT_COMMENT = "COMMENT"
+
+
+def verdict_to_review_event(verdict: str | None) -> str:
+    """Map an aggregated panel verdict onto a native GitHub review event.
+
+    This is the load-bearing half of ateles#241: it turns a parsed-prose verdict
+    into a real review state that GitHub itself enforces (visible in the PR's
+    Reviews section and honoured by branch protection), instead of a verdict that
+    only the dispatcher can see.
+
+    Mapping — deliberately conservative in one direction only:
+      approve         -> APPROVE
+      request_changes -> REQUEST_CHANGES
+      comment         -> COMMENT
+      blocked         -> COMMENT   (blocking is expressed by routing findings
+                                    back for a fix, not by hard-blocking merge)
+      None            -> COMMENT   (unparseable: never escalate on a guess)
+
+    REQUEST_CHANGES is returned for EXACTLY ONE input. That asymmetry is the
+    point: escalating on a mis-parse would block a good PR under branch
+    protection, and de-escalating a real REQUEST_CHANGES would defeat the
+    feature. Everything ambiguous lands on the inert COMMENT.
+    """
+    if verdict == "approve":
+        return _REVIEW_EVENT_APPROVE
+    if verdict == "request_changes":
+        return _REVIEW_EVENT_REQUEST_CHANGES
+    return _REVIEW_EVENT_COMMENT
 
 
 # ── Per-agent GitHub account registry (#109) ─────────────────────────────────
@@ -570,6 +645,28 @@ def _token_for_agent_on_repo(agent: str, repo: str) -> str:
 # shared-checkout/daemon-fragility hazard).
 NEOTOMA_LOCAL_CHECKOUT = os.path.expanduser(
     os.environ.get("NEOTOMA_LOCAL_CHECKOUT", "~/neotoma-rc-src")
+)
+
+# Auto-release (push_main trigger): the only repo with a publishable release
+# pipeline. A merge to any other repo's main does not prepare a release.
+PHOENICURUS_RELEASE_REPO = os.environ.get(
+    "PHOENICURUS_RELEASE_REPO", "markmhendrickson/neotoma"
+)
+# The release repo's default branch. A check_suite:completed on this branch is
+# the signal that a merge's CI has settled — the retry that lets a push_main
+# deferred on in-progress/red CI finally prepare (prepare.py leaves the SHA lock
+# unstamped on those transient deferrals precisely so this retry can fire).
+PHOENICURUS_RELEASE_BRANCH = os.environ.get("PHOENICURUS_RELEASE_BRANCH", "main")
+# Cap on the synchronous half of prepare.py (preflight + spawning the detached
+# prepare agent). Generous: it shells out to git and `gh run list`.
+PHOENICURUS_PREPARE_TIMEOUT_S = int(
+    os.environ.get("PHOENICURUS_PREPARE_TIMEOUT_S", "300")
+)
+# Cap on publish.py invoked from an email approval. Publish is the whole
+# irreversible sequence (merge RC, tag, await npm, GitHub Release, deploys), so
+# this is generous — well above the npm-publish wait.
+PHOENICURUS_PUBLISH_TIMEOUT_S = int(
+    os.environ.get("PHOENICURUS_PUBLISH_TIMEOUT_S", "1800")
 )
 
 
@@ -793,6 +890,81 @@ _AUTH_FAILURE_SIGNATURES = (
 )
 
 
+# Signatures of a SESSION / USAGE-LIMIT failure — distinct from an auth failure.
+# A 401 needs the operator to re-auth (page + wait for a human). A usage limit
+# clears ON ITS OWN at a known reset time, so the right response is not "page and
+# stop" but "wait for the reset, then resume the same work automatically". These
+# are kept separate from _AUTH_FAILURE_SIGNATURES precisely because the
+# remediation differs: re-auth vs. auto-resume. ("credit balance is too low"
+# stays with auth — a metered-billing exhaustion needs an operator top-up, not a
+# timed retry.)
+_SESSION_LIMIT_SIGNATURES = (
+    "hit your session limit",
+    "you've hit your session limit",
+    "session limit reached",
+    "usage limit reached",
+    "you've reached your usage limit",
+    "rate limit",
+    "resets at",
+    "resets ",
+)
+
+
+def detect_session_limit(*texts: str) -> bool:
+    """True when a panelist/aggregation failed on a self-clearing usage limit.
+
+    Distinguished from :func:`detect_auth_failure` so the dispatcher can SCHEDULE
+    A RESUME after the reset window rather than page-and-stop: a session/usage
+    limit is transient and clears on its own, unlike an expired token."""
+    blob = " ".join(t for t in texts if t).lower()
+    # Require an explicit "limit" or "reset" cue, not just any of the softer
+    # substrings, to avoid misfiring on prose that merely mentions "rate".
+    if not any(sig in blob for sig in _SESSION_LIMIT_SIGNATURES):
+        return False
+    return "limit" in blob or "reset" in blob
+
+
+def parse_limit_reset_delay(*texts: str, now: "datetime | None" = None) -> int:
+    """Best-effort seconds until a usage limit resets, from the failure message.
+
+    Parses shapes like "resets 7:30pm", "resets at 19:30", "resets 7pm
+    (Europe/Madrid)". Returns a conservative default when no time is found, and
+    always at least a small floor so a mis-parse can't busy-loop. The clock is
+    injected for testability; timezone in the message is ignored.
+
+    TZ ASSUMPTION (Loxia #264 review): `now` defaults to naive `datetime.now()`,
+    so the "resume late, not early" guarantee holds only when the daemon's local
+    clock is at or behind the reset time's zone. The Apis daemon runs
+    `Europe/Madrid` (the plist sets TZ), which is the zone the Anthropic reset
+    messages quote, so this holds in practice. Even if it did not, the
+    still-limited re-defer path re-arms with a fresh reset, so an early resume
+    self-corrects rather than failing."""
+    import re
+
+    default = int(os.environ.get("APIS_LIMIT_RESET_DEFAULT_SECONDS", str(3 * 3600)))
+    floor = 300
+    blob = " ".join(t for t in texts if t).lower()
+    m = re.search(r"resets?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", blob)
+    if not m:
+        return default
+    now = now or datetime.now()
+    hour = int(m.group(1))
+    minute = int(m.group(2) or 0)
+    ampm = m.group(3)
+    if ampm == "pm" and hour < 12:
+        hour += 12
+    elif ampm == "am" and hour == 12:
+        hour = 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return default
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    delay = int((target - now).total_seconds())
+    # Pad past the reset boundary so we don't retry the instant it flips.
+    return max(floor, delay + 120)
+
+
 def detect_auth_failure(*texts: str) -> bool:
     """True when any text carries a Claude/Anthropic auth-failure signature.
 
@@ -810,7 +982,12 @@ def compose_auth_failure_comment(agent: str) -> str:
     than a bare 'could not post' that reads like the agent's verdict."""
     return (
         f"{_VANELLUS_COMMENT_MARKER}\n"
-        f"{attribution_header('vanellus', 'PR steward')}\n\n"
+        # Attribute to the dispatcher, not Vanellus: this is NOT a Vanellus
+        # verdict, and its own body + footer say so. A vanellus/PR-steward header
+        # on a "not a verdict" notice reads, at a skim, exactly like the verdict
+        # it is disclaiming — the same "looked like a verdict" bug this PR's
+        # deferral marker was written to avoid, at the header level (#264 ux).
+        f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
         f"⚠️ **Panel review unavailable — agent credential failure.** The `{agent}` "
         "panel agent (spawned as `claude --print` by the Apis dispatcher) could "
         "not authenticate to the Anthropic API (401). This is an infrastructure "
@@ -922,6 +1099,34 @@ class DispatchConfig:
     auto_address_findings: bool = (
         os.environ.get("ATELES_SWARM_AUTO_ADDRESS_FINDINGS", "0") == "1"
     )
+    # Auto re-review on push (ateles#230). When a PR's parent issue still has an
+    # open pre-impl gate, Lanius returns `blocked` and `_handle_pr` skips the
+    # panel — correct on the FIRST look (nothing has been reviewed yet), but on a
+    # re-push it means an author can push exactly the fix a lens asked for and
+    # nothing re-evaluates it: the PR waits for a human to manually re-invoke the
+    # reviewer (`/swarm-run`). When ON, a `synchronize` push to a gate-blocked PR
+    # re-invokes the lens agents that own the open gates against the new head, so
+    # they re-affirm the block, raise a new finding, or sign off on their own.
+    #
+    # This does NOT weaken the self-certification boundary: the gate still flips
+    # only on a LENS agent's own verdict — a push never clears a gate, and the
+    # dispatcher never infers sign-off from the fact that code changed. Merge
+    # stays behind APIS_AUTONOMY_AUTO_MERGE regardless. Default OFF preserves
+    # today's notify-and-wait exactly.
+    auto_rereview_on_push: bool = (
+        os.environ.get("ATELES_SWARM_AUTO_REREVIEW", "0") == "1"
+    )
+    # Repos the startup resume sweep scans for issue pipelines left in flight by
+    # a daemon restart. The daemon is otherwise webhook-driven and keeps no repo
+    # list, so this is explicit. Comma-separated; empty disables the sweep.
+    resume_repositories: tuple[str, ...] = tuple(
+        r.strip()
+        for r in os.environ.get(
+            "APIS_RESUME_REPOSITORIES",
+            f"{_OPERATOR_LOGIN}/ateles,{_OPERATOR_LOGIN}/neotoma",
+        ).split(",")
+        if r.strip()
+    )
 
 
 class SwarmDispatcher:
@@ -956,6 +1161,10 @@ class SwarmDispatcher:
                 await self._handle_email_approve(trigger)
             elif trigger.kind == "ci_status":
                 await self._handle_ci_status(trigger)
+            elif trigger.kind == "push_main":
+                await self._handle_push_main(trigger)
+            elif trigger.kind == "release_approve":
+                await self._handle_release_approve(trigger)
             elif trigger.is_pr:
                 await self._handle_pr(trigger)
             elif trigger.kind == "issue_comment":
@@ -1011,14 +1220,351 @@ class SwarmDispatcher:
                 out.append(section)
         return out
 
+    # ── in-flight pipeline marker (restart resume) ───────────────────────────
+    #
+    # The issue pipeline spawns `claude --print` children in-process and holds
+    # its progress only in memory. A daemon restart (crash, KeepAlive bounce,
+    # a deliberate `launchctl bootout` to pick up new code) therefore orphans
+    # the children and silently voids the run: nothing retries it, and the
+    # issue is left looking as though the pipeline simply never happened.
+    # Observed 2026-07-17: two /swarm-run invocations were logged as started
+    # and lost to a restart ~3 minutes later, with no trace and no retry.
+    #
+    # The `task` watchdog already implements resume-after-restart, but it
+    # sweeps `task` entities and the issue pipeline creates none, so it cannot
+    # see this work. Rather than force pipeline runs into the 82-field
+    # operator-domain `task` schema (semantic abuse, and its re-dispatch goes
+    # to the task executor, not here), mark the run on the ISSUE itself with a
+    # hidden marker comment — the same durable primitive `_FIX_ROUND_MARKER`
+    # already uses precisely because it "survives daemon restarts". It needs no
+    # Neotoma round-trip, which matters: Neotoma was returning 530s during the
+    # very outage window this fix addresses.
+    _PIPELINE_INFLIGHT_MARKER = "<!-- apis-pipeline-inflight:{started_at} -->"
+    # datetime.isoformat() emits "+00:00" (not "Z"), so the timestamp group must
+    # accept "+"/":" — a regex that only allowed "Z" would write markers it could
+    # never match back, silently breaking both the clear and the resume sweep.
+    _PIPELINE_INFLIGHT_RE = re.compile(
+        r"<!-- apis-pipeline-inflight:([0-9T:.+\-]+Z?) -->"
+    )
+
     async def _handle_issue_opened(self, trigger: SwarmTrigger) -> None:
         """Ordered, additive spec pipeline for a newly-opened issue.
 
         Concurrency-safe: acquires the bounded issue-pipeline semaphore so a
         burst of issue.opened events cannot stampede the daemon.
+
+        Restart-safe: records an in-flight marker before the first agent spawn
+        and clears it on completion, so a restart mid-pipeline leaves a durable
+        trace the startup sweep can resume (ateles#230 follow-up).
+
+        Queue-visible: when the single-slot pipeline semaphore is already held,
+        the acquire below can block for many minutes with no signal, so the
+        issue looks acknowledged (its /swarm-run or open confirmation is posted)
+        while it is actually parked (ateles#259). We emit a queued signal BEFORE
+        blocking and a started signal once the slot is acquired, so the wait is
+        visible in the log even absent any GitHub comment.
         """
-        async with self._issue_pipeline_semaphore():
-            await self._run_issue_spec_pipeline(trigger)
+        ref = f"{trigger.repository}#{trigger.number}"
+        sem = self._issue_pipeline_semaphore()
+        if sem.locked():
+            log.info(
+                f"[{DAEMON_NAME}] issue pipeline for {ref} QUEUED — waiting for "
+                "the issue-pipeline slot (another pipeline is running)"
+            )
+            _queued_at = datetime.now(timezone.utc)
+        else:
+            _queued_at = None
+        async with sem:
+            if _queued_at is not None:
+                waited_s = (datetime.now(timezone.utc) - _queued_at).total_seconds()
+                log.info(
+                    f"[{DAEMON_NAME}] issue pipeline for {ref} STARTED — "
+                    f"acquired the issue-pipeline slot after {waited_s:.1f}s queued"
+                )
+            await self._mark_pipeline_inflight(trigger)
+            try:
+                await self._run_issue_spec_pipeline(trigger)
+            finally:
+                # Clear on success AND on failure: a pipeline that ran to a
+                # real error is not "interrupted" — it already reported itself
+                # and must not be resurrected by the sweep on every boot.
+                await self._clear_pipeline_inflight(trigger)
+
+    async def _mark_pipeline_inflight(self, trigger: SwarmTrigger) -> None:
+        """Post the hidden in-flight marker. Best-effort: a marker we cannot
+        write only costs resumability, so it must never block the pipeline."""
+        marker = self._PIPELINE_INFLIGHT_MARKER.format(
+            started_at=datetime.now(timezone.utc).isoformat()
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"https://api.github.com/repos/{trigger.repository}/issues/"
+                    f"{trigger.number}/comments",
+                    json={"body": marker},
+                    headers=self._github_headers(trigger.repository),
+                )
+                resp.raise_for_status()
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: could "
+                f"not record in-flight pipeline marker ({exc}) — the run "
+                "proceeds but will not be resumable if the daemon restarts"
+            )
+
+    async def _clear_pipeline_inflight(self, trigger: SwarmTrigger) -> None:
+        """Delete any in-flight markers on this issue. Best-effort."""
+        ref = f"{trigger.repository}#{trigger.number}"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    f"https://api.github.com/repos/{trigger.repository}/issues/"
+                    f"{trigger.number}/comments",
+                    params={"per_page": 100},
+                    headers=self._github_headers(trigger.repository),
+                )
+                resp.raise_for_status()
+                for comment in resp.json():
+                    if self._PIPELINE_INFLIGHT_RE.search(comment.get("body", "")):
+                        await client.delete(
+                            f"https://api.github.com/repos/{trigger.repository}"
+                            f"/issues/comments/{comment.get('id')}",
+                            headers=self._github_headers(trigger.repository),
+                        )
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: could not clear in-flight pipeline "
+                f"marker ({exc}) — a stale marker may cause one redundant "
+                "resume on the next daemon start"
+            )
+
+    async def resume_interrupted_pipelines(self, repositories: list[str]) -> dict:
+        """Resume issue pipelines left in flight by a daemon restart.
+
+        Called once at startup. Searches each repo for open issues carrying the
+        hidden in-flight marker — the signature of a pipeline that began but
+        never finished, because only a restart can prevent the `finally` that
+        clears it — and re-runs each one.
+
+        Bounded and fail-open by construction:
+          * only OPEN issues with the marker are candidates (a closed issue's
+            pipeline is moot);
+          * `_handle_issue_opened` clears the marker in its own `finally`, so a
+            resumed run cannot re-trigger itself into a loop;
+          * the existing issue-pipeline semaphore still applies, so a resume
+            burst cannot stampede the daemon;
+          * every failure path logs and returns — a broken resume must never
+            stop the daemon from booting.
+
+        Returns a summary dict for logging/tests.
+        """
+        summary = {"scanned": 0, "resumed": 0, "failed": 0}
+        for repository in repositories:
+            try:
+                issues = await self._issues_with_inflight_marker(repository)
+            except Exception as exc:
+                log.warning(
+                    f"[{DAEMON_NAME}] resume sweep: could not scan {repository} "
+                    f"({exc}) — skipping"
+                )
+                continue
+            summary["scanned"] += len(issues)
+            for issue in issues:
+                ref = f"{repository}#{issue.get('number')}"
+                log.info(
+                    f"[{DAEMON_NAME}] resume sweep: {ref} has an in-flight "
+                    "pipeline marker — the daemon restarted mid-run; re-running"
+                )
+                self.notifier.send(
+                    f"Resuming issue pipeline on {ref} — it was interrupted by "
+                    "a daemon restart",
+                    priority=Priority.INFO,
+                    handler=DAEMON_NAME,
+                )
+                try:
+                    await self._handle_issue_opened(
+                        SwarmTrigger(
+                            kind="issue_opened",
+                            repository=repository,
+                            number=issue.get("number", 0),
+                            title=issue.get("title", ""),
+                            body=issue.get("body") or "",
+                            author=(issue.get("user") or {}).get("login", ""),
+                            html_url=issue.get("html_url", ""),
+                            delivery_id=f"resume-{issue.get('number')}",
+                            action="opened",
+                            labels=[
+                                lbl.get("name", "")
+                                for lbl in (issue.get("labels") or [])
+                                if isinstance(lbl, dict)
+                            ],
+                        )
+                    )
+                    summary["resumed"] += 1
+                except Exception as exc:
+                    summary["failed"] += 1
+                    log.error(
+                        f"[{DAEMON_NAME}] resume sweep: {ref} failed to resume "
+                        f"({exc})",
+                        exc_info=True,
+                    )
+        if summary["scanned"]:
+            log.info(f"[{DAEMON_NAME}] resume sweep: {summary}")
+        return summary
+
+    async def resume_deferred_reviews(self, repositories: list[str]) -> dict:
+        """Re-run PR reviews that were deferred by a usage limit and have matured.
+
+        A panel/aggregation throttled by a session limit posts a
+        ``review-deferred-until:<ISO>`` marker instead of a verdict (see
+        :meth:`_handle_panel_session_limit`). This sweep — run PERIODICALLY, since
+        a reset is hours out and the daemon may not restart in that window — finds
+        open PRs whose deferral time has passed and re-dispatches them through
+        ``_handle_pr``, which re-runs the whole panel. If the limit has cleared,
+        a real verdict lands; if not, a fresh (later) deferral marker replaces it.
+
+        Bounded and fail-open, same discipline as resume_interrupted_pipelines:
+          * only OPEN PRs with a MATURED marker are candidates;
+          * the marker's timestamp gates re-dispatch, so an unmatured deferral is
+            left alone (no busy-loop before the reset);
+          * a re-run posts a new marker or a verdict, superseding the old one, so
+            a still-limited PR can't thrash — it just re-defers to the next reset;
+          * every failure path logs and continues.
+        """
+        summary = {"scanned": 0, "resumed": 0, "not_yet": 0, "failed": 0}
+        now = datetime.now(timezone.utc)
+        for repository in repositories:
+            try:
+                prs = await self._prs_with_matured_deferral(repository, now)
+            except Exception as exc:
+                log.warning(
+                    f"[{DAEMON_NAME}] deferred-review sweep: could not scan "
+                    f"{repository} ({exc}) — skipping"
+                )
+                continue
+            summary["scanned"] += prs["scanned"]
+            summary["not_yet"] += prs["not_yet"]
+            for pr in prs["due"]:
+                ref = f"{repository}#{pr.get('number')}"
+                log.info(
+                    f"[{DAEMON_NAME}] deferred-review sweep: {ref} deferral has "
+                    "matured — re-running the panel"
+                )
+                try:
+                    trigger = SwarmTrigger(
+                        kind="pr_synchronize",
+                        repository=repository,
+                        number=int(pr.get("number")),
+                        title=pr.get("title", ""),
+                        body=pr.get("body") or "",
+                        author=(pr.get("user") or {}).get("login", ""),
+                        html_url=pr.get("html_url", ""),
+                        delivery_id=f"deferred-resume-{pr.get('number')}",
+                        action="synchronize",
+                        head_ref=(pr.get("head") or {}).get("ref", ""),
+                        base_ref=(pr.get("base") or {}).get("ref", ""),
+                    )
+                    await self._handle_pr(trigger)
+                    summary["resumed"] += 1
+                except Exception as exc:
+                    summary["failed"] += 1
+                    log.error(
+                        f"[{DAEMON_NAME}] deferred-review sweep: {ref} failed to "
+                        f"resume ({exc})",
+                        exc_info=True,
+                    )
+        if summary["scanned"]:
+            log.info(f"[{DAEMON_NAME}] deferred-review sweep: {summary}")
+        return summary
+
+    async def _prs_with_matured_deferral(self, repository: str, now: datetime) -> dict:
+        """Open PRs in `repository` split by whether their deferral has matured.
+
+        Returns {"due": [pr,...], "scanned": n, "not_yet": n}. A PR is 'due' when
+        its latest deferral marker's ISO time is <= now. PRs with no deferral
+        marker are ignored entirely (not scanned count). Best-effort per PR."""
+        result: dict = {"due": [], "scanned": 0, "not_yet": 0}
+        list_url = f"https://api.github.com/repos/{repository}/pulls"
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                list_url,
+                params={"state": "open", "per_page": 100},
+                headers=self._github_headers(repository),
+            )
+            resp.raise_for_status()
+            for pr in resp.json():
+                num = pr.get("number")
+                c_url = (
+                    f"https://api.github.com/repos/{repository}/issues/{num}/comments"
+                )
+                try:
+                    cresp = await client.get(
+                        c_url,
+                        params={"per_page": 100},
+                        headers=self._github_headers(repository),
+                    )
+                    cresp.raise_for_status()
+                except Exception:
+                    continue
+                # Walk comments in order. A deferral is LIVE only if it is the
+                # latest terminal marker — i.e. no aggregation verdict was posted
+                # AFTER it. Once a real verdict (or a newer deferral) lands, the
+                # old deferral is superseded and the PR stops being "due", so a
+                # resolved PR is not re-dispatched forever (Loxia #264 review).
+                latest_iso = None  # ISO of the most-recent still-live deferral
+                for c in cresp.json():
+                    body = c.get("body", "")
+                    m = self._REVIEW_DEFERRED_RE.search(body)
+                    if m:
+                        latest_iso = m.group(1)  # a newer deferral supersedes
+                    elif _VANELLUS_COMMENT_MARKER in body:
+                        latest_iso = None  # a verdict after a deferral clears it
+                if latest_iso is None:
+                    # No live deferral: either never deferred, or a verdict has
+                    # since superseded it. Not a candidate.
+                    continue
+                result["scanned"] += 1
+                try:
+                    due_at = datetime.strptime(
+                        latest_iso, "%Y-%m-%dT%H:%M:%SZ"
+                    ).replace(tzinfo=timezone.utc)
+                except ValueError:
+                    # Unparseable marker — treat as due so it can't get stuck.
+                    result["due"].append(pr)
+                    continue
+                if due_at <= now:
+                    result["due"].append(pr)
+                else:
+                    result["not_yet"] += 1
+        return result
+
+    async def _issues_with_inflight_marker(self, repository: str) -> list[dict]:
+        """Open issues in `repository` carrying the in-flight pipeline marker."""
+        out: list[dict] = []
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"https://api.github.com/repos/{repository}/issues",
+                params={"state": "open", "per_page": 100},
+                headers=self._github_headers(repository),
+            )
+            resp.raise_for_status()
+            for issue in resp.json():
+                # /issues returns PRs too; a PR's pipeline is the PR handler's.
+                if issue.get("pull_request"):
+                    continue
+                comments = await client.get(
+                    f"https://api.github.com/repos/{repository}/issues/"
+                    f"{issue.get('number')}/comments",
+                    params={"per_page": 100},
+                    headers=self._github_headers(repository),
+                )
+                comments.raise_for_status()
+                if any(
+                    self._PIPELINE_INFLIGHT_RE.search(c.get("body", ""))
+                    for c in comments.json()
+                ):
+                    out.append(issue)
+        return out
 
     async def _run_issue_spec_pipeline(self, trigger: SwarmTrigger) -> None:
         ref = f"{trigger.repository}#{trigger.number}"
@@ -1029,6 +1575,7 @@ class SwarmDispatcher:
             self._lanius_issue_prompt(trigger),
             github_token=_token_for_agent_on_repo("lanius", trigger.repository),
             include_github_contract=True,
+            notifier=self.notifier,
         )
         if not lanius.ok:
             self.notifier.send(
@@ -1061,6 +1608,7 @@ class SwarmDispatcher:
                     section.agent, trigger.repository
                 ),
                 include_github_contract=True,
+                notifier=self.notifier,
             )
             section_text = self._extract_section_text(result.stdout, section)
             # Persist ADDITIVELY: correct only this section's field. Even when
@@ -1093,7 +1641,14 @@ class SwarmDispatcher:
                     "Spec is ready; open the build manually or re-run once the "
                     "spec is implementable."
                 ),
-                priority=Priority.OPERATOR_DECISION,
+                # A successfully-opened PR is FYI — the PR gate pipeline owns it
+                # and will stop at the operator's merge approval, so this needs
+                # no immediate action and belongs in the digest. The NO-PR branch
+                # is a real failure the operator must act on, so it stays an
+                # immediate operator decision.
+                priority=(
+                    Priority.INFO if pr_url else Priority.OPERATOR_DECISION
+                ),
                 handler=DAEMON_NAME,
             )
         else:
@@ -1170,8 +1725,7 @@ class SwarmDispatcher:
         human-written body above them (never clobbers the reporter's text).
         Re-running replaces only the marked block.  Best-effort, never raises.
         """
-        repo_token = _token_for_repo(trigger.repository)
-        if not repo_token:
+        if not _token_for_repo(trigger.repository) and not self.config.github_token:
             log.warning(
                 f"[{DAEMON_NAME}] no GitHub token — spec mirror skipped for "
                 f"{trigger.repository}#{trigger.number}"
@@ -1238,6 +1792,7 @@ class SwarmDispatcher:
             self._cicada_build_prompt(trigger, state),
             github_token=_token_for_agent_on_repo("cicada", trigger.repository),
             include_github_contract=True,
+            notifier=self.notifier,
         )
         if not result.ok:
             log.error(
@@ -1372,15 +1927,21 @@ class SwarmDispatcher:
                     f"[{DAEMON_NAME}] {ref}: product-code PR with no parent "
                     "issue — surfacing pipeline bypass (review still proceeds)"
                 )
-                await self._post_pipeline_bypass_comment(trigger)
-                self.notifier.send(
-                    f"PR {ref} touched product code with no parent issue — it "
-                    "bypassed the gated pm/arch → Cicada pipeline. Review "
-                    "proceeds; merge stays operator-gated. File the issue and "
-                    "add `Closes #N`, or accept the bypass.",
-                    priority=Priority.OPERATOR_DECISION,
-                    handler=DAEMON_NAME,
+                newly_surfaced = await self._post_pipeline_bypass_comment(
+                    trigger
                 )
+                # Only ping the operator the first time the bypass is surfaced.
+                # Later PR events (synchronize/label/reopen) re-enter this path
+                # for the same PR and would otherwise re-notify identically.
+                if newly_surfaced:
+                    self.notifier.send(
+                        f"PR {ref} touched product code with no parent issue — it "
+                        "bypassed the gated pm/arch → Cicada pipeline. Review "
+                        "proceeds; merge stays operator-gated. File the issue and "
+                        "add `Closes #N`, or accept the bypass.",
+                        priority=Priority.OPERATOR_DECISION,
+                        handler=DAEMON_NAME,
+                    )
 
         # 1. Lanius: enforce PR gate inheritance against the parent issue.
         _lanius_token = _token_for_agent_on_repo("lanius", trigger.repository)
@@ -1389,6 +1950,7 @@ class SwarmDispatcher:
             self._lanius_pr_prompt(trigger, parent),
             github_token=_lanius_token,
             include_github_contract=True,
+            notifier=self.notifier,
         )
         verdict = parse_gate_verdict(lanius.stdout)
         if verdict is None and lanius.ok:
@@ -1410,16 +1972,58 @@ class SwarmDispatcher:
                 ),
                 github_token=_lanius_token,
                 include_github_contract=True,
+                notifier=self.notifier,
             )
             verdict = parse_gate_verdict(lanius.stdout)
+        # Gates Lanius reports as still-pending (from its GATE_PENDING: line on a
+        # blocked verdict). Fed to select_panel so the owning lens is guaranteed
+        # a seat under the cap — otherwise a carried-over gate can never clear
+        # because its owning lens is never re-invoked (ateles#230 panel gap).
+        pending_gates = parse_pending_gates(lanius.stdout)
         if verdict == "blocked":
-            log.info(f"[{DAEMON_NAME}] {ref}: pre-impl gates open — panel skipped")
-            self.notifier.send(
-                f"PR {ref} blocked by Lanius — pre-impl gates not signed off",
-                priority=Priority.INFO,
-                handler=DAEMON_NAME,
-            )
-            return
+            # ateles#230: on the FIRST look a gate-blocked PR should skip the
+            # panel — nothing has been reviewed, so there is no finding to
+            # re-evaluate and running the panel would just front-run the gates.
+            # But on a RE-PUSH the same skip is the autonomy hole: an author can
+            # push exactly the fix a lens asked for and nothing re-evaluates it;
+            # the PR sits until a human manually re-invokes the reviewer. The
+            # `max_fix_rounds` contract above already assumes "the push
+            # (synchronize) re-runs the panel" — this restores that for
+            # externally-authored pushes too, not just Cicada's.
+            #
+            # SELF-CERTIFICATION BOUNDARY (ateles#230 arch §4): re-REVIEW is not
+            # re-APPROVE. This re-runs the LENS AGENTS, which reach their own
+            # verdicts and own their own gate_status mutations (Lanius/lens own
+            # that — the dispatcher never writes gate state here, and never
+            # infers sign-off from the fact that a push happened).
+            if (
+                self.config.auto_rereview_on_push
+                and trigger.kind in _AUTO_REREVIEW_TRIGGER_KINDS
+            ):
+                log.info(
+                    f"[{DAEMON_NAME}] {ref}: pre-impl gates open, but this is a "
+                    f"{trigger.kind} — auto-re-reviewing against the new head "
+                    "(ATELES_SWARM_AUTO_REREVIEW=1)"
+                )
+                # Fall through to the panel: the lenses re-evaluate the new head
+                # and either re-affirm the block, raise a new finding, or sign
+                # off. Merge stays behind APIS_AUTONOMY_AUTO_MERGE regardless.
+            else:
+                log.info(
+                    f"[{DAEMON_NAME}] {ref}: pre-impl gates open — panel skipped"
+                )
+                self.notifier.send(
+                    f"PR {ref} blocked by Lanius — pre-impl gates not signed off"
+                    + (
+                        ""
+                        if trigger.kind not in _AUTO_REREVIEW_TRIGGER_KINDS
+                        else " (re-push: set ATELES_SWARM_AUTO_REREVIEW=1 to "
+                        "auto-re-review pushes against open gates)"
+                    ),
+                    priority=Priority.INFO,
+                    handler=DAEMON_NAME,
+                )
+                return
         if not verdict:
             log.warning(
                 f"[{DAEMON_NAME}] {ref}: Lanius emitted no GATE_INHERITANCE "
@@ -1439,6 +2043,7 @@ class SwarmDispatcher:
             gate_contributors=set(expectations),
             changed_files=changed_files,
             max_panel=self.config.panel_max,
+            pending_gates=pending_gates,
         )
 
         reviews: list[tuple[str, str]] = []
@@ -1455,12 +2060,18 @@ class SwarmDispatcher:
                 result = await run_skill(
                     lens.agent,
                     self._panelist_prompt(
-                        trigger, lens, expectations.get(lens.agent, ""), parent
+                        trigger,
+                        lens,
+                        expectations.get(lens.agent, ""),
+                        parent,
+                        has_worktree=bool(qa_worktree),
+                        owns_pending_gate=lens.lens in pending_gates,
                     ),
                     github_token=_token_for_agent_on_repo(
                         lens.agent, trigger.repository
                     ),
                     include_github_contract=True,
+                    notifier=self.notifier,
                     cwd=qa_worktree,
                 )
             finally:
@@ -1504,8 +2115,21 @@ class SwarmDispatcher:
             self._vanellus_prompt(trigger, parent, [p.lens for p in panel], reviews),
             github_token=_token_for_agent_on_repo("vanellus", trigger.repository),
             include_github_contract=True,
+            notifier=self.notifier,
         )
 
+        # 4a-0. Session/usage-limit guard (checked BEFORE auth, since a limit
+        #     message can co-occur with auth-ish prose): the aggregation's claude
+        #     call was throttled, not un-authenticated. Its "verdict" is just the
+        #     limit notice. Post a truthful REVIEW-INCOMPLETE marker (never a stub
+        #     that reads like a verdict) and schedule a resume after the reset,
+        #     rather than paging the operator to fix nothing.
+        if detect_session_limit(vanellus_result.stdout, vanellus_result.stderr):
+            await self._handle_panel_session_limit(
+                trigger, parent, "vanellus",
+                vanellus_result.stdout, vanellus_result.stderr,
+            )
+            return
         # 4a. Credential-expiry guard: if the aggregation's claude call failed
         #     auth (expired OAuth / missing ANTHROPIC_API_KEY), its "verdict" is
         #     just the 401. Reframe it as an infra failure and page the operator
@@ -1526,12 +2150,106 @@ class SwarmDispatcher:
         #        max_fix_rounds; a Cicada push re-runs this whole handler.
         #      APPROVE/COMMENT → readiness gate: only signal merge-ready when
         #        required CI is also green.
-        verdict = parse_review_verdict(vanellus_result.stdout)
+        #    The verdict is read from stdout when present, else recovered from
+        #    the durable aggregation comment on the PR (ateles#292) — Vanellus
+        #    posts the verdict reliably but repeats it in stdout only ~25% of
+        #    the time, and a missed token silently downgrades a REQUEST_CHANGES
+        #    to an inert COMMENT on GitHub.
+        verdict, used_comment_fallback = await self._resolve_review_verdict(
+            trigger, vanellus_result.stdout
+        )
+        if used_comment_fallback:
+            log.info(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: verdict "
+                f"recovered via comment fallback (stdout omitted it) — {verdict!r}"
+            )
+
+        # 5a. Emit the verdict as a NATIVE GitHub Review (ateles#241) before
+        #     branching, so it lands on BOTH paths — a REQUEST_CHANGES that
+        #     routes findings back is exactly as worth recording in GitHub's
+        #     review state as an APPROVE that proceeds. Best-effort: a failure
+        #     here must not change the routing decision below, which remains
+        #     driven by the parsed verdict.
+        await self._emit_formal_review(trigger, verdict, vanellus_result.stdout)
+
         if not review_verdict_is_clear(verdict):
             await self._route_blocking_findings(trigger, parent, reviews, verdict)
             return
 
         await self._gate_merge_readiness(trigger, parent, panel)
+
+    async def _emit_formal_review(
+        self, t: SwarmTrigger, verdict: str | None, body: str
+    ) -> str | None:
+        """Post the aggregated panel verdict as a native GitHub Review.
+
+        This is ateles#241: the swarm's verdicts previously existed only as prose
+        in an issue comment, so GitHub's own review state stayed empty and branch
+        protection had nothing to enforce. Emitting a real review event puts the
+        verdict where GitHub (and a human scanning the PR) can see it.
+
+        Deliberately dispatcher-side rather than agent-side: headless panelists
+        routinely fail their own `gh` calls, and of the lens agents only Vanellus
+        and Waxwing even hold `gh pr review` grants.
+
+        Best-effort — returns the review id on success, else None. NEVER raises:
+        the routing decision in `_handle_pr` is driven by the parsed verdict, and
+        a GitHub hiccup must not change which branch runs.
+
+        Two failures are expected and handled quietly rather than as errors:
+        - 422 "Can not approve your own pull request" — the swarm authored the PR
+          and is reviewing under the same identity. Falls back to COMMENT so the
+          verdict still lands. Resolves once per-agent accounts (#109) ship.
+        - 422 on a closed/merged PR — a race between the panel and a merge.
+        """
+        event = verdict_to_review_event(verdict)
+        ref = f"{t.repository}#{t.number}"
+
+        if not _token_for_repo(t.repository) and not self.config.github_token:
+            log.warning(
+                f"[{DAEMON_NAME}] no GitHub token — formal review skipped for {ref}"
+            )
+            return None
+
+        url = f"https://api.github.com/repos/{t.repository}/pulls/{t.number}/reviews"
+        # GitHub rejects a bodyless REQUEST_CHANGES/COMMENT (only APPROVE may be
+        # bodyless), so always carry text.
+        text = (body or "").strip() or (
+            f"Aggregated swarm panel verdict: {verdict or 'unparseable'}."
+        )
+        payload = {"event": event, "body": text[:65000]}
+
+        async def _post(p: dict) -> httpx.Response:
+            async with httpx.AsyncClient(timeout=30) as client:
+                return await client.post(
+                    url, json=p, headers=self._github_headers(t.repository)
+                )
+
+        try:
+            resp = await _post(payload)
+            if resp.status_code == 422 and event != _REVIEW_EVENT_COMMENT:
+                # Self-review or otherwise-unacceptable event: degrade to COMMENT
+                # so the verdict is still recorded, and say so plainly.
+                detail = (resp.text or "")[:200]
+                log.warning(
+                    f"[{DAEMON_NAME}] formal review {event} rejected on {ref} "
+                    f"(422) — retrying as COMMENT: {detail}"
+                )
+                resp = await _post({**payload, "event": _REVIEW_EVENT_COMMENT})
+            resp.raise_for_status()
+            review_id = resp.json().get("id")
+            log.info(
+                f"[{DAEMON_NAME}] posted formal GitHub review {event} on {ref} "
+                f"(id={review_id}, verdict={verdict})"
+            )
+            return str(review_id) if review_id is not None else None
+        except Exception as exc:
+            # Never fail the handler on a review-post problem.
+            log.warning(
+                f"[{DAEMON_NAME}] formal review post failed on {ref} "
+                f"({event}): {exc}"
+            )
+            return None
 
     # ── loop closure: findings → fix → readiness (ateles#179) ────────────────
 
@@ -1609,6 +2327,60 @@ class SwarmDispatcher:
                 f"could not record fix round {n}: {exc}"
             )
 
+    _ESCALATION_MARKER = "<!-- apis-escalated:{kind} -->"
+
+    async def _claim_escalation(self, trigger: SwarmTrigger, kind: str) -> bool:
+        """First-caller-wins guard for a once-per-PR operator escalation.
+
+        A PR re-review fires on every push/label/reopen, so an operator
+        escalation (`unparseable` verdict, auto-fix-exhausted) would re-notify
+        identically each time — ateles#262 sent four copies of the same
+        auto-fix-exhausted ping, neotoma#1988 three. This posts a hidden marker
+        comment keyed by `kind`; if the marker already exists it returns False
+        so the caller skips the notification. Same edit-not-duplicate primitive
+        as the fix-round and bypass markers, and the body carries no command
+        token. Fail-OPEN: if the marker can't be read or written we return True
+        so a real escalation is never swallowed by a transient GitHub error.
+        """
+        marker = self._ESCALATION_MARKER.format(kind=kind)
+        list_url = (
+            f"https://api.github.com/repos/{trigger.repository}/issues/"
+            f"{trigger.number}/comments"
+        )
+        headers = self._github_headers(trigger.repository)
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    list_url, params={"per_page": 100}, headers=headers
+                )
+                resp.raise_for_status()
+                for comment in resp.json():
+                    if marker in comment.get("body", ""):
+                        log.info(
+                            f"[{DAEMON_NAME}] {trigger.repository}"
+                            f"#{trigger.number}: '{kind}' already escalated — "
+                            "suppressing duplicate operator notification"
+                        )
+                        return False
+                body = (
+                    f"{marker}\n"
+                    f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+                    f"🔔 Escalated to the operator (`{kind}`). Further PR events "
+                    "will not re-notify for this same condition."
+                )
+                resp = await client.post(
+                    list_url, json={"body": body}, headers=headers
+                )
+                resp.raise_for_status()
+                return True
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                f"escalation-dedup check failed for '{kind}' ({exc}) — "
+                "notifying anyway (fail-open)"
+            )
+            return True
+
     async def _route_blocking_findings(
         self,
         trigger: SwarmTrigger,
@@ -1650,14 +2422,17 @@ class SwarmDispatcher:
         if not by_lens:
             # Verdict was not clear but no parseable [BLOCKING] block exists
             # (e.g. a BLOCKED "cannot proceed" or a malformed verdict). Don't
-            # guess a fix — escalate so a human reads the review.
-            self.notifier.send(
-                f"PR {ref}: review verdict `{verdict or 'unparseable'}` is not "
-                "clear but no blocking findings could be parsed — needs your "
-                "read. Merge held.",
-                priority=Priority.OPERATOR_DECISION,
-                handler=DAEMON_NAME,
-            )
+            # guess a fix — escalate so a human reads the review. Only notify
+            # once per PR: a re-review of the same unparseable verdict must not
+            # re-ping the operator.
+            if await self._claim_escalation(trigger, "unparseable-verdict"):
+                self.notifier.send(
+                    f"PR {ref}: review verdict `{verdict or 'unparseable'}` is "
+                    "not clear but no blocking findings could be parsed — needs "
+                    "your read. Merge held.",
+                    priority=Priority.OPERATOR_DECISION,
+                    handler=DAEMON_NAME,
+                )
             return
 
         # Partition every blocking finding by finding_kind. Computed and
@@ -1716,13 +2491,17 @@ class SwarmDispatcher:
             # failing implementation finding is still part of why the PR is
             # stuck at the cap and must not be omitted from this message.
             lenses = ", ".join(sorted(by_lens))
-            self.notifier.send(
-                f"PR {ref}: {self.config.max_fix_rounds} auto-fix rounds did not "
-                f"clear review (still blocking on: {lenses}). Escalating — needs "
-                "your attention. Merge held.",
-                priority=Priority.OPERATOR_DECISION,
-                handler=DAEMON_NAME,
-            )
+            # Once-per-PR: the exhausted-rounds condition is re-evaluated on
+            # every subsequent push, so guard the operator ping behind the
+            # escalation marker to avoid identical repeats (ateles#262 ×4).
+            if await self._claim_escalation(trigger, "auto-fix-exhausted"):
+                self.notifier.send(
+                    f"PR {ref}: {self.config.max_fix_rounds} auto-fix rounds did "
+                    f"not clear review (still blocking on: {lenses}). Escalating "
+                    "— needs your attention. Merge held.",
+                    priority=Priority.OPERATOR_DECISION,
+                    handler=DAEMON_NAME,
+                )
             return
 
         this_round = prior_rounds + 1
@@ -1743,6 +2522,7 @@ class SwarmDispatcher:
                 self._fix_guidance_prompt(trigger, lens, agent, findings_text),
                 github_token=_token_for_agent_on_repo(agent, trigger.repository),
                 include_github_contract=True,
+                notifier=self.notifier,
             )
             if result.ok and result.stdout.strip():
                 guidance_blocks.append(
@@ -1763,6 +2543,7 @@ class SwarmDispatcher:
             self._cicada_fix_prompt(trigger, parent, this_round, consolidated),
             github_token=_token_for_agent_on_repo("cicada", trigger.repository),
             include_github_contract=True,
+            notifier=self.notifier,
         )
         # An auth-expired claude call can exit 0 with the 401 in stdout, so a
         # bare `ok` is not enough — reframe an auth failure as an infra page.
@@ -1923,6 +2704,7 @@ class SwarmDispatcher:
             self._cicada_ci_fix_prompt(trigger, parent, this_round),
             github_token=_token_for_agent_on_repo("cicada", trigger.repository),
             include_github_contract=True,
+            notifier=self.notifier,
         )
         if detect_auth_failure(cicada_result.stdout, cicada_result.stderr):
             await self._handle_panel_auth_failure(trigger, "cicada")
@@ -2134,10 +2916,12 @@ class SwarmDispatcher:
             handler=DAEMON_NAME,
         )
 
-        # Delegate gate-waiving to Lanius (it owns gate_status mutations).
-        # Lanius will correct each unsigned pre-impl gate to "waived", record
-        # the waive in owner_history, and advance current_owner.
-        await self._lanius_waive_gates(trigger)
+        # Perform the waive DISPATCHER-SIDE (ateles#285). This is a mechanical
+        # state transition with no judgement in it, so it does not go through
+        # an agent turn: the dispatcher corrects each unsigned pre-impl gate to
+        # "waived", appends to owner_history, RE-READS to verify the write
+        # landed, and posts an operator-visible comment either way.
+        await self._waive_gates(trigger)
 
         # If the comment is on a PR, re-run the PR pipeline immediately.
         # If it's on the parent issue, the operator needs to re-push or
@@ -2350,6 +3134,46 @@ class SwarmDispatcher:
         would page the operator on ordinary out-of-order delivery, which is
         ateles#197 with `ci` swapped for `status`.
         """
+        # Auto-release retry: a CI rollup completing on the release repo's
+        # default branch is how a push_main that deferred on in-progress/red CI
+        # gets a second chance. The merge webhook fires before that merge's CI
+        # finishes, so _handle_push_main often hits `ci is None` and defers
+        # WITHOUT stamping the SHA lock; when the same commit's CI later goes
+        # green this event re-invokes prepare, which now sees green and prepares.
+        # A default-branch suite carries no associated PR, so this must run
+        # before the no-PR early return below.
+        if (
+            trigger.repository == PHOENICURUS_RELEASE_REPO
+            and trigger.ci_head_branch == PHOENICURUS_RELEASE_BRANCH
+        ):
+            if trigger.ci_conclusion == "success":
+                log.info(
+                    f"[{DAEMON_NAME}] {PHOENICURUS_RELEASE_BRANCH} CI succeeded on "
+                    f"{trigger.repository} ({trigger.ci_head_sha[:9]}) — retrying "
+                    "release prep"
+                )
+                push_like = SwarmTrigger(
+                    kind="push_main",
+                    repository=trigger.repository,
+                    number=0,
+                    title="",
+                    body="",
+                    author="",
+                    html_url="",
+                    delivery_id=trigger.delivery_id,
+                    action="push",
+                    push_ref=f"refs/heads/{PHOENICURUS_RELEASE_BRANCH}",
+                    push_after=trigger.ci_head_sha,
+                )
+                await self._handle_push_main(push_like)
+            else:
+                log.info(
+                    f"[{DAEMON_NAME}] {PHOENICURUS_RELEASE_BRANCH} CI on "
+                    f"{trigger.repository} concluded {trigger.ci_conclusion!r} — "
+                    "no release retry"
+                )
+            return
+
         pr_number = next((n for n in trigger.ci_pr_numbers if n), 0) or trigger.number
         if not pr_number:
             log.debug(
@@ -2408,6 +3232,82 @@ class SwarmDispatcher:
         log.info(f"[{DAEMON_NAME}] {ref}: CI green + review clear — gating readiness")
         # Pass the CI state we already computed so the gate does not re-fetch it.
         await self._gate_merge_readiness(pr_trigger, parent, panel=[], ci_state=ci)
+
+    async def _resolve_review_verdict(
+        self, t: SwarmTrigger, stdout: str
+    ) -> tuple[str | None, bool]:
+        """Resolve the panel verdict: stdout first, the PR comment as fallback.
+
+        ateles#292: `parse_review_verdict` reads Vanellus's stdout, but Vanellus
+        posts its aggregated verdict to GitHub without reliably repeating it
+        inline (observed: 3 of 4 production emissions parsed as None). A missed
+        token downgrades a real REQUEST_CHANGES to the inert COMMENT on the
+        native review — precisely the state ateles#241 exists to record. So when
+        stdout carries no token, re-read the durable artifact: the Vanellus
+        aggregation comment already on the PR, marked with
+        ``_VANELLUS_COMMENT_MARKER``.
+
+        Returns ``(verdict, used_fallback)``. ``verdict`` is None when neither
+        source carries a valid token — the caller still treats None as not-clear
+        (``review_verdict_is_clear(None)`` is False), so behaviour on total
+        failure is unchanged from before this fallback existed.
+
+        Best-effort — NEVER raises. A GitHub hiccup falls through to
+        ``(None, False)`` rather than breaking ``_handle_pr``.
+
+        Ordering note: this runs after ``_post_missing_vanellus_comment``, which
+        reposts Vanellus's stdout when no aggregation comment landed. So the
+        comment section has already settled — this is not a race against
+        comment-posting latency.
+        """
+        verdict = parse_review_verdict(stdout)
+        if verdict is not None:
+            return verdict, False
+
+        url = (
+            f"https://api.github.com/repos/{t.repository}/issues/"
+            f"{t.number}/comments"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    url,
+                    params={"per_page": 100, "sort": "created", "direction": "desc"},
+                    headers=self._github_headers(t.repository),
+                )
+                resp.raise_for_status()
+                # Newest-first, mirroring _pr_review_is_clear: honour the LATEST
+                # aggregation, and scan past non-Vanellus comments to find it.
+                for comment in resp.json():
+                    body = comment.get("body", "")
+                    if _VANELLUS_COMMENT_MARKER not in body:
+                        continue
+                    fallback_verdict = parse_review_verdict(body)
+                    if fallback_verdict is None:
+                        # Marker present but no token — a prose-only aggregation.
+                        # Do not loosen the regex; report no verdict.
+                        log.warning(
+                            f"[{DAEMON_NAME}] {t.repository}#{t.number}: Vanellus "
+                            "aggregation comment carries no verdict token either "
+                            "— no verdict recovered"
+                        )
+                        return None, False
+                    log.info(
+                        f"[{DAEMON_NAME}] {t.repository}#{t.number}: stdout had no "
+                        f"verdict token — recovered {fallback_verdict!r} from the "
+                        "Vanellus aggregation comment (fallback fired)"
+                    )
+                    return fallback_verdict, True
+                log.warning(
+                    f"[{DAEMON_NAME}] {t.repository}#{t.number}: no Vanellus "
+                    "aggregation comment found — no verdict recovered"
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: comment fallback read "
+                f"failed ({exc}) — falling back to no-verdict"
+            )
+        return None, False
 
     async def _pr_review_is_clear(self, repository: str, pr_number: int) -> bool:
         """True when the latest Vanellus aggregation on the PR is a clear verdict.
@@ -2480,6 +3380,166 @@ class SwarmDispatcher:
             head_ref=(pr.get("head") or {}).get("ref", ""),
             base_ref=(pr.get("base") or {}).get("ref", ""),
         )
+
+    async def _handle_push_main(self, trigger: SwarmTrigger) -> None:
+        """React to a merge landing on main by asking the release daemon to prepare.
+
+        This is the auto-release trigger: instead of waiting for the Mon-Thu
+        07:00 scheduled sweep, every merge to main immediately offers Phoenicurus
+        a chance to cut a release candidate. The approval gate is UNCHANGED - this
+        only removes the schedule lag before the operator is asked.
+
+        We deliberately do NOT re-implement any release policy here. ``prepare.py
+        --on-merge`` re-applies every gate it already owns (unreleased-commit
+        count vs PHOENICURUS_MIN_COMMITS, main CI green, no release already in
+        flight) and rate-limits per main commit, so a burst of merges cannot
+        stack up release candidates. This handler's only job is to invoke it and
+        stay quiet when there is nothing to do.
+
+        Only the Neotoma repo has a publishable release pipeline; a push to any
+        other repo is ignored. Fully best-effort; never raises.
+        """
+        if trigger.repository != PHOENICURUS_RELEASE_REPO:
+            log.debug(
+                f"[{DAEMON_NAME}] push to {trigger.repository} is not the release "
+                "repo - ignoring"
+            )
+            return
+
+        script = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "phoenicurus-release",
+            "prepare.py",
+        )
+        if not os.path.exists(script):
+            log.warning(f"[{DAEMON_NAME}] release prepare script missing: {script}")
+            return
+
+        sha = (trigger.push_after or "")[:9]
+        log.info(
+            f"[{DAEMON_NAME}] main advanced to {sha} on {trigger.repository} - "
+            "invoking release prepare (--on-merge)"
+        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                script,
+                "--on-merge",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            # prepare.py's phase 1 is a fast preflight; phase 2 spawns a detached
+            # headless agent and returns. A generous cap keeps a wedged git/gh
+            # call from pinning the dispatcher forever.
+            out, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=PHOENICURUS_PREPARE_TIMEOUT_S
+            )
+            tail = (out or b"").decode(errors="replace").strip().splitlines()
+            log.info(
+                f"[{DAEMON_NAME}] release prepare exited rc={proc.returncode}"
+                + (f": {tail[-1]}" if tail else "")
+            )
+        except asyncio.TimeoutError:
+            log.error(
+                f"[{DAEMON_NAME}] release prepare timed out after "
+                f"{PHOENICURUS_PREPARE_TIMEOUT_S}s for {sha}"
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            log.error(f"[{DAEMON_NAME}] release prepare failed for {sha}: {exc}")
+
+    async def _handle_release_approve(self, trigger: SwarmTrigger) -> None:
+        """Publish a release the operator approved by email reply.
+
+        Turdus verified the reply came from the operator's address and carried
+        `approve <exact version>` + the release-approve token, then POSTed to the
+        Apis /approve-release route (shared-secret gated). This runs the SAME
+        irreversible publish path as a Telegram approve: `publish.py --version
+        <v> --from-email-approval`, which itself flips the release_result
+        pending_approval -> approved (refusing any other starting state, so a
+        duplicate/stale reply can't re-publish) and then ships it.
+
+        This is the ONE handler that drives an irreversible publish, so it is
+        deliberately strict and loud: it never runs publish for a malformed
+        version, it bounds the subprocess, and it Telegrams the outcome (success
+        or failure) so the operator always learns what their reply did.
+        """
+        version = (trigger.release_version or "").strip()
+        if not re.match(r"^v[0-9][0-9A-Za-z.\-+]*$", version):
+            log.error(
+                f"[{DAEMON_NAME}] release_approve with invalid version "
+                f"{version!r} — refusing to publish"
+            )
+            return
+
+        script = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "phoenicurus-release",
+            "publish.py",
+        )
+        if not os.path.exists(script):
+            log.error(f"[{DAEMON_NAME}] publish script missing: {script}")
+            self.notifier.send(
+                f"🔴 Release {version} email-approved but publish.py is missing "
+                f"at {script} — publish did NOT run.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+            return
+
+        log.info(
+            f"[{DAEMON_NAME}] operator email-approved release {version} — "
+            "invoking publish.py --from-email-approval"
+        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                script,
+                "--version",
+                version,
+                "--from-email-approval",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=PHOENICURUS_PUBLISH_TIMEOUT_S
+            )
+            tail = (out or b"").decode(errors="replace").strip().splitlines()
+            last = tail[-1] if tail else ""
+            if proc.returncode == 0:
+                log.info(f"[{DAEMON_NAME}] publish {version} succeeded: {last}")
+                # publish.py sends its own rich success Telegram; keep this short.
+            else:
+                log.error(
+                    f"[{DAEMON_NAME}] publish {version} FAILED rc="
+                    f"{proc.returncode}: {last}"
+                )
+                self.notifier.send(
+                    f"🔴 Release {version} email-approved but publish FAILED "
+                    f"(rc={proc.returncode}): {last[:300]}. See "
+                    "phoenicurus-release.log.",
+                    priority=Priority.BLOCKER,
+                    handler=DAEMON_NAME,
+                )
+        except asyncio.TimeoutError:
+            log.error(
+                f"[{DAEMON_NAME}] publish {version} timed out after "
+                f"{PHOENICURUS_PUBLISH_TIMEOUT_S}s"
+            )
+            self.notifier.send(
+                f"🔴 Release {version} publish TIMED OUT after "
+                f"{PHOENICURUS_PUBLISH_TIMEOUT_S}s — it may be partially done; "
+                "check phoenicurus-release.log and the registry before retrying.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error(f"[{DAEMON_NAME}] publish {version} error: {exc}")
+            self.notifier.send(
+                f"🔴 Release {version} email-approved but publish errored: "
+                f"{exc}. Publish may not have run.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
 
     async def _handle_approve(self, trigger: SwarmTrigger) -> None:
         """Execute the /approve operator command (Phase H1 HITL checkpoint).
@@ -2926,7 +3986,7 @@ class SwarmDispatcher:
                     f"on {trigger.repository}#{trigger.number}"
                 )
 
-    async def _post_pipeline_bypass_comment(self, trigger: SwarmTrigger) -> None:
+    async def _post_pipeline_bypass_comment(self, trigger: SwarmTrigger) -> bool:
         """Post (or edit) a visible notice that a product-code PR has no parent issue.
 
         This is the loud half of the pipeline-bypass guard: a product PR that
@@ -2940,6 +4000,13 @@ class SwarmDispatcher:
         token (`/swarm-run`, `/confirm-gates-clear`, `Closes #`) so it cannot
         self-trigger the comment handler or spoof an issue link. Best-effort:
         exceptions are logged, never propagated.
+
+        Returns True when a NEW bypass comment was posted (the bypass is being
+        surfaced for the first time), False when an existing marker was merely
+        re-edited or the post was skipped/failed. The caller uses this to fire
+        the operator notification only on first surfacing — otherwise every
+        subsequent PR event (synchronize, label, re-open) re-notifies for the
+        same already-known bypass (ateles#242 got four identical pings).
         """
         _BYPASS_MARKER = "<!-- pipeline-bypass-notice -->"
 
@@ -2949,7 +4016,7 @@ class SwarmDispatcher:
                 f"[{DAEMON_NAME}] no GitHub token — pipeline-bypass notice "
                 f"skipped for {trigger.repository}#{trigger.number}"
             )
-            return
+            return False
 
         # Body deliberately writes "Closes" with a backtick-escaped hash so the
         # instructional text does not itself parse as a parent-issue link.
@@ -2992,32 +4059,54 @@ class SwarmDispatcher:
                     )
 
                 if existing_id is not None:
+                    # A marker already exists → this bypass was surfaced before.
+                    # Editing it in place is a no-op re-notify; even if the PATCH
+                    # fails transiently the bypass is already known, so fail
+                    # CLOSED (return False) — never re-ping for a known bypass.
                     patch_url = (
                         f"https://api.github.com/repos/{trigger.repository}/"
                         f"issues/comments/{existing_id}"
                     )
-                    resp = await client.patch(
-                        patch_url, json={"body": body}, headers=headers
-                    )
-                    resp.raise_for_status()
-                    log.info(
-                        f"[{DAEMON_NAME}] edited existing pipeline-bypass notice "
-                        f"#{existing_id} on {trigger.repository}#{trigger.number}"
-                    )
-                else:
-                    resp = await client.post(
-                        list_url, json={"body": body}, headers=headers
-                    )
-                    resp.raise_for_status()
-                    log.info(
-                        f"[{DAEMON_NAME}] posted pipeline-bypass notice on "
-                        f"{trigger.repository}#{trigger.number}"
-                    )
+                    try:
+                        resp = await client.patch(
+                            patch_url, json={"body": body}, headers=headers
+                        )
+                        resp.raise_for_status()
+                        log.info(
+                            f"[{DAEMON_NAME}] edited existing pipeline-bypass "
+                            f"notice #{existing_id} on "
+                            f"{trigger.repository}#{trigger.number}"
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            f"[{DAEMON_NAME}] could not edit existing bypass "
+                            f"notice on {trigger.repository}#{trigger.number}: "
+                            f"{exc}"
+                        )
+                    return False
+                resp = await client.post(
+                    list_url, json={"body": body}, headers=headers
+                )
+                resp.raise_for_status()
+                log.info(
+                    f"[{DAEMON_NAME}] posted pipeline-bypass notice on "
+                    f"{trigger.repository}#{trigger.number}"
+                )
+                return True
         except Exception as exc:
+            # We reached here without confirming an existing marker (the dedup
+            # GET failed and/or the NEW-comment POST failed), so this may be a
+            # first-time bypass we could not surface. Fail OPEN — return True so
+            # the operator is still notified — mirroring _claim_escalation and
+            # ensuring a genuine bypass is never silently swallowed by a
+            # transient GitHub error. (A confirmed-duplicate PATCH failure
+            # returns False above and never reaches here.)
             log.warning(
                 f"[{DAEMON_NAME}] failed to post pipeline-bypass notice on "
-                f"{trigger.repository}#{trigger.number}: {exc}"
+                f"{trigger.repository}#{trigger.number}: {exc} — notifying "
+                "anyway (fail-open)"
             )
+            return True
 
     async def _fetch_issue_fields(
         self, repository: str, issue_number: int
@@ -3042,13 +4131,33 @@ class SwarmDispatcher:
             )
             return None
 
-    async def _lanius_waive_gates(self, trigger: SwarmTrigger) -> None:
-        """Ask Lanius to waive all unsigned pre-impl gates on the issue entity.
+    async def _waive_gates(self, trigger: SwarmTrigger) -> WaiveOutcome:
+        """Waive all unsigned pre-impl gates DISPATCHER-SIDE, then verify.
 
-        Mirrors the gate-waive mechanics in the Lanius SKILL.md (lines 48-52):
-        correct gate_status.<gate> → "waived", append to owner_history, advance
-        current_owner to the next phase.  Best-effort: logs on failure but does
-        not raise.
+        ateles#285 — root cause and fix.  This used to prompt Lanius to perform
+        the ``correct()`` calls.  That silently no-opped (2026-07-27T17:37: the
+        agent spawned, produced nothing, wrote nothing, and posted nothing) and
+        before that PARTIALLY applied (2026-07-23: waived ``arch``, left ``ux``
+        pending).  Because the helper was documented "best-effort — logs on
+        failure but does not raise", the operator saw the command acknowledged
+        and had no reason to think it had not worked, while PR gate inheritance
+        kept blocking correctly on the still-pending gate.
+
+        A gate waive is a DETERMINISTIC STATE TRANSITION: ``gate_status.<gate>``
+        → ``waived`` for each unsigned pre-impl gate, plus one ``owner_history``
+        append.  There is no judgement in it, so it must not depend on an agent
+        turn (same lesson as ateles#263 — do not rely on an LLM to persist a
+        mechanical mutation).  The dispatcher now:
+
+          1. reads the issue entity,
+          2. sweeps ALL of :data:`PRE_IMPL_GATES` (a total function — the
+             partial-apply mode is structurally impossible),
+          3. writes ``gate_status`` + ``owner_history``,
+          4. RE-READS and asserts every targeted gate is now cleared,
+          5. reports the outcome to the operator on GitHub either way.
+
+        Returns the :class:`WaiveOutcome` so the caller can decide whether to
+        re-trigger the PR pipeline.  Never raises.
         """
         ref = f"{trigger.repository}#{trigger.number}"
         issue_number = trigger.number
@@ -3057,45 +4166,144 @@ class SwarmDispatcher:
         if trigger.comment_on_pr:
             issue_number = self._parent_issue_number(trigger.body) or trigger.number
 
-        prompt = (
-            "Invoke the lanius agent per your appended system prompt.\n\n"
-            f"The operator has issued `{_CONFIRM_GATES_CLEAR_CMD}` on "
-            f"{trigger.repository}#{trigger.number} "
-            f"({trigger.comment_html_url or trigger.html_url}).\n\n"
-            f"Parent issue (where gates live): #{issue_number} in "
-            f"{trigger.repository}.\n\n"
-            "ACTION REQUIRED — operator override, execute immediately:\n"
-            f"For each gate in {list(PRE_IMPL_GATES)} that is currently "
-            "`pending` or `blocked` on the parent issue entity (not already "
-            "`signed_off` or `waived`), do ALL of the following:\n"
-            "  1. `correct()` the issue entity: set `gate_status.<gate>` → "
-            "`\"waived\"`.\n"
-            "  2. Append to `owner_history`: "
-            '`{"gate": "<gate>", "action": "waived", '
-            '"actor": "operator", "reason": "operator /confirm-gates-clear '
-            'override", "timestamp": "<now>"}`.\n'
-            "  3. After waiving all unsigned gates, set `current_owner` to "
-            "the next phase (e.g. `pr_review` if pm and arch are now done).\n"
-            "  4. Post ONE GitHub comment on the PR (or issue) confirming which "
-            "gates were waived and that the review pipeline will now proceed.\n\n"
-            "Do NOT waive gates that are already `signed_off` or `waived`.\n"
-            "If ALL gates are already signed_off/waived, post a comment saying "
-            "the pipeline is already clear.\n\n"
-            f"{_agent_prompt_instruction('lanius', 'gate admin')}"
+        store = IssueGateStore(
+            self.config.neotoma_base_url, self.config.neotoma_token
         )
-        result = await run_skill(
-            "lanius",
-            prompt,
-            github_token=_token_for_agent_on_repo("lanius", trigger.repository),
-            include_github_contract=True,
-        )
-        if not result.ok:
+        try:
+            outcome = await store.waive(
+                trigger.repository, issue_number, PRE_IMPL_GATES
+            )
+        except Exception as exc:  # noqa: BLE001 — never crash the pipeline
             log.error(
-                f"[{DAEMON_NAME}] Lanius gate-waive failed on {ref}: "
-                f"{result.error or f'rc={result.returncode}'}"
+                f"[{DAEMON_NAME}] gate waive raised on {ref}: {exc} — "
+                "reporting failure to the operator"
+            )
+            outcome = WaiveOutcome(
+                entity_found=True, targeted=list(PRE_IMPL_GATES),
+                failed=list(PRE_IMPL_GATES),
+            )
+
+        # ALWAYS surface the result on GitHub — success, no-op, and failure.
+        # The 2026-07-27 failure produced ZERO GitHub-visible output, which is
+        # a core part of the bug (#285 point 3).
+        try:
+            await self._post_gate_waive_comment(trigger, outcome)
+        except Exception as exc:  # noqa: BLE001 — comment is best-effort
+            log.warning(
+                f"[{DAEMON_NAME}] could not post gate-waive comment on {ref}: "
+                f"{exc}"
+            )
+
+        if not outcome.entity_found:
+            log.error(
+                f"[{DAEMON_NAME}] gate waive on {ref}: no Neotoma issue entity "
+                f"for {trigger.repository}#{issue_number} — nothing waived"
+            )
+            self.notifier.send(
+                f"Gate waive on {ref} FAILED — no Neotoma issue entity for "
+                f"{trigger.repository}#{issue_number}. The pipeline stays "
+                "blocked; the issue may never have been triaged.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+        elif outcome.failed:
+            log.error(
+                f"[{DAEMON_NAME}] gate waive on {ref} VERIFICATION FAILED — "
+                f"still unsigned: {', '.join(outcome.failed)}"
+            )
+            self.notifier.send(
+                f"Gate waive on {ref} FAILED verification — these gates are "
+                f"still unsigned after the write: {', '.join(outcome.failed)}. "
+                "The review pipeline will keep blocking.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+        elif outcome.waived:
+            log.info(
+                f"[{DAEMON_NAME}] gate waive on {ref}: waived and verified "
+                f"{', '.join(outcome.waived)}"
             )
         else:
-            log.info(f"[{DAEMON_NAME}] Lanius gate-waive completed for {ref}")
+            log.info(
+                f"[{DAEMON_NAME}] gate waive on {ref}: no gates needed waiving "
+                "(all pre-impl gates already clear)"
+            )
+        return outcome
+
+    async def _post_gate_waive_comment(
+        self, trigger: SwarmTrigger, outcome: WaiveOutcome
+    ) -> None:
+        """Post (or edit) the operator-visible gate-waive result comment.
+
+        Follows the SWARM_GITHUB_CONTRACT edit-not-duplicate rule via a stable
+        marker, and — like _post_swarm_run_comment — the body carries NO command
+        token so the dispatcher's own comment cannot re-trigger the command
+        detector (neotoma#1686 self-trigger defence).
+        """
+        _WAIVE_MARKER = "<!-- swarm-gate-waive-result -->"
+
+        if not _token_for_repo(trigger.repository):
+            log.warning(
+                f"[{DAEMON_NAME}] no GitHub token — gate-waive result comment "
+                f"skipped for {trigger.repository}#{trigger.number}"
+            )
+            return
+
+        body = format_waive_comment(
+            marker=_WAIVE_MARKER,
+            header=attribution_header("apis", "swarm dispatcher"),
+            waived=outcome.waived,
+            already_clear=outcome.already_clear,
+            failed=outcome.failed,
+            entity_found=outcome.entity_found,
+        )
+
+        list_url = (
+            f"https://api.github.com/repos/{trigger.repository}/issues/"
+            f"{trigger.number}/comments"
+        )
+        headers = self._github_headers(trigger.repository)
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            existing_id: int | None = None
+            try:
+                resp = await client.get(
+                    list_url, params={"per_page": 100}, headers=headers
+                )
+                resp.raise_for_status()
+                for comment in resp.json():
+                    if _WAIVE_MARKER in comment.get("body", ""):
+                        existing_id = comment["id"]
+                        break
+            except Exception as exc:
+                log.warning(
+                    f"[{DAEMON_NAME}] could not list comments for gate-waive "
+                    f"dedup on {trigger.repository}#{trigger.number}: {exc} — "
+                    "will post new"
+                )
+
+            if existing_id is not None:
+                patch_url = (
+                    f"https://api.github.com/repos/{trigger.repository}/"
+                    f"issues/comments/{existing_id}"
+                )
+                resp = await client.patch(
+                    patch_url, json={"body": body}, headers=headers
+                )
+                resp.raise_for_status()
+                log.info(
+                    f"[{DAEMON_NAME}] edited gate-waive result comment "
+                    f"#{existing_id} on {trigger.repository}#{trigger.number}"
+                )
+            else:
+                resp = await client.post(
+                    list_url, json={"body": body}, headers=headers
+                )
+                resp.raise_for_status()
+                log.info(
+                    f"[{DAEMON_NAME}] posted gate-waive result comment on "
+                    f"{trigger.repository}#{trigger.number}"
+                )
 
     # ── prompts ──────────────────────────────────────────────────────────────
 
@@ -3372,7 +4580,8 @@ class SwarmDispatcher:
             "BLOCKED COMMENT REQUIREMENTS (ateles#112): when you post a "
             "blocking comment, it MUST include:\n"
             "  1. A list of WHICH pre-impl gates are unsigned and who owns "
-            "each (e.g. `pm` owned by Pavo, `arch` owned by Waxwing).\n"
+            "each (e.g. `pm` owned by Pavo, `ux` owned by Accipiter, `arch` "
+            "owned by Waxwing).\n"
             "  2. The exact operator-override command: "
             f"`/confirm-gates-clear` — only @{operator_login} may issue this "
             "command; it waives all unsigned pre-impl gates and re-triggers "
@@ -3382,13 +4591,32 @@ class SwarmDispatcher:
             "operator can waive it.\n\n"
             f"{_agent_prompt_instruction('lanius', 'PR gate inheritance')}\n\n"
             "End your reply with exactly one line: `GATE_INHERITANCE: clear` "
-            "or `GATE_INHERITANCE: blocked` so the dispatcher can route."
+            "or `GATE_INHERITANCE: blocked` so the dispatcher can route. When "
+            "you emit `blocked`, add a SECOND line naming the unsigned pre-impl "
+            "gates as a comma-separated list, e.g. `GATE_PENDING: arch,ux` — "
+            "the dispatcher uses this to guarantee the lens agent that owns "
+            "each pending gate a seat on the (capped) review panel, so a gate "
+            "can never stay blocked because its owning lens was never "
+            "re-invoked. Omit the line when clear."
         )
 
     @staticmethod
     def _panelist_prompt(
-        t: SwarmTrigger, lens: Lens, expectation: str, parent: int | None = None
+        t: SwarmTrigger,
+        lens: Lens,
+        expectation: str,
+        parent: int | None = None,
+        has_worktree: bool = False,
+        owns_pending_gate: bool = False,
     ) -> str:
+        """Build a lens panelist's prompt.
+
+        `has_worktree` reflects whether this panelist actually got a writable PR
+        checkout as its cwd. It gates the evidence bar: telling a lens to "run
+        the code" when it is reviewing diff-only would be a lie that either
+        wastes its turn or invites invented output (#254 / plan
+        ent_ccd6660fc28800a2ae3a5623).
+        """
         expectation_block = (
             "Your pre-registered expectations on the parent issue were:\n"
             f"{expectation}\n\nReview against them first: did the change meet "
@@ -3396,6 +4624,32 @@ class SwarmDispatcher:
             if expectation
             else "You did not pre-register expectations for this issue; review "
             "against your standing lens criteria."
+        )
+        # The evidence bar for a [BLOCKING] verdict. Motivated by neotoma PR
+        # #1946: 0 of 11 blocking findings across 3 rounds cited executing
+        # anything, and both wrong findings came from a lens with no checkout.
+        # Reading the code is a hypothesis; running it is evidence.
+        evidence_bar = (
+            "EVIDENCE BAR FOR BLOCKING. Your cwd is a writable checkout of the "
+            "PR branch, and you have Bash. A finding may be `[BLOCKING]` ONLY "
+            "if you RAN something that demonstrates it — a failing test, a "
+            "command whose output contradicts what the code claims, a "
+            "reproduction of the defect. Quote the command and its ACTUAL "
+            "output in the finding's detail. If you cannot reproduce it, or you "
+            "only reasoned from reading the diff, file it `[NON-BLOCKING]` and "
+            "say what you could not verify. This is the standard "
+            "`fixed_means_behavior_verified_not_contract_accepted` "
+            "(ent_db0b7855d47012084477fb00) already imposes on the implementer; "
+            "it binds you too. Do not block a merge on a hypothesis."
+            if has_worktree
+            else "EVIDENCE BAR FOR BLOCKING. You are reviewing DIFF-ONLY this "
+            "run: no PR checkout could be prepared, so you cannot execute the "
+            "code. Findings you cannot demonstrate by running something are "
+            "hypotheses. Prefer `[NON-BLOCKING]`, and state plainly that the "
+            "concern is unverified and what would confirm it. Reserve "
+            "`[BLOCKING]` for defects evident from the diff itself (a missing "
+            "declaration, a contradicted invariant, an absent required artifact) "
+            "— never for a claim about runtime behaviour you could not observe."
         )
         blocking_rules = (
             "Your output is FORWARD-LOOKING and non-blocking: do not request "
@@ -3428,6 +4682,7 @@ class SwarmDispatcher:
             "both, use `decision` — an omitted or invalid finding_kind is "
             "treated as `decision` by the dispatcher regardless, so there is "
             "no benefit to guessing `implementation`."
+            + evidence_bar
         )
         # Build the check-off instruction only when there is a parent issue AND
         # this panelist pre-registered expectations (so there is a comment to edit).
@@ -3450,6 +4705,40 @@ class SwarmDispatcher:
                 f"existing one in place. Preserve the header line "
                 f"(`**{EXPECTATION_MARKER} ({lens.lens})**`) and all item text "
                 f"exactly; only toggle the checkboxes from `[ ]` to `[x]`."
+            )
+        # Gate-writeback (ateles: PR-panel sign-off never reached gate_status).
+        # A lens seated because it OWNS a pending pre-impl gate (arch/ux/pm) must
+        # transcribe its own non-blocking verdict into the parent issue's
+        # `gate_status` — otherwise the panel re-runs the lens, the lens signs off
+        # in a PR comment, but `gate_status.<gate>` stays `pending`, so Lanius
+        # re-blocks next round and the PR loops forever (observed on #1944: arch
+        # SIGNED_OFF in comments across multiple rounds while gate_status.arch
+        # stayed pending). This is the missing writeback: the panelist owns its
+        # own gate_status mutation (the dispatcher never writes gate state).
+        gate_writeback_block = ""
+        if parent and owns_pending_gate and not lens.forward_looking:
+            gate_writeback_block = (
+                f"\n\nGATE WRITEBACK — you own the pre-impl `{lens.lens}` gate on "
+                f"parent issue #{parent}, which is currently `pending`. Your PR "
+                "comment is NOT sufficient to clear it; the gate lives on the "
+                "issue entity and Lanius reads it as authoritative. After you post "
+                "your review, you MUST reconcile `gate_status` yourself:\n"
+                f"  1. Retrieve the parent issue entity: "
+                f"`retrieve_entity_by_identifier(entity_type='issue', "
+                f"identifier='{parent}', by='github_number')` and read its "
+                "`gate_status`.\n"
+                f"  2. If — and ONLY if — your verdict on THIS PR is a clean "
+                f"sign-off (no `[BLOCKING]` findings from your `{lens.lens}` "
+                f"lens), `correct()` the issue entity so `gate_status.{lens.lens}` "
+                "→ `\"signed_off\"`. MERGE the existing map: preserve every other "
+                "gate's value exactly (never downgrade another gate), change only "
+                f"your own `{lens.lens}` key. Use idempotency_key "
+                f"`gate-signoff-{lens.lens}-{t.number}`.\n"
+                "  3. If your verdict has any blocking finding, LEAVE the gate "
+                "`pending` (do not sign off) — the block stands until the author "
+                "resolves it and you re-review.\n"
+                "Do this even though this is a PR-panel review, not the issue "
+                "pipeline: the sign-off only counts once it is in `gate_status`."
             )
         _panelist_role = f"{lens.lens} lens panelist"
         if is_provisioned(lens.agent):
@@ -3482,6 +4771,7 @@ class SwarmDispatcher:
             f"{comment_identity_block}\n\n"
             f"{blocking_rules}"
             f"{checkoff_block}"
+            f"{gate_writeback_block}"
         )
 
     @staticmethod
@@ -3781,6 +5071,110 @@ class SwarmDispatcher:
         except Exception as exc:
             log.error(
                 f"[{DAEMON_NAME}] auth-failure comment failed for "
+                f"{t.repository}#{t.number}: {exc}"
+            )
+
+    # Durable marker: a PR whose review was deferred by a usage limit. Carries
+    # the ISO resume time so the sweep can re-dispatch it once the limit clears.
+    # Head-SHA-agnostic and restart-surviving, same substrate as the fix-round
+    # counter. Distinct from _VANELLUS_COMMENT_MARKER so a deferral is NEVER
+    # mistaken for an aggregation that ran.
+    _REVIEW_DEFERRED_MARKER = "<!-- review-deferred-until:{iso} -->"
+    _REVIEW_DEFERRED_RE = re.compile(r"<!-- review-deferred-until:([^ ]+) -->")
+
+    async def _handle_panel_session_limit(
+        self,
+        t: SwarmTrigger,
+        parent: int | None,
+        agent: str,
+        stdout: str,
+        stderr: str,
+    ) -> None:
+        """A panel/aggregation call was throttled by a self-clearing usage limit.
+
+        Unlike an auth failure (page + wait for a human), a usage limit resets on
+        its own — so this posts a TRUTHFUL "review incomplete, will resume" marker
+        (never a stub that reads like a verdict) with the resume time, and lets
+        the resume sweep re-dispatch after the reset. Best-effort; never raises.
+        """
+        delay = parse_limit_reset_delay(stdout, stderr)
+        resume_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        iso = resume_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+        log.warning(
+            f"[{DAEMON_NAME}] {agent} panel on {t.repository}#{t.number} hit a "
+            f"usage limit; deferring review resume until {iso} (~{delay}s)"
+        )
+        # Notify at INFO (always-digest), not BLOCKER: nothing for the operator
+        # to fix — it self-resolves. (An operator who wants it sooner can top
+        # up / wait.)
+        try:
+            self.notifier.send(
+                f"⏳ Swarm review on {t.repository}#{t.number} paused on a usage "
+                f"limit; auto-resumes at {iso}. No action needed.",
+                priority=Priority.INFO,
+                handler=DAEMON_NAME,
+            )
+        except Exception as exc:
+            log.error(f"[{DAEMON_NAME}] session-limit notice failed: {exc}", exc_info=True)
+
+        repo_token = _token_for_repo(t.repository)
+        if not repo_token:
+            return
+        body = (
+            f"{self._REVIEW_DEFERRED_MARKER.format(iso=iso)}\n"
+            f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+            "⏳ **Review incomplete — panel throttled by a usage limit.** The "
+            f"`{agent}` aggregation could not run because the model call hit a "
+            "session/usage limit. This is **not** a verdict — the PR has not been "
+            f"assessed. The review will resume automatically after the limit "
+            f"resets (scheduled ~`{iso}`); no operator action is required.\n\n"
+            "_Posted by the Apis dispatcher — distinct from a `vanellus-"
+            "aggregation` verdict on purpose, so a throttled review is never "
+            "mistaken for a completed one._"
+        )
+        url = f"https://api.github.com/repos/{t.repository}/issues/{t.number}/comments"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                # ADVANCE, don't skip: a still-limited re-run must move the reset
+                # time forward, or the sweep would keep re-dispatching every pass
+                # (Loxia #264 review). Delete any prior deferral markers, then
+                # post the fresh one carrying the NEW reset ISO. Deleting first
+                # also keeps the "latest live marker" invariant the sweep relies
+                # on unambiguous.
+                resp = await client.get(
+                    url, params={"per_page": 100},
+                    headers=self._github_headers(t.repository),
+                )
+                resp.raise_for_status()
+                for c in resp.json():
+                    if self._REVIEW_DEFERRED_RE.search(c.get("body", "")):
+                        del_url = (
+                            f"https://api.github.com/repos/{t.repository}/issues/"
+                            f"comments/{c.get('id')}"
+                        )
+                        try:
+                            d = await client.delete(
+                                del_url, headers=self._github_headers(t.repository)
+                            )
+                            d.raise_for_status()
+                        except Exception as exc:
+                            log.warning(
+                                f"[{DAEMON_NAME}] could not delete stale deferral "
+                                f"marker {c.get('id')} on {t.repository}#{t.number} "
+                                f"({exc}); posting fresh marker anyway"
+                            )
+                post = await client.post(
+                    url, json={"body": body},
+                    headers=self._github_headers(t.repository),
+                )
+                post.raise_for_status()
+                log.info(
+                    f"[{DAEMON_NAME}] posted review-deferred marker on "
+                    f"{t.repository}#{t.number} (resume {iso})"
+                )
+        except Exception as exc:
+            log.error(
+                f"[{DAEMON_NAME}] deferral comment failed for "
                 f"{t.repository}#{t.number}: {exc}"
             )
 

@@ -103,6 +103,16 @@ class Notifier:
         self._email_primary = os.environ.get("ATELES_NOTIFY_EMAIL", "0") == "1"
         self._operator_email = os.environ.get("OPERATOR_EMAIL", "").strip()
         self._swarm_email = os.environ.get("ATELES_SWARM_EMAIL", "").strip()
+        # Delivery target for system notifications. When From (the swarm alias)
+        # and To are the *same* Gmail account, Gmail files the message under
+        # SENT and never surfaces it in the inbox as UNREAD — so operator-facing
+        # alerts silently pile up unseen. ATELES_NOTIFY_TO lets the operator
+        # point notifications at a genuinely separate address (or a plus-alias
+        # a filter forces to the inbox). Defaults to OPERATOR_EMAIL so behaviour
+        # is unchanged until configured.
+        self._notify_to = (
+            os.environ.get("ATELES_NOTIFY_TO", "").strip() or self._operator_email
+        )
         self._digest_queue: list[str] = []
         self._apprise: Any = None
         if HAS_APPRISE:
@@ -211,11 +221,11 @@ class Notifier:
         message. Uses an argv list (no shell) so arbitrary notification text can't
         be misinterpreted. Returns False on any failure so the caller can fall
         back to Telegram."""
-        if not self._operator_email:
+        if not self._notify_to:
             return False
         first = (message.strip().splitlines() or ["notification"])[0]
         subject = f"[Ateles] {first[:80]}"
-        cmd = ["gws", "gmail", "+send", "--to", self._operator_email,
+        cmd = ["gws", "gmail", "+send", "--to", self._notify_to,
                "--subject", subject, "--body", message]
         if self._swarm_email:
             cmd += ["--from", self._swarm_email]
