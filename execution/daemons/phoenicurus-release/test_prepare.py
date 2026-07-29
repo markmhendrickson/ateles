@@ -108,7 +108,47 @@ def test_email_send_builds_gws_command_with_from(monkeypatch):
     assert "--to" in cmd and "op@example.com" in cmd
     assert "--from" in cmd and "swarm@example.com" in cmd
     assert "--subject" in cmd and "🚀 subj" in cmd
-    assert "--body" in cmd and "body text" in cmd
+    assert "--body" in cmd
+    body_arg = cmd[cmd.index("--body") + 1]
+    assert "body text" in body_arg
+    assert "--html" in cmd
+
+
+# ── _plain_to_html: markdown-ish daemon notices rendered for email ───────────
+
+def test_plain_to_html_heading_levels_map_one_to_one():
+    assert prepare._plain_to_html("# Title") == "<h1>Title</h1>"
+    assert prepare._plain_to_html("## Section") == "<h2>Section</h2>"
+
+
+def test_plain_to_html_bold_and_code():
+    assert prepare._plain_to_html("**hello**") == "<p><strong>hello</strong></p>"
+    assert prepare._plain_to_html("`gws gmail +send`") == "<p><code>gws gmail +send</code></p>"
+
+
+def test_plain_to_html_code_span_contents_are_literal():
+    # Markdown code spans are not re-interpreted as markdown — `**x**` inside
+    # backticks must stay literal text, not become <strong> nested in <code>.
+    assert prepare._plain_to_html("`**not bold**`") == "<p><code>**not bold**</code></p>"
+
+
+def test_plain_to_html_bullets():
+    assert prepare._plain_to_html("- item one\n- item two") == (
+        "<ul>\n<li>item one</li>\n<li>item two</li>\n</ul>"
+    )
+
+
+def test_plain_to_html_markdown_link():
+    assert prepare._plain_to_html("[here](https://example.com)") == (
+        '<p><a href="https://example.com">here</a></p>'
+    )
+
+
+def test_plain_to_html_escapes_quotes_in_url_no_attribute_injection():
+    # A literal `"` in a URL must not break out of the generated href attribute.
+    out = prepare._plain_to_html('[label](https://example.com/"onmouseover="alert(1))')
+    assert "&quot;" in out
+    assert 'onmouseover="alert' not in out
 
 
 def test_email_send_fail_open_on_nonzero_rc(monkeypatch):
