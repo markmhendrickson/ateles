@@ -199,7 +199,11 @@ def main(argv: list[str]) -> int:
     violations = 0
     for path in iter_scope(argv, include_mirrors=include_mirrors):
         for lineno, name, line in check_file(path, retired):
-            rel = path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path
+            rel = (
+                path.relative_to(REPO_ROOT)
+                if path.is_relative_to(REPO_ROOT)
+                else path
+            )
             print(
                 f"{rel}:{lineno}: retired agent name '{name}' "
                 f"(now '{retired[name]}'): {line[:120]}"
