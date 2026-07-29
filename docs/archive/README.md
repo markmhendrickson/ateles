@@ -18,10 +18,12 @@ are reversible; several should ultimately live elsewhere.
   `cursor_directory.md`, `cursor_rules/` — pre-swarm Cursor/foundation-era guidance, superseded by the
   entity / agent_policy model.
 - `legacy_data_types_inventory.md` — self-described legacy inventory; superseded by `data_types.md`.
+- `shared/` — the legacy "three-layer" Strategy/Execution/Truth foundation (28 files), superseded by the
+  entity / agent_policy model.
 
-> The rest of the legacy "three-layer" foundation lives under `docs/shared/` and is **not** archived — three
-> of its files (`agent-workflow-requirements.md`, `agent-mcp-access-policy.md`, `agent-data-rules.md`) are
-> still cited as live policy by the linters and `.gitleaks.toml`. Relocating those is a separate, careful step.
+> The 3 still-live policy files that were under `docs/shared/` — `agent-workflow-requirements.md`,
+> `agent-mcp-access-policy.md`, `agent-data-rules.md` (cited by the linters and `.gitleaks.toml`) — were
+> **moved to [`docs/policies/`](../policies/)**, not archived.
 
 ## Command docs superseded by skills (Part 2.F)
 - `language_command.md`, `learn_neotoma_command.md`, `neotoma_learn_command.md`, `store_neotoma_command.md`,

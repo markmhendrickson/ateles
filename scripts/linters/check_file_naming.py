@@ -170,7 +170,7 @@ def main():
         for violation in all_violations:
             print(f"  {violation}", file=sys.stderr)
         print(
-            "\nSee foundation-config.yaml and /shared/docs/agent-workflow-requirements.md for naming conventions.",
+            "\nSee foundation-config.yaml and docs/policies/agent-workflow-requirements.md for naming conventions.",
             file=sys.stderr,
         )
         sys.exit(1)
