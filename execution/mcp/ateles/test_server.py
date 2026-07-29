@@ -680,6 +680,16 @@ class TestListCheckpoints(unittest.TestCase):
         self.assertEqual(result["count"], 0)
 
 
+def _tool_input_schema(tool):
+    """MCP SDK renamed Tool.inputSchema → input_schema; support both."""
+    schema = getattr(tool, "input_schema", None)
+    if schema is None:
+        schema = getattr(tool, "inputSchema", None)
+    if schema is None:
+        raise AttributeError(f"Tool {tool.name!r} has neither input_schema nor inputSchema")
+    return schema
+
+
 class TestToolSchemas(unittest.TestCase):
 
     def test_four_tools_defined(self):
@@ -691,12 +701,13 @@ class TestToolSchemas(unittest.TestCase):
 
     def test_route_task_requires_description(self):
         rt = next(t for t in srv.TOOLS if t.name == "route_task")
-        self.assertIn("task_description", rt.inputSchema["required"])
+        self.assertIn("task_description", _tool_input_schema(rt)["required"])
 
     def test_resolve_checkpoint_requires_both_params(self):
         rc = next(t for t in srv.TOOLS if t.name == "resolve_checkpoint")
-        self.assertIn("checkpoint_id", rc.inputSchema["required"])
-        self.assertIn("action", rc.inputSchema["required"])
+        schema = _tool_input_schema(rc)
+        self.assertIn("checkpoint_id", schema["required"])
+        self.assertIn("action", schema["required"])
 
     def test_all_handlers_registered(self):
         for tool in srv.TOOLS:
