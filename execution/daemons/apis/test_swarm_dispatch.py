@@ -5129,7 +5129,10 @@ def test_pipeline_marks_queued_before_inflight_when_semaphore_contended(monkeypa
     a "queued" marker must be written BEFORE the acquire attempt (so a
     restart while parked is durable), then "inflight" once acquired."""
     calls = []
-    d = SwarmDispatcher(_StubNotifier(), _config())
+    cfg = DispatchConfig(
+        neotoma_token="", github_token="", max_concurrent_issue_pipelines=1
+    )
+    d = SwarmDispatcher(_StubNotifier(), cfg)
 
     async def fake_mark(self, trigger, *, stage="inflight"):
         calls.append((f"mark:{stage}", trigger.number))
