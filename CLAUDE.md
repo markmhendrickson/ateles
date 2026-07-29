@@ -51,6 +51,7 @@ All hooks are **fail-open** (stdlib-only Python; any error or missing `NEOTOMA_B
 - **Always use Neotoma prod** (`mcp__mcpsrv_neotoma__*`), never the dev instance.
 - **Google Calendar**: always use `gws` CLI with `Europe/Madrid` timezone.
 - **Gmail**: always use `gws gmail ...` commands, not the Gmail MCP server.
+- **Slack**: use `python3 execution/scripts/slack_cli.py` (wraps the Slack Web API like `gws` wraps Google). Reads (`search`, `history`, `channels`, `whoami`) are free. **`post` is operator-gated**: it dry-runs (prints the payload, exits non-zero) unless `--yes` is passed, and it posts *as the operator*. Treat a post as a checkpoint — draft it, show the operator the dry-run, send with `--yes` only after approval. Needs `SLACK_USER_TOKEN` (materialized from `ateles-private`); posting also needs the `chat:write` scope. See `docs/slack_integration.md`.
 - **Strip PII before filing issues** — scrub usernames, worktree names, platform names; use `visibility: private` for session-derived issues.
 
 ---
