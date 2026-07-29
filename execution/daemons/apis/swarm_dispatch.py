@@ -2050,7 +2050,13 @@ class SwarmDispatcher:
         #    unless APIS_AUTONOMY_AUTO_MERGE=1 (ateles#80 guardrail).
         vanellus_result = await run_skill(
             "vanellus",
-            self._vanellus_prompt(trigger, parent, [p.lens for p in panel], reviews),
+            self._vanellus_prompt(
+                trigger,
+                parent,
+                [p.lens for p in panel],
+                reviews,
+                auto_merge=self.config.auto_merge,
+            ),
             github_token=_token_for_agent_on_repo("vanellus", trigger.repository),
             include_github_contract=True,
             notifier=self.notifier,
@@ -4624,6 +4630,7 @@ class SwarmDispatcher:
         parent: int | None,
         lenses: list[str],
         reviews: list[tuple[str, str]] | None = None,
+        auto_merge: bool = False,
     ) -> str:
         # The captured lens reviews are embedded INLINE below so the aggregator
         # never has to re-fetch them via `gh`. Vanellus runs diff-only
@@ -4662,10 +4669,26 @@ class SwarmDispatcher:
             "Repeat the full aggregated verdict text in your reply here (the "
             "dispatcher parses it and posts the comment for you if your gh "
             "call fails).\n\n"
-            "AUTONOMY GUARDRAIL — DO NOT MERGE. Merge is operator-gated: a "
-            "blocking checkpoint_brief is filed at the merge boundary; the "
-            "operator merges or instructs you to. This overrides any merge "
-            "instruction in your standing protocol."
+            + (
+                # Flag ON: the dispatcher deliberately files NO merge checkpoint
+                # (see _gate_merge_readiness, which returns early on auto_merge),
+                # so if this prompt still said "DO NOT MERGE" nothing would merge
+                # AND no checkpoint would be raised — strictly worse than the flag
+                # being off. Authorize the merge here, with the hard stops intact.
+                "AUTONOMY — YOU MAY MERGE. Auto-merge is enabled "
+                "(APIS_AUTONOMY_AUTO_MERGE=1). Merge via `gh pr merge --squash` "
+                "ONLY when ALL hold: parent-issue gate inheritance passes (pm/ux/"
+                "arch signed_off, waived, or not_required), every REQUIRED "
+                "branch-protection check is green, and a head-SHA-matched verdict "
+                "is APPROVE with Blocking: 0. If any fails, do NOT merge — post "
+                "the verdict naming the blocker and stop. Releases remain "
+                "human-gated; merging to main is not a release."
+                if auto_merge
+                else "AUTONOMY GUARDRAIL — DO NOT MERGE. Merge is operator-gated: a "
+                "blocking checkpoint_brief is filed at the merge boundary; the "
+                "operator merges or instructs you to. This overrides any merge "
+                "instruction in your standing protocol."
+            )
         )
 
     # ── GitHub helpers ───────────────────────────────────────────────────────
