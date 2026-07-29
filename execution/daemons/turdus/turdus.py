@@ -89,6 +89,17 @@ MAX_MESSAGES = int(os.environ.get("TURDUS_MAX_MESSAGES", "20"))
 # path as a GitHub review or /approve comment. Env-gated: without the operator
 # address AND the shared secret, this path is inert.
 OPERATOR_EMAIL = os.environ.get("OPERATOR_EMAIL", "").strip().lower()
+
+# ── Self-notification guard ───────────────────────────────────────────────────
+# Turdus sends its own digests via the notifier (gws +send --from ATELES_SWARM_EMAIL,
+# a `+swarm` Gmail alias that lands in the SAME inbox). Those digests carry an
+# "[Ateles] [turdus] … invoice(s) …" subject — which matches the invoice/actionable
+# keyword filters, so on the next poll Turdus re-triages its OWN notification and
+# fires another one: a runaway self-feeding loop. Skip any message Turdus itself
+# authored — identified by the swarm From-address or the "[Ateles]" subject prefix.
+SWARM_EMAIL = os.environ.get("ATELES_SWARM_EMAIL", "").strip().lower()
+_SELF_SUBJECT_PREFIX = "[Ateles]"
+
 APIS_APPROVE_URL = os.environ.get(
     "APIS_APPROVE_EMAIL_URL", "http://127.0.0.1:8742/approve-email"
 )
@@ -643,6 +654,20 @@ def _extract_sender_address(sender: str) -> str:
     return addr
 
 
+def _is_self_notification(sender: str, subject: str) -> bool:
+    """True if this message is one Turdus (or the swarm) sent to the operator.
+
+    Triage feeds on the operator's inbox, into which the notifier delivers swarm
+    digests via a `+swarm` alias — same inbox, unread. Left unfiltered, Turdus's
+    own "[Ateles] …" digest matches the invoice/actionable keywords and triggers
+    an endless self-notification loop. Match on the swarm From-address (primary)
+    or the "[Ateles]" subject prefix (fallback when the address isn't configured).
+    """
+    if SWARM_EMAIL and _extract_sender_address(sender) == SWARM_EMAIL:
+        return True
+    return (subject or "").lstrip().startswith(_SELF_SUBJECT_PREFIX)
+
+
 def _parse_approve_token(text: str) -> tuple[str, int] | None:
     """Extract (repository, pr_number) from a `swarm-approve: owner/repo#N`
     correlation line. Returns None if absent/malformed. Mirrors
@@ -1031,6 +1056,15 @@ async def poll_once(notifier: Notifier, state: dict) -> dict:
         sender = msg.get("sender", msg.get("from", ""))
         subject = msg.get("subject", "(no subject)")
         snippet = msg.get("snippet", "")
+
+        # Skip Turdus's own swarm digests — they re-enter the inbox via the
+        # +swarm alias and would otherwise self-trigger an invoice loop.
+        if _is_self_notification(sender, subject):
+            log.info(
+                f"[{DAEMON_NAME}] SELF-SKIP: own swarm digest "
+                f"subject={subject[:60]!r}"
+            )
+            continue
 
         classification = _classify_message(sender, subject, snippet)
         msg["classification"] = classification
