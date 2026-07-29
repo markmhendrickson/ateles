@@ -224,3 +224,18 @@ def test_settings_merge_preserves_hand_authored_entries(tmp_path, monkeypatch):
     merged, changes = render_hooks.merge_settings_wiring(hand_authored, {"hook_a": policy})
     assert merged["hooks"]["SessionStart"] == hand_authored["hooks"]["SessionStart"]
     assert any("wired hook_a" in c for c in changes)
+
+
+def test_check_skips_when_bearer_token_unset(monkeypatch, capsys):
+    """CI has no NEOTOMA_BEARER_TOKEN secret yet — --check must exit 0 SKIP,
+    not 401-fail the lane. Mirrors validate_tool_allowlist.py's clean-skip."""
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
+    monkeypatch.delenv("NEOTOMA_BEARER_TOKEN", raising=False)
+    # Prevent ~/.config/neotoma/.env from supplying a token in local runs.
+    monkeypatch.setattr(Path, "home", lambda: Path("/tmp/render-hooks-no-home"))
+    monkeypatch.setattr(sys, "argv", ["render_hooks.py", "--check"])
+    rc = render_hooks.main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "SKIP" in out
+    assert "NEOTOMA_BEARER_TOKEN unset" in out

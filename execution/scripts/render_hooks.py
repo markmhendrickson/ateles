@@ -469,6 +469,22 @@ def main() -> int:
         return 0
 
     base_url, token = _load_env()
+    # Repo CI does not yet provision NEOTOMA_BEARER_TOKEN (same gap documented
+    # in agent-config-validation.yml). --check must SKIP cleanly rather than
+    # fail the lane on 401 — unit tests already assert the contract without a
+    # live Neotoma call. --write still requires a token (mutate path).
+    if not (token or "").strip():
+        if args.write:
+            sys.exit(
+                "NEOTOMA_BEARER_TOKEN not set (env or ~/.config/neotoma/.env) — "
+                "required for --write"
+            )
+        print(
+            "SKIP: NEOTOMA_BEARER_TOKEN unset — cannot verify hook_policy drift "
+            "against Neotoma (CI secret not yet provisioned)"
+        )
+        return 0
+
     hook_names = discover_logic_modules()
     policies = fetch_hook_policies(base_url, token)
 

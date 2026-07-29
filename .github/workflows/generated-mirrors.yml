@@ -9,6 +9,10 @@ name: Generated mirrors — drift check
 # requirement. Reuses the same NEOTOMA_BEARER_TOKEN/NEOTOMA_BASE_URL
 # credential class already used by loxia-pr-review.yml and
 # lanius-stale-issues.yml; no new CI credential is introduced.
+# NOTE: NEOTOMA_BEARER_TOKEN is not yet a repo secret (same pre-existing gap
+# as agent-config-validation.yml). render_hooks.py --check SKIPs cleanly
+# (exit 0) when the token is unset; once the secret is provisioned this
+# step becomes a real drift gate without a workflow change.
 
 on:
   pull_request:
