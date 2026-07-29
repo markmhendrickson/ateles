@@ -589,3 +589,324 @@ class TestGoldenPathEndToEnd:
         ppm_idx = order.index("preflight_post_merge")
         tag_idx = order.index("tag_and_push")
         assert merge_idx < ppm_idx < tag_idx
+
+
+# ── CI npm publish handoff (neotoma#2015) ────────────────────────────────────
+#
+# Publishing moved to GitHub Actions for provenance + laptop-independence. The
+# risk that introduces is a SYNCHRONOUS failure becoming an ASYNCHRONOUS one:
+# if the wait were quiet, a failed CI publish would let the release continue to
+# github_release and "succeed" with nothing on npm. These tests pin the loud
+# behaviour.
+
+
+def test_await_ci_publish_returns_once_registry_flips():
+    """Polls until the registry reports the target version, then returns."""
+    seen = iter(["0.18.8", "0.18.8", "0.19.0"])
+    with patch.object(publish, "_registry_version", side_effect=lambda *a: next(seen)):
+        with patch.object(publish, "time") as t:
+            t.monotonic.side_effect = [0, 1, 2, 3, 4, 5]
+            publish.await_ci_npm_publish("v0.19.0", dry_run=False)
+            # Slept between polls rather than hot-looping the registry.
+            assert t.sleep.called
+
+
+def test_await_ci_publish_short_circuits_when_already_published():
+    """A --resume-from re-run must not wait for a publish that already landed."""
+    with patch.object(publish, "_registry_version", return_value="0.19.0") as rv:
+        with patch.object(publish, "time") as t:
+            publish.await_ci_npm_publish("v0.19.0", dry_run=False)
+            assert rv.call_count == 1, "should return on the first registry read"
+            assert not t.sleep.called, "must not sleep when already published"
+
+
+def test_await_ci_publish_timeout_raises_and_telegrams():
+    """Timeout must FAIL the release loudly, not fall through to github_release."""
+    with patch.object(publish, "_registry_version", return_value="0.18.8"):
+        with patch.object(publish, "telegram_send") as tg:
+            with patch.object(publish, "time") as t:
+                # First call arms the deadline; subsequent calls are past it.
+                t.monotonic.side_effect = [0, 10_000, 10_000, 10_000]
+                try:
+                    publish.await_ci_npm_publish("v0.19.0", dry_run=False)
+                    raise AssertionError("expected StepError on timeout")
+                except publish.StepError as exc:
+                    msg = str(exc)
+                    # The operator must learn the release is tagged-but-unpublished,
+                    # where to look, and how to recover.
+                    assert "TAGGED but NOT" in msg
+                    assert "resume-from=npm_publish" in msg
+                    assert "actions" in msg.lower()
+            assert tg.called, "timeout must notify the operator"
+            assert "🔴" in tg.call_args[0][0]
+
+
+def test_await_ci_publish_dry_run_makes_no_registry_calls():
+    with patch.object(publish, "_registry_version") as rv:
+        publish.await_ci_npm_publish("v0.19.0", dry_run=True)
+        assert not rv.called
+
+
+def test_npm_publish_routes_to_ci_by_default():
+    with patch.object(publish, "NPM_PUBLISH_MODE", "ci"):
+        with patch.object(publish, "await_ci_npm_publish") as ci:
+            with patch.object(publish, "npm_publish_local") as local:
+                publish.npm_publish("v0.19.0", dry_run=False)
+                assert ci.called and not local.called
+
+
+def test_npm_publish_local_mode_publishes_from_host():
+    """The local fallback stays reachable when CI publishing is unavailable."""
+    with patch.object(publish, "NPM_PUBLISH_MODE", "local"):
+        with patch.object(publish, "await_ci_npm_publish") as ci:
+            with patch.object(publish, "npm_publish_local") as local:
+                publish.npm_publish("v0.19.0", dry_run=False)
+                assert local.called and not ci.called
+
+
+# ── --from-email-approval state gate (email-reply approval, ateles) ──────────
+#
+# The email-approval path flips pending_approval -> approved then publishes. It
+# MUST refuse any other starting state so a duplicate/stale email reply can't
+# re-publish or publish an un-prepared version. These pin that gate; publish
+# steps are stubbed so no irreversible action runs.
+
+
+def _release(status: str, version: str = "v0.20.0") -> dict:
+    return {"snapshot": {"version": version, "status": status,
+                         "rc_branch": f"release/{version}"}}
+
+
+def _stub_publish_steps(mp):
+    # neutralize every irreversible step + the status writer so we test only the gate
+    for name in ("preflight", "merge_rc_pr", "preflight_post_merge", "tag_and_push",
+                 "npm_publish", "github_release", "deploy_sandbox",
+                 "publish_github_release_draft", "post_release", "set_release_status",
+                 "telegram_send"):
+        if hasattr(publish, name):
+            mp.setattr(publish, name, MagicMock(return_value="" if name == "post_release" else None))
+
+
+def test_email_approval_publishes_from_pending_approval(monkeypatch):
+    _stub_publish_steps(monkeypatch)
+    flips = []
+    monkeypatch.setattr(publish, "set_release_status",
+                        lambda v, s, extra=None: flips.append((v, s)))
+    # should flip to approved, then run (no raise)
+    publish.publish_release(_release("pending_approval"), "v0.20.0",
+                            dry_run=False, force=False, email_approval=True)
+    assert ("v0.20.0", "approved") in flips
+
+
+def test_email_approval_refuses_already_published(monkeypatch):
+    _stub_publish_steps(monkeypatch)
+    try:
+        publish.publish_release(_release("published"), "v0.20.0",
+                                dry_run=False, force=False, email_approval=True)
+        raise AssertionError("expected StepError refusing to re-publish")
+    except publish.StepError as exc:
+        assert "not 'pending_approval'" in str(exc)
+
+
+def test_email_approval_refuses_publishing_state(monkeypatch):
+    # a reply arriving mid-publish must not kick off a second publish
+    _stub_publish_steps(monkeypatch)
+    try:
+        publish.publish_release(_release("publishing"), "v0.20.0",
+                                dry_run=False, force=False, email_approval=True)
+        raise AssertionError("expected StepError")
+    except publish.StepError as exc:
+        assert "not 'pending_approval'" in str(exc)
+
+
+def test_email_approval_dry_run_does_not_flip_status(monkeypatch):
+    _stub_publish_steps(monkeypatch)
+    flips = []
+    monkeypatch.setattr(publish, "set_release_status",
+                        lambda v, s, extra=None: flips.append((v, s)))
+    publish.publish_release(_release("pending_approval"), "v0.20.0",
+                            dry_run=True, force=False, email_approval=True)
+    assert flips == []  # dry-run makes no state change
+
+
+# ── RC field-name reconciliation (release_url/branch vs rc_pr_url/rc_branch) ──
+#
+# prepare.py's agent historically stored `release_url` + `branch`; publish.py
+# read only `rc_pr_url` + `rc_branch`, so both came back empty and the PR URL
+# was lost on publish. The reader now accepts both names (rc_* preferred).
+
+
+def _capture_rc_fields(release, monkeypatch):
+    """Run publish_release far enough to capture the resolved rc_pr_url/rc_branch,
+    then abort before any irreversible step."""
+    captured = {}
+
+    def fake_preflight(version, rc_branch, dry_run):
+        captured["rc_branch"] = rc_branch  # preflight runs first
+
+    def fake_merge(rc_pr_url, rc_branch, dry_run, version=""):
+        captured["rc_pr_url"] = rc_pr_url
+        # abort here — after both rc_branch (preflight) and rc_pr_url are captured,
+        # before tag_and_push / npm / any irreversible step
+        raise publish.StepError("stop-after-capture")
+
+    monkeypatch.setattr(publish, "set_release_status", lambda *a, **k: None)
+    monkeypatch.setattr(publish, "preflight", fake_preflight)
+    monkeypatch.setattr(publish, "merge_rc_pr", fake_merge)
+    monkeypatch.setattr(publish, "telegram_send", lambda *a, **k: None)
+    try:
+        publish.publish_release(release, "v0.20.0", dry_run=False, force=True)
+    except publish.StepError:
+        pass
+    return captured
+
+
+def test_reads_rc_fields_when_present(monkeypatch):
+    rel = {"snapshot": {"status": "approved", "rc_pr_url": "https://x/pr/9",
+                        "rc_branch": "release/v0.20.0"}}
+    cap = _capture_rc_fields(rel, monkeypatch)
+    assert cap["rc_branch"] == "release/v0.20.0"
+
+
+def test_falls_back_to_release_url_and_branch(monkeypatch):
+    # the OLD prepare convention: release_url + branch, no rc_* — must still resolve
+    rel = {"snapshot": {"status": "approved", "release_url": "https://x/pr/9",
+                        "branch": "release/v0.20.0"}}
+    cap = _capture_rc_fields(rel, monkeypatch)
+    assert cap["rc_pr_url"] == "https://x/pr/9", "release_url must be picked up"
+    assert cap["rc_branch"] == "release/v0.20.0", "branch must be picked up"
+
+
+def test_rc_name_wins_over_plain_when_both_present(monkeypatch):
+    rel = {"snapshot": {"status": "approved",
+                        "rc_pr_url": "https://x/pr/RC", "release_url": "https://x/pr/OLD",
+                        "rc_branch": "release/RC", "branch": "release/OLD"}}
+    cap = _capture_rc_fields(rel, monkeypatch)
+    assert cap["rc_pr_url"] == "https://x/pr/RC"
+    assert cap["rc_branch"] == "release/RC"
+
+
+# ── Transient-failure retry for Neotoma reads (auto-recover from 403 blips) ──
+#
+# A transient 403 (loopback prod during a server restart) stranded the first
+# live release-approval: neotoma_query returned [], publish saw "no release
+# record", and gave up. The query layer now retries transient failures so a
+# blip self-recovers without a human re-running an approved release.
+
+import io as _io
+import urllib.error as _uerr
+import urllib.request as _ureq
+
+
+def _http_error(code):
+    return _uerr.HTTPError("u", code, "x", {}, _io.BytesIO(b""))
+
+
+def test_retry_recovers_from_transient_403(monkeypatch):
+    monkeypatch.setattr(publish, "_NEOTOMA_MAX_ATTEMPTS", 4)
+    monkeypatch.setattr(publish, "_NEOTOMA_RETRY_BASE_S", 0.0)
+    monkeypatch.setattr(publish.time, "sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    class _R:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def read(self): return b'{"entities":[{"ok":1}]}'
+
+    def flaky(req, timeout=20):
+        calls["n"] += 1
+        if calls["n"] < 3:  # 403 twice, then OK
+            raise _http_error(403)
+        return _R()
+
+    monkeypatch.setattr(_ureq, "urlopen", flaky)
+    out = publish.neotoma_query("release_result")
+    assert out == [{"ok": 1}], "must recover after transient 403s"
+    assert calls["n"] == 3
+
+
+def test_404_is_not_retried(monkeypatch):
+    monkeypatch.setattr(publish, "_NEOTOMA_MAX_ATTEMPTS", 4)
+    monkeypatch.setattr(publish.time, "sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    def not_found(req, timeout=20):
+        calls["n"] += 1
+        raise _http_error(404)
+
+    monkeypatch.setattr(_ureq, "urlopen", not_found)
+    assert publish.neotoma_fetch_entity("ent_x") is None
+    assert calls["n"] == 1, "404 is a real answer, not a blip — no retry"
+
+
+def test_gives_up_after_max_attempts(monkeypatch):
+    monkeypatch.setattr(publish, "_NEOTOMA_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(publish, "_NEOTOMA_RETRY_BASE_S", 0.0)
+    monkeypatch.setattr(publish.time, "sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    def always_503(req, timeout=20):
+        calls["n"] += 1
+        raise _http_error(503)
+
+    monkeypatch.setattr(_ureq, "urlopen", always_503)
+    assert publish.neotoma_query("release_result") == []
+    assert calls["n"] == 3, "bounded — does not retry forever"
+# ── Duplicate-RC guard: refuse to guess between concurrent RCs ───────────────
+#
+# Two concurrent prepare runs cut two RCs for v0.20.0 (release/v0.20.0 and
+# release/v0.20.0-a) → two pending_approval release_results. find_release must
+# HALT rather than silently publish "the newest" for an irreversible release.
+
+def _rr(branch, pr, status="pending_approval", eid="ent_x", obs="2026-07-27T15:00:00Z"):
+    return {"entity_id": eid, "last_observation_at": obs,
+            "snapshot": {"version": "v0.20.0", "status": status,
+                         "rc_branch": branch, "rc_pr_url": pr}}
+
+
+def test_find_release_single_rc_resolves(monkeypatch):
+    monkeypatch.setattr(publish, "neotoma_query",
+                        lambda *a, **k: [_rr("release/v0.20.0", "pr/29")])
+    r = publish.find_release("v0.20.0", None)
+    assert r is not None and publish._entity_fields(r)["rc_branch"] == "release/v0.20.0"
+
+
+def test_find_release_refuses_two_distinct_rcs(monkeypatch):
+    monkeypatch.setattr(publish, "neotoma_query", lambda *a, **k: [
+        _rr("release/v0.20.0", "pr/29", eid="ent_A"),
+        _rr("release/v0.20.0-a", "pr/28", eid="ent_B", obs="2026-07-27T15:22:00Z"),
+    ])
+    try:
+        publish.find_release("v0.20.0", None)
+        raise AssertionError("expected StepError refusing to guess")
+    except publish.StepError as exc:
+        assert "distinct in-flight release candidates" in str(exc)
+        assert "--entity-id" in str(exc)  # tells the operator how to disambiguate
+
+
+def test_find_release_entity_id_bypasses_duplicate_guard(monkeypatch):
+    # naming the exact entity IS the disambiguation — never blocked
+    monkeypatch.setattr(publish, "neotoma_fetch_entity",
+                        lambda eid: _rr("release/v0.20.0-a", "pr/28", eid=eid))
+    r = publish.find_release("v0.20.0", "ent_B")
+    assert publish._entity_fields(r)["rc_branch"] == "release/v0.20.0-a"
+
+
+def test_find_release_ignores_terminal_duplicate(monkeypatch):
+    # a PUBLISHED record for the same version number is history, not a rival RC
+    monkeypatch.setattr(publish, "neotoma_query", lambda *a, **k: [
+        _rr("release/v0.20.0", "pr/29", status="pending_approval", eid="ent_A"),
+        _rr("release/v0.20.0-old", "pr/1", status="published", eid="ent_old"),
+    ])
+    r = publish.find_release("v0.20.0", None)  # must NOT raise
+    assert publish._entity_fields(r)["rc_branch"] == "release/v0.20.0"
+
+
+def test_find_release_same_rc_reobserved_is_one_candidate(monkeypatch):
+    # same branch/PR twice (re-observation) collapses to one — no false refusal
+    monkeypatch.setattr(publish, "neotoma_query", lambda *a, **k: [
+        _rr("release/v0.20.0", "pr/29", eid="ent_A", obs="2026-07-27T15:00:00Z"),
+        _rr("release/v0.20.0", "pr/29", eid="ent_A", obs="2026-07-27T15:47:00Z"),
+    ])
+    r = publish.find_release("v0.20.0", None)  # must NOT raise
+    assert r["last_observation_at"] == "2026-07-27T15:47:00Z"  # newest obs

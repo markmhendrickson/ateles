@@ -7,7 +7,8 @@ Operator-approved release executor for Neotoma. Two halves:
   push → `npm publish` → GitHub Release → sandbox deploy → verify → publish draft →
   post-deploy probes → mark published → Telegram confirmation. No LLM. Invoked
   **on demand** after approval, not on a schedule.
-- **`prepare.py`** — the scheduled Mon–Thu prep run. Two-phase (like Cotinga):
+- **`prepare.py`** — the prep run, triggered on every merge to Neotoma's main
+  (with the Mon–Thu schedule kept as a safety net). Two-phase (like Cotinga):
   Phase 1 is a fast preflight gate (unreleased commits since the last tag ≥
   `PHOENICURUS_MIN_COMMITS`? main CI green? no release already in flight?); if it
   passes, Phase 2 spawns a headless `claude --print` agent that runs the
@@ -19,6 +20,30 @@ Operator-approved release executor for Neotoma. Two halves:
 This split exists because release approval can take hours — a launchd daemon
 cannot block in-process that long (unlike Monedula's 120 s payment approval).
 Prepare runs and exits; publish fires later when the operator approves.
+
+## Triggering (auto-release)
+
+A merge to Neotoma's `main` prepares a release candidate immediately, instead of
+waiting for the next scheduled sweep:
+
+```
+merge to main → GitHub `push` webhook → Apis gateway (github_gateway)
+  → swarm_dispatch._handle_push_main → prepare.py --on-merge
+```
+
+`--on-merge` changes **only** the rate limit — from once per calendar day to once
+per `origin/main` commit (state file `.phoenicurus_prepare_last_sha`). Every other
+gate is unchanged: `PHOENICURUS_MIN_COMMITS`, main CI green, and the in-flight
+`release_result` check all still apply, so a burst of merges cannot stack up
+release candidates. The two locks are independent — a merge-triggered run never
+consumes the daily lock, so the scheduled Mon–Thu run still fires as a safety net
+if the webhook path is down.
+
+**The approval gate is unchanged.** This only removes the schedule lag before the
+operator is asked; publishing still requires `approve <version>`.
+
+Tag pushes are deliberately ignored by the gateway — publishing a release pushes
+a tag, which would otherwise re-trigger prepare in a loop.
 
 ## State model (`release_result` entity)
 
@@ -76,9 +101,18 @@ and re-running it would be redundant or unsafe.
 - **No redundant push**: since the RC PR is always merged server-side via
   `gh pr merge`, `tag_and_push` no longer runs a follow-up `git push origin
   main` — only the release tag is pushed.
-- **npm auth preflight**: runs `npm whoami` with the automation token before
-  publishing; a missing/expired token fails **loud** (Telegram) rather than
-  producing a tagged-but-unpublished release.
+- **npm publish runs in CI** (neotoma#2015): the tag push fires
+  `.github/workflows/npm-publish.yml`, which builds on a pinned Node 20 and
+  publishes with **provenance** (a signed attestation binding the tarball to the
+  commit — not obtainable from a local publish). `publish.py` then polls the
+  registry until the version appears.
+  - **Bounded, loud wait**: moving the publish off-box turns a synchronous
+    failure into an asynchronous one, so the poll has a hard timeout
+    (`PHOENICURUS_NPM_PUBLISH_WAIT_S`, default 900s) that **fails the release**
+    with a Telegram alert rather than falling through to `github_release` with
+    nothing on npm.
+  - **Local fallback**: set `PHOENICURUS_NPM_PUBLISH_MODE=local` to publish from
+    this host instead (keeps the old `npm whoami` preflight + registry verify).
 - **Registry verify**: confirms `npm view neotoma version` matches after publish.
 - **Sandbox verify**: confirms `version` + `mode: sandbox` on the live host
   before publishing the GitHub Release draft.
@@ -87,20 +121,67 @@ and re-running it would be redundant or unsafe.
 
 | Var | Purpose |
 |-----|---------|
-| `NPM_TOKEN` | npm granular automation token (Publish scope, `neotoma` only, bypass-2FA). Operator-managed; never echoed. |
+| `NPM_TOKEN` | npm granular automation token. Only needed for `PHOENICURUS_NPM_PUBLISH_MODE=local`; the default CI path uses the `NPM_TOKEN` **repo secret** instead. |
+| `PHOENICURUS_NPM_PUBLISH_MODE` | `ci` (default — await the Actions publish) or `local` (publish from this host). |
+| `PHOENICURUS_NPM_PUBLISH_WAIT_S` | How long to wait for CI to land the version (default 900). Timeout fails the release loudly. |
 | `NEOTOMA_BEARER_TOKEN` | Neotoma API auth (omitted automatically on loopback). |
 | `NEOTOMA_BASE_URL` | Neotoma API base (default `http://localhost:3180`). |
 | `NEOTOMA_REPO_ROOT` | Neotoma source checkout to release from (default `~/repos/neotoma`). |
 | `NEOTOMA_SANDBOX_URL` | Sandbox host to verify (default `https://neotoma-sandbox.fly.dev`). |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram push (via shared `send.mjs`). |
 | `TELEGRAM_TOPIC_PHOENICURUS` | Optional Telegram topic/thread id for release messages. |
+| `OPERATOR_EMAIL` | Where release RC notifications are emailed (in addition to Telegram). Unset → email is skipped, Telegram only. |
+| `ATELES_SWARM_EMAIL` | Optional `From:` for release email (the shared swarm address, matching the other daemons). |
 
-## Approval routing (Ateles)
+## Notification channels
 
-`publish.py` is invoked by Ateles when the operator replies `approve <version>`
-on Telegram: Ateles flips the `release_result` to `approved`, then runs
-`python3 publish.py --version <version>`. See the Ateles SOUL.md
-"Release approval" section.
+A prepared release candidate is sent to the operator on **both Telegram and
+email**. The spawned prepare agent (step 11–12 of its prompt) posts the full
+rendered notes + RC PR link + `approve/skip` instruction to Telegram, and emails
+the same via `gws gmail +send` (subject `🚀 Release <TAG> ready to approve`) using
+the same `OPERATOR_EMAIL`/`ATELES_SWARM_EMAIL` the shared `lib/notify` Notifier
+uses — so release mail matches every other swarm daemon. Email is **fail-open**:
+if `OPERATOR_EMAIL` is unset or the send fails, the run logs it and continues;
+Telegram is the guaranteed channel and the release is never blocked on email.
+
+## Approval routing — two channels
+
+A prepared release can be approved on **either channel**:
+
+**Telegram** — the operator replies `approve <version>`; Ateles flips the
+`release_result` to `approved` and runs `python3 publish.py --version <version>`.
+See the Ateles SOUL.md "Release approval" section.
+
+**Email reply** — the operator replies `approve <version>` to the RC email. The
+routing mirrors the swarm PR-approve flow:
+
+```
+reply "approve <version>" to the RC email
+  → Turdus (Gmail poll) verifies: sender == operator, subject has "ready to
+    approve", body has `release-approve: <version>` token AND unquoted
+    `approve <that exact version>`
+  → POST /approve-release (Apis, loopback + X-Approve-Secret)
+  → swarm_dispatch._handle_release_approve
+  → publish.py --version <version> --from-email-approval
+     (flips pending_approval → approved, refusing any other state, then ships)
+```
+
+Safety properties (match the PR-approve flow + one extra):
+- **Operator-sender check** — only replies from `OPERATOR_EMAIL` count.
+- **Loopback + shared secret** — `/approve-release` is 127.0.0.1-only and
+  requires `APIS_APPROVE_EMAIL_SECRET`; unset → 503, wrong → 401. An email alone
+  can't drive a publish without the secret on both daemons.
+- **Unquoted-text guard** — the word `approve` must be the operator's own text,
+  not the quoted `Reply approve …` from the original email.
+- **Exact-version match** (operator ruling 2026-07-27) — the reply must name
+  *this* release's version, so a stale `approve` from an old release thread can
+  never trigger the wrong publish.
+- **State gate** — `--from-email-approval` publishes only from
+  `pending_approval`; a duplicate or stale reply on an already-published version
+  is refused.
+
+Config: set `APIS_APPROVE_EMAIL_SECRET` (shared, Turdus + Apis) and
+`APIS_APPROVE_RELEASE_URL` (default `http://127.0.0.1:8742/approve-release`).
 
 ## Troubleshooting
 
