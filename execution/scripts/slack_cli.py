@@ -249,26 +249,29 @@ def cmd_post(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="slack_cli.py", description=__doc__.splitlines()[1])
-    p.add_argument("--json", action="store_true", help="Emit raw JSON")
     sub = p.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("search", help="Search messages (needs search:read.public)")
     s.add_argument("query")
     s.add_argument("--count", type=int, default=20)
     s.add_argument("--sort", default="timestamp", choices=["score", "timestamp"])
+    s.add_argument("--json", action="store_true", help="Emit raw JSON")
     s.set_defaults(func=cmd_search)
 
     h = sub.add_parser("history", help="Read a channel's recent messages")
     h.add_argument("channel", help="Channel ID (e.g. C0123ABC)")
     h.add_argument("--limit", type=int, default=50)
+    h.add_argument("--json", action="store_true", help="Emit raw JSON")
     h.set_defaults(func=cmd_history)
 
     c = sub.add_parser("channels", help="List channels")
     c.add_argument("--types", default="public_channel")
     c.add_argument("--limit", type=int, default=200)
+    c.add_argument("--json", action="store_true", help="Emit raw JSON")
     c.set_defaults(func=cmd_channels)
 
     w = sub.add_parser("whoami", help="Verify the token (auth.test)")
+    w.add_argument("--json", action="store_true", help="Emit raw JSON")
     w.set_defaults(func=cmd_whoami)
 
     po = sub.add_parser(
@@ -288,6 +291,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes", action="store_true",
         help="Actually send. Without this, prints a dry-run and exits non-zero.",
     )
+    po.add_argument("--json", action="store_true", help="Emit raw JSON")
     po.set_defaults(func=cmd_post)
 
     return p

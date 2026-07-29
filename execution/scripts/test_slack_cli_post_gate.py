@@ -85,9 +85,57 @@ def test_yes_reaches_send_path():
     print("ok: --yes reaches chat.postMessage with the right payload")
 
 
+def _parses_ok(argv):
+    """True if build_parser().parse_args(argv) succeeds without SystemExit."""
+    try:
+        args = slack_cli.build_parser().parse_args(argv)
+    except SystemExit:
+        return None
+    return args
+
+
+def test_json_flag_parses_after_search_subcommand():
+    # Documented form: docstring usage block + docs/slack_integration.md:81
+    args = _parses_ok(["search", "manju leads deck", "--count", "20", "--json"])
+    assert args is not None, "documented invocation failed to parse"
+    assert args.json is True
+    assert args.count == 20
+    print("ok: search '<query>' --count N --json parses (docstring usage form)")
+
+
+def test_json_flag_parses_after_search_subcommand_query_only():
+    # docs/slack_integration.md:81 ("leads deck" --json, no --count)
+    args = _parses_ok(["search", "leads deck", "--json"])
+    assert args is not None, "documented invocation failed to parse"
+    assert args.json is True
+    print("ok: search '<query>' --json parses (docs/slack_integration.md form)")
+
+
+def test_history_without_json_parses():
+    # docs/slack_integration.md:78 — sanity check, no --json
+    args = _parses_ok(["history", "C0123ABC", "--limit", "100"])
+    assert args is not None, "documented invocation failed to parse"
+    assert args.json is False
+    assert args.limit == 100
+    print("ok: history <channel> --limit N parses without --json")
+
+
+def test_json_flag_parses_after_channels_subcommand():
+    # docstring usage block: channels [--types public_channel] [--json]
+    args = _parses_ok(["channels", "--types", "public_channel", "--json"])
+    assert args is not None, "documented invocation failed to parse"
+    assert args.json is True
+    assert args.types == "public_channel"
+    print("ok: channels --types public_channel --json parses (docstring usage form)")
+
+
 if __name__ == "__main__":
     test_dry_run_without_yes_sends_nothing_and_exits_2()
     test_empty_message_refused()
     test_stdin_body_read_in_dry_run()
     test_yes_reaches_send_path()
+    test_json_flag_parses_after_search_subcommand()
+    test_json_flag_parses_after_search_subcommand_query_only()
+    test_history_without_json_parses()
+    test_json_flag_parses_after_channels_subcommand()
     print("\nALL PASS")
