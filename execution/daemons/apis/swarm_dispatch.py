@@ -2196,6 +2196,8 @@ class SwarmDispatcher:
     # head-SHA-agnostic (a bounded loop must count rounds, not commits).
     _FIX_ROUND_MARKER = "<!-- apis-fix-round:{n} -->"
     _FIX_ROUND_RE = re.compile(r"<!-- apis-fix-round:(\d+) -->")
+    _STRANDED_FIX_MARKER = "<!-- apis-fix-round-stranded:{n}:{state_token} -->"
+    _STRANDED_FIX_RE = re.compile(r"<!-- apis-fix-round-stranded:(\d+):(\S+) -->")
 
     def _lens_fix_agent(self, lens: str) -> str:
         """Agent that authors fix guidance for a finding raised under `lens`.
@@ -2281,6 +2283,32 @@ class SwarmDispatcher:
         so a real escalation is never swallowed by a transient GitHub error.
         """
         marker = self._ESCALATION_MARKER.format(kind=kind)
+    async def _head_sha(self, repository: str, pr_number: int) -> str | None:
+        """Current head SHA for a PR, or None on any fetch error.
+
+        Single source of truth for "what's the head SHA right now" — routes
+        through `_fetch_pr`, the same GitHub-read path already used elsewhere
+        in the dispatcher, rather than a second parallel git/GitHub call.
+        """
+        pr = await self._fetch_pr(repository, pr_number)
+        if not pr:
+            return None
+        return (pr.get("head") or {}).get("sha") or None
+
+    async def _diff_stat_summary(self, worktree: str | None) -> str:
+        """`git diff --stat` summary for an operator notification (paths + line
+        counts only — never full patch content, which could re-leak secrets a
+        prior finding required redacting). Best-effort; empty on any failure."""
+        if not worktree:
+            return ""
+        rc, out, _ = await _git(["diff", "--stat"], cwd=worktree)
+        return out.strip() if rc == 0 else ""
+
+    async def _find_stranded_fix_markers(
+        self, trigger: SwarmTrigger
+    ) -> list[tuple[int, str]]:
+        """All (round, state_token) pairs already posted as stranded-fix
+        markers on this PR. Best-effort; empty list on any read error."""
         list_url = (
             f"https://api.github.com/repos/{trigger.repository}/issues/"
             f"{trigger.number}/comments"
@@ -2318,6 +2346,176 @@ class SwarmDispatcher:
                 "notifying anyway (fail-open)"
             )
             return True
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    list_url,
+                    params={"per_page": 100},
+                    headers=self._github_headers(trigger.repository),
+                )
+                resp.raise_for_status()
+                found: list[tuple[int, str]] = []
+                for comment in resp.json():
+                    m = self._STRANDED_FIX_RE.search(comment.get("body", ""))
+                    if m:
+                        found.append((int(m.group(1)), m.group(2)))
+                return found
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                f"stranded-fix-marker read failed ({exc})"
+            )
+            return []
+
+    async def _notify_fix_round_blocker(
+        self,
+        trigger: SwarmTrigger,
+        *,
+        round_n: int,
+        state_token: str,
+        detail: str,
+        worktree: str | None = None,
+    ) -> None:
+        """Send the operator-facing blocker for a fix round that did not land.
+
+        Idempotency-keyed on (repo, pr, round, state_token): before sending,
+        checks whether a stranded-fix marker for this EXACT (round, token)
+        already exists on the PR and skips the page if so. This is what makes
+        a killed/respawned dispatch that re-enters the same logical round not
+        send a duplicate operator page for the same event. Also posts the
+        durable stranded-fix marker comment (mirrors `_record_fix_round`'s
+        marker) so a later cap-exhaustion check can tell "this round's fix
+        never landed" apart from "no fix was ever attempted".
+        """
+        existing = await self._find_stranded_fix_markers(trigger)
+        if (round_n, state_token) in existing:
+            log.info(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                f"fix round {round_n} already flagged `{state_token}` — "
+                "skipping duplicate operator page"
+            )
+            return
+
+        ref = f"{trigger.repository}#{trigger.number}"
+        diff_summary = await self._diff_stat_summary(worktree)
+        parts = [
+            f"PR {ref}: fix round {round_n} — `{state_token}`. {detail}",
+        ]
+        if worktree:
+            parts.append(f"Worktree: {worktree}")
+        if diff_summary:
+            parts.append(f"Diff (--stat): {diff_summary}")
+        self.notifier.send(
+            "\n".join(parts),
+            priority=Priority.OPERATOR_DECISION,
+            handler=DAEMON_NAME,
+        )
+        await self._record_stranded_fix_round(trigger, round_n, state_token)
+
+    async def _record_stranded_fix_round(
+        self, trigger: SwarmTrigger, n: int, state_token: str
+    ) -> None:
+        """Post the stranded-fix marker comment (best-effort)."""
+        body = (
+            f"{self._STRANDED_FIX_MARKER.format(n=n, state_token=state_token)}\n"
+            f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+            f"⚠️ Auto-fix round {n} did not produce a verified commit on this "
+            f"PR's head (`{state_token}`)."
+        )
+        list_url = (
+            f"https://api.github.com/repos/{trigger.repository}/issues/"
+            f"{trigger.number}/comments"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    list_url,
+                    json={"body": body},
+                    headers=self._github_headers(trigger.repository),
+                )
+                resp.raise_for_status()
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                f"could not record stranded fix round {n}: {exc}"
+            )
+
+    async def _last_round_stranded(self, trigger: SwarmTrigger) -> bool:
+        """True when the MOST RECENT fix round has a stranded-fix marker.
+
+        Reads the PR's comments and compares the highest fix-round number
+        against the highest stranded-fix-round number — if they match, the
+        last round attempted never landed a verified commit. Fail-safe: any
+        read error returns False (falls back to the plain exhaustion message
+        rather than over-claiming a stranding it can't confirm).
+        """
+        list_url = (
+            f"https://api.github.com/repos/{trigger.repository}/issues/"
+            f"{trigger.number}/comments"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    list_url,
+                    params={"per_page": 100},
+                    headers=self._github_headers(trigger.repository),
+                )
+                resp.raise_for_status()
+                best_round = 0
+                best_stranded = 0
+                for comment in resp.json():
+                    body = comment.get("body", "")
+                    m = self._FIX_ROUND_RE.search(body)
+                    if m:
+                        best_round = max(best_round, int(m.group(1)))
+                    m2 = self._STRANDED_FIX_RE.search(body)
+                    if m2:
+                        best_stranded = max(best_stranded, int(m2.group(1)))
+                return best_stranded > 0 and best_stranded >= best_round
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                f"stranded-fix-round read failed ({exc}) — treating as not-stranded"
+            )
+            return False
+
+    async def _verify_fix_round_landed(
+        self, trigger: SwarmTrigger, *, round_n: int, pre_sha: str | None
+    ) -> bool:
+        """Confirm the fix round actually produced a new pushed commit.
+
+        Fetches the PR's CURRENT head SHA fresh (never a cached/hoisted value)
+        and compares against `pre_sha`, captured immediately before the Cicada
+        dispatch for THIS attempt. Returns True only when the head advanced —
+        the hard precondition for treating the round as done and re-running
+        the panel. On any ambiguity (fetch fails, SHA unchanged) this fails
+        CLOSED to a loud operator notification rather than assuming success:
+        silently trusting an unverified push is the exact bug being fixed.
+        """
+        post_sha = await self._head_sha(trigger.repository, trigger.number)
+        if post_sha is None:
+            await self._notify_fix_round_blocker(
+                trigger,
+                round_n=round_n,
+                state_token="fix_round_push_failed",
+                detail=(
+                    "could not verify whether the fix landed (PR head-SHA "
+                    "fetch failed) — treating as unverified, not as success."
+                ),
+            )
+            return False
+        if pre_sha is not None and post_sha == pre_sha:
+            await self._notify_fix_round_blocker(
+                trigger,
+                round_n=round_n,
+                state_token="fix_round_uncommitted",
+                detail=(
+                    "Cicada's dispatch completed but the PR head SHA did not "
+                    "advance — the fix (if any) was never committed/pushed."
+                ),
+            )
+            return False
+        return True
 
     async def _route_blocking_findings(
         self,
@@ -2363,9 +2561,34 @@ class SwarmDispatcher:
         prior_rounds = await self._fix_round_count(trigger)
         if prior_rounds >= self.config.max_fix_rounds:
             lenses = ", ".join(sorted(by_lens))
-            # Once-per-PR: the exhausted-rounds condition is re-evaluated on
-            # every subsequent push, so guard the operator ping behind the
-            # escalation marker to avoid identical repeats (ateles#262 ×4).
+            # Two DISTINCT exhaustion conditions, each deduped on its own
+            # escalation marker. ateles#262's invariant is "one page per PR per
+            # CONDITION", not one page per PR, so two markers is consistent with
+            # that design rather than a way around it.
+            #
+            # Order matters: the stranded case is the MORE SPECIFIC signal — it
+            # says a working fix may exist uncommitted, which is more actionable
+            # than "rounds exhausted". Checking it first is also what stops a
+            # stranded round sending BOTH pages for a single event.
+            if await self._last_round_stranded(trigger):
+                # No _claim_escalation here: _notify_fix_round_blocker already
+                # dedups on its own (round, state_token) stranded-fix marker,
+                # so a second guard would be redundant — and would suppress the
+                # page whenever the marker read fails.
+                await self._notify_fix_round_blocker(
+                    trigger,
+                    round_n=prior_rounds,
+                    state_token="fix_loop_exhausted_with_stranded_fix",
+                    detail=(
+                        f"{self.config.max_fix_rounds} auto-fix rounds reached "
+                        f"and the last round's fix never landed (still blocking "
+                        f"on: {lenses}). A fix may exist uncommitted — needs "
+                        "your attention. Merge held."
+                    ),
+                )
+                return
+            # Plain exhaustion: no stranded fix, so the generic page — once per
+            # PR (ateles#262 sent four identical copies before the marker).
             if await self._claim_escalation(trigger, "auto-fix-exhausted"):
                 self.notifier.send(
                     f"PR {ref}: {self.config.max_fix_rounds} auto-fix rounds did "
@@ -2377,7 +2600,6 @@ class SwarmDispatcher:
             return
 
         this_round = prior_rounds + 1
-        await self._record_fix_round(trigger, this_round)
 
         # Each lens agent proposes fix guidance for its own findings.
         guidance_blocks: list[str] = []
@@ -2407,6 +2629,11 @@ class SwarmDispatcher:
 
         consolidated = "\n\n".join(guidance_blocks)
 
+        # Capture the PRE-dispatch head SHA fresh for THIS attempt (never
+        # hoisted above a retry/respawn) so a killed-then-respawned Cicada
+        # dispatch compares against the right baseline.
+        pre_sha = await self._head_sha(trigger.repository, trigger.number)
+
         # Hand the consolidated guidance to Cicada to implement + push.
         cicada_result = await run_skill(
             "cicada",
@@ -2428,6 +2655,20 @@ class SwarmDispatcher:
                 handler=DAEMON_NAME,
             )
             return
+
+        # Verify a NEW commit actually landed before counting the round as
+        # done and re-running the panel. Cicada returning `ok` is not
+        # sufficient — it may have edited the worktree without committing or
+        # pushing (ateles#263). The round counter (`_record_fix_round`) is
+        # NOT advanced until this confirms — an unverified push must not
+        # consume a round, nor be silently re-reviewed at its stale SHA.
+        landed = await self._verify_fix_round_landed(
+            trigger, round_n=this_round, pre_sha=pre_sha
+        )
+        if not landed:
+            return
+
+        await self._record_fix_round(trigger, this_round)
         log.info(
             f"[{DAEMON_NAME}] {ref}: dispatched auto-fix round {this_round} "
             f"({len(by_lens)} lens(es) → Cicada); awaiting its push to re-review"
@@ -2559,6 +2800,19 @@ class SwarmDispatcher:
         ref = f"{trigger.repository}#{trigger.number}"
         prior_rounds = await self._fix_round_count(trigger)
         if prior_rounds >= self.config.max_fix_rounds:
+            if await self._last_round_stranded(trigger):
+                await self._notify_fix_round_blocker(
+                    trigger,
+                    round_n=prior_rounds,
+                    state_token="fix_loop_exhausted_with_stranded_fix",
+                    detail=(
+                        f"required CI is failing after "
+                        f"{self.config.max_fix_rounds} auto-fix rounds, and the "
+                        "last round's fix never landed. A fix may exist "
+                        "uncommitted — needs your attention. Merge held."
+                    ),
+                )
+                return
             self.notifier.send(
                 f"PR {ref}: required CI is failing after "
                 f"{self.config.max_fix_rounds} auto-fix rounds. Escalating — "
@@ -2568,7 +2822,7 @@ class SwarmDispatcher:
             )
             return
         this_round = prior_rounds + 1
-        await self._record_fix_round(trigger, this_round)
+        pre_sha = await self._head_sha(trigger.repository, trigger.number)
         cicada_result = await run_skill(
             "cicada",
             self._cicada_ci_fix_prompt(trigger, parent, this_round),
@@ -2587,6 +2841,14 @@ class SwarmDispatcher:
                 handler=DAEMON_NAME,
             )
             return
+
+        landed = await self._verify_fix_round_landed(
+            trigger, round_n=this_round, pre_sha=pre_sha
+        )
+        if not landed:
+            return
+
+        await self._record_fix_round(trigger, this_round)
         log.info(
             f"[{DAEMON_NAME}] {ref}: dispatched CI-fix round {this_round} to "
             "Cicada; awaiting its push to re-review"
