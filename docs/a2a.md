@@ -103,6 +103,98 @@ Two independent layers, both reusing `lib/daemon_runtime`:
 Inbound tasks default to `visibility: private` — an external caller cannot make
 swarm work public without an explicit scope grant.
 
+**Advisory-mode disclosure:** while `authorize_caller()` runs in advisory mode
+(current phase), a request may be **allowed even when the grant check itself
+fails or is unreachable** — the check logs a warning and lets the request
+through rather than hard-blocking. When this happens, the accepted-task
+response text says so explicitly:
+
+```
+Task accepted (id=apis-a2a-…, neotoma=ent_…, routed_to=cicada). Note:
+authorization check was unavailable; this request was allowed under
+advisory policy.
+```
+
+A normal, fully-enforced acceptance never carries this note. If you are
+building on this integration today, treat the trust boundary as provisional
+until advisory mode is hardened into a hard block.
+
+**Requesting a grant:** `a2a:task:create` grants are issued by the Ateles
+operator. [TODO: operator contact process — no self-serve or documented
+request flow exists yet; until this lands, `missing_capability` rejections
+require an out-of-band conversation with the operator.]
+
+---
+
+## Example: `message/send`
+
+**Accepted request:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "method": "message/send",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [
+        {"kind": "text", "text": "Fix the failing CI build on the docker step.\n\nThe pytest job has been red since the last merge to main."}
+      ]
+    }
+  }
+}
+```
+
+**Accepted response** (caller held an active grant with `a2a:task:create`):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "result": {
+    "parts": [
+      {"kind": "text", "text": "Task accepted (id=apis-a2a-3f9c2b1a, neotoma=ent_7a2e1c, routed_to=cicada)."}
+    ]
+  }
+}
+```
+
+**Rejected response** (caller's grant lacks the capability):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "result": {
+    "parts": [
+      {"kind": "text", "text": "Rejected [missing_capability]: Your grant doesn't include a2a:task:create. — Ask the Ateles operator to add the a2a:task:create capability to your grant."}
+    ]
+  }
+}
+```
+
+`a2a-sdk`'s `AgentExecutor.execute(context, event_queue) -> None` contract has
+no structured-error return channel distinct from `cancel()`'s — both use
+`event_queue.enqueue_event(new_agent_text_message(...))`. So today, both
+acceptance and rejection are delivered as plain text over the same channel,
+formatted as `code` + `message` + `hint` (see table below) rather than a
+JSON-RPC `error` object. A future `a2a-sdk` upgrade may add a structured-error
+path; this is tracked as a follow-up, not implemented here.
+
+## Error-code reference
+
+| `code` | `message` | `hint` |
+|---|---|---|
+| `missing_caller_identity` | No verified caller identity on this request. | Include a Bearer token issued by the Ateles operator. See docs/a2a.md#authorization. |
+| `grant_not_active` | Your agent_grant exists but is not active. | Ask the Ateles operator to activate your grant, or check its expiry. |
+| `missing_capability` | Your grant doesn't include a2a:task:create. | Ask the Ateles operator to add the a2a:task:create capability to your grant. |
+| `neotoma_store_failed` | The task could not be recorded. | This is a transient or configuration issue on the Ateles side, not a problem with your request. Retry, or contact the operator if it persists. |
+
+Rendered as `f"Rejected [{code}]: {message} — {hint}"` for authorization
+failures, or `f"Task submission failed [{code}]: {message} — {hint}"` for
+post-authorization submission failures.
+
 ---
 
 ## Configuration
@@ -127,6 +219,13 @@ The gateway reads these environment variables (add them to `.env.example` and
 ---
 
 ## Running
+
+**`APIS_A2A_ENABLE` defaults to `0` (off).** The gateway does not start unless
+this is explicitly set to `1` — it ships default-off until arch/security signs
+off on hardening `authorize_caller()`'s advisory-only enforcement into a hard
+block (see [Authorization](#authorization) above). The shipped
+`com.ateles.apis-a2a.plist` sets `APIS_A2A_ENABLE=0`; flip it to `1` once that
+decision lands.
 
 ```bash
 pip install -r execution/daemons/apis/requirements.txt

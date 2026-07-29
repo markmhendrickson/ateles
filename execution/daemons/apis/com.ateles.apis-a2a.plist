@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ateles.apis-a2a</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/markmhendrickson/repos/ateles/.venv/bin/python3</string>
+        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/apis/a2a_gateway.py</string>
+    </array>
+
+    <!-- Run at login -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart if it crashes -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Minimum seconds between relaunches. Guards against a restart storm when
+         the daemon exits repeatedly in a short window — mirrors com.ateles.apis.plist
+         (ateles#193) so a transient upstream blip clears between attempts. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/apis-a2a.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/apis-a2a.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/markmhendrickson</string>
+        <key>PATH</key>
+        <string>/Users/markmhendrickson/.local/bin:/Users/markmhendrickson/.nvm/versions/node/v20.20.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>NEOTOMA_BASE_URL</key>
+        <string>https://neotoma.markmhendrickson.com</string>
+        <key>VIRTUAL_ENV</key>
+        <string>/Users/markmhendrickson/repos/ateles/.venv</string>
+        <key>PYTHONPATH</key>
+        <string>/Users/markmhendrickson/repos/ateles/.venv/lib/python3.14/site-packages</string>
+        <!-- Gateway is off by default until arch/security confirms the
+             advisory-only authorize_caller() posture is acceptable for a
+             default-on deployment (ateles#305). Flip to "1" once that
+             decision lands. -->
+        <key>APIS_A2A_ENABLE</key>
+        <string>0</string>
+        <key>APIS_A2A_HOST</key>
+        <string>127.0.0.1</string>
+        <key>APIS_A2A_PORT</key>
+        <string>8788</string>
+    </dict>
+</dict>
+</plist>

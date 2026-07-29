@@ -61,6 +61,61 @@ AGENT_VERSION = "1.0.0"
 # Capability required of a caller's agent_grant to delegate a task.
 A2A_TASK_CAPABILITY = "a2a:task:create"
 
+# authorize_caller() reject reasons → caller-facing (message, hint). Reuses the
+# existing internal reason strings as the stable `code` enum — no new reasons.
+REJECTION_DETAIL: dict[str, tuple[str, str]] = {
+    "missing_caller_identity": (
+        "No verified caller identity on this request.",
+        "Include a Bearer token issued by the Ateles operator. See docs/a2a.md#authorization.",
+    ),
+    "grant_not_active": (
+        "Your agent_grant exists but is not active.",
+        "Ask the Ateles operator to activate your grant, or check its expiry.",
+    ),
+    "missing_capability": (
+        "Your grant doesn't include a2a:task:create.",
+        "Ask the Ateles operator to add the a2a:task:create capability to your grant.",
+    ),
+}
+
+# ApisTaskBridge result.error codes → caller-facing (message, hint).
+SUBMISSION_ERROR_DETAIL: dict[str, tuple[str, str]] = {
+    "neotoma_store_failed": (
+        "The task could not be recorded.",
+        "This is a transient or configuration issue on the Ateles side, not a "
+        "problem with your request. Retry, or contact the operator if it persists.",
+    ),
+}
+
+
+def _format_rejection(reason: str) -> str:
+    """Render an authorize_caller() reject reason as a caller-facing string."""
+    detail = REJECTION_DETAIL.get(reason)
+    if detail is None:
+        return f"Rejected [{reason}]"
+    message, hint = detail
+    return f"Rejected [{reason}]: {message} — {hint}"
+
+
+def _format_advisory_note(reason: str) -> str:
+    """Return the disclosure suffix to append to an accepted-task message when
+    authorization ran in advisory (unenforced) mode; empty string otherwise."""
+    if reason == "grant_check_unavailable_advisory":
+        return (
+            " Note: authorization check was unavailable; this request was "
+            "allowed under advisory policy."
+        )
+    return ""
+
+
+def _format_submission_failure(error: Optional[str]) -> str:
+    """Render an ApisTaskBridge result.error as a caller-facing string."""
+    detail = SUBMISSION_ERROR_DETAIL.get(error or "")
+    if detail is None:
+        return f"Task submission failed [{error}]"
+    message, hint = detail
+    return f"Task submission failed [{error}]: {message} — {hint}"
+
 
 # ── Agent Card ──────────────────────────────────────────────────────────────
 
@@ -281,7 +336,7 @@ def serve(bridge: Optional[ApisTaskBridge] = None) -> None:
             allowed, reason = authorize_caller(caller)
             if not allowed:
                 await event_queue.enqueue_event(
-                    new_agent_text_message(f"Rejected: {reason}")
+                    new_agent_text_message(_format_rejection(reason))
                 )
                 return
 
@@ -291,9 +346,10 @@ def serve(bridge: Optional[ApisTaskBridge] = None) -> None:
                     f"Task accepted (id={result.a2a_task_id}, "
                     f"neotoma={result.neotoma_entity_id}, "
                     f"routed_to={result.skill or 'unrouted'})."
+                    f"{_format_advisory_note(reason)}"
                 )
             else:
-                text = f"Task submission failed: {result.error}"
+                text = _format_submission_failure(result.error)
             await event_queue.enqueue_event(new_agent_text_message(text))
 
         async def cancel(
