@@ -59,6 +59,21 @@ def main(argv: list[str]) -> int:
             print(f"[{name}] decrypt FAILED ({exc})")
             rc = 1
             continue
+
+        # Drift guard: the manifest is the declaration of what this snapshot is
+        # supposed to carry; the snapshot is what it actually carries. When a var
+        # is added to the manifest but secrets_publish is never re-run, the
+        # snapshot silently materializes fewer vars than declared and the
+        # consumer fails far away from the cause — as ELEVENLABS_API_KEY did,
+        # aborting a meeting transcription after two paid ElevenLabs passes.
+        declared = set(files.get(name, {}).get("default", {}).keys())
+        missing = sorted(declared - set(values))
+        if missing:
+            print(
+                f"[{name}] WARNING: declared in manifest but MISSING from snapshot: "
+                f"{', '.join(missing)} — re-run secrets_publish.py {name} to resync"
+            )
+
         changed = sl.merge_into_env_file(env_file, values)
         print(f"[{name}] → {env_file}: materialized {len(values)} var(s); "
               f"{len(changed)} changed")

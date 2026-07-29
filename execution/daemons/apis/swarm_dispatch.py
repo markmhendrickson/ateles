@@ -4405,8 +4405,16 @@ class SwarmDispatcher:
         parent_line = (
             f"The PR body references parent issue #{parent}."
             if parent
-            else "No parent issue reference found in the PR body — find it "
-            "yourself or treat gate inheritance as blocked."
+            else "No parent issue reference found in the PR body. Try to find "
+            "one yourself (a `Closes #N` line, a matching open issue). If you "
+            "genuinely cannot, this is an UNPARENTED PR, not a blocked one: "
+            "there is no `gate_status` to inherit, so there is nothing to "
+            "enforce. Emit `GATE_INHERITANCE: clear` and assign Vanellus. The "
+            "dispatcher has already surfaced the pipeline bypass on the PR and "
+            "notified the operator, review still runs, and merge stays "
+            "operator-gated — so nothing is being waved through. Blocking here "
+            "would strand every incidental fix that was found while doing other "
+            "work and never began life as a planned issue."
         )
         operator_login = _OPERATOR_LOGIN
         return (
