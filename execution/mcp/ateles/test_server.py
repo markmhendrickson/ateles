@@ -689,14 +689,25 @@ class TestToolSchemas(unittest.TestCase):
         names = {t.name for t in srv.TOOLS}
         self.assertEqual(names, {"get_swarm_roster", "route_task", "list_checkpoints", "resolve_checkpoint"})
 
+    @staticmethod
+    def _input_schema(tool):
+        """mcp.types.Tool field name flipped between releases (inputSchema vs
+        input_schema). Prefer the live attribute; fall back to model_dump."""
+        schema = getattr(tool, "input_schema", None) or getattr(tool, "inputSchema", None)
+        if schema is None and hasattr(tool, "model_dump"):
+            dumped = tool.model_dump()
+            schema = dumped.get("inputSchema") or dumped.get("input_schema")
+        return schema
+
     def test_route_task_requires_description(self):
         rt = next(t for t in srv.TOOLS if t.name == "route_task")
-        self.assertIn("task_description", rt.inputSchema["required"])
+        self.assertIn("task_description", self._input_schema(rt)["required"])
 
     def test_resolve_checkpoint_requires_both_params(self):
         rc = next(t for t in srv.TOOLS if t.name == "resolve_checkpoint")
-        self.assertIn("checkpoint_id", rc.inputSchema["required"])
-        self.assertIn("action", rc.inputSchema["required"])
+        schema = self._input_schema(rc)
+        self.assertIn("checkpoint_id", schema["required"])
+        self.assertIn("action", schema["required"])
 
     def test_all_handlers_registered(self):
         for tool in srv.TOOLS:

@@ -60,6 +60,17 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^mcp__ccd_session__spawn_task$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/spawn_task_neotoma_pairing.py\""
+          }
+        ]
+      }
     ]
   }
 }
