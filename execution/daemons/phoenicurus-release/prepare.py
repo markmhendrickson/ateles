@@ -328,11 +328,20 @@ def _plain_to_html(text: str) -> str:
     import re as _re
 
     def inline(s: str) -> str:
-        s = _html.escape(s, quote=False)
-        s = _re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+        s = _html.escape(s, quote=True)
+        # Extract code spans first so their literal contents (e.g. `**not bold**`)
+        # aren't re-interpreted as markdown by the passes below, then restore last.
+        codes: list[str] = []
+
+        def stash_code(m: "_re.Match[str]") -> str:
+            codes.append(m.group(1))
+            return f"\x00{len(codes) - 1}\x00"
+
+        s = _re.sub(r"`([^`]+)`", stash_code, s)
         s = _re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
         s = _re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', s)
         s = _re.sub(r'(?<!href=")(?<!">)(https?://[^\s<)]+)', r'<a href="\1">\1</a>', s)
+        s = _re.sub(r"\x00(\d+)\x00", lambda m: f"<code>{codes[int(m.group(1))]}</code>", s)
         return s
 
     out: list[str] = []
@@ -356,7 +365,7 @@ def _plain_to_html(text: str) -> str:
             in_ul = False
         h = _re.match(r"^(#{1,6})\s+(.*)$", line)
         if h:
-            lvl = min(len(h.group(1)) + 1, 6)
+            lvl = len(h.group(1))
             out.append(f"<h{lvl}>{inline(h.group(2))}</h{lvl}>")
         else:
             out.append(f"<p>{inline(line)}</p>")
