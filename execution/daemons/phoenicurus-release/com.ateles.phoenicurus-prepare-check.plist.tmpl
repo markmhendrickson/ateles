@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Companion agent to com.ateles.phoenicurus-prepare: reconciles what the last
+  spawned prepare agent actually DID.
+
+  prepare.py backgrounds a headless `claude --print` agent and exits, so it never
+  sees the child's exit status. This agent reads the exit sentinel the spawn
+  wrapper appends to the agent log and either stamps the idempotency lock (on a
+  confirmed success) or notifies the operator, clears the lock, and schedules a
+  retry (on failure). Without it a prepare agent can die silently and the
+  release is locked out for the day with no notification.
+
+  Cheap and idempotent: exits immediately when there is nothing to reconcile.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ateles.phoenicurus-prepare-check</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/markmhendrickson/repos/ateles/.venv/bin/python3</string>
+        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/phoenicurus-release/prepare.py</string>
+        <string>--check-agent-outcome</string>
+    </array>
+
+    <!-- Every 15 minutes. The outcome window is 45 min, so a hung agent is
+         detected within one interval of the deadline. -->
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/markmhendrickson</string>
+        <key>PATH</key>
+        <string>/Users/markmhendrickson/.local/bin:/Users/markmhendrickson/.nvm/versions/node/v20.20.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>NEOTOMA_BASE_URL</key>
+        <string>http://localhost:9180</string>
+        <key>NEOTOMA_REPO_ROOT</key>
+        <string>/Users/markmhendrickson/repos/neotoma</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/phoenicurus-release.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/phoenicurus-release.log</string>
+</dict>
+</plist>

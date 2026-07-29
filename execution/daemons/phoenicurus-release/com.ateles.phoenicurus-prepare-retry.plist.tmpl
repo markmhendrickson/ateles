@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Companion agent to com.ateles.phoenicurus-prepare: re-runs a prepare that a
+  Claude usage limit deferred.
+
+  When the prepare agent dies with "limit reached ∙ resets 6:40pm (Europe/Madrid)"
+  that is a WAIT, not a failure — the outcome check writes a retry deadline and
+  this agent picks it up once the reset has passed (up to 3 attempts, then the
+  operator is notified). Without it a usage limit costs the day's release.
+
+  Cheap and idempotent: exits immediately when no retry is scheduled or the
+  deadline is still ahead.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ateles.phoenicurus-prepare-retry</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/markmhendrickson/repos/ateles/.venv/bin/python3</string>
+        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/phoenicurus-release/prepare.py</string>
+        <string>--retry-if-due</string>
+    </array>
+
+    <!-- Every 15 minutes, so a reset deadline is acted on promptly. -->
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/markmhendrickson</string>
+        <key>PATH</key>
+        <string>/Users/markmhendrickson/.local/bin:/Users/markmhendrickson/.nvm/versions/node/v20.20.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>NEOTOMA_BASE_URL</key>
+        <string>http://localhost:9180</string>
+        <key>NEOTOMA_REPO_ROOT</key>
+        <string>/Users/markmhendrickson/repos/neotoma</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/phoenicurus-release.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/phoenicurus-release.log</string>
+</dict>
+</plist>

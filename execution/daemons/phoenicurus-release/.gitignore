@@ -1,4 +1,10 @@
 # Local runtime state — never commit
+# Covered by the glob, listed explicitly so the daemon's state surface is legible:
+#   .phoenicurus_prepare_last_run    daily idempotency stamp (scheduled path)
+#   .phoenicurus_prepare_last_sha    per-commit idempotency stamp (--on-merge)
+#   .phoenicurus_prepare_last_spawn  last spawned agent, for --check-agent-outcome
+#   .phoenicurus_prepare_retry_after usage-limit retry deadline + attempt count
+#   .phoenicurus_prepare_auth_notify auth-failure notification rate limit
 .phoenicurus_*
 *.log
 .npmrc-phoenicurus-*
