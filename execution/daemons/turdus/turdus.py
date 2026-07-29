@@ -260,11 +260,20 @@ def _load_state() -> dict:
 
 
 def _save_state(state: dict) -> None:
-    """Persist state to local state file."""
+    """Persist state to local state file.
+
+    Write via a temp file + ``os.replace`` so a crash mid-write cannot leave a
+    truncated JSON that ``_load_state`` would discard (falling back to an empty
+    ``processed_ids`` and re-routing an already-approved message). Approval
+    paths call this synchronously via ``_persist_handled``; atomicity matters.
+    """
     if DRY_RUN:
         return
     try:
-        _STATE_FILE.write_text(json.dumps(state, indent=2))
+        _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _STATE_FILE.with_suffix(_STATE_FILE.suffix + ".tmp")
+        tmp.write_text(json.dumps(state, indent=2))
+        os.replace(tmp, _STATE_FILE)
     except OSError as exc:
         log.warning(f"[{DAEMON_NAME}] Failed to save state: {exc}")
 

@@ -604,7 +604,7 @@ class TestRetryIfDue:
         assert ran == []
         assert prepare.RETRY_STATE_FILE.exists(), "the schedule must survive"
 
-    def test_due_retry_forces_a_prepare_and_clears_the_file(self, env, monkeypatch):
+    def test_due_retry_forces_a_prepare_and_disarms_the_schedule(self, env, monkeypatch):
         prepare.RETRY_STATE_FILE.write_text(
             json.dumps(
                 {"retry_after": _iso_ago(1), "attempts": 1, "on_merge": True,
@@ -621,7 +621,33 @@ class TestRetryIfDue:
 
         assert prepare.retry_if_due() == 0
         assert calls == [(False, True, True)], "the retry must bypass the daily lock"
-        assert not prepare.RETRY_STATE_FILE.exists()
+        # Schedule is disarmed (no retry_after) but the attempt count is kept so
+        # a subsequent usage-limit failure increments rather than resetting to 1.
+        breadcrumb = json.loads(prepare.RETRY_STATE_FILE.read_text())
+        assert "retry_after" not in breadcrumb
+        assert breadcrumb["attempts"] == 1
+
+    def test_retry_attempt_count_survives_rerun(self, env, monkeypatch):
+        # The production path that used to infinite-loop: schedule → due → clear
+        # → re-run → fail again → schedule as attempt 1 forever. The breadcrumb
+        # left by retry_if_due must make the next _schedule_retry land on 2.
+        prepare.RETRY_STATE_FILE.write_text(
+            json.dumps(
+                {"retry_after": _iso_ago(1), "attempts": 1, "on_merge": False,
+                 "tag": "v0.19.0"}
+            )
+        )
+        monkeypatch.setattr(prepare, "run_prepare", lambda *a, **k: 0)
+        prepare.retry_if_due()
+
+        prepare._schedule_retry(
+            _iso_ago(-60), on_merge=False, head="", tag="v0.19.0"
+        )
+        retry = json.loads(prepare.RETRY_STATE_FILE.read_text())
+        assert retry["attempts"] == 2, (
+            "clearing the whole retry file before re-running would reset the "
+            "cap and retry forever on a sticky usage limit"
+        )
 
     def test_exhausted_budget_notifies_instead_of_retrying(self, env, monkeypatch):
         prepare.RETRY_STATE_FILE.write_text(
@@ -640,6 +666,15 @@ class TestRetryIfDue:
         assert ran == []
         assert any("Giving up" in n for n in env.notified)
         assert not prepare.RETRY_STATE_FILE.exists()
+
+    def test_unarmed_breadcrumb_is_a_noop(self, env, monkeypatch):
+        prepare.RETRY_STATE_FILE.write_text(json.dumps({"attempts": 2}))
+        ran = []
+        monkeypatch.setattr(prepare, "run_prepare", lambda *a, **k: ran.append(k) or 0)
+
+        assert prepare.retry_if_due() == 0
+        assert ran == []
+        assert prepare.RETRY_STATE_FILE.exists(), "breadcrumb must survive"
 
     def test_unparseable_deadline_is_discarded(self, env, monkeypatch):
         prepare.RETRY_STATE_FILE.write_text(json.dumps({"retry_after": "soon"}))

@@ -888,14 +888,20 @@ def spawn_prepare_agent(
 
     log_offset = AGENT_LOG.stat().st_size if AGENT_LOG.exists() else 0
     try:
-        subprocess.Popen(
-            ["sh", "-c", _agent_shell_command(claude, prompt)],
-            cwd=str(NEOTOMA_REPO_ROOT),
-            env=_agent_env(),
-            stdout=open(AGENT_LOG, "a"),
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        # Open the agent log ourselves so we can close the fd in the parent after
+        # Popen inherits it — leaving it open would leak a handle per spawn.
+        agent_log_fh = open(AGENT_LOG, "a")
+        try:
+            subprocess.Popen(
+                ["sh", "-c", _agent_shell_command(claude, prompt)],
+                cwd=str(NEOTOMA_REPO_ROOT),
+                env=_agent_env(),
+                stdout=agent_log_fh,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        finally:
+            agent_log_fh.close()
     except Exception as exc:  # noqa: BLE001
         log.error(f"failed to spawn prepare agent: {exc}")
         notify_operator(f"🔴 Phoenicurus: failed to spawn prepare agent — {exc}")
@@ -998,12 +1004,24 @@ def retry_if_due(dry_run: bool = False) -> int:
     """
     Re-run a prepare that was deferred by a usage limit, once the reset has
     passed. A no-op when nothing is scheduled or the deadline is still ahead.
+
+    Attempt-count preservation: clearing the whole retry file before re-running
+    would reset ``attempts`` to 0, so every subsequent usage-limit failure would
+    re-arm as attempt 1 and the cap would never fire (infinite retry). After
+    consuming a due schedule we leave an unarmed breadcrumb that keeps the
+    attempt count; ``_schedule_retry`` increments from it, and a successful
+    outcome clears it via ``_clear_retry_state``.
     """
     state = _read_retry_state()
     if not state:
         log.info("No prepare retry scheduled — nothing to do.")
         return 0
-    deadline = _parse_iso(str(state.get("retry_after") or ""))
+    raw_deadline = state.get("retry_after")
+    if not raw_deadline:
+        # Unarmed breadcrumb left by a prior re-run — not a live schedule.
+        log.info("No prepare retry armed — nothing to do.")
+        return 0
+    deadline = _parse_iso(str(raw_deadline))
     if deadline is None:
         log.warning("retry state has no usable deadline — discarding it")
         _clear_retry_state()
@@ -1029,7 +1047,24 @@ def retry_if_due(dry_run: bool = False) -> int:
         f"Prepare retry due (attempt {attempts}/{MAX_RETRY_ATTEMPTS}, "
         f"on_merge={on_merge}) — re-running prepare."
     )
-    _clear_retry_state()
+    # Disarm the schedule but KEEP the attempt count so a repeated usage-limit
+    # failure increments rather than resetting. Success clears this entirely.
+    try:
+        RETRY_STATE_FILE.write_text(
+            json.dumps(
+                {
+                    "attempts": attempts,
+                    "on_merge": on_merge,
+                    "head": state.get("head") or "",
+                    "tag": state.get("tag") or "",
+                    "disarmed_at": _now_iso(),
+                },
+                indent=2,
+            )
+        )
+    except OSError as exc:
+        log.warning(f"could not disarm retry state: {exc}")
+        _clear_retry_state()
     return run_prepare(dry_run, True, on_merge=on_merge)
 
 
