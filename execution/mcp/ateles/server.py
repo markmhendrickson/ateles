@@ -1,0 +1,615 @@
+#!/usr/bin/env python3
+"""
+ateles — MCP server for Ateles swarm routing and checkpoint management.
+
+Provides four tools that wrap multi-step Neotoma query patterns into single
+calls, so any connected agent gets reliable swarm interaction without
+re-deriving the roster/policy/checkpoint dance each session.
+
+Tools:
+  get_swarm_roster   — full roster (roles → agent names)
+  route_task         — resolve owning agent + definition + execution policy
+  list_checkpoints   — pending checkpoint_briefs awaiting operator
+  resolve_checkpoint — approve/reject a checkpoint with validation
+
+Environment:
+  NEOTOMA_BASE_URL       (default: https://neotoma.markmhendrickson.com)
+  NEOTOMA_BEARER_TOKEN   (required)
+  SWARM_ROSTER_KEY       (default: default)
+
+Transport: stdio (launched by Claude Code as an MCP server subprocess).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sys
+from typing import Any
+
+import httpx
+from mcp.server import Server
+from mcp.server.stdio import stdio_server
+from mcp.types import (
+    TextContent,
+    Tool,
+)
+
+log = logging.getLogger("ateles")
+
+NEOTOMA_BASE_URL = os.environ.get(
+    "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
+)
+NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
+ROSTER_KEY = os.environ.get("SWARM_ROSTER_KEY", "default")
+
+DEFAULT_POLICY_ID = os.environ.get(
+    "EXECUTION_POLICY_DEFAULT_ID", "ent_dfce6edecefe3eb7fc9e0337"
+)
+
+AGENT_POLICY_OVERRIDES: dict[str, str] = {
+    "monedula": os.environ.get(
+        "MONEDULA_POLICY_ID", "ent_c7f81385afbd993db3dd11ff"
+    ),
+}
+
+SERVER_INSTRUCTIONS = """\
+You are connected to Ateles. Follow these operating rules:
+
+1. **Dispatch, don't do inline.** When route_task identifies an owning agent, \
+delegate to that agent rather than doing the work yourself.
+2. **Monitor dispatched work.** After dispatching a task via route_task, track \
+its status in Neotoma (retrieve the task entity periodically). Report completion, \
+failure, or checkpoint escalation back to the operator — do not fire-and-forget.
+3. **Consent gate.** Never send anything public, email anyone, or take an \
+irreversible external action without operator approval.
+4. **Checkpoint protocol.** Pending checkpoints (list_checkpoints) are the \
+operator's decision queue. Present each with its blast radius, confidence vs \
+threshold, and reason. Act on the operator's decision via resolve_checkpoint — \
+do NOT execute the held task yourself.
+5. **Neotoma first.** Durable memory lives in Neotoma. Store, don't leave in \
+conversation.
+"""
+
+
+# ── Neotoma HTTP helpers ─────────────────────────────────────────────────────
+
+def _headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}
+
+
+# Last transport failure, so callers can tell "Neotoma said no rows" apart from
+# "the request never succeeded". Both still surface as None/[] from the helpers
+# — this records WHY, and tools echo it back to the agent.
+#
+# Motivating bug: _retrieve_entities posted to a 404 path, got None, returned
+# [], and get_swarm_roster reported "swarm_roster not found" — a data-absence
+# message for a transport failure. The URL fix alone would leave the next wrong
+# endpoint, expired token, or outage just as silent.
+_last_transport_error: str | None = None
+
+
+def _clear_transport_error() -> None:
+    global _last_transport_error
+    _last_transport_error = None
+
+
+def _record_transport_error(kind: str, method: str, path: str, detail: str) -> None:
+    """kind is the agent-actionable class: no_token | not_found | request_failed."""
+    global _last_transport_error
+    _last_transport_error = f"{kind}: {method} {path} — {detail}"
+    log.warning("neotoma %s %s failed (%s): %s", method, path, kind, detail)
+
+
+def _describe_transport_error() -> str | None:
+    return _last_transport_error
+
+
+def _request(method: str, path: str, *, params: dict | None = None, body: dict | None = None) -> dict | None:
+    if not NEOTOMA_BEARER_TOKEN:
+        _record_transport_error(
+            "no_token", method, path,
+            "NEOTOMA_BEARER_TOKEN is unset — escalate to the operator, retrying will not help",
+        )
+        return None
+    try:
+        resp = httpx.request(
+            method,
+            f"{NEOTOMA_BASE_URL}{path}",
+            headers=_headers(),
+            params=params,
+            json=body,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        _clear_transport_error()
+        return resp.json()
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        kind = "not_found" if status == 404 else "request_failed"
+        hint = (
+            " — endpoint does not exist on this Neotoma instance (entity lists are POST /entities/query)"
+            if status == 404
+            else ""
+        )
+        _record_transport_error(kind, method, path, f"HTTP {status}{hint}")
+        return None
+    except Exception as exc:
+        _record_transport_error("request_failed", method, path, f"{type(exc).__name__}: {exc}")
+        return None
+
+
+def _get(path: str, params: dict | None = None) -> dict | None:
+    return _request("GET", path, params=params)
+
+
+def _post(path: str, body: dict) -> dict | None:
+    return _request("POST", path, body=body)
+
+
+def _retrieve_entities(
+    entity_type: str,
+    search: str | None = None,
+    snapshot_filters: dict | None = None,
+    limit: int = 100,
+    include_snapshots: bool = True,
+) -> list[dict]:
+    body: dict[str, Any] = {
+        "entity_type": entity_type,
+        "limit": limit,
+        "include_snapshots": include_snapshots,
+    }
+    if search:
+        body["search"] = search
+    if snapshot_filters:
+        body["snapshot_filters"] = snapshot_filters
+    # POST /entities/query — NOT /retrieve, which 404s. The GET /entities list
+    # endpoint does not exist either; see lib/daemon_runtime/agent_loader.py.
+    data = _post("/entities/query", body)
+    if data is None:
+        return []
+    return data.get("entities", [])
+
+
+def _snapshot_of(entity: dict) -> dict:
+    snap = (entity.get("snapshot") or {}).get("snapshot")
+    if isinstance(snap, dict):
+        return snap
+    if isinstance(entity.get("snapshot"), dict):
+        return entity["snapshot"]
+    return entity
+
+
+def _correct(entity_id: str, entity_type: str, field: str, value: Any, idem_key: str) -> bool:
+    body = {
+        "entity_id": entity_id,
+        "entity_type": entity_type,
+        "field": field,
+        "value": value,
+        "idempotency_key": idem_key,
+    }
+    result = _post("/correct", body)
+    return result is not None
+
+
+# Tie-break order for equal-length keyword matches, most specific first.
+#
+# Only consulted when two roles match a description with keywords of identical
+# length; unequal lengths are always decided by length alone. Without this,
+# equal-length ties fall to whichever role appears first in role_keywords —
+# reintroducing the declaration-order dependence the length rule exists to
+# remove (e.g. "payment" and "bug fix" are both 7 characters).
+#
+# Rationale for the order: money and irreversible external actions outrank
+# generic implementation work, so an ambiguous description escalates toward the
+# more consequential handler rather than silently landing on code.
+ROLE_TIE_BREAK: tuple[str, ...] = (
+    "payments",
+    "tax",
+    "release_manager",
+    "compliance",
+    "pr_steward",
+    "issue_triage",
+    "qa",
+    "code",
+)
+
+
+def _role_priority(role: str) -> int:
+    """Higher is more specific. Unlisted roles share the lowest priority."""
+    try:
+        return len(ROLE_TIE_BREAK) - ROLE_TIE_BREAK.index(role)
+    except ValueError:
+        return 0
+
+
+# ── Tool implementations ─────────────────────────────────────────────────────
+
+def _get_swarm_roster() -> dict:
+    entities = _retrieve_entities(
+        "swarm_roster",
+        snapshot_filters={"roster_key": {"op": "eq", "value": ROSTER_KEY}},
+        limit=1,
+    )
+    if not entities:
+        # Distinguish "Neotoma has no such roster" from "the request failed" —
+        # reporting the former for the latter is what hid the /retrieve 404.
+        transport_error = _describe_transport_error()
+        if transport_error:
+            return {
+                "error": f"could not reach Neotoma: {transport_error}",
+                "roster_key": ROSTER_KEY,
+                "transport_error": transport_error,
+            }
+        return {"error": "swarm_roster not found", "roster_key": ROSTER_KEY}
+
+    snap = _snapshot_of(entities[0])
+    roles_raw = snap.get("roles", "{}")
+    if isinstance(roles_raw, str):
+        try:
+            roles = json.loads(roles_raw)
+        except (json.JSONDecodeError, TypeError):
+            roles = {}
+    else:
+        roles = roles_raw
+
+    return {
+        "entity_id": entities[0].get("entity_id", entities[0].get("id", "")),
+        "roster_key": ROSTER_KEY,
+        "swarm_domain": snap.get("swarm_domain", ""),
+        "roles": roles,
+    }
+
+
+def _route_task(task_description: str, action_type: str | None = None) -> dict:
+    roster = _get_swarm_roster()
+    if "error" in roster:
+        return roster
+
+    roles: dict[str, str] = roster.get("roles", {})
+
+    best_role: str | None = None
+    best_agent: str | None = None
+
+    desc_lower = task_description.lower()
+    # Declaration order is cosmetic — the longest matching keyword wins (see
+    # the selection loop below), so specificity is decided by keyword length,
+    # not by position in this table. Grouping here is for readability only.
+    role_keywords: dict[str, list[str]] = {
+        "pr_steward": ["review pr", "merge pr", "pull request review"],
+        "issue_triage": ["issue", "bug report", "github issue", "triage issue"],
+        "email_triage": ["email", "inbox", "triage email", "mail"],
+        "financial_analysis": ["financial analysis", "revenue", "forecast"],
+        "customer_intelligence": ["customer", "lead", "prospect"],
+        "strategy_adversary": ["strategy", "adversarial", "red team"],
+        "release_manager": ["release", "deploy", "version"],
+        "recurring_tasks": ["recurring", "scheduled task", "cron"],
+        "neotoma_repo": ["neotoma", "neotoma repo"],
+        "compliance": ["compliance", "legal review", "contract"],
+        "screenshots": ["screenshot", "capture screen"],
+        "designer": ["design", "mockup", "wireframe", "ui ", "ux "],
+        "content": ["blog", "write post", "content", "article"],
+        "briefings": ["meeting", "briefing", "agenda", "calendar"],
+        "payments": ["payment", "invoice", "pay ", "transfer", "wage"],
+        "health": ["workout", "exercise", "gym", "fitness", "health"],
+        "tax": ["tax", "fiscal", "iva", "vat", "hacienda"],
+        "mirror": ["mirror", "sync repo", "apus"],
+        "gtm": ["go to market", "gtm", "launch"],
+        "pm": ["product", "roadmap", "feature plan"],
+        "crm": ["contact", "crm", "relationship"],
+        "qa": ["test", "qa ", "quality"],
+        "code": [
+            "code", "implement", "build", "refactor",
+            # Natural bug-fix phrasings. A rigid "fix bug" misses the far more
+            # common "fix a bug" / "fix the bug", which then fell through to
+            # the dispatcher fallback.
+            "fix bug", "fix a bug", "fix the bug", "bugfix", "bug fix",
+        ],
+        "dispatcher": ["dispatch", "assign", "route"],
+    }
+
+    # Selection is (keyword length, role priority) — never dict order.
+    #
+    # Longest keyword wins: "refactor the payment module" must reach code via
+    # "refactor" (8) rather than payments via "payment" (7).
+    #
+    # Ties are the subtle half. Length alone leaves equal-length matches to be
+    # settled by whichever role is declared first, which is the same
+    # order-dependence in a different disguise — e.g. "process payment for a
+    # bug fix" matches payments' "payment" (7) and code's "bug fix" (7), and
+    # silently resolved to payments purely by position. ROLE_TIE_BREAK states
+    # the intent explicitly: when two roles match equally well, the more
+    # consequential/specific handler wins. Roles absent from the list share the
+    # lowest priority and then fall back to alphabetical order, so the result is
+    # always deterministic and never depends on table position.
+    best_key: tuple[int, int, str] | None = None
+    matched_keyword: str | None = None
+    for role, keywords in role_keywords.items():
+        if role not in roles:
+            continue
+        for kw in keywords:
+            if kw not in desc_lower:
+                continue
+            # Higher tuple sorts better: longer keyword, then higher priority,
+            # then a stable alphabetical tiebreak (negated via reverse compare).
+            priority = _role_priority(role)
+            key = (len(kw), priority, role)
+            if best_key is None or key > best_key:
+                best_key = key
+                matched_keyword = kw
+                best_role = role
+                best_agent = roles[role]
+
+    # Fallback: nothing in the table matched this description at all.
+    matched_via = "keyword" if matched_keyword else "fallback"
+    if not best_agent:
+        best_role = "dispatcher"
+        best_agent = roles.get("dispatcher")
+
+    agent_def = None
+    if best_agent:
+        agents = _retrieve_entities("agent_definition", search=best_agent, limit=1)
+        if agents:
+            snap = _snapshot_of(agents[0])
+            agent_def = {
+                "entity_id": agents[0].get("entity_id", agents[0].get("id", "")),
+                "name": snap.get("name", ""),
+                "description": snap.get("description", ""),
+                "prompt_markdown": snap.get("prompt_markdown", ""),
+                "context_entity_types": snap.get("context_entity_types", []),
+                "operational_entity_types": snap.get("operational_entity_types", []),
+                "tool_allowlist": snap.get("tool_allowlist", []),
+                "tier": snap.get("tier", ""),
+                "aauth_sub": snap.get("aauth_sub", ""),
+            }
+
+    policy_id = AGENT_POLICY_OVERRIDES.get(
+        (best_agent or "").lower(), DEFAULT_POLICY_ID
+    )
+    policy_data = _get(f"/entities/{policy_id}")
+    policy = None
+    if policy_data:
+        psnap = _snapshot_of(policy_data)
+        policy = {
+            "entity_id": policy_id,
+            "title": psnap.get("title", ""),
+            "confidence_threshold": psnap.get("confidence_threshold"),
+            "blast_radius_default": psnap.get("blast_radius_default"),
+            "high_blast_action_types": psnap.get("high_blast_action_types"),
+        }
+
+    result: dict[str, Any] = {
+        "matched_role": best_role,
+        "matched_agent": best_agent,
+        # Why this role won: the keyword that matched (longest match wins), or
+        # "fallback" when nothing matched. Makes a misroute a one-field
+        # diagnosis instead of a source dive through role_keywords.
+        "matched_keyword": matched_keyword,
+        "matched_via": matched_via,
+        "swarm_domain": roster.get("swarm_domain", ""),
+    }
+    if agent_def:
+        result["agent_definition"] = agent_def
+    if policy:
+        result["execution_policy"] = policy
+    if action_type:
+        result["action_type"] = action_type
+        if policy:
+            high_blast = policy.get("high_blast_action_types", [])
+            if isinstance(high_blast, str):
+                try:
+                    high_blast = json.loads(high_blast)
+                except (json.JSONDecodeError, TypeError):
+                    high_blast = []
+            result["action_blast_radius"] = (
+                "high" if action_type.lower() in [h.lower() for h in (high_blast or [])]
+                else "low"
+            )
+    return result
+
+
+def _list_checkpoints() -> dict:
+    entities = _retrieve_entities(
+        "checkpoint_brief",
+        snapshot_filters={"status": {"op": "eq", "value": "awaiting_operator"}},
+        limit=50,
+    )
+
+    checkpoints = []
+    for ent in entities:
+        snap = _snapshot_of(ent)
+        eid = ent.get("entity_id", ent.get("id", ""))
+
+        task_id = snap.get("task_entity_id")
+        task_title = None
+        if task_id:
+            task_data = _get(f"/entities/{task_id}")
+            if task_data:
+                tsnap = _snapshot_of(task_data)
+                task_title = tsnap.get("title", "")
+
+        checkpoints.append({
+            "checkpoint_id": eid,
+            "title": snap.get("title", ""),
+            "status": snap.get("status", ""),
+            "handler": snap.get("handler", ""),
+            "task_entity_id": task_id,
+            "task_title": task_title,
+            "confidence": snap.get("confidence"),
+            "confidence_threshold": snap.get("confidence_threshold"),
+            "blast_radius": snap.get("blast_radius", ""),
+            "gate_action": snap.get("gate_action", ""),
+            "reason": snap.get("reason", ""),
+            "proposed_alternatives": snap.get("proposed_alternatives", []),
+        })
+
+    return {"count": len(checkpoints), "checkpoints": checkpoints}
+
+
+def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
+    action_lower = action.strip().lower()
+    if action_lower not in ("approve", "reject"):
+        return {"error": f"action must be 'approve' or 'reject', got '{action}'"}
+
+    data = _get(f"/entities/{checkpoint_id}")
+    if data is None:
+        return {"error": f"checkpoint {checkpoint_id} not found or Neotoma unreachable"}
+
+    snap = _snapshot_of(data)
+    current_status = str(snap.get("status", "")).strip().lower()
+    if current_status not in ("awaiting_operator",):
+        return {
+            "error": f"checkpoint is '{current_status}', not 'awaiting_operator' — cannot resolve",
+            "checkpoint_id": checkpoint_id,
+        }
+
+    dispatched = snap.get("resolved_dispatched")
+    if dispatched is True or str(dispatched).strip().lower() in {"true", "1", "yes"}:
+        return {
+            "error": "checkpoint already dispatched — this is a replay",
+            "checkpoint_id": checkpoint_id,
+        }
+
+    new_status = "approved" if action_lower == "approve" else "rejected"
+    idem_key = f"resolve-checkpoint-{checkpoint_id}-{new_status}"
+
+    ok = _correct(checkpoint_id, "checkpoint_brief", "status", new_status, idem_key)
+    if not ok:
+        return {"error": "failed to correct checkpoint status in Neotoma"}
+
+    task_id = snap.get("task_entity_id")
+    if action_lower == "reject" and task_id:
+        _correct(task_id, "task", "status", "declined", f"decline-swarm-harness-{task_id}")
+
+    return {
+        "checkpoint_id": checkpoint_id,
+        "new_status": new_status,
+        "task_entity_id": task_id,
+        "action_taken": (
+            "approved — dispatcher will re-dispatch"
+            if action_lower == "approve"
+            else "rejected — task marked declined"
+        ),
+    }
+
+
+# ── MCP Server setup ─────────────────────────────────────────────────────────
+
+TOOLS = [
+    Tool(
+        name="get_swarm_roster",
+        description=(
+            "Returns the full Ateles swarm roster: a map of roles to agent names, "
+            "plus the swarm domain and roster entity ID. Use this to discover which "
+            "agents exist and what roles they fill."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="route_task",
+        description=(
+            "Given a task description, resolves the owning agent from the swarm "
+            "roster by role, fetches its agent_definition (prompt, context types, "
+            "tool allowlist), and the applicable execution_policy. Returns the "
+            "complete dispatch context in one call. Optionally pass action_type to "
+            "get the blast radius classification for that action."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "task_description": {
+                    "type": "string",
+                    "description": "What the task is about — used for keyword-based role matching.",
+                },
+                "action_type": {
+                    "type": "string",
+                    "description": (
+                        "Optional action type (e.g. 'git_push', 'payment', 'publish') "
+                        "to classify blast radius under the resolved policy."
+                    ),
+                },
+            },
+            "required": ["task_description"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="list_checkpoints",
+        description=(
+            "Returns all pending checkpoint_briefs (status: awaiting_operator) with "
+            "task title, assigned agent, blast radius, confidence vs threshold, and "
+            "reason pre-joined. These are the operator's decision queue."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="resolve_checkpoint",
+        description=(
+            "Approves or rejects a pending checkpoint_brief by entity ID. Validates "
+            "that the checkpoint is awaiting_operator and has not already been "
+            "dispatched. On rejection, also marks the referenced task as declined."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "checkpoint_id": {
+                    "type": "string",
+                    "description": "Entity ID of the checkpoint_brief to resolve.",
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["approve", "reject"],
+                    "description": "Whether to approve or reject the checkpoint.",
+                },
+            },
+            "required": ["checkpoint_id", "action"],
+            "additionalProperties": False,
+        },
+    ),
+]
+
+TOOL_HANDLERS = {
+    "get_swarm_roster": lambda args: _get_swarm_roster(),
+    "route_task": lambda args: _route_task(
+        args["task_description"], args.get("action_type")
+    ),
+    "list_checkpoints": lambda args: _list_checkpoints(),
+    "resolve_checkpoint": lambda args: _resolve_checkpoint(
+        args["checkpoint_id"], args["action"]
+    ),
+}
+
+
+async def main():
+    server = Server("ateles", instructions=SERVER_INSTRUCTIONS)
+
+    @server.list_tools()
+    async def handle_list_tools() -> list[Tool]:
+        return TOOLS
+
+    @server.call_tool()
+    async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+        handler = TOOL_HANDLERS.get(name)
+        if not handler:
+            return [TextContent(type="text", text=json.dumps({"error": f"unknown tool: {name}"}))]
+        result = handler(arguments or {})
+        return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+    options = server.create_initialization_options()
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(read_stream, write_stream, options)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
+    import asyncio
+    asyncio.run(main())

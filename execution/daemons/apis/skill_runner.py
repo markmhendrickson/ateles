@@ -19,6 +19,13 @@ Stage 5 (ateles#94): when no agent_definition loads (empty prompt_markdown),
 emits a notifier WARN and a harness_event with the degraded_generic_subagent
 marker so degraded dispatches are observable. Dispatch still proceeds.
 
+ateles#257: on a FAILED dispatch the complete child stdout AND stderr are
+persisted to a per-dispatch file under ``~/Library/Logs/ateles/dispatch-failures/``
+and that path is echoed into both the ERROR log line and the harness_event
+``output_summary``, so a failure is never again unreconstructable from a
+truncated slice. Failed dispatches also raise a rate-limited operator
+notification, so a swarm-wide breakage produces a signal instead of silence.
+
 Failures never raise — callers get a SkillResult and decide how to degrade;
 one bad dispatch must not take down the daemon.
 """
@@ -26,9 +33,11 @@ one bad dispatch must not take down the daemon.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -54,6 +63,59 @@ DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
 ATELES_REPO = Path(
     os.environ.get("ATELES_REPO_PATH", str(Path.home() / "repos" / "ateles"))
 )
+
+# ── Dropped-allowlist-rule detection (ateles#255) ──────────────────────────────
+# The CLI silently continues past a rejected `--allowedTools` rule, logging a
+# single stderr line per dropped rule instead of failing the dispatch. Before
+# this, that line was only visible in ~/Library/Logs/ateles/apis.log — a
+# swarm-wide breakage (see issue #255) went unnoticed for a week because
+# nothing surfaced it to the operator. This regex + helper turn every dropped
+# rule into one batched notifier alert per dispatch (never one alert per rule,
+# to avoid paging noise on a single bad grant).
+#
+# The CLI line-wraps this message (confirmed in the issue's own quoted repro):
+#   "... dispatch failed (rc=1): Ignoring\n--allowedTools rule \"pr*\": ..."
+# — a newline, not a space, separates "Ignoring" and "--allowedTools". `\s+`
+# (DOTALL not needed; \s already matches \n) tolerates that wrap so the
+# detector actually matches real CLI output, not just a single-line fixture.
+_DROPPED_ALLOWLIST_RULE_RE = re.compile(r'Ignoring\s+--allowedTools rule "([^"]*)"')
+
+
+def _find_dropped_allowlist_rules(stderr: str) -> list[str]:
+    """Return the distinct dropped-rule names named in a dispatch's stderr.
+
+    Order-preserving, de-duplicated (the same rule can be logged more than
+    once for a single dispatch). Empty input / no match -> empty list.
+    """
+    if not stderr:
+        return []
+    seen: dict[str, None] = {}
+    for m in _DROPPED_ALLOWLIST_RULE_RE.finditer(stderr):
+        seen.setdefault(m.group(1), None)
+    return list(seen)
+
+
+def _notify_dropped_allowlist_rules(
+    notifier, *, role: str, rules: list[str], returncode: int | None
+) -> None:
+    """Send ONE batched notifier alert naming every dropped rule for this
+    dispatch (never one alert per rule — see module docstring above)."""
+    if not rules or notifier is None:
+        return
+    rule_list = ", ".join(f'"{r}"' for r in rules)
+    msg = (
+        f"Agent {role!r} dispatch had {len(rules)} --allowedTools rule(s) "
+        f"silently dropped by the CLI: {rule_list} (rc={returncode}). "
+        "The corresponding tool_allowlist grant(s) never reached the agent — "
+        "fix the grant grammar in the agent_definition."
+    )
+    try:
+        from lib.notify import Priority
+
+        notifier.send(msg, priority=Priority.WARN, handler="apis")
+    except Exception as exc:
+        log.debug(f"[apis] dropped-allowlist-rule notifier.send failed: {exc}")
+
 
 # ── Agent-definition cache ─────────────────────────────────────────────────────
 # Per-role cache within the process lifetime. AgentLoader.load() makes a
@@ -235,9 +297,7 @@ def build_system_prompt(
                 False,
             )
         return (
-            f"{definition_prompt}\n\n"
-            "---\n\n"
-            f"{skill_md}",
+            f"{definition_prompt}\n\n---\n\n{skill_md}",
             False,
         )
     # Degraded: no definition_prompt.
@@ -267,7 +327,7 @@ def _write_harness_event(
     Uses the same /store endpoint and pattern as lib/activity/_store_activity_log.
     Never raises — a harness_event failure must not crash dispatch.
     """
-    base_url = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:3180").rstrip("/")
+    base_url = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180").rstrip("/")
     token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     if not token:
         return
@@ -315,6 +375,234 @@ def _write_harness_event(
             pass
     except Exception as exc:
         log.debug(f"[apis] harness_event write failed (non-fatal): {exc}")
+
+
+# ── Dispatch-failure diagnostics (ateles#257) ──────────────────────────────────
+#
+# On a failed dispatch the ONLY durable evidence used to be `stderr[:500]` in a
+# log line and `stderr[:200]` in a harness_event — stdout was dropped entirely.
+# That is why ateles#256's rc=1 root cause is unrecoverable: the leading bytes
+# of stderr were an incidental `--allowedTools` warning and the real error sat
+# past the cut, or in stdout.
+#
+# We now write the COMPLETE stdout+stderr of every failed dispatch to a
+# per-dispatch file and put its path everywhere the failure surfaces.
+# Everything here is best-effort: a diagnostics failure must NEVER break
+# dispatch.
+
+DISPATCH_FAILURE_LOG_DIR = Path(
+    os.environ.get(
+        "ATELES_DISPATCH_FAILURE_LOG_DIR",
+        str(Path.home() / "Library" / "Logs" / "ateles" / "dispatch-failures"),
+    )
+)
+
+# Rate-limit window for operator notifications about dispatch failures. A
+# swarm-wide breakage should produce a signal, not 200 of them: identical
+# (skill, returncode, stderr-shape) failures notify at most once per window.
+DISPATCH_FAILURE_NOTIFY_WINDOW_SECONDS = int(
+    os.environ.get("ATELES_DISPATCH_FAILURE_NOTIFY_WINDOW", "3600")
+)
+
+# signature -> monotonic seconds of last notification. Process-local; the daemon
+# is long-lived, so this is the right lifetime for burst suppression.
+_dispatch_failure_notified_at: dict[str, float] = {}
+
+# Env vars whose values must never land in a diagnostics file, in case a failing
+# child echoes its own environment or argv.
+_REDACTED_ENV_VARS = (
+    "NEOTOMA_BEARER_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "TELEGRAM_BOT_TOKEN",
+)
+
+_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _slug(value: str, *, limit: int = 60) -> str:
+    """
+    Filesystem-safe slug for one path component. Never raises.
+
+    Dots are collapsed so no ``..`` survives: ``skill`` reaches this from a
+    caller-supplied name, and the result is joined onto a directory path.
+    """
+    cleaned = _SLUG_RE.sub("-", (value or "").strip())
+    cleaned = re.sub(r"\.+", ".", cleaned).strip("-.")
+    return (cleaned or "unknown")[:limit]
+
+
+def _redact_secrets(text: str) -> str:
+    """Replace any known secret value appearing in child output."""
+    out = text
+    for var in _REDACTED_ENV_VARS:
+        secret = os.environ.get(var, "")
+        if secret and len(secret) >= 8:
+            out = out.replace(secret, f"<redacted:{var}>")
+    return out
+
+
+def _summarize_command(cmd: list[str]) -> str:
+    """
+    Render the dispatch command for the diagnostics header.
+
+    The ``--append-system-prompt`` payload is multi-KB and not diagnostic, so it
+    is elided by length rather than inlined.
+    """
+    parts: list[str] = []
+    elide_next = False
+    for arg in cmd:
+        if elide_next:
+            parts.append(f"<{len(arg)}B system-prompt elided>")
+            elide_next = False
+            continue
+        parts.append(arg)
+        if arg == "--append-system-prompt":
+            elide_next = True
+    return _redact_secrets(" ".join(parts))
+
+
+def write_dispatch_failure_log(
+    *,
+    skill: str,
+    role: str,
+    returncode: int | None,
+    stdout: str,
+    stderr: str,
+    task_entity_id: str = "",
+    cmd: list[str] | None = None,
+    cwd: str | None = None,
+    duration_ms: int | None = None,
+) -> str:
+    """
+    Persist the COMPLETE stdout and stderr of a failed dispatch to a file.
+
+    Returns the absolute path written, or ``""`` when the write could not be
+    made. NEVER raises — diagnostics must not be able to break a dispatch.
+
+    The file is written mode-0600: child output can contain repository content
+    and, in pathological cases, tokens echoed by a failing tool.
+    """
+    try:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        DISPATCH_FAILURE_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        path = DISPATCH_FAILURE_LOG_DIR / f"{_slug(skill)}-{ts}.log"
+
+        header = [
+            "# Ateles dispatch failure (ateles#257)",
+            f"written_at: {datetime.now(timezone.utc).isoformat()}",
+            f"skill: {skill}",
+            f"role: {role}",
+            f"returncode: {returncode}",
+            f"task_entity_id: {task_entity_id or '(none)'}",
+            f"cwd: {cwd or '(daemon default)'}",
+            f"duration_ms: {duration_ms if duration_ms is not None else '(unknown)'}",
+            f"stdout_bytes: {len(stdout)}",
+            f"stderr_bytes: {len(stderr)}",
+        ]
+        if cmd:
+            header.append(f"command: {_summarize_command(list(cmd))}")
+
+        body = (
+            "\n".join(header)
+            + "\n\n===== STDOUT (complete) =====\n"
+            + _redact_secrets(stdout)
+            + "\n===== END STDOUT =====\n"
+            + "\n===== STDERR (complete) =====\n"
+            + _redact_secrets(stderr)
+            + "\n===== END STDERR =====\n"
+        )
+        path.write_text(body, encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return str(path)
+    except Exception as exc:  # noqa: BLE001 — diagnostics must never break dispatch
+        log.warning(f"[apis] could not write dispatch-failure log (non-fatal): {exc}")
+        return ""
+
+
+def _failure_signature(skill: str, returncode: int | None, stderr: str) -> str:
+    """
+    Stable dedup key for a dispatch failure.
+
+    Keys on (skill, returncode, hash of the stderr *shape*) so a burst of the
+    SAME systemic breakage collapses to one notification while a genuinely
+    different failure still gets through. Long hex runs and digits are
+    normalized out so per-run ids and timestamps don't defeat the dedup.
+    """
+    normalized = re.sub(r"[0-9a-f]{6,}", "<hex>", (stderr or "")[-2000:])
+    normalized = re.sub(r"\d+", "<n>", normalized)
+    digest = hashlib.sha256(normalized.encode("utf-8", "replace")).hexdigest()[:12]
+    return f"{skill}:{returncode}:{digest}"
+
+
+def _should_notify_dispatch_failure(
+    signature: str, *, now: float | None = None
+) -> bool:
+    """
+    True when this failure signature has not notified within the rate-limit
+    window. Records the notification time as a side effect when it returns True.
+    """
+    current = time.monotonic() if now is None else now
+    last = _dispatch_failure_notified_at.get(signature)
+    if last is not None and (current - last) < DISPATCH_FAILURE_NOTIFY_WINDOW_SECONDS:
+        return False
+    _dispatch_failure_notified_at[signature] = current
+    return True
+
+
+def notify_dispatch_failure(
+    notifier,
+    *,
+    skill: str,
+    role: str,
+    returncode: int | None,
+    stderr: str,
+    task_entity_id: str = "",
+    log_path: str = "",
+) -> bool:
+    """
+    Send a rate-limited operator notification for a failed dispatch.
+
+    Returns True when a notification was actually delivered to the notifier,
+    False when suppressed by dedup, when no notifier was supplied, or when
+    delivery raised. Never raises.
+
+    Priority is BLOCKER per the rubric: a failed dispatch is work that did not
+    happen and will not retry itself — it must reach the operator promptly
+    rather than wait for a digest. Dedup is what keeps that from becoming spam.
+    """
+    if notifier is None:
+        return False
+    try:
+        signature = _failure_signature(skill, returncode, stderr)
+        if not _should_notify_dispatch_failure(signature):
+            log.debug(
+                f"[apis] dispatch-failure notification suppressed (dedup): {signature}"
+            )
+            return False
+
+        preview = _redact_secrets(" ".join((stderr or "").split()))[:300]
+        message = (
+            f"Dispatch FAILED: {skill} (role {role}, rc={returncode}) "
+            f"for task {task_entity_id or '(unknown)'}. "
+            f"Full output: "
+            f"{log_path or '(diagnostics file unavailable — see daemon log)'}"
+        )
+        if preview:
+            message += f" — stderr head: {preview}"
+
+        from lib.notify import Priority
+
+        notifier.send(message, priority=Priority.BLOCKER, handler="apis")
+        return True
+    except Exception as exc:  # noqa: BLE001 — notification must never break dispatch
+        log.debug(f"[apis] dispatch-failure notifier.send failed: {exc}")
+        return False
 
 
 # ── SkillResult ────────────────────────────────────────────────────────────────
@@ -421,6 +709,7 @@ async def run_skill(
         if notifier is not None:
             try:
                 from lib.notify import Priority
+
                 notifier.send(warn_msg, priority=Priority.WARN, handler="apis")
             except Exception as exc:
                 log.debug(f"[apis] notifier.send failed: {exc}")
@@ -471,7 +760,9 @@ async def run_skill(
     #   the config to a mode-0600 temp file and pass the file path to --mcp-config.
     #   The temp file is cleaned up in a try/finally after the subprocess exits.
     _mcp_tmp_path: str | None = None
-    _neotoma_base = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180").rstrip("/")
+    _neotoma_base = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180").rstrip(
+        "/"
+    )
     _neotoma_token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     _mcp_cfg: dict = {
         "mcpServers": {
@@ -493,7 +784,9 @@ async def run_skill(
         with os.fdopen(fd, "w") as _f:
             json.dump(_mcp_cfg, _f)
         cmd += ["--mcp-config", _mcp_tmp_path]
-        log.debug(f"[apis] Injected --mcp-config {_mcp_tmp_path} (mcpsrv_neotoma HTTP MCP)")
+        log.debug(
+            f"[apis] Injected --mcp-config {_mcp_tmp_path} (mcpsrv_neotoma HTTP MCP)"
+        )
     except Exception as exc:
         # Non-fatal: proceed without the MCP config injection rather than abort.
         log.warning(f"[apis] Could not write MCP config temp file (non-fatal): {exc}")
@@ -622,6 +915,17 @@ async def run_skill(
             except Exception as exc:
                 log.debug(f"[apis] timeout harness_event write failed: {exc}")
 
+            # ateles#257 — a timed-out dispatch is the same silent failure class;
+            # route it through the same rate-limited operator notification.
+            notify_dispatch_failure(
+                notifier,
+                skill=skill,
+                role=_role,
+                returncode=None,
+                stderr=msg,
+                task_entity_id=task_entity_id,
+            )
+
             return SkillResult(skill, False, None, "", "", error=msg)
 
         duration_ms = int((time.monotonic_ns() - _start_ns) / 1_000_000)
@@ -632,6 +936,20 @@ async def run_skill(
             stdout=stdout.decode("utf-8", errors="replace"),
             stderr=stderr.decode("utf-8", errors="replace"),
         )
+
+        # ── Dropped-allowlist-rule notification (ateles#255) ──────────────────────
+        # Checked regardless of exit code: the CLI logs "Ignoring --allowedTools
+        # rule" and continues, so a drop can coexist with rc=0. One batched alert
+        # per dispatch, not one per rule. Off-loaded to a thread (like the
+        # harness_event writes below) so an unusually large stderr blob can't
+        # block the event loop for other concurrent dispatches.
+        dropped_rules = await asyncio.to_thread(
+            _find_dropped_allowlist_rules, result.stderr
+        )
+        if dropped_rules:
+            _notify_dropped_allowlist_rules(
+                notifier, role=_role, rules=dropped_rules, returncode=proc.returncode
+            )
 
         # ── Stage 2: harness_event at completion ──────────────────────────────────
         if result.ok:
@@ -651,9 +969,27 @@ async def run_skill(
             except Exception as exc:
                 log.debug(f"[apis] success harness_event write failed: {exc}")
         else:
+            # ateles#257 — persist the COMPLETE stdout+stderr before anything
+            # truncates them, then name that file everywhere the failure surfaces.
+            failure_log_path = await asyncio.to_thread(
+                write_dispatch_failure_log,
+                skill=skill,
+                role=_role,
+                returncode=proc.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                task_entity_id=task_entity_id,
+                cmd=cmd,
+                cwd=cwd,
+                duration_ms=duration_ms,
+            )
+            path_note = failure_log_path or "(diagnostics file unavailable)"
+
             log.error(
-                f"[apis] {skill} dispatch failed (rc={proc.returncode}): "
-                f"{result.stderr[:500]}"
+                f"[apis] {skill} dispatch failed (rc={proc.returncode}); "
+                f"full output: {path_note} "
+                f"(stdout {len(result.stdout)}B, stderr {len(result.stderr)}B); "
+                f"stderr head: {result.stderr[:500]}"
             )
             try:
                 await asyncio.to_thread(
@@ -664,11 +1000,26 @@ async def run_skill(
                     event_type="subprocess",
                     tool_name=skill,
                     success="false",
-                    output_summary=f"rc={proc.returncode} {result.stderr[:200]}",
+                    output_summary=(
+                        f"rc={proc.returncode} full_output={path_note} "
+                        f"{result.stderr[:200]}"
+                    ),
                     duration_ms=duration_ms,
                 )
             except Exception as exc:
                 log.debug(f"[apis] failure harness_event write failed: {exc}")
+
+            # ateles#257 — a dispatch failure must reach the operator, not just a
+            # log file. Rate-limited so a swarm-wide breakage is one signal.
+            notify_dispatch_failure(
+                notifier,
+                skill=skill,
+                role=_role,
+                returncode=proc.returncode,
+                stderr=result.stderr,
+                task_entity_id=task_entity_id,
+                log_path=failure_log_path,
+            )
 
         return result
 

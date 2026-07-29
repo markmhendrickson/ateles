@@ -1,0 +1,68 @@
+name: Agent config validation
+
+# Validation lane for the Neotoma-canonical agent_definition surface (ateles#255):
+#   1. tool_allowlist grant grammar — the `bash:<command>` prefix is silently
+#      dropped by Claude Code's --allowedTools parser; only Bash(<command>:*)
+#      is honored. This lane fails the build the moment that prefix reappears,
+#      PROVIDED NEOTOMA_BEARER_TOKEN is configured (see caveat below).
+#   2. Generated agent-doc mirror freshness — docs/agents/*.md and
+#      .claude/skills/*/SKILL.md are rendered FROM Neotoma agent_definition
+#      entities (execution/scripts/render_agent_docs.py) and must never be
+#      hand-edited or left stale, per the swarm's
+#      regenerate_generated_files_before_opening_pr policy.
+#
+# Both checks read live Neotoma state, so this lane needs NEOTOMA_BEARER_TOKEN.
+# validate_tool_allowlist.py itself treats a missing token or unreachable
+# Neotoma as a clean SKIP (exit 0) rather than a crash — see the step-level
+# NOTE below for the informational/continue-on-error rollout plan.
+
+on:
+  pull_request:
+    paths:
+      - "docs/agents/**"
+      - ".claude/skills/**"
+      - "execution/scripts/render_agent_docs.py"
+      - "scripts/linters/validate_tool_allowlist.py"
+      - ".github/workflows/agent-config-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: tool_allowlist + agent-doc-mirror freshness
+    runs-on: ubuntu-latest
+    env:
+      NEOTOMA_BEARER_TOKEN: ${{ secrets.NEOTOMA_BEARER_TOKEN }}
+      NEOTOMA_BASE_URL: ${{ vars.NEOTOMA_BASE_URL || 'https://neotoma.markmhendrickson.com' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # NOTE: non-blocking for now. NEOTOMA_BEARER_TOKEN is not yet provisioned
+      # as a repo secret (same pre-existing gap loxia-pr-review.yml and
+      # lanius-stale-issues.yml already carry), so this step cannot yet reach
+      # live Neotoma in CI. Per arch review on ateles#255: land the lint
+      # informational first, promote to a hard gate once the secret exists
+      # and a 9/9-green run confirms it. Flip to blocking (remove
+      # `continue-on-error`) once NEOTOMA_BEARER_TOKEN is added to repo
+      # secrets.
+      - name: "Validate tool_allowlist grant grammar (no bash: prefix)"
+        continue-on-error: true
+        run: python3 scripts/linters/validate_tool_allowlist.py
+
+      # NOTE: non-blocking for now. As of ateles#255 the checked-in mirrors
+      # under docs/agents/ and .claude/skills/ carry pre-existing drift from
+      # Neotoma unrelated to this lane (renamed-agent references, agents added
+      # to Neotoma with no corresponding regen commit). Making this blocking
+      # today would fail on that pre-existing gap, not on new PRs. Flip to a
+      # hard failure (remove `continue-on-error`) once a full mirror regen
+      # lands and the two trees are back in sync.
+      - name: Validate agent-doc mirrors are in sync with Neotoma (informational)
+        continue-on-error: true
+        run: python3 execution/scripts/render_agent_docs.py --check

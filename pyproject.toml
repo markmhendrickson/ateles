@@ -25,6 +25,11 @@ dependencies = [
 [project.optional-dependencies]
 # Apis A2A inbound gateway — folds execution/daemons/apis/requirements.txt.
 a2a = ["a2a-sdk>=0.3.0", "uvicorn>=0.30.0"]
+# Apis GitHub webhook gateway (execution/daemons/apis/github_gateway.py) —
+# imports aiohttp unconditionally at module load, so it's needed to even
+# collect execution/daemons/apis/test_github_gateway.py and
+# test_swarm_dispatch.py (which imports github_gateway transitively).
+apis-gateway = ["aiohttp>=3.9"]
 # File-watching daemons — folds scripts/requirements.txt.
 watch = ["watchdog>=3.0.0"]
 # Reference MCP servers under docs/mcp/* — union of their runtime deps so
@@ -49,6 +54,7 @@ dev = [
     "pytest-cov>=4.1",
     "pytest-mock>=3.11",
     "ruff>=0.5",
+    "aiohttp>=3.9", # execution/daemons/apis test collection (see apis-gateway extra)
 ]
 
 [project.scripts]

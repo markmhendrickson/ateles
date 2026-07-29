@@ -1159,6 +1159,75 @@ def handle_error(error: Exception, context: str = "") -> List[TextContent]:
     return [TextContent(type="text", text=json.dumps(error_response, indent=2))]
 ```
 
+### Never collapse a transport failure into "no data"
+
+A helper that returns `None` (or `[]`) for *every* failure makes a broken
+request indistinguishable from a legitimately empty result. The caller then
+reports absence — "not found" — for what was actually a 404, an expired token,
+or an outage, and the real fault stays invisible.
+
+This is not hypothetical. The `ateles` MCP server shipped calling a Neotoma
+endpoint that does not exist. Every lookup 404'd, the helper returned `None`,
+and `get_swarm_roster` reported `"swarm_roster not found"` for a roster that
+was plainly present. It passed its full unit suite, CI, and a multi-lens
+review panel, because the failure was silent at every layer.
+
+Record *why* a call failed and surface it in the tool result, classified into
+what the calling agent should do about it:
+
+```python
+# no_token      → escalate to the operator; retrying will not help
+# not_found     → the path or entity is wrong; re-check the request
+# request_failed→ transient; a retry may succeed
+```
+
+Keep the honest empty result distinct: when nothing failed and the query
+genuinely returned nothing, still say "not found". Test both branches, or the
+error path will quietly swallow real absences.
+
+### Pin the request path in tests
+
+Mocking the HTTP helper (`_get`/`_post`, `fetch`, a client object) verifies the
+logic *around* a call and nothing about the call itself — wrong path, wrong
+method, wrong body shape, and wrong auth header all pass green. Assert the
+path and body explicitly:
+
+```python
+@patch("server._post")
+def test_retrieve_posts_to_entities_query(self, mock_post):
+    mock_post.return_value = {"entities": []}
+    srv._retrieve_entities("swarm_roster", limit=5)
+    assert mock_post.call_args[0][0] == "/entities/query"
+```
+
+And before declaring an integration done, make one real call against the live
+service. "Tests pass" is not evidence it works when the tests mock the
+boundary.
+
+**Neotoma specifics:** the entity list/query endpoint is `POST /entities/query`.
+Both `POST /retrieve` and `GET /entities` return 404. Single-entity fetch is
+`GET /entities/{entity_id}`; corrections are `POST /correct`. See
+`lib/daemon_runtime/agent_loader.py` for the canonical request shape.
+
+### Make ambiguous routing deterministic and self-explaining
+
+Any keyword/pattern table that maps input to a handler needs a tie-break rule
+that does not depend on declaration order — otherwise reordering the table
+silently changes behavior, and the rule is invisible to whoever edits it next.
+
+`ateles`'s `route_task` resolves by `(keyword length, role priority, role
+name)`: the longest match wins, ties fall to an explicit priority list
+(`ROLE_TIE_BREAK`) rather than table position, and the role name gives a stable
+final tiebreak. Two failure modes this closes, both of which shipped:
+
+- Rigid multi-word keywords miss natural phrasing — `"fix bug"` does not match
+  `"fix a bug"`. Include the variants.
+- Length alone still leaves *equal-length* matches to declaration order, which
+  is the same order-dependence in disguise.
+
+Return the matched keyword alongside the chosen handler, so a misroute is a
+one-field diagnosis instead of a source dive.
+
 ### Common Error Types
 
 1. Authentication Errors: Missing or invalid credentials
