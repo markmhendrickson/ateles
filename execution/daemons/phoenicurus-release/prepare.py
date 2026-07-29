@@ -191,6 +191,60 @@ def telegram_send(text: str) -> None:
             log.warning(f"telegram send failed: {exc}")
 
 
+def _plain_to_html(text: str) -> str:
+    """
+    Render a short daemon notice as HTML for email.
+
+    These notices are written as terse markdown-ish text (a headline, some
+    `**bold**`, a bullet or two, a backticked command). Sent as plain text they
+    arrive in Gmail as literal `**` and `-` characters — the same defect the
+    agent-composed RC email had.
+
+    Semantic tags only: no font-family, font-size, or color, so the message
+    inherits the mail client's own typography. Stdlib only; this daemon has no
+    third-party dependencies.
+    """
+    import html as _html
+    import re as _re
+
+    def inline(s: str) -> str:
+        s = _html.escape(s, quote=False)
+        s = _re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+        s = _re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
+        s = _re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', s)
+        s = _re.sub(r'(?<!href=")(?<!">)(https?://[^\s<)]+)', r'<a href="\1">\1</a>', s)
+        return s
+
+    out: list[str] = []
+    in_ul = False
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not line.strip():
+            if in_ul:
+                out.append("</ul>")
+                in_ul = False
+            continue
+        m = _re.match(r"^\s*[-*]\s+(.*)$", line)
+        if m:
+            if not in_ul:
+                out.append("<ul>")
+                in_ul = True
+            out.append(f"<li>{inline(m.group(1))}</li>")
+            continue
+        if in_ul:
+            out.append("</ul>")
+            in_ul = False
+        h = _re.match(r"^(#{1,6})\s+(.*)$", line)
+        if h:
+            lvl = min(len(h.group(1)) + 1, 6)
+            out.append(f"<h{lvl}>{inline(h.group(2))}</h{lvl}>")
+        else:
+            out.append(f"<p>{inline(line)}</p>")
+    if in_ul:
+        out.append("</ul>")
+    return "\n".join(out)
+
+
 def email_send(subject: str, body: str) -> bool:
     """
     Send a release notification to the operator's inbox via `gws gmail +send`.
@@ -200,6 +254,11 @@ def email_send(subject: str, body: str) -> bool:
     every other swarm daemon. Fail-open: any missing config or send error logs and
     returns False so the caller keeps Telegram as the guaranteed channel — release
     notification must never be blocked on email.
+
+    Sent with `--html` (see `_plain_to_html`). The agent-composed RC email is
+    already HTML; this is the daemon's OWN notice path (hard blocks, and the
+    prepare-failure notices tracked in ateles#330), which was still delivering
+    raw markdown.
 
     Returns True only if gws reports a successful send.
     """
@@ -213,7 +272,7 @@ def email_send(subject: str, body: str) -> bool:
         log.warning("gws CLI not found — cannot email release notification")
         return False
     cmd = [gws, "gmail", "+send", "--to", OPERATOR_EMAIL,
-           "--subject", subject, "--body", body]
+           "--subject", subject, "--body", _plain_to_html(body), "--html"]
     if SWARM_EMAIL:
         cmd += ["--from", SWARM_EMAIL]
     try:
