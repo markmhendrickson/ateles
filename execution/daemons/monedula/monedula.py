@@ -425,6 +425,22 @@ def telegram_long_poll_once(timeout_sec: int = 120) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+# Bare affirmatives that the attendance gate deliberately does NOT accept as
+# approval — the operator must instead name attendance ("attended all" / ...).
+_BARE_AFFIRMATIVES = frozenset({"yes", "yes all", "y", "y all"})
+
+
+def _is_bare_affirmative(reply: str | None) -> bool:
+    """
+    True when the reply is a bare "yes"-style affirmative that the attendance
+    gate rejects. Used to distinguish "operator tried to approve but didn't
+    name attendance" (→ nudge) from a genuine skip / timeout (→ plain skip).
+    """
+    if not reply:
+        return False
+    return reply.lower().strip() in _BARE_AFFIRMATIVES
+
+
 def _parse_reply(reply: str | None, handler_names: list[str]) -> set[str]:
     """
     Parse the operator's Telegram reply and return the set of handler names
@@ -619,7 +635,20 @@ def main() -> None:
 
     if not approved:
         log.info(f"No payments approved (reply={reply!r}) — skipping all.")
-        telegram_send(f"⏭️ Monedula: skipped all payments for {yesterday_str}.")
+        # A bare "yes"/"yes all" is intentionally rejected by the attendance
+        # gate — but silence would let the operator believe they approved a
+        # payment that was actually skipped. Nudge them toward the attendance
+        # vocabulary rather than just reporting a skip. Genuine "no"/"skip"
+        # replies (and timeouts) get the plain skip confirmation.
+        if _is_bare_affirmative(reply):
+            telegram_send(
+                f"⚠️ Monedula: nothing paid for {yesterday_str} — a bare "
+                f'"yes" does not approve, because payments are attendance-'
+                f'gated. Reply "attended all" or "attended <session>" to '
+                f"confirm the session(s) you actually attended."
+            )
+        else:
+            telegram_send(f"⏭️ Monedula: skipped all payments for {yesterday_str}.")
         return
 
     log.info(f"Approved handlers: {approved}")
