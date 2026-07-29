@@ -445,8 +445,13 @@ def parse_pending_gates(stdout: str) -> set[str]:
 
 # Vanellus / panelist verdict token (SWARM_GITHUB_CONTRACT, skill_runner.py):
 # a review comment carries exactly one of these bold verdict tokens.
+# Trailing punctuation inside the bold is tolerated: Vanellus writes both
+# `**APPROVE**` and `**APPROVE.**` in practice, and the stricter form silently
+# parsed the latter as no-verdict — which downgraded a real APPROVE to the inert
+# COMMENT on the native review (observed on ateles#296). The vocabulary itself is
+# unchanged; only trailing `.`/`:`/`!` inside the markers is now absorbed.
 _REVIEW_VERDICT = re.compile(
-    r"\*\*(APPROVE|REQUEST_CHANGES|COMMENT|BLOCKED)\*\*", re.I
+    r"\*\*(APPROVE|REQUEST_CHANGES|COMMENT|BLOCKED)[.:!]?\*\*", re.I
 )
 
 
@@ -472,6 +477,17 @@ def review_verdict_is_clear(verdict: str | None) -> bool:
     not merge-ready and blocking findings should route back for a fix.
     """
     return verdict in ("approve", "comment")
+
+
+def finding_id(lens: str, head_sha: str, summary: str) -> str:
+    """Stable ID for one finding, keyed to content rather than position.
+
+    Content-keyed (not index-keyed) so that a later round which resolves an
+    earlier finding does not renumber the survivors — the whole point is that a
+    persisting finding keeps its identity across rounds.
+    """
+    digest = content_digest([lens, head_sha[:12], summary])[:8]
+    return f"{lens}-{digest}"
 
 
 # GitHub's Reviews API accepts exactly these three events.
@@ -1984,6 +2000,21 @@ class SwarmDispatcher:
             pending_gates=pending_gates,
         )
 
+        # Anchor the reviews to the head the panel actually reads (ateles#269).
+        # Resolved BEFORE the lenses run: a push landing mid-panel must not
+        # re-anchor reviews onto a commit no lens ever saw. Best-effort — an
+        # unresolved head degrades to an explicit sentinel, never a wrong SHA.
+        pr_obj = await self._fetch_pr(trigger.repository, trigger.number)
+        head_obj = pr_obj.get("head") if isinstance(pr_obj, dict) else None
+        panel_head_sha = (
+            head_obj.get("sha", "") if isinstance(head_obj, dict) else ""
+        )
+        if not panel_head_sha:
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: could not resolve PR head SHA — "
+                "panel reviews persist unanchored (head_sha_unresolved)"
+            )
+
         reviews: list[tuple[str, str]] = []
         for lens in panel:
             # QE3: the qa lens (Phoenicurus) authors + runs an eval, so it needs a
@@ -2023,7 +2054,9 @@ class SwarmDispatcher:
         #     from the PR comments).
         if reviews:
             agents_by_lens = {p.lens: p.agent for p in panel}
-            await self._persist_panel_reviews(trigger, reviews, agents_by_lens)
+            await self._persist_panel_reviews(
+                trigger, reviews, agents_by_lens, head_sha=panel_head_sha
+            )
             await self._post_missing_panel_comments(
                 trigger, reviews, agents_by_lens
             )
@@ -3142,9 +3175,14 @@ class SwarmDispatcher:
                     headers=self._github_headers(t.repository),
                 )
                 resp.raise_for_status()
-                # Newest-first, mirroring _pr_review_is_clear: honour the LATEST
-                # aggregation, and scan past non-Vanellus comments to find it.
-                for comment in resp.json():
+                # GitHub's ISSUE-comments endpoint IGNORES sort/direction and
+                # always returns oldest-first (verified against the live API on
+                # ateles#296: `direction=desc` still yielded ascending order).
+                # Reverse client-side rather than trusting the parameter — the
+                # unreversed scan returns the FIRST aggregation ever posted, so a
+                # PR whose early round was REQUEST_CHANGES keeps reporting that
+                # verdict forever even after later rounds approve.
+                for comment in reversed(resp.json()):
                     body = comment.get("body", "")
                     if _VANELLUS_COMMENT_MARKER not in body:
                         continue
@@ -3178,12 +3216,11 @@ class SwarmDispatcher:
     async def _pr_review_is_clear(self, repository: str, pr_number: int) -> bool:
         """True when the latest Vanellus aggregation on the PR is a clear verdict.
 
-        Reads the PR's comments NEWEST-FIRST (sort=created&direction=desc) and
-        returns the verdict of the first Vanellus-aggregation marker found — so
-        the latest verdict is honoured even on a PR with >100 comments (the
-        marker would otherwise sit on a later page of an oldest-first scan and be
-        missed). Fail-closed (False) on any error — we must never claim
-        merge-ready off a failed read.
+        Returns the verdict of the LATEST Vanellus-aggregation marker. The
+        issue-comments endpoint ignores sort/direction and returns oldest-first,
+        so the page is reversed client-side; scanning unreversed would honour the
+        FIRST aggregation and pin the PR to a superseded verdict. Fail-closed
+        (False) on any error — we must never claim merge-ready off a failed read.
         """
         url = (
             f"https://api.github.com/repos/{repository}/issues/"
@@ -3197,7 +3234,9 @@ class SwarmDispatcher:
                     headers=self._github_headers(repository),
                 )
                 resp.raise_for_status()
-                for comment in resp.json():  # newest-first
+                # Reversed client-side: the endpoint ignores sort/direction and
+                # returns oldest-first (see _resolve_review_verdict).
+                for comment in reversed(resp.json()):
                     body = comment.get("body", "")
                     if _VANELLUS_COMMENT_MARKER in body:
                         return review_verdict_is_clear(parse_review_verdict(body))
@@ -4743,10 +4782,15 @@ class SwarmDispatcher:
 
     # ── Neotoma helpers ──────────────────────────────────────────────────────
 
-    async def _store_entities(self, entities: list[dict], idempotency_key: str) -> None:
+    async def _store_entities(
+        self, entities: list[dict], idempotency_key: str
+    ) -> dict | None:
+        """Store entities; returns the parsed response (with created entity_ids)
+        so callers that need to link the new record (e.g. a SUPERSEDES edge)
+        can do so, or None on any failure — best-effort, never crashes."""
         if not self.config.neotoma_token:
             log.warning(f"[{DAEMON_NAME}] NEOTOMA_BEARER_TOKEN unset — store skipped")
-            return
+            return None
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
@@ -4757,8 +4801,10 @@ class SwarmDispatcher:
                     },
                 )
                 resp.raise_for_status()
+                return resp.json() if resp.content else {}
         except Exception as exc:
             log.error(f"[{DAEMON_NAME}] Neotoma store failed ({idempotency_key}): {exc}")
+            return None
 
     async def _log_harness_event(self, t: SwarmTrigger) -> None:
         entities = [
@@ -4785,11 +4831,110 @@ class SwarmDispatcher:
         t: SwarmTrigger,
         reviews: list[tuple[str, str]],
         agents_by_lens: dict[str, str] | None = None,
+        head_sha: str = "",
     ) -> None:
-        """Store each captured panel review as a harness_event so the review
-        text survives even when the panelist could not post its PR comment."""
+        """Persist each captured lens review as a `pr_review` entity (ateles#269).
+
+        Neotoma is the RECORD; the GitHub comment is a rendering of it. Identity
+        is the composite (repository, pr_number, review_lens, head_sha), so a
+        re-run against the same head dedupes onto the same entity while a new
+        push creates a distinct one — which is what makes a stale verdict
+        distinguishable from the live one.
+
+        A `harness_event` is still written alongside as the append-only audit
+        row: the two answer different questions (what is the current review of
+        this head, versus what did the daemon do and when). Dropping it would
+        lose dispatch-level history that is not review state.
+
+        When `head_sha` is unavailable the review is still persisted, tagged
+        `head_sha_unresolved` so it can never be mistaken for a head-anchored
+        record and silently deduped against a real one.
+        """
         agents_by_lens = agents_by_lens or {}
-        entities = [
+        sha = head_sha or "head_sha_unresolved"
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Prior live reviews for these lenses, fetched once up front: their
+        # `review_round` seeds the new entity's round number, and their
+        # entity_id is what the post-store SUPERSEDES edge points at.
+        priors = await self._prior_live_reviews(
+            t, [lens for lens, _ in reviews], sha
+        )
+
+        entities: list[dict] = []
+        for lens, text in reviews:
+            # Reuse the structured parser the learning pass already relies on
+            # (review_learning.parse_findings) rather than a second, weaker
+            # line-splitter — one grammar, one place to fix it.
+            findings = parse_findings(text, lens=lens)
+            blocking = [f for f in findings if f.blocking]
+            non_blocking = [f for f in findings if not f.blocking]
+
+            def _shape(f: ReviewFinding) -> dict:
+                return {
+                    "id": finding_id(lens, sha, f"{f.category}: {f.summary}"),
+                    "category": f.category,
+                    "summary": f.summary,
+                    "files": f.files,
+                }
+
+            prior = priors.get(lens)
+            prior_round = (prior or {}).get("snapshot", {}).get("review_round") or 0
+
+            entities.append(
+                {
+                    "entity_type": "pr_review",
+                    "repository": t.repository,
+                    "pr_number": t.number,
+                    "pr_title": t.title,
+                    "review_lens": lens,
+                    "reviewer_agent": agents_by_lens.get(lens, ""),
+                    "head_sha": sha,
+                    "verdict": parse_review_verdict(text) or "unparseable",
+                    "status": "live",
+                    "review_round": prior_round + 1,
+                    "content": text,
+                    "blocking_findings": [_shape(f) for f in blocking],
+                    "nonblocking_findings": [_shape(f) for f in non_blocking],
+                    "finding_ids": [
+                        finding_id(lens, sha, f"{f.category}: {f.summary}")
+                        for f in (*blocking, *non_blocking)
+                    ],
+                    "generated_by": agents_by_lens.get(lens, DAEMON_NAME),
+                    "generated_at": now,
+                }
+            )
+        # `generated_at` is deliberately EXCLUDED from the idempotency key: it
+        # changes every run, so including it would make a same-head re-run mint
+        # a fresh key and defeat the idempotency this method depends on. The key
+        # is derived from the identity + review content only (Loxia review).
+        digest_basis = [
+            {k: v for k, v in e.items() if k != "generated_at"} for e in entities
+        ]
+        store_result = await self._store_entities(
+            entities,
+            idempotency_key=(
+                f"pr-review-{t.repository}-{t.number}-{sha[:12]}-"
+                f"{content_digest(digest_basis)}"
+            ),
+        )
+        new_ids_by_lens = self._new_pr_review_ids_by_lens(entities, store_result)
+
+        # Supersede prior reviews for the same (repo, pr, lens) at OTHER heads.
+        # Without this, every round's review reads as `live` and a consumer
+        # cannot tell the current verdict from a stale one — the exact defect
+        # ateles#269 exists to fix. Runs after the store so a failure here can
+        # never cost us the new record.
+        await self._supersede_prior_reviews(
+            t,
+            [e["review_lens"] for e in entities],
+            sha,
+            priors=priors,
+            new_ids_by_lens=new_ids_by_lens,
+        )
+
+        # Audit row (unchanged shape) — dispatch history, not review state.
+        audit = [
             {
                 "entity_type": "harness_event",
                 "event_type": "github.panel_review",
@@ -4800,17 +4945,216 @@ class SwarmDispatcher:
                 "delivery_id": t.delivery_id,
                 "lens": lens,
                 "content": text,
-                "occurred_at": datetime.now(timezone.utc).isoformat(),
+                "occurred_at": now,
             }
             for lens, text in reviews
         ]
         await self._store_entities(
-            entities,
+            audit,
             idempotency_key=(
                 f"panel-reviews-{t.repository}-{t.number}-"
-                f"{t.delivery_id}-{content_digest(entities)}"
+                f"{t.delivery_id}-{content_digest(audit)}"
             ),
         )
+
+    async def _neotoma_post(self, path: str, payload: dict) -> dict | None:
+        """POST to Neotoma; None on any failure (best-effort, never crashes).
+
+        NOTE: the prod REST surface exposes the entity read as
+        ``POST /entities/query`` — ``/retrieve_entities`` 404s, and that 404
+        silently degraded every ``issue_spec`` load to empty state until it was
+        caught (issue_spec.py:253). Use ``entities/query`` here for the same
+        reason.
+        """
+        if not self.config.neotoma_token:
+            log.warning(
+                f"[{DAEMON_NAME}] NEOTOMA_BEARER_TOKEN unset — {path} skipped"
+            )
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"{self.config.neotoma_base_url}/{path}",
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {self.config.neotoma_token}"
+                    },
+                )
+                resp.raise_for_status()
+                return resp.json() if resp.content else {}
+        except Exception as exc:  # noqa: BLE001 — best-effort, never crash
+            log.warning(f"[{DAEMON_NAME}] Neotoma {path} failed: {exc}")
+            return None
+
+    async def _matching_prior_reviews(
+        self,
+        t: SwarmTrigger,
+        lenses: list[str],
+        current_sha: str,
+    ) -> list[dict]:
+        """Live `pr_review` entities for (repo, pr, lens) at a head OTHER than
+        `current_sha`, one per lens at most (already-superseded rows excluded).
+
+        Shared by `_persist_panel_reviews` (round-number lookup, before the new
+        entities are built) and `_supersede_prior_reviews` (the supersede pass,
+        after they're stored) so both read the identical prior-round record
+        instead of two queries risking a different snapshot between them.
+        """
+        # Filter server-side on (repository, pr_number) rather than scanning a
+        # capped page client-side (qa lens, ateles#296): `pr_review` grows
+        # without bound — one row per lens per head per PR, forever — so any
+        # fixed client-side cap eventually silently stops finding prior rounds
+        # and leaves two "live" reviews for one lens, the exact pathology
+        # ateles#269 exists to eliminate. Scoping the query to a single PR keeps
+        # the result set inherently small (lenses x heads on ONE PR).
+        data = await self._neotoma_post(
+            "entities/query",
+            {
+                "entity_type": "pr_review",
+                "snapshot_filters": {
+                    "repository": {"op": "eq", "value": t.repository},
+                    "pr_number": {"op": "eq", "value": t.number},
+                },
+                "limit": 200,
+                "include_snapshots": True,
+            },
+        )
+        if not data:
+            return []
+        matches = []
+        for entity in data.get("entities", []):
+            snap = entity.get("snapshot") or {}
+            if (
+                snap.get("repository") != t.repository
+                or str(snap.get("pr_number")) != str(t.number)
+                or snap.get("review_lens") not in lenses
+                or snap.get("head_sha") == current_sha
+                or snap.get("status") == "superseded"
+            ):
+                continue
+            if entity.get("entity_id"):
+                matches.append(entity)
+        return matches
+
+    async def _prior_live_reviews(
+        self,
+        t: SwarmTrigger,
+        lenses: list[str],
+        current_sha: str,
+    ) -> dict[str, dict]:
+        """Map lens -> its prior live review entity (for `review_round` seeding).
+
+        Best-effort: an empty map (e.g. Neotoma unavailable) just means every
+        new entity starts at round 1, which is correct for a first-ever review.
+        """
+        by_lens: dict[str, dict] = {}
+        for entity in await self._matching_prior_reviews(t, lenses, current_sha):
+            lens = (entity.get("snapshot") or {}).get("review_lens")
+            if lens:
+                by_lens[lens] = entity
+        return by_lens
+
+    def _new_pr_review_ids_by_lens(
+        self, entities: list[dict], store_result: dict | None
+    ) -> dict[str, str]:
+        """Map review_lens -> newly-stored entity_id from a `/store` response.
+
+        `store` echoes back one result per input entity in the same order
+        (by `observation_index`), so zipping the request list against the
+        response gives the new id for each lens without a second round trip.
+        """
+        if not store_result:
+            return {}
+        by_index = {
+            r.get("observation_index"): r.get("entity_id")
+            for r in store_result.get("entities", [])
+            if r.get("entity_id")
+        }
+        return {
+            e["review_lens"]: by_index[i]
+            for i, e in enumerate(entities)
+            if i in by_index
+        }
+
+    async def _supersede_prior_reviews(
+        self,
+        t: SwarmTrigger,
+        lenses: list[str],
+        current_sha: str,
+        priors: dict[str, dict] | None = None,
+        new_ids_by_lens: dict[str, str] | None = None,
+    ) -> None:
+        """Flip prior same-(repo, pr, lens) reviews at other heads to superseded.
+
+        This is what makes "the live verdict" a queryable fact rather than an
+        inference from max(head_sha) — re-deriving currency by scanning would be
+        exactly the comment-scraping shape ateles#269 exists to remove.
+
+        Entities at the CURRENT head are left alone: a same-head re-run dedupes
+        onto the same record, so superseding it would mark the live review stale.
+        Reviews already `superseded` are skipped so repeat runs are idempotent.
+        Best-effort throughout — a Neotoma failure must not cost the new record,
+        which is already stored by the time this runs.
+
+        `priors` lets a caller that already fetched the matching prior entities
+        (e.g. `_persist_panel_reviews`, for `review_round`) pass them in instead
+        of triggering a second identical query; omitted, this method queries for
+        itself so it remains independently callable (as the existing tests do).
+        When `new_ids_by_lens` is supplied, a `SUPERSEDES` edge is created from
+        the new entity to each prior it demotes — the queryable graph trail
+        acceptance criterion #2 on ateles#269 asks for, distinct from `status`.
+        """
+        entities = (
+            list(priors.values())
+            if priors is not None
+            else await self._matching_prior_reviews(t, lenses, current_sha)
+        )
+        new_ids_by_lens = new_ids_by_lens or {}
+
+        for entity in entities:
+            snap = entity.get("snapshot") or {}
+            entity_id = entity.get("entity_id", "")
+            if not entity_id:
+                continue
+            await self._neotoma_post(
+                "correct",
+                {
+                    "entity_id": entity_id,
+                    "entity_type": "pr_review",
+                    "field": "status",
+                    "value": "superseded",
+                    "idempotency_key": (
+                        f"pr-review-supersede-{entity_id}-{current_sha[:12]}"
+                    ),
+                },
+            )
+            await self._neotoma_post(
+                "correct",
+                {
+                    "entity_id": entity_id,
+                    "entity_type": "pr_review",
+                    "field": "superseded_by",
+                    "value": current_sha,
+                    "idempotency_key": (
+                        f"pr-review-superseded-by-{entity_id}-{current_sha[:12]}"
+                    ),
+                },
+            )
+            new_id = new_ids_by_lens.get(snap.get("review_lens"))
+            if new_id:
+                await self._neotoma_post(
+                    "create_relationship",
+                    {
+                        "source_entity_id": new_id,
+                        "target_entity_id": entity_id,
+                        "relationship_type": "SUPERSEDES",
+                    },
+                )
+            log.info(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: superseded "
+                f"{snap.get('review_lens')} review at "
+                f"{str(snap.get('head_sha'))[:9]} → {current_sha[:9]}"
+            )
 
     async def _post_missing_panel_comments(
         self,
