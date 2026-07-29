@@ -1255,6 +1255,43 @@ def test_lanius_pr_prompt_gate_inheritance_contract_snapshot():
     assert "trigger_swarm_pr.py issue" in prompt
 
 
+def test_lanius_pr_prompt_unparented_pr_fails_open_not_blocked():
+    """An unparented PR must NOT be instructed to block on gate inheritance.
+
+    The dispatcher's own design says a parentless product-code PR fails open:
+    `_handle_pr` surfaces the bypass loudly (PR comment + operator notification)
+    and its comment says "never blocks the pipeline"; the verdict-retry text
+    tells Lanius to emit `clear` when it cannot verify gates. But the parent_line
+    used to say "treat gate inheritance as blocked", which contradicted all
+    three and stranded every incidental fix that never began as a planned issue.
+
+    There is nothing to enforce when there is no parent: no `gate_status` exists
+    to inherit. Blocking there is not conservative, it is a dead end — the only
+    exits are a retroactive issue or an operator waive.
+    """
+    prompt = SwarmDispatcher._lanius_pr_prompt(_trigger(), parent=None)
+
+    assert "UNPARENTED PR, not a blocked one" in prompt
+    assert "Emit `GATE_INHERITANCE: clear`" in prompt
+    # The old instruction must be gone — its presence is the bug.
+    assert "treat gate inheritance as blocked" not in prompt
+    # Failing open must stay honest about the compensating controls.
+    assert "merge stays" in prompt and "operator-gated" in prompt
+
+
+def test_lanius_pr_prompt_parented_pr_still_enforces_gates():
+    """Regression: the unparented carve-out must not weaken the parented path.
+
+    A PR WITH a parent still gets the full inheritance contract — the carve-out
+    is keyed strictly on the absence of a parent.
+    """
+    prompt = SwarmDispatcher._lanius_pr_prompt(_trigger(), parent=80)
+
+    assert "references parent issue #80" in prompt
+    assert "UNPARENTED PR" not in prompt
+    assert "enforce PR gate inheritance" in prompt
+
+
 # ── pipeline-bypass guard (product PR with no parent issue) ──────────────────
 
 
