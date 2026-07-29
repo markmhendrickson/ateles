@@ -108,7 +108,10 @@ def test_email_send_builds_gws_command_with_from(monkeypatch):
     assert "--to" in cmd and "op@example.com" in cmd
     assert "--from" in cmd and "swarm@example.com" in cmd
     assert "--subject" in cmd and "🚀 subj" in cmd
-    assert "--body" in cmd and "body text" in cmd
+    assert "--body" in cmd
+    body_arg = cmd[cmd.index("--body") + 1]
+    assert "body text" in body_arg
+    assert "--html" in cmd
 
 
 def test_email_send_fail_open_on_nonzero_rc(monkeypatch):
