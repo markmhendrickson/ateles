@@ -32,11 +32,20 @@ Environment variables:
   APIS_AGENT_DEFINITION_ID    Neotoma entity ID for Apis's agent_definition (optional)
   APIS_DRY_RUN                Set to "1" to log events without dispatching agents
   APIS_AUTO_EXECUTE           Set to "1" to auto-execute due tasks (default: notify only)
-  APIS_CLAUDE_BIN             Path to the claude CLI (default: autodetect on PATH)
-  CLAUDE_CODE_OAUTH_TOKEN     Claude subscription token (claude setup-token).
-                              When set, spawned `claude --print` children bill the
-                              operator's Max plan and ANTHROPIC_API_KEY is dropped
-                              from the child env; absent, falls back to API key.
+  APIS_HARNESS_PROVIDERS      Ordered subscription-backed CLIs to balance across
+                              (default: claude,codex,cursor).
+  APIS_HARNESS_HEADROOM       JSON estimates of remaining bundled-plan capacity,
+                              e.g. {"claude":0.2,"codex":0.8,"cursor":0.6}.
+  APIS_HARNESS_HEADROOM_FILE  Live JSON override read before every dispatch
+                              (default: ~/.config/ateles/harness-headroom.json).
+  APIS_HARNESS_MIN_HEADROOM   Hold out providers at/below this score (default: .05).
+  APIS_HARNESS_COOLDOWN_SECONDS
+                              Hold-out after quota/auth/launch failure (default: 3600).
+  APIS_CLAUDE_BIN             Claude CLI path (default: autodetect on PATH).
+  APIS_CODEX_BIN              Codex CLI path (defaults to ChatGPT app, then PATH).
+  APIS_CURSOR_BIN             Cursor Agent CLI path (default: cursor-agent on PATH).
+  APIS_ALLOW_METERED_HARNESS  "1" permits usage-based API-key fallback. Default 0:
+                              API keys are removed and capped plans fail over/queue.
   APIS_DISPATCH_TIMEOUT       Per-dispatch timeout in seconds (default: 1800)
   ATELES_REPO_PATH            Local path to ateles clone (default: ~/repos/ateles)
 
@@ -54,7 +63,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -73,6 +81,7 @@ if _NEOTOMA_ENV_FILE.exists():
             if _v[:1] not in ('"', "'") and " #" in _v:
                 _v = _v.split(" #", 1)[0].strip()
             os.environ.setdefault(_k.strip(), _v.strip('"').strip("'"))
+
 
 # Pick the bearer token that matches the instance we actually target. The shared
 # ~/.config/neotoma/.env carries a LOCAL-scoped NEOTOMA_BEARER_TOKEN (the local
@@ -237,6 +246,7 @@ def _successful_recurrences(snapshot: dict) -> int:
     except (TypeError, ValueError):
         return 0
 
+
 ATELES_REPO = Path(
     os.environ.get("ATELES_REPO_PATH", str(Path.home() / "repos" / "ateles"))
 )
@@ -256,10 +266,6 @@ RUN_EMAIL = os.environ.get("APIS_RUN_EMAIL", "0") == "1"
 # and email the operator the specific gaps instead of executing. Default off.
 READINESS_GATE = os.environ.get("APIS_READINESS_GATE", "0") == "1"
 
-# Path to the Claude CLI binary used to spawn T4 agents. Set by env var or
-# auto-detected from PATH. If absent, dispatch falls back to log-only.
-CLAUDE_BIN = os.environ.get("APIS_CLAUDE_BIN") or shutil.which("claude")
-
 # Dispatch timeout per agent invocation (seconds).
 DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
 
@@ -274,8 +280,9 @@ GITHUB_WEBHOOK_SECRET = os.environ.get("APIS_GITHUB_WEBHOOK_SECRET", "")
 # gateway (a2a_executor.py) so inbound A2A tasks and SSE-sourced tasks route
 # through one source of truth. Tags are inferred from the task title/body
 # (neotoma-agent's due-date hygiene may set them first; Apis falls back to
-# local inference). Each tag maps to a T4 skill dispatched via `claude --print`
-# (see _spawn_claude_skill). Set APIS_DRY_RUN=1 to log intent without spawning.
+# local inference). Each tag maps to a T4 skill dispatched through the
+# quota-aware Claude/Codex/Cursor runner (see _spawn_harness_skill).
+# Set APIS_DRY_RUN=1 to log intent without spawning.
 
 from routing import (  # noqa: E402
     infer_tags_from_text as _infer_tags_from_text,
@@ -292,7 +299,7 @@ from task_watchdog import TaskWatchdog  # noqa: E402
 # ── T4 dispatch ────────────────────────────────────────────────────────────────
 
 
-async def _spawn_claude_skill(
+async def _spawn_harness_skill(
     skill: str,
     entity_id: str,
     snapshot: dict,
@@ -318,7 +325,7 @@ async def _spawn_claude_skill(
     title = snapshot.get("title", "(untitled)")
     body = snapshot.get("body", "") or snapshot.get("description", "")
     prompt = (
-        f"Invoke the {skill} agent per your appended system prompt.\n\n"
+        f"Invoke the {skill} agent per the supplied system and skill instructions.\n\n"
         f"Task {entity_id} (trigger={trigger}): {title}\n\n"
         f"{body}".strip()
     )
@@ -350,7 +357,7 @@ async def dispatch_task(
     gate_override: bool = False,
 ) -> None:
     """
-    Route a task to the appropriate T4 skill and spawn it via `claude --print`.
+    Route a task to the appropriate T4 skill and spawn it via a bundled-plan CLI.
 
     Applies the confidence × blast-radius execution gate before spawning: a
     non-auto-execute decision writes a blocking checkpoint_brief and notifies the
@@ -401,7 +408,9 @@ async def dispatch_task(
             "— escalating (no owner)"
         )
         set_task_status(
-            entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
+            entity_id,
+            TaskStatus.BLOCKED,
+            handler=DAEMON_NAME,
             from_status=current_status,
             reason=f"no route/owner (tags={existing_tags}, assigned_to={assigned_to})",
             key_suffix=trigger,
@@ -418,8 +427,11 @@ async def dispatch_task(
     # Lifecycle: the dispatcher resolved an owner — record ROUTED so the task can
     # never read "pending" while it is actually in flight.
     set_task_status(
-        entity_id, TaskStatus.ROUTED, handler=DAEMON_NAME,
-        from_status=current_status, key_suffix=trigger,
+        entity_id,
+        TaskStatus.ROUTED,
+        handler=DAEMON_NAME,
+        from_status=current_status,
+        key_suffix=trigger,
     )
 
     # ── Readiness gate (E4) ───────────────────────────────────────────────────
@@ -437,16 +449,21 @@ async def dispatch_task(
             write_assessment(entity_id, assessment)
             ask = missing_request(assessment, title)
             set_task_status(
-                entity_id, TaskStatus.AWAITING_INPUT, handler=DAEMON_NAME,
+                entity_id,
+                TaskStatus.AWAITING_INPUT,
+                handler=DAEMON_NAME,
                 from_status=TaskStatus.ROUTED.value,
                 reason=f"readiness {assessment.score:.2f}<{assessment.threshold:.2f}: "
-                       f"missing {', '.join(assessment.missing)}",
+                f"missing {', '.join(assessment.missing)}",
                 key_suffix=trigger,
             )
             if RUN_EMAIL:
                 send_run_email(
-                    task_id=entity_id, run_key=f"{trigger}-readiness",
-                    stage="kickoff", title=title, body=ask,
+                    task_id=entity_id,
+                    run_key=f"{trigger}-readiness",
+                    stage="kickoff",
+                    title=title,
+                    body=ask,
                 )
             notifier.send(
                 f"NOT READY — needs input: {title[:70]}\n{ask}\n  task={entity_id}",
@@ -492,7 +509,11 @@ async def dispatch_task(
                 ),
                 handler=DAEMON_NAME,
                 alternatives=(
-                    ["Re-scope to a lower-blast action", "Provide missing inputs", "Decline"]
+                    [
+                        "Re-scope to a lower-blast action",
+                        "Provide missing inputs",
+                        "Decline",
+                    ]
                     if decision.action == GateAction.CHECKPOINT_WITH_ALTERNATIVES
                     else None
                 ),
@@ -510,8 +531,11 @@ async def dispatch_task(
                 f"(checkpoint_brief={brief_id})"
             )
             set_task_status(
-                entity_id, TaskStatus.AWAITING_APPROVAL, handler=DAEMON_NAME,
-                from_status=TaskStatus.ROUTED.value, reason=decision.reason,
+                entity_id,
+                TaskStatus.AWAITING_APPROVAL,
+                handler=DAEMON_NAME,
+                from_status=TaskStatus.ROUTED.value,
+                reason=decision.reason,
                 key_suffix=trigger,
             )
             job.escalated(
@@ -529,13 +553,18 @@ async def dispatch_task(
     _gate_label = "override" if gate_override else "auto-execute"
     if DRY_RUN:
         log.info(f"[{DAEMON_NAME}] DRY RUN — skipping {skill} dispatch for {entity_id}")
-        job.finished(f"task {entity_id} → {skill} routed (dry-run, gate: {_gate_label})")
+        job.finished(
+            f"task {entity_id} → {skill} routed (dry-run, gate: {_gate_label})"
+        )
         return
 
     # Lifecycle: about to spawn the T4 agent.
     set_task_status(
-        entity_id, TaskStatus.EXECUTING, handler=DAEMON_NAME,
-        from_status=TaskStatus.ROUTED.value, key_suffix=trigger,
+        entity_id,
+        TaskStatus.EXECUTING,
+        handler=DAEMON_NAME,
+        from_status=TaskStatus.ROUTED.value,
+        key_suffix=trigger,
     )
 
     # E1/E2: this run's thread. run_key keys it to the attempt so SSE replays reuse
@@ -567,31 +596,48 @@ async def dispatch_task(
         """
         if run_conversation_id:
             append_turn(
-                conversation_id=run_conversation_id, role=role, content=content,
+                conversation_id=run_conversation_id,
+                role=role,
+                content=content,
                 sender_kind="orchestrator",
                 idempotency_key=f"runturn-{entity_id}-{stage}-{trigger}",
             )
         if RUN_EMAIL:
             send_run_email(
-                task_id=entity_id, run_key=run_key, stage=stage, title=title,
+                task_id=entity_id,
+                run_key=run_key,
+                stage=stage,
+                title=title,
                 body=content,
             )
 
-    _run_stage("user",
-               f"Dispatched {skill} for task {entity_id} (trigger={trigger}): {title}",
-               stage="kickoff")
+    _run_stage(
+        "user",
+        f"Dispatched {skill} for task {entity_id} (trigger={trigger}): {title}",
+        stage="kickoff",
+    )
 
     try:
-        result = await _spawn_claude_skill(
-            skill, entity_id, snapshot, trigger, notifier, role=role,
+        result = await _spawn_harness_skill(
+            skill,
+            entity_id,
+            snapshot,
+            trigger,
+            notifier,
+            role=role,
             run_conversation_id=run_conversation_id,
         )
     except Exception as exc:
         # Unexpected crash in the spawn machinery itself → record as a failed run.
-        _run_stage("assistant", f"{skill} dispatch crashed: {type(exc).__name__}: {exc}",
-                   stage="crash")
+        _run_stage(
+            "assistant",
+            f"{skill} dispatch crashed: {type(exc).__name__}: {exc}",
+            stage="crash",
+        )
         set_task_status(
-            entity_id, TaskStatus.FAILED, handler=DAEMON_NAME,
+            entity_id,
+            TaskStatus.FAILED,
+            handler=DAEMON_NAME,
             from_status=TaskStatus.EXECUTING.value,
             reason=f"dispatch raised {type(exc).__name__}: {exc}",
             key_suffix=trigger,
@@ -600,10 +646,11 @@ async def dispatch_task(
         raise
 
     if result.ok:
-        _run_stage("assistant", f"{skill} completed (trigger={trigger}).",
-                   stage="done")
+        _run_stage("assistant", f"{skill} completed (trigger={trigger}).", stage="done")
         set_task_status(
-            entity_id, TaskStatus.DONE, handler=DAEMON_NAME,
+            entity_id,
+            TaskStatus.DONE,
+            handler=DAEMON_NAME,
             from_status=TaskStatus.EXECUTING.value,
             result=f"{skill} completed (trigger={trigger})",
             key_suffix=trigger,
@@ -611,15 +658,19 @@ async def dispatch_task(
         job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
     else:
         reason = result.error or f"rc={result.returncode}"
-        _run_stage("assistant", f"{skill} failed (trigger={trigger}): {reason}",
-                   stage="failed")
+        _run_stage(
+            "assistant", f"{skill} failed (trigger={trigger}): {reason}", stage="failed"
+        )
         # FAILED (not BLOCKED): the stall watchdog (plan task ent_3cdd75…) owns
         # retry-with-backoff and escalation-on-exhaustion out-of-band, so the SSE
         # loop is never blocked by an inline sleep. Notify now so failures are not
         # silent in the interim before the watchdog ships.
         set_task_status(
-            entity_id, TaskStatus.FAILED, handler=DAEMON_NAME,
-            from_status=TaskStatus.EXECUTING.value, reason=reason,
+            entity_id,
+            TaskStatus.FAILED,
+            handler=DAEMON_NAME,
+            from_status=TaskStatus.EXECUTING.value,
+            reason=reason,
             key_suffix=trigger,
         )
         notifier.send(
@@ -676,7 +727,9 @@ async def handle_checkpoint_brief(
 
     if resolution == "rejected":
         mark_task_declined(
-            task_id, reason=f"operator rejected checkpoint {entity_id}", handler=DAEMON_NAME
+            task_id,
+            reason=f"operator rejected checkpoint {entity_id}",
+            handler=DAEMON_NAME,
         )
         stamp_checkpoint_dispatched(entity_id, handler=DAEMON_NAME)
         notifier.send(
@@ -713,7 +766,11 @@ async def handle_checkpoint_brief(
     # skill's own idempotency covers the rare stamp-succeeded-then-dispatch-crashed case.
     stamp_checkpoint_dispatched(entity_id, handler=DAEMON_NAME)
     await dispatch_task(
-        task_id, task_snapshot, trigger="approved", notifier=notifier, gate_override=True
+        task_id,
+        task_snapshot,
+        trigger="approved",
+        notifier=notifier,
+        gate_override=True,
     )
 
 
@@ -763,9 +820,7 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
         # status transitions are logged for observability only to avoid
         # re-dispatching work already routed at creation.
         if status in ("approved", "ready"):
-            log.info(
-                f"[{DAEMON_NAME}] Task {entity_id} moved to status={status!r}"
-            )
+            log.info(f"[{DAEMON_NAME}] Task {entity_id} moved to status={status!r}")
         # Watch for due-date changes (raw payload may include a changed_fields list)
         changed = event.raw.get("changed_fields") or []
         if "due_date" in changed:
@@ -799,7 +854,8 @@ async def main() -> None:
     log.info(f"[{DAEMON_NAME}] ateles_repo={ATELES_REPO}")
     log.info(
         f"[{DAEMON_NAME}] dry_run={DRY_RUN} auto_execute={AUTO_EXECUTE} "
-        f"claude_bin={CLAUDE_BIN or '<none>'} dispatch_timeout={DISPATCH_TIMEOUT_SECONDS}s"
+        f"harness_providers={os.environ.get('APIS_HARNESS_PROVIDERS', 'claude,codex,cursor')} "
+        f"dispatch_timeout={DISPATCH_TIMEOUT_SECONDS}s"
     )
 
     # 1. Load agent_definition from Neotoma
@@ -877,9 +933,7 @@ async def main() -> None:
     #    Each pass re-dispatches PRs whose deferral has matured; if the limit is
     #    still active, the re-run just posts a fresh (later) deferral marker.
     #    Fire-and-forget and fail-open — a broken sweep must never stop the loop.
-    deferred_interval = int(
-        os.environ.get("APIS_DEFERRED_REVIEW_SWEEP_SECONDS", "600")
-    )
+    deferred_interval = int(os.environ.get("APIS_DEFERRED_REVIEW_SWEEP_SECONDS", "600"))
 
     async def deferred_review_sweep() -> None:
         while True:

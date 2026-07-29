@@ -46,7 +46,9 @@ if _NEOTOMA_ENV_FILE.exists():
             _k = _k.strip()
             _v = _v.strip().strip('"').strip("'")
             _existing = _os.environ.get(_k, "")
-            if not _existing or (_existing.startswith("__") and _existing.endswith("__")):
+            if not _existing or (
+                _existing.startswith("__") and _existing.endswith("__")
+            ):
                 _os.environ[_k] = _v
 
 from .aauth_signer import AAuthSigner
@@ -99,6 +101,7 @@ from .session_finalize import (
     finalize_session,
     load_end_skill,
 )
+from .claude_auth import claude_subprocess_env
 from .sse_client import NeotomaEvent, SSEClient, hydrate_snapshot
 from .task_lifecycle import (
     MAX_ATTEMPTS,
@@ -115,6 +118,7 @@ __all__ = [
     "SSEClient",
     "NeotomaEvent",
     "hydrate_snapshot",
+    "claude_subprocess_env",
     "AAuthSigner",
     "GrantChecker",
     "AgentGrant",

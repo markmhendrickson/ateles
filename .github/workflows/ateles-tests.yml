@@ -58,7 +58,9 @@ jobs:
       - name: Install MCP server deps
         run: |
           uv venv .mcp-venv
-          VIRTUAL_ENV=.mcp-venv uv pip install mcp httpx
+          # Pin <2: mcp 2.0 renamed Tool.inputSchema→input_schema and dropped
+          # Server.list_tools; ateles MCP server still targets the 1.x API surface.
+          VIRTUAL_ENV=.mcp-venv uv pip install 'mcp>=1.1.0,<2' httpx
       - name: Run ateles MCP server tests
         run: .mcp-venv/bin/python execution/mcp/ateles/test_server.py
       - name: Run ateles MCP server smoke tests
