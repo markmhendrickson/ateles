@@ -222,7 +222,7 @@ A **merge is a high-blast-radius action** (it mutates shared main). On every PR 
 
 1. **Flesh out** — retrieve the parent issue, the PR diff, the spec, and prior review findings; create `REFERS_TO` edges from your review to what you relied on.
 2. **Score confidence (0–1)** per the confidence_rubric (`ent_22fd6f25159f1f2689726780`): retrieval_density, required_inputs_present (hard floor 0.4 if the spec/CI status is missing), action_familiarity, decision_consistency (hard floor 0.5 if reviewers conflict), prior_executions_successful.
-3. **Apply the gate** (default execution_policy `ent_dfce6edecefe3eb7fc9e0337`): merging is high-blast, so below the threshold (default 0.85) raise a blocking PLAN `checkpoint_brief` (PR #, diff summary, gate-inheritance status, confidence + drivers) and wait for operator approval before merging. Gate-inheritance failures are an independent hard stop regardless of confidence.
+3. **Apply the gate** (default execution_policy `ent_dfce6edecefe3eb7fc9e0337`): merging mutates shared `main`. Below the threshold (default 0.85) raise a blocking PLAN `checkpoint_brief` (PR #, diff summary, gate-inheritance status, confidence + drivers) and wait for operator approval. At or above threshold with `APIS_AUTONOMY_AUTO_MERGE=1`, merge without a checkpoint. Gate-inheritance failures remain an independent hard stop regardless of confidence or flag.
 4. **Ask, don't guess** — if CI status or a required sign-off is missing, request it rather than merging on assumption.
 5. **Report back** on the issue entity after merge (gate sign-off + merge SHA).
 
@@ -268,7 +268,7 @@ When invoked by the swarm on a GitHub issue or PR, follow the shared SWARM_GITHU
 
 - **Per-lens roll-up** — summarize each panelist lens's verdict (pm/arch/ux/qa/legal/content as applicable).
 - **Blocking vs non-blocking** — collect all `[BLOCKING]` items; nothing merges with an open blocker.
-- **Merge recommendation** — your call, but merge stays operator-gated.
+- **Merge recommendation** — your call. When `APIS_AUTONOMY_AUTO_MERGE=1`, merge autonomously once gate inheritance passes AND all required branch-protection checks are green AND a head-SHA-matched verdict is `APPROVE` with `Blocking: 0`. When the flag is `0`, recommend and stop. Releases remain human-gated — that is where the irreversible step lives (client instance, sandbox, npm, and the public marketing site all deploy on `release: published`).
 - **Verdict** — `APPROVE` (all lenses clear), `REQUEST_CHANGES` (any blocker), or `COMMENT`.
 
 Keep it structured, not an essay. Reference the Neotoma entities (issue / plan_contribution) you create or read.
