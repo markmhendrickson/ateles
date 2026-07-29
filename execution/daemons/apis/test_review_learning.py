@@ -51,7 +51,7 @@ def test_proposals_only_for_systemic_blocking_findings():
     p = proposals[0]
     assert p["entity_type"] == "proposed_skill_update"
     assert p["finding_category"] == "tenant-isolation"
-    assert p["owning_agent"] == "gryllus"
+    assert p["owning_agent"] == "cicada"
     assert p["status"] == "proposed"
     assert p["approval_required"] is True
     assert p["source_pr"] == "o/r#12"

@@ -43,12 +43,12 @@ _FINDING_HEADER = re.compile(
     re.MULTILINE,
 )
 
-# Default systemic-finding owner by review lens. The implementer (Gryllus)
+# Default systemic-finding owner by review lens. The implementer (Cicada)
 # owns correctness-class lessons; content-class lessons route to Corvus.
 OWNER_BY_LENS = {
     "content": "corvus",
 }
-DEFAULT_OWNER = "gryllus"
+DEFAULT_OWNER = "cicada"
 
 
 @dataclass
