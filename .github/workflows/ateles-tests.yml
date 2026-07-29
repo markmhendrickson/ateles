@@ -15,6 +15,7 @@ on:
       - "execution/daemons/apis/**"
       - "execution/daemons/phoenicurus-release/**"
       - "execution/mcp/**"
+      - "execution/scripts/**"
       - "lib/daemon_runtime/**"
       - "lib/approval/**"
       - "pyproject.toml"
@@ -47,6 +48,12 @@ jobs:
         run: uv run --extra dev python -m pytest execution/daemons/phoenicurus-release/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
+      # Slack CLI --yes post gate (qa #322): test_slack_cli_post_gate.py lives
+      # under execution/scripts/ and was never collected — path filter + pytest
+      # scope both missed it. Dedicated step keeps sibling script-test noise out
+      # of this security-critical gate.
+      - name: Run execution/scripts tests (slack post gate)
+        run: uv run --extra dev python -m pytest execution/scripts/test_slack_cli_post_gate.py -q
 
   mcp-server-tests:
     runs-on: ubuntu-latest
