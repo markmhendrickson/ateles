@@ -5995,3 +5995,42 @@ def test_handle_pr_still_comments_when_no_verdict_anywhere(monkeypatch):
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
     assert ("review", "COMMENT") in calls, calls
     assert any(c[0] == "route" for c in calls), calls
+
+
+# ── Vanellus merge authorization tracks APIS_AUTONOMY_AUTO_MERGE (ateles#333) ──
+#
+# Regression guard for a real defect: _vanellus_prompt injected an unconditional
+# "DO NOT MERGE ... This overrides any merge instruction in your standing
+# protocol" while _gate_merge_readiness returns EARLY when auto_merge is on (so
+# no checkpoint is filed either). With the flag on, the dispatcher stepped aside
+# expecting Vanellus to merge while simultaneously forbidding it — nothing
+# merged and nothing was escalated, strictly worse than the flag being off.
+
+
+def test_vanellus_prompt_forbids_merge_when_auto_merge_off():
+    prompt = swarm_dispatch.SwarmDispatcher._vanellus_prompt(
+        _trigger(), 80, ["pm"], None, auto_merge=False
+    )
+    assert "DO NOT MERGE" in prompt
+    assert "operator-gated" in prompt
+    assert "YOU MAY MERGE" not in prompt
+
+
+def test_vanellus_prompt_authorizes_merge_when_auto_merge_on():
+    prompt = swarm_dispatch.SwarmDispatcher._vanellus_prompt(
+        _trigger(), 80, ["pm"], None, auto_merge=True
+    )
+    assert "YOU MAY MERGE" in prompt
+    # The unconditional prohibition must be gone, or the flag is inert.
+    assert "DO NOT MERGE. Merge is operator-gated" not in prompt
+    # Hard stops must still be stated so autonomy is bounded, not blanket.
+    assert "gate inheritance" in prompt
+    assert "branch-protection" in prompt
+    assert "APPROVE with Blocking: 0" in prompt
+    assert "Releases remain human-gated" in prompt
+
+
+def test_vanellus_prompt_defaults_to_forbidding_merge():
+    # Omitting the parameter must fail closed, not open.
+    prompt = swarm_dispatch.SwarmDispatcher._vanellus_prompt(_trigger(), 80, ["pm"])
+    assert "DO NOT MERGE" in prompt
