@@ -66,6 +66,10 @@ class TestRouteTask(unittest.TestCase):
                 "email_triage": "turdus",
                 "tax": "picus",
                 "pr_steward": "vanellus",
+                "architect": "waxwing",
+                "legal": "buteo",
+                "compliance": "robin",
+                "qa": "phoenicurus",
             },
         }
 
@@ -169,6 +173,56 @@ class TestRouteTask(unittest.TestCase):
         # The unambiguous payments case must still route to payments.
         self.assertEqual(
             srv._route_task("pay the yoga invoice")["matched_role"], "payments"
+        )
+
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    @patch("server._get_swarm_roster")
+    def test_architecture_review_routes_to_architect(self, mock_roster, mock_retrieve, mock_get):
+        """`architect` had no keywords at all, so every architecture review fell
+        through to the dispatcher — the most-trafficked review path in the swarm
+        was silently unrouted, and `matched_via: fallback` was the only tell."""
+        mock_roster.return_value = self.mock_roster
+        mock_retrieve.return_value = self.mock_agent_def
+        mock_get.return_value = self.mock_policy
+
+        for desc in (
+            "review this PR for architectural soundness",
+            "do an arch review of this change",
+            "design review for the new endpoint",
+            "this is an interface change to the store contract",
+        ):
+            with self.subTest(desc=desc):
+                result = srv._route_task(desc)
+                self.assertEqual(result["matched_role"], "architect")
+                self.assertEqual(result["matched_via"], "keyword")
+
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    @patch("server._get_swarm_roster")
+    def test_legal_and_compliance_are_distinguished(self, mock_roster, mock_retrieve, mock_get):
+        """`compliance` claimed "contract", so a legal question routed
+        confidently to the compliance agent. A confident wrong match is worse
+        than a fallback: fallback signals uncertainty via `matched_via`, while
+        this was indistinguishable from a correct route."""
+        mock_roster.return_value = self.mock_roster
+        mock_retrieve.return_value = self.mock_agent_def
+        mock_get.return_value = self.mock_policy
+
+        for desc in ("is this legally risky", "check our liability here"):
+            with self.subTest(desc=desc, expect="legal"):
+                self.assertEqual(srv._route_task(desc)["matched_role"], "legal")
+
+        for desc in ("is this GDPR compliant", "run a regulatory check"):
+            with self.subTest(desc=desc, expect="compliance"):
+                self.assertEqual(srv._route_task(desc)["matched_role"], "compliance")
+
+        # "contract" is claimed by neither role: it is ambiguous across a legal
+        # agreement, an API contract, and a contractor engagement. Falling back
+        # is the honest answer, and asserting it keeps a future well-meaning
+        # edit from quietly reintroducing the wrong-agent bug.
+        self.assertEqual(
+            srv._route_task("update the contract")["matched_via"], "fallback"
         )
 
     @patch("server._get_swarm_roster")
