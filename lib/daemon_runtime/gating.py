@@ -77,6 +77,41 @@ class BlastRadius(str, Enum):
     HIGH = "high"
 
 
+class CheckpointPosture(str, Enum):
+    """Per-boundary posture when a checkpoint's *check itself* errors out
+    (exception, timeout, unloadable policy/deps, malformed response) — NOT
+    the same as the check running cleanly and returning "blocked".
+
+    OPEN   — proceed, but always log (never a silent degrade).
+    CLOSED — block, file a checkpoint_brief, notify, and wait for an
+             operator verdict (never a silent hang, never a silent proceed).
+
+    Absent from a policy's ``checkpoint_postures`` map == OPEN (additive;
+    matches today's behavior with zero config, per ateles#350).
+    """
+
+    OPEN = "open"
+    CLOSED = "closed"
+
+
+# Boundaries that are fail-closed by default when a policy doesn't override
+# them via ``checkpoint_postures``. Per ateles#350 (PM ent_9fad4e409e3fe3ed48e0b599,
+# arch ADR ent_7ea55d51d88553f358bc29f0): pre_merge is included because
+# `_required_ci_state`'s live call site (execution/daemons/apis/swarm_dispatch.py
+# — the pre-merge CI-status check) reaches merged code under
+# APIS_AUTONOMY_AUTO_MERGE=1, so fail-open there is unacceptable.
+# Session-integrity hooks are deliberately NOT in this set — they stay open.
+DEFAULT_CLOSED_BOUNDARIES = frozenset(
+    {
+        "pre_payment",
+        "pre_release",
+        "pre_comms",
+        "pre_irreversible",
+        "pre_merge",
+    }
+)
+
+
 class GateAction(str, Enum):
     AUTO_EXECUTE = "auto_execute"
     CHECKPOINT = "checkpoint_plan_approval"
@@ -96,6 +131,7 @@ class ExecutionPolicy:
         default_factory=lambda: frozenset(_FALLBACK_HIGH_BLAST)
     )
     low_blast_action_types: frozenset[str] = field(default_factory=frozenset)
+    checkpoint_postures: dict[str, CheckpointPosture] = field(default_factory=dict)
     loaded: bool = False  # False = using fallbacks (Neotoma unreachable)
 
     def blast_radius_for(self, action_type: str | None) -> BlastRadius:
@@ -108,6 +144,22 @@ class ExecutionPolicy:
                 return BlastRadius.HIGH
         # Unknown action type → fall back to the policy's default.
         return self.blast_radius_default
+
+    def posture_for(self, boundary: str | None) -> CheckpointPosture:
+        """Resolve a checkpoint boundary's on-check-failure posture.
+
+        Explicit ``checkpoint_postures[boundary]`` wins. Otherwise a
+        boundary in ``DEFAULT_CLOSED_BOUNDARIES`` is CLOSED; every other
+        (including unrecognized/absent) boundary is OPEN — additive, no
+        behavior change for boundaries nobody has configured (ateles#350).
+        """
+        if boundary:
+            b = boundary.strip().lower()
+            if b in self.checkpoint_postures:
+                return self.checkpoint_postures[b]
+            if b in DEFAULT_CLOSED_BOUNDARIES:
+                return CheckpointPosture.CLOSED
+        return CheckpointPosture.OPEN
 
 
 @dataclass
@@ -156,6 +208,7 @@ def _parse_policy(entity_id: str, data: dict) -> ExecutionPolicy:
 
     high = _as_set(snap.get("high_blast_action_types")) or frozenset(_FALLBACK_HIGH_BLAST)
     low = _as_set(snap.get("low_blast_action_types"))
+    postures = _parse_checkpoint_postures(snap.get("checkpoint_postures"), entity_id)
 
     return ExecutionPolicy(
         entity_id=entity_id,
@@ -165,8 +218,47 @@ def _parse_policy(entity_id: str, data: dict) -> ExecutionPolicy:
         auto_execute_after_n_successful_recurrences=n_recur,
         high_blast_action_types=high,
         low_blast_action_types=low,
+        checkpoint_postures=postures,
         loaded=True,
     )
+
+
+class InvalidCheckpointPosture(ValueError):
+    """Raised when an execution_policy declares a checkpoint posture outside
+    {open, closed}. Fails HARD at policy-load time (per ateles#350 spec) —
+    a typo'd posture must never silently resolve to a default, since that
+    could turn an intended `closed` boundary into a silent `open`.
+    """
+
+
+def _parse_checkpoint_postures(
+    raw: object, policy_entity_id: str
+) -> dict[str, CheckpointPosture]:
+    if raw is None:
+        return {}
+    if isinstance(raw, str):
+        import json as _json
+
+        try:
+            raw = _json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+    if not isinstance(raw, dict):
+        return {}
+
+    postures: dict[str, CheckpointPosture] = {}
+    for boundary, value in raw.items():
+        v = str(value).strip().lower()
+        try:
+            postures[str(boundary).strip().lower()] = CheckpointPosture(v)
+        except ValueError:
+            allowed = ", ".join(p.value for p in CheckpointPosture)
+            raise InvalidCheckpointPosture(
+                f"execution_policy {policy_entity_id!r}: checkpoint_postures"
+                f"[{boundary!r}] = {value!r} is not a valid posture "
+                f"(allowed: {allowed})"
+            ) from None
+    return postures
 
 
 def _fetch_entity(entity_id: str) -> dict | None:
@@ -189,7 +281,16 @@ def _fetch_entity(entity_id: str) -> dict | None:
 def load_policy(policy_id: str | None = None) -> ExecutionPolicy:
     """
     Load an execution_policy entity. Returns a fallback policy (loaded=False)
-    when Neotoma is unreachable, so the gate still functions (fails closed).
+    when Neotoma is unreachable OR malformed, so the gate always functions
+    (fails closed) and callers never need their own try/except around this.
+
+    A policy with an invalid `checkpoint_postures` entry (see
+    `InvalidCheckpointPosture`) is a config error the operator must fix, but
+    it must not itself crash whatever daemon happened to call load_policy()
+    next — that would turn a typo in an unrelated boundary's posture into an
+    outage of the whole gate. We log it loudly (visible, with the
+    allowed-values hint from `_parse_checkpoint_postures`) and degrade to the
+    same conservative fallback used for an unreachable policy.
     """
     pid = policy_id or DEFAULT_POLICY_ID
     data = _fetch_entity(pid)
@@ -200,7 +301,14 @@ def load_policy(policy_id: str | None = None) -> ExecutionPolicy:
             _FALLBACK_THRESHOLD,
         )
         return ExecutionPolicy(entity_id=pid, loaded=False)
-    return _parse_policy(pid, data)
+    try:
+        return _parse_policy(pid, data)
+    except InvalidCheckpointPosture as exc:
+        log.error(
+            f"[gating] policy {pid} has an invalid checkpoint_postures entry "
+            f"— using conservative fallback until fixed: {exc}"
+        )
+        return ExecutionPolicy(entity_id=pid, loaded=False)
 
 
 def resolve_policy_for_agent(

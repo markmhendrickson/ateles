@@ -81,6 +81,8 @@ from review_learning import (
 from review_panel import LENSES, Lens, select_expectation_agents, select_panel
 from skill_runner import SkillResult, run_skill
 
+from lib.daemon_runtime.checkpoint_posture import PostureOutcome, evaluate_with_posture
+from lib.daemon_runtime.gating import load_policy
 from lib.notify import Notifier, Priority
 
 log = logging.getLogger("apis.swarm_dispatch")
@@ -2608,11 +2610,20 @@ class SwarmDispatcher:
         """Return "green" | "failing" | "pending" | "unknown" for the PR head.
 
         Gates on the combined commit status + check-runs for the PR's head SHA.
-        Fail-open to "unknown" on any fetch error so a transient API failure
-        never fabricates a green (which would page the operator to merge an
-        unverified PR).
+
+        ateles#350: the `pre_merge` boundary's on_check_failure posture governs
+        what a check-fetch failure DOES beyond returning "unknown". "unknown"
+        never fabricates a green either way — the caller already treats
+        non-"green" as "hold, don't page ready-to-merge" — but under
+        posture=closed (pre_merge's default) a check-fetch failure
+        additionally files a blocking checkpoint_brief + notifies, instead of
+        silently retrying on the next webhook with no operator-visible trail.
+        The OPEN/CLOSED decision itself is delegated to
+        `evaluate_with_posture` (lib/daemon_runtime/checkpoint_posture.py) —
+        the single shared helper — rather than re-derived here.
         """
-        try:
+
+        async def _fetch_state() -> str:
             async with httpx.AsyncClient(timeout=30) as client:
                 headers = self._github_headers(trigger.repository)
                 pr = await client.get(
@@ -2659,12 +2670,72 @@ class SwarmDispatcher:
                     # No checks configured at all — treat as green (nothing to fail).
                     return "green"
                 return "green"
-        except Exception as exc:
-            log.warning(
-                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
-                f"CI state fetch failed ({exc}) — treating as unknown"
-            )
+
+        ref = f"{trigger.repository}#{trigger.number}"
+        # load_policy() does a blocking httpx.get(); run it off the event loop
+        # so one slow/hung Neotoma fetch can't stall every other concurrent
+        # webhook dispatch this daemon is handling.
+        policy = await asyncio.to_thread(load_policy)
+        result = await evaluate_with_posture(
+            _fetch_state,
+            boundary="pre_merge",
+            policy=policy,
+            title=f"CI status check failed: {ref}",
+            handler=DAEMON_NAME,
+            notify=lambda msg, **kw: self.notifier.send(
+                msg, priority=Priority.OPERATOR_DECISION, **kw
+            ),
+            file_brief=lambda boundary, error, decision: self._file_ci_check_failure_brief(
+                trigger, boundary=boundary, error=error
+            ),
+        )
+        if isinstance(result, PostureOutcome):
+            # Either posture returns "unknown" to the caller — OPEN logged
+            # and proceeded, CLOSED blocked and escalated; neither fabricates
+            # a "green" that would page the operator to merge unverified code.
             return "unknown"
+        return result
+
+    async def _file_ci_check_failure_brief(
+        self, trigger: SwarmTrigger, *, boundary: str, error: str
+    ) -> str | None:
+        """Escalation hook for `evaluate_with_posture`'s CLOSED path at the
+        `pre_merge` boundary (ateles#350).
+
+        This daemon's checkpoints are keyed by `owner/repo#n` (`subject_ref`),
+        not a Neotoma `task` entity, so this overrides the default
+        `write_checkpoint_brief` escalation rather than forcing a fabricated
+        task_entity_id. Returns the checkpoint_brief's entity_id (best-effort;
+        None if Neotoma is unreachable — the caller does not proceed either
+        way, since `evaluate_with_posture` already decided CLOSED).
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
+        entities = [
+            {
+                "entity_type": "checkpoint_brief",
+                "title": f"CI status check failed: {ref}",
+                "checkpoint_kind": "pre_merge_check_failure",
+                "blocking": True,
+                "subject_ref": ref,
+                "body": (
+                    f"Fetching required-CI status for {trigger.html_url} failed "
+                    f"({error}). posture=closed for boundary={boundary}, so the "
+                    "swarm is holding this PR at 'unknown' CI state rather than "
+                    "silently retrying with no operator-visible trail. Review "
+                    f"the failure and reply {_APPROVE_CMD} once CI state is "
+                    f"confirmed manually, or {_REJECT_CMD} <reason> to stop."
+                ),
+                "status": "open",
+            }
+        ]
+        await self._store_entities(
+            entities,
+            idempotency_key=(
+                f"pre-merge-check-failure-{trigger.repository}-{trigger.number}-"
+                f"{trigger.delivery_id}-{content_digest(entities)}"
+            ),
+        )
+        return None
 
     async def _route_ci_failure(
         self, trigger: SwarmTrigger, parent: int | None

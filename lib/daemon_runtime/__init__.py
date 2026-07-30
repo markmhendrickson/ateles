@@ -58,11 +58,15 @@ from .drift import (
     parse_comments,
     parse_drift_signals,
 )
+from .checkpoint_posture import CheckFailure, PostureOutcome, evaluate_with_posture
 from .gating import (
     BlastRadius,
+    CheckpointPosture,
+    DEFAULT_CLOSED_BOUNDARIES,
     ExecutionPolicy,
     GateAction,
     GateDecision,
+    InvalidCheckpointPosture,
     evaluate_gate,
     load_policy,
     resolve_policy_for_agent,
@@ -131,6 +135,13 @@ __all__ = [
     "load_policy",
     "resolve_policy_for_agent",
     "write_checkpoint_brief",
+    # checkpoint posture (ateles#350)
+    "CheckpointPosture",
+    "DEFAULT_CLOSED_BOUNDARIES",
+    "InvalidCheckpointPosture",
+    "CheckFailure",
+    "PostureOutcome",
+    "evaluate_with_posture",
     # drift / generalization
     "DriftSignal",
     "DriftCluster",
