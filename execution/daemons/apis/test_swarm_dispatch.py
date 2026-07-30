@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 import httpx
 import swarm_dispatch
 from github_gateway import SwarmTrigger
+from lib.daemon_runtime.gating import CheckpointPosture, ExecutionPolicy
+from lib.notify import Priority
 from review_panel import Lens
 from skill_runner import SkillResult
 from swarm_dispatch import (
@@ -873,6 +875,70 @@ def test_required_ci_state_unknown_fails_open_on_api_error(monkeypatch):
     assert _ci_state(monkeypatch, raise_on={"status"}) == "unknown"
     assert _ci_state(monkeypatch, raise_on={"checks"}) == "unknown"
     assert _ci_state(monkeypatch, raise_on={"pulls"}) == "unknown"
+
+
+# ── pre_merge on_check_failure posture (ateles#350) ──────────────────────────
+
+
+def test_ci_check_failure_closed_posture_files_brief_and_notifies(monkeypatch):
+    # pre_merge defaults to posture=closed (DEFAULT_CLOSED_BOUNDARIES):
+    # an API error at the CI-status boundary must file a blocking
+    # checkpoint_brief and send an operator_decision notification — not just
+    # silently return "unknown" for a caller to (maybe) notice.
+    monkeypatch.setattr(swarm_dispatch, "load_policy", lambda: ExecutionPolicy(
+        entity_id="fallback", loaded=False
+    ))
+    stored = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.append((entities, idempotency_key))
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    client = _FakeCIHttpxClient(raise_on={"status"})
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    state = asyncio.run(d._required_ci_state(_trigger()))
+
+    assert state == "unknown"  # caller-facing return value is unchanged
+    assert len(stored) == 1
+    entities, _ = stored[0]
+    assert entities[0]["entity_type"] == "checkpoint_brief"
+    assert entities[0]["checkpoint_kind"] == "pre_merge_check_failure"
+    assert entities[0]["blocking"] is True
+    assert any("posture=closed" in msg for msg in notifier.sent)
+    assert Priority.OPERATOR_DECISION in notifier.priorities
+
+
+def test_ci_check_failure_open_posture_only_logs_no_brief(monkeypatch, caplog):
+    pol = ExecutionPolicy(
+        entity_id="p",
+        checkpoint_postures={"pre_merge": CheckpointPosture.OPEN},
+        loaded=True,
+    )
+    monkeypatch.setattr(swarm_dispatch, "load_policy", lambda: pol)
+    stored = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.append((entities, idempotency_key))
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    client = _FakeCIHttpxClient(raise_on={"status"})
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    with caplog.at_level("WARNING"):
+        state = asyncio.run(d._required_ci_state(_trigger()))
+
+    assert state == "unknown"
+    assert stored == []  # no checkpoint_brief filed under open posture
+    assert notifier.sent == []  # no operator page under open posture
+    assert "on_check_failure=open" in caplog.text
+    assert "boundary=pre_merge" in caplog.text
 
 
 # ── _handle_ci_status (check_suite:completed → route/readiness, ateles#197) ──

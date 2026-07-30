@@ -109,6 +109,80 @@ Assignment is **per artifact type**:
 
 ---
 
+## Fail-open vs fail-closed: a per-boundary posture (ateles#350)
+
+A checkpoint's **condition/action** (above) governs a check that runs cleanly
+and returns a verdict. This section governs the OTHER case: the check
+**itself** fails to run — an exception, timeout, unloadable policy/deps, or
+malformed response. Before #350 that failure mode had a single implicit
+global behavior (mostly fail-open, i.e. proceed). Now it's an explicit
+**per-boundary** field, `on_check_failure`, on each `execution_policy.checkpoints[]`
+entry (or per-boundary in `checkpoint_postures`), resolved by
+`ExecutionPolicy.posture_for(boundary)` (`lib/daemon_runtime/gating.py`).
+
+### Naming
+
+| Token | Meaning |
+|---|---|
+| `on_check_failure` | Field on a checkpoint entry (alongside `boundary` / `condition` / `action`) |
+| `open` | Check errored → proceed; MUST log (never silent) |
+| `closed` | Check errored → block + escalate; MUST NOT proceed, MUST NOT silently hang |
+| absent field | Same as `open` (additive — no behavior change for unconfigured boundaries) |
+
+Do not use `fail_open` / `fail_closed` as config keys — those are prose shorthand only.
+
+### Boundary → default posture
+
+| Boundary | Default `on_check_failure` | Rationale |
+|---|---|---|
+| `pre_payment` | `closed` | Money moved on a false proceed is often irreversible. |
+| `pre_release` | `closed` | A bad release ships to real users; the cost of a false proceed is high and reversal is expensive. |
+| `pre_comms` | `closed` | An external-facing post can't be unsent. |
+| `pre_irreversible` | `closed` | Generic catch-all for `block:irreversible:*` scopes — no undo by definition. |
+| `pre_merge` | `closed` | The live call site (`_required_ci_state` → `_gate_merge_readiness`, `execution/daemons/apis/swarm_dispatch.py`) is reachable under `APIS_AUTONOMY_AUTO_MERGE=1`; a false "CI green" would merge unverified code. |
+| `issue.triaged`, `pr.opened`, session-integrity hooks | `open` (default, unconfigured) | Cheap, reversible boundaries — the swarm degrading to "proceed + log" rather than blocking on every transient Neotoma/GitHub blip keeps trivial work flowing. Session-integrity hooks are explicitly **out of scope** for closure and stay fail-open by design. |
+
+`checkpoint_postures` on a policy entity can override any of the above per repo/item, same as the condition DSL overrides `action`.
+
+### Worked example
+
+```json
+{
+  "name": "pre_merge",
+  "boundary": "pre_merge",
+  "condition": "always",
+  "action": "block_until_approve",
+  "on_check_failure": "closed",
+  "brief_template": "...",
+  "blocking": true
+}
+```
+
+### Failure narratives
+
+**Closed (brief filed).** The `pre_merge` CI-status fetch raises (GitHub API
+timeout). `posture=closed` → the dispatcher does not fabricate a "green" or
+silently retry: it files a blocking `checkpoint_brief` (`checkpoint_kind:
+pre_merge_check_failure`) and sends an `operator_decision` notification —
+"BLOCKED at checkpoint 'pre_merge': CI status check failed for owner/repo#123
+(...). posture=closed — waiting for /approve, /reject, or /hold." The PR sits
+at CI state `unknown` (never "green") until the operator resolves it.
+
+**Open (log + proceed).** A boundary configured (or left unconfigured,
+defaulting to) `open` hits the same kind of check failure. The swarm proceeds
+past that boundary and logs: `"checkpoint check failed; proceeding because
+on_check_failure=open (boundary=<name>): <error>"`. No brief, no block — the
+log line is the only trace, by design, for boundaries cheap enough that
+blocking on every transient failure would be worse than an occasional false
+proceed.
+
+### Session-integrity hooks stay fail-open
+
+Session-integrity hooks (the harness's own liveness/session checks) are
+explicitly **not** part of the closed-boundary defaults above and are **out
+of scope** for this change — they remain fail-open so a hook failure can
+never itself deadlock a session.
+
 ## Build phases
 
 - **Phase H1 — `pre_merge` formalized.** Convert today's hardcoded operator-gated-merge into a configured `pre_merge` checkpoint + the `/approve` `/reject` `/hold` commands (generalizing `/confirm-gates-clear`). Lowest-risk: it's already the default behavior; this just makes it explicit + adds the verdict verbs, AND requests the operator as PR reviewer (`--add-reviewer`) on block, dismissing on resolve. Test on a real PR.
