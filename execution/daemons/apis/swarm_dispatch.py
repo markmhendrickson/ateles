@@ -79,7 +79,7 @@ from review_learning import (
     propose_skill_updates,
 )
 from review_panel import LENSES, Lens, select_expectation_agents, select_panel
-from skill_runner import SkillResult, run_skill
+from skill_runner import SkillResult, run_skill, write_dispatch_failure_log
 
 from lib.daemon_runtime.checkpoint_posture import PostureOutcome, evaluate_with_posture
 from lib.daemon_runtime.gating import load_policy
@@ -1861,11 +1861,27 @@ class SwarmDispatcher:
         #    this returns None and the caller reports "handoff ran but no PR".
         found = await self._find_open_pr_for_issue(trigger)
         if not found:
+            # Persist the COMPLETE child output. `run_skill` only writes a
+            # diagnostics file when the dispatch FAILS (rc != 0); this branch is
+            # the exit-0-but-did-nothing case, which used to leave no artifact at
+            # all — the reason the #1882-class failure has been undiagnosable
+            # across eight issues. The post-condition failing IS the failure, so
+            # capture it here with the same writer and name the file in the log.
+            log_path = await asyncio.to_thread(
+                write_dispatch_failure_log,
+                skill="cicada",
+                role="cicada",
+                returncode=result.returncode,
+                stdout=result.stdout or "",
+                stderr=result.stderr or "",
+                task_entity_id=f"{trigger.repository}#{trigger.number}",
+            )
             log.warning(
                 f"[{DAEMON_NAME}] Cicada build handoff for "
                 f"{trigger.repository}#{trigger.number} returned ok but NO PR "
                 f"was opened ({len(result.stdout or '')}B stdout) — reporting "
-                "no-PR so the operator can build manually."
+                "no-PR so the operator can build manually. Full output: "
+                f"{log_path or '(diagnostics file unavailable)'}"
             )
         return found
 
