@@ -10,10 +10,13 @@ Also covers the checkbox definition-of-done changes:
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 
 import httpx
 import swarm_dispatch
 from github_gateway import SwarmTrigger
+from lib.daemon_runtime.gating import CheckpointPosture, ExecutionPolicy
+from lib.notify import Priority
 from review_panel import Lens
 from skill_runner import SkillResult
 from swarm_dispatch import (
@@ -872,6 +875,70 @@ def test_required_ci_state_unknown_fails_open_on_api_error(monkeypatch):
     assert _ci_state(monkeypatch, raise_on={"status"}) == "unknown"
     assert _ci_state(monkeypatch, raise_on={"checks"}) == "unknown"
     assert _ci_state(monkeypatch, raise_on={"pulls"}) == "unknown"
+
+
+# ── pre_merge on_check_failure posture (ateles#350) ──────────────────────────
+
+
+def test_ci_check_failure_closed_posture_files_brief_and_notifies(monkeypatch):
+    # pre_merge defaults to posture=closed (DEFAULT_CLOSED_BOUNDARIES):
+    # an API error at the CI-status boundary must file a blocking
+    # checkpoint_brief and send an operator_decision notification — not just
+    # silently return "unknown" for a caller to (maybe) notice.
+    monkeypatch.setattr(swarm_dispatch, "load_policy", lambda: ExecutionPolicy(
+        entity_id="fallback", loaded=False
+    ))
+    stored = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.append((entities, idempotency_key))
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    client = _FakeCIHttpxClient(raise_on={"status"})
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    state = asyncio.run(d._required_ci_state(_trigger()))
+
+    assert state == "unknown"  # caller-facing return value is unchanged
+    assert len(stored) == 1
+    entities, _ = stored[0]
+    assert entities[0]["entity_type"] == "checkpoint_brief"
+    assert entities[0]["checkpoint_kind"] == "pre_merge_check_failure"
+    assert entities[0]["blocking"] is True
+    assert any("posture=closed" in msg for msg in notifier.sent)
+    assert Priority.OPERATOR_DECISION in notifier.priorities
+
+
+def test_ci_check_failure_open_posture_only_logs_no_brief(monkeypatch, caplog):
+    pol = ExecutionPolicy(
+        entity_id="p",
+        checkpoint_postures={"pre_merge": CheckpointPosture.OPEN},
+        loaded=True,
+    )
+    monkeypatch.setattr(swarm_dispatch, "load_policy", lambda: pol)
+    stored = []
+
+    async def fake_store(self, entities, idempotency_key):
+        stored.append((entities, idempotency_key))
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    client = _FakeCIHttpxClient(raise_on={"status"})
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    with caplog.at_level("WARNING"):
+        state = asyncio.run(d._required_ci_state(_trigger()))
+
+    assert state == "unknown"
+    assert stored == []  # no checkpoint_brief filed under open posture
+    assert notifier.sent == []  # no operator page under open posture
+    assert "on_check_failure=open" in caplog.text
+    assert "boundary=pre_merge" in caplog.text
 
 
 # ── _handle_ci_status (check_suite:completed → route/readiness, ateles#197) ──
@@ -2626,7 +2693,7 @@ def test_additive_spec_pr_opened_is_info_priority(monkeypatch):
     monkeypatch.setattr(SwarmDispatcher, "_gates_green", lambda self, lanius: True)
     monkeypatch.setattr(SwarmDispatcher, "_open_implementation_pr", fake_open_pr)
     monkeypatch.setattr(SwarmDispatcher, "_mark_pipeline_inflight",
-                        lambda self, t: _async_none())
+                        lambda self, t, **kw: _async_none())
     monkeypatch.setattr(SwarmDispatcher, "_clear_pipeline_inflight",
                         lambda self, t: _async_none())
 
@@ -5096,8 +5163,8 @@ def _resume_dispatcher(monkeypatch, *, calls):
     async def fake_pipeline(self, trigger):
         calls.append(("pipeline", trigger.number))
 
-    async def fake_mark(self, trigger):
-        calls.append(("mark", trigger.number))
+    async def fake_mark(self, trigger, *, stage="inflight"):
+        calls.append((f"mark:{stage}", trigger.number))
 
     async def fake_clear(self, trigger):
         calls.append(("clear", trigger.number))
@@ -5109,12 +5176,67 @@ def _resume_dispatcher(monkeypatch, *, calls):
 
 
 def test_pipeline_marks_inflight_then_clears_on_success(monkeypatch):
+    """Uncontended path: the semaphore is free, so no "queued" marker is
+    written (ateles#323 gates it on `sem.locked()`, matching the pre-existing
+    QUEUED-log branch) — only "inflight" then clear, same cost as before this
+    fix."""
     calls = []
     d = _resume_dispatcher(monkeypatch, calls=calls)
     asyncio.run(d._handle_issue_opened(_trigger(kind="issue_opened", number=230)))
-    # Marker must be written BEFORE the run and cleared after — that ordering is
-    # what makes an interrupted run detectable.
-    assert calls == [("mark", 230), ("pipeline", 230), ("clear", 230)]
+    assert calls == [
+        ("mark:inflight", 230),
+        ("pipeline", 230),
+        ("clear", 230),
+    ]
+
+
+def test_pipeline_marks_queued_before_inflight_when_semaphore_contended(monkeypatch):
+    """ateles#323: when a second trigger arrives while the semaphore is held,
+    a "queued" marker must be written BEFORE the acquire attempt (so a
+    restart while parked is durable), then "inflight" once acquired."""
+    calls = []
+    cfg = DispatchConfig(
+        neotoma_token="", github_token="", max_concurrent_issue_pipelines=1
+    )
+    d = SwarmDispatcher(_StubNotifier(), cfg)
+
+    async def fake_mark(self, trigger, *, stage="inflight"):
+        calls.append((f"mark:{stage}", trigger.number))
+
+    async def fake_clear(self, trigger):
+        calls.append(("clear", trigger.number))
+
+    first_in_slot = asyncio.Event()
+
+    async def fake_pipeline(self, trigger):
+        calls.append(("pipeline", trigger.number))
+        if trigger.number == 241:
+            first_in_slot.set()
+            await asyncio.sleep(0.02)
+
+    monkeypatch.setattr(SwarmDispatcher, "_mark_pipeline_inflight", fake_mark)
+    monkeypatch.setattr(SwarmDispatcher, "_clear_pipeline_inflight", fake_clear)
+    monkeypatch.setattr(SwarmDispatcher, "_run_issue_spec_pipeline", fake_pipeline)
+
+    async def run_two():
+        t1 = asyncio.create_task(
+            d._handle_issue_opened(_trigger(kind="issue_opened", number=241))
+        )
+        await first_in_slot.wait()
+        t2 = asyncio.create_task(
+            d._handle_issue_opened(_trigger(kind="issue_opened", number=999))
+        )
+        await asyncio.gather(t1, t2)
+
+    asyncio.run(run_two())
+
+    marks_for_999 = [c for c in calls if c[1] == 999]
+    assert marks_for_999 == [
+        ("mark:queued", 999),
+        ("mark:inflight", 999),
+        ("pipeline", 999),
+        ("clear", 999),
+    ]
 
 
 def test_pipeline_clears_inflight_marker_even_when_pipeline_raises(monkeypatch):
@@ -5149,9 +5271,16 @@ def test_resume_sweep_reruns_pipelines_with_inflight_marker(monkeypatch):
 
     monkeypatch.setattr(SwarmDispatcher, "_issues_with_inflight_marker", fake_scan)
     monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle)
+
+    async def fake_advanced(self, repository, number, resume_started_at):
+        return True
+
+    monkeypatch.setattr(
+        SwarmDispatcher, "_pipeline_advanced_past_triage", fake_advanced
+    )
     summary = asyncio.run(d.resume_interrupted_pipelines(["owner/repo"]))
     assert resumed == [("owner/repo", 230, "issue_opened")]
-    assert summary == {"scanned": 1, "resumed": 1, "failed": 0}
+    assert summary == {"scanned": 1, "resumed": 1, "failed": 0, "stalled": 0}
 
 
 def test_resume_sweep_skips_issues_without_marker(monkeypatch):
@@ -5208,16 +5337,314 @@ def test_resume_sweep_counts_a_failed_resume_without_raising(monkeypatch):
     monkeypatch.setattr(SwarmDispatcher, "_issues_with_inflight_marker", fake_scan)
     monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle)
     summary = asyncio.run(d.resume_interrupted_pipelines(["owner/repo"]))
-    assert summary == {"scanned": 1, "resumed": 0, "failed": 1}
+    assert summary == {"scanned": 1, "resumed": 0, "failed": 1, "stalled": 0}
 
 
 def test_inflight_marker_regex_roundtrip():
     marker = SwarmDispatcher._PIPELINE_INFLIGHT_MARKER.format(
-        started_at="2026-07-17T12:25:53.123456+00:00"
+        started_at="2026-07-17T12:25:53.123456+00:00", stage="inflight"
     )
-    assert SwarmDispatcher._PIPELINE_INFLIGHT_RE.search(marker)
+    m = SwarmDispatcher._PIPELINE_INFLIGHT_RE.search(marker)
+    assert m
+    assert m.group(2) == "inflight"
     # Must not match the sibling fix-round marker.
     assert not SwarmDispatcher._PIPELINE_INFLIGHT_RE.search("<!-- apis-fix-round:2 -->")
+
+
+def test_inflight_marker_regex_matches_queued_stage():
+    marker = SwarmDispatcher._PIPELINE_INFLIGHT_MARKER.format(
+        started_at="2026-07-17T12:25:53.123456+00:00", stage="queued"
+    )
+    m = SwarmDispatcher._PIPELINE_INFLIGHT_RE.search(marker)
+    assert m
+    assert m.group(2) == "queued"
+
+
+def test_inflight_marker_regex_defaults_stage_for_legacy_marker_without_suffix():
+    """A marker written by a daemon build predating ateles#323 has no stage
+    suffix at all; it must still match (group(2) is None, callers default it
+    to "inflight" — today's behavior) rather than becoming invisible to the
+    resume sweep after a mixed-version deploy."""
+    legacy = "<!-- apis-pipeline-inflight:2026-07-17T12:25:53.123456+00:00 -->"
+    m = SwarmDispatcher._PIPELINE_INFLIGHT_RE.search(legacy)
+    assert m
+    assert m.group(2) is None
+
+
+# ── ateles#323: queued-marker durability across restart ─────────────────────
+
+
+def test_queued_marker_survives_restart_and_sweep_dispatches_it(monkeypatch):
+    """ateles#323 regression: a second trigger parked on the single-slot
+    semaphore when the daemon dies must be picked up by the resume sweep on
+    the next boot — via the SAME `issue_opened` entry point a fresh trigger
+    would use, not a special-cased resume path.
+
+    We enqueue two triggers so the second parks on the semaphore (a real
+    1-slot asyncio.Semaphore; the first pipeline's lanius call sleeps to hold
+    the slot open). Mid-park, we simulate the restart: no `async with sem`
+    frame survives a real process restart, so we throw away the first
+    dispatcher instance entirely and construct a NEW one — the second
+    pipeline's coroutine (and its semaphore wait) is gone, exactly as a killed
+    process would lose it. What must survive is the "queued" marker written to
+    GitHub BEFORE the semaphore was even attempted.
+
+    The reconstructed dispatcher's resume sweep must then find that marker and
+    re-dispatch #999 through `_handle_issue_opened`, observed via the actual
+    effect: `_run_issue_spec_pipeline` runs for it (the real triage entry
+    point), not merely that a marker row exists.
+    """
+    # GitHub-side state, keyed by issue number — durable across the
+    # "restart" and scoped per-issue exactly like the real API (clearing
+    # #241's marker on completion must never touch #999's).
+    markers_by_issue: dict[int, str] = {}
+
+    def _stage_of(number):
+        body = markers_by_issue.get(number)
+        if body is None:
+            return None
+        m = SwarmDispatcher._PIPELINE_INFLIGHT_RE.search(body)
+        return (m.group(2) or "inflight") if m else None
+
+    async def fake_mark(self, trigger, *, stage="inflight"):
+        markers_by_issue[trigger.number] = (
+            SwarmDispatcher._PIPELINE_INFLIGHT_MARKER.format(
+                started_at="2026-07-17T12:00:00+00:00", stage=stage
+            )
+        )
+
+    async def fake_clear(self, trigger):
+        markers_by_issue.pop(trigger.number, None)
+
+    first_in_slot = asyncio.Event()
+    pipeline_ran = []
+
+    async def fake_pipeline(self, trigger):
+        pipeline_ran.append(trigger.number)
+        if trigger.number == 241:
+            # First pipeline holds the slot long enough that #999 must queue.
+            first_in_slot.set()
+            await asyncio.sleep(0.05)
+
+    monkeypatch.setattr(SwarmDispatcher, "_mark_pipeline_inflight", fake_mark)
+    monkeypatch.setattr(SwarmDispatcher, "_clear_pipeline_inflight", fake_clear)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_run_issue_spec_pipeline", fake_pipeline
+    )
+
+    cfg = DispatchConfig(
+        neotoma_token="", github_token="", max_concurrent_issue_pipelines=1
+    )
+    dispatcher_before_restart = SwarmDispatcher(_StubNotifier(), cfg)
+
+    async def run_until_parked():
+        t1 = asyncio.create_task(
+            dispatcher_before_restart._handle_issue_opened(
+                _issue_trigger(number=241)
+            )
+        )
+        await first_in_slot.wait()
+        # #999 starts, writes its "queued" marker, then blocks on `sem` — we
+        # deliberately do NOT await it further, simulating the restart killing
+        # the process while it's parked.
+        t2 = asyncio.create_task(
+            dispatcher_before_restart._handle_issue_opened(
+                _issue_trigger(number=999)
+            )
+        )
+        # Give #999's coroutine a tick to reach and write its queued marker
+        # (it blocks on `sem` right after, so this is not itself racy: #999
+        # cannot proceed past the mark until #241 releases the semaphore).
+        await asyncio.sleep(0.01)
+        return t1, t2
+
+    t1, t2 = asyncio.run(run_until_parked())
+    # "Restart": the process dies. Neither task survives; drop them without
+    # awaiting completion (mirrors a killed process, not a graceful shutdown).
+    t1.cancel()
+    t2.cancel()
+
+    # #999's queued marker must have made it to GitHub before the park.
+    assert _stage_of(999) == "queued", (
+        f"expected a queued-stage marker for the parked pipeline; got "
+        f"{markers_by_issue}"
+    )
+
+    pipeline_ran.clear()
+
+    async def fake_scan(self, repository):
+        assert repository == "owner/repo"
+        return [
+            {
+                "number": 999,
+                "title": "queued issue",
+                "body": "b",
+                "user": {"login": "x"},
+                "html_url": "u",
+                "labels": [],
+                "_marker_stage": _stage_of(999),
+            }
+        ]
+
+    monkeypatch.setattr(
+        SwarmDispatcher, "_issues_with_inflight_marker", fake_scan
+    )
+
+    async def fake_advanced(self, repository, number, resume_started_at):
+        return True
+
+    monkeypatch.setattr(
+        SwarmDispatcher, "_pipeline_advanced_past_triage", fake_advanced
+    )
+
+    # New process, new dispatcher instance — nothing from the old one carries
+    # over except what was durably written to GitHub.
+    dispatcher_after_restart = SwarmDispatcher(_StubNotifier(), cfg)
+    summary = asyncio.run(
+        dispatcher_after_restart.resume_interrupted_pipelines(["owner/repo"])
+    )
+
+    assert 999 in pipeline_ran, (
+        "the resumed 'queued' issue must be dispatched through the real "
+        "triage entry point (_run_issue_spec_pipeline), not merely have its "
+        "marker acknowledged"
+    )
+    assert summary["resumed"] == 1
+    assert summary["stalled"] == 0
+
+
+def test_resumed_inflight_pipeline_that_never_advances_is_escalated_not_requeued(
+    monkeypatch,
+):
+    """Second regression for ateles#323: a resumed pipeline whose marker was
+    'inflight' (a lens agent was mid-run) but that produces no phase-2 event
+    (no spec-mirror marker reaches the issue body) must NOT be silently
+    re-queued for the next restart — it must escalate via the stall guard so a
+    repeat-every-boot failure is visible instead of invisible.
+    """
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_scan(self, repository):
+        return [
+            {
+                "number": 555,
+                "title": "stuck issue",
+                "body": "b",
+                "user": {"login": "x"},
+                "html_url": "u",
+                "labels": [],
+                "_marker_stage": "inflight",
+            }
+        ]
+
+    async def fake_handle(self, trigger):
+        # The resumed run "completes" but never reaches the first lens
+        # section — e.g. Lanius hangs/no-ops without ever mirroring a spec.
+        pass
+
+    async def fake_advanced(self, repository, number, resume_started_at):
+        assert (repository, number) == ("owner/repo", 555)
+        return False  # the issue was never touched again after the resume
+
+    monkeypatch.setattr(SwarmDispatcher, "_issues_with_inflight_marker", fake_scan)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_pipeline_advanced_past_triage", fake_advanced
+    )
+
+    summary = asyncio.run(d.resume_interrupted_pipelines(["owner/repo"]))
+
+    assert summary == {"scanned": 1, "resumed": 1, "failed": 0, "stalled": 1}
+    # Escalated to the operator, not silently re-queued.
+    from lib.notify import Priority
+
+    assert any(
+        p == Priority.OPERATOR_DECISION for p in d.notifier.priorities
+    ), d.notifier.sent_full
+
+
+def test_pipeline_advanced_past_triage_true_when_issue_touched_after_resume(
+    monkeypatch,
+):
+    """The issue's `updated_at` moved past the resume start time — the
+    pipeline made real progress (the spec mirror PATCHes the body on every
+    section, bumping `updated_at`)."""
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_fetch(self, repository, number):
+        assert (repository, number) == ("owner/repo", 555)
+        return {"updated_at": "2026-07-17T12:05:00Z"}
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_issue_fields", fake_fetch)
+    resume_started_at = datetime(2026, 7, 17, 12, 0, 0, tzinfo=timezone.utc)
+    result = asyncio.run(
+        d._pipeline_advanced_past_triage("owner/repo", 555, resume_started_at)
+    )
+    assert result is True
+
+
+def test_pipeline_advanced_past_triage_false_when_not_touched_since_resume(
+    monkeypatch,
+):
+    """The issue's `updated_at` predates (or equals) the resume start —
+    nothing happened after this resume began, even if the spec-mirror marker
+    is present in the body from some earlier, unrelated completed run.
+    """
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_fetch(self, repository, number):
+        return {"updated_at": "2026-07-17T11:55:00Z"}
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_issue_fields", fake_fetch)
+    resume_started_at = datetime(2026, 7, 17, 12, 0, 0, tzinfo=timezone.utc)
+    result = asyncio.run(
+        d._pipeline_advanced_past_triage("owner/repo", 555, resume_started_at)
+    )
+    assert result is False
+
+
+def test_pipeline_advanced_past_triage_not_fooled_by_stale_spec_marker(monkeypatch):
+    """Regression for the false-negative found in self-review: checking mere
+    PRESENCE of SPEC_MARKER_START in the body would wrongly read a STALLED
+    resume as 'advanced', because that marker is spliced in and never removed
+    — it persists from any prior completed run on the same issue regardless
+    of whether the CURRENT resume made progress. A body containing the marker
+    but an `updated_at` that predates the resume must still report False.
+    """
+    from issue_spec import SPEC_MARKER_START
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_fetch(self, repository, number):
+        return {
+            "updated_at": "2026-07-17T09:00:00Z",  # long before this resume
+            "body": f"some text\n{SPEC_MARKER_START}\nold spec\n<!-- swarm-spec:end -->",
+        }
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_issue_fields", fake_fetch)
+    resume_started_at = datetime(2026, 7, 17, 12, 0, 0, tzinfo=timezone.utc)
+    result = asyncio.run(
+        d._pipeline_advanced_past_triage("owner/repo", 555, resume_started_at)
+    )
+    assert result is False, (
+        "a stale spec-mirror marker from a prior run must not mask a stalled "
+        "resume as having advanced"
+    )
+
+
+def test_pipeline_advanced_past_triage_fails_open_on_fetch_error(monkeypatch):
+    d = SwarmDispatcher(_StubNotifier(), _config())
+
+    async def fake_fetch(self, repository, number):
+        return None
+
+    monkeypatch.setattr(SwarmDispatcher, "_fetch_issue_fields", fake_fetch)
+    result = asyncio.run(
+        d._pipeline_advanced_past_triage(
+            "owner/repo", 555, datetime.now(timezone.utc)
+        )
+    )
+    assert result is True
 
 
 # ── push_main → release prepare (auto-release trigger) ─────────────────────
@@ -5995,3 +6422,42 @@ def test_handle_pr_still_comments_when_no_verdict_anywhere(monkeypatch):
     asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
     assert ("review", "COMMENT") in calls, calls
     assert any(c[0] == "route" for c in calls), calls
+
+
+# ── Vanellus merge authorization tracks APIS_AUTONOMY_AUTO_MERGE (ateles#333) ──
+#
+# Regression guard for a real defect: _vanellus_prompt injected an unconditional
+# "DO NOT MERGE ... This overrides any merge instruction in your standing
+# protocol" while _gate_merge_readiness returns EARLY when auto_merge is on (so
+# no checkpoint is filed either). With the flag on, the dispatcher stepped aside
+# expecting Vanellus to merge while simultaneously forbidding it — nothing
+# merged and nothing was escalated, strictly worse than the flag being off.
+
+
+def test_vanellus_prompt_forbids_merge_when_auto_merge_off():
+    prompt = swarm_dispatch.SwarmDispatcher._vanellus_prompt(
+        _trigger(), 80, ["pm"], None, auto_merge=False
+    )
+    assert "DO NOT MERGE" in prompt
+    assert "operator-gated" in prompt
+    assert "YOU MAY MERGE" not in prompt
+
+
+def test_vanellus_prompt_authorizes_merge_when_auto_merge_on():
+    prompt = swarm_dispatch.SwarmDispatcher._vanellus_prompt(
+        _trigger(), 80, ["pm"], None, auto_merge=True
+    )
+    assert "YOU MAY MERGE" in prompt
+    # The unconditional prohibition must be gone, or the flag is inert.
+    assert "DO NOT MERGE. Merge is operator-gated" not in prompt
+    # Hard stops must still be stated so autonomy is bounded, not blanket.
+    assert "gate inheritance" in prompt
+    assert "branch-protection" in prompt
+    assert "APPROVE with Blocking: 0" in prompt
+    assert "Releases remain human-gated" in prompt
+
+
+def test_vanellus_prompt_defaults_to_forbidding_merge():
+    # Omitting the parameter must fail closed, not open.
+    prompt = swarm_dispatch.SwarmDispatcher._vanellus_prompt(_trigger(), 80, ["pm"])
+    assert "DO NOT MERGE" in prompt

@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import pytest
+
 from lib.daemon_runtime.gating import (
+    DEFAULT_CLOSED_BOUNDARIES,
     BlastRadius,
+    CheckpointPosture,
     ExecutionPolicy,
     GateAction,
+    InvalidCheckpointPosture,
+    _parse_policy,
     evaluate_gate,
     read_checkpoint_resolution,
 )
@@ -154,3 +160,107 @@ def test_checkpoint_already_dispatched():
     assert checkpoint_already_dispatched({"resolved_dispatched": False}) is False
     assert checkpoint_already_dispatched({}) is False
     assert checkpoint_already_dispatched({"resolved_dispatched": None}) is False
+
+
+# ── checkpoint posture (ateles#350) ─────────────────────────────────────────
+
+
+def test_posture_absent_field_defaults_to_open_for_unlisted_boundary():
+    pol = ExecutionPolicy(entity_id="p", loaded=True)
+    assert pol.posture_for("issue.triaged") == CheckpointPosture.OPEN
+    assert pol.posture_for(None) == CheckpointPosture.OPEN
+    assert pol.posture_for("totally_unknown_boundary") == CheckpointPosture.OPEN
+
+
+def test_posture_default_closed_boundaries():
+    pol = ExecutionPolicy(entity_id="p", loaded=True)
+    for boundary in DEFAULT_CLOSED_BOUNDARIES:
+        assert pol.posture_for(boundary) == CheckpointPosture.CLOSED
+    assert DEFAULT_CLOSED_BOUNDARIES == {
+        "pre_payment",
+        "pre_release",
+        "pre_comms",
+        "pre_irreversible",
+        "pre_merge",
+    }
+
+
+def test_posture_explicit_override_wins_over_default():
+    pol = ExecutionPolicy(
+        entity_id="p",
+        checkpoint_postures={"pre_merge": CheckpointPosture.OPEN},
+        loaded=True,
+    )
+    assert pol.posture_for("pre_merge") == CheckpointPosture.OPEN
+
+    pol2 = ExecutionPolicy(
+        entity_id="p",
+        checkpoint_postures={"issue.triaged": CheckpointPosture.CLOSED},
+        loaded=True,
+    )
+    assert pol2.posture_for("issue.triaged") == CheckpointPosture.CLOSED
+
+
+def test_posture_is_case_insensitive_on_boundary_name():
+    pol = ExecutionPolicy(
+        entity_id="p",
+        checkpoint_postures={"pre_merge": CheckpointPosture.OPEN},
+        loaded=True,
+    )
+    assert pol.posture_for("PRE_MERGE") == CheckpointPosture.OPEN
+    assert pol.posture_for(" Pre_Merge ") == CheckpointPosture.OPEN
+
+
+def test_parse_policy_reads_checkpoint_postures_from_snapshot():
+    data = {
+        "snapshot": {
+            "checkpoint_postures": {"pre_merge": "closed", "issue.triaged": "open"}
+        }
+    }
+    pol = _parse_policy("ent_x", data)
+    assert pol.posture_for("pre_merge") == CheckpointPosture.CLOSED
+    assert pol.posture_for("issue.triaged") == CheckpointPosture.OPEN
+
+
+def test_parse_policy_accepts_json_string_checkpoint_postures():
+    data = {"snapshot": {"checkpoint_postures": '{"pre_merge": "closed"}'}}
+    pol = _parse_policy("ent_x", data)
+    assert pol.posture_for("pre_merge") == CheckpointPosture.CLOSED
+
+
+def test_parse_policy_hard_fails_on_invalid_posture_value():
+    data = {"snapshot": {"checkpoint_postures": {"pre_merge": "fail_open"}}}
+    with pytest.raises(InvalidCheckpointPosture):
+        _parse_policy("ent_x", data)
+
+
+def test_parse_policy_missing_checkpoint_postures_is_empty_and_additive():
+    # No behavior change for policies that never set checkpoint_postures at
+    # all: only the DEFAULT_CLOSED_BOUNDARIES set applies, everything else
+    # resolves open exactly like before #350.
+    data = {"snapshot": {}}
+    pol = _parse_policy("ent_x", data)
+    assert pol.checkpoint_postures == {}
+    assert pol.posture_for("issue.triaged") == CheckpointPosture.OPEN
+    assert pol.posture_for("pre_merge") == CheckpointPosture.CLOSED
+
+
+def test_load_policy_degrades_to_fallback_on_invalid_posture(monkeypatch):
+    # A live policy entity with a typo'd checkpoint_postures value must NOT
+    # crash load_policy()'s callers (core task dispatch, CI-failure handling,
+    # ...) — it degrades to the same conservative fallback used for an
+    # unreachable policy, per load_policy()'s "never raises, fails closed"
+    # contract. Regression for the #350 self-review finding: _parse_policy
+    # raising InvalidCheckpointPosture was previously unguarded here.
+    import lib.daemon_runtime.gating as gating_mod
+
+    monkeypatch.setattr(
+        gating_mod,
+        "_fetch_entity",
+        lambda pid: {"snapshot": {"checkpoint_postures": {"pre_merge": "fail_open"}}},
+    )
+    pol = gating_mod.load_policy("ent_bad_policy")
+    assert pol.loaded is False
+    assert pol.entity_id == "ent_bad_policy"
+    # Still resolves postures safely via the DEFAULT_CLOSED_BOUNDARIES fallback.
+    assert pol.posture_for("pre_merge") == CheckpointPosture.CLOSED

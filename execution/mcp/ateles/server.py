@@ -208,9 +208,18 @@ ROLE_TIE_BREAK: tuple[str, ...] = (
     "payments",
     "tax",
     "release_manager",
+    # `legal` outranks `compliance`: both can match a risk-flavoured
+    # description, and misrouting a legal judgment to conformance review is the
+    # more costly direction — compliance answers "does this meet the standard",
+    # which is the wrong question when someone asks whether they may act at all.
+    "legal",
     "compliance",
     "pr_steward",
     "issue_triage",
+    # `architect` above `qa`/`code`: an interface or schema change wants the
+    # arch judgment before implementation or coverage review, matching the gate
+    # order the swarm already enforces (arch signs off before impl).
+    "architect",
     "qa",
     "code",
 )
@@ -278,6 +287,20 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
     # not by position in this table. Grouping here is for readability only.
     role_keywords: dict[str, list[str]] = {
         "pr_steward": ["review pr", "merge pr", "pull request review"],
+        # `architect` (waxwing) had no entry at all, so every architecture
+        # review fell through to the dispatcher — the most-trafficked review
+        # path in the swarm silently unrouted. Keywords favour the review/design
+        # framing over the bare word "architecture", which appears incidentally
+        # in many descriptions that are not requests for an arch judgment.
+        "architect": [
+            "architectural",
+            "architecture review",
+            "arch review",
+            "design review",
+            "contract-first",
+            "schema design",
+            "interface change",
+        ],
         "issue_triage": ["issue", "bug report", "github issue", "triage issue"],
         "email_triage": ["email", "inbox", "triage email", "mail"],
         "financial_analysis": ["financial analysis", "revenue", "forecast"],
@@ -286,7 +309,19 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
         "release_manager": ["release", "deploy", "version"],
         "recurring_tasks": ["recurring", "scheduled task", "cron"],
         "neotoma_repo": ["neotoma", "neotoma repo"],
-        "compliance": ["compliance", "legal review", "contract"],
+        # `legal` (buteo) and `compliance` (robin) are distinct roster roles and
+        # were previously indistinguishable: compliance claimed "contract", so
+        # "is this contract change legally risky" routed confidently to
+        # compliance. A confident wrong match is worse than no match — a
+        # fallback at least signals uncertainty via `matched_via`, while this
+        # looked identical to a correct route. Legal owns the judgment calls
+        # (is this risky, may we say this); compliance owns conformance to a
+        # stated standard.
+        "legal": ["legal", "legally", "liability", "licence", "license", "terms of service"],
+        "compliance": ["compliance", "regulatory", "gdpr", "conformance"],
+        # "contract" is deliberately claimed by neither: it is ambiguous across a
+        # legal agreement, an API contract, and a contractor engagement. Left
+        # unmatched it reaches the dispatcher, which is the honest answer.
         "screenshots": ["screenshot", "capture screen"],
         "designer": ["design", "mockup", "wireframe", "ui ", "ux "],
         "content": ["blog", "write post", "content", "article"],
