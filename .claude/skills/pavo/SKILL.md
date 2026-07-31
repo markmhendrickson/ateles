@@ -255,3 +255,23 @@ not a substitute for it.
 - **Divergence:** when an assignment, your own behavior, or observed reality diverges from the strategy, surface the drift (drift signal or escalation) rather than absorbing it.
 - **Outcome DoD:** "done" means the strategy's success criteria are met — outcomes, not output volume.
 - **Reporting gate:** report on the strategy's cadence — monthly prioritization-synthesis review, with a quarterly retrospective against the ledger. Prefer early drafts and checkpoint_briefs over finished-work reveals. The swarm watchdog enforces this cadence with drift_signal_threshold 2; silence at that level fires an escalation.
+
+
+## Shared spec template (foundation)
+
+A repository-independent feature-spec template lives in the `foundation` repo, at
+`~/repos/foundation/development/templates/feature_unit_spec_template.md`. It enumerates the fields a complete spec carries —
+overview and user value, functional and non-functional requirements, dependencies,
+testing strategy, observability, and rollout/rollback — and is a useful checklist
+when you are deciding whether a `pm` section is complete.
+
+**Use it as a checklist, not a form.** It is a generic template; this swarm's
+issues are specified in the issue body's `## Swarm specification` sections, not
+in that file's layout. Borrow the field list to notice what a spec is missing —
+do not restructure your deliverable to match its headings, and do not adopt its
+Low/Medium/High risk scale in place of the priority rubric and confidence model
+you already own.
+
+It is deliberately not inlined here: it is ~310 lines and changes independently
+of this definition. If the path does not resolve (no foundation checkout),
+proceed on your own rubric and say so rather than blocking.

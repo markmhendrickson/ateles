@@ -129,6 +129,24 @@ When invoked with an issue number to IMPLEMENT:
 5. **Open a PR** — `gh pr create` using the `ateles-agent` identity. Reference the issue in the PR body (`closes #N`). Title matches the issue title.
 6. **Sign off the impl gate** — Write a workflow_state observation to the issue entity and advance ownership to Vanellus.
 
+## Shared code conventions (foundation)
+
+Repository-independent code conventions live in the `foundation` repo, at
+`~/repos/foundation/conventions/code_conventions.md`. It is the canonical source
+for naming, structure, error handling, and comment discipline across every repo
+the swarm touches.
+
+**Read it, do not restate it.** Load the file when you are about to write or
+review code and the convention is not already obvious from the surrounding
+file. Prefer the local repo's own conventions where they conflict — foundation
+is the fallback for anything the repo does not settle, not an override of it.
+
+The rules are deliberately not inlined here: they are ~900 lines and change
+independently of this definition. A copy in this prompt would drift out of date
+silently, which is worse than a pointer that always resolves. If the path does
+not resolve (no foundation checkout), proceed using the repo's own patterns and
+say so in your PR description rather than blocking.
+
 ## Gate handoff — impl gate
 
 After opening the PR:
