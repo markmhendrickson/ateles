@@ -32,11 +32,20 @@ Environment variables:
   APIS_AGENT_DEFINITION_ID    Neotoma entity ID for Apis's agent_definition (optional)
   APIS_DRY_RUN                Set to "1" to log events without dispatching agents
   APIS_AUTO_EXECUTE           Set to "1" to auto-execute due tasks (default: notify only)
-  APIS_CLAUDE_BIN             Path to the claude CLI (default: autodetect on PATH)
-  CLAUDE_CODE_OAUTH_TOKEN     Claude subscription token (claude setup-token).
-                              When set, spawned `claude --print` children bill the
-                              operator's Max plan and ANTHROPIC_API_KEY is dropped
-                              from the child env; absent, falls back to API key.
+  APIS_HARNESS_PROVIDERS      Ordered subscription-backed CLIs to balance across
+                              (default: claude,codex,cursor).
+  APIS_HARNESS_HEADROOM       JSON estimates of remaining bundled-plan capacity,
+                              e.g. {"claude":0.2,"codex":0.8,"cursor":0.6}.
+  APIS_HARNESS_HEADROOM_FILE  Live JSON override read before every dispatch
+                              (default: ~/.config/ateles/harness-headroom.json).
+  APIS_HARNESS_MIN_HEADROOM   Hold out providers at/below this score (default: .05).
+  APIS_HARNESS_COOLDOWN_SECONDS
+                              Hold-out after quota/auth/launch failure (default: 3600).
+  APIS_CLAUDE_BIN             Claude CLI path (default: autodetect on PATH).
+  APIS_CODEX_BIN              Codex CLI path (defaults to ChatGPT app, then PATH).
+  APIS_CURSOR_BIN             Cursor Agent CLI path (default: cursor-agent on PATH).
+  APIS_ALLOW_METERED_HARNESS  "1" permits usage-based API-key fallback. Default 0:
+                              API keys are removed and capped plans fail over/queue.
   APIS_DISPATCH_TIMEOUT       Per-dispatch timeout in seconds (default: 1800)
   ATELES_REPO_PATH            Local path to ateles clone (default: ~/repos/ateles)
 
@@ -54,7 +63,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -256,10 +264,6 @@ RUN_EMAIL = os.environ.get("APIS_RUN_EMAIL", "0") == "1"
 # and email the operator the specific gaps instead of executing. Default off.
 READINESS_GATE = os.environ.get("APIS_READINESS_GATE", "0") == "1"
 
-# Path to the Claude CLI binary used to spawn T4 agents. Set by env var or
-# auto-detected from PATH. If absent, dispatch falls back to log-only.
-CLAUDE_BIN = os.environ.get("APIS_CLAUDE_BIN") or shutil.which("claude")
-
 # Dispatch timeout per agent invocation (seconds).
 DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
 
@@ -274,8 +278,9 @@ GITHUB_WEBHOOK_SECRET = os.environ.get("APIS_GITHUB_WEBHOOK_SECRET", "")
 # gateway (a2a_executor.py) so inbound A2A tasks and SSE-sourced tasks route
 # through one source of truth. Tags are inferred from the task title/body
 # (neotoma-agent's due-date hygiene may set them first; Apis falls back to
-# local inference). Each tag maps to a T4 skill dispatched via `claude --print`
-# (see _spawn_claude_skill). Set APIS_DRY_RUN=1 to log intent without spawning.
+# local inference). Each tag maps to a T4 skill dispatched through the
+# quota-aware Claude/Codex/Cursor runner (see _spawn_harness_skill).
+# Set APIS_DRY_RUN=1 to log intent without spawning.
 
 from routing import (  # noqa: E402
     infer_tags_from_text as _infer_tags_from_text,
@@ -292,7 +297,7 @@ from task_watchdog import TaskWatchdog  # noqa: E402
 # ── T4 dispatch ────────────────────────────────────────────────────────────────
 
 
-async def _spawn_claude_skill(
+async def _spawn_harness_skill(
     skill: str,
     entity_id: str,
     snapshot: dict,
@@ -318,7 +323,7 @@ async def _spawn_claude_skill(
     title = snapshot.get("title", "(untitled)")
     body = snapshot.get("body", "") or snapshot.get("description", "")
     prompt = (
-        f"Invoke the {skill} agent per your appended system prompt.\n\n"
+        f"Invoke the {skill} agent per the supplied system and skill instructions.\n\n"
         f"Task {entity_id} (trigger={trigger}): {title}\n\n"
         f"{body}".strip()
     )
@@ -350,7 +355,7 @@ async def dispatch_task(
     gate_override: bool = False,
 ) -> None:
     """
-    Route a task to the appropriate T4 skill and spawn it via `claude --print`.
+    Route a task to the appropriate T4 skill and spawn it via a bundled-plan CLI.
 
     Applies the confidence × blast-radius execution gate before spawning: a
     non-auto-execute decision writes a blocking checkpoint_brief and notifies the
@@ -582,7 +587,7 @@ async def dispatch_task(
                stage="kickoff")
 
     try:
-        result = await _spawn_claude_skill(
+        result = await _spawn_harness_skill(
             skill, entity_id, snapshot, trigger, notifier, role=role,
             run_conversation_id=run_conversation_id,
         )
@@ -799,7 +804,8 @@ async def main() -> None:
     log.info(f"[{DAEMON_NAME}] ateles_repo={ATELES_REPO}")
     log.info(
         f"[{DAEMON_NAME}] dry_run={DRY_RUN} auto_execute={AUTO_EXECUTE} "
-        f"claude_bin={CLAUDE_BIN or '<none>'} dispatch_timeout={DISPATCH_TIMEOUT_SECONDS}s"
+        f"harness_providers={os.environ.get('APIS_HARNESS_PROVIDERS', 'claude,codex,cursor')} "
+        f"dispatch_timeout={DISPATCH_TIMEOUT_SECONDS}s"
     )
 
     # 1. Load agent_definition from Neotoma

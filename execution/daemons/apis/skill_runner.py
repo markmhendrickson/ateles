@@ -1,11 +1,12 @@
 """
-execution/daemons/apis/skill_runner.py — spawn a T4 agent via `claude --print`.
+execution/daemons/apis/skill_runner.py — spawn a T4 agent via a bundled-plan CLI.
 
-Single implementation of the spawn pattern previously inlined in apis.py (and
-mirrored in Formica): `claude --print --append-system-prompt <SKILL.md>` with
-the work prompt piped on stdin. Extracted so the GitHub trigger pipelines
-(swarm_dispatch.py) can reuse it and capture agent output for the review
-learning loop.
+Single implementation of the spawn pattern previously inlined in apis.py. A
+quota-aware router selects among Claude Code, Codex, and Cursor Agent, all using
+the operator's subscription login; usage-based API credentials are removed from
+the child environment unless the operator explicitly enables metered fallback.
+The GitHub trigger pipelines (swarm_dispatch.py) reuse this implementation and
+capture agent output for the review learning loop.
 
 Stage 1 (ateles#94): loads the dispatched role's agent_definition from Neotoma
 so the spawned subprocess gets the role's canonical system prompt prepended to
@@ -55,10 +56,22 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
         sys.path.insert(0, _p)
 
 from lib.daemon_runtime import AgentDefinition, AgentLoader  # noqa: E402
+from harness_router import (  # noqa: E402
+    cool_down,
+    cooling_providers,
+    provider_candidates,
+)
 
 log = logging.getLogger("apis.skill_runner")
 
 CLAUDE_BIN = os.environ.get("APIS_CLAUDE_BIN") or shutil.which("claude")
+_CODEX_APP_BIN = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
+CODEX_BIN = (
+    os.environ.get("APIS_CODEX_BIN")
+    or (str(_CODEX_APP_BIN) if _CODEX_APP_BIN.is_file() else None)
+    or shutil.which("codex")
+)
+CURSOR_BIN = os.environ.get("APIS_CURSOR_BIN") or shutil.which("cursor-agent")
 DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
 ATELES_REPO = Path(
     os.environ.get("ATELES_REPO_PATH", str(Path.home() / "repos" / "ateles"))
@@ -616,15 +629,141 @@ class SkillResult:
     stdout: str
     stderr: str
     error: str = ""  # non-process failure: missing binary / SKILL.md / timeout
+    provider: str = ""
+    attempted_providers: tuple[str, ...] = ()
 
 
-# ── Main runner ────────────────────────────────────────────────────────────────
+# ── Harness adapters + capacity detection ─────────────────────────────────────
+
+_CAPACITY_FAILURE_SIGNATURES = (
+    "usage limit",
+    "rate limit reached",
+    "rate_limit_error",
+    "you've hit your limit",
+    "you have hit your limit",
+    "weekly limit",
+    "session limit",
+    "maximum usage",
+    "quota exceeded",
+    "out of requests",
+    "no requests remaining",
+    "resets at",
+    "resets in",
+)
+
+_AUTH_FAILURE_SIGNATURES = (
+    "invalid authentication credentials",
+    "could not resolve authentication",
+    "oauth token has expired",
+    "authentication_error",
+    "authentication required",
+    "please run /login",
+    "please run `claude auth login`",
+    "please run 'agent login'",
+    "invalid api key",
+    "not logged in",
+    "login required",
+)
+
+_METERED_CREDENTIALS = (
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "CURSOR_API_KEY",
+)
 
 
-async def run_skill(
+def _provider_binaries() -> dict[str, str | None]:
+    return {
+        "claude": CLAUDE_BIN,
+        "codex": CODEX_BIN,
+        "cursor": CURSOR_BIN,
+    }
+
+
+def _provider_failure_kind(*texts: str) -> str | None:
+    """Classify failures that are safe to retry on another harness."""
+    blob = " ".join(text for text in texts if text).lower()
+    if any(signature in blob for signature in _CAPACITY_FAILURE_SIGNATURES):
+        return "capacity"
+    if any(signature in blob for signature in _AUTH_FAILURE_SIGNATURES):
+        return "auth"
+    return None
+
+
+def _provider_command(
+    provider: str,
+    binary: str,
+    system_prompt: str,
+    work_prompt: str,
+    *,
+    cwd: str | None,
+) -> tuple[list[str], bytes | None]:
+    """Build one provider's noninteractive command and initial stdin payload."""
+    if provider == "claude":
+        return [binary, "--print", "--append-system-prompt", system_prompt], None
+
+    composite_prompt = (
+        f"{system_prompt}\n\n"
+        "---\n\n"
+        "## Dispatched task\n\n"
+        f"{work_prompt}"
+    )
+    if provider == "codex":
+        return (
+            [
+                binary,
+                "exec",
+                "--sandbox",
+                "workspace-write",
+                "--ephemeral",
+                "--skip-git-repo-check",
+                "--color",
+                "never",
+                *(["--cd", cwd] if cwd else []),
+                "-",
+            ],
+            composite_prompt.encode(),
+        )
+    if provider == "cursor":
+        return (
+            [
+                binary,
+                "--print",
+                "--force",
+                "--trust",
+                "--approve-mcps",
+                "--output-format",
+                "text",
+                *(["--workspace", cwd] if cwd else []),
+                composite_prompt,
+            ],
+            None,
+        )
+    raise ValueError(f"unsupported harness provider: {provider}")
+
+
+def _subscription_only_env(
+    env_extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build a child env that cannot silently spill into metered API billing."""
+    child = {**os.environ, **(env_extra or {})}
+    if child.get("APIS_ALLOW_METERED_HARNESS", "0") != "1":
+        for key in _METERED_CREDENTIALS:
+            child.pop(key, None)
+    elif child.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
+        # Even under the explicit override, prefer Max-plan OAuth for Claude.
+        child.pop("ANTHROPIC_API_KEY", None)
+    return child
+
+
+# ── Single-provider runner ─────────────────────────────────────────────────────
+
+
+async def _run_skill_once(
     skill: str,
     prompt: str,
     *,
+    provider: str,
     role: str | None = None,
     task_entity_id: str = "",
     timeout: int | None = None,
@@ -661,8 +800,9 @@ async def run_skill(
     False (the default) for all SSE/non-GitHub task dispatches so the contract never
     appears in payment, health, finance, or other non-GitHub work.
 
-    `claude --print` tool-allowlist flag: --allowed-tools (confirmed present;
-    accepts comma- or space-separated tool names, e.g. "Bash,Edit,Read").
+    Claude's `--allowed-tools` and injected Neotoma MCP config remain specific
+    to the Claude adapter. Codex and Cursor receive the same system + skill
+    instructions as a composite prompt and use their ambient configured tools.
 
     ``cwd`` (QE3 — eval-authoring affordance): when supplied, the dispatched
     child subprocess runs with this working directory instead of inheriting the
@@ -677,21 +817,33 @@ async def run_skill(
     # ── Load agent_definition (Stage 1) ───────────────────────────────────────
     agent_def = await asyncio.to_thread(_load_agent_def, _role)
 
-    if CLAUDE_BIN is None:
-        msg = "claude binary unavailable (APIS_CLAUDE_BIN unset, not on PATH)"
+    binary = _provider_binaries().get(provider)
+    if binary is None:
+        msg = (
+            f"{provider} binary unavailable "
+            f"(APIS_{provider.upper()}_BIN unset, not on PATH)"
+        )
         log.warning(f"[apis] {skill} dispatch skipped — {msg}")
-        return SkillResult(skill, False, None, "", "", error=msg)
+        return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
     skill_path = ATELES_REPO / ".claude" / "skills" / skill / "SKILL.md"
     if not skill_path.exists():
         msg = f"SKILL.md not found at {skill_path}"
         log.error(f"[apis] {skill} dispatch skipped — {msg}")
-        return SkillResult(skill, False, None, "", "", error=msg)
+        return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
     try:
         skill_md = skill_path.read_text(encoding="utf-8")
     except OSError as exc:
-        return SkillResult(skill, False, None, "", "", error=f"read failed: {exc}")
+        return SkillResult(
+            skill,
+            False,
+            None,
+            "",
+            "",
+            error=f"read failed: {exc}",
+            provider=provider,
+        )
 
     # ── Build system prompt (Stage 1 + Stage 5) ────────────────────────────────
     system_prompt, degraded = build_system_prompt(
@@ -722,7 +874,7 @@ async def run_skill(
                 role=_role,
                 agent_sub=agent_def.aauth_sub,
                 event_type="subprocess",
-                tool_name=skill,
+                tool_name=f"{provider}:{skill}",
                 success="partial",
                 input_summary=_title_hint,
                 output_summary="degraded_generic_subagent",
@@ -730,8 +882,10 @@ async def run_skill(
         except Exception as exc:
             log.debug(f"[apis] degraded harness_event write failed: {exc}")
 
-    # ── Build command (Stage 1: tool allowlist) ────────────────────────────────
-    cmd = [CLAUDE_BIN, "--print", "--append-system-prompt", system_prompt]
+    # ── Build provider command ─────────────────────────────────────────────────
+    cmd, stdin_payload = _provider_command(
+        provider, binary, system_prompt, prompt, cwd=cwd
+    )
 
     # ── Stage 6: inject Neotoma MCP config so dispatched child can reach Neotoma ─
     # Dispatched `claude --print` children inherit the ambient Claude MCP config,
@@ -760,40 +914,46 @@ async def run_skill(
     #   the config to a mode-0600 temp file and pass the file path to --mcp-config.
     #   The temp file is cleaned up in a try/finally after the subprocess exits.
     _mcp_tmp_path: str | None = None
-    _neotoma_base = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180").rstrip(
-        "/"
-    )
-    _neotoma_token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
-    _mcp_cfg: dict = {
-        "mcpServers": {
-            "mcpsrv_neotoma": {
-                "type": "http",
-                "url": f"{_neotoma_base}/mcp",
+    if provider == "claude":
+        _neotoma_base = os.environ.get(
+            "NEOTOMA_BASE_URL", "http://localhost:9180"
+        ).rstrip("/")
+        _neotoma_token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
+        _mcp_cfg: dict = {
+            "mcpServers": {
+                "mcpsrv_neotoma": {
+                    "type": "http",
+                    "url": f"{_neotoma_base}/mcp",
+                }
             }
         }
-    }
-    if _neotoma_token:
-        _mcp_cfg["mcpServers"]["mcpsrv_neotoma"]["headers"] = {
-            "Authorization": f"Bearer {_neotoma_token}"
-        }
+        if _neotoma_token:
+            _mcp_cfg["mcpServers"]["mcpsrv_neotoma"]["headers"] = {
+                "Authorization": f"Bearer {_neotoma_token}"
+            }
 
-    # Write the MCP config to a mode-0600 temp file to avoid argv exposure.
-    try:
-        fd, _mcp_tmp_path = tempfile.mkstemp(suffix=".json", prefix="apis_mcp_")
-        os.chmod(_mcp_tmp_path, 0o600)
-        with os.fdopen(fd, "w") as _f:
-            json.dump(_mcp_cfg, _f)
-        cmd += ["--mcp-config", _mcp_tmp_path]
-        log.debug(
-            f"[apis] Injected --mcp-config {_mcp_tmp_path} (mcpsrv_neotoma HTTP MCP)"
-        )
-    except Exception as exc:
-        # Non-fatal: proceed without the MCP config injection rather than abort.
-        log.warning(f"[apis] Could not write MCP config temp file (non-fatal): {exc}")
-        _mcp_tmp_path = None
+        # Write the MCP config to a mode-0600 temp file to avoid argv exposure.
+        try:
+            fd, _mcp_tmp_path = tempfile.mkstemp(
+                suffix=".json", prefix="apis_mcp_"
+            )
+            os.chmod(_mcp_tmp_path, 0o600)
+            with os.fdopen(fd, "w") as _f:
+                json.dump(_mcp_cfg, _f)
+            cmd += ["--mcp-config", _mcp_tmp_path]
+            log.debug(
+                f"[apis] Injected --mcp-config {_mcp_tmp_path} "
+                "(mcpsrv_neotoma HTTP MCP)"
+            )
+        except Exception as exc:
+            # Non-fatal: proceed without injection rather than abort.
+            log.warning(
+                f"[apis] Could not write MCP config temp file (non-fatal): {exc}"
+            )
+            _mcp_tmp_path = None
 
     tools = agent_def.tools  # property: list[str]; ['*'] means all
-    if tools != ["*"]:
+    if provider == "claude" and tools != ["*"]:
         # --allowed-tools is confirmed present in `claude --print --help`
         # (alias: --allowedTools). Accepts comma- or space-separated tool names.
         # MCP server tools use the "mcp__<servername>__*" wildcard form, where the
@@ -806,13 +966,13 @@ async def run_skill(
         allowed = ",".join(allowed_list)
         cmd += ["--allowed-tools", allowed]
         log.info(
-            f"[apis] Spawning: claude --print --append-system-prompt "
+            f"[apis] Spawning via {provider}: "
             f"<{_role}:agent_def+{skill}.SKILL.md> "
             f"--allowed-tools {allowed} timeout={timeout}s"
         )
     else:
         log.info(
-            f"[apis] Spawning: claude --print --append-system-prompt "
+            f"[apis] Spawning via {provider}: "
             f"<{_role}:{'agent_def+' if not degraded else 'degraded-'}{skill}.SKILL.md> "
             f"timeout={timeout}s"
         )
@@ -825,26 +985,17 @@ async def run_skill(
             role=_role,
             agent_sub=agent_def.aauth_sub,
             event_type="subprocess",
-            tool_name=skill,
+            tool_name=f"{provider}:{skill}",
             success="partial",  # "partial" = in-flight / started
             input_summary=prompt[:200],
         )
     except Exception as exc:
         log.debug(f"[apis] start harness_event write failed (non-fatal): {exc}")
 
-    subprocess_env = {**os.environ, **(env_extra or {})}
-
-    # Anthropic auth for the spawned `claude --print`: prefer the operator's
-    # Claude subscription (Max plan) over metered pay-as-you-go API credits.
-    # `claude setup-token` mints a long-lived subscription token exposed as
-    # CLAUDE_CODE_OAUTH_TOKEN; when it is present we hand it to the child and
-    # REMOVE ANTHROPIC_API_KEY from the child's env — if both are set the API
-    # key wins and the child bills metered credits (the exact failure that
-    # exhausted the panel's balance). When the OAuth token is absent we leave
-    # ANTHROPIC_API_KEY in place (graceful fallback — child still authenticates,
-    # just on metered credits), so this is a no-op until the token is provisioned.
-    if subprocess_env.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
-        subprocess_env.pop("ANTHROPIC_API_KEY", None)
+    # Hard boundary from the approved plan: all three adapters use bundled
+    # subscription auth by default. API-key credentials are removed so a capped
+    # plan queues/fails over instead of silently spending metered tokens.
+    subprocess_env = _subscription_only_env(env_extra)
 
     # ateles#109 — per-agent GitHub identity: when the caller resolved a
     # per-agent token (e.g. via _token_for_agent_on_repo in swarm_dispatch),
@@ -878,19 +1029,40 @@ async def run_skill(
                 )
 
     _start_ns = time.monotonic_ns()
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=subprocess_env,
-        cwd=cwd,  # QE3: qa lens runs in a PR-branch worktree; None = inherit daemon dir
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=subprocess_env,
+            cwd=cwd,  # QE3: qa lens runs in a PR-branch worktree
+        )
+    except OSError as exc:
+        if _mcp_tmp_path is not None:
+            try:
+                os.unlink(_mcp_tmp_path)
+            except OSError:
+                pass
+        msg = f"{provider} launch failed: {exc}"
+        log.warning(f"[apis] {skill} dispatch skipped — {msg}")
+        return SkillResult(
+            skill,
+            False,
+            None,
+            "",
+            "",
+            error=msg,
+            provider=provider,
+        )
 
     try:
         try:
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(input=prompt.encode()), timeout=timeout
+                proc.communicate(
+                    input=stdin_payload if stdin_payload is not None else prompt.encode()
+                ),
+                timeout=timeout,
             )
         except asyncio.TimeoutError:
             proc.kill()
@@ -907,7 +1079,7 @@ async def run_skill(
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
-                    tool_name=skill,
+                    tool_name=f"{provider}:{skill}",
                     success="false",
                     output_summary=f"timeout after {timeout}s",
                     duration_ms=duration_ms,
@@ -926,7 +1098,15 @@ async def run_skill(
                 task_entity_id=task_entity_id,
             )
 
-            return SkillResult(skill, False, None, "", "", error=msg)
+            return SkillResult(
+                skill,
+                False,
+                None,
+                "",
+                "",
+                error=msg,
+                provider=provider,
+            )
 
         duration_ms = int((time.monotonic_ns() - _start_ns) / 1_000_000)
         result = SkillResult(
@@ -935,6 +1115,7 @@ async def run_skill(
             returncode=proc.returncode,
             stdout=stdout.decode("utf-8", errors="replace"),
             stderr=stderr.decode("utf-8", errors="replace"),
+            provider=provider,
         )
 
         # ── Dropped-allowlist-rule notification (ateles#255) ──────────────────────
@@ -943,8 +1124,10 @@ async def run_skill(
         # per dispatch, not one per rule. Off-loaded to a thread (like the
         # harness_event writes below) so an unusually large stderr blob can't
         # block the event loop for other concurrent dispatches.
-        dropped_rules = await asyncio.to_thread(
-            _find_dropped_allowlist_rules, result.stderr
+        dropped_rules = (
+            await asyncio.to_thread(_find_dropped_allowlist_rules, result.stderr)
+            if provider == "claude"
+            else []
         )
         if dropped_rules:
             _notify_dropped_allowlist_rules(
@@ -953,7 +1136,10 @@ async def run_skill(
 
         # ── Stage 2: harness_event at completion ──────────────────────────────────
         if result.ok:
-            log.info(f"[apis] {skill} dispatch ok ({len(result.stdout)}B stdout)")
+            log.info(
+                f"[apis] {skill} dispatch via {provider} ok "
+                f"({len(result.stdout)}B stdout)"
+            )
             try:
                 await asyncio.to_thread(
                     _write_harness_event,
@@ -961,9 +1147,11 @@ async def run_skill(
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
-                    tool_name=skill,
+                    tool_name=f"{provider}:{skill}",
                     success="true",
-                    output_summary=f"{len(result.stdout)}B stdout rc=0",
+                    output_summary=(
+                        f"provider={provider} {len(result.stdout)}B stdout rc=0"
+                    ),
                     duration_ms=duration_ms,
                 )
             except Exception as exc:
@@ -986,7 +1174,8 @@ async def run_skill(
             path_note = failure_log_path or "(diagnostics file unavailable)"
 
             log.error(
-                f"[apis] {skill} dispatch failed (rc={proc.returncode}); "
+                f"[apis] {skill} dispatch via {provider} failed "
+                f"(rc={proc.returncode}); "
                 f"full output: {path_note} "
                 f"(stdout {len(result.stdout)}B, stderr {len(result.stderr)}B); "
                 f"stderr head: {result.stderr[:500]}"
@@ -998,10 +1187,11 @@ async def run_skill(
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
-                    tool_name=skill,
+                    tool_name=f"{provider}:{skill}",
                     success="false",
                     output_summary=(
-                        f"rc={proc.returncode} full_output={path_note} "
+                        f"provider={provider} rc={proc.returncode} "
+                        f"full_output={path_note} "
                         f"{result.stderr[:200]}"
                     ),
                     duration_ms=duration_ms,
@@ -1011,15 +1201,16 @@ async def run_skill(
 
             # ateles#257 — a dispatch failure must reach the operator, not just a
             # log file. Rate-limited so a swarm-wide breakage is one signal.
-            notify_dispatch_failure(
-                notifier,
-                skill=skill,
-                role=_role,
-                returncode=proc.returncode,
-                stderr=result.stderr,
-                task_entity_id=task_entity_id,
-                log_path=failure_log_path,
-            )
+            if _provider_failure_kind(result.stdout, result.stderr) is None:
+                notify_dispatch_failure(
+                    notifier,
+                    skill=skill,
+                    role=_role,
+                    returncode=proc.returncode,
+                    stderr=result.stderr,
+                    task_entity_id=task_entity_id,
+                    log_path=failure_log_path,
+                )
 
         return result
 
@@ -1030,3 +1221,99 @@ async def run_skill(
                 os.unlink(_mcp_tmp_path)
             except OSError:
                 pass
+
+
+async def run_skill(
+    skill: str,
+    prompt: str,
+    *,
+    role: str | None = None,
+    task_entity_id: str = "",
+    timeout: int | None = None,
+    env_extra: dict[str, str] | None = None,
+    notifier=None,
+    github_token: str | None = None,
+    include_github_contract: bool = False,
+    cwd: str | None = None,
+    provider: str | None = None,
+) -> SkillResult:
+    """Route one skill run across subscription-backed harness providers.
+
+    The first candidate is selected with smooth weighted round-robin using the
+    operator-supplied headroom estimates. Capacity, authentication, and launch
+    failures cool that provider down and immediately try the next eligible CLI.
+    Ordinary task failures and timeouts do not fail over because replaying a
+    side-effecting task on another provider could duplicate work.
+
+    Passing ``provider`` pins the invocation to one adapter, primarily for
+    diagnostics and focused tests.
+    """
+    binaries = _provider_binaries()
+    candidates = provider_candidates(binaries, preferred=provider)
+    if not candidates:
+        configured = os.environ.get(
+            "APIS_HARNESS_PROVIDERS", "claude,codex,cursor"
+        )
+        cooling = ",".join(sorted(cooling_providers())) or "none"
+        msg = (
+            "no subscription-backed harness provider has usable headroom "
+            f"(configured={configured}; cooling={cooling})"
+        )
+        return SkillResult(skill, False, None, "", "", error=msg)
+
+    attempted: list[str] = []
+    last_result: SkillResult | None = None
+    for selected in candidates:
+        attempted.append(selected)
+        result = await _run_skill_once(
+            skill,
+            prompt,
+            provider=selected,
+            role=role,
+            task_entity_id=task_entity_id,
+            timeout=timeout,
+            env_extra=env_extra,
+            notifier=notifier,
+            github_token=github_token,
+            include_github_contract=include_github_contract,
+            cwd=cwd,
+        )
+        result.attempted_providers = tuple(attempted)
+        # A successful agent may legitimately discuss "usage limits" in its
+        # answer. Only inspect stdout when the process itself failed; stderr and
+        # explicit runner errors remain diagnostic on every result.
+        failure_kind = _provider_failure_kind(
+            result.error,
+            result.stderr,
+            result.stdout if not result.ok else "",
+        )
+        launch_failure = result.error.startswith(f"{selected} launch failed:")
+
+        if result.ok and failure_kind is None:
+            return result
+        if failure_kind is None and not launch_failure:
+            return result
+
+        cool_down(selected)
+        last_result = result
+        log.warning(
+            f"[apis] {skill}: {selected} {failure_kind or 'launch'} failure; "
+            "trying next subscription-backed provider"
+        )
+
+    assert last_result is not None  # candidates was non-empty
+    last_result.ok = False
+    last_result.error = (
+        "all eligible subscription-backed harness providers were exhausted "
+        f"after attempts: {', '.join(attempted)}"
+    )
+    last_result.attempted_providers = tuple(attempted)
+    notify_dispatch_failure(
+        notifier,
+        skill=skill,
+        role=(role or skill).lower(),
+        returncode=last_result.returncode,
+        stderr=last_result.error,
+        task_entity_id=task_entity_id,
+    )
+    return last_result
