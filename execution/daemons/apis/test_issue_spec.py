@@ -187,9 +187,9 @@ def _section(key):
 def test_first_section_creates_entity():
     store = _StubStore()
     state = SpecState(repo="owner/repo", issue_number=7, title="T")
-    state = asyncio.run(store.upsert_section(state, _section("pm"), "PM scope"))
+    state = asyncio.run(store.upsert_section(state, _section("pm"), _PM_SPEC))
     assert state.entity_id, "entity should be created on first section"
-    assert state.sections["pm_section"] == "PM scope"
+    assert state.sections["pm_section"] == _PM_SPEC.strip()
     assert state.sequence_state == ["pm"]
     # A store call was made.
     assert any(c[0] == "store" for c in store.calls)
@@ -199,12 +199,12 @@ def test_second_section_corrects_only_its_own_field_preserving_first():
     """Planting a section for agent X then running agent Y preserves X."""
     store = _StubStore()
     state = SpecState(repo="owner/repo", issue_number=7, title="T")
-    state = asyncio.run(store.upsert_section(state, _section("pm"), "PM scope"))
-    state = asyncio.run(store.upsert_section(state, _section("eng"), "ENG plan"))
+    state = asyncio.run(store.upsert_section(state, _section("pm"), _PM_SPEC))
+    state = asyncio.run(store.upsert_section(state, _section("eng"), _ENG_SPEC))
 
     # Both sections present in memory.
-    assert state.sections["pm_section"] == "PM scope"
-    assert state.sections["eng_section"] == "ENG plan"
+    assert state.sections["pm_section"] == _PM_SPEC.strip()
+    assert state.sections["eng_section"] == _ENG_SPEC.strip()
     assert state.sequence_state == ["pm", "eng"]
 
     # The eng write was a CORRECT of eng_section only — no store re-create, and
@@ -216,17 +216,17 @@ def test_second_section_corrects_only_its_own_field_preserving_first():
 
     # Server snapshot still has PM's section intact.
     server_snap = next(iter(store._server.values()))["snapshot"]
-    assert server_snap["pm_section"] == "PM scope"
-    assert server_snap["eng_section"] == "ENG plan"
+    assert server_snap["pm_section"] == _PM_SPEC.strip()
+    assert server_snap["eng_section"] == _ENG_SPEC.strip()
 
 
 def test_rerun_same_section_is_idempotent_no_duplicate_sequence():
     store = _StubStore()
     state = SpecState(repo="owner/repo", issue_number=7, title="T")
-    state = asyncio.run(store.upsert_section(state, _section("pm"), "v1"))
-    state = asyncio.run(store.upsert_section(state, _section("pm"), "v2"))
+    state = asyncio.run(store.upsert_section(state, _section("pm"), _PM_SPEC))
+    state = asyncio.run(store.upsert_section(state, _section("pm"), _PM_SPEC_V2))
     assert state.sequence_state == ["pm"]  # no duplicate
-    assert state.sections["pm_section"] == "v2"  # replaced in place
+    assert state.sections["pm_section"] == _PM_SPEC_V2.strip()  # replaced in place
     # Only one entity in the simulated server.
     assert len(store._server) == 1
 
@@ -234,14 +234,48 @@ def test_rerun_same_section_is_idempotent_no_duplicate_sequence():
 def test_load_reconstructs_state_from_server():
     store = _StubStore()
     state = SpecState(repo="owner/repo", issue_number=9, title="T")
-    asyncio.run(store.upsert_section(state, _section("pm"), "PM"))
-    asyncio.run(store.upsert_section(state, _section("qa"), "QA"))
+    asyncio.run(store.upsert_section(state, _section("pm"), _PM_SPEC))
+    asyncio.run(store.upsert_section(state, _section("qa"), _QA_SPEC))
 
     reloaded = asyncio.run(store.load("owner/repo", 9, "T"))
     assert reloaded.entity_id
-    assert reloaded.sections["pm_section"] == "PM"
-    assert reloaded.sections["qa_section"] == "QA"
+    assert reloaded.sections["pm_section"] == _PM_SPEC.strip()
+    assert reloaded.sections["qa_section"] == _QA_SPEC.strip()
     assert set(reloaded.sequence_state) == {"pm", "qa"}
+
+
+# Minimal well-formed spec sections for the storage-mechanics tests below.
+# Those tests exercise create/correct/merge behaviour, not content, but their
+# text must still pass validation — a bare "PM" placeholder is exactly the
+# report-shaped stub the validator is built to reject.
+_PM_SPEC = """\
+### Problem
+Users cannot complete the flow.
+
+### Acceptance criteria
+- [ ] The flow completes without manual intervention
+"""
+
+_QA_SPEC = """\
+### Test plan
+- [ ] Regression test for the reported defect
+- [ ] Edge case: empty input
+"""
+
+_ENG_SPEC = """\
+### Approach
+Add a guard at the write path.
+
+- [ ] Reject malformed input before persistence
+"""
+
+_PM_SPEC_V2 = """\
+### Problem
+Revised scope after arch review.
+
+### Acceptance criteria
+- [ ] The revised flow completes
+"""
 
 
 # ── Section validation ──────────────────────────────────────────────────────
@@ -357,6 +391,60 @@ def test_salvages_real_spec_from_leaking_section():
     assert "inspector/entities" not in out
     assert "Created (3)" not in out
     assert "Retrieved (2)" not in out
+
+
+def test_rejects_report_about_the_work_with_no_spec():
+    """#1985 pm, verbatim — the entire section is a link to a comment.
+
+    Nothing here specifies anything; it reports that work happened elsewhere.
+    """
+    with pytest.raises(SpecSectionRejected) as exc:
+        validate_section_text(
+            "pm",
+            "Verdict comment posted: "
+            "https://github.com/markmhendrickson/neotoma/issues/1985"
+            "#issuecomment-5047506505",
+        )
+    assert exc.value.reason == "no_spec_content"
+
+
+def test_rejects_pointer_embedded_mid_paragraph():
+    """#1927 design, verbatim — the pointer sits inside a summary sentence.
+
+    An earlier version anchored on standalone pointer sentences and missed 42
+    sections shaped like this: they read as content because they describe what
+    the section covered, but the section itself is not here.
+    """
+    with pytest.raises(SpecSectionRejected) as exc:
+        validate_section_text(
+            "design",
+            "Delivered the Design/UX spec section for neotoma#1927 above, "
+            "between the fences. Since triage already fast-pathed this as a "
+            "bug with `ux: not_required`, I marked the section `COMMENT` "
+            "(advisory guidance for implementation) rather than a blocking "
+            "sign-off — covering error-message shape, no new env/config "
+            "surface, retry visibility, and required doc updates.",
+        )
+    assert exc.value.reason == "pointer"
+
+
+def test_accepts_substantive_prose_without_structure():
+    """A short spec with no headings is still a spec if it actually specifies.
+
+    Guards the length escape hatch: report-voice detection alone cannot
+    discriminate ("All three options are reversible at low cost" is real spec
+    prose), so substantial prose is trusted even without markdown structure.
+    """
+    prose = (
+        "All three options are reversible at low cost. Option A is an "
+        "instruction-text change and reverts cleanly with a single edit. "
+        "Option B requires a schema field, so it must land contract-first "
+        "with the migration ordered ahead of the handler change. Option C "
+        "is rejected: it would couple the display rule to the transport "
+        "layer, which breaks the CLI surface that has no display concept "
+        "at all. Recommend B, sequenced behind the arch gate."
+    )
+    assert validate_section_text("security", prose) == prose
 
 
 def test_clean_section_passes_through_unchanged():

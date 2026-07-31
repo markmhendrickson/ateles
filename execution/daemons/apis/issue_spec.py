@@ -128,14 +128,45 @@ def spec_key(repo: str, issue_number: int) -> str:
 # prompt wording did not hold across 39 independent occurrences.
 
 # Phrases where the agent points at its own reply instead of writing the spec.
+#
+# These match ANYWHERE in the section, not just at the start of it. An early
+# version anchored on standalone pointer sentences and missed 42 sections where
+# the pointer is embedded mid-paragraph alongside a verdict summary — e.g.
+# "Legal section delivered above between the spec fences. Summary: no blocking
+# legal risk…", which reads like content but contains no specification.
 _POINTER_PATTERNS: tuple[str, ...] = (
     r"see (the )?spec fences above",
-    r"(written|drafted|returned|provided) above",
-    r"above in the required fences",
+    r"(written|drafted|returned|delivered|provided|authored|posted)\s+"
+    r"(and \w+\s+)?(above|below)",
+    r"above,?\s+(between|in)\s+the\s+(required\s+)?fences",
+    r"(between|in)\s+the\s+(required\s+)?(spec\s+)?fences",
     r"for full content to merge",
-    r"section is written above",
+    r"section is (written|above)",
     r"see (the )?(fences|section) above",
+    r"returned in the (required )?fences",
+    r"for the dispatcher to write",
 )
+
+# Positive evidence that a section actually CONTAINS a specification rather
+# than a report about having authored one. A spec has structure: subheadings,
+# checklists, tables, numbered requirements, or code/field references.
+#
+# This is the load-bearing check. Report-voice phrasing alone cannot
+# discriminate — "All three options are reversible at low cost" (real spec) and
+# "All Neotoma bookkeeping steps are complete" (report) open identically. What
+# separates them is that the real spec goes on to specify something.
+_SPEC_STRUCTURE_PATTERNS: tuple[str, ...] = (
+    r"^#{2,6}\s+\S",          # subheadings (### Problem, #### Licensing)
+    r"^\s*[-*]\s*\[[ x]\]",   # checklists (acceptance criteria, DoD)
+    r"^\s*\|.*\|",            # tables (eval matrices)
+    r"^\s*\d+\.\s+\S",        # numbered requirements
+)
+_SPEC_STRUCTURE_RE = re.compile("|".join(_SPEC_STRUCTURE_PATTERNS), re.M)
+
+# A section with no structure can still be a legitimate short spec if it is
+# substantive prose. Below this length, prose with no structure and no
+# specifying content is a report, not a spec.
+_MIN_UNSTRUCTURED_SPEC_CHARS = 400
 
 # Markers of a Neotoma per-turn bookkeeping block. The observed corruptions use
 # several different renderings (the display rule was followed by different
@@ -191,14 +222,20 @@ def validate_section_text(section_key: str, text: str) -> str:
     """Return the section text to store, or raise ``SpecSectionRejected``.
 
     Rejects, rather than silently mirroring:
-      * a section that only points at the agent's reply (mode A), and
-      * a section that is nothing but Neotoma bookkeeping (mode B).
+      * a section that is nothing but Neotoma bookkeeping (mode B),
+      * a section that points at the agent's reply (mode A), and
+      * a section that reports on authoring a spec without containing one.
 
-    A section carrying BOTH real content and a bookkeeping block is SALVAGED —
-    the bookkeeping lines are stripped and the spec is kept. That is the common
-    case (47 of the 60 corrupted sections had real content underneath), and
-    discarding a good spec over a formatting violation would be the worse
-    failure.
+    A section carrying BOTH a real spec and a bookkeeping block is SALVAGED —
+    the bookkeeping lines are stripped and the spec is kept.
+
+    The last check is the important one, and it is deliberately POSITIVE: a
+    section must show evidence of specifying something (structure, or
+    substantial prose) rather than merely failing to look like a report.
+    Detecting reports by their phrasing does not work — "All three options are
+    reversible at low cost" (real spec) and "All Neotoma bookkeeping steps are
+    complete" (report) are indistinguishable by voice. Only the presence of an
+    actual specification separates them.
 
     An EMPTY section is allowed through untouched. The pipeline deliberately
     upserts an empty section when extraction yields nothing, so that
@@ -218,7 +255,8 @@ def validate_section_text(section_key: str, text: str) -> str:
             "section contained only a Neotoma per-turn display block",
         )
 
-    # A pointer phrase in what remains means the real spec went into the reply.
+    # A pointer phrase anywhere means the real spec went into the reply, which
+    # is not persisted anywhere the issue body can reach.
     if _POINTER_RE.search(cleaned):
         raise SpecSectionRejected(
             section_key,
@@ -227,6 +265,16 @@ def validate_section_text(section_key: str, text: str) -> str:
             "containing it; the reply is not persisted anywhere the issue "
             "body can reach",
         )
+
+    # Positive evidence that this is a specification, not a report about one.
+    if not _SPEC_STRUCTURE_RE.search(cleaned):
+        if len(cleaned) < _MIN_UNSTRUCTURED_SPEC_CHARS:
+            raise SpecSectionRejected(
+                section_key,
+                "no_spec_content",
+                f"section has no spec structure and only {len(cleaned)} chars "
+                "of prose; it reports on the work rather than specifying it",
+            )
 
     return cleaned
 
