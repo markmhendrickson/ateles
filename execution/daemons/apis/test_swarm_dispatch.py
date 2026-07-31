@@ -5147,6 +5147,44 @@ def test_open_implementation_pr_returns_none_when_no_pr(monkeypatch):
     assert url is None
 
 
+def test_open_implementation_pr_persists_output_when_no_pr(monkeypatch):
+    """An exit-0 dispatch that opens NO PR must still leave a full transcript.
+
+    `run_skill` writes a diagnostics file only when the dispatch FAILS, so the
+    exit-0-but-did-nothing case left nothing to diagnose — the reason this
+    failure mode survived across eight issues undiagnosed. The post-condition
+    failing IS the failure, so the complete stdout must be persisted here.
+    """
+    import skill_runner
+
+    # conftest's autouse fixture already redirects this; bind the same path here
+    # so the assertions below read from a directory this test controls.
+    log_dir = skill_runner.DISPATCH_FAILURE_LOG_DIR
+
+    narration = "I have analysed the spec and will now implement it. Step 1..."
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, narration, "some stderr")
+
+    monkeypatch.setattr("swarm_dispatch.run_skill", fake_run_skill)
+
+    async def fake_find(self, trigger):
+        return None
+
+    monkeypatch.setattr(SwarmDispatcher, "_find_open_pr_for_issue", fake_find)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    url = asyncio.run(d._open_implementation_pr(_issue_trigger(), _empty_spec_state()))
+
+    assert url is None
+    written = list(log_dir.glob("cicada-*.log"))
+    assert len(written) == 1, f"expected one diagnostics file, got {written}"
+    body = written[0].read_text(encoding="utf-8")
+    # The complete child output must be recoverable, not a truncated head.
+    assert narration in body
+    assert "some stderr" in body
+
+
 def _empty_spec_state():
     from issue_spec import SpecState
     return SpecState(repo="markmhendrickson/neotoma", issue_number=1882, title="t")
