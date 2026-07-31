@@ -37,6 +37,7 @@ Neotoma's schema-inference, exactly as other daemon-created types are stored
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -105,6 +106,129 @@ ALWAYS_KEYS: tuple[str, ...] = tuple(s.key for s in SECTIONS if s.always)
 def spec_key(repo: str, issue_number: int) -> str:
     """Canonical key for an issue's spec entity: ``<repo>#<number>``."""
     return f"{repo}#{issue_number}"
+
+
+# ── Section validation ───────────────────────────────────────────────────────
+# Two failure modes were found in 39 of 79 spec-bearing issues (ateles audit,
+# 2026-07-31), affecting every lens including the unconditional ones (PM 18,
+# Eng 14) — so this is not a per-agent or per-lens wording bug, it is
+# structural: every lens agent runs under the Neotoma MCP display rule, which
+# mandates rendering a bookkeeping block in its REPLY, and agents cannot
+# distinguish "my reply" from "the artifact I am authoring".
+#
+#   A. GUTTED   — the agent wrote the real section into its conversational
+#                 reply and stored only a pointer to it ("Legal section written
+#                 and returned above in the required fences"). The analysis is
+#                 unrecoverable from the issue.
+#   B. LEAK     — the Neotoma per-turn display block (Created/Updated/Retrieved
+#                 with inspector entity links) was published into a PUBLIC
+#                 issue body, exposing internal entity IDs and instance URLs.
+#
+# Validation lives here, at the single write chokepoint, precisely because
+# prompt wording did not hold across 39 independent occurrences.
+
+# Phrases where the agent points at its own reply instead of writing the spec.
+_POINTER_PATTERNS: tuple[str, ...] = (
+    r"see (the )?spec fences above",
+    r"(written|drafted|returned|provided) above",
+    r"above in the required fences",
+    r"for full content to merge",
+    r"section is written above",
+    r"see (the )?(fences|section) above",
+)
+
+# Markers of a Neotoma per-turn bookkeeping block. The observed corruptions use
+# several different renderings (the display rule was followed by different
+# agents at different times), so match the shape, not one exact format.
+_BOOKKEEPING_PATTERNS: tuple[str, ...] = (
+    r"🧠\s*Neotoma\s*—",
+    r"^\s*[-*#>\s]*\**\s*(✅|🔄|🔍|🆕|📥|💬|📝)?\s*\**(Created|Updated|Retrieved)\**\s*\(\d+\)",
+    r"^\s*[-*]\s*(🆕|📥|💬|📝|✅|🔄|🔍)\s*(Created|Updated|Retrieved)\s*:",
+    r"unknown_fields_count",
+    r"/inspector/(entities|conversations)/ent_",
+)
+
+_POINTER_RE = re.compile("|".join(_POINTER_PATTERNS), re.I)
+_BOOKKEEPING_RE = re.compile("|".join(_BOOKKEEPING_PATTERNS), re.I | re.M)
+
+
+class SpecSectionRejected(ValueError):
+    """Raised when a section is bookkeeping or a pointer rather than a spec.
+
+    Carries ``reason`` (``"bookkeeping"`` / ``"pointer"`` / ``"empty"``) so the
+    caller can report which contract the agent broke, and ``section_key`` for
+    the gate message handed back to the authoring agent.
+    """
+
+    def __init__(self, section_key: str, reason: str, detail: str = ""):
+        self.section_key = section_key
+        self.reason = reason
+        self.detail = detail
+        super().__init__(
+            f"section '{section_key}' rejected ({reason})"
+            + (f": {detail}" if detail else "")
+        )
+
+
+def strip_bookkeeping(text: str) -> str:
+    """Remove Neotoma per-turn display lines from a section body.
+
+    Used both to salvage the substantive remainder of a leaking section and to
+    measure how much real content a section actually carries. Only whole lines
+    matching a bookkeeping marker are dropped; prose is never rewritten.
+    """
+    kept = [
+        line
+        for line in (text or "").splitlines()
+        if not _BOOKKEEPING_RE.search(line)
+    ]
+    # Collapse the blank runs left behind by removed lines.
+    out = re.sub(r"\n{3,}", "\n\n", "\n".join(kept))
+    return out.strip()
+
+
+def validate_section_text(section_key: str, text: str) -> str:
+    """Return the section text to store, or raise ``SpecSectionRejected``.
+
+    Rejects, rather than silently mirroring:
+      * a section that only points at the agent's reply (mode A), and
+      * a section that is nothing but Neotoma bookkeeping (mode B).
+
+    A section carrying BOTH real content and a bookkeeping block is SALVAGED —
+    the bookkeeping lines are stripped and the spec is kept. That is the common
+    case (47 of the 60 corrupted sections had real content underneath), and
+    discarding a good spec over a formatting violation would be the worse
+    failure.
+
+    An EMPTY section is allowed through untouched. The pipeline deliberately
+    upserts an empty section when extraction yields nothing, so that
+    ``sequence_state`` still records the turn ran; empty was never the bug, and
+    ``assemble_spec_markdown`` already skips empty sections when mirroring.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+
+    cleaned = strip_bookkeeping(raw)
+
+    if not cleaned:
+        raise SpecSectionRejected(
+            section_key,
+            "bookkeeping",
+            "section contained only a Neotoma per-turn display block",
+        )
+
+    # A pointer phrase in what remains means the real spec went into the reply.
+    if _POINTER_RE.search(cleaned):
+        raise SpecSectionRejected(
+            section_key,
+            "pointer",
+            "section refers to content in the agent's reply instead of "
+            "containing it; the reply is not persisted anywhere the issue "
+            "body can reach",
+        )
+
+    return cleaned
 
 
 # ── Pure assembly / splice helpers (unit-tested without any I/O) ─────────────
@@ -301,8 +425,14 @@ class IssueSpecStore:
 
         Idempotent: re-running the same section replaces that field in place
         (no duplicate entity, no duplicate sequence_state entry).
+
+        Raises ``SpecSectionRejected`` when the text is a pointer at the
+        agent's reply or is nothing but Neotoma bookkeeping. Rejecting at the
+        write is deliberate: a bad section that reaches the entity gets
+        mirrored into a PUBLIC issue body, and nothing downstream can tell it
+        apart from a real spec.
         """
-        text = (text or "").strip()
+        text = validate_section_text(section.key, text)
         # Merge into the in-memory view first (so the caller sees current state
         # even when persistence degrades).
         assert state.sections is not None and state.sequence_state is not None

@@ -6,6 +6,8 @@ IssueSpecStore create/correct additive-merge behaviour with a stubbed Neotoma.
 
 import asyncio
 
+import pytest
+
 from issue_spec import (
     ALWAYS_KEYS,
     SECTION_BY_AGENT,
@@ -14,10 +16,13 @@ from issue_spec import (
     SPEC_MARKER_END,
     SPEC_MARKER_START,
     IssueSpecStore,
+    SpecSectionRejected,
     SpecState,
     assemble_spec_markdown,
     spec_key,
     splice_managed_block,
+    strip_bookkeeping,
+    validate_section_text,
     _extract_entity_id,
 )
 
@@ -237,6 +242,182 @@ def test_load_reconstructs_state_from_server():
     assert reloaded.sections["pm_section"] == "PM"
     assert reloaded.sections["qa_section"] == "QA"
     assert set(reloaded.sequence_state) == {"pm", "qa"}
+
+
+# ── Section validation ──────────────────────────────────────────────────────
+# Fixtures below are VERBATIM (lightly truncated) from the corrupted sections
+# found in markmhendrickson/neotoma, so a regression reproduces the real bug
+# rather than a synthetic approximation of it.
+
+
+# Mode A — the agent wrote the spec into its reply and stored a pointer.
+_GUTTED_LEGAL_2053 = """\
+🧠 Neotoma — [Buteo legal review — issue #2053 MCP OAuth terminal detour](https://neotoma.markmhendrickson.com/inspector/conversations/ent_8d8c78d6ebb8fe6e9e52421d)
+
+- ✅ Created (3): 🗂️ [conversation thread](https://neotoma.markmhendrickson.com/inspector/entities/ent_8d8c78d6ebb8fe6e9e52421d)
+- 🔍 Retrieved (2): 🌍 [locale_profile:default](https://neotoma.markmhendrickson.com/inspector/entities/ent_ea9a413189860f872c6cc99a)
+
+Legal section written and returned above in the required fences — no blocking \
+legal risk found at current scope. No qualified-counsel escalation needed.
+"""
+
+_GUTTED_DESIGN_2053 = """\
+🧠 Neotoma — [Issue #2053: MCP OAuth ...](https://neotoma.markmhendrickson.com/inspector/conversations/ent_9425a8ed431ba3e63e2d99bc)
+
+- ✅ Created (2): 💬 [user turn message](https://neotoma.markmhendrickson.com/inspector/entities/ent_9ec73fbd98561edeef1012da)
+
+[accipiter] ux_flow: Design/UX spec section written above (in-app connect flow \
+with per-step error states). See spec fences above for full content to merge \
+into issue body.
+"""
+
+# Mode B — real spec present, but a bookkeeping block rode along with it.
+_LEAKING_LEGAL = """\
+🧠 Neotoma — [Buteo legal review](https://neotoma.markmhendrickson.com/inspector/conversations/ent_abc)
+
+- ✅ Created (3): 🗂️ [conversation thread](https://neotoma.markmhendrickson.com/inspector/entities/ent_def)
+- 🔍 Retrieved (2): 🌍 [locale_profile:default](https://neotoma.markmhendrickson.com/inspector/entities/ent_ea9)
+
+#### Licensing
+No new dependencies are introduced, so no new licence obligations attach.
+
+#### Data handling
+No new data category and no new lawful basis; the OAuth subject is already
+processed under the existing basis.
+"""
+
+
+def test_rejects_pointer_section_mode_a_legal():
+    """#2053 legal: buteo wrote the section into its reply and stored a pointer.
+
+    The real analysis existed only in an agent turn, so the issue body — the
+    thing humans and downstream gates actually read — carried nothing.
+    """
+    with pytest.raises(SpecSectionRejected) as exc:
+        validate_section_text("legal", _GUTTED_LEGAL_2053)
+    assert exc.value.reason == "pointer"
+    assert exc.value.section_key == "legal"
+
+
+def test_rejects_pointer_section_mode_a_design():
+    """#2053 design: same failure via different phrasing ("See spec fences above").
+
+    Two agents produced this independently, which is why detection keys on the
+    pointer SHAPE rather than one agent's wording.
+    """
+    with pytest.raises(SpecSectionRejected) as exc:
+        validate_section_text("design", _GUTTED_DESIGN_2053)
+    assert exc.value.reason == "pointer"
+
+
+def test_rejects_section_that_is_only_bookkeeping():
+    """A section carrying no spec at all must not reach a public issue body."""
+    only_bookkeeping = (
+        "🧠 Neotoma — [thread](https://neotoma.markmhendrickson.com/inspector/conversations/ent_x)\n"
+        "- ✅ Created (2): 💬 [user turn message](https://neotoma.markmhendrickson.com/inspector/entities/ent_y)\n"
+        "- 🔍 Retrieved (1): 🐛 [issue #1](https://neotoma.markmhendrickson.com/inspector/entities/ent_z)\n"
+    )
+    with pytest.raises(SpecSectionRejected) as exc:
+        validate_section_text("qa", only_bookkeeping)
+    assert exc.value.reason == "bookkeeping"
+
+
+def test_empty_section_is_allowed_through():
+    """Empty is NOT the bug, and rejecting it breaks the pipeline.
+
+    `_run_issue_spec_pipeline` upserts an empty section when extraction yields
+    nothing, so `sequence_state` still records that the turn ran. Rejecting
+    empty would abort the whole pipeline on a single unproductive lens.
+    """
+    assert validate_section_text("pm", "   \n  ") == ""
+    assert validate_section_text("pm", "") == ""
+
+
+def test_empty_section_upserts_without_raising():
+    """The pipeline's record-the-turn-ran path must keep working."""
+    store = _StubStore()
+    state = SpecState(repo="owner/repo", issue_number=11, title="T")
+    asyncio.run(store.upsert_section(state, _section("pm"), ""))
+    assert state.sequence_state == ["pm"]
+    assert state.sections["pm_section"] == ""
+
+
+def test_salvages_real_spec_from_leaking_section():
+    """Mode B is SALVAGED, not rejected.
+
+    47 of the 60 corrupted sections carried a real spec under the bookkeeping.
+    Discarding a good spec over a formatting violation would be worse than the
+    leak, so the bookkeeping is stripped and the analysis is kept.
+    """
+    out = validate_section_text("legal", _LEAKING_LEGAL)
+    assert "#### Licensing" in out
+    assert "No new data category" in out
+    # Every trace of the per-turn display block is gone.
+    assert "🧠 Neotoma" not in out
+    assert "inspector/entities" not in out
+    assert "Created (3)" not in out
+    assert "Retrieved (2)" not in out
+
+
+def test_clean_section_passes_through_unchanged():
+    """A well-formed spec must survive validation byte-for-byte.
+
+    283 of 353 real sections are clean; a validator that rewrote them would do
+    more damage than the bug it fixes.
+    """
+    clean = (
+        "### Problem\n"
+        "First-time users hit a terminal detour.\n\n"
+        "### Acceptance criteria\n"
+        "- [ ] Connects without opening a terminal\n"
+    )
+    assert validate_section_text("pm", clean) == clean.strip()
+
+
+def test_strip_bookkeeping_preserves_prose_mentioning_created():
+    """Only whole bookkeeping LINES are dropped — prose is never rewritten.
+
+    "Created" and "Retrieved" are ordinary English words that legitimately
+    appear in a spec; stripping on the bare word would corrupt real content.
+    """
+    text = (
+        "### Engineering\n"
+        "The store Created a duplicate entity when the key collided.\n"
+        "Retrieved rows are then merged by canonical_name.\n"
+    )
+    assert strip_bookkeeping(text) == text.strip()
+
+
+def test_upsert_section_rejects_pointer_before_any_write():
+    """The gate is at the WRITE, not the mirror.
+
+    A bad section that lands on the entity gets mirrored into a public issue
+    body, and nothing downstream can distinguish it from a real spec — so
+    nothing may be persisted for a rejected section.
+    """
+    store = _StubStore()
+    state = SpecState(repo="owner/repo", issue_number=7, title="T")
+
+    with pytest.raises(SpecSectionRejected):
+        asyncio.run(
+            store.upsert_section(state, _section("legal"), _GUTTED_LEGAL_2053)
+        )
+
+    assert store.calls == []
+    assert state.sections == {}
+    assert state.sequence_state == []
+
+
+def test_upsert_section_stores_salvaged_text_not_raw():
+    """A salvaged section persists WITHOUT the bookkeeping that rode in."""
+    store = _StubStore()
+    state = SpecState(repo="owner/repo", issue_number=8, title="T")
+    asyncio.run(store.upsert_section(state, _section("legal"), _LEAKING_LEGAL))
+
+    stored = state.sections["legal_section"]
+    assert "#### Licensing" in stored
+    assert "inspector/entities" not in stored
+    assert "🧠 Neotoma" not in stored
 
 
 def test_spec_key_format():
