@@ -232,17 +232,108 @@ _INVOICE_SENDER_KEYWORDS = [
     "quickbooks",
 ]
 
+# Pure notification/automation senders that are NEVER invoices — a code-forge
+# or provider system notice whose subject merely *mentions* an invoice keyword
+# (e.g. a GitHub email about a PR titled "...break invoice loop"). These are
+# hard denials: no real invoice is sent from these addresses.
+_INVOICE_SENDER_DENYLIST = [
+    "notifications@",  # code-forge / system notifications (github, gitlab, …)
+    "noreply-accounts@",  # provider account notices (google, …)
+]
+
+# Generic "no-reply" prefixes are a WEAK deny: many legitimate billing systems
+# send invoices from noreply@<billing-domain>. So a no-reply sender is only
+# treated as non-invoice when it lacks a positive invoice sender-keyword — the
+# known billing fragment (billing@, stripe, paypal, …) wins over the prefix.
+_INVOICE_SOFT_DENY_PREFIXES = [
+    "no-reply@",
+    "noreply@",
+]
+
+# Subject fragments that signal a NON-payment message even when an invoice
+# keyword is present — refunds, receipts-of-something-received, data-shares.
+# A refund or a "receipt is ready" note is not a payment the operator owes.
+_INVOICE_NEGATIVE_SUBJECT_KEYWORDS = [
+    "refund",
+    "on the way",
+    "shared some",
+    "account data",
+    "has been paid",
+    "payment received",
+    "we've received your payment",
+    "thanks for your payment",
+]
+
+
+def _has_invoice_sender_keyword(sender_lower: str) -> bool:
+    return any(kw in sender_lower for kw in _INVOICE_SENDER_KEYWORDS)
+
+
+# Money-signal gate (guard #3, ateles#205 signed-off scope): a currency
+# symbol/code adjacent to an amount, or an amount adjacent to a currency. A bare
+# invoice keyword with no money amount (e.g. "Please see attached invoice")
+# should NOT, on its own, route a payment to monedula.
+_CURRENCY_TOKENS = r"€|\$|£|usd|eur|gbp|chf|mxn"
+_MONEY_SIGNAL_RE = re.compile(
+    r"(?:(?:" + _CURRENCY_TOKENS + r")\s?\d)"  # €120 / $ 1,000 / USD 40
+    r"|(?:\d[\d.,]*\s?(?:" + _CURRENCY_TOKENS + r"))",  # 120€ / 1.000 eur
+    re.IGNORECASE,
+)
+
+
+def _has_money_signal(*texts: str) -> bool:
+    """True if any text carries a currency+amount token (guard #3)."""
+    return any(_MONEY_SIGNAL_RE.search(t or "") for t in texts)
+
 
 def _is_invoice(sender: str, subject: str, snippet: str) -> bool:
-    """Return True if this message is an invoice or payment request."""
+    """Return True if this message is an invoice or payment request.
+
+    Precision guards (ateles#205 signed-off scope) run before any bare-keyword
+    match can route a payment to monedula:
+      1. Pure automation/notification senders are never invoices.
+      2. Refund / receipt-of-payment / data-share subjects are excluded even
+         when they contain an invoice keyword.
+      3. A generic no-reply@ sender is non-invoice unless it carries a positive
+         invoice signal.
+      4. Money-signal gate: a subject-keyword match must be corroborated by a
+         currency/amount token (in subject or snippet) OR come from a trusted
+         billing sender. A bare keyword with no amount and no billing sender
+         does not route (closes the amount-less "invoice" false-positive).
+    """
     subj_lower = subject.lower()
     sender_lower = sender.lower()
-    for kw in _INVOICE_SUBJECT_KEYWORDS:
-        if kw in subj_lower:
-            return True
-    for kw in _INVOICE_SENDER_KEYWORDS:
-        if kw in sender_lower:
-            return True
+
+    # 1. Hard deny: pure notification/automation senders.
+    for deny in _INVOICE_SENDER_DENYLIST:
+        if deny in sender_lower:
+            return False
+
+    # 2. Negative subject signals veto a positive keyword match.
+    for neg in _INVOICE_NEGATIVE_SUBJECT_KEYWORDS:
+        if neg in subj_lower:
+            return False
+
+    subject_signal = any(kw in subj_lower for kw in _INVOICE_SUBJECT_KEYWORDS)
+    sender_signal = _has_invoice_sender_keyword(sender_lower)
+
+    # 3. Soft deny: a generic no-reply@ sender is non-invoice ONLY when there is
+    #    no positive invoice signal at all. A real billing system that mails from
+    #    noreply@<billing-domain> with an invoice subject still routes.
+    if (
+        any(p in sender_lower for p in _INVOICE_SOFT_DENY_PREFIXES)
+        and not sender_signal
+        and not subject_signal
+    ):
+        return False
+
+    # 4. A trusted billing sender is sufficient on its own. Otherwise a subject
+    #    keyword must be corroborated by a money signal (currency + amount), so a
+    #    bare "please see attached invoice" with no amount does not route.
+    if sender_signal:
+        return True
+    if subject_signal and _has_money_signal(subject, snippet):
+        return True
     return False
 
 
