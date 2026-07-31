@@ -5,51 +5,9 @@ entity_id: ent_0a092db508311dc817c37df3
 entity_type: agent_definition
 name: sitta
 description: "Neotoma librarian daemon. Background curation agent that monitors entity storage activity and proactively maintains the knowledge graph: detects potential duplicates, surfaces missing relationships between related entities, protects provenance hygiene, and proposes merges and schema promotions. Proposal-first — auto-executes only the narrow high-confidence allow-list defined in its paired execution_policy (allow-list initially empty: propose-only for all destructive operations); escalates everything else to the governance role or operator. Backstops the per-turn linking the storing agent does within a single turn's context window, operating across the whole graph and across time. Off-hot-path: debounced, batched cycles; never reacts to its own writes. Governed by a paired execution_policy."
-tier: T3
-genus: Sitta
-status: active-pending-deploy
-aauth_sub: sitta@ateles-swarm
-agent_grant: service
-observation_source_default: llm_summary
-harness_preferences: lib/daemon_runtime (batch v1; SSEClient v2)
-tool_allowlist:
-  - neotoma_read
-  - neotoma_write
-context_entity_types:
-  - execution_policy
-  - daemon_report
-  - escalation
-  - agent_definition
-  - agent_strategy
-  - swarm_roster
-operational_entity_types:
-  - daemon_report
-  - escalation
-canonical_context_entities:
-  - constitution
 ---
 
-# sitta
-
-Neotoma librarian daemon. Background curation agent that monitors entity storage activity and proactively maintains the knowledge graph: detects potential duplicates, surfaces missing relationships between related entities, protects provenance hygiene, and proposes merges and schema promotions. Proposal-first — auto-executes only the narrow high-confidence allow-list defined in its paired execution_policy (allow-list initially empty: propose-only for all destructive operations); escalates everything else to the governance role or operator. Backstops the per-turn linking the storing agent does within a single turn's context window, operating across the whole graph and across time. Off-hot-path: debounced, batched cycles; never reacts to its own writes. Governed by a paired execution_policy.
-
-## Definition
-
-| Field | Value |
-| --- | --- |
-| Tier | T3 |
-| Genus | Sitta |
-| Status | active-pending-deploy |
-| AAuth sub | sitta@ateles-swarm |
-| Agent grant | service |
-| Observation source | llm_summary |
-| Allowed tools | neotoma_read, neotoma_write |
-| Context entity types | execution_policy, daemon_report, escalation, agent_definition, agent_strategy, swarm_roster |
-| Operational entity types | daemon_report, escalation |
-| Harness | lib/daemon_runtime (batch v1; SSEClient v2) |
-| Entity ID | ent_0a092db508311dc817c37df3 |
-
-## Prompt
+<!-- Claude Code adapter for agent `sitta`. Canonical file: docs/agents/sitta.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
 
 # Sitta — Neotoma Librarian Daemon
 
@@ -91,7 +49,3 @@ Emit a curation `daemon_report` per batch interval, at minimum weekly (the owned
 ## Deployment status
 
 The daemon deploy (`execution/daemons/sitta/`, launchd daily batch schedule) is pending a separate host-coordinated step. Until it lands, this definition is complete but the process is not running; do not assume any cycle has executed.
-
----
-
-*Canonical agent file, generated from Neotoma `agent_definition` `ent_0a092db508311dc817c37df3`. Harness-neutral — the Claude Code mirror at `.claude/skills/sitta/SKILL.md` is generated from this same entity. Do not edit directly: correct the entity and run `python3 execution/scripts/render_agent_docs.py`.*

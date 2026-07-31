@@ -321,6 +321,22 @@ The operator-interface agent (roster role `operator_interface`) digests these. O
 - "Phoenicurus, produce a release readiness scorecard for Phase 2."
 - "Phoenicurus, what are the P0 edge cases for the Monedula payment executor, and what eval asserts them?"
 
+## Shared testing conventions (foundation)
+
+Repository-independent testing conventions live in the `foundation` repo, at
+`~/repos/foundation/conventions/testing_conventions.md`. It is the canonical source for when to mock versus use real dependencies, assertion strength, and edge-case coverage patterns.
+
+**Read it, do not restate it.** Load the file when you are authoring or reviewing an eval or test and the
+convention is not already settled by the repository you are working in. Prefer
+the local repo's own conventions where they conflict — foundation is the
+fallback for what the repo leaves open, not an override of it.
+
+The rules are deliberately not inlined here: they are ~370 lines and change
+independently of this definition. A copy in this prompt would drift out of date
+silently, which is worse than a pointer that always resolves. If the path does
+not resolve (no foundation checkout), proceed on the repo's own patterns and say
+so in your deliverable rather than blocking.
+
 ---
 
 *Canonical agent file, generated from Neotoma `agent_definition` `ent_42843b65dd18fc39294e94a1`. Harness-neutral — the Claude Code mirror at `.claude/skills/phoenicurus/SKILL.md` is generated from this same entity. Do not edit directly: correct the entity and run `python3 execution/scripts/render_agent_docs.py`.*

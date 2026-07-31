@@ -128,7 +128,7 @@ def emit_hook_output(context: str) -> None:
 def _run_selftest() -> int:
     manifest = _load_manifest()
     cases = [
-        ("implement issue #42 and open a pr", {"gryllus"}),
+        ("implement issue #42 and open a pr", {"cicada"}),
         ("can you review the pr and squash merge it", {"vanellus"}),
         ("design the user flow and information architecture for onboarding", {"accipiter"}),
         ("draft a contract review for compliance and the privacy policy", {"buteo"}),

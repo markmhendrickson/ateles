@@ -15,6 +15,7 @@ The canonical, harness-neutral file for every `agent_definition` entity in Neoto
 | cicada | T4 | Cicada | active | ✅ | [cicada.md](cicada.md) |
 | ciconia | T4 | Ciconia | planned | ✅ | [ciconia.md](ciconia.md) |
 | columba | T4 | Columba | planned | ✅ | [columba.md](columba.md) |
+| concierge | T4 |  | planned | ✅ | [concierge.md](concierge.md) |
 | corvus | T4 | Corvus | active | ✅ | [corvus.md](corvus.md) |
 | cotinga | T3 | Cotinga cotinga | active | ✅ | [cotinga.md](cotinga.md) |
 | formica | T3 | Formica | active | ✅ | [formica.md](formica.md) |
@@ -26,12 +27,15 @@ The canonical, harness-neutral file for every `agent_definition` entity in Neoto
 | menura | T2 | Menura | planned | ✅ | [menura.md](menura.md) |
 | monedula | T3 | Corvus monedula | active | ✅ | [monedula.md](monedula.md) |
 | neotoma-agent | T3 | Castor | planned | ✅ | [neotoma-agent.md](neotoma-agent.md) |
+| nucifraga | T4 | Nucifraga | planned | ✅ | [nucifraga.md](nucifraga.md) |
+| ops | T4 |  | planned | ✅ | [ops.md](ops.md) |
 | pavo | T4 | Pavo | active | ✅ | [pavo.md](pavo.md) |
 | phoenicurus | T4 | Phoenicurus | planned | ✅ | [phoenicurus.md](phoenicurus.md) |
 | picus | T4 | Picus | active | ✅ | [picus.md](picus.md) |
+| ploceus | T4 | Ploceus | planned | ✅ | [ploceus.md](ploceus.md) |
 | regulus | T4 | Regulus | planned | ✅ | [regulus.md](regulus.md) |
 | robin | T4 | Erithacus | planned | ✅ | [robin.md](robin.md) |
-| sitta | T3 | Sitta | proposed | ✅ | [sitta.md](sitta.md) |
+| sitta | T3 | Sitta | active-pending-deploy | ✅ | [sitta.md](sitta.md) |
 | struthio | T4 | Struthio | planned | ✅ | [struthio.md](struthio.md) |
 | sturnus | T3 | Sturnus | active | ✅ | [sturnus.md](sturnus.md) |
 | sylvia | T3 | Sylvia | active | ✅ | [sylvia.md](sylvia.md) |
@@ -40,4 +44,4 @@ The canonical, harness-neutral file for every `agent_definition` entity in Neoto
 | vanellus | T4 | Vanellus | active | ✅ | [vanellus.md](vanellus.md) |
 | waxwing | T4 | Bombycilla | active | ✅ | [waxwing.md](waxwing.md) |
 
-*35 agents. Generated from Neotoma — do not edit directly.*
+*39 agents. Generated from Neotoma — do not edit directly.*

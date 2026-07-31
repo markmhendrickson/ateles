@@ -23,15 +23,15 @@
       "strong_signals": ["design the interface", "user flow", "ux design", "information architecture"]
     },
     {
-      "name": "bombycilla",
-      "command": "/bombycilla",
+      "name": "waxwing",
+      "command": "/waxwing",
       "role": "technical architect — architecture reviews, schema design, ADRs, API design",
       "signals": ["architecture", "architect", "schema design", "data model", "adr", "system design", "technical design", "scalability", "api design", "design doc", "refactor strategy"],
       "strong_signals": ["technical architecture", "schema design", "system design", "architecture review"]
     },
     {
-      "name": "gryllus",
-      "command": "/gryllus",
+      "name": "cicada",
+      "command": "/cicada",
       "role": "issue worker — implements GitHub issues, opens PRs, signs the impl gate",
       "signals": ["implement", "build the feature", "write the code", "fix the bug", "open a pr", "open a pull request", "code this", "ship the implementation", "wire up"],
       "strong_signals": ["implement the issue", "implement issue", "open a pull request", "open a pr"]
