@@ -5,6 +5,7 @@ IssueSpecStore create/correct additive-merge behaviour with a stubbed Neotoma.
 """
 
 import asyncio
+import re
 
 import pytest
 
@@ -278,6 +279,31 @@ Revised scope after arch review.
 """
 
 
+def test_fixtures_carry_no_real_entity_ids_or_live_host():
+    """This repo is PUBLIC — fixtures must not ship real IDs or the live host.
+
+    Committing genuine `ent_…` values and the production inspector URL into a
+    public test file is the same exposure this module exists to prevent, just
+    through a different door (caught in review on PR #356). The assertions all
+    key on SHAPE — the marker glyph, the `inspector/entities` path, pointer
+    phrasing — so anonymized stand-ins preserve full regression coverage.
+    """
+    import pathlib
+
+    source = pathlib.Path(__file__).read_text()
+    # Skip this function's own body: it necessarily spells out the patterns it
+    # forbids, and would otherwise match itself.
+    guard = "def test_fixtures_carry_no_real_entity_ids_or_live_host"
+    fixtures = source[: source.index(guard)] + source[source.index("\n\n\n", source.index(guard)) :]
+
+    live_host = "neotoma." + "markmhendrickson" + ".com"
+    assert live_host not in fixtures, "live inspector host in a public fixture"
+    # Real Neotoma IDs are 24 hex chars; the stand-ins above use 'z'/'y', which
+    # are not hex digits, so this stays a meaningful check.
+    real_ids = re.findall(r"ent_(?=[0-9a-f]{24}\b)[0-9a-f]{24}", fixtures)
+    assert not real_ids, f"real-looking entity IDs in a public fixture: {real_ids}"
+
+
 # ── Section validation ──────────────────────────────────────────────────────
 # Fixtures below are VERBATIM (lightly truncated) from the corrupted sections
 # found in markmhendrickson/neotoma, so a regression reproduces the real bug
@@ -286,19 +312,19 @@ Revised scope after arch review.
 
 # Mode A — the agent wrote the spec into its reply and stored a pointer.
 _GUTTED_LEGAL_2053 = """\
-🧠 Neotoma — [Buteo legal review — issue #2053 MCP OAuth terminal detour](https://neotoma.markmhendrickson.com/inspector/conversations/ent_8d8c78d6ebb8fe6e9e52421d)
+🧠 Neotoma — [Buteo legal review — issue #2053 MCP OAuth terminal detour](https://neotoma.example.invalid/inspector/conversations/ent_zzlegalconvzzzzzzzzzzzz)
 
-- ✅ Created (3): 🗂️ [conversation thread](https://neotoma.markmhendrickson.com/inspector/entities/ent_8d8c78d6ebb8fe6e9e52421d)
-- 🔍 Retrieved (2): 🌍 [locale_profile:default](https://neotoma.markmhendrickson.com/inspector/entities/ent_ea9a413189860f872c6cc99a)
+- ✅ Created (3): 🗂️ [conversation thread](https://neotoma.example.invalid/inspector/entities/ent_zzlegalconvzzzzzzzzzzzz)
+- 🔍 Retrieved (2): 🌍 [locale_profile:default](https://neotoma.example.invalid/inspector/entities/ent_zzlocaleprofilezzzzzzz)
 
 Legal section written and returned above in the required fences — no blocking \
 legal risk found at current scope. No qualified-counsel escalation needed.
 """
 
 _GUTTED_DESIGN_2053 = """\
-🧠 Neotoma — [Issue #2053: MCP OAuth ...](https://neotoma.markmhendrickson.com/inspector/conversations/ent_9425a8ed431ba3e63e2d99bc)
+🧠 Neotoma — [Issue #2053: MCP OAuth ...](https://neotoma.example.invalid/inspector/conversations/ent_yydesignconvyyyyyyyyyy)
 
-- ✅ Created (2): 💬 [user turn message](https://neotoma.markmhendrickson.com/inspector/entities/ent_9ec73fbd98561edeef1012da)
+- ✅ Created (2): 💬 [user turn message](https://neotoma.example.invalid/inspector/entities/ent_yydesignusermsgyyyyyy)
 
 [accipiter] ux_flow: Design/UX spec section written above (in-app connect flow \
 with per-step error states). See spec fences above for full content to merge \
@@ -307,10 +333,10 @@ into issue body.
 
 # Mode B — real spec present, but a bookkeeping block rode along with it.
 _LEAKING_LEGAL = """\
-🧠 Neotoma — [Buteo legal review](https://neotoma.markmhendrickson.com/inspector/conversations/ent_abc)
+🧠 Neotoma — [Buteo legal review](https://neotoma.example.invalid/inspector/conversations/ent_abc)
 
-- ✅ Created (3): 🗂️ [conversation thread](https://neotoma.markmhendrickson.com/inspector/entities/ent_def)
-- 🔍 Retrieved (2): 🌍 [locale_profile:default](https://neotoma.markmhendrickson.com/inspector/entities/ent_ea9)
+- ✅ Created (3): 🗂️ [conversation thread](https://neotoma.example.invalid/inspector/entities/ent_def)
+- 🔍 Retrieved (2): 🌍 [locale_profile:default](https://neotoma.example.invalid/inspector/entities/ent_ea9)
 
 #### Licensing
 No new dependencies are introduced, so no new licence obligations attach.
@@ -347,9 +373,9 @@ def test_rejects_pointer_section_mode_a_design():
 def test_rejects_section_that_is_only_bookkeeping():
     """A section carrying no spec at all must not reach a public issue body."""
     only_bookkeeping = (
-        "🧠 Neotoma — [thread](https://neotoma.markmhendrickson.com/inspector/conversations/ent_x)\n"
-        "- ✅ Created (2): 💬 [user turn message](https://neotoma.markmhendrickson.com/inspector/entities/ent_y)\n"
-        "- 🔍 Retrieved (1): 🐛 [issue #1](https://neotoma.markmhendrickson.com/inspector/entities/ent_z)\n"
+        "🧠 Neotoma — [thread](https://neotoma.example.invalid/inspector/conversations/ent_x)\n"
+        "- ✅ Created (2): 💬 [user turn message](https://neotoma.example.invalid/inspector/entities/ent_y)\n"
+        "- 🔍 Retrieved (1): 🐛 [issue #1](https://neotoma.example.invalid/inspector/entities/ent_z)\n"
     )
     with pytest.raises(SpecSectionRejected) as exc:
         validate_section_text("qa", only_bookkeeping)
