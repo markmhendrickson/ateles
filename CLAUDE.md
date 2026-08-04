@@ -43,6 +43,10 @@ All hooks are **fail-open** (stdlib-only Python; any error or missing `NEOTOMA_B
 
 ---
 
+## Gmail send-gate hook (mechanical enforcement)
+
+- **`gmail_send_gate.py`** (PreToolUse: `Bash`) — blocks Gmail operations that can deliver mail without a per-message operator approval: `gws gmail users drafts update` (the misfiring call), `drafts send`, `messages send`, and the `+send`/`+reply`/`+reply-all`/`+forward` helpers. Staging and reads stay allowed (`drafts create`/`get`/`list`, `messages list`/`get`, `+read`), as does every non-Gmail `gws` service. Compound commands are split on `&&`/`;`/`|`/newlines so a send hidden after an innocuous segment is still caught. Approved sends run with the override prefixed inline: `ATELES_ALLOW_GMAIL_SEND=1 gws gmail users messages send …`. Fail-open (stdlib-only; any error → exit 0). Motivated by 2026-07-08 and again 2026-07-31, when a reply staged as an unsent draft was delivered to an external contact by a later `drafts update` — no send command was ever issued and the operator had given no approval. `drafts update` is not a safe staging operation: re-supplying `raw` + `threadId` can consume the draft into a sent message. To edit a staged draft, build a NEW draft rather than updating in place. See memory `feedback_gws_draft_update_can_send`.
+
 ## Standing constraints
 
 - **Plan-mirrored docs are render targets, not source files.** `docs/taxonomy.md`, `docs/phases.md`, and `docs/architecture.md` mirror plan `ent_99ace4dd6673aa36ed08b1fe` fields (`taxonomy_markdown`, `phases_markdown`, `architecture_markdown`). Never edit these files directly: correct the plan field via `mcp__mcpsrv_neotoma__correct`, then run `python3 execution/scripts/render_plan_docs.py`; run `--check` before committing them. For an operator-approved local edit, `--push` writes the files back as plan corrections.
