@@ -49,7 +49,26 @@ class WiseTransferHandler(PaymentHandler):
         return self.profile.name
 
     def matches(self, events: list[dict]) -> list[dict]:
-        """Return a match for each event whose title contains any profile keyword."""
+        """Return matches for this profile.
+
+        Two trigger kinds, deliberately kept separate:
+
+        * Recurring (calendar_keywords): a calendar event whose title matches.
+          These are ATTENDANCE-GATED — the event is not proof the session
+          happened, so approval must name the handler (see _parse_reply).
+        * One-off (due_date): an invoice due today or overdue. There is no
+          session to attend, so there is no calendar event to match against.
+
+        A one-off never matches on a calendar event, and a recurring profile
+        never matches on a date — the two paths do not interact.
+        """
+        # Calendar keywords win: a profile with them is recurring and therefore
+        # attendance-gated, even if it also carries a due_date. Only a profile
+        # with NO keywords is a one-off that may fire on a date alone — this is
+        # what stops a stray due_date from bypassing the attendance gate.
+        if not self.profile.calendar_keywords and self.profile.due_date:
+            return _due_date_matches(self.profile, self.name)
+
         matched = []
         for event in events:
             summary = event.get("summary", "") or ""
@@ -61,6 +80,8 @@ class WiseTransferHandler(PaymentHandler):
 
     def preview(self, match: dict) -> str:
         summary = match.get("summary", self.profile.label)
+        if match.get("trigger") == "due_date":
+            summary = f"due {match.get('due_date', '?')} (one-off invoice)"
         contact = _load_contact(self.profile)
         name = contact.get("name", "[recipient]") if contact else "[recipient]"
         iban = contact.get("iban", "…") if contact else "…"
@@ -175,16 +196,75 @@ class WiseTransferHandler(PaymentHandler):
 
 
 # ---------------------------------------------------------------------------
+# One-off due-date trigger
+# ---------------------------------------------------------------------------
+
+
+def _due_date_matches(profile: PaymentProfile, name: str) -> list[dict]:
+    """Match a one-off profile whose due_date is today or already past.
+
+    Returns at most one match. A malformed due_date does NOT fire the payment —
+    it logs and returns nothing, so a typo can never cause an unintended
+    transfer.
+    """
+    raw = (profile.due_date or "").strip()
+    try:
+        due = date.fromisoformat(raw)
+    except ValueError:
+        log.warning(
+            f"[{name}] invalid due_date {raw!r} (expected ISO YYYY-MM-DD) — not matching"
+        )
+        return []
+
+    today = date.today()
+    if due > today:
+        log.info(f"[{name}] due {due.isoformat()}, not yet due — skipping.")
+        return []
+
+    overdue_days = (today - due).days
+    log.info(
+        f"[{name}] one-off payment due {due.isoformat()}"
+        + (f" ({overdue_days}d overdue)" if overdue_days else " (today)")
+    )
+    return [
+        {
+            "trigger": "due_date",
+            "due_date": due.isoformat(),
+            "overdue_days": overdue_days,
+            "summary": profile.label,
+        }
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Contact loading (from contacts.parquet, generic)
 # ---------------------------------------------------------------------------
 
 
 def _load_contact(profile: PaymentProfile) -> dict | None:
     """
-    Load payment contact from contacts.parquet using profile config.
-    Tries contact_id prefix first, then category+platform fallback.
-    Returns dict with at least 'name' and 'iban', or None on failure.
+    Resolve the payee for this profile.
+
+    Order of precedence:
+      1. The profile's own wise_iban / wise_recipient_name. A one-off invoice
+         payee (a law firm, a supplier) is not a standing contact, so the
+         profile carries the details directly rather than requiring a
+         contacts.parquet row.
+      2. contacts.parquet, by contact_id prefix then category+platform.
+
+    Returns a dict with at least 'name' and 'iban', or None on failure.
     """
+    iban_on_profile = (getattr(profile, "wise_iban", "") or "").strip()
+    name_on_profile = (getattr(profile, "wise_recipient_name", "") or "").strip()
+    if iban_on_profile and name_on_profile:
+        log.info(f"[{profile.name}] payee resolved from profile (no contacts lookup)")
+        return {"name": name_on_profile, "iban": iban_on_profile}
+    if iban_on_profile or name_on_profile:
+        log.warning(
+            f"[{profile.name}] profile carries only one of wise_iban/"
+            f"wise_recipient_name — both are required; falling back to contacts"
+        )
+
     data_dir = os.environ.get("DATA_DIR", "").strip()
     if not data_dir:
         log.warning(f"[{profile.name}] DATA_DIR not set — cannot load contacts")
@@ -526,6 +606,18 @@ def _update_task(profile: PaymentProfile, result: dict) -> None:
     except Exception as exc:
         log.warning(f"[{profile.name}] neotoma update error: {exc}")
 
+    # A one-off invoice has no "next" occurrence: close the task and archive the
+    # profile so the next daily run cannot pay the same invoice twice.
+    if profile.one_off:
+        if result.get("status") != "sent":
+            log.info(
+                f"[{profile.name}] one-off payment not sent — leaving task and "
+                f"profile active for retry."
+            )
+            return
+        _close_one_off(profile, task_id, neotoma)
+        return
+
     next_due = _find_next_event_due_date(profile)
     if next_due:
         try:
@@ -556,6 +648,49 @@ def _update_task(profile: PaymentProfile, result: dict) -> None:
         log.warning(
             f"[{profile.name}] Could not find next event date — due_date not updated."
         )
+
+
+def _close_one_off(profile: PaymentProfile, task_id: str, neotoma: str) -> None:
+    """Mark a one-off task done and archive its profile after a paid transfer.
+
+    Archiving matters: load_profiles_from_neotoma() skips non-active profiles,
+    so this is what stops a paid one-off invoice from matching again tomorrow.
+    A failure here is logged loudly rather than raised — the money has already
+    moved, and the caller must not treat a bookkeeping failure as a payment
+    failure. The risk it leaves is a duplicate preview, not a duplicate payment:
+    the operator still has to approve by name at the Telegram gate.
+    """
+    for args, what in (
+        (["entities", "update", task_id, "--status", "done"], "task status=done"),
+        (
+            ["entities", "update", profile.entity_id, "--status", "archived"],
+            "profile status=archived",
+        ),
+    ):
+        if args[2] in ("", None):
+            log.warning(f"[{profile.name}] cannot set {what}: no entity id")
+            continue
+        try:
+            res = subprocess.run(
+                [neotoma, "--api-only", *args],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=os.environ,
+            )
+            if res.returncode != 0:
+                log.error(
+                    f"[{profile.name}] ONE-OFF CLEANUP FAILED ({what}): "
+                    f"{res.stderr.strip()[:200]} — this profile may re-trigger; "
+                    f"archive it by hand."
+                )
+            else:
+                log.info(f"[{profile.name}] one-off {what} set.")
+        except Exception as exc:
+            log.error(
+                f"[{profile.name}] ONE-OFF CLEANUP ERROR ({what}): {exc} — "
+                f"this profile may re-trigger; archive it by hand."
+            )
 
 
 def _find_next_event_due_date(profile: PaymentProfile) -> str | None:

@@ -68,9 +68,20 @@ class PaymentProfile:
     contact_platform: str = ""  # fallback: contacts.parquet platform
     wise_reference: str = ""  # Wise transfer reference
     wise_legal_type: str = "PRIVATE"  # Wise recipient legalType: PRIVATE | BUSINESS
+    # A one-off payee is not a standing contact, so the profile can carry the
+    # bank details directly instead of requiring a contacts.parquet row.
+    wise_iban: str = ""
+    wise_recipient_name: str = ""
 
     # BTC-specific
     btc_address: str = ""
+
+    # One-off payments: due on a date rather than gated by a calendar event.
+    # A profile with a due_date and no calendar_keywords is a one-off invoice;
+    # it matches on the date instead of on attendance at a session.
+    due_date: str = ""  # ISO YYYY-MM-DD; empty for recurring profiles
+    one_off: bool = False  # archive the profile after a successful transfer
+    entity_id: str = ""  # Neotoma payment_profile entity id (for archiving)
 
     # Neotoma task
     neotoma_task_id: str = ""
@@ -164,8 +175,17 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
                 keywords_raw = [k.strip() for k in keywords_raw.split(",") if k.strip()]
         calendar_keywords = [str(k).strip().lower() for k in keywords_raw if k]
 
-        if not calendar_keywords:
-            log.warning(f"payment_profile {label!r} has no calendar_keywords — skipped")
+        due_date = str(snap.get("due_date") or "").strip()
+        one_off = bool(snap.get("one_off")) or (not calendar_keywords and bool(due_date))
+
+        # A profile needs at least one trigger: calendar keywords (recurring,
+        # attendance-gated) or a due date (one-off invoice). With neither it is
+        # unreachable — matches() can never fire — so say so plainly.
+        if not calendar_keywords and not due_date:
+            log.warning(
+                f"payment_profile {label!r} is UNREACHABLE: no calendar_keywords "
+                f"(recurring trigger) and no due_date (one-off trigger) — skipped"
+            )
             continue
 
         payment_type_raw = str(snap.get("payment_type", "wise")).lower()
@@ -222,7 +242,12 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
                 contact_platform=snap.get("contact_platform", ""),
                 wise_reference=snap.get("wise_reference", ""),
                 wise_legal_type=legal_type_raw,
+                wise_iban=str(snap.get("wise_iban") or "").strip(),
+                wise_recipient_name=str(snap.get("wise_recipient_name") or "").strip(),
                 btc_address=snap.get("btc_address", ""),
+                due_date=due_date,
+                one_off=one_off,
+                entity_id=str(item.get("entity_id") or "").strip(),
                 neotoma_task_id=snap.get("neotoma_task_id", ""),
                 task_keywords=task_keywords,
             )
@@ -329,6 +354,10 @@ def _load_profile(prefix: str) -> PaymentProfile | None:
         contact_platform=env("CONTACT_PLATFORM"),
         wise_reference=env("WISE_REFERENCE"),
         wise_legal_type=(env("WISE_LEGAL_TYPE") or "PRIVATE").strip().upper(),
+        wise_iban=env("WISE_IBAN"),
+        wise_recipient_name=env("WISE_RECIPIENT_NAME"),
+        due_date=env("DUE_DATE"),
+        one_off=env("ONE_OFF") == "1",
         # btc
         btc_address=env("BTC_ADDRESS"),
         # neotoma
