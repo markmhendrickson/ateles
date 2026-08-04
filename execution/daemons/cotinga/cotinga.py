@@ -36,6 +36,10 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+# Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
+# User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
+NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
+
 # ---------------------------------------------------------------------------
 # Env bootstrap (launchd does not source shell profiles)
 # ---------------------------------------------------------------------------
@@ -455,6 +459,7 @@ def _neotoma_get(path: str) -> dict | list | None:
                 "Accept": "application/json",
             },
         )
+        req.add_header("User-Agent", NEOTOMA_USER_AGENT)
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read())
     except Exception as exc:
@@ -531,6 +536,7 @@ def telegram_send(text: str, parse_mode: str | None = None) -> None:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        req.add_header("User-Agent", NEOTOMA_USER_AGENT)
         with urllib.request.urlopen(req, timeout=15) as resp:
             body = json.loads(resp.read())
             msg_id = body.get("result", {}).get("message_id")
@@ -580,6 +586,7 @@ def create_neotoma_task(title: str, description: str, due_date: str, priority: s
             },
             method="POST",
         )
+        req.add_header("User-Agent", NEOTOMA_USER_AGENT)
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
         entities = data.get("entities") or []

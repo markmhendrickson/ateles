@@ -33,6 +33,10 @@ import urllib.request
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+# Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
+# User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
+NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
+
 # ---------------------------------------------------------------------------
 # Bootstrap: load env from ~/.config/neotoma/.env before anything else.
 # (launchd does not source shell profiles)
@@ -158,6 +162,7 @@ def _emit_daemon_report(severity: str, message: str, details: dict | None = None
                 "Content-Type": "application/json",
             },
         )
+        req.add_header("User-Agent", NEOTOMA_USER_AGENT)
         with urllib.request.urlopen(req, timeout=30):
             pass
     except Exception as exc:  # non-fatal

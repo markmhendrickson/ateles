@@ -62,6 +62,10 @@ from harness_router import (  # noqa: E402
     provider_candidates,
 )
 
+# Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
+# User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
+NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
+
 log = logging.getLogger("apis.skill_runner")
 
 CLAUDE_BIN = os.environ.get("APIS_CLAUDE_BIN") or shutil.which("claude")
@@ -397,6 +401,7 @@ def _write_harness_event(
             "Accept": "application/json",
         },
     )
+    req.add_header("User-Agent", NEOTOMA_USER_AGENT)
     try:
         with urllib.request.urlopen(req, timeout=5.0):
             pass

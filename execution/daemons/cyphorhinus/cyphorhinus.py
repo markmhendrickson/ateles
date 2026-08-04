@@ -50,6 +50,10 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+# Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
+# User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
+NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
+
 # ── Path + env bootstrap ────────────────────────────────────────────────────
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -114,6 +118,7 @@ def _neotoma_query(entity_type: str, *, search: str | None = None, limit: int = 
             "Accept": "application/json",
         },
     )
+    req.add_header("User-Agent", NEOTOMA_USER_AGENT)
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.load(r).get("entities", [])
@@ -185,6 +190,7 @@ def _store_operator_followup(*, job: dict, reply_text: str, reply_message_id: in
             "Accept": "application/json",
         },
     )
+    req.add_header("User-Agent", NEOTOMA_USER_AGENT)
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.load(r)
@@ -231,6 +237,7 @@ def _tg_send(text: str, reply_to: int | None = None) -> None:
         method="POST",
         headers={"Content-Type": "application/json"},
     )
+    req.add_header("User-Agent", NEOTOMA_USER_AGENT)
     try:
         urllib.request.urlopen(req, timeout=10)
     except Exception as exc:

@@ -45,6 +45,10 @@ for _p in (str(_DAEMON_DIR), str(_REPO_ROOT)):
 
 from routing import infer_tags_from_text, resolve_skill  # noqa: E402
 
+# Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
+# User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
+NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
+
 log = logging.getLogger("apis.a2a")
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -219,6 +223,7 @@ def create_neotoma_task(
             req = urllib.request.Request(
                 url, data=data, headers=headers, method="POST"
             )
+            req.add_header("User-Agent", NEOTOMA_USER_AGENT)
             with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_SECONDS) as resp:
                 resp_json = json.loads(resp.read())
     except Exception as exc:
