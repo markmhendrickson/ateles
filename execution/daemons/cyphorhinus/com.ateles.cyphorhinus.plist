@@ -21,7 +21,7 @@
         <key>HOME</key>
         <string>/Users/markmhendrickson</string>
         <key>NEOTOMA_BASE_URL</key>
-        <string>http://localhost:3180</string>
+        <string>https://neotoma.markmhendrickson.com</string>
     </dict>
 
     <key>KeepAlive</key>

@@ -23,7 +23,7 @@
         <key>NEOTOMA_PROJECT_ROOT</key>
         <string>/Users/markmhendrickson/repos/neotoma</string>
         <key>NEOTOMA_BASE_URL</key>
-        <string>http://localhost:3180</string>
+        <string>https://neotoma.markmhendrickson.com</string>
     </dict>
 
     <key>KeepAlive</key>

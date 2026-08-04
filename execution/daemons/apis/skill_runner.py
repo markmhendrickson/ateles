@@ -94,6 +94,20 @@ ATELES_REPO = Path(
 _DROPPED_ALLOWLIST_RULE_RE = re.compile(r'Ignoring\s+--allowedTools rule "([^"]*)"')
 
 
+def _require_neotoma_base_url() -> str:
+    """Return NEOTOMA_BASE_URL (trailing slash stripped) or raise.
+
+    No localhost default by design — see the 2026-08-04 migration off local
+    hosting; a fallback would silently target a dead port.
+    """
+    v = os.environ.get("NEOTOMA_BASE_URL", "").strip()
+    if not v:
+        raise RuntimeError(
+            'NEOTOMA_BASE_URL is not set. It must point at the Neotoma instance (e.g. https://neotoma.markmhendrickson.com). Local hosting was retired 2026-08-04 and http://localhost:9180 no longer serves anything, so there is deliberately no default: a silent fallback would send writes at a dead port. Under launchd the plist supplies this; for an ad-hoc run, export it or source ~/.config/neotoma/.env first.'
+        )
+    return v.rstrip("/")
+
+
 def _find_dropped_allowlist_rules(stderr: str) -> list[str]:
     """Return the distinct dropped-rule names named in a dispatch's stderr.
 
@@ -340,7 +354,7 @@ def _write_harness_event(
     Uses the same /store endpoint and pattern as lib/activity/_store_activity_log.
     Never raises — a harness_event failure must not crash dispatch.
     """
-    base_url = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180").rstrip("/")
+    base_url = _require_neotoma_base_url()
     token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     if not token:
         return
@@ -916,7 +930,7 @@ async def _run_skill_once(
     _mcp_tmp_path: str | None = None
     if provider == "claude":
         _neotoma_base = os.environ.get(
-            "NEOTOMA_BASE_URL", "http://localhost:9180"
+            "NEOTOMA_BASE_URL", ""
         ).rstrip("/")
         _neotoma_token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
         _mcp_cfg: dict = {

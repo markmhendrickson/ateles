@@ -125,6 +125,20 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _require_base_url() -> str:
+    """Return NEOTOMA_BASE_URL, or raise with a directly actionable message.
+
+    Deliberately has NO localhost default: local hosting was retired
+    2026-08-04, so a fallback would point every write at a dead port and fail
+    silently rather than loudly.
+    """
+    if not NEOTOMA_BASE_URL:
+        raise RuntimeError(
+            'NEOTOMA_BASE_URL is not set. It must point at the Neotoma instance (e.g. https://neotoma.markmhendrickson.com). Local hosting was retired 2026-08-04 and http://localhost:9180 no longer serves anything, so there is deliberately no default: a silent fallback would send writes at a dead port. Under launchd the plist supplies this; for an ad-hoc run, export it or source ~/.config/neotoma/.env first.'
+        )
+    return NEOTOMA_BASE_URL.rstrip("/")
+
+
 def _check_already_ran_today() -> bool:
     """Return True if this daemon already ran today (idempotency guard)."""
     if STATE_FILE.exists():
@@ -211,7 +225,7 @@ def fetch_yesterday_events() -> list[dict]:
 
 def _fetch_entity_by_id(entity_id: str) -> dict | None:
     """Fetch a single entity (with snapshot) by ID from Neotoma. None on error."""
-    base_url = (NEOTOMA_BASE_URL or "http://localhost:9180").rstrip("/")
+    base_url = _require_base_url()
     is_loopback = "localhost" in base_url or "127.0.0.1" in base_url
     try:
         url = f"{base_url}/entities/{entity_id}"

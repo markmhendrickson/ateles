@@ -83,7 +83,7 @@ TELEGRAM_TOPIC = os.environ.get("TELEGRAM_TOPIC_PHOENICURUS", "") or os.environ.
 )
 
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
-NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180")
+NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "")
 # The npm automation token. Accept either conventional name so the release
 # works from whatever the SOPS snapshot materialized: NPM_TOKEN (Ateles'
 # manifest name) OR NODE_AUTH_TOKEN (npm's own env var, also what the neotoma
