@@ -79,7 +79,12 @@ SENDING_PATTERNS = [
     ),
 ]
 
-SEGMENT_SPLIT = re.compile(r"&&|\|\||[;\n|]")
+SEGMENT_SPLIT = re.compile(r"&&|[;\n|]")
+
+# An override must PREFIX the sending segment itself (optionally after `env`),
+# which is the documented usage. Anchored at the segment start so an override
+# on an unrelated earlier segment cannot vouch for a later send.
+OVERRIDE_PREFIX = re.compile(rf"^(?:env\s+)?{OVERRIDE_ENV}=1\b")
 
 
 def log(msg: str) -> None:
@@ -119,13 +124,23 @@ def guidance(label: str, why: str) -> str:
 
 
 def find_sending_call(command: str):
-    """Return (label, why) for the first sending segment, or None."""
+    """Return (label, why) for the first unapproved sending segment, or None.
+
+    The override is evaluated PER SEGMENT: it must prefix the sending segment
+    itself. An override prefixing some earlier, unrelated segment does not
+    vouch for a later send — otherwise
+    `ATELES_ALLOW_GMAIL_SEND=1 echo ok && gws gmail ... send` would smuggle a
+    send past the gate.
+    """
     for segment in SEGMENT_SPLIT.split(command):
         normalized = " ".join(segment.split())
         if not normalized:
             continue
         for pattern, label, why in SENDING_PATTERNS:
             if pattern.search(normalized):
+                if OVERRIDE_PREFIX.match(normalized):
+                    log(f"inline override prefixes this {label}; allowing")
+                    break
                 return label, why
     return None
 
@@ -151,16 +166,12 @@ def main() -> int:
         return 0
 
     if os.environ.get(OVERRIDE_ENV, "").strip() == "1":
-        log("override set; allowing an operator-approved send")
+        log("override set in the hook environment; allowing an approved send")
         return 0
 
-    # An override prefixed inline (ATELES_ALLOW_GMAIL_SEND=1 gws ...) is the
-    # documented approval path; the env var is not visible to this hook, so
-    # honor the literal prefix in the command itself.
-    if re.search(rf"\b{OVERRIDE_ENV}=1\b", command):
-        log("inline override present; allowing an operator-approved send")
-        return 0
-
+    # The inline form (ATELES_ALLOW_GMAIL_SEND=1 gws ...) is the documented
+    # approval path. It is evaluated per segment inside find_sending_call so
+    # that it only vouches for the segment it actually prefixes.
     hit = find_sending_call(command)
     if hit is None:
         return 0
