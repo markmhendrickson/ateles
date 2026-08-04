@@ -33,6 +33,28 @@ BLOCK = [
     ("real send chained after echo", f"echo staging && {U} messages {SEND} --params x"),
     ("real send chained after git commit", f'git commit -m "wip" && {U} drafts update --params x'),
     ("real send after a grep", f"grep -q x file && {U} drafts {SEND} --params y"),
+    # Evasion vectors from an adversarial pass (arch lens flagged this class as
+    # unverified). The first three were LIVE bypasses: interpreters and
+    # heredoc readers had been in TEXT_BEARING_LEADERS, so the gated command
+    # rode through as their argument.
+    ("python -c executing it", f"python3 -c '{U} messages {SEND}'"),
+    ("node -e executing it", f"node -e '{U} messages {SEND}'"),
+    ("cat heredoc then real send", f"cat <<EOF\nnote\nEOF\n{U} messages {SEND} --params x"),
+    ("backslash line continuation", f"{U} messages \\\n {SEND} --params x"),
+    ("bash -c wrapper", f"bash -c '{U} messages {SEND} --params x'"),
+    ("sh -c wrapper", f'sh -c "{U} messages {SEND} --params x"'),
+    ("command substitution $()", f"$({U} messages {SEND} --params x)"),
+    ("backtick substitution", f"`{U} messages {SEND} --params x`"),
+    ("subshell parens", f"({U} messages {SEND} --params x)"),
+    ("background &", f"true & {U} messages {SEND} --params x"),
+    ("|| chain", f"false || {U} messages {SEND} --params x"),
+    ("xargs indirection", f"echo x | xargs {U} messages {SEND}"),
+    ("absolute path to gws", f"/usr/local/bin/{U} messages {SEND} --params x"),
+    ("nohup wrapper", f"nohup {U} messages {SEND} --params x"),
+    ("env non-override prefix", f"env FOO=1 {U} messages {SEND} --params x"),
+    ("extra inner whitespace", f"{U}   messages    {SEND} --params x"),
+    ("tab separated", f"{U}\tmessages\t{SEND} --params x"),
+    ("quoted verb", f"{U} messages '{SEND}' --params x"),
 ]
 
 ALLOW = [

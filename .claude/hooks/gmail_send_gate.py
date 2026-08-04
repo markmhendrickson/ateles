@@ -53,6 +53,10 @@ own bug).
 import json
 import re
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _session_integrity import read_hook_input  # noqa: E402
 
 OVERRIDE_ENV = "ATELES_ALLOW_GMAIL_SEND"
 
@@ -87,13 +91,19 @@ SENDING_PATTERNS = [
 SEGMENT_SPLIT = re.compile(r"&&|[;\n|]")
 
 # Commands that merely CARRY the pattern as text rather than invoking it: a
-# commit message documenting the hazard, a grep for it, a heredoc writing this
-# file. Matching those blocks work that sends nothing — and the first casualty
-# was this hook's own commit. A segment whose leading command is one of these
-# is treated as text-bearing, not mail-sending.
+# commit message documenting the hazard, a grep for it. Matching those blocks
+# work that sends nothing — the first casualty was this hook's own commit.
+#
+# This list must contain ONLY commands that cannot themselves execute another
+# command. Interpreters (`python -c`, `node -e`, `bash -c`, `perl -e`, `ruby
+# -e`) and heredoc-consuming readers (`cat`) were in an earlier revision and
+# were live bypasses: `python3 -c '<gated command>'` sailed through, because
+# the leader was exempt and the pattern rode along as its argument. An
+# adversarial pass caught it (see test_gmail_send_gate.py). Do not add an
+# executor here.
 TEXT_BEARING_LEADERS = re.compile(
-    r"^(?:git\s+(?:commit|tag|notes)|echo|printf|cat|grep|rg|sed|awk|"
-    r"gh\s+(?:pr|issue|release)|python3?|node)\b"
+    r"^(?:git\s+(?:commit|tag|notes)|echo|printf|grep|rg|"
+    r"gh\s+(?:pr|issue|release))\b"
 )
 
 # An override must PREFIX the sending segment itself (optionally after `env`),
@@ -103,6 +113,10 @@ OVERRIDE_PREFIX = re.compile(rf"^(?:env\s+)?{OVERRIDE_ENV}=1\b")
 
 
 def log(msg: str) -> None:
+    """Local rather than imported: the shared helper's `log` hardcodes a
+    `[session-integrity]` prefix, which would mislabel this gate's diagnostics
+    as coming from a different subsystem. `read_hook_input` IS shared (see the
+    import above) since its stdin/fail-open semantics are identical."""
     try:
         print(f"[gmail_send_gate] {msg}", file=sys.stderr)
     except Exception:  # noqa: BLE001 — logging must never block
@@ -138,6 +152,17 @@ def guidance(label: str, why: str) -> str:
     )
 
 
+def _join_line_continuations(command: str) -> str:
+    r"""Fold `\<newline>` sequences so a continued command stays ONE segment.
+
+    Without this, `gws gmail users messages \<newline> send ...` splits on the
+    newline into two segments, neither of which matches — a live bypass found
+    by an adversarial pass. A backslash-newline is shell line continuation, not
+    a command separator.
+    """
+    return re.sub(r"\\[ \t]*\n", " ", command)
+
+
 def find_sending_call(command: str):
     """Return (label, why) for the first unapproved sending segment, or None.
 
@@ -147,7 +172,7 @@ def find_sending_call(command: str):
     `ATELES_ALLOW_GMAIL_SEND=1 echo ok && gws gmail ... send` would smuggle a
     send past the gate.
     """
-    for segment in SEGMENT_SPLIT.split(command):
+    for segment in SEGMENT_SPLIT.split(_join_line_continuations(command)):
         normalized = " ".join(segment.split())
         if not normalized:
             continue
@@ -168,17 +193,7 @@ def find_sending_call(command: str):
 
 
 def main() -> int:
-    try:
-        raw = sys.stdin.read()
-    except Exception:  # noqa: BLE001
-        return 0
-    if not raw.strip():
-        return 0
-
-    try:
-        payload = json.loads(raw)
-    except Exception:  # noqa: BLE001
-        return 0
+    payload = read_hook_input()  # shared helper; fail-open to {} on any error
 
     if payload.get("tool_name") != "Bash":
         return 0
