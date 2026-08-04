@@ -84,6 +84,24 @@ TELEGRAM_TOPIC = os.environ.get("TELEGRAM_TOPIC_PHOENICURUS", "") or os.environ.
 
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "")
+
+def _neotoma_base() -> str:
+    """Base URL for Neotoma calls, or raise with an actionable message.
+
+    No localhost default by design: local hosting was retired 2026-08-04, so a
+    fallback would silently target a dead port instead of failing.
+    """
+    base = NEOTOMA_BASE_URL.rstrip("/")
+    if not base:
+        raise RuntimeError(
+            "NEOTOMA_BASE_URL is not set. It must point at the Neotoma instance "
+            "(e.g. https://neotoma.markmhendrickson.com). Local hosting was retired "
+            "2026-08-04 and http://localhost:9180 no longer serves anything, so there "
+            "is deliberately no default. Under launchd the plist supplies this; for an "
+            "ad-hoc run, export it or source ~/.config/neotoma/.env first."
+        )
+    return base
+
 # The npm automation token. Accept either conventional name so the release
 # works from whatever the SOPS snapshot materialized: NPM_TOKEN (Ateles'
 # manifest name) OR NODE_AUTH_TOKEN (npm's own env var, also what the neotoma
@@ -172,7 +190,7 @@ def telegram_send(text: str) -> None:
 
 
 def _neotoma_headers() -> dict:
-    base = NEOTOMA_BASE_URL.rstrip("/")
+    base = _neotoma_base()
     is_loopback = "localhost" in base or "127.0.0.1" in base
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     if NEOTOMA_BEARER_TOKEN and not is_loopback:
@@ -234,7 +252,7 @@ def _neotoma_request_json(req: urllib.request.Request, what: str):
 
 def neotoma_query(entity_type: str, limit: int = 100) -> list[dict]:
     """Query entities of a type from Neotoma. Empty list on error (after retries)."""
-    base = NEOTOMA_BASE_URL.rstrip("/")
+    base = _neotoma_base()
     body = json.dumps(
         {"entity_type": entity_type, "limit": limit, "include_snapshots": True}
     ).encode()
@@ -251,7 +269,7 @@ def neotoma_query(entity_type: str, limit: int = 100) -> list[dict]:
 
 def neotoma_fetch_entity(entity_id: str) -> dict | None:
     """Fetch a single entity by id. None on error (after retries)."""
-    base = NEOTOMA_BASE_URL.rstrip("/")
+    base = _neotoma_base()
     req = urllib.request.Request(
         f"{base}/entities/{entity_id}", headers=_neotoma_headers()
     )
@@ -260,7 +278,7 @@ def neotoma_fetch_entity(entity_id: str) -> dict | None:
 
 def neotoma_store(entities: list[dict], idempotency_key: str) -> dict | None:
     """Store/update entities via POST /store. None on error (after retries)."""
-    base = NEOTOMA_BASE_URL.rstrip("/")
+    base = _neotoma_base()
     body = json.dumps(
         {"entities": entities, "idempotency_key": idempotency_key}
     ).encode()
