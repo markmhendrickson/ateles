@@ -6,6 +6,7 @@ literal sending invocation — otherwise the very hook under test blocks the
 harness that runs it.
 """
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -55,10 +56,18 @@ ALLOW = [
 ]
 
 
-def run(command, tool="Bash"):
+def run(command, tool="Bash", env=None):
     payload = json.dumps({"tool_name": tool, "tool_input": {"command": command}})
+    child_env = None
+    if env:
+        child_env = dict(os.environ)
+        child_env.update(env)
     p = subprocess.run(
-        [sys.executable, HOOK], input=payload, capture_output=True, text=True
+        [sys.executable, HOOK],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env=child_env,
     )
     return p.returncode
 
@@ -81,6 +90,24 @@ def main():
         if not ok:
             failures.append(label)
 
+    # An EXPORTED override must not approve anything. Honouring an ambient
+    # env var would let one `export` silently approve every send for the rest
+    # of the session — the "approval carries forward" failure ateles#387 was
+    # filed to close. These run the hook with the variable actually set in its
+    # environment, which the inline-prefix cases cannot exercise.
+    print("\n=== EXPORTED OVERRIDE MUST NOT APPROVE (expect 2) ===")
+    exported = {"ATELES_ALLOW_GMAIL_SEND": "1"}
+    for label, cmd in [
+        ("exported override + messages send", f"{U} messages {SEND} --params x"),
+        ("exported override + drafts update", f"{U} drafts update --params x"),
+        ("exported override + +reply", f"{G} +reply --id 1"),
+    ]:
+        rc = run(cmd, env=exported)
+        ok = rc == 2
+        print(f"  [{'ok' if ok else 'FAIL'}] exit={rc}  {label}")
+        if not ok:
+            failures.append(label)
+
     print("\n=== EDGE CASES (expect 0) ===")
     edges = [
         ("non-Bash tool", lambda: run(f"{U} messages {SEND}", tool="Edit")),
@@ -99,7 +126,7 @@ def main():
         if not ok:
             failures.append(label)
 
-    total = len(BLOCK) + len(ALLOW) + len(edges)
+    total = len(BLOCK) + len(ALLOW) + len(edges) + 3  # +3 exported-override cases
     print(f"\n{total - len(failures)}/{total} passed")
     if failures:
         print("FAILURES: " + ", ".join(failures))

@@ -33,19 +33,24 @@ Compound commands (`&&`, `;`, `|`, newlines) are split into segments and
 evaluated independently, so a send hidden after an innocuous first segment is
 still caught.
 
-Approval flow: when the operator HAS approved this specific message in chat, set
-ATELES_ALLOW_GMAIL_SEND=1 for that one invocation, e.g.
+Approval flow: when the operator HAS approved this specific message in chat,
+prefix ATELES_ALLOW_GMAIL_SEND=1 to that one invocation, e.g.
 
     ATELES_ALLOW_GMAIL_SEND=1 gws gmail users messages send --params ... --json ...
 
 That keeps the gate on by default while leaving an explicit, auditable path for
-an approved send. The env var is deliberately per-command, not exported.
+an approved send.
+
+The override is recognised ONLY as an inline prefix on the gated segment
+itself. An exported/ambient ATELES_ALLOW_GMAIL_SEND is deliberately ignored:
+honouring it would let one `export` silently approve every send for the rest of
+the session, which is the "approval carries forward" failure this gate exists to
+close. Approval is per message, so the override is re-typed per command.
 
 Fail-open: any error or unparseable input → exit 0 (never block a session on our
 own bug).
 """
 import json
-import os
 import re
 import sys
 
@@ -182,13 +187,15 @@ def main() -> int:
     if not isinstance(command, str) or "gmail" not in command:
         return 0
 
-    if os.environ.get(OVERRIDE_ENV, "").strip() == "1":
-        log("override set in the hook environment; allowing an approved send")
-        return 0
-
-    # The inline form (ATELES_ALLOW_GMAIL_SEND=1 gws ...) is the documented
-    # approval path. It is evaluated per segment inside find_sending_call so
-    # that it only vouches for the segment it actually prefixes.
+    # The inline form (ATELES_ALLOW_GMAIL_SEND=1 gws ...) is the ONLY approval
+    # path, evaluated per segment inside find_sending_call so it vouches solely
+    # for the segment it prefixes.
+    #
+    # Deliberately absent: an ambient `os.environ[OVERRIDE_ENV]` check. That
+    # would let a single `export` silently approve every send for the rest of
+    # the session — the exact "approval carries forward" failure this gate
+    # exists to close (see ateles#387). Approval is per message; the override
+    # must be re-typed per command.
     hit = find_sending_call(command)
     if hit is None:
         return 0
