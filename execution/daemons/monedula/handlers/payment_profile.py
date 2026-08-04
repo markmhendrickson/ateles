@@ -13,6 +13,7 @@ Each profile is identified by a PREFIX (e.g. "THERAPY", "YOGA") and reads:
   <PREFIX>_CONTACT_PLATFORM  (wise only) Fallback platform for contact lookup
   <PREFIX>_AMOUNT_EUR     Transfer amount in EUR (integer)
   <PREFIX>_WISE_REFERENCE (wise only) Wise transfer reference string
+  <PREFIX>_WISE_LEGAL_TYPE (wise only) Recipient legalType: PRIVATE (default) | BUSINESS
   <PREFIX>_BTC_ADDRESS    (btc only) Destination BTC address
   <PREFIX>_NEOTOMA_TASK_ID    Neotoma task entity ID to update after payment
   <PREFIX>_TASK_KEYWORDS  (optional) Comma-separated keywords for Neotoma task search fallback
@@ -49,6 +50,9 @@ from typing import Literal
 
 log = logging.getLogger(__name__)
 
+# Wise accepts only these legalType values when creating an IBAN recipient.
+_WISE_LEGAL_TYPES = {"PRIVATE", "BUSINESS"}
+
 
 @dataclass
 class PaymentProfile:
@@ -63,6 +67,7 @@ class PaymentProfile:
     contact_category: str = ""  # fallback: contacts.parquet category
     contact_platform: str = ""  # fallback: contacts.parquet platform
     wise_reference: str = ""  # Wise transfer reference
+    wise_legal_type: str = "PRIVATE"  # Wise recipient legalType: PRIVATE | BUSINESS
 
     # BTC-specific
     btc_address: str = ""
@@ -196,6 +201,15 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
             str(k).strip().lower() for k in task_kw_raw if k
         ] or calendar_keywords
 
+        legal_type_raw = str(snap.get("wise_legal_type") or "PRIVATE").strip().upper()
+        if legal_type_raw not in _WISE_LEGAL_TYPES:
+            log.warning(
+                f"payment_profile {label!r} invalid wise_legal_type="
+                f"{legal_type_raw!r} (expected one of {sorted(_WISE_LEGAL_TYPES)}) "
+                f"— skipped"
+            )
+            continue
+
         profiles.append(
             PaymentProfile(
                 prefix=prefix,
@@ -207,6 +221,7 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
                 contact_category=snap.get("contact_category", ""),
                 contact_platform=snap.get("contact_platform", ""),
                 wise_reference=snap.get("wise_reference", ""),
+                wise_legal_type=legal_type_raw,
                 btc_address=snap.get("btc_address", ""),
                 neotoma_task_id=snap.get("neotoma_task_id", ""),
                 task_keywords=task_keywords,
@@ -313,6 +328,7 @@ def _load_profile(prefix: str) -> PaymentProfile | None:
         contact_category=env("CONTACT_CATEGORY"),
         contact_platform=env("CONTACT_PLATFORM"),
         wise_reference=env("WISE_REFERENCE"),
+        wise_legal_type=(env("WISE_LEGAL_TYPE") or "PRIVATE").strip().upper(),
         # btc
         btc_address=env("BTC_ADDRESS"),
         # neotoma

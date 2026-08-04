@@ -121,6 +121,7 @@ class WiseTransferHandler(PaymentHandler):
                 self.profile.amount_eur,
                 self.profile.wise_reference,
                 label=self.name,
+                legal_type=self.profile.wise_legal_type,
             )
         except Exception as exc:
             log.error(f"[{self.name}] Wise transfer exception: {exc}")
@@ -309,14 +310,30 @@ def _get_wise_profile_id(token: str) -> int:
     raise RuntimeError("No Wise profiles found")
 
 
-def _get_or_create_recipient(token: str, profile_id: int, iban: str, name: str) -> int:
-    iban[:2].upper() if len(iban) >= 2 else "ES"
+def _get_or_create_recipient(
+    token: str,
+    profile_id: int,
+    iban: str,
+    name: str,
+    legal_type: str = "PRIVATE",
+) -> int:
+    """Create a Wise IBAN recipient.
+
+    legal_type must be PRIVATE (individual) or BUSINESS (company). Sending
+    PRIVATE for a company-held account risks the transfer being returned on a
+    name/legal-type mismatch — after the funds have already left the balance.
+    """
+    legal_type = (legal_type or "PRIVATE").strip().upper()
+    if legal_type not in ("PRIVATE", "BUSINESS"):
+        raise ValueError(
+            f"Invalid Wise legalType {legal_type!r} — expected PRIVATE or BUSINESS"
+        )
     body = {
         "profile": profile_id,
         "accountHolderName": name,
         "currency": "EUR",
         "type": "iban",
-        "details": {"legalType": "PRIVATE", "iban": iban.replace(" ", "")},
+        "details": {"legalType": legal_type, "iban": iban.replace(" ", "")},
     }
     result = _wise_post(token, "/v1/accounts", body)
     account_id = result.get("id")
@@ -376,6 +393,7 @@ def _execute_wise_transfer(
     amount_eur: int,
     reference: str,
     label: str = "payment",
+    legal_type: str = "PRIVATE",
 ) -> dict:
     """Full Wise transfer flow. Returns result dict with status and details."""
     log.info(f"[{label}] Starting Wise transfer: €{amount_eur} to IBAN {iban[:10]}…")
@@ -383,7 +401,9 @@ def _execute_wise_transfer(
     profile_id = _get_wise_profile_id(token)
     log.info(f"[{label}] Wise profile_id: {profile_id}")
 
-    account_id = _get_or_create_recipient(token, profile_id, iban, recipient_name)
+    account_id = _get_or_create_recipient(
+        token, profile_id, iban, recipient_name, legal_type
+    )
     log.info(f"[{label}] Wise recipient account_id: {account_id}")
 
     quote_uuid = _create_quote(token, profile_id, amount_eur)
