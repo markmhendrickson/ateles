@@ -16,11 +16,14 @@ All times are in the rubric's configured timezone (default: Europe/Madrid).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
+import time as _time
 from datetime import datetime, time
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 try:
@@ -114,6 +117,16 @@ class Notifier:
             os.environ.get("ATELES_NOTIFY_TO", "").strip() or self._operator_email
         )
         self._digest_queue: list[str] = []
+        # Edge-triggered alert state (opt-in, via send(state_key=...)). Maps a
+        # caller-supplied condition key -> the epoch seconds the condition was
+        # first reported failing. Persisted to disk so a daemon that restarts
+        # mid-outage (launchd KeepAlive) does not re-alert for an outage the
+        # operator was already told about.
+        self._state_path = Path(
+            os.environ.get("ATELES_NOTIFY_STATE_FILE", "")
+            or Path.home() / ".config" / "ateles" / "notify_state.json"
+        )
+        self._alert_state: dict[str, float] = self._load_alert_state()
         self._apprise: Any = None
         if HAS_APPRISE:
             self._apprise = apprise.Apprise()
@@ -125,6 +138,54 @@ class Notifier:
             log.warning(
                 "[notify] apprise not installed — notifications will be logged only."
             )
+
+    # ── Edge-triggered alert state ───────────────────────────────────────────
+
+    def _load_alert_state(self) -> dict[str, float]:
+        """Read persisted failing-condition state. Fail-open to empty."""
+        try:
+            raw = json.loads(self._state_path.read_text())
+            if isinstance(raw, dict):
+                return {str(k): float(v) for k, v in raw.items()}
+        except Exception:  # noqa: BLE001 — missing/corrupt state must not break alerting
+            pass
+        return {}
+
+    def _save_alert_state(self) -> None:
+        """Persist failing-condition state. Best-effort; never raises."""
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._state_path.write_text(json.dumps(self._alert_state))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("[notify] could not persist alert state: %s", exc)
+
+    def resolve(self, state_key: str, message: str = "", handler: str = "") -> bool:
+        """
+        Mark a previously-failing condition as recovered.
+
+        Sends exactly one recovery notification if (and only if) this key was
+        actively alerting, then clears it so a future failure alerts fresh.
+        No-op when the key was never failing, so callers can invoke this on
+        every success without generating noise.
+
+        Returns True if a recovery notification was delivered.
+        """
+        started = self._alert_state.pop(state_key, None)
+        if started is None:
+            return False
+        self._save_alert_state()
+        elapsed = max(0, int(_time.time() - started))
+        mins, secs = divmod(elapsed, 60)
+        hours, mins = divmod(mins, 60)
+        if hours:
+            duration = f"{hours}h {mins}m"
+        elif mins:
+            duration = f"{mins}m {secs}s"
+        else:
+            duration = f"{secs}s"
+        tag = f"[{handler}] " if handler else ""
+        text = message or f"{state_key} recovered"
+        return self._deliver(f"✅ {tag}{text} (was failing {duration})", force=True)
 
     # ── Factory ──────────────────────────────────────────────────────────────
 
@@ -142,15 +203,38 @@ class Notifier:
         priority: Priority | str = Priority.INFO,
         handler: str = "",
         bypass_silence: bool = False,
+        state_key: str | None = None,
     ) -> bool:
         """
         Route a notification by priority.
 
-        Returns True if sent immediately, False if queued or dropped.
+        ``state_key`` opts this call into EDGE-TRIGGERED delivery: the message is
+        sent on the transition into the failing state and then suppressed while
+        that same condition keeps recurring, until ``resolve(state_key)`` is
+        called. Use it for conditions polled on a loop (an unreachable
+        dependency, a failing health check) where every poll would otherwise
+        emit an identical alert — a 60s poll against a multi-hour outage
+        produced 106 identical emails on 2026-08-04.
+
+        Pass a STABLE key ("neotoma-unavailable"), not the raw error text:
+        messages that embed a changing request id or timestamp defeat
+        suppression. Omit it entirely for one-shot events, which are unaffected.
+
+        Returns True if sent immediately, False if queued, dropped, or
+        suppressed as a repeat.
         """
         prio = Priority(priority) if isinstance(priority, str) else priority
         tag = f"[{handler}] " if handler else ""
         full_message = f"{tag}{message}"
+
+        if state_key is not None:
+            if state_key in self._alert_state:
+                log.debug(
+                    "[notify] Suppressed repeat for %r (already alerting)", state_key
+                )
+                return False
+            self._alert_state[state_key] = _time.time()
+            self._save_alert_state()
 
         if prio == Priority.CRITICAL:
             # Critical always fires immediately, even in silence window
