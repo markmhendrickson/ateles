@@ -26,6 +26,12 @@ BLOCK = [
     ("SMUGGLED override (was a leak)", f"{OVR} echo ok && {U} messages {SEND} --params x"),
     ("override on seg2, send on seg3", f"echo a ; {OVR} echo b ; {U} drafts update --params x"),
     ("override at end, send earlier", f"{U} drafts update --params x && {OVR} echo done"),
+    # The text-bearing allowance must not become a bypass: a leader only
+    # excuses its OWN segment, so a real invocation chained after one is
+    # still judged on its own.
+    ("real send chained after echo", f"echo staging && {U} messages {SEND} --params x"),
+    ("real send chained after git commit", f'git commit -m "wip" && {U} drafts update --params x'),
+    ("real send after a grep", f"grep -q x file && {U} drafts {SEND} --params y"),
 ]
 
 ALLOW = [
@@ -39,6 +45,13 @@ ALLOW = [
     ("override PREFIXES the send", f"{OVR} {U} messages {SEND} --params x"),
     ("env-form override", f"env {OVR} {U} drafts update --params x"),
     ("override after a safe segment", f"echo ok && {OVR} {U} messages {SEND} --params x"),
+    # Text-bearing commands: the pattern appears as prose/args, nothing is
+    # invoked. The first casualty of not handling these was this hook's own
+    # commit, whose message documents the very command it gates.
+    ("git commit documenting the command", f'git commit -m "fix: block {U} messages {SEND}"'),
+    ("echo of the command", f"echo '{U} messages {SEND}'"),
+    ("grep for the pattern", f"grep -rn '{U} drafts update' docs/"),
+    ("gh pr create describing it", f'gh pr create --body "blocks {U} drafts update"'),
 ]
 
 

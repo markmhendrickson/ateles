@@ -81,6 +81,16 @@ SENDING_PATTERNS = [
 
 SEGMENT_SPLIT = re.compile(r"&&|[;\n|]")
 
+# Commands that merely CARRY the pattern as text rather than invoking it: a
+# commit message documenting the hazard, a grep for it, a heredoc writing this
+# file. Matching those blocks work that sends nothing — and the first casualty
+# was this hook's own commit. A segment whose leading command is one of these
+# is treated as text-bearing, not mail-sending.
+TEXT_BEARING_LEADERS = re.compile(
+    r"^(?:git\s+(?:commit|tag|notes)|echo|printf|cat|grep|rg|sed|awk|"
+    r"gh\s+(?:pr|issue|release)|python3?|node)\b"
+)
+
 # An override must PREFIX the sending segment itself (optionally after `env`),
 # which is the documented usage. Anchored at the segment start so an override
 # on an unrelated earlier segment cannot vouch for a later send.
@@ -135,6 +145,13 @@ def find_sending_call(command: str):
     for segment in SEGMENT_SPLIT.split(command):
         normalized = " ".join(segment.split())
         if not normalized:
+            continue
+        # A segment led by git-commit/echo/grep/etc. carries the pattern as
+        # TEXT (a commit message, a search, a heredoc) and invokes nothing.
+        # This is not a bypass: the leader must be the first token, so a real
+        # invocation cannot hide behind it — `echo x && gws ... ` splits into
+        # two segments and the sending one is still judged on its own.
+        if TEXT_BEARING_LEADERS.match(normalized):
             continue
         for pattern, label, why in SENDING_PATTERNS:
             if pattern.search(normalized):
