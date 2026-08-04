@@ -803,6 +803,9 @@ def _http_error(code):
 
 
 def test_retry_recovers_from_transient_403(monkeypatch):
+    # publish.py no longer falls back to a localhost URL (local hosting was
+    # retired 2026-08-04), so the base URL must be supplied explicitly.
+    monkeypatch.setattr(publish, "NEOTOMA_BASE_URL", "http://neotoma.test")
     monkeypatch.setattr(publish, "_NEOTOMA_MAX_ATTEMPTS", 4)
     monkeypatch.setattr(publish, "_NEOTOMA_RETRY_BASE_S", 0.0)
     monkeypatch.setattr(publish.time, "sleep", lambda *_: None)
@@ -826,6 +829,9 @@ def test_retry_recovers_from_transient_403(monkeypatch):
 
 
 def test_404_is_not_retried(monkeypatch):
+    # publish.py no longer falls back to a localhost URL (local hosting was
+    # retired 2026-08-04), so the base URL must be supplied explicitly.
+    monkeypatch.setattr(publish, "NEOTOMA_BASE_URL", "http://neotoma.test")
     monkeypatch.setattr(publish, "_NEOTOMA_MAX_ATTEMPTS", 4)
     monkeypatch.setattr(publish.time, "sleep", lambda *_: None)
     calls = {"n": 0}
@@ -840,6 +846,7 @@ def test_404_is_not_retried(monkeypatch):
 
 
 def test_gives_up_after_max_attempts(monkeypatch):
+    monkeypatch.setattr(publish, "NEOTOMA_BASE_URL", "http://neotoma.test")
     monkeypatch.setattr(publish, "_NEOTOMA_MAX_ATTEMPTS", 3)
     monkeypatch.setattr(publish, "_NEOTOMA_RETRY_BASE_S", 0.0)
     monkeypatch.setattr(publish.time, "sleep", lambda *_: None)
