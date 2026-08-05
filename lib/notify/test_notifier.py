@@ -146,3 +146,114 @@ def test_email_skipped_when_no_operator_address(monkeypatch):
     monkeypatch.setattr("lib.notify.notifier.subprocess.run", fake_run)
     n.send("blocker", priority=Priority.BLOCKER, handler="apis")
     assert called["n"] == 0  # never shelled out without a recipient
+
+
+# ── Edge-triggered alerts (state_key) ────────────────────────────────────────
+#
+# Regression: a 60s poll loop against a multi-hour outage sent one identical
+# email per poll (106 on 2026-08-04). Repeats of the SAME condition must
+# collapse to one notification, with a single follow-up when it recovers.
+
+
+def _counting_notifier(tmp_path, monkeypatch):
+    """Notifier whose deliveries are counted instead of sent."""
+    n = Notifier(rubric=NO_SILENCE)
+    n._state_path = tmp_path / "notify_state.json"
+    n._alert_state = {}
+    sent = []
+    monkeypatch.setattr(n, "_deliver", lambda msg, force=False: sent.append(msg) or True)
+    return n, sent
+
+
+def test_repeat_alerts_suppressed_until_resolved(tmp_path, monkeypatch):
+    n, sent = _counting_notifier(tmp_path, monkeypatch)
+    for _ in range(60):  # an hour of once-a-minute polls
+        n.send("Neotoma unavailable", priority=Priority.BLOCKER,
+               handler="piculet", state_key="neotoma-unavailable")
+    assert len(sent) == 1, f"expected 1 alert for 60 polls, got {len(sent)}"
+
+
+def test_resolve_sends_one_recovery_then_is_idempotent(tmp_path, monkeypatch):
+    n, sent = _counting_notifier(tmp_path, monkeypatch)
+    n.send("Neotoma unavailable", priority=Priority.BLOCKER,
+           handler="piculet", state_key="neotoma-unavailable")
+    assert n.resolve("neotoma-unavailable", "Neotoma reachable", "piculet") is True
+    # Every later success must stay silent — resolve is safe to call each poll.
+    for _ in range(10):
+        assert n.resolve("neotoma-unavailable", "Neotoma reachable", "piculet") is False
+    assert len(sent) == 2  # one down, one up
+    assert sent[1].startswith("✅")
+    assert "was failing" in sent[1]
+
+
+def test_recurrence_after_resolve_alerts_again(tmp_path, monkeypatch):
+    n, sent = _counting_notifier(tmp_path, monkeypatch)
+    n.send("down", priority=Priority.BLOCKER, state_key="k")
+    n.resolve("k")
+    n.send("down", priority=Priority.BLOCKER, state_key="k")  # new outage
+    assert len([m for m in sent if not m.startswith("✅")]) == 2
+
+
+def test_state_survives_restart_mid_outage(tmp_path, monkeypatch):
+    """launchd KeepAlive restarts a crashed daemon; the outage is still ongoing
+    and must NOT produce a second 'down' alert from the fresh process."""
+    state = tmp_path / "notify_state.json"
+    monkeypatch.setenv("ATELES_NOTIFY_STATE_FILE", str(state))
+
+    first = Notifier(rubric=NO_SILENCE)
+    sent_a = []
+    monkeypatch.setattr(first, "_deliver", lambda m, force=False: sent_a.append(m) or True)
+    first.send("down", priority=Priority.BLOCKER, state_key="neotoma-unavailable")
+    assert len(sent_a) == 1
+
+    second = Notifier(rubric=NO_SILENCE)  # simulates the restarted process
+    sent_b = []
+    monkeypatch.setattr(second, "_deliver", lambda m, force=False: sent_b.append(m) or True)
+    second.send("down", priority=Priority.BLOCKER, state_key="neotoma-unavailable")
+    assert sent_b == [], "restart re-alerted for an outage already reported"
+
+
+def test_distinct_conditions_alert_independently(tmp_path, monkeypatch):
+    n, sent = _counting_notifier(tmp_path, monkeypatch)
+    n.send("neotoma down", priority=Priority.BLOCKER, state_key="neotoma")
+    n.send("wise down", priority=Priority.BLOCKER, state_key="wise")
+    assert len(sent) == 2  # unrelated failures must not mask each other
+
+
+def test_omitting_state_key_is_unchanged(tmp_path, monkeypatch):
+    """The 20 existing daemons pass no state_key — every call must still send."""
+    n, sent = _counting_notifier(tmp_path, monkeypatch)
+    for _ in range(5):
+        n.send("payment sent", priority=Priority.BLOCKER, handler="monedula")
+    assert len(sent) == 5
+
+
+def test_corrupt_state_file_fails_open(tmp_path, monkeypatch):
+    state = tmp_path / "notify_state.json"
+    state.write_text("{not json")
+    monkeypatch.setenv("ATELES_NOTIFY_STATE_FILE", str(state))
+    n = Notifier(rubric=NO_SILENCE)
+    sent = []
+    monkeypatch.setattr(n, "_deliver", lambda m, force=False: sent.append(m) or True)
+    n.send("down", priority=Priority.BLOCKER, state_key="k")
+    assert len(sent) == 1  # unreadable state must not silence alerting
+
+
+def test_undelivered_state_key_does_not_suppress(tmp_path, monkeypatch):
+    """A state_key call that queues instead of delivering must NOT mark the
+    condition alerting — otherwise the first poll silently arms suppression and
+    the operator is never told about the outage at all."""
+    n = Notifier(rubric=ALWAYS_SILENT)
+    n._state_path = tmp_path / "notify_state.json"
+    n._alert_state = {}
+    sent = []
+    monkeypatch.setattr(n, "_deliver", lambda m, force=False: sent.append(m) or True)
+
+    # WARN inside a silence window queues for digest — it does not deliver.
+    assert n.send("degraded", priority=Priority.WARN, state_key="k") is False
+    assert sent == []
+    assert "k" not in n._alert_state, "armed suppression without delivering"
+
+    # Because nothing was delivered, a later deliverable alert still gets through.
+    assert n.send("down", priority=Priority.BLOCKER, state_key="k") is True
+    assert len(sent) == 1
