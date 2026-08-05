@@ -59,6 +59,7 @@ from gate_waive import (
     IssueGateStore,
     WaiveOutcome,
     format_waive_comment,
+    parse_gate_status,
 )
 from github_gateway import SwarmTrigger
 from issue_spec import (
@@ -89,8 +90,50 @@ log = logging.getLogger("apis.swarm_dispatch")
 
 DAEMON_NAME = "apis"
 
-_PARENT_ISSUE = re.compile(r"\b(?:closes|fixes|resolves)\s+#(\d+)", re.I)
+# ateles#390: the closing keyword may be followed by a BARE reference
+# (`closes #2072`) or a FULLY QUALIFIED one (`closes markmhendrickson/neotoma#2072`).
+# The original pattern required `#` immediately after the keyword, so a
+# qualified reference matched nothing, `_parent_issue_number` returned None, and
+# the caller's `or trigger.number` fallback silently waived against the PR
+# number — for which no `issue` entity exists. That is the whole of the
+# "no Neotoma issue entity for #2078" failure: the PR body read
+# `Closes markmhendrickson/neotoma#2072, closes markmhendrickson/neotoma#2073`.
+# The owner/repo prefix is optional and non-capturing; only the number is taken.
+_PARENT_ISSUE = re.compile(
+    r"\b(?:closes|fixes|resolves)\s+(?:[\w.-]+/[\w.-]+)?#(\d+)", re.I
+)
 _GATE_VERDICT = re.compile(r"GATE_INHERITANCE:\s*(clear|blocked)", re.I)
+
+
+def _merge_waive_outcomes(outcomes: list[WaiveOutcome]) -> WaiveOutcome:
+    """Collapse per-parent waive results into one operator-facing outcome.
+
+    ateles#390: a PR may close several issues, each with its own gates. The
+    merged view is deliberately PESSIMISTIC — `entity_found` requires that every
+    parent resolved, and `verified` requires that every parent verified — so a
+    partial success can never read as a clean waive. Reporting "waived" while
+    one parent silently stayed blocked is the failure mode this whole path
+    exists to eliminate.
+    """
+    if not outcomes:
+        return WaiveOutcome(entity_found=False)
+
+    def _union(attr: str) -> list[str]:
+        out: list[str] = []
+        for o in outcomes:
+            for g in getattr(o, attr):
+                if g not in out:
+                    out.append(g)
+        return out
+
+    return WaiveOutcome(
+        entity_found=all(o.entity_found for o in outcomes),
+        targeted=_union("targeted"),
+        already_clear=_union("already_clear"),
+        waived=_union("waived"),
+        failed=_union("failed"),
+        verified=all(o.verified for o in outcomes),
+    )
 
 # ateles#232 QA finding: `reopened` (github_gateway.py maps it to kind
 # "pr_reopened", distinct from "pr_synchronize") re-enters the pipeline the
@@ -2111,6 +2154,12 @@ class SwarmDispatcher:
         )
 
         reviews: list[tuple[str, str]] = []
+        # Lenses seated because they own a pending pre-impl gate are INSTRUCTED
+        # (via gate_writeback_block) to correct gate_status themselves. That
+        # instruction is not self-verifying: if the agent skips it, or Neotoma
+        # is unreachable mid-run, the write vanishes and the dispatcher still
+        # reports success. Track who owed a write so it can be read back below.
+        owed_gate_writes: list[str] = []
         for lens in panel:
             # QE3: the qa lens (Phoenicurus) authors + runs an eval, so it needs a
             # writable PR-branch checkout as its cwd. Other lenses stay diff-only
@@ -2142,6 +2191,27 @@ class SwarmDispatcher:
                 await cleanup_pr_worktree(qa_worktree)
             if result.ok:
                 reviews.append((lens.lens, result.stdout))
+                if parent and lens.lens in pending_gates and not lens.forward_looking:
+                    owed_gate_writes.append(lens.lens)
+
+        # 2a. VERIFY the gate writebacks actually landed (ateles#391).
+        #
+        # Observed failure: Waxwing posted a full arch review ending SIGNED_OFF
+        # on a PR, gate_status.arch stayed `pending`, owner_history had zero
+        # waxwing entries — and the dispatcher logged the dispatch as ok. The
+        # PR then sat BLOCKED on gate inheritance while every comment read as
+        # approving. Neotoma was also flapping during that run, so a fire-and-
+        # forget correct() could be lost with no trace.
+        #
+        # gate_waive.py already established the rule for this repo: a gate
+        # transition is written and then RE-READ to assert it landed. The lens
+        # path skipped that. We do not write the gate here — the dispatcher must
+        # never write gate state, that is the self-certification boundary — we
+        # only detect the drift and surface it loudly.
+        if owed_gate_writes:
+            await self._verify_lens_gate_writes(
+                trigger, parent, owed_gate_writes
+            )
 
         # 2b. Persist the captured reviews and backfill any review:<lens>
         #     comment the panelist could not post itself (PR-87 self-dogfood
@@ -4227,28 +4297,56 @@ class SwarmDispatcher:
         re-trigger the PR pipeline.  Never raises.
         """
         ref = f"{trigger.repository}#{trigger.number}"
-        issue_number = trigger.number
-        # comment_on_pr means trigger.number IS the PR number; the parent issue
-        # number is in the PR body.  Extract it.
+        # Gates live on ISSUE entities; PRs do not carry `gate_status` at all.
+        # So on a PR we waive against its parent issues — ALL of them (ateles#390:
+        # neotoma#2078 closed both #2072 and #2073, each with `arch: pending`).
+        #
+        # Critically, there is NO fallback to trigger.number here. The old code
+        # did `parent or trigger.number`, which on an extraction miss waived
+        # against the PR number, found no issue entity, and reported the useless
+        # "no Neotoma issue entity for #2078". A miss now says so plainly.
         if trigger.comment_on_pr:
-            issue_number = self._parent_issue_number(trigger.body) or trigger.number
+            issue_numbers = self._parent_issue_numbers(trigger.body)
+            if not issue_numbers:
+                log.error(
+                    f"[{DAEMON_NAME}] gate waive on {ref}: no parent issue found "
+                    f"in the PR body — gates live on issues, so there is nothing "
+                    f"to waive. Add a `Closes #<n>` line to the PR body."
+                )
+                outcome = WaiveOutcome(
+                    entity_found=False, targeted=[], failed=[]
+                )
+                try:
+                    await self._post_gate_waive_comment(trigger, outcome)
+                except Exception:  # noqa: BLE001 — comment is best-effort
+                    pass
+                return outcome
+        else:
+            issue_numbers = [trigger.number]
 
         store = IssueGateStore(
             self.config.neotoma_base_url, self.config.neotoma_token
         )
-        try:
-            outcome = await store.waive(
-                trigger.repository, issue_number, PRE_IMPL_GATES
-            )
-        except Exception as exc:  # noqa: BLE001 — never crash the pipeline
-            log.error(
-                f"[{DAEMON_NAME}] gate waive raised on {ref}: {exc} — "
-                "reporting failure to the operator"
-            )
-            outcome = WaiveOutcome(
-                entity_found=True, targeted=list(PRE_IMPL_GATES),
-                failed=list(PRE_IMPL_GATES),
-            )
+        outcomes: list[WaiveOutcome] = []
+        for issue_number in issue_numbers:
+            try:
+                outcomes.append(
+                    await store.waive(
+                        trigger.repository, issue_number, PRE_IMPL_GATES
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — never crash the pipeline
+                log.error(
+                    f"[{DAEMON_NAME}] gate waive raised on {ref} "
+                    f"(parent #{issue_number}): {exc} — reporting failure"
+                )
+                outcomes.append(
+                    WaiveOutcome(
+                        entity_found=True, targeted=list(PRE_IMPL_GATES),
+                        failed=list(PRE_IMPL_GATES),
+                    )
+                )
+        outcome = _merge_waive_outcomes(outcomes)
 
         # ALWAYS surface the result on GitHub — success, no-op, and failure.
         # The 2026-07-27 failure produced ZERO GitHub-visible output, which is
@@ -4893,6 +4991,25 @@ class SwarmDispatcher:
         m = _PARENT_ISSUE.search(pr_body or "")
         return int(m.group(1)) if m else None
 
+    @staticmethod
+    def _parent_issue_numbers(pr_body: str) -> list[int]:
+        """Every parent issue a PR closes, in order, de-duplicated.
+
+        ateles#390: a PR routinely closes more than one issue — neotoma#2078
+        closed both #2072 and #2073, each carrying its own `gate_status` with
+        `arch: pending`. `_parent_issue_number` returns only the first match, so
+        a gate waive could clear at most one parent and the PR stayed blocked on
+        the other with no indication why. Gate operations must iterate ALL
+        parents; the singular accessor is kept for callers that legitimately
+        want just the primary (prompt text, log refs).
+        """
+        seen: list[int] = []
+        for m in _PARENT_ISSUE.finditer(pr_body or ""):
+            n = int(m.group(1))
+            if n not in seen:
+                seen.append(n)
+        return seen
+
     def _github_headers(self, repo: str = "") -> dict[str, str]:
         """Return GitHub API request headers with the per-repo token (#95).
 
@@ -4960,6 +5077,79 @@ class SwarmDispatcher:
         return out
 
     # ── Neotoma helpers ──────────────────────────────────────────────────────
+
+    async def _verify_lens_gate_writes(
+        self, t: SwarmTrigger, parent: int, owed: list[str]
+    ) -> None:
+        """Assert that lenses which owed a gate writeback actually made it.
+
+        ateles#391: the writeback is prompt text telling the panelist to
+        `correct()` the parent issue's `gate_status`. Nothing checked that it
+        happened, so a skipped write — or one lost to a Neotoma outage — left
+        the PR BLOCKED while every review comment read as approving. The two
+        surfaces disagreeing IS the signal; this makes it observable.
+
+        Deliberately read-only about gate state. The dispatcher must never write
+        a gate (the self-certification boundary: an agent signs its own gate, a
+        dispatcher never signs it for them). On drift we notify and log; we do
+        not "helpfully" set the gate.
+        """
+        if not self.config.neotoma_token:
+            log.warning(
+                f"[{DAEMON_NAME}] NEOTOMA_BEARER_TOKEN unset — "
+                f"gate writeback for #{parent} not verified"
+            )
+            return
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"{self.config.neotoma_base_url}/retrieve_entity_by_identifier",
+                    json={
+                        "entity_type": "issue",
+                        "identifier": str(parent),
+                        "by": "github_number",
+                    },
+                    headers={
+                        "Authorization": f"Bearer {self.config.neotoma_token}"
+                    },
+                )
+                resp.raise_for_status()
+                snapshot = (resp.json() or {}).get("snapshot") or {}
+        except Exception as exc:
+            # An unverifiable write is NOT a verified one. Say so rather than
+            # letting a read failure read as success — that conflation is how
+            # the original bug stayed invisible.
+            log.error(
+                f"[{DAEMON_NAME}] could not verify gate writeback on #{parent} "
+                f"({exc}); gates {sorted(owed)} are UNVERIFIED, not confirmed"
+            )
+            return
+
+        gates = parse_gate_status(snapshot.get("gate_status"))
+        SATISFIED = {"signed_off", "waived", "not_required"}
+        stuck = [g for g in owed if gates.get(g, "pending") not in SATISFIED]
+        if not stuck:
+            log.info(
+                f"[{DAEMON_NAME}] gate writeback verified on #{parent}: "
+                f"{sorted(owed)} landed"
+            )
+            return
+
+        ref = f"{t.repository}#{t.number}"
+        log.error(
+            f"[{DAEMON_NAME}] GATE DRIFT on #{parent} from panel {ref}: "
+            f"{sorted(stuck)} still {[gates.get(g, 'pending') for g in stuck]} "
+            f"after the lens reviewed and was told to write back"
+        )
+        self.notifier.send(
+            f"Gate drift on #{parent} (panel {ref}): "
+            f"{', '.join(sorted(stuck))} did not advance despite the lens "
+            f"completing its review. The PR will stay BLOCKED on gate "
+            f"inheritance until the gate is written. Either re-run the lens or "
+            f"waive via /confirm-gates-clear.",
+            priority=Priority.OPERATOR_DECISION,
+            handler=DAEMON_NAME,
+        )
 
     async def _store_entities(self, entities: list[dict], idempotency_key: str) -> None:
         if not self.config.neotoma_token:

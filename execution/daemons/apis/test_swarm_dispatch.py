@@ -6499,3 +6499,165 @@ def test_vanellus_prompt_defaults_to_forbidding_merge():
     # Omitting the parameter must fail closed, not open.
     prompt = swarm_dispatch.SwarmDispatcher._vanellus_prompt(_trigger(), 80, ["pm"])
     assert "DO NOT MERGE" in prompt
+
+
+# --- ateles#391: lens gate writebacks must be verified, not assumed ----------
+#
+# The observed failure: a lens posted SIGNED_OFF on the PR, gate_status stayed
+# `pending`, owner_history had zero entries for that agent, and the dispatcher
+# reported the dispatch as ok. The PR then sat BLOCKED forever while every
+# comment read as approving. These tests pin the read-back that makes the
+# drift observable.
+
+
+def _gate_verify_dispatcher(monkeypatch, snapshot, *, raise_on_read=False):
+    """Dispatcher whose Neotoma read returns `snapshot` (or blows up).
+
+    Needs a non-empty neotoma_token: the shared `_config()` deliberately has
+    none, which short-circuits the verifier before it reads anything. Without
+    this the tests pass while exercising nothing.
+    """
+    d = SwarmDispatcher(
+        _StubNotifier(), DispatchConfig(neotoma_token="tok", github_token="")
+    )
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"snapshot": snapshot}
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, **kwargs):
+            if raise_on_read:
+                raise RuntimeError("neotoma unreachable")
+            return _Resp()
+
+    monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", _Client)
+    return d
+
+
+def _trigger_for_gate_test():
+    return SwarmTrigger(
+        kind="pull_request",
+        repository="markmhendrickson/neotoma",
+        number=2078,
+        title="t",
+        html_url="u",
+        delivery_id="d1",
+        action="opened",
+        body="",
+        author="a",
+    )
+
+
+def test_gate_drift_notifies_when_lens_signed_off_but_gate_stayed_pending(monkeypatch):
+    """The exact ateles#391 state: review done, gate never moved."""
+    d = _gate_verify_dispatcher(
+        monkeypatch, {"gate_status": {"arch": "pending", "pm": "signed_off"}}
+    )
+    asyncio.run(d._verify_lens_gate_writes(_trigger_for_gate_test(), 2072, ["arch"]))
+    sent = " ".join(d.notifier.sent)
+    assert "arch" in sent and "2072" in sent, (
+        "drift between a completed review and an unmoved gate must be surfaced"
+    )
+
+
+def test_no_notification_when_the_gate_actually_landed(monkeypatch):
+    d = _gate_verify_dispatcher(
+        monkeypatch, {"gate_status": {"arch": "signed_off", "pm": "signed_off"}}
+    )
+    asyncio.run(d._verify_lens_gate_writes(_trigger_for_gate_test(), 2072, ["arch"]))
+    sent = getattr(d.notifier, "sent", [])
+    assert not sent, "a landed gate write must stay silent"
+
+
+def test_waived_and_not_required_count_as_satisfied(monkeypatch):
+    d = _gate_verify_dispatcher(
+        monkeypatch, {"gate_status": {"arch": "waived", "ux": "not_required"}}
+    )
+    asyncio.run(
+        d._verify_lens_gate_writes(_trigger_for_gate_test(), 2072, ["arch", "ux"])
+    )
+    assert not getattr(d.notifier, "sent", []), (
+        "waived/not_required are satisfied states, not drift"
+    )
+
+
+def test_unreadable_neotoma_does_not_report_success(monkeypatch):
+    """An unverifiable write is not a verified one.
+
+    Neotoma was flapping during the original incident. If a failed read were
+    treated as 'gate fine', the check would be worthless exactly when it is
+    most needed — the same class of bug as a watcher that passes on empty input.
+    """
+    d = _gate_verify_dispatcher(monkeypatch, {}, raise_on_read=True)
+    asyncio.run(d._verify_lens_gate_writes(_trigger_for_gate_test(), 2072, ["arch"]))
+    # No false "verified" claim, and no false drift alarm either — it logs and
+    # returns, leaving the state explicitly unknown.
+    assert not getattr(d.notifier, "sent", [])
+
+
+# --- ateles#390: gate waive must resolve ALL parents, qualified or bare ------
+
+
+def test_parent_extraction_handles_fully_qualified_references():
+    """The exact neotoma#2078 body that produced 'no Neotoma issue entity'.
+
+    The old pattern required `#` immediately after the keyword, so a
+    `closes owner/repo#N` reference matched nothing and the caller fell back to
+    the PR number — for which no issue entity exists.
+    """
+    body = "Closes markmhendrickson/neotoma#2072, closes markmhendrickson/neotoma#2073."
+    assert SwarmDispatcher._parent_issue_numbers(body) == [2072, 2073]
+
+
+def test_parent_extraction_still_handles_bare_references():
+    assert SwarmDispatcher._parent_issue_numbers("Closes #2072") == [2072]
+
+
+def test_parent_extraction_returns_every_parent_not_just_the_first():
+    """A PR closing two issues has two sets of gates; waiving one leaves it blocked."""
+    body = "Fixes #10 and resolves owner/repo#20"
+    assert SwarmDispatcher._parent_issue_numbers(body) == [10, 20]
+
+
+def test_parent_extraction_dedupes_and_handles_absence():
+    assert SwarmDispatcher._parent_issue_numbers("closes #5, closes #5") == [5]
+    assert SwarmDispatcher._parent_issue_numbers("no linkage") == []
+
+
+def test_merged_waive_outcome_is_pessimistic_about_entity_found():
+    """One unresolved parent must not read as a clean waive."""
+    from gate_waive import WaiveOutcome
+
+    merged = swarm_dispatch._merge_waive_outcomes([
+        WaiveOutcome(entity_found=True, waived=["arch"], verified=True),
+        WaiveOutcome(entity_found=False),
+    ])
+    assert not merged.entity_found and not merged.ok
+
+
+def test_merged_waive_outcome_unions_gates_and_requires_all_verified():
+    from gate_waive import WaiveOutcome
+
+    merged = swarm_dispatch._merge_waive_outcomes([
+        WaiveOutcome(entity_found=True, waived=["arch"], verified=True),
+        WaiveOutcome(entity_found=True, waived=["ux"], verified=False),
+    ])
+    assert merged.waived == ["arch", "ux"]
+    assert not merged.verified, "an unverified parent must not report as verified"
+
+
+def test_merged_waive_outcome_of_nothing_is_not_found():
+    assert not swarm_dispatch._merge_waive_outcomes([]).entity_found
