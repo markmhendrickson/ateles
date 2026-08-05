@@ -5190,6 +5190,43 @@ def _empty_spec_state():
     return SpecState(repo="markmhendrickson/neotoma", issue_number=1882, title="t")
 
 
+def test_build_prompt_disambiguates_blocking_markers_in_spec():
+    """ateles#359: a spec carrying [BLOCKING] markers must not read as 'do not build'.
+
+    Lens agents write review vocabulary into build specs, and the swarm-wide
+    prompt defines `[BLOCKING]` as 'the author must address them' while Cicada's
+    prompt says to raise a checkpoint rather than open a PR. Cicada IS the
+    author, so an unqualified spec makes refusing-to-build the compliant
+    reading — the observed failure across eight issues (only the two specs with
+    zero blocking markers ever produced a PR).
+
+    The build prompt must therefore state explicitly that markers inside the
+    spec are definition-of-done items for the PR being opened, not findings
+    that withhold it.
+    """
+    from issue_spec import SpecState
+
+    state = SpecState(repo="owner/repo", issue_number=100, title="t")
+    state.sections = {
+        "security": (
+            "- [ ] Flag as [NON-BLOCKING] for this PR, but if exposed on a "
+            "guest surface this becomes [BLOCKING] and needs rate-limiting."
+        )
+    }
+    prompt = SwarmDispatcher._cicada_build_prompt(_issue_trigger(), state)
+
+    # The spec's own markers still reach the builder (we do not strip signal).
+    assert "[NON-BLOCKING]" in prompt
+
+    lowered = prompt.lower()
+    # The builder is told these are requirements to satisfy, not merge-blockers.
+    assert "definition-of-done" in lowered
+    # And is told not to withhold the PR merely because the word appears.
+    assert "open the pr" in lowered
+    # The conditional-marker case is called out, since specs phrase it that way.
+    assert "conditional" in lowered
+
+
 # ── issue-pipeline resume after restart (ateles#230 follow-up) ───────────────
 
 
