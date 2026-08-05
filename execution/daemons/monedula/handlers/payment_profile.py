@@ -48,6 +48,14 @@ import os
 from dataclasses import dataclass, field
 from typing import Literal
 
+# Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
+# User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
+NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
+
+# Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
+# User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
+NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
+
 log = logging.getLogger(__name__)
 
 # Wise accepts only these legalType values when creating an IBAN recipient.
@@ -112,9 +120,15 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
     import urllib.request
 
     bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "").strip()
-    base_url = os.environ.get(
-        "NEOTOMA_BASE_URL", ""
-    ).rstrip("/")
+    # No default: local hosting was retired 2026-08-04, and any fallback here is
+    # a silent-failure vector — an unreachable default reads as "no profiles
+    # configured" and the run pays nothing while reporting success. Fail loudly.
+    base_url = os.environ.get("NEOTOMA_BASE_URL", "").strip().rstrip("/")
+    if not base_url:
+        raise RuntimeError(
+            "NEOTOMA_BASE_URL is not set — refusing to guess a Neotoma endpoint. "
+            "Set it to the hosted instance URL before running Monedula."
+        )
 
     # On a loopback target the server trusts localhost (NEOTOMA_TRUST_PROD_LOOPBACK)
     # and a stale/invalid bearer is actively rejected — so omit the header locally.
@@ -141,8 +155,27 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
             method="POST",
             headers=headers,
         )
+        req.add_header("User-Agent", NEOTOMA_USER_AGENT)
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        # An auth/transport rejection is NOT "no profiles configured". Returning
+        # [] quietly here is how every scheduled run since the hosted migration
+        # reported success while paying nothing: Cloudflare answered 403 and the
+        # daemon could not tell that apart from an empty result. Log at ERROR so
+        # it is visible, and name the two causes worth checking first.
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:200]
+        except Exception:
+            pass
+        log.error(
+            f"Neotoma payment_profile fetch REJECTED: HTTP {exc.code} — no profiles "
+            f"loaded, so NO payments will be proposed this run. "
+            f"Check NEOTOMA_BEARER_TOKEN (401/403) and that the request carries a "
+            f"User-Agent (Cloudflare 1010 blocks urllib's default). {detail}"
+        )
+        return []
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
         log.warning(f"Neotoma payment_profile fetch failed: {exc}")
         return []
@@ -267,7 +300,14 @@ def load_profiles_with_neotoma_fallback() -> list[PaymentProfile]:
     Phase 5 entrypoint. Monedula callers should use this instead of
     load_profiles() to transparently prefer Neotoma-sourced profiles.
     """
-    profiles = load_profiles_from_neotoma()
+    try:
+        profiles = load_profiles_from_neotoma()
+    except RuntimeError as exc:
+        # Neotoma is unconfigured, not unreachable. That is loud in the log but
+        # recoverable here, because env-var profiles are a real second source —
+        # so fall through rather than taking the whole run down.
+        log.error(f"Neotoma payment profiles unavailable: {exc}")
+        profiles = []
     if profiles:
         return profiles
 

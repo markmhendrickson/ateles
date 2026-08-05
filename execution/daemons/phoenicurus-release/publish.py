@@ -51,6 +51,10 @@ import urllib.request
 from datetime import date
 from pathlib import Path
 
+# Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
+# User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
+NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
+
 # ---------------------------------------------------------------------------
 # Bootstrap: load env from ~/.config/neotoma/.env (launchd does not source
 # shell profiles). setdefault so an explicit environment wins.
@@ -259,6 +263,7 @@ def neotoma_query(entity_type: str, limit: int = 100) -> list[dict]:
     req = urllib.request.Request(
         f"{base}/entities/query", data=body, headers=_neotoma_headers(), method="POST"
     )
+    req.add_header("User-Agent", NEOTOMA_USER_AGENT)
     data = _neotoma_request_json(req, f"query {entity_type}")
     if data is None:
         return []
@@ -273,6 +278,7 @@ def neotoma_fetch_entity(entity_id: str) -> dict | None:
     req = urllib.request.Request(
         f"{base}/entities/{entity_id}", headers=_neotoma_headers()
     )
+    req.add_header("User-Agent", NEOTOMA_USER_AGENT)
     return _neotoma_request_json(req, f"fetch {entity_id}")
 
 
@@ -285,6 +291,7 @@ def neotoma_store(entities: list[dict], idempotency_key: str) -> dict | None:
     req = urllib.request.Request(
         f"{base}/store", data=body, headers=_neotoma_headers(), method="POST"
     )
+    req.add_header("User-Agent", NEOTOMA_USER_AGENT)
     return _neotoma_request_json(req, "store")
 
 

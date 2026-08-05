@@ -24,6 +24,10 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+# Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
+# User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
+NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
+
 # ---------------------------------------------------------------------------
 # Env bootstrap
 # ---------------------------------------------------------------------------
@@ -133,6 +137,7 @@ def _neotoma_get(path: str) -> dict | list | None:
                 "Accept": "application/json",
             },
         )
+        req.add_header("User-Agent", NEOTOMA_USER_AGENT)
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read())
     except Exception as exc:

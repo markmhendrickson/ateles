@@ -23,6 +23,10 @@ import sys
 import time
 from pathlib import Path
 
+# Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
+# User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
+NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -462,6 +466,7 @@ def _neotoma_query(
             "Accept": "application/json",
         },
     )
+    req.add_header("User-Agent", NEOTOMA_USER_AGENT)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode()

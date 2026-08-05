@@ -26,6 +26,10 @@ import urllib.request
 from datetime import date, timedelta
 from pathlib import Path
 
+# Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
+# User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
+NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
+
 # ---------------------------------------------------------------------------
 # Bootstrap: load env from ~/.config/neotoma/.env before anything else.
 # (launchd does not source shell profiles)
@@ -238,6 +242,7 @@ def _fetch_entity_by_id(entity_id: str) -> dict | None:
         if NEOTOMA_BEARER_TOKEN and not is_loopback:
             headers["Authorization"] = f"Bearer {NEOTOMA_BEARER_TOKEN}"
         req = urllib.request.Request(url, headers=headers)
+        req.add_header("User-Agent", NEOTOMA_USER_AGENT)
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read())
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
