@@ -185,7 +185,7 @@ Every comment MUST open with this header (bold, em-dash, literal "Ateles swarm,"
 
 Rules — read carefully:
 
-- **Agent name in Title Case** — e.g. `Pavo`, `Gryllus`, `Lanius`. Never lowercase.
+- **Agent name in Title Case** — e.g. `Pavo`, `Cicada`, `Lanius`. Never lowercase.
 - **Em-dash** (—, U+2014), not a hyphen (-) or double-hyphen (--).
 - **"Ateles swarm,"** is literal — include the comma, no variations.
 - **`<role-phrase>`** is YOUR fixed role label used consistently every time \
@@ -1031,7 +1031,7 @@ async def _run_skill_once(
     # the dispatched child can sign its own Neotoma writes as <role>@ateles-swarm.
     # The Neotoma client signer (aauth_client_signer.ts) reads three vars:
     #   NEOTOMA_AAUTH_PRIVATE_JWK_PATH — path to the EC/P-256 JWK keypair file
-    #   NEOTOMA_AAUTH_SUB              — the signing subject (e.g. gryllus@ateles-swarm)
+    #   NEOTOMA_AAUTH_SUB              — the signing subject (e.g. cicada@ateles-swarm)
     #   NEOTOMA_AAUTH_ISS              — the issuer (https://markmhendrickson.com)
     # We only inject when the role JWK file actually exists at the expected path;
     # if it is absent the child proceeds unsigned (graceful degradation, as today).
