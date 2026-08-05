@@ -133,6 +133,11 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--stdin", action="store_true", help="read value from stdin, not clipboard")
     ap.add_argument("--list", action="store_true", help="list managed env vars and exit")
     ap.add_argument("--no-materialize", action="store_true", help="skip the .env write")
+    ap.add_argument(
+        "--gh-secret", action="append", default=[], metavar="OWNER/REPO",
+        help="also set this GitHub Actions secret to the same value (repeatable). "
+             "Runs only after the shape check and the 1Password round-trip pass.",
+    )
     args = ap.parse_args(argv)
 
     if args.list:
@@ -217,6 +222,26 @@ def main(argv: list[str]) -> int:
         ).returncode
         if rc != 0:
             return rc
+
+    # GitHub Actions secrets last: only a value that already passed the shape
+    # check and the 1Password round-trip is allowed to reach CI. Doing this with
+    # a bare `pbpaste | gh secret set` is how the neotoma CLAUDE_CODE_OAUTH_TOKEN
+    # secret was overwritten with 15 characters of unrelated text on 2026-08-05 —
+    # gh accepts any stdin and reports success, and a corrupted CI secret is
+    # write-only, so the damage only surfaces as a confusing auth failure in a
+    # later workflow run.
+    for repo in args.gh_secret:
+        print(f"[+]   setting Actions secret in {repo}")
+        r = subprocess.run(
+            ["gh", "secret", "set", args.env_var, "-R", repo],
+            input=value, text=True, capture_output=True,
+        )
+        if r.returncode != 0:
+            print(f"      FAILED: {r.stderr.strip() or r.returncode}")
+            print("      (1Password/.env are already updated; re-run with only "
+                  "--gh-secret to retry just this step)")
+            return 1
+        print(f"      ok — {repo}")
 
     print(f"\nDone. {args.env_var} rotated. Clear your clipboard:  pbcopy </dev/null")
     print(f"Commit the snapshot in ateles-private: git -C ~/repos/ateles-private commit -am 'rotate {args.env_var}'")
