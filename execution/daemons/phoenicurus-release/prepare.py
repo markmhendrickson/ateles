@@ -315,7 +315,7 @@ def existing_release_status(next_version_hint: str) -> str | None:
     Return the status of any release_result already tracking work since the last
     tag, so we don't re-prepare on top of a pending_approval release.
     """
-    base = os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180").rstrip("/")
+    base = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
     is_loopback = "localhost" in base or "127.0.0.1" in base
     bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
@@ -425,7 +425,7 @@ release-candidate PR, then HALT:
    `npm run -s release-notes:render -- --tag <TAG> --head-ref HEAD --supplement <path>`.
 
 Then record + notify:
-10. Store a Neotoma `release_result` entity (POST {os.environ.get("NEOTOMA_BASE_URL", "http://localhost:9180")}/store)
+10. Store a Neotoma `release_result` entity (POST {os.environ.get("NEOTOMA_BASE_URL", "")}/store)
     with fields: version=<TAG>, status="pending_approval". Set BOTH branch-name
     fields to "release/<TAG>": `rc_branch` AND `branch`. Set BOTH PR-URL fields
     to the RC PR URL: `rc_pr_url` AND `release_url`. (publish.py reads the `rc_*`
