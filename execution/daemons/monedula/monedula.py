@@ -166,18 +166,23 @@ def _yesterday() -> date:
     return date.today() - timedelta(days=1)
 
 
-def fetch_yesterday_events() -> list[dict]:
+def fetch_yesterday_events() -> list[dict] | None:
     """
     Use gws CLI to fetch all calendar events for yesterday.
     Returns list of event dicts (each with at least 'summary').
-    Returns empty list on any failure.
+
+    Returns None on FAILURE, which is distinct from [] meaning "yesterday had
+    no events". Callers must not treat a failed fetch as an empty day: the
+    calendar leg runs at most once per day, so a failure that reads as "no
+    sessions" silently skips a real payment obligation (this is what caused
+    the 2026-07-30 therapy session to go unnotified and unpaid).
     """
     import shutil
 
     gws = shutil.which("gws")
     if not gws:
         log.error("gws CLI not found in PATH — cannot check calendar")
-        return []
+        return None
 
     yest = _yesterday()
     time_min = yest.strftime("%Y-%m-%dT00:00:00+02:00")
@@ -201,7 +206,7 @@ def fetch_yesterday_events() -> list[dict]:
         )
         if result.returncode != 0:
             log.error(f"gws calendar events list failed: {result.stderr.strip()[:300]}")
-            return []
+            return None
 
         data = json.loads(result.stdout)
         items = data.get("items") or []
@@ -212,10 +217,10 @@ def fetch_yesterday_events() -> list[dict]:
 
     except json.JSONDecodeError as exc:
         log.error(f"Failed to parse gws output: {exc}")
-        return []
+        return None
     except Exception as exc:
         log.error(f"Calendar fetch error: {exc}")
-        return []
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -572,11 +577,6 @@ def main() -> None:
         log.info("Already ran today — exiting.")
         return
 
-    # Mark as started immediately to prevent concurrent launchd re-launches.
-    # We clear this at the very end if something goes wrong before completion,
-    # but keep it on successful runs to prevent double-payment.
-    _mark_ran_today()
-
     yesterday = _yesterday()
     yesterday_str = yesterday.isoformat()
     log.info(f"Checking calendar for yesterday: {yesterday_str}")
@@ -587,8 +587,34 @@ def main() -> None:
 
     all_handlers = load_handlers()
 
-    # Fetch yesterday's events
+    # Fetch yesterday's events BEFORE claiming the day.
+    #
+    # The calendar leg runs at most once per day. Marking the day before the
+    # fetch meant a failed fetch still consumed the only attempt, with no
+    # retry — so a transient outage silently skipped that day's payments
+    # entirely. The daily run drifted to just after midnight, when this host
+    # is asleep with no network, and every attempt failed for a week straight
+    # (the 2026-07-30 therapy session went unnotified and unpaid as a result).
+    #
+    # Now a failed fetch leaves the day unclaimed, so the next launchd tick
+    # (~15 min) retries until the network is back.
     events = fetch_yesterday_events()
+
+    if events is None:
+        log.error(
+            "Calendar fetch FAILED — leaving today unclaimed so the next tick retries. "
+            "Not treating this as 'no sessions yesterday'."
+        )
+        _notify(
+            f"monedula: calendar fetch failed for {yesterday_str} — "
+            "payment detection is DOWN; will retry next tick",
+            priority="blocker",
+        )
+        return
+
+    # Calendar fetch succeeded — claim the day so concurrent launchd
+    # re-launches (and later ticks) skip the calendar leg.
+    _mark_ran_today()
 
     # Find triggered handlers from calendar
     triggered: list[tuple] = []  # [(handler, [match, ...]), ...]
