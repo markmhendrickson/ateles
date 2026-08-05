@@ -102,7 +102,8 @@ _AUTO_REREVIEW_TRIGGER_KINDS = ("pr_synchronize", "pr_reopened")
 # A PR that touches these paths is a product change that SHOULD originate from a
 # gated issue routed through Cicada. When such a PR has NO parent issue
 # (`Closes #N`), it bypassed the pm/arch pre-impl gates: Lanius still fails open
-# for review (merge stays operator-gated), but the bypass must be LOUD, not
+# for review (merge gated unless APIS_AUTONOMY_AUTO_MERGE=1), but the bypass
+# must be LOUD, not
 # silent. Matches source/API/schema/migration/CLI surfaces across repos; excludes
 # pure docs, tests, and config-only diffs (those are lower-stakes and legitimately
 # land without the full pipeline).
@@ -1008,8 +1009,9 @@ class DispatchConfig:
     # Auto-build handoff (rollout safety): when ON, a fully-assembled spec whose
     # gates are green chains into an implementation PR (Cicada build) so the PR
     # gate pipeline takes over.  Default OFF/unset = spec-only, notify-and-wait
-    # for the operator's `build` approval.  Never auto-MERGES — that boundary
-    # stays operator-gated via APIS_AUTONOMY_AUTO_MERGE regardless.
+    # for the operator's `build` approval.  This flag never merges; the merge
+    # boundary is governed separately by APIS_AUTONOMY_AUTO_MERGE, which when
+    # set to 1 lets Vanellus merge WITHOUT operator approval.
     auto_build: bool = os.environ.get("ATELES_SWARM_AUTO_BUILD", "0") == "1"
     # Operator-approval-triggers-merge (approval loop). When ON, an explicit
     # operator approval — via the /approve issue comment, a GitHub PR review
@@ -1682,7 +1684,8 @@ class SwarmDispatcher:
                 f"{', '.join(completed) or 'none'}); "
                 + (
                     f"auto-build ON — implementation PR opened ({pr_url}); the "
-                    "PR gate pipeline now owns it (merge stays operator-gated)."
+                    "PR gate pipeline now owns it (merge is operator-gated "
+                    "unless APIS_AUTONOMY_AUTO_MERGE=1)."
                     if pr_url
                     else "auto-build ON, but the Cicada build handoff opened NO "
                     "PR (spec may be incomplete or the build produced nothing). "
@@ -1720,8 +1723,9 @@ class SwarmDispatcher:
 
         Lanius owns gate_status; when its new-issue protocol ran cleanly and did
         not emit a `GATE_INHERITANCE: blocked` verdict, we treat the gates as
-        green enough to hand off (the PR pipeline re-checks inheritance and the
-        merge boundary is still operator-gated regardless).  Conservative: any
+        green enough to hand off (the PR pipeline re-checks inheritance; the
+        merge boundary is operator-gated unless APIS_AUTONOMY_AUTO_MERGE=1).
+        Conservative: any
         Lanius failure or explicit blocked verdict returns False.
         """
         if not lanius.ok:
@@ -1825,7 +1829,8 @@ class SwarmDispatcher:
         Cicada is instructed to branch off FRESH origin/main in a worktree,
         implement the assembled spec, and open a PR whose body references the
         issue (`Closes #<n>`) so the existing ``_handle_pr`` gate pipeline takes
-        over.  This method NEVER merges anything.
+        over.  This method itself never merges; whether the resulting PR is
+        merged autonomously depends on APIS_AUTONOMY_AUTO_MERGE.
 
         Returns the opened PR URL when a PR was ACTUALLY opened, else None.
         A successful dispatch (exit 0) is NOT sufficient: on #1882 Cicada
@@ -1980,7 +1985,8 @@ class SwarmDispatcher:
 
         # 0. Pipeline-bypass guard (ateles): a product-code PR with NO parent
         #    issue skipped the gated issue → pm/arch → Cicada path. Lanius still
-        #    fails open for review below (merge stays operator-gated), but the
+        #    fails open for review below (merge gated unless
+        #    APIS_AUTONOMY_AUTO_MERGE=1), but the
         #    bypass must be surfaced LOUDLY — a visible PR comment + an operator
         #    notification — instead of being silently retro-initialized as a
         #    "legacy independent fix". Best-effort; never blocks the pipeline.
@@ -2001,7 +2007,7 @@ class SwarmDispatcher:
                     self.notifier.send(
                         f"PR {ref} touched product code with no parent issue — it "
                         "bypassed the gated pm/arch → Cicada pipeline. Review "
-                        "proceeds; merge stays operator-gated. File the issue and "
+                        "proceeds; merge is gated unless auto-merge is on. File the issue and "
                         "add `Closes #N`, or accept the bypass.",
                         priority=Priority.OPERATOR_DECISION,
                         handler=DAEMON_NAME,
@@ -2032,7 +2038,8 @@ class SwarmDispatcher:
                     "final line. End with exactly `GATE_INHERITANCE: clear` or "
                     "`GATE_INHERITANCE: blocked`. If you cannot verify the "
                     "gates from here, emit `GATE_INHERITANCE: clear` — review "
-                    "proceeds and merge stays operator-gated regardless."
+                    "proceeds; the merge boundary is governed by "
+                    "APIS_AUTONOMY_AUTO_MERGE, not by your verdict."
                 ),
                 github_token=_lanius_token,
                 include_github_contract=True,
@@ -2091,8 +2098,8 @@ class SwarmDispatcher:
         if not verdict:
             log.warning(
                 f"[{DAEMON_NAME}] {ref}: Lanius emitted no GATE_INHERITANCE "
-                "verdict — proceeding to panel (fail-open for review, "
-                "merge stays gated)"
+                "verdict — proceeding to panel (fail-open for review; merge "
+                "gated unless APIS_AUTONOMY_AUTO_MERGE=1)"
             )
 
         # 2. Assemble the review panel (neotoma#1640): pre-registered agents
@@ -2465,7 +2472,8 @@ class SwarmDispatcher:
         consolidated guidance is handed to Cicada, which implements + pushes;
         the push (synchronize) re-runs the whole PR handler. Bounded by
         max_fix_rounds so an unresolvable finding escalates to the operator
-        instead of looping forever. Merge stays operator-gated throughout.
+        instead of looping forever. Merge is operator-gated throughout unless
+        APIS_AUTONOMY_AUTO_MERGE=1.
         """
         ref = f"{trigger.repository}#{trigger.number}"
 
@@ -4093,7 +4101,7 @@ class SwarmDispatcher:
             "⚠️ **Pipeline bypass** — this PR touches product code but "
             "has no parent issue, so it skipped the gated pipeline "
             "(issue triage → pm/arch sign-off → Cicada implementation).\n\n"
-            "The review panel still runs and **merge stays operator-gated**, so "
+            "The review panel still runs, so "
             "nothing is blocked. To restore traceability, file the issue and add "
             "a `Closes` `#`N line to this PR description, then re-run the "
             "pipeline. Otherwise the gates are being back-filled after the fact "
@@ -4640,7 +4648,8 @@ class SwarmDispatcher:
             "at `signed_off`/`waived`, PRESERVE those exactly — never downgrade "
             "a `signed_off` gate to `pending`. Only emit `blocked` when "
             "`gate_status` exists AND a pre-impl gate is genuinely `pending` "
-            "(unsigned). Merge stays operator-gated regardless, per the "
+            "(unsigned). The merge boundary is governed by "
+            "APIS_AUTONOMY_AUTO_MERGE, not by this gate, per the "
             "fail-open-for-review guardrail. To run the full issue pipeline on "
             "a legacy issue (gate init + expectations + Pavo), the operator can "
             "backfill via `trigger_swarm_pr.py issue <n>`.\n\n"
