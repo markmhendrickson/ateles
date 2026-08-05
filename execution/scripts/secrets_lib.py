@@ -106,8 +106,15 @@ def parse_dotenv(text: str) -> dict[str, str]:
 def merge_into_env_file(env_file: Path, updates: dict[str, str]) -> list[str]:
     """Merge `updates` into a dotenv file, preserving unmanaged keys.
 
-    Returns the list of var NAMES changed (never values). Creates parent dirs
-    and the file if missing.
+    Values are written WRAPPED IN DOUBLE QUOTES so that `#`, spaces, and `=`
+    survive shell-sourcing of the file. Standard dotenv parsers strip one layer
+    of wrapping quotes on read, so consumers see the raw value. Note this
+    differs from `to_dotenv` above, which renders the SOPS plaintext unquoted —
+    the two write different artifacts for different readers, and conflating
+    them leads to "the .env is corrupted" false alarms.
+
+    Returns the list of var NAMES whose VALUE changed (never the values
+    themselves); re-quoting alone is not a change.
     """
     env_file.parent.mkdir(parents=True, exist_ok=True)
     existing_lines = env_file.read_text().splitlines() if env_file.exists() else []
@@ -115,13 +122,24 @@ def merge_into_env_file(env_file: Path, updates: dict[str, str]) -> list[str]:
     changed: list[str] = []
     out_lines: list[str] = []
 
+    def unquote(v: str) -> str:
+        """Strip one layer of wrapping quotes, matching dotenv parser behaviour."""
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+            return v[1:-1]
+        return v
+
     for line in existing_lines:
         stripped = line.strip()
         if stripped and not stripped.startswith("#") and "=" in stripped:
             key = stripped.partition("=")[0].strip()
             if key in updates:
+                # Compare VALUES, not line text. Comparing rendered lines made a
+                # rotation report "0 changed" when only the quoting differed, and
+                # would report a spurious change on a pure re-quote.
+                old_val = unquote(stripped.partition("=")[2])
                 new_line = f'{key}="{updates[key]}"'
-                if new_line != line:
+                if old_val != updates[key]:
                     changed.append(key)
                 out_lines.append(new_line)
                 seen.add(key)
