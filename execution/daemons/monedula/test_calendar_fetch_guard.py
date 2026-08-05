@@ -22,6 +22,7 @@ import shutil
 import subprocess
 from datetime import date
 
+import handlers
 import monedula
 
 
@@ -78,7 +79,7 @@ def test_failed_fetch_leaves_day_unclaimed(monkeypatch, tmp_path) -> None:
     state = tmp_path / ".monedula_last_run"
     monkeypatch.setattr(monedula, "STATE_FILE", state)
     monkeypatch.setattr(monedula, "fetch_yesterday_events", lambda: None)
-    monkeypatch.setattr(monedula, "load_profiles_from_neotoma", lambda *a, **k: [], raising=False)
+    monkeypatch.setattr(handlers, "load_handlers", lambda: [])
 
     monedula.main()
 
@@ -90,7 +91,7 @@ def test_successful_fetch_claims_the_day(monkeypatch, tmp_path) -> None:
     state = tmp_path / ".monedula_last_run"
     monkeypatch.setattr(monedula, "STATE_FILE", state)
     monkeypatch.setattr(monedula, "fetch_yesterday_events", lambda: [])
-    monkeypatch.setattr(monedula, "load_profiles_from_neotoma", lambda *a, **k: [], raising=False)
+    monkeypatch.setattr(handlers, "load_handlers", lambda: [])
     monkeypatch.setattr(monedula, "fetch_due_payment_tasks", lambda *a, **k: [])
 
     monedula.main()
