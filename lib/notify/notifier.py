@@ -233,8 +233,31 @@ class Notifier:
                     "[notify] Suppressed repeat for %r (already alerting)", state_key
                 )
                 return False
-            self._alert_state[state_key] = _time.time()
-            self._save_alert_state()
+            # Record the condition as alerting ONLY if this call actually
+            # delivered. A priority that queues or drops (INFO, or WARN inside a
+            # silence window) would otherwise mark the key alerting with nothing
+            # sent, suppressing every later poll until resolve() — the operator
+            # would hear about the outage exactly never.
+            delivered = self._route(prio, full_message, bypass_silence)
+            if delivered:
+                self._alert_state[state_key] = _time.time()
+                self._save_alert_state()
+            else:
+                log.warning(
+                    "[notify] %r not delivered at priority %s (queued/dropped) — "
+                    "not marking as alerting; edge-triggered alerts need a "
+                    "priority that delivers immediately (BLOCKER/CRITICAL).",
+                    state_key,
+                    prio.value,
+                )
+            return delivered
+
+        return self._route(prio, full_message, bypass_silence)
+
+    def _route(
+        self, prio: Priority, full_message: str, bypass_silence: bool
+    ) -> bool:
+        """Deliver or queue an already-tagged message according to its priority."""
 
         if prio == Priority.CRITICAL:
             # Critical always fires immediately, even in silence window

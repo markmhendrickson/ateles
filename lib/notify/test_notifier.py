@@ -237,3 +237,23 @@ def test_corrupt_state_file_fails_open(tmp_path, monkeypatch):
     monkeypatch.setattr(n, "_deliver", lambda m, force=False: sent.append(m) or True)
     n.send("down", priority=Priority.BLOCKER, state_key="k")
     assert len(sent) == 1  # unreadable state must not silence alerting
+
+
+def test_undelivered_state_key_does_not_suppress(tmp_path, monkeypatch):
+    """A state_key call that queues instead of delivering must NOT mark the
+    condition alerting — otherwise the first poll silently arms suppression and
+    the operator is never told about the outage at all."""
+    n = Notifier(rubric=ALWAYS_SILENT)
+    n._state_path = tmp_path / "notify_state.json"
+    n._alert_state = {}
+    sent = []
+    monkeypatch.setattr(n, "_deliver", lambda m, force=False: sent.append(m) or True)
+
+    # WARN inside a silence window queues for digest — it does not deliver.
+    assert n.send("degraded", priority=Priority.WARN, state_key="k") is False
+    assert sent == []
+    assert "k" not in n._alert_state, "armed suppression without delivering"
+
+    # Because nothing was delivered, a later deliverable alert still gets through.
+    assert n.send("down", priority=Priority.BLOCKER, state_key="k") is True
+    assert len(sent) == 1
