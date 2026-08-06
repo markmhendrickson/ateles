@@ -425,7 +425,9 @@ release-candidate PR, then HALT:
    using exactly this commit message format (matching precedent commit
    01344fec9): `chore(release): bump version to <TAG> + supplement`.
 8. Open the release-candidate PR (release/<TAG> -> main) with the supplement as
-   the body. Post `@claude review` on it.
+   the body. Do NOT post `@claude review` — that workflow
+   (`claude_pr_review.yml`) was disabled on 2026-06-24 and the comment fires
+   nothing. The Ateles swarm review panel picks the PR up on its own.
 9. Render the exact GitHub Release notes with
    `npm run -s release-notes:render -- --tag <TAG> --head-ref HEAD --supplement <path>`.
 
