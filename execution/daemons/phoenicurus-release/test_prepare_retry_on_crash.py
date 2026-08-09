@@ -47,6 +47,7 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(prepare, "MERGE_STATE_FILE", tmp_path / ".sha")
     monkeypatch.setattr(prepare, "STATE_FILE", tmp_path / ".day")
     monkeypatch.setattr(prepare, "SPAWN_COUNT_FILE", tmp_path / ".spawns")
+    monkeypatch.setattr(prepare, "SPAWN_PID_FILE", tmp_path / ".pid")
     return tmp_path
 
 
@@ -112,11 +113,13 @@ def ready_to_spawn(isolated_state, monkeypatch):
 
     spawns: list[str] = []
 
-    def _fake_spawn(tag, count, dry_run):
+    def _fake_spawn(tag, count, dry_run, head=""):
         spawns.append(tag)
         return True  # Popen succeeded — says nothing about the agent's outcome
 
     monkeypatch.setattr(prepare, "spawn_prepare_agent", _fake_spawn)
+    # Default: no peer running, so existing tests exercise the spawn path.
+    monkeypatch.setattr(prepare, "_live_peer_pid", lambda _h: None)
     monkeypatch.setattr(
         prepare, "NEOTOMA_REPO_ROOT", _FakeRepoRoot(isolated_state), raising=False
     )
@@ -267,3 +270,89 @@ def test_budget_not_exhausted_below_max(isolated_state, monkeypatch):
     monkeypatch.setattr(prepare, "MAX_SPAWNS_PER_HEAD", 3)
     prepare._record_spawn(SHA)
     assert prepare._spawn_count(SHA) < prepare.MAX_SPAWNS_PER_HEAD
+
+# ---------------------------------------------------------------------------
+# Deferral to a live peer must not spend a retry attempt
+# ---------------------------------------------------------------------------
+
+
+def test_deferring_to_a_live_peer_does_not_spend_an_attempt(ready_to_spawn, monkeypatch):
+    """
+    A spawned agent runs for minutes. When the daemon fires again in that window,
+    the new run must defer to the live peer — and deferring is NOT an attempt.
+
+    Observed 2026-08-09: attempts 2/3 and 3/3 were both deferrals (agents that
+    correctly stood down rather than race a competing RC PR), the original agent
+    then died, and the head was left with a spent budget and no release. Three
+    "attempts", zero tries.
+    """
+    monkeypatch.setattr(prepare, "MAX_SPAWNS_PER_HEAD", 3)
+    prepare.run_prepare(dry_run=False, force=False, on_merge=True)
+    assert len(ready_to_spawn) == 1
+    assert prepare._spawn_count(SHA) == 1
+
+    # A peer is alive for this head (our own pid always is).
+    monkeypatch.setattr(prepare, "_live_peer_pid", lambda h: 4242)
+
+    prepare.run_prepare(dry_run=False, force=False, on_merge=True)
+    prepare.run_prepare(dry_run=False, force=False, on_merge=True)
+
+    assert len(ready_to_spawn) == 1, "must not spawn while a peer is working"
+    assert prepare._spawn_count(SHA) == 1, (
+        "deferring to a peer charged a retry attempt; three deferrals would "
+        "exhaust the budget without a single agent having tried"
+    )
+    assert not prepare._already_ran_for_sha(SHA), (
+        "deferral must leave the head retryable — the peer may still die"
+    )
+
+
+def test_dead_peer_does_not_block_a_retry(ready_to_spawn, monkeypatch):
+    """Once the peer is gone, the head must become spawnable again."""
+    monkeypatch.setattr(prepare, "MAX_SPAWNS_PER_HEAD", 3)
+    prepare.run_prepare(dry_run=False, force=False, on_merge=True)
+
+    monkeypatch.setattr(prepare, "_live_peer_pid", lambda h: None)
+    prepare.run_prepare(dry_run=False, force=False, on_merge=True)
+
+    assert len(ready_to_spawn) == 2, "a dead peer must not suppress the retry"
+
+
+def test_live_peer_probe_reports_none_for_a_dead_pid(isolated_state, monkeypatch):
+    """The liveness probe must not treat a stale pid file as a running agent."""
+    monkeypatch.setattr(prepare, "SPAWN_PID_FILE", isolated_state / ".pid")
+    (isolated_state / ".pid").write_text(f"{SHA} 999999")
+    assert prepare._live_peer_pid(SHA) is None
+
+
+def test_live_peer_probe_is_per_head(isolated_state, monkeypatch):
+    """A peer working a DIFFERENT head must not block this one."""
+    import os
+    monkeypatch.setattr(prepare, "SPAWN_PID_FILE", isolated_state / ".pid")
+    (isolated_state / ".pid").write_text(f"{OTHER_SHA} {os.getpid()}")
+    assert prepare._live_peer_pid(SHA) is None
+    assert prepare._live_peer_pid(OTHER_SHA) == os.getpid()
+
+
+def test_scheduled_sweep_does_not_consult_the_peer_gate(ready_to_spawn, monkeypatch):
+    """
+    Pins the scope Loxia asked about on ateles#408.
+
+    The sweep is rate-limited per calendar day, not per commit, so it passes
+    head="" and has no key for a peer lookup. It therefore does NOT defer via
+    this path — but it also cannot miscount, because `_record_spawn` is equally
+    merge-only. Documenting the asymmetry so a future reader does not "fix" the
+    docstring by wiring the sweep in without giving it a head to key on.
+    """
+    monkeypatch.setattr(prepare, "_live_peer_pid", lambda _h: 4242)
+    monkeypatch.setattr(prepare, "_already_ran_today", lambda: False)
+
+    prepare.run_prepare(dry_run=False, force=False, on_merge=False)
+
+    assert len(ready_to_spawn) == 1, (
+        "the sweep does not consult the peer gate — it has no head to key on"
+    )
+    assert prepare._spawn_count(SHA) == 0, (
+        "and it must not touch the per-head counter either, or a sweep would "
+        "silently spend a merge-path attempt"
+    )

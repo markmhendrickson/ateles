@@ -87,6 +87,10 @@ MERGE_STATE_FILE = Path(__file__).parent / ".phoenicurus_prepare_last_sha"
 # unbounded retry spawns an agent on every webhook and buries the real cause.
 MAX_SPAWNS_PER_HEAD = int(os.environ.get("PHOENICURUS_MAX_SPAWNS_PER_HEAD", "3"))
 SPAWN_COUNT_FILE = Path(__file__).parent / ".phoenicurus_prepare_spawn_count"
+# PID of the agent currently preparing a head, so a later run can defer to a
+# live peer WITHOUT spawning an agent just to have it stand down (which would
+# spend a retry attempt on a non-attempt — see _live_peer_pid).
+SPAWN_PID_FILE = Path(__file__).parent / ".phoenicurus_prepare_spawn_pid"
 AGENT_LOG = LOG_DIR / "phoenicurus-prepare-agent.log"
 
 NEOTOMA_REPO_ROOT = Path(
@@ -167,6 +171,57 @@ def _spawn_count(head: str) -> int:
         return int(n) if sha == head else 0
     except (ValueError, OSError):
         return 0
+
+
+def _live_peer_pid(head: str) -> int | None:
+    """
+    PID of a prepare agent still running for this head, or None.
+
+    A spawned agent lives for many minutes. When a later MERGE fires inside that
+    window, the new agent discovers the peer and correctly stands down rather
+    than racing it to open a competing RC PR. But standing down is not an
+    attempt, and counting it as one is how a head burns its whole retry budget
+    without a single agent ever trying: observed 2026-08-09, where attempts 2/3
+    and 3/3 were both deferrals and the original then died, leaving the release
+    stuck with the budget spent.
+
+    Checking here means we never spawn the deferring agent at all — cheaper
+    than spawning one to discover what the parent already knows.
+
+    SCOPE: merge-triggered runs only. The scheduled sweep passes `head=""` (it
+    is rate-limited per calendar day, not per commit), so it has no head to key
+    a peer lookup on and does not consult this. A sweep firing while a
+    merge-spawned agent is still working therefore relies on the daily lock
+    alone, and can in principle still spawn a peer that stands down — costing a
+    wasted spawn, though no longer a miscounted attempt, since `_record_spawn`
+    is likewise merge-only. Closing that would mean keying peer state on
+    something other than the head; deliberately out of scope here.
+    """
+    if not head or not SPAWN_PID_FILE.exists():
+        return None
+    try:
+        sha, _, pid_s = SPAWN_PID_FILE.read_text().strip().partition(" ")
+        if sha != head:
+            return None
+        pid = int(pid_s)
+    except (ValueError, OSError):
+        return None
+    try:
+        os.kill(pid, 0)  # signal 0 = liveness probe, sends nothing
+    except (ProcessLookupError, PermissionError, OSError):
+        return None
+    return pid
+
+
+def _record_spawn_pid(head: str, pid: int) -> None:
+    """Remember which process is preparing this head, so peers can defer to it."""
+    if not head:
+        return
+    try:
+        SPAWN_PID_FILE.write_text(f"{head} {pid}")
+    except OSError as exc:
+        # Losing this only costs us a redundant spawn, never a missed release.
+        log.warning(f"could not persist spawn pid: {exc}")
 
 
 def _record_spawn(head: str) -> int:
@@ -462,13 +517,19 @@ release-candidate PR, then HALT:
    `npm run -s release-notes:render -- --tag <TAG> --head-ref HEAD --supplement <path>`.
 
 Then record + notify:
-10. Store a Neotoma `release_result` entity (POST {os.environ.get("NEOTOMA_BASE_URL", "")}/store)
-    with fields: version=<TAG>, status="pending_approval". Set BOTH branch-name
-    fields to "release/<TAG>": `rc_branch` AND `branch`. Set BOTH PR-URL fields
-    to the RC PR URL: `rc_pr_url` AND `release_url`. (publish.py reads the `rc_*`
-    names; the plain names are kept for continuity — write both so either reader
-    resolves.) Use idempotency_key
-    "release-<TAG>-pending_approval-{date.today().isoformat()}".
+10. Record the release by running THIS SCRIPT — do not POST /store yourself:
+
+      python3 {Path(__file__).parent}/store_release_result.py \\
+        --version <TAG> --status pending_approval \\
+        --rc-branch release/<TAG> --rc-pr-url <RC_PR_URL>
+
+    It signs the write with phoenicurus's AAuth key. A plain POST /store is
+    denied: `release_result` has no configured access policy, so it defaults to
+    `closed` (no guest access), and a bearer-token request resolves as a guest.
+    That denial is why v0.21.4 prepared with no durable record (ateles#402).
+    The script sets both the `rc_*` and plain field names, and the idempotency
+    key, so re-running it is safe. If it exits non-zero, say so in your Telegram
+    and email — do NOT report the release as recorded.
 11. Send a Telegram notification with: the version, the FULL rendered release
     notes, the RC PR URL, and any advisory flags (security sensitive=true,
     /review findings, CI status). End with: "Reply `approve <TAG>` to publish, or
@@ -503,7 +564,9 @@ def _agent_env() -> dict:
     return env
 
 
-def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool:
+def spawn_prepare_agent(
+    last_tag: str, commit_count: int, dry_run: bool, head: str = ""
+) -> bool:
     import shutil
 
     claude = shutil.which("claude")
@@ -521,7 +584,7 @@ def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool
         return True
 
     try:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [claude, "--print", "--dangerously-skip-permissions", prompt],
             cwd=str(NEOTOMA_REPO_ROOT),
             env=_agent_env(),
@@ -529,7 +592,13 @@ def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-        log.info("Prepare agent spawned (background). It will Telegram when ready.")
+        # Record the pid so a later run defers to this agent instead of
+        # spawning one just to have it stand down.
+        _record_spawn_pid(head, proc.pid)
+        log.info(
+            f"Prepare agent spawned (background, pid {proc.pid}). "
+            "It will Telegram when ready."
+        )
         return True
     except Exception as exc:  # noqa: BLE001
         log.error(f"failed to spawn prepare agent: {exc}")
@@ -611,6 +680,21 @@ def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
             _mark_ran(on_merge, head, transient=True)
         return 0
 
+    # Defer to a live peer BEFORE consulting the retry budget. An agent that
+    # stands down for a peer never attempted anything, so charging it an
+    # attempt is miscounting — and three such deferrals exhaust the budget
+    # while zero agents have tried. Leave the lock unstamped so this head is
+    # re-evaluated once the peer finishes or dies.
+    peer = _live_peer_pid(head) if on_merge else None
+    if peer and not force:
+        log.info(
+            f"prepare agent (pid {peer}) is already working {head[:9]} — deferring "
+            "to it rather than racing a competing RC PR. Not counted as an attempt."
+        )
+        if not dry_run:
+            _mark_ran(on_merge, head, transient=True)
+        return 0
+
     # Bounded retry: a crashed agent gets another attempt, but a head that has
     # burned through its attempts stops and asks rather than spawning forever.
     prior = _spawn_count(head) if on_merge else 0
@@ -640,7 +724,7 @@ def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
     )
     if not dry_run and on_merge:
         _record_spawn(head)
-    ok = spawn_prepare_agent(tag, count, dry_run)
+    ok = spawn_prepare_agent(tag, count, dry_run, head)
 
     # Do NOT stamp the per-commit lock here. `spawn_prepare_agent` returns as
     # soon as `Popen` hands back a process, so `ok` means "the agent launched",
