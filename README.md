@@ -63,9 +63,9 @@ Two commitments define the direction:
 | **P4 — Distributed authority & initiative** | Two kinds of mechanism, doing different work: rights that *scope* what a principal may do (domain ownership, budget/resource rights, cross-team workflows, first-class initiative + proposal + reprioritization objects), and structural checks on how those rights get *exercised* (quorum, separation of duties) — which make an outcome depend on more than one interest rather than on one principal's judgement | 🔭 Vision |
 | **P5 — Organizational operating system** | Strategy/rubric ownership, authority graph, workflow contracts, governance analytics, enterprise audit | 🔭 Vision |
 
-[COPY: Note that these P1–P5 vision stages are a different axis from the Phase 0–9 build checklist in
-[docs/phases.md](docs/phases.md) — the vision phases describe *how far the product's governance model
-reaches*, the build phases track *implementation sequencing*.]
+> These vision stages (P1–P5) are a different axis from the Phase 0–9 implementation checklist in
+> [docs/phases.md](docs/phases.md): P1–P5 describe how far the product's governance model reaches;
+> Phase 0–9 tracks implementation sequencing.
 
 Scoping and structural checks are complementary, not interchangeable. A well-specified grant bounds what a
 principal may do; it says nothing about a principal exercising authority they legitimately hold in a
