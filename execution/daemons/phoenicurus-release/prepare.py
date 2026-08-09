@@ -80,6 +80,13 @@ STATE_FILE = Path(__file__).parent / ".phoenicurus_prepare_last_run"
 # than the calendar day, so a merge can trigger a prepare run the same day an
 # earlier one already ran (the scheduled path's daily lock would swallow it).
 MERGE_STATE_FILE = Path(__file__).parent / ".phoenicurus_prepare_last_sha"
+# How many times a single head may have an agent spawned for it before we stop
+# and ask the operator. A crashed agent must be retried (see run_prepare), but
+# "retry forever" is its own failure: if the agent dies for a reason retrying
+# cannot fix — no API credits, a missing agent_grant, a bad prompt — an
+# unbounded retry spawns an agent on every webhook and buries the real cause.
+MAX_SPAWNS_PER_HEAD = int(os.environ.get("PHOENICURUS_MAX_SPAWNS_PER_HEAD", "3"))
+SPAWN_COUNT_FILE = Path(__file__).parent / ".phoenicurus_prepare_spawn_count"
 AGENT_LOG = LOG_DIR / "phoenicurus-prepare-agent.log"
 
 NEOTOMA_REPO_ROOT = Path(
@@ -149,6 +156,31 @@ def _already_ran_for_sha(sha: str) -> bool:
 def _mark_ran_for_sha(sha: str) -> None:
     if sha:
         MERGE_STATE_FILE.write_text(sha)
+
+
+def _spawn_count(head: str) -> int:
+    """How many agents have already been spawned for this head."""
+    if not head or not SPAWN_COUNT_FILE.exists():
+        return 0
+    try:
+        sha, _, n = SPAWN_COUNT_FILE.read_text().strip().partition(" ")
+        return int(n) if sha == head else 0
+    except (ValueError, OSError):
+        return 0
+
+
+def _record_spawn(head: str) -> int:
+    """Increment and persist this head's spawn count; return the new value."""
+    n = _spawn_count(head) + 1
+    if head:
+        try:
+            SPAWN_COUNT_FILE.write_text(f"{head} {n}")
+        except OSError as exc:  # noqa: BLE001
+            # Losing the counter must not block a release; worst case we retry
+            # more than MAX_SPAWNS_PER_HEAD times, which is still better than
+            # never retrying at all.
+            log.warning(f"could not persist spawn count: {exc}")
+    return n
 
 
 def _mark_ran(on_merge: bool, head: str, *, transient: bool = False) -> None:
@@ -579,13 +611,53 @@ def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
             _mark_ran(on_merge, head, transient=True)
         return 0
 
+    # Bounded retry: a crashed agent gets another attempt, but a head that has
+    # burned through its attempts stops and asks rather than spawning forever.
+    prior = _spawn_count(head) if on_merge else 0
+    if on_merge and prior >= MAX_SPAWNS_PER_HEAD and not force:
+        log.error(
+            f"{prior} prepare agent(s) already spawned for {head[:9]} with no "
+            "release_result to show for it — not spawning another."
+        )
+        notify_operator(
+            f"🔴 Phoenicurus: {prior} prepare attempts for `{head[:9]}` produced no "
+            f"release candidate. Not retrying automatically.\n\n"
+            f"Check `{AGENT_LOG}` for why the agent is dying, then re-run with "
+            "`--force` once the cause is fixed."
+        )
+        _mark_ran(on_merge, head)  # stop the loop; operator owns it now
+        return 1
+
     log.info(
         f"Preconditions met: {count} commits since {tag}, main CI green. "
-        "Spawning prepare agent."
+        f"Spawning prepare agent (attempt {prior + 1}/{MAX_SPAWNS_PER_HEAD})."
     )
+    if not dry_run and on_merge:
+        _record_spawn(head)
     ok = spawn_prepare_agent(tag, count, dry_run)
+
+    # Do NOT stamp the per-commit lock here. `spawn_prepare_agent` returns as
+    # soon as `Popen` hands back a process, so `ok` means "the agent launched",
+    # never "the agent produced an RC". Stamping on launch is a claim about an
+    # outcome that has not happened yet, and it is not recoverable: a stamped
+    # SHA suppresses every later run for that head, so an agent that dies
+    # mid-flight leaves the release permanently unprepared with nothing to
+    # retry it.
+    #
+    # That is not hypothetical. On 2026-08-08 the agent spawned for neotoma
+    # 78dbcbefe died on `API Error: Unable to connect to API (ENOTFOUND)`, and
+    # every subsequent run logged "Already ran for origin/main 78dbcbefe" while
+    # no RC PR existed. The fix that merged never reached a release.
+    #
+    # A crashed agent is exactly what `transient` describes — "a state expected
+    # to change for the SAME head" — so leave the lock unstamped and let the
+    # next run re-evaluate. Re-running is safe because the real idempotency
+    # guard is the in-flight `release_result` check above: once the agent
+    # succeeds, that gate short-circuits and stamps the SHA itself. The lock
+    # therefore comes to mean "an RC exists for this head", which is the
+    # condition we actually want to avoid repeating.
     if not dry_run:
-        _mark_ran(on_merge, head)
+        _mark_ran(on_merge, head, transient=True)
     return 0 if ok else 1
 
 
