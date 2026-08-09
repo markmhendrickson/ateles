@@ -60,8 +60,13 @@ Two commitments define the direction:
 | **P1 — Governed execution for one principal** | Agent identity (AAuth), agent-to-principal binding, capability grants, risk-gated execution with operator checkpoints, typed workflows, append-only audit | ✅ **Running daily.** This is the current repo: one operator, ~18 daemons, the full governance substrate |
 | **P2 — Multi-operator identity & ownership** | Multiple human operators, teams, workflow ownership, named accountability, personal/shared queues, basic roles | 🔜 Planned — design tracked on the issues board |
 | **P3 — Delegation & approval** | Scoped delegation, approval matrices, escalation, veto, timeouts, substitution, operator absence, risk-tiered checkpoints across principals | 🔜 Planned |
-| **P4 — Distributed authority & initiative** | Domain ownership, quorum, separation of duties, cross-team workflows, budget/resource rights, first-class initiative + proposal + reprioritization objects | 🔭 Vision |
+| **P4 — Distributed authority & initiative** | Two kinds of mechanism, doing different work: rights that *scope* what a principal may do (domain ownership, budget/resource rights, cross-team workflows, first-class initiative + proposal + reprioritization objects), and structural checks on how those rights get *exercised* (quorum, separation of duties) — which make an outcome depend on more than one interest rather than on one principal's judgement | 🔭 Vision |
 | **P5 — Organizational operating system** | Strategy/rubric ownership, authority graph, workflow contracts, governance analytics, enterprise audit | 🔭 Vision |
+
+Scoping and structural checks are complementary, not interchangeable. A well-specified grant bounds what a
+principal may do; it says nothing about a principal exercising authority they legitimately hold in a
+motivated way — which is the failure most organizational governance exists to catch. Quorum and separation
+of duties are what address that, structurally, by refusing to let one interest decide alone.
 
 The substrate was deliberately built so the single-operator case is not a dead end: agents already carry
 their own verified identities, capability is already entity-scoped rather than assumed, high-blast actions
