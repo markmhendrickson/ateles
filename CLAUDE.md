@@ -41,6 +41,21 @@ All hooks are **fail-open** (stdlib-only Python; any error or missing `NEOTOMA_B
 
 - **`sibling_repo_worktree_guard.py`** (PreToolUse: `Edit|Write|NotebookEdit|Bash`) — a distinct concern from the session-integrity hooks above: it protects **other repos**, not this session's audit trail. When operating from the Ateles repo, it **hard-blocks** any mutation of a *sibling* repo's **shared main clone** (e.g. `~/repos/neotoma`): file edits, and git-mutating Bash (commit, checkout/switch, reset, merge, rebase, cherry-pick, push, …). It allows the Ateles repo itself, any dedicated **linked worktree**, read-only git, and `git worktree add` (the remedy). On a hit it directs you to `git worktree add ~/repos/<repo>-wt-<slug> origin/main` first. Detection: `git rev-parse --git-dir` == `--git-common-dir` ⇒ main clone; also honors `git -C <path>` / `--git-dir=<path>`. Fail-open (stdlib-only; any error → exit 0). Override a deliberate case with `ATELES_ALLOW_SHARED_REPO_WRITES=1`. Motivated by a 2026-07-21 incident where a stray write + commit landed on another session's branch in the shared checkout.
 
+## Deployment-checkout freshness (daemons)
+
+`lib/daemon_runtime/checkout_drift.py` reports, at daemon startup, whether the checkout a daemon was launched from is **behind, diverged, or dirty** relative to its upstream. A daemon runs the working tree it was started in, not `origin/main` — so when that checkout drifts, a merged fix silently never reaches it.
+
+**Advisory by default**: logs at ERROR and continues. These daemons are the swarm's release, payment, and dispatch path, and a guard that hard-stops eighteen of them on a stale checkout would cause a larger outage than the drift it prevents.
+
+| Env var | Effect |
+|---|---|
+| `ATELES_ENFORCE_CHECKOUT_FRESHNESS=1` | Make drift **fatal** — the daemon raises `CheckoutDriftError` instead of warning |
+| `ATELES_CHECKOUT_DRIFT_NO_FETCH=1` | Skip the remote-ref refresh (tests, deliberately offline hosts) |
+
+Two deliberate non-verdicts: a **failed fetch** reports `unknown`, not drift (offline must not look identical to unpushed commits, or the warning gets ignored), and **untracked files** are not drift (daemon checkouts accumulate logs and state files). **Ahead-only counts as drift** — unpushed commits in a deployment checkout are both invisible to review and one power-cycle from being lost.
+
+Motivated by three occurrences on the same checkout: ateles#339 and #361 (both recovered by hand; the PR titles read "stranded in the deploy checkout"), then 2026-08-09, when `~/ateles-rc-src` sat on a 2026-07-28 local merge commit — 3 ahead, 14 behind — so ateles#401 merged to main and never reached the running daemon while `git pull --ff-only` refused without changing HEAD.
+
 ---
 
 ## Gmail send-gate hook (mechanical enforcement)

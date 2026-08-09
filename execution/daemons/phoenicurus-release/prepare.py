@@ -694,14 +694,23 @@ def main() -> int:
     # being debugged) never reached it. Advisory: logs and continues, because a
     # release daemon that refuses to start is worse than one running slightly
     # stale code. Set ATELES_ENFORCE_CHECKOUT_FRESHNESS=1 to make it fatal.
+    # Only the SETUP of the check is advisory. `warn_on_drift` itself must run
+    # outside this guard: it raises CheckoutDriftError under enforcement, and a
+    # blanket `except Exception` here would catch that and downgrade the abort
+    # to a warning — advertising a switch that can never fire. That is the same
+    # silently-defeated-safety-mechanism failure this module exists to catch,
+    # so the guard is scoped to import/path errors only (Loxia, ateles#405).
     try:
         sys.path.insert(0, str(PROJECT_ROOT / "lib" / "daemon_runtime"))
         from checkout_drift import warn_on_drift  # noqa: PLC0415
-
-        warn_on_drift("phoenicurus-prepare", Path(__file__).resolve().parent)
     except Exception as exc:  # noqa: BLE001
-        # The freshness check must never be the reason a release fails to prepare.
+        # A missing or broken check must never be the reason a release fails to
+        # prepare — but its absence should be visible, not silent.
         log.warning(f"checkout freshness check unavailable: {exc}")
+    else:
+        # Raises CheckoutDriftError when ATELES_ENFORCE_CHECKOUT_FRESHNESS=1;
+        # deliberately uncaught so enforcement actually aborts the run.
+        warn_on_drift("phoenicurus-prepare", Path(__file__).resolve().parent)
 
     try:
         return run_prepare(args.dry_run, args.force, on_merge=args.on_merge)

@@ -234,3 +234,49 @@ def test_unknown_never_raises_even_when_enforced(remote_and_clone):
 
     r = warn_on_drift("test-daemon", clone, enforce=True)
     assert r.state == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Enforcement reaches the caller
+# ---------------------------------------------------------------------------
+
+
+def test_enforcement_is_not_swallowed_by_a_caller_guard(remote_and_clone, monkeypatch):
+    """
+    A caller that wraps the check in `except Exception` silently defeats
+    enforcement: CheckoutDriftError is a RuntimeError, so a blanket catch
+    downgrades the abort to a warning and the daemon runs on stale code anyway.
+
+    That is precisely the failure this module exists to catch, and ateles#405
+    shipped it in `prepare.py` on the first pass (caught by Loxia). This test
+    pins the contract the call site depends on: under enforcement the error
+    must escape, and it must NOT be a subclass of anything a caller would
+    reasonably catch as "the check is unavailable".
+    """
+    _origin, _work, clone = remote_and_clone
+    _commit(clone, "local_only.txt")
+
+    # The shape prepare.py now uses: setup guarded, the check itself is not.
+    setup_failed = False
+    try:
+        fn = warn_on_drift
+    except Exception:  # pragma: no cover - defensive
+        setup_failed = True
+    assert not setup_failed
+
+    with pytest.raises(CheckoutDriftError):
+        fn("test-daemon", clone, enforce=True)
+
+
+def test_drift_error_carries_the_report(remote_and_clone):
+    """The raised error must explain itself, or an operator sees only a traceback."""
+    _origin, _work, clone = remote_and_clone
+    _commit(clone, "local_only.txt")
+
+    with pytest.raises(CheckoutDriftError) as excinfo:
+        warn_on_drift("test-daemon", clone, enforce=True)
+
+    err = excinfo.value
+    assert isinstance(err.report, DriftReport)
+    assert err.report.is_drifted
+    assert "DIVERGED" in str(err)
