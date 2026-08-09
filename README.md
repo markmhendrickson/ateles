@@ -1,10 +1,16 @@
 # Ateles
 
-**A single-operator AI agent swarm that runs a founder's company and personal life — every agent action
-attributed, capability-scoped, and queryable.**
+**The operating system for organizations where humans and AI agents jointly initiate, delegate, execute,
+review, approve, and reconcile work — under explicit authority, with every action attributed,
+capability-scoped, and queryable.**
 
-Ateles is the reference architecture for running a *fleet* of AI agents as one person. It is two systems in
-one repository:
+That is the category Ateles is built toward. What ships today is its first proving ground: a
+**single-operator reference implementation** — an AI agent swarm that runs a founder's company and personal
+life end to end, with the governance substrate (identity, capability, gating, audit) already real. See
+[Vision and execution status](#vision-and-execution-status) for exactly where the implementation stands
+against the vision.
+
+Ateles is two systems in one repository:
 
 1. **A governed runtime substrate** — AAuth-signed agent identities, capability grants, an append-only
    observation log, confidence × blast-radius execution gating, and workflow orchestration. This is what
@@ -20,11 +26,58 @@ Neotoma entities, dispatched through AAuth-signed identities, and audited throug
 they write to. Open source. Local-first. MIT licensed.
 
 **Who it's for:** [docs/icp.md](docs/icp.md) · **Architecture:** [docs/architecture.md](docs/architecture.md)
-· **Taxonomy:** [docs/taxonomy.md](docs/taxonomy.md) · **Phases:** [docs/phases.md](docs/phases.md)
+· **Taxonomy:** [docs/taxonomy.md](docs/taxonomy.md) · **Implementation phases:** [docs/phases.md](docs/phases.md)
 
 > **Not a package — a blueprint.** Ateles is a reference architecture you fork and adapt, not an installable
-> product. It assumes one operator who owns the machine, the keypairs, and the Neotoma instance. See
+> product. Today it assumes one operator who owns the machine, the keypairs, and the Neotoma instance — the
+> single-principal case of the multi-operator model described below. See
 > [Who this is for](docs/icp.md) for the precise profile and the explicit anti-profile.
+
+## Vision and execution status
+
+As AI makes execution abundant, the constraint stops being "can we produce the work?" and becomes **agency
+fragmentation**: many humans and many agents can initiate and execute work, but authority, accountability,
+approval, and reconciliation stay implicit — scattered across chat threads, managerial memory, and
+convention. Generic agent orchestration coordinates *computation*. Ateles is built to coordinate
+**legitimate action**: who or what may act, on whose authority, against which state, through which
+workflow, with which approvals, and under whose accountability.
+
+Two commitments define the direction:
+
+- **Governed autonomy under distributed authority.** Authority is modeled as
+  `principal + domain + scope + action + conditions + time` — structured, scoped, delegable, revocable, and
+  inspectable. Reconciliation is a topology of domain owners, approvers, and quorums, not a single human
+  bottleneck.
+- **Governed initiative ("bounded open work").** Vague expectations like *act like an owner* become
+  explicit, auditable rights — to propose, investigate, run experiments, execute in a sandbox, approve,
+  veto, escalate, and receive attributable credit — with risk-tiered approval and explicit reprioritization
+  when new work displaces old.
+
+### Where execution stands
+
+| Vision phase | What it means | Status |
+| --- | --- | --- |
+| **P1 — Governed execution for one principal** | Agent identity (AAuth), agent-to-principal binding, capability grants, risk-gated execution with operator checkpoints, typed workflows, append-only audit | ✅ **Running daily.** This is the current repo: one operator, ~18 daemons, the full governance substrate |
+| **P2 — Multi-operator identity & ownership** | Multiple human operators, teams, workflow ownership, named accountability, personal/shared queues, basic roles | 🔜 Planned — design tracked on the issues board |
+| **P3 — Delegation & approval** | Scoped delegation, approval matrices, escalation, veto, timeouts, substitution, operator absence, risk-tiered checkpoints across principals | 🔜 Planned |
+| **P4 — Distributed authority & initiative** | Two kinds of mechanism, doing different work: rights that *scope* what a principal may do (domain ownership, budget/resource rights, cross-team workflows, first-class initiative + proposal + reprioritization objects), and structural checks on how those rights get *exercised* (quorum, separation of duties) — which make an outcome depend on more than one interest rather than on one principal's judgement | 🔭 Vision |
+| **P5 — Organizational operating system** | Strategy/rubric ownership, authority graph, workflow contracts, governance analytics, enterprise audit | 🔭 Vision |
+
+> These vision stages (P1–P5) are a different axis from the Phase 0–9 implementation checklist in
+> [docs/phases.md](docs/phases.md): P1–P5 describe how far the product's governance model reaches;
+> Phase 0–9 tracks implementation sequencing.
+
+Scoping and structural checks are complementary, not interchangeable. A well-specified grant bounds what a
+principal may do; it says nothing about a principal exercising authority they legitimately hold in a
+motivated way — which is the failure most organizational governance exists to catch. Quorum and separation
+of duties are what address that, structurally, by refusing to let one interest decide alone.
+
+The substrate was deliberately built so the single-operator case is not a dead end: agents already carry
+their own verified identities, capability is already entity-scoped rather than assumed, high-blast actions
+already checkpoint to a principal, and every action is already attributed and replayable. Multi-operator is
+an extension of the entity model (more principals, ownership, delegation edges), not a rewrite.
+[Neotoma](https://github.com/markmhendrickson/neotoma) evolves in lock-step as the shared, governed state
+substrate the swarm acts against.
 
 ## Why this exists
 
@@ -369,8 +422,9 @@ Full type catalog: [docs/data_types.md](docs/data_types.md).
 
 ## Current status
 
-**Phase:** Reference architecture in daily autonomous + operator-driven use. **Operator:** one (Mark
-Hendrickson). **License:** MIT.
+**Phase:** P1 of the [vision roadmap](#vision-and-execution-status) — a single-principal reference
+architecture in daily autonomous + operator-driven use. **Operator:** one (Mark Hendrickson).
+**License:** MIT.
 
 **What is solid (implemented and tested):**
 
@@ -490,9 +544,11 @@ your infrastructure, keep the contract (AAuth identity, observation recording, `
 pipeline).
 
 **How does this compare to LangGraph / CrewAI / AutoGen?**
-Those frameworks orchestrate multi-step LLM calls inside one process. Ateles orchestrates long-running
-background daemons that spawn `claude` subprocesses, each with its own AAuth identity, writing to a canonical
-state store. Different problem — agent fleets across days, not chains across seconds.
+Those frameworks orchestrate multi-step LLM calls inside one process — they coordinate *computation*.
+Ateles orchestrates long-running background daemons that spawn `claude` subprocesses, each with its own
+AAuth identity, writing to a canonical state store — and is built toward coordinating *legitimate action*:
+authority, approval, accountability, and reconciliation across humans and agents. Different problem —
+governed fleets across days, not chains across seconds.
 
 **Why launchd instead of Docker / k8s?**
 Single operator, one machine. launchd is the lowest-overhead scheduler that survives reboots. The same
