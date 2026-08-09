@@ -110,6 +110,9 @@ def test_enforcement_aborts_the_daemon(drifted_checkout, tmp_path):
         {
             "ATELES_ENFORCE_CHECKOUT_FRESHNESS": "1",
             "ATELES_CHECKOUT_DRIFT_NO_FETCH": "1",
+            # prepare.py passes Path(__file__).parent into the guard; cwd alone
+            # never reaches it. Point the inspector at the fixture checkout.
+            "ATELES_CHECKOUT_DRIFT_ROOT": str(drifted_checkout),
             "NEOTOMA_REPO_ROOT": str(tmp_path / "no-such-repo"),
         },
         cwd=drifted_checkout,
@@ -133,6 +136,7 @@ def test_advisory_mode_does_not_abort(drifted_checkout, tmp_path):
     proc = _run_prepare(
         {
             "ATELES_CHECKOUT_DRIFT_NO_FETCH": "1",
+            "ATELES_CHECKOUT_DRIFT_ROOT": str(drifted_checkout),
             "NEOTOMA_REPO_ROOT": str(tmp_path / "no-such-repo"),
         },
         cwd=drifted_checkout,

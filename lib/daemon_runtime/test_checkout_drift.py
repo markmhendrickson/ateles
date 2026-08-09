@@ -190,6 +190,26 @@ def test_no_upstream_is_unknown(remote_and_clone):
 # ---------------------------------------------------------------------------
 
 
+def test_checkout_root_env_overrides_explicit_path(remote_and_clone, monkeypatch, tmp_path):
+    """
+    Entrypoint tests cannot rely on subprocess cwd: prepare.py always passes
+    Path(__file__).parent. ATELES_CHECKOUT_DRIFT_ROOT must win so the fixture
+    checkout is what gets inspected (CI failure on ateles#405 round 1).
+    """
+    _origin, _work, clone = remote_and_clone
+    _commit(clone, "local_only.txt")
+    decoy = tmp_path / "decoy"
+    _init(decoy)
+    _commit(decoy, "decoy.txt")
+
+    monkeypatch.setenv("ATELES_CHECKOUT_DRIFT_ROOT", str(clone))
+    monkeypatch.setenv("ATELES_CHECKOUT_DRIFT_NO_FETCH", "1")
+    # Explicit path points at a non-tracking decoy; override must still see drift.
+    r = check_checkout_drift(decoy)
+    assert r.state == "diverged", r
+    assert r.is_drifted
+
+
 def test_warn_on_drift_does_not_raise_by_default(remote_and_clone, monkeypatch):
     """
     Advisory by default. These daemons are the release, payment, and dispatch

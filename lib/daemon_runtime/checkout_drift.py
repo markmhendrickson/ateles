@@ -53,6 +53,13 @@ ENFORCE_ENV = "ATELES_ENFORCE_CHECKOUT_FRESHNESS"
 #: offline; the check then compares against whatever ref data is already local.
 NO_FETCH_ENV = "ATELES_CHECKOUT_DRIFT_NO_FETCH"
 
+#: Force the path that is inspected. Entrypoint tests need this because
+#: ``prepare.py`` always passes ``Path(__file__).parent`` (the real package
+#: tree), so setting the subprocess ``cwd`` alone never reaches the guard —
+#: CI then inspects the Actions checkout (often no ``@{u}``) and the fixture
+#: drift is invisible. Production leaves this unset.
+CHECKOUT_ROOT_ENV = "ATELES_CHECKOUT_DRIFT_ROOT"
+
 
 @dataclass(frozen=True)
 class DriftReport:
@@ -126,7 +133,15 @@ def check_checkout_drift(
     Never raises — a guard that can crash the process it guards is worse than
     no guard.
     """
-    root = Path(checkout) if checkout else Path(__file__).resolve().parent.parent.parent
+    # Env override wins so entrypoint subprocess tests can point the guard at a
+    # fixture repo without rewriting the daemon's Path(__file__) call site.
+    override = os.environ.get(CHECKOUT_ROOT_ENV)
+    if override:
+        root = Path(override)
+    elif checkout is not None:
+        root = Path(checkout)
+    else:
+        root = Path(__file__).resolve().parent.parent.parent
 
     rc, top = _git(["rev-parse", "--show-toplevel"], root)
     if rc != 0:

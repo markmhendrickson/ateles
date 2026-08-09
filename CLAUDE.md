@@ -51,6 +51,7 @@ All hooks are **fail-open** (stdlib-only Python; any error or missing `NEOTOMA_B
 |---|---|
 | `ATELES_ENFORCE_CHECKOUT_FRESHNESS=1` | Make drift **fatal** — the daemon raises `CheckoutDriftError` instead of warning |
 | `ATELES_CHECKOUT_DRIFT_NO_FETCH=1` | Skip the remote-ref refresh (tests, deliberately offline hosts) |
+| `ATELES_CHECKOUT_DRIFT_ROOT=<path>` | Force the path the guard inspects (entrypoint tests; production leaves unset) |
 
 Two deliberate non-verdicts: a **failed fetch** reports `unknown`, not drift (offline must not look identical to unpushed commits, or the warning gets ignored), and **untracked files** are not drift (daemon checkouts accumulate logs and state files). **Ahead-only counts as drift** — unpushed commits in a deployment checkout are both invisible to review and one power-cycle from being lost.
 

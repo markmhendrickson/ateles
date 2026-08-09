@@ -708,6 +708,12 @@ def main() -> int:
         # prepare — but its absence should be visible, not silent.
         log.warning(f"checkout freshness check unavailable: {exc}")
     else:
+        # Judge this file's own directory — a daemon runs the checkout it was
+        # launched from, which is exactly what we want to assess. The library
+        # honours ATELES_CHECKOUT_DRIFT_ROOT to override the inspected path
+        # (entrypoint tests; production leaves it unset), so the call site
+        # needs no override of its own.
+        #
         # Raises CheckoutDriftError when ATELES_ENFORCE_CHECKOUT_FRESHNESS=1;
         # deliberately uncaught so enforcement actually aborts the run.
         warn_on_drift("phoenicurus-prepare", Path(__file__).resolve().parent)
