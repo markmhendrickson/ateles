@@ -26,7 +26,7 @@ Neotoma entities, dispatched through AAuth-signed identities, and audited throug
 they write to. Open source. Local-first. MIT licensed.
 
 **Who it's for:** [docs/icp.md](docs/icp.md) · **Architecture:** [docs/architecture.md](docs/architecture.md)
-· **Taxonomy:** [docs/taxonomy.md](docs/taxonomy.md) · **Phases:** [docs/phases.md](docs/phases.md)
+· **Taxonomy:** [docs/taxonomy.md](docs/taxonomy.md) · **Implementation phases:** [docs/phases.md](docs/phases.md)
 
 > **Not a package — a blueprint.** Ateles is a reference architecture you fork and adapt, not an installable
 > product. Today it assumes one operator who owns the machine, the keypairs, and the Neotoma instance — the
@@ -62,6 +62,10 @@ Two commitments define the direction:
 | **P3 — Delegation & approval** | Scoped delegation, approval matrices, escalation, veto, timeouts, substitution, operator absence, risk-tiered checkpoints across principals | 🔜 Planned |
 | **P4 — Distributed authority & initiative** | Two kinds of mechanism, doing different work: rights that *scope* what a principal may do (domain ownership, budget/resource rights, cross-team workflows, first-class initiative + proposal + reprioritization objects), and structural checks on how those rights get *exercised* (quorum, separation of duties) — which make an outcome depend on more than one interest rather than on one principal's judgement | 🔭 Vision |
 | **P5 — Organizational operating system** | Strategy/rubric ownership, authority graph, workflow contracts, governance analytics, enterprise audit | 🔭 Vision |
+
+[COPY: Note that these P1–P5 vision stages are a different axis from the Phase 0–9 build checklist in
+[docs/phases.md](docs/phases.md) — the vision phases describe *how far the product's governance model
+reaches*, the build phases track *implementation sequencing*.]
 
 Scoping and structural checks are complementary, not interchangeable. A well-specified grant bounds what a
 principal may do; it says nothing about a principal exercising authority they legitimately hold in a
