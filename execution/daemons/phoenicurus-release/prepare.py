@@ -87,6 +87,10 @@ MERGE_STATE_FILE = Path(__file__).parent / ".phoenicurus_prepare_last_sha"
 # unbounded retry spawns an agent on every webhook and buries the real cause.
 MAX_SPAWNS_PER_HEAD = int(os.environ.get("PHOENICURUS_MAX_SPAWNS_PER_HEAD", "3"))
 SPAWN_COUNT_FILE = Path(__file__).parent / ".phoenicurus_prepare_spawn_count"
+# PID of the agent currently preparing a head, so a later run can defer to a
+# live peer WITHOUT spawning an agent just to have it stand down (which would
+# spend a retry attempt on a non-attempt — see _live_peer_pid).
+SPAWN_PID_FILE = Path(__file__).parent / ".phoenicurus_prepare_spawn_pid"
 AGENT_LOG = LOG_DIR / "phoenicurus-prepare-agent.log"
 
 NEOTOMA_REPO_ROOT = Path(
@@ -167,6 +171,48 @@ def _spawn_count(head: str) -> int:
         return int(n) if sha == head else 0
     except (ValueError, OSError):
         return 0
+
+
+def _live_peer_pid(head: str) -> int | None:
+    """
+    PID of a prepare agent still running for this head, or None.
+
+    A spawned agent lives for many minutes. When the daemon fires again in that
+    window — a second merge, the scheduled sweep — the new agent discovers the
+    peer and correctly stands down rather than racing it to open a competing RC
+    PR. But standing down is not an attempt, and counting it as one is how a
+    head burns its whole retry budget without a single agent ever trying:
+    observed 2026-08-09, where attempts 2/3 and 3/3 were both deferrals and the
+    original then died, leaving the release stuck with the budget spent.
+
+    Checking here means we never spawn the deferring agent at all — cheaper
+    than spawning one to discover what the parent already knows.
+    """
+    if not head or not SPAWN_PID_FILE.exists():
+        return None
+    try:
+        sha, _, pid_s = SPAWN_PID_FILE.read_text().strip().partition(" ")
+        if sha != head:
+            return None
+        pid = int(pid_s)
+    except (ValueError, OSError):
+        return None
+    try:
+        os.kill(pid, 0)  # signal 0 = liveness probe, sends nothing
+    except (ProcessLookupError, PermissionError, OSError):
+        return None
+    return pid
+
+
+def _record_spawn_pid(head: str, pid: int) -> None:
+    """Remember which process is preparing this head, so peers can defer to it."""
+    if not head:
+        return
+    try:
+        SPAWN_PID_FILE.write_text(f"{head} {pid}")
+    except OSError as exc:
+        # Losing this only costs us a redundant spawn, never a missed release.
+        log.warning(f"could not persist spawn pid: {exc}")
 
 
 def _record_spawn(head: str) -> int:
@@ -503,7 +549,9 @@ def _agent_env() -> dict:
     return env
 
 
-def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool:
+def spawn_prepare_agent(
+    last_tag: str, commit_count: int, dry_run: bool, head: str = ""
+) -> bool:
     import shutil
 
     claude = shutil.which("claude")
@@ -521,7 +569,7 @@ def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool
         return True
 
     try:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [claude, "--print", "--dangerously-skip-permissions", prompt],
             cwd=str(NEOTOMA_REPO_ROOT),
             env=_agent_env(),
@@ -529,7 +577,13 @@ def spawn_prepare_agent(last_tag: str, commit_count: int, dry_run: bool) -> bool
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-        log.info("Prepare agent spawned (background). It will Telegram when ready.")
+        # Record the pid so a later run defers to this agent instead of
+        # spawning one just to have it stand down.
+        _record_spawn_pid(head, proc.pid)
+        log.info(
+            f"Prepare agent spawned (background, pid {proc.pid}). "
+            "It will Telegram when ready."
+        )
         return True
     except Exception as exc:  # noqa: BLE001
         log.error(f"failed to spawn prepare agent: {exc}")
@@ -611,6 +665,21 @@ def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
             _mark_ran(on_merge, head, transient=True)
         return 0
 
+    # Defer to a live peer BEFORE consulting the retry budget. An agent that
+    # stands down for a peer never attempted anything, so charging it an
+    # attempt is miscounting — and three such deferrals exhaust the budget
+    # while zero agents have tried. Leave the lock unstamped so this head is
+    # re-evaluated once the peer finishes or dies.
+    peer = _live_peer_pid(head) if on_merge else None
+    if peer and not force:
+        log.info(
+            f"prepare agent (pid {peer}) is already working {head[:9]} — deferring "
+            "to it rather than racing a competing RC PR. Not counted as an attempt."
+        )
+        if not dry_run:
+            _mark_ran(on_merge, head, transient=True)
+        return 0
+
     # Bounded retry: a crashed agent gets another attempt, but a head that has
     # burned through its attempts stops and asks rather than spawning forever.
     prior = _spawn_count(head) if on_merge else 0
@@ -640,7 +709,7 @@ def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
     )
     if not dry_run and on_merge:
         _record_spawn(head)
-    ok = spawn_prepare_agent(tag, count, dry_run)
+    ok = spawn_prepare_agent(tag, count, dry_run, head)
 
     # Do NOT stamp the per-commit lock here. `spawn_prepare_agent` returns as
     # soon as `Popen` hands back a process, so `ok` means "the agent launched",
