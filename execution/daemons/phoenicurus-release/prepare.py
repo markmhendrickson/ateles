@@ -517,13 +517,19 @@ release-candidate PR, then HALT:
    `npm run -s release-notes:render -- --tag <TAG> --head-ref HEAD --supplement <path>`.
 
 Then record + notify:
-10. Store a Neotoma `release_result` entity (POST {os.environ.get("NEOTOMA_BASE_URL", "")}/store)
-    with fields: version=<TAG>, status="pending_approval". Set BOTH branch-name
-    fields to "release/<TAG>": `rc_branch` AND `branch`. Set BOTH PR-URL fields
-    to the RC PR URL: `rc_pr_url` AND `release_url`. (publish.py reads the `rc_*`
-    names; the plain names are kept for continuity — write both so either reader
-    resolves.) Use idempotency_key
-    "release-<TAG>-pending_approval-{date.today().isoformat()}".
+10. Record the release by running THIS SCRIPT — do not POST /store yourself:
+
+      python3 {Path(__file__).parent}/store_release_result.py \\
+        --version <TAG> --status pending_approval \\
+        --rc-branch release/<TAG> --rc-pr-url <RC_PR_URL>
+
+    It signs the write with phoenicurus's AAuth key. A plain POST /store is
+    denied: `release_result` has no configured access policy, so it defaults to
+    `closed` (no guest access), and a bearer-token request resolves as a guest.
+    That denial is why v0.21.4 prepared with no durable record (ateles#402).
+    The script sets both the `rc_*` and plain field names, and the idempotency
+    key, so re-running it is safe. If it exits non-zero, say so in your Telegram
+    and email — do NOT report the release as recorded.
 11. Send a Telegram notification with: the version, the FULL rendered release
     notes, the RC PR URL, and any advisory flags (security sensitive=true,
     /review findings, CI status). End with: "Reply `approve <TAG>` to publish, or
