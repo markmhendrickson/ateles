@@ -68,7 +68,11 @@ if _ENV_FILE.exists():
 def main() -> int:
     ap = argparse.ArgumentParser(description="Store a signed release_result entity")
     ap.add_argument("--version", required=True, help="release tag, e.g. v0.21.5")
-    ap.add_argument("--status", required=True, help="prepared|pending_approval|approved|publishing|published|failed")
+    ap.add_argument(
+        "--status",
+        required=True,
+        help="prepared|pending_approval|approved|publishing|published|failed",
+    )
     ap.add_argument("--rc-branch", default="", help="release branch name")
     ap.add_argument("--rc-pr-url", default="", help="RC pull-request URL")
     ap.add_argument("--notes", default="", help="free-text notes")
