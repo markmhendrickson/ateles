@@ -175,7 +175,7 @@ def _record_spawn(head: str) -> int:
     if head:
         try:
             SPAWN_COUNT_FILE.write_text(f"{head} {n}")
-        except OSError as exc:  # noqa: BLE001
+        except OSError as exc:
             # Losing the counter must not block a release; worst case we retry
             # more than MAX_SPAWNS_PER_HEAD times, which is still better than
             # never retrying at all.
@@ -619,13 +619,19 @@ def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
             f"{prior} prepare agent(s) already spawned for {head[:9]} with no "
             "release_result to show for it — not spawning another."
         )
-        notify_operator(
-            f"🔴 Phoenicurus: {prior} prepare attempts for `{head[:9]}` produced no "
-            f"release candidate. Not retrying automatically.\n\n"
-            f"Check `{AGENT_LOG}` for why the agent is dying, then re-run with "
-            "`--force` once the cause is fixed."
-        )
-        _mark_ran(on_merge, head)  # stop the loop; operator owns it now
+        # Both side-effects stay behind `not dry_run`, like every other mutation
+        # in this function. A dry run must be observable-only: it should never
+        # page the operator, and it must never stamp the lock — doing so would
+        # let a diagnostic invocation silently retire a head that still needs
+        # preparing, which is the same class of bug this PR exists to fix.
+        if not dry_run:
+            notify_operator(
+                f"🔴 Phoenicurus: {prior} prepare attempts for `{head[:9]}` produced "
+                f"no release candidate. Not retrying automatically.\n\n"
+                f"Check `{AGENT_LOG}` for why the agent is dying, then re-run with "
+                "`--force` once the cause is fixed."
+            )
+            _mark_ran(on_merge, head)  # stop the loop; operator owns it now
         return 1
 
     log.info(

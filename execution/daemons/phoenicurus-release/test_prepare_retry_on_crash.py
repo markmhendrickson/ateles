@@ -205,6 +205,34 @@ def test_spawning_stops_after_the_budget_is_spent(ready_to_spawn, monkeypatch):
     assert prepare._already_ran_for_sha(SHA), "give up cleanly rather than looping"
 
 
+def test_dry_run_on_exhausted_budget_has_no_side_effects(ready_to_spawn, monkeypatch):
+    """
+    A dry run must be observable-only, even on the give-up path.
+
+    Loxia flagged this on ateles#401: the budget-exhaustion branch originally
+    ran `notify_operator` and `_mark_ran` outside the `not dry_run` guard that
+    every other mutation in `run_prepare` sits behind. So a diagnostic
+    `--dry-run` would page the operator and stamp the lock — silently retiring a
+    head that still needed preparing, which is the same class of bug this fix
+    exists to remove.
+    """
+    monkeypatch.setattr(prepare, "MAX_SPAWNS_PER_HEAD", 1)
+    notices: list[str] = []
+    monkeypatch.setattr(prepare, "notify_operator", lambda msg: notices.append(msg))
+
+    # Burn the budget for real, so the next call takes the give-up branch.
+    prepare.run_prepare(dry_run=False, force=False, on_merge=True)
+    notices.clear()
+
+    prepare.run_prepare(dry_run=True, force=False, on_merge=True)
+
+    assert notices == [], "a dry run must not page the operator"
+    assert not prepare._already_ran_for_sha(SHA), (
+        "a dry run must not stamp the per-commit lock — that would retire a head "
+        "that still needs preparing"
+    )
+
+
 def test_terminal_outcome_still_locks_the_head(isolated_state):
     """The non-transient path must still stamp, or every run would re-spawn."""
     prepare._mark_ran(on_merge=True, head=SHA)
