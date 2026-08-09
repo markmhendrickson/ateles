@@ -686,6 +686,23 @@ def main() -> int:
         ),
     )
     args = ap.parse_args()
+
+    # Report whether this daemon is running the code that is actually on main.
+    # A daemon executes the checkout it was launched from, so a merged fix does
+    # nothing until that checkout is updated — on 2026-08-09 this daemon ran a
+    # 2026-07-28 local merge commit, and ateles#401 (the fix for the very stall
+    # being debugged) never reached it. Advisory: logs and continues, because a
+    # release daemon that refuses to start is worse than one running slightly
+    # stale code. Set ATELES_ENFORCE_CHECKOUT_FRESHNESS=1 to make it fatal.
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT / "lib" / "daemon_runtime"))
+        from checkout_drift import warn_on_drift  # noqa: PLC0415
+
+        warn_on_drift("phoenicurus-prepare", Path(__file__).resolve().parent)
+    except Exception as exc:  # noqa: BLE001
+        # The freshness check must never be the reason a release fails to prepare.
+        log.warning(f"checkout freshness check unavailable: {exc}")
+
     try:
         return run_prepare(args.dry_run, args.force, on_merge=args.on_merge)
     except Exception as exc:  # noqa: BLE001
