@@ -177,16 +177,25 @@ def _live_peer_pid(head: str) -> int | None:
     """
     PID of a prepare agent still running for this head, or None.
 
-    A spawned agent lives for many minutes. When the daemon fires again in that
-    window — a second merge, the scheduled sweep — the new agent discovers the
-    peer and correctly stands down rather than racing it to open a competing RC
-    PR. But standing down is not an attempt, and counting it as one is how a
-    head burns its whole retry budget without a single agent ever trying:
-    observed 2026-08-09, where attempts 2/3 and 3/3 were both deferrals and the
-    original then died, leaving the release stuck with the budget spent.
+    A spawned agent lives for many minutes. When a later MERGE fires inside that
+    window, the new agent discovers the peer and correctly stands down rather
+    than racing it to open a competing RC PR. But standing down is not an
+    attempt, and counting it as one is how a head burns its whole retry budget
+    without a single agent ever trying: observed 2026-08-09, where attempts 2/3
+    and 3/3 were both deferrals and the original then died, leaving the release
+    stuck with the budget spent.
 
     Checking here means we never spawn the deferring agent at all — cheaper
     than spawning one to discover what the parent already knows.
+
+    SCOPE: merge-triggered runs only. The scheduled sweep passes `head=""` (it
+    is rate-limited per calendar day, not per commit), so it has no head to key
+    a peer lookup on and does not consult this. A sweep firing while a
+    merge-spawned agent is still working therefore relies on the daily lock
+    alone, and can in principle still spawn a peer that stands down — costing a
+    wasted spawn, though no longer a miscounted attempt, since `_record_spawn`
+    is likewise merge-only. Closing that would mean keying peer state on
+    something other than the head; deliberately out of scope here.
     """
     if not head or not SPAWN_PID_FILE.exists():
         return None

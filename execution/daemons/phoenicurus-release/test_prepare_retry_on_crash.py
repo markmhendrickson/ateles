@@ -332,3 +332,27 @@ def test_live_peer_probe_is_per_head(isolated_state, monkeypatch):
     (isolated_state / ".pid").write_text(f"{OTHER_SHA} {os.getpid()}")
     assert prepare._live_peer_pid(SHA) is None
     assert prepare._live_peer_pid(OTHER_SHA) == os.getpid()
+
+
+def test_scheduled_sweep_does_not_consult_the_peer_gate(ready_to_spawn, monkeypatch):
+    """
+    Pins the scope Loxia asked about on ateles#408.
+
+    The sweep is rate-limited per calendar day, not per commit, so it passes
+    head="" and has no key for a peer lookup. It therefore does NOT defer via
+    this path — but it also cannot miscount, because `_record_spawn` is equally
+    merge-only. Documenting the asymmetry so a future reader does not "fix" the
+    docstring by wiring the sweep in without giving it a head to key on.
+    """
+    monkeypatch.setattr(prepare, "_live_peer_pid", lambda _h: 4242)
+    monkeypatch.setattr(prepare, "_already_ran_today", lambda: False)
+
+    prepare.run_prepare(dry_run=False, force=False, on_merge=False)
+
+    assert len(ready_to_spawn) == 1, (
+        "the sweep does not consult the peer gate — it has no head to key on"
+    )
+    assert prepare._spawn_count(SHA) == 0, (
+        "and it must not touch the per-head counter either, or a sweep would "
+        "silently spend a merge-path attempt"
+    )
