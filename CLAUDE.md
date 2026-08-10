@@ -57,6 +57,19 @@ Two deliberate non-verdicts: a **failed fetch** reports `unknown`, not drift (of
 
 Motivated by three occurrences on the same checkout: ateles#339 and #361 (both recovered by hand; the PR titles read "stranded in the deploy checkout"), then 2026-08-09, when `~/ateles-rc-src` sat on a 2026-07-28 local merge commit — 3 ahead, 14 behind — so ateles#401 merged to main and never reached the running daemon while `git pull --ff-only` refused without changing HEAD.
 
+### Which checkout a daemon runs from
+
+Daemons run **dedicated checkouts**, never the shared main clone where interactive sessions work:
+
+| Daemon | Checkout |
+|---|---|
+| Ateles daemons (Apis, Phoenicurus prepare, …) | `~/ateles-rc-src` |
+| Phoenicurus **release** (`NEOTOMA_REPO_ROOT`) | `~/neotoma-rc-src` |
+
+The shared clones (`~/repos/ateles`, `~/repos/neotoma`) are for sessions and are dirty most of the time. `publish.py` refuses to tag atop a dirty tree — correctly, since publishing ships whatever is in the working tree — so a release pointed at the shared clone blocks on whoever last left it dirty. That happened on 2026-08-10: an approved v0.21.5 publish refused over 12 modified files belonging to an unrelated session (ateles#412).
+
+**Two consequences worth remembering when debugging a daemon:** verify against the checkout the daemon actually runs from, not the worktree you are editing in; and a merged fix does nothing until that checkout is updated.
+
 ---
 
 ## Gmail send-gate hook (mechanical enforcement)

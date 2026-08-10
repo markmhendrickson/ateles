@@ -47,8 +47,12 @@
         <string>/Users/markmhendrickson/.local/bin:/Users/markmhendrickson/.nvm/versions/node/v20.20.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>NEOTOMA_BASE_URL</key>
         <string>https://neotoma.markmhendrickson.com</string>
+        <!-- Dedicated release checkout, NOT the shared main clone. publish.py
+             refuses to tag atop a dirty tree, and ~/repos/neotoma is where
+             interactive sessions work — so releases there block on whoever
+             last left it dirty (observed 2026-08-10 on v0.21.5). -->
         <key>NEOTOMA_REPO_ROOT</key>
-        <string>/Users/markmhendrickson/repos/neotoma</string>
+        <string>/Users/markmhendrickson/neotoma-rc-src</string>
     </dict>
 
     <key>StandardOutPath</key>

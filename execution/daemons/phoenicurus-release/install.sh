@@ -47,9 +47,30 @@ else
 fi
 
 echo "Neotoma repo:"
+# Prefer the dedicated release checkout over the shared main clone.
+#
+# publish.py refuses to tag and ship atop a dirty tree — correctly, since it
+# would put unreviewed changes into a release. But ~/repos/neotoma is where
+# interactive sessions work, so it is dirty most of the time, and a release
+# then blocks on someone else's uncommitted files. Observed 2026-08-10:
+# an approved v0.21.5 publish refused with 12 modified files belonging to an
+# unrelated session on an unrelated branch.
+#
+# ~/neotoma-rc-src exists for exactly this and mirrors how the ateles daemons
+# already run from ~/ateles-rc-src. Falls back to the shared clone when it is
+# absent so a fresh install still works.
+if [ -z "${NEOTOMA_REPO_ROOT:-}" ] && [ -f "$HOME/neotoma-rc-src/package.json" ]; then
+  NEOTOMA_REPO_ROOT="$HOME/neotoma-rc-src"
+fi
 NEOTOMA_REPO_ROOT="${NEOTOMA_REPO_ROOT:-$HOME/repos/neotoma}"
 if [ -f "$NEOTOMA_REPO_ROOT/package.json" ]; then
   echo "  ✓ $NEOTOMA_REPO_ROOT"
+  case "$NEOTOMA_REPO_ROOT" in
+    "$HOME/repos/neotoma")
+      echo "    ! shared clone — releases will block whenever a session leaves it dirty"
+      echo "      (create $HOME/neotoma-rc-src, or set NEOTOMA_REPO_ROOT)"
+      ;;
+  esac
 else
   echo "  ✗ no package.json at $NEOTOMA_REPO_ROOT (set NEOTOMA_REPO_ROOT)"
   fail=1
