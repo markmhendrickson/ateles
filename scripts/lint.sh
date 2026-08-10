@@ -75,6 +75,10 @@ find ./strategy/operations -name "*.md" | \
 echo "  - Checking config sourcing (no hardcoded operator config)..."
 python scripts/linters/check_hardcoded_config.py || ERRORS=$((ERRORS + 1))
 
+# Agent roster (no retired agent names in prompts, mirrors, or routing code)
+echo "  - Checking agent roster (no retired agent names)..."
+python scripts/linters/check_agent_roster.py || ERRORS=$((ERRORS + 1))
+
 # tool_allowlist grant grammar (ateles#255 — bash: prefix is silently dropped
 # by the CLI's --allowedTools parser; only Bash(<command>:*) is honored).
 # Requires live Neotoma; skipped (not failed) when NEOTOMA_BASE_URL is unset
