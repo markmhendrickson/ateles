@@ -898,6 +898,23 @@ async def main() -> None:
                     f"[{DAEMON_NAME}] deferred-review sweep failed: {exc}",
                     exc_info=True,
                 )
+            # 3. Stalled reviews. The deferred sweep only rescues PRs that got
+            #    far enough to post a deferral marker. A review that dies
+            #    earlier leaves NOTHING — no marker, no formal review, no error
+            #    anyone reads — and with auto-merge keyed on a formal approval
+            #    the PR just sits (ateles#408: two days, every check green,
+            #    zero reviews, found by a human). Same cadence and the same
+            #    fail-open discipline; runs after the deferred pass so a PR
+            #    with a live deferral is never double-handled.
+            try:
+                await dispatcher.resume_stalled_reviews(
+                    list(dispatcher.config.resume_repositories)
+                )
+            except Exception as exc:
+                log.error(
+                    f"[{DAEMON_NAME}] stalled-review sweep failed: {exc}",
+                    exc_info=True,
+                )
             await asyncio.sleep(deferred_interval)
 
     log.info(f"[{DAEMON_NAME}] Subscribing to SSE: {SUBSCRIBE_ENTITY_TYPES}")
