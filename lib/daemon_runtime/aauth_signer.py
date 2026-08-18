@@ -40,7 +40,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .aauth_identifier import normalize_for_wire as _normalize_sub
+try:  # imported as part of the daemon_runtime package
+    from .aauth_identifier import normalize_for_wire as _normalize_sub
+except ImportError:  # imported flat, with lib/daemon_runtime on sys.path
+    # Daemon scripts (e.g. store_release_result.py) and their tests
+    # sys.path-insert this directory and `import aauth_signer` as a bare
+    # top-level module rather than via the `lib.daemon_runtime` package, so
+    # the relative import above has no parent package to resolve against.
+    # Fall back to the same bare import those callers already rely on.
+    from aauth_identifier import normalize_for_wire as _normalize_sub  # type: ignore[no-redef]
 
 log = logging.getLogger(__name__)
 

@@ -109,3 +109,28 @@ def test_agent_domain_is_env_overridable(monkeypatch) -> None:
 
     monkeypatch.setenv("ATELES_AAUTH_AGENT_DOMAIN", "agent.example")
     assert build("planner") == "aauth:planner@agent.example"
+
+
+def test_aauth_signer_imports_flat(tmp_path) -> None:
+    """Daemon scripts put lib/daemon_runtime on sys.path and import aauth_signer.
+
+    A package-only relative import raises ImportError at collection for
+    phoenicurus-release (store_release_result.py and its tests).
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    pkg_dir = Path(__file__).resolve().parent
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(pkg_dir)
+    result = subprocess.run(
+        [sys.executable, "-c", "import aauth_signer; print(aauth_signer.AAuthSigner)"],
+        capture_output=True,
+        text=True,
+        cwd=str(tmp_path),
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, f"flat import failed:\n{result.stderr}"
