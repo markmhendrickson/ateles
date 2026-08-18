@@ -26,7 +26,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "lib"))
 
-from daemon_runtime.aauth_identifier import build_agent_identifier  # noqa: E402
+from daemon_runtime.aauth_identifier import (  # noqa: E402
+    LEGACY_SUFFIX,
+    build_agent_identifier,
+)
 
 # Default keys directory: ateles-private repo alongside ateles.
 _DEFAULT_KEYS_DIR = Path(
@@ -106,11 +109,19 @@ def mint(name: str, keys_dir: Path, alg: str = "Ed25519") -> Path:
     key_material = _ed25519_jwk() if alg == "Ed25519" else _es256_jwk()
     kid = base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode()
 
-    # draft-10 §5.1: the subject is an aauth: URI whose domain is the agent
-    # provider's. `alg` is included per §12.8.1 — a verifier MUST reject a key
-    # whose alg is absent.
+    # draft-10 §5.1 defines the subject as an aauth: URI whose domain is the
+    # agent provider's — build_agent_identifier(name) below is that form.
+    # But the *stored* sub stays the legacy `<name>@ateles-swarm` form until
+    # ATELES_AAUTH_SPEC_IDENTIFIERS is flipped: normalize_for_wire() passes a
+    # stored sub through unchanged when the flag is off, on the assumption
+    # that what's stored is the legacy form the ~25 live agent_grant entities
+    # still match on. Storing the spec form here would present it on the
+    # wire regardless of the flag and fail admission for every re-minted key
+    # — the same flag-day outage the gate exists to prevent, just triggered
+    # by minting instead of the flag. `alg` is included per §12.8.1 — a
+    # verifier MUST reject a key whose alg is absent.
     jwk = {
-        "sub": build_agent_identifier(name),
+        "sub": f"{name}{LEGACY_SUFFIX}",
         "kid": kid,
         **key_material,
     }
@@ -140,9 +151,10 @@ def main() -> None:
     name = args.name.lower()
     out_path = mint(name, args.keys_dir, args.alg)
     print(f"Keypair written to: {out_path}")
-    print(f"  sub: {build_agent_identifier(name)}")
+    print(f"  sub (on the wire today): {name}{LEGACY_SUFFIX}")
+    print(f"  sub (draft-10, once ATELES_AAUTH_SPEC_IDENTIFIERS=1): {build_agent_identifier(name)}")
     print(f"  format: canonical JWK ({args.alg})")
-    print(f"  mode: 0600")
+    print("  mode: 0600")
     print()
     print("Next: restart the daemon so it picks up the new keypair.")
 

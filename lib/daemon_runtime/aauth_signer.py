@@ -42,6 +42,10 @@ from typing import Any
 
 try:  # imported as part of the daemon_runtime package
     from .aauth_identifier import normalize_for_wire as _normalize_sub
+    from .aauth_httpsig import _sign_for_alg, alg_for_jwk
+    from .aauth_httpsig import (
+        load_private_key_from_jwk as _load_private_key_from_jwk,
+    )
 except ImportError:  # imported flat, with lib/daemon_runtime on sys.path
     # Daemon scripts (e.g. store_release_result.py) and their tests
     # sys.path-insert this directory and `import aauth_signer` as a bare
@@ -49,6 +53,10 @@ except ImportError:  # imported flat, with lib/daemon_runtime on sys.path
     # the relative import above has no parent package to resolve against.
     # Fall back to the same bare import those callers already rely on.
     from aauth_identifier import normalize_for_wire as _normalize_sub  # type: ignore[no-redef]
+    from aauth_httpsig import _sign_for_alg, alg_for_jwk  # type: ignore[no-redef]
+    from aauth_httpsig import (  # type: ignore[no-redef]
+        load_private_key_from_jwk as _load_private_key_from_jwk,
+    )
 
 log = logging.getLogger(__name__)
 
@@ -73,6 +81,7 @@ class AAuthSigner:
     sub: str = ""
     key_id: str = ""
     _private_key: Any = None
+    _alg: str = "ES256"
     _warned: bool = False
 
     @classmethod
@@ -109,16 +118,20 @@ class AAuthSigner:
             # Canonical JWK format: has "kty" and "d" fields.
             if "kty" in data and "d" in data:
                 kid = data.get("kid", "")
-                private_key = _load_private_key_jwk(data)
+                alg = alg_for_jwk(data)
+                private_key = _load_private_key_jwk(data, alg)
             else:
-                # Legacy PEM format.
+                # Legacy PEM format — PEM keys minted here have always been
+                # EC/P-256; Ed25519 is only produced in the canonical JWK
+                # format above.
                 kid = data.get("key_id", data.get("kid", ""))
+                alg = "ES256"
                 private_key = _load_private_key(data.get("private_key_pem", ""))
 
-            signer = cls(sub=sub, key_id=kid)
+            signer = cls(sub=sub, key_id=kid, _alg=alg)
             signer._private_key = private_key
             log.info(
-                f"[{agent_name}] AAuth keypair loaded (sub={sub} kid={kid} "
+                f"[{agent_name}] AAuth keypair loaded (sub={sub} kid={kid} alg={alg} "
                 f"format={'jwk' if 'kty' in data else 'pem'})"
             )
             return signer
@@ -151,7 +164,9 @@ class AAuthSigner:
             return {}
 
         try:
-            token = _sign_jwt(self.sub, self.key_id, self._private_key, method, path)
+            token = _sign_jwt(
+                self.sub, self.key_id, self._private_key, method, path, self._alg
+            )
             return {"X-AAuth-Token": token}
         except Exception as exc:
             log.warning(f"[{self.sub}] AAuth signing failed: {exc}")
@@ -181,57 +196,81 @@ def _load_private_key(pem: str) -> Any:
         return None
 
 
-def _load_private_key_jwk(data: dict) -> Any:
-    """Load an EC P-256 private key from a JWK dict (fields: d, x, y, crv)."""
+def _load_private_key_jwk(data: dict, alg: str = "ES256") -> Any:
+    """Load a private key from a JWK dict (EC/P-256 or OKP/Ed25519).
+
+    Delegates to :func:`aauth_httpsig.load_private_key_from_jwk`, which
+    already handles both algorithm families draft-10 §12.8.1 admits — this
+    module used to carry its own EC-only copy of the same logic, which is
+    exactly why it silently couldn't load the Ed25519 keys
+    ``mint_daemon_keypair.py`` produces by default.
+    """
     try:
-        import base64
-
-        from cryptography.hazmat.primitives.asymmetric.ec import (
-            SECP256R1,
-            EllipticCurvePrivateNumbers,
-            EllipticCurvePublicNumbers,
-        )
-
-        def _b64url_to_int(s: str) -> int:
-            # Pad to a multiple of 4 and decode base64url.
-            pad = (4 - len(s) % 4) % 4
-            return int.from_bytes(base64.urlsafe_b64decode(s + "=" * pad), "big")
-
-        x = _b64url_to_int(data["x"])
-        y = _b64url_to_int(data["y"])
-        d = _b64url_to_int(data["d"])
-        pub = EllipticCurvePublicNumbers(x=x, y=y, curve=SECP256R1())
-        priv = EllipticCurvePrivateNumbers(private_value=d, public_numbers=pub)
-        return priv.private_key()
-    except ImportError:
-        log.warning("[aauth] cryptography not installed — AAuth signing unavailable")
-        return None
+        return _load_private_key_from_jwk(data)
     except Exception as exc:
-        log.warning(f"[aauth] Could not load JWK private key: {exc}")
+        # aauth_httpsig raises AAuthSigningError (a plain Exception) for both
+        # a missing `cryptography` package and a malformed/unsupported key —
+        # one catch-all keeps this the same fail-safe-to-stub behavior as
+        # every other loader in this module.
+        log.warning(f"[aauth] Could not load JWK private key (alg={alg}): {exc}")
         return None
 
 
-def _sign_jwt(sub: str, kid: str, private_key: Any, method: str, path: str) -> str:
+def _sign_jwt(
+    sub: str, kid: str, private_key: Any, method: str, path: str, alg: str = "ES256"
+) -> str:
     """
-    Produce a minimal AAuth JWT.
-    Requires: cryptography, PyJWT or manual jose encoding.
+    Produce a minimal AAuth JWT, signed with the key's own algorithm.
+
+    ES256 goes through PyJWT as before. Ed25519 is assembled and signed
+    manually: PyJWT 2.13 only registers Ed25519 as the polymorphic "EdDSA"
+    identifier that RFC 9864 deprecated and draft-10 §12.8.1 forbids on the
+    wire, and the protected header must already say "Ed25519" before signing
+    since it's part of the JWS signing input — mirroring the same constraint
+    `aauth_httpsig._encode_jws_manually` handles for the richer agent token.
     """
+    now = int(time.time())
+    payload = {
+        "sub": sub,
+        "iat": now,
+        "exp": now + 300,  # 5 min expiry
+        "method": method.upper(),
+        "path": path,
+    }
+    headers = {"alg": alg, "typ": "JWT"}
+    if kid:
+        headers["kid"] = kid
+
+    if alg == "Ed25519":
+        try:
+            segments = [
+                _b64url_nopad(json.dumps(part, separators=(",", ":")).encode("utf-8"))
+                for part in (headers, payload)
+            ]
+            signing_input = ".".join(segments).encode("ascii")
+            signature = _sign_for_alg(private_key, signing_input, alg)
+            segments.append(_b64url_nopad(signature))
+            return ".".join(segments)
+        except ImportError:
+            log.warning("[aauth] cryptography not installed — returning empty token")
+            return ""
+        except Exception as exc:
+            log.warning(f"[aauth] JWT signing failed: {exc}")
+            return ""
+
     try:
         import jwt  # PyJWT
 
-        now = int(time.time())
-        payload = {
-            "sub": sub,
-            "iat": now,
-            "exp": now + 300,  # 5 min expiry
-            "method": method.upper(),
-            "path": path,
-        }
-        headers = {"kid": kid} if kid else {}
-        return jwt.encode(payload, private_key, algorithm="ES256", headers=headers)
+        return jwt.encode(payload, private_key, algorithm=alg, headers=headers)
     except ImportError:
         log.warning("[aauth] PyJWT not installed — returning empty token")
         return ""
     except Exception as exc:
         log.warning(f"[aauth] JWT signing failed: {exc}")
         return ""
+
+
+def _b64url_nopad(data: bytes) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
