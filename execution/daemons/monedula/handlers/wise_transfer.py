@@ -390,6 +390,46 @@ def _get_wise_profile_id(token: str) -> int:
     raise RuntimeError("No Wise profiles found")
 
 
+def _normalize_iban(iban: str) -> str:
+    """IBANs compare without spacing or case — 'ES62 2100' == 'es622100'."""
+    return "".join((iban or "").split()).upper()
+
+
+def _find_existing_recipient(token: str, profile_id: int, iban: str) -> int | None:
+    """Return an existing recipient account id for this IBAN, or None.
+
+    Matching is by IBAN, not by name. The IBAN is the account's identity; the
+    account-holder name is a label that varies in spacing, accents and
+    abbreviation between what a payee tells you and what their bank stores.
+
+    A lookup failure is not fatal: the caller falls back to creating the
+    recipient, which is the pre-existing behaviour.
+    """
+    try:
+        accounts = _wise_get(token, f"/v1/accounts?profile={profile_id}&currency=EUR")
+    except Exception as exc:  # network, auth, schema drift — all non-fatal here
+        log.warning(f"Wise recipient lookup failed ({exc}) — will attempt create")
+        return None
+
+    if isinstance(accounts, dict):
+        accounts = accounts.get("content") or accounts.get("accounts") or []
+    if not isinstance(accounts, list):
+        log.warning(f"Wise /v1/accounts returned unexpected shape: {type(accounts)}")
+        return None
+
+    want = _normalize_iban(iban)
+    for acct in accounts:
+        if not isinstance(acct, dict):
+            continue
+        details = acct.get("details") or {}
+        if _normalize_iban(str(details.get("iban") or "")) == want:
+            account_id = acct.get("id")
+            if account_id:
+                log.info(f"Reusing existing Wise recipient {account_id} for this IBAN")
+                return int(account_id)
+    return None
+
+
 def _get_or_create_recipient(
     token: str,
     profile_id: int,
@@ -397,12 +437,22 @@ def _get_or_create_recipient(
     name: str,
     legal_type: str = "PRIVATE",
 ) -> int:
-    """Create a Wise IBAN recipient.
+    """Return an existing Wise IBAN recipient for this IBAN, or create one.
+
+    Looks up first. Creating unconditionally would add a duplicate recipient
+    every run for a payee that already exists — and recipient creation is the
+    step Wise runs Verification of Payee against, so a needless create is also
+    a needless chance to be blocked by a name mismatch on an account that is
+    already known-good.
 
     legal_type must be PRIVATE (individual) or BUSINESS (company). Sending
     PRIVATE for a company-held account risks the transfer being returned on a
     name/legal-type mismatch — after the funds have already left the balance.
     """
+    existing = _find_existing_recipient(token, profile_id, iban)
+    if existing is not None:
+        return existing
+
     legal_type = (legal_type or "PRIVATE").strip().upper()
     if legal_type not in ("PRIVATE", "BUSINESS"):
         raise ValueError(
