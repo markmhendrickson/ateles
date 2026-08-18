@@ -254,11 +254,13 @@ because it resolves keys in-network.
 4. **Handle `required_input`.** Parse the `invalid_input` error and retry with
    the server's requested covered components instead of failing.
 
-5. **Decide on the person-server model.** Dick Hardt is rolling out a live PS at
-   `person.hello.coop`, which makes evaluating missions and PS-asserted access
-   concrete rather than theoretical. The decision is whether to converge
-   `agent_grant`/`execution_policy` onto the standard governance layer or keep
-   ours and document the divergence.
+5. **Person-server model — evaluated, deferred.** The live PS at
+   `person.hello.coop` implements the identity half (person tokens, auth
+   tokens, interaction) but exposes no `mission_endpoint`,
+   `permission_endpoint`, or `audit_endpoint` — precisely the governance
+   surface `agent_grant` and `execution_policy` occupy. Keep ours; re-probe
+   when those endpoints appear. See
+   [`aauth_person_server_evaluation.md`](aauth_person_server_evaluation.md).
 
 6. **Tighten grants.** Several still use `*` for `store_structured`/`correct`.
    Per-entity-type allowlists turn admission into real containment.
