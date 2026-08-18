@@ -15,7 +15,6 @@ Runs as a launchd agent — see com.markmhendrickson.cyphorhinus.plist.
 """
 
 import json
-import logging
 import os
 import re
 import subprocess
@@ -171,25 +170,15 @@ _persist_bearer_token(_bearer)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-class _FlushingFileHandler(logging.FileHandler):
-    """FileHandler that flushes after every record — required when stdout is
-    piped by launchd and Python's default block-buffering would delay log lines."""
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-    def emit(self, record: logging.LogRecord) -> None:
-        super().emit(record)
-        self.flush()
+from lib.daemon_runtime.logging_setup import configure_daemon_logging
 
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [cyphorhinus] %(levelname)s %(message)s",
-    handlers=[
-        _FlushingFileHandler(LOG_FILE),
-        # stdout is captured by launchd to the same log file — no StreamHandler
-        # here to avoid every line appearing twice in the log.
-    ],
-)
-log = logging.getLogger(__name__)
+# Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
+# unbounded retry logging filled a 926 GB disk on 2026-08-18.
+log = configure_daemon_logging("cyphorhinus", also_stdout=True)
 
 
 # Dedup state for Telegram alerts — avoids repeat messages for persistent errors.

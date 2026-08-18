@@ -38,7 +38,6 @@ a missing token / gws / mailbox logs and no-ops, never crashes.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import subprocess
 import sys
@@ -49,6 +48,8 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+from lib.daemon_runtime.logging_setup import configure_daemon_logging
 
 _NEOTOMA_ENV_FILE = Path.home() / ".config" / "neotoma" / ".env"
 if _NEOTOMA_ENV_FILE.exists():
@@ -71,18 +72,9 @@ LOG_DIR = Path.home() / "Library" / "Logs" / "ateles"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-class _FlushingFileHandler(logging.FileHandler):
-    def emit(self, record: logging.LogRecord) -> None:
-        super().emit(record)
-        self.flush()
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [riparia] %(levelname)s %(message)s",
-    handlers=[_FlushingFileHandler(LOG_DIR / "riparia.log")],
-)
-log = logging.getLogger("riparia")
+# Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
+# unbounded retry logging filled a 926 GB disk on 2026-08-18.
+log = configure_daemon_logging("riparia")
 
 # ── Config ──────────────────────────────────────────────────────────────────
 DAEMON_NAME = "riparia"

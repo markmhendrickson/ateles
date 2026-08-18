@@ -22,7 +22,6 @@ Neotoma is authoritative for recurrence rules. Calendar is output/import surface
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
 import shutil
@@ -51,6 +50,8 @@ if _NEOTOMA_ENV_FILE.exists():
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+from lib.daemon_runtime.logging_setup import configure_daemon_logging
 
 try:
     from lib.notify import Notifier
@@ -104,24 +105,9 @@ CALENDAR_LOOKAHEAD_DAYS = int(os.environ.get("SYLVIA_CALENDAR_LOOKAHEAD_DAYS", "
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-class _FlushingFileHandler(logging.FileHandler):
-    def emit(self, record: logging.LogRecord) -> None:
-        super().emit(record)
-        self.flush()
-
-
-# Guard against duplicate handlers when launchd re-execs in the same process tree.
-_root = logging.getLogger()
-if not _root.handlers:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [sylvia] %(levelname)s %(message)s",
-        handlers=[
-            _FlushingFileHandler(LOG_FILE),
-            logging.StreamHandler(sys.stdout),
-        ],
-    )
-log = logging.getLogger("sylvia")
+# Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
+# unbounded retry logging filled a 926 GB disk on 2026-08-18.
+log = configure_daemon_logging("sylvia", also_stdout=True)
 
 # ---------------------------------------------------------------------------
 # Idempotency guard

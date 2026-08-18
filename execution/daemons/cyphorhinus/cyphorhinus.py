@@ -41,7 +41,6 @@ Runs as a launchd agent — see com.ateles.cyphorhinus.plist.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import sys
 import time
@@ -59,6 +58,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from lib.daemon_runtime.logging_setup import configure_daemon_logging
+
 _NEOTOMA_ENV_FILE = Path.home() / ".config" / "neotoma" / ".env"
 if _NEOTOMA_ENV_FILE.exists():
     for _line in _NEOTOMA_ENV_FILE.read_text().splitlines():
@@ -71,23 +72,9 @@ if _NEOTOMA_ENV_FILE.exists():
                 os.environ[_k.strip()] = _v
 
 # ── Logging ─────────────────────────────────────────────────────────────────
-LOG_DIR = Path.home() / "Library" / "Logs" / "ateles"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-LOG_FILE = LOG_DIR / "cyphorhinus.log"
-
-
-class _FlushingFileHandler(logging.FileHandler):
-    def emit(self, record: logging.LogRecord) -> None:
-        super().emit(record)
-        self.flush()
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [cyphorhinus] %(levelname)s %(message)s",
-    handlers=[_FlushingFileHandler(LOG_FILE)],
-)
-log = logging.getLogger("cyphorhinus")
+# Rotating + repeat-suppressing: this daemon wrote a 276 GB log on 2026-08-18
+# when DNS failure turned the long-poll into a ~500 line/second retry storm.
+log = configure_daemon_logging("cyphorhinus")
 
 # ── Config ──────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("CYPHORHINUS_TELEGRAM_BOT_TOKEN", "").strip()
@@ -202,6 +189,25 @@ def _store_operator_followup(*, job: dict, reply_text: str, reply_message_id: in
 
 
 # ── Telegram helpers ────────────────────────────────────────────────────────
+_poll_failures = 0
+
+
+def _sleep_after_failed_poll() -> None:
+    """Back off after a poll that failed without reaching the server.
+
+    A successful call blocks for POLL_TIMEOUT (50s) inside Telegram's long-poll,
+    which is what paces this loop. A DNS or connection failure returns in ~2ms,
+    so without an explicit sleep the loop spins at the speed of the error — the
+    2026-08-18 incident wrote ~500 log lines/second for the length of the
+    outage. Backoff is capped at POLL_TIMEOUT so recovery is never slower than
+    one normal poll.
+    """
+    global _poll_failures
+    _poll_failures += 1
+    delay = min(2 ** min(_poll_failures, 6), POLL_TIMEOUT)
+    time.sleep(delay)
+
+
 def _tg_get_updates(offset: int) -> list[dict]:
     """Long-poll getUpdates. Returns the list of update objects."""
     params = urllib.parse.urlencode(
@@ -214,12 +220,16 @@ def _tg_get_updates(offset: int) -> list[dict]:
             if not data.get("ok"):
                 log.warning(f"getUpdates not ok: {data}")
                 return []
+            global _poll_failures
+            _poll_failures = 0
             return data.get("result", [])
     except urllib.error.URLError as exc:
         log.warning(f"getUpdates network error: {exc}")
+        _sleep_after_failed_poll()
         return []
     except Exception as exc:
         log.warning(f"getUpdates error: {exc}")
+        _sleep_after_failed_poll()
         return []
 
 
