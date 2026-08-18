@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-execution/scripts/mint_daemon_keypair.py — Generate an ES256 P-256 keypair for a daemon.
+execution/scripts/mint_daemon_keypair.py — Generate an AAuth keypair for a daemon.
+
+Defaults to Ed25519, which draft-hardt-oauth-aauth-protocol-10 §12.8.1 makes a
+MUST for agents and resources; ES256 (EC/P-256) remains available via
+--alg ES256 for verifiers that do not yet accept Ed25519.
 
 Writes ateles-private/keys/<name>.jwk.json in canonical JWK format.
 The file is mode 0600 and contains both the private scalar and public
@@ -20,6 +24,10 @@ import os
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "lib"))
+
+from daemon_runtime.aauth_identifier import build_agent_identifier  # noqa: E402
+
 # Default keys directory: ateles-private repo alongside ateles.
 _DEFAULT_KEYS_DIR = Path(
     os.environ.get(
@@ -34,10 +42,56 @@ def _int_to_b64url(n: int, byte_length: int = 32) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
 
-def mint(name: str, keys_dir: Path) -> Path:
+def _bytes_to_b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def _ed25519_jwk() -> dict:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    private_key = Ed25519PrivateKey.generate()
+    raw_priv = private_key.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    raw_pub = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return {
+        "kty": "OKP",
+        "crv": "Ed25519",
+        "alg": "Ed25519",
+        "x": _bytes_to_b64url(raw_pub),
+        "d": _bytes_to_b64url(raw_priv),
+    }
+
+
+def _es256_jwk() -> dict:
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives.asymmetric.ec import (
+        SECP256R1,
+        generate_private_key,
+    )
+
+    private_key = generate_private_key(SECP256R1(), default_backend())
+    pub = private_key.public_key().public_numbers()
+    priv = private_key.private_numbers()
+    return {
+        "kty": "EC",
+        "crv": "P-256",
+        "alg": "ES256",
+        "x": _int_to_b64url(pub.x),
+        "y": _int_to_b64url(pub.y),
+        "d": _int_to_b64url(priv.private_value),
+    }
+
+
+def mint(name: str, keys_dir: Path, alg: str = "Ed25519") -> Path:
     try:
-        from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1, generate_private_key
-        from cryptography.hazmat.backends import default_backend
+        import cryptography  # noqa: F401
     except ImportError:
         sys.exit("ERROR: cryptography package not installed. Run: pip install cryptography")
 
@@ -49,20 +103,16 @@ def mint(name: str, keys_dir: Path) -> Path:
             f"ERROR: {out_path} already exists. Delete it first if you intend to rotate."
         )
 
-    private_key = generate_private_key(SECP256R1(), default_backend())
-    pub = private_key.public_key().public_numbers()
-    priv = private_key.private_numbers()
-
+    key_material = _ed25519_jwk() if alg == "Ed25519" else _es256_jwk()
     kid = base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode()
 
+    # draft-10 §5.1: the subject is an aauth: URI whose domain is the agent
+    # provider's. `alg` is included per §12.8.1 — a verifier MUST reject a key
+    # whose alg is absent.
     jwk = {
-        "sub": f"{name}@ateles-swarm",
+        "sub": build_agent_identifier(name),
         "kid": kid,
-        "kty": "EC",
-        "crv": "P-256",
-        "x": _int_to_b64url(pub.x),
-        "y": _int_to_b64url(pub.y),
-        "d": _int_to_b64url(priv.private_value),
+        **key_material,
     }
 
     out_path.write_text(json.dumps(jwk, indent=2) + "\n")
@@ -74,6 +124,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Mint an AAuth keypair for a daemon.")
     parser.add_argument("--name", required=True, help="Daemon name (e.g. monedula)")
     parser.add_argument(
+        "--alg",
+        choices=["Ed25519", "ES256"],
+        default="Ed25519",
+        help="Signing algorithm (default: Ed25519, a MUST in draft-10 §12.8.1)",
+    )
+    parser.add_argument(
         "--keys-dir",
         type=Path,
         default=_DEFAULT_KEYS_DIR,
@@ -82,10 +138,10 @@ def main() -> None:
     args = parser.parse_args()
 
     name = args.name.lower()
-    out_path = mint(name, args.keys_dir)
+    out_path = mint(name, args.keys_dir, args.alg)
     print(f"Keypair written to: {out_path}")
-    print(f"  sub: {name}@ateles-swarm")
-    print(f"  format: canonical JWK (ES256 P-256)")
+    print(f"  sub: {build_agent_identifier(name)}")
+    print(f"  format: canonical JWK ({args.alg})")
     print(f"  mode: 0600")
     print()
     print("Next: restart the daemon so it picks up the new keypair.")

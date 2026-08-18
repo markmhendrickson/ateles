@@ -170,3 +170,193 @@ def test_rejects_non_ec_jwk() -> None:
 
     with pytest.raises(AAuthSigningError):
         HttpSigSigner(private_jwk={"kty": "RSA", "n": "x", "e": "AQAB"}, sub="s", iss="s")
+
+
+# ── draft-10 conformance (draft-hardt-oauth-aauth-protocol-10) ───────────────
+
+
+def _ed25519_test_jwk() -> dict:
+    """A throwaway Ed25519 JWK (NOT a real agent key)."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import serialization
+
+    priv = Ed25519PrivateKey.generate()
+    raw_priv = priv.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    raw_pub = priv.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+
+    def b64u(b: bytes) -> str:
+        return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+    return {
+        "kty": "OKP",
+        "crv": "Ed25519",
+        "d": b64u(raw_priv),
+        "x": b64u(raw_pub),
+        "sub": "tester@ateles-swarm",
+        "kid": "test-ed25519-kid",
+    }
+
+
+def _decode_agent_token(headers: dict) -> dict:
+    """Pull the aa-agent+jwt out of Signature-Key and decode its claims."""
+    import jwt as pyjwt
+
+    sig_key = headers["signature-key"]
+    token = sig_key.split('jwt="', 1)[1].rsplit('"', 1)[0]
+    return pyjwt.decode(token, options={"verify_signature": False})
+
+
+def test_agent_token_carries_draft10_required_claims() -> None:
+    """draft-10 §5.2.2 REQUIRES iss, dwk, sub, jti, cnf, iat, exp."""
+    signer = HttpSigSigner(
+        private_jwk=_valid_test_jwk(),
+        sub="aauth:tester@example.com",
+        iss="https://example.com",
+        kid="test-kid",
+    )
+    headers = signer.sign_headers(method="GET", url="https://x.example/a", body=None)
+    claims = _decode_agent_token(headers)
+
+    for required in ("iss", "dwk", "sub", "jti", "cnf", "iat", "exp"):
+        assert required in claims, f"missing required claim: {required}"
+    assert claims["dwk"] == "aauth-agent.json"
+    assert claims["iss"] == "https://example.com"
+    assert claims["sub"] == "aauth:tester@example.com"
+
+
+def test_jti_is_unique_per_token() -> None:
+    """jti is a token identifier — a fresh one on every mint."""
+    signer = HttpSigSigner(
+        private_jwk=_valid_test_jwk(),
+        sub="aauth:tester@example.com",
+        iss="https://example.com",
+    )
+    seen = {
+        _decode_agent_token(
+            signer.sign_headers(method="GET", url="https://x.example/a", body=None)
+        )["jti"]
+        for _ in range(5)
+    }
+    assert len(seen) == 5
+
+
+def test_cnf_jwk_always_carries_fully_specified_alg() -> None:
+    """draft-10 §12.8.1: a verifier MUST reject a key whose alg is absent."""
+    jwk = _valid_test_jwk()
+    jwk.pop("alg", None)
+    signer = HttpSigSigner(
+        private_jwk=jwk, sub="aauth:t@example.com", iss="https://example.com"
+    )
+    headers = signer.sign_headers(method="GET", url="https://x.example/a", body=None)
+    claims = _decode_agent_token(headers)
+    assert claims["cnf"]["jwk"]["alg"] == "ES256"
+    assert "d" not in claims["cnf"]["jwk"], "private component leaked into cnf"
+
+
+def test_ed25519_signature_verifies() -> None:
+    """Ed25519 support is a MUST in draft-10 §12.8.1; sign and verify for real."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    jwk = _ed25519_test_jwk()
+    signer = HttpSigSigner(
+        private_jwk=jwk, sub="aauth:t@example.com", iss="https://example.com"
+    )
+    headers = signer.sign_headers(
+        method="POST",
+        url="https://x.example/store",
+        body=b'{"a":1}',
+        content_type="application/json",
+    )
+
+    claims = _decode_agent_token(headers)
+    assert claims["cnf"]["jwk"]["alg"] == "Ed25519"
+
+    # Rebuild the signature base and verify with the public key.
+    values = {
+        "@method": "POST",
+        "@authority": "x.example",
+        "@path": "/store",
+        "content-type": "application/json",
+        "content-digest": headers["content-digest"],
+        "signature-key": headers["signature-key"],
+    }
+    params = headers["signature-input"].split("=", 1)[1]
+    lines = [f'"{c}": {values[c]}' for c in COMPONENTS_WITH_BODY]
+    lines.append(f'"@signature-params": {params}')
+    base = "\n".join(lines).encode()
+
+    raw_sig = base64.b64decode(headers["signature"].split("=:", 1)[1].rstrip(":"))
+    assert len(raw_sig) == 64, "Ed25519 signature must be the native 64-byte form"
+
+    pub = Ed25519PublicKey.from_public_bytes(
+        base64.urlsafe_b64decode(jwk["x"] + "=" * (-len(jwk["x"]) % 4))
+    )
+    pub.verify(raw_sig, base)  # raises on failure
+
+
+def test_rejects_polymorphic_eddsa_alg() -> None:
+    """draft-10 §12.8.1: the polymorphic EdDSA identifier MUST NOT be used."""
+    from daemon_runtime.aauth_httpsig import AAuthSigningError, alg_for_jwk
+
+    jwk = _ed25519_test_jwk()
+    jwk["alg"] = "EdDSA"
+    with pytest.raises(AAuthSigningError, match="EdDSA"):
+        alg_for_jwk(jwk)
+
+
+def test_rejects_alg_disagreeing_with_key_type() -> None:
+    """A verifier MUST reject a key whose kty/crv disagrees with its alg."""
+    from daemon_runtime.aauth_httpsig import AAuthSigningError, alg_for_jwk
+
+    jwk = _valid_test_jwk()
+    jwk["alg"] = "Ed25519"  # but it is EC/P-256
+    with pytest.raises(AAuthSigningError, match="disagrees"):
+        alg_for_jwk(jwk)
+
+
+def test_ed25519_agent_token_is_a_valid_jws_with_fully_specified_alg() -> None:
+    """The token we hand-assemble must verify as a JWS and name Ed25519."""
+    import json as _json
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    jwk = _ed25519_test_jwk()
+    signer = HttpSigSigner(
+        private_jwk=jwk, sub="aauth:t@example.com", iss="https://example.com"
+    )
+    headers = signer.sign_headers(method="GET", url="https://x.example/a", body=None)
+    token = headers["signature-key"].split('jwt="', 1)[1].rsplit('"', 1)[0]
+
+    def b64u_dec(seg: str) -> bytes:
+        return base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
+
+    h_seg, p_seg, s_seg = token.split(".")
+    header = _json.loads(b64u_dec(h_seg))
+    assert header["alg"] == "Ed25519", "must use the fully-specified identifier"
+    assert header["typ"] == "aa-agent+jwt"
+
+    pub = Ed25519PublicKey.from_public_bytes(b64u_dec(jwk["x"]))
+    pub.verify(b64u_dec(s_seg), f"{h_seg}.{p_seg}".encode("ascii"))
+
+    claims = _json.loads(b64u_dec(p_seg))
+    for required in ("iss", "dwk", "sub", "jti", "cnf", "iat", "exp"):
+        assert required in claims
+
+
+def test_cnf_jwk_excludes_non_jwk_bookkeeping() -> None:
+    """Key files carry `sub`/bookkeeping; cnf.jwk must hold only JWK members."""
+    jwk = _valid_test_jwk()
+    jwk["sub"] = "aauth:tester@example.com"
+    signer = HttpSigSigner(
+        private_jwk=jwk, sub="aauth:tester@example.com", iss="https://example.com"
+    )
+    headers = signer.sign_headers(method="GET", url="https://x.example/a", body=None)
+    cnf = _decode_agent_token(headers)["cnf"]["jwk"]
+    assert "sub" not in cnf
+    assert set(cnf) <= {"kty", "crv", "x", "y", "n", "e", "alg", "kid", "use"}

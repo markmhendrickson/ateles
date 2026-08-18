@@ -40,6 +40,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .aauth_identifier import normalize as _normalize_sub
+
 log = logging.getLogger(__name__)
 
 # Default location: ateles-private repo, checked out alongside ateles
@@ -90,11 +92,11 @@ class AAuthSigner:
                 "stub signer in use (run: python execution/scripts/mint_daemon_keypair.py "
                 f"--name {name})"
             )
-            return cls(sub=f"{name}@ateles-swarm")
+            return cls(sub=_normalize_sub(f"{name}@ateles-swarm"))
 
         try:
             data = json.loads(key_path.read_text())
-            sub = data.get("sub", f"{name}@ateles-swarm")
+            sub = _normalize_sub(data.get("sub", f"{name}@ateles-swarm"))
 
             # Canonical JWK format: has "kty" and "d" fields.
             if "kty" in data and "d" in data:
@@ -117,12 +119,12 @@ class AAuthSigner:
                 f"[{agent_name}] Failed to load AAuth key from {key_path}: {exc} — "
                 "stub signer in use"
             )
-            return cls(sub=f"{name}@ateles-swarm")
+            return cls(sub=_normalize_sub(f"{name}@ateles-swarm"))
 
     @classmethod
     def stub(cls, agent_name: str) -> AAuthSigner:
         """Return a no-op stub signer for testing or pre-Phase-1 use."""
-        return cls(sub=f"{agent_name.lower()}@ateles-swarm")
+        return cls(sub=_normalize_sub(f"{agent_name.lower()}@ateles-swarm"))
 
     def headers(self, method: str = "POST", path: str = "/store") -> dict[str, str]:
         """

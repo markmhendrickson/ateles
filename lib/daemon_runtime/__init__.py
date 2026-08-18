@@ -49,6 +49,14 @@ if _NEOTOMA_ENV_FILE.exists():
             if not _existing or (_existing.startswith("__") and _existing.endswith("__")):
                 _os.environ[_k] = _v
 
+from .aauth_identifier import (
+    InvalidAgentIdentifier,
+    build_agent_identifier,
+    is_legacy_agent_identifier,
+    normalize_agent_identifier,
+    subagent_identifier,
+    validate_agent_identifier,
+)
 from .aauth_signer import AAuthSigner
 from .agent_loader import AgentDefinition, AgentLoader
 from .drift import (
@@ -120,6 +128,13 @@ __all__ = [
     "NeotomaEvent",
     "hydrate_snapshot",
     "AAuthSigner",
+    # AAuth agent identifiers (draft-10 §5.1)
+    "InvalidAgentIdentifier",
+    "build_agent_identifier",
+    "is_legacy_agent_identifier",
+    "normalize_agent_identifier",
+    "subagent_identifier",
+    "validate_agent_identifier",
     "GrantChecker",
     "AgentGrant",
     "suspend_grant",
