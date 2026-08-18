@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -40,10 +41,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "lib"))
 from daemon_runtime.aauth_httpsig import HttpSigSigner  # noqa: E402
 
 
+DEFAULT_ISS = "https://markmhendrickson.com"
+
+
 def _signer(jwk_path: Path) -> HttpSigSigner:
     jwk = json.loads(jwk_path.read_text())
     sub = jwk.get("sub") or f"{jwk_path.stem}@ateles-swarm"
-    return HttpSigSigner(private_jwk=jwk, sub=sub, iss=sub, kid=jwk.get("kid"))
+    # `iss` is the agent provider's HTTPS URL, not the subject — a verifier
+    # resolves {iss}/.well-known/{dwk} to discover the key.
+    iss = os.environ.get("NEOTOMA_AAUTH_ISS", DEFAULT_ISS)
+    return HttpSigSigner(private_jwk=jwk, sub=sub, iss=iss, kid=jwk.get("kid"))
 
 
 def emit(jwk_path: Path, out: Path | None) -> None:
