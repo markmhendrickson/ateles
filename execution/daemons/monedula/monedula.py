@@ -603,7 +603,7 @@ def main() -> None:
     # on every ~15-minute tick.
     calendar_done = _check_already_ran_today()
     if calendar_done:
-        log.info(f"Calendar leg already ran today — one-off profiles only.")
+        log.info("Calendar leg already ran today — one-off profiles only.")
         events: list | None = []
     else:
         log.info(f"Checking calendar for yesterday: {yesterday_str}")
