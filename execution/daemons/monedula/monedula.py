@@ -577,20 +577,37 @@ def _build_preview_message(
 def main() -> None:
     log.info("Monedula starting.")
 
-    # Idempotency: exit immediately if already ran today
-    if _check_already_ran_today():
-        log.info("Already ran today — exiting.")
-        return
-
     yesterday = _yesterday()
     yesterday_str = yesterday.isoformat()
-    log.info(f"Checking calendar for yesterday: {yesterday_str}")
 
     # Load handlers from env-var-defined payment profiles.
     # Set MONEDULA_PROFILES=THERAPY,YOGA (and corresponding profile env vars).
     from handlers import load_handlers
 
     all_handlers = load_handlers()
+
+    # The daily claim gates the CALENDAR leg only — never the whole run.
+    #
+    # Recurring payments are attendance-gated: they need yesterday's events,
+    # and that fetch must happen at most once per day. One-off invoices have
+    # no session and no event; they fire on a due date alone.
+    #
+    # Those two things used to share one gate. `_check_already_ran_today()`
+    # sat at the top of main() and returned BEFORE load_handlers() ran, so a
+    # one-off profile created after the day's calendar run stayed invisible
+    # until the next calendar day — with nothing in the log to say so. A
+    # same-day invoice could not be paid at all, and two rental payments
+    # (2026-08-15, 2026-08-18) were sent by hand because of it.
+    #
+    # Now the guard scopes to the calendar fetch, and one-offs are evaluated
+    # on every ~15-minute tick.
+    calendar_done = _check_already_ran_today()
+    if calendar_done:
+        log.info("Calendar leg already ran today — one-off profiles only.")
+        events: list | None = []
+    else:
+        log.info(f"Checking calendar for yesterday: {yesterday_str}")
+        events = None  # set by the fetch below
 
     # Fetch yesterday's events BEFORE claiming the day.
     #
@@ -603,23 +620,27 @@ def main() -> None:
     #
     # Now a failed fetch leaves the day unclaimed, so the next launchd tick
     # (~15 min) retries until the network is back.
-    events = fetch_yesterday_events()
+    if not calendar_done:
+        events = fetch_yesterday_events()
 
-    if events is None:
-        log.error(
-            "Calendar fetch FAILED — leaving today unclaimed so the next tick retries. "
-            "Not treating this as 'no sessions yesterday'."
-        )
-        _notify(
-            f"monedula: calendar fetch failed for {yesterday_str} — "
-            "payment detection is DOWN; will retry next tick",
-            priority="blocker",
-        )
-        return
-
-    # Calendar fetch succeeded — claim the day so concurrent launchd
-    # re-launches (and later ticks) skip the calendar leg.
-    _mark_ran_today()
+        if events is None:
+            log.error(
+                "Calendar fetch FAILED — leaving today unclaimed so the next tick "
+                "retries. Not treating this as 'no sessions yesterday'."
+            )
+            _notify(
+                f"monedula: calendar fetch failed for {yesterday_str} — "
+                "recurring payment detection is DOWN; will retry next tick",
+                priority="blocker",
+            )
+            # Do NOT return: a calendar outage says nothing about whether an
+            # invoice is due. Recurring payments are skipped this tick (no
+            # events to attend-gate against), one-offs continue below.
+            events = []
+        else:
+            # Calendar fetch succeeded — claim the day so concurrent launchd
+            # re-launches (and later ticks) skip the calendar leg.
+            _mark_ran_today()
 
     # Find triggered handlers from calendar
     triggered: list[tuple] = []  # [(handler, [match, ...]), ...]
