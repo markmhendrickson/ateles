@@ -2,451 +2,279 @@
 
 ## Purpose
 
-Documents how AAuth agent authentication is used across the Ateles repo: identity topology, signing implementations, daemon keypair status, wire format, Neotoma grant configuration, and the checklist to activate per-daemon attribution.
+Documents how AAuth agent authentication is used across the Ateles repo: which
+parts of the protocol we implement, where the signing code lives, the current
+per-agent activation state, and what conformance work remains.
 
 ## Scope
 
-Covers all AAuth-related files in the repo (`execution/scripts/aauth_*.py`, `lib/daemon_runtime/aauth_signer.py`, the MCP proxy layer, and the published `.well-known/` endpoints), the current activation state for each daemon, and next steps. Does not cover Neotoma's server-side verifier implementation — see the Neotoma repo for `aauthVerify` middleware details.
+Covers the AAuth code in this repo (`lib/daemon_runtime/aauth_*.py`,
+`lib/daemon_runtime/grant_checker.py`, `execution/scripts/mint_daemon_keypair.py`,
+the MCP tool-grant proxy) and the published `.well-known/` endpoints. Does not
+cover Neotoma's server-side verifier — see the Neotoma repo for `aauthVerify`.
+
+**Spec version tracked: `draft-hardt-oauth-aauth-protocol-10` (6 August 2026).**
+Home: [aauth.dev](https://www.aauth.dev/). Note the draft was renamed — the
+earlier `draft-hardt-aauth-protocol` series expired at -02 and was replaced by
+the `-oauth-` series, which resets the numbering. It is an individual
+Internet-Draft with no IETF standing, revising roughly monthly; pin to a
+version and re-check rather than chasing head.
 
 ---
 
-AAuth is the agent authentication protocol Ateles uses to give every daemon and invocable agent a verifiable identity. This document maps where AAuth is used across the repo, how each component fits together, and what still needs to be done before the full trust chain is active.
+## What we implement, and what we don't
+
+AAuth as specified is a large protocol: five resource access modes, four token
+types, an orthogonal agent-governance layer, and multi-hop call chaining.
+
+**Ateles implements the first access mode only — identity-based access.** An
+agent signs each request with its own key; the resource (Neotoma) verifies the
+signature and applies its own policy. Everything else in our stack — which
+entity types an agent may write, which MCP tools it may call — is *our* policy
+layer (`agent_grant`), not the spec's.
+
+| Spec capability | Status here |
+|---|---|
+| Identity-based access (agent token + HTTP signature) | ✅ implemented |
+| Resource-managed / PS-asserted / federated access | ❌ not implemented |
+| Person Server, auth tokens, resource tokens | ❌ none; we have no PS |
+| Missions, clarification chat, mission log | ❌ not implemented (see below) |
+| Sub-agents (`parent_agent`, `subagent_token`) | ◐ identifiers only, no token flow |
+| Call chaining | ❌ not implemented |
+| `AAuth-Requirement` / `AAuth-Access` / `AAuth-Capabilities` headers | ❌ not parsed or emitted |
+| R3 per-call tool authorization | ❌ our `mcp_tool_grant_proxy` is a local analogue |
+
+Two of our homegrown mechanisms have standard counterparts we deliberately have
+not adopted yet:
+
+- **`agent_grant` ≈ PS-managed permission + audit.** The spec puts per-action
+  permission and audit at a person server the operator chooses. Ours lives in
+  Neotoma as an entity.
+- **`execution_policy` ≈ missions.** A mission is a scoped authorization
+  context with a Markdown intent description, an approver, an `s256` identity
+  hash, and an append-only mission log. That is close to what `execution_policy`
+  does for swarm dispatch.
+
+Converging on the standard would mean giving up control of that policy surface
+to a PS; keeping ours means staying non-standard on the governance half. That
+is an open decision, not an oversight.
 
 ---
 
 ## What AAuth does here
 
-AAuth solves two intertwined problems:
+1. **Attribution — which agent wrote this observation?** Each daemon signs with
+   its own keypair, so Neotoma records `agent_sub` per observation rather than
+   collapsing everything to the operator's bearer token.
 
-1. **Attribution — which agent wrote this observation?** Without AAuth, every Neotoma write comes from the operator-scoped auth, making attribution coarse-grained ("a Claude session did this"). With AAuth, each daemon signs its requests with its own EC keypair, so Neotoma records `agent_sub: anthus@ateles-swarm` (or `cursor@markmhendrickson.com` for IDE sessions) on every observation — provenance down to the agent, not just the operator.
+2. **Authorization — what may this agent touch?** Each verified `(sub, iss)` is
+   matched against an `agent_grant` whose `capabilities` array declares the
+   permitted operations, scoped by operation, entity type, and — via
+   `tool:<server>:<tool>` entries — by MCP tool and parameter.
 
-2. **Authorization — what is this agent allowed to do, and to which entities and tools?** Each verified `(sub, iss)` is matched against an `agent_grant` entity whose `capabilities` map declares which Neotoma operations the agent can perform. Capabilities can be scoped:
-   - by **operation** (`store_structured`, `create_relationship`, `correct`, `retrieve`, …)
-   - by **entity type** (`store_structured: ["agent_action_observation", "participation_record"]` instead of `*`)
-   - by **field, scope, or external resource** (e.g. `github_harness:write` scoped to specific repos for Cicada/Vanellus)
-   - by **MCP tool and parameter** — capability ops of the form `tool:<server>:<tool>` with an optional `param_constraints` map (e.g. `tool:btc-wallet:btc_send_transfer` with `{ "max_amount_sats": 500000 }`). Enforced at runtime by the `mcp_tool_grant_proxy` (see [Tool-level authorization](#tool-level-authorization-issue-26) and [ateles#26](https://github.com/markmhendrickson/ateles/issues/26)).
-
-   The grant is the per-agent policy boundary. Monedula's grant lets it write `transaction` and `payment_profile` but not `agent_definition`; Cicada's lets it write `agent_action_observation` but not `business_strategy`; a future read-only auditor agent could have a grant that allows `retrieve: *` and nothing else. Wrong-capability writes fail at admission, before any side effect — the boundary lives in Neotoma, not in agent code.
-
-So AAuth is both **who** (signed identity) and **what they're allowed to touch** (grant-driven capability scope). The two halves are inseparable: signature verification proves who the agent is; grant admission decides whether that agent is allowed to perform this specific operation on this specific entity type or call this specific tool. Today only Cursor, Cicada, and Vanellus have grants populated, and most grants use `*` rather than explicit per-entity-type allowlists — tightening this is in the to-do list below.
-
-Neotoma's AAuth pipeline:
-1. **Signature verification** — checks the RFC 9421 HTTP Message Signature
-2. **Tier resolution** — ES256 software key → `tier=software`; FIDO2-attested key → `tier=hardware`
-3. **Grant admission** — matches the resolved `(sub, iss)` against an `agent_grant` entity; checks requested operation against `capabilities`; gates `eligible_for_trusted_writes`
+Neotoma's pipeline: signature verification → tier resolution (`software` for a
+plain key, `hardware` for FIDO2-attested) → grant admission.
 
 ---
 
-## Identity topology
+## Wire format
 
-All agent identities share one issuer (`iss = https://markmhendrickson.com`). Each distinct agent role gets its own subject and keypair.
+Label `aasig`, RFC 9421 HTTP Message Signatures:
 
-### Two identity flavors
+```http
+Content-Digest:  sha-256=:<std-b64(sha256(body))>:
+Signature-Key:   aasig=jwt;jwt="<aa-agent+jwt>"
+Signature-Input: aasig=("@method" "@authority" "@path" "content-type"
+                        "content-digest" "signature-key");created=<unix>
+Signature:       aasig=:<std-b64(raw signature)>:
+```
 
-The repo currently maintains **two parallel keypair formats** for two contexts:
+Draft-10 §12.8.3.1 mandates exactly four covered components — `@method`,
+`@authority`, `@path`, `signature-key` — each closing a request-substitution
+attack. We always cover those, and add `content-type` + `content-digest` on
+requests with a body, which the spec permits (servers MAY require extras).
 
-1. **JWK format** (`.creds/aauth_agent_*.private.jwk`) — used by the Cursor IDE MCP proxy. Provisioned by `aauth_provision_identity.py`. Public keys publish to `markmhendrickson.com/.well-known/jwks.json`. ES256 P-256 only.
+**Not yet handled:** a server that demands additional covered components
+replies `invalid_input` with a `required_input` list. We do not parse that
+response, so we would fail rather than retry with the wider component set.
 
-2. **PEM format** (`ateles-private/keys/<daemon>.json`, with `sub`, `key_id`, `algorithm`, and PEM-encoded private/public material) — used by T3 daemons via `lib/daemon_runtime/aauth_signer.py`. **Not yet published to JWKS** — only Neotoma can verify these today (via local key resolution or because the daemon talks to Neotoma over a trusted connection).
+### Agent token claims (§5.2.2)
 
-Unifying these formats and publishing all public keys to the same JWKS is on the to-do list below.
+```json
+{
+  "iss": "https://markmhendrickson.com",
+  "dwk": "aauth-agent.json",
+  "sub": "anthus@ateles-swarm",
+  "jti": "<128-bit base64url>",
+  "cnf": { "jwk": { "kty": "OKP", "crv": "Ed25519", "alg": "Ed25519", "x": "…" } },
+  "iat": 1787068036,
+  "exp": 1787068336,
+  "jkt": "<RFC 7638 thumbprint>"
+}
+```
 
-### Per-agent status (ground truth, May 2026)
+`iss`, `dwk`, `sub`, `jti`, `cnf`, `iat`, `exp` are all REQUIRED. `dwk` is the
+key-discovery pointer — a verifier resolves `{iss}/.well-known/{dwk}` and
+selects the key matching the JWS header `kid`.
 
-| Agent | `sub` | `kid` | Keypair on disk | Published in JWKS | `agent_grant` entity |
-|---|---|---|---|---|---|
-| Cursor IDE | `cursor@markmhendrickson.com` | `sw-cursor-1` | ✅ `.creds/aauth_agent_cursor.private.jwk` | ✅ | ✅ `ent_36b1ccf3...` |
-| Apus | `apus@ateles-swarm` | `apus-edfb838b` | ✅ `ateles-private/keys/apus.json` | ❌ | ❌ |
-| Formica | `formica@ateles-swarm` | `formica-f536eae6` | ✅ `ateles-private/keys/formica.json` | ❌ | ❌ |
-| Cicada | `cicada@ateles-swarm` | `cicada-1534bccd` | ✅ `ateles-private/keys/cicada.json` | ❌ | ✅ `ent_8e3101e9...` (github_harness:write on ateles) |
-| Monedula | `monedula@ateles-swarm` | `monedula-e128133c` | ✅ `ateles-private/keys/monedula.json` | ❌ | ❌ |
-| neotoma-agent | `neotoma-agent@ateles-swarm` | `castor-c50f03d8` | ✅ `ateles-private/keys/neotoma_agent.json` | ❌ | ❌ |
-| Ateles | `ateles@ateles-swarm` | `ateles-854d78fb` | ✅ `ateles-private/keys/ateles.json` | ❌ | ❌ |
-| Vanellus | `vanellus@ateles-swarm` | `vanellus-d919a64c` | ✅ `ateles-private/keys/vanellus.json` | ❌ | ✅ `ent_09762f11...` (github_harness:write on ateles+neotoma) |
-| Anthus | `anthus@ateles-swarm` | — | ❌ | ❌ | ❌ |
-| Tyto, Turdus, Apis | `<name>@ateles-swarm` | — | ❌ | ❌ | ❌ |
-| Menura, Piculet, Strix | `<name>@ateles-swarm` | — | ❌ | ❌ | ❌ |
-| YubiKey hardware tier — Cursor (planned)     | `cursor@markmhendrickson.com`  | `hw-cursor-yk-1`     | not started | not started | covered by existing cursor grant |
-| YubiKey hardware tier — Operator (planned)   | `mark@markmhendrickson.com`    | `hw-operator-yk-1`   | not started | not started | new grant, full capability set |
-| YubiKey hardware tier — Ateles (planned)  | `ateles@ateles-swarm`       | `hw-ateles-yk-1`  | not started | not started | upgrade existing (TBD) |
-| YubiKey hardware tier — Monedula (planned)   | `monedula@ateles-swarm`        | `hw-monedula-yk-1`   | not started | not started | upgrade existing (TBD) |
-| YubiKey hardware tier — Apus (planned)       | `apus@ateles-swarm`            | `hw-apus-yk-1`       | not started | not started | upgrade existing (TBD) |
+`jkt` is **not** part of draft-10; it predates the current draft and Neotoma's
+deployed verifier still reads it, so we keep emitting it (`include_jkt=True`).
+Drop it once Neotoma no longer needs it.
 
-### What "active" means per row
+`cnf.jwk` carries the public key inline, which lets a verifier check the
+signature without a JWKS fetch. We strip key-file bookkeeping (`sub`, etc.) so
+only real JWK members ride along, and always set a fully-specified `alg` —
+§12.8.1 requires a verifier to **reject a key whose `alg` is absent**.
 
-- **Keypair on disk + JWKS publish + agent_grant** → fully active, end-to-end attribution and admission. Only Cursor reaches this today.
-- **Keypair on disk only** → daemon can mint AAuth JWTs locally, but external verifiers can't fetch the public key, and Neotoma will verify but won't admit unless a grant matches. Effectively "signs but unadmitted." This covers Apus, Formica, Monedula, neotoma-agent, Ateles.
-- **Keypair + grant, no JWKS publish** → Cicada and Vanellus can be admitted by Neotoma for github_harness writes, but only over the local network where Neotoma already has the key. Publishing to JWKS would extend trust to any AAuth resource.
-- **No keypair** → daemon falls back to stub mode (logs a warning, sends no AAuth headers, attribution defaults to operator-scoped auth).
+### Algorithms (§12.8.1)
 
-Source for the JWKS file in repo: `execution/website/markmhendrickson/react-app/public/.well-known/`
+Agents and resources **MUST support Ed25519**; ES256 is only a SHOULD. Newly
+minted keys are Ed25519 by default; `--alg ES256` remains available for
+verifiers that do not yet accept Ed25519.
+
+Also enforced: the polymorphic `EdDSA` identifier MUST NOT be used (RFC 9864
+deprecated it in favour of `Ed25519`), and a key whose `kty`/`crv` disagrees
+with its `alg` is rejected at signing time rather than emitted for a verifier
+to reject.
+
+> **Implementation note.** PyJWT 2.13 registers Ed25519 only under the
+> deprecated `EdDSA` name. Since the protected header is part of the JWS
+> signing input, it must already say `Ed25519` when the signature is computed —
+> rewriting it afterwards invalidates the token. Those tokens are therefore
+> assembled and signed directly rather than through `pyjwt.encode`.
+
+---
+
+## Agent identifiers (§5.1)
+
+An identifier is a URI: `aauth:local@domain`, where `domain` is the **agent
+provider's** domain (for us, `markmhendrickson.com`, derived from `iss`). The
+local part allows `a-z 0-9 - _ + .`, must be non-empty, and is capped at 255
+characters. `+` is reserved as the sub-agent delimiter, so a top-level agent's
+local part must not contain one. Comparison is exact and case-sensitive.
+
+Our historical subjects — `anthus@ateles-swarm` — are invalid twice over: no
+`aauth:` scheme, and `ateles-swarm` is not a domain.
+
+**The migration is gated and currently OFF.** Neotoma admits an agent by
+matching the presented `sub` against `agent_grant.match_sub`, and 25 of the 28
+live grants still carry the legacy value. Emitting the new form before those
+grants are migrated would fail admission for every daemon simultaneously.
+
+```bash
+# Off by default; opt in per environment once grants are migrated.
+ATELES_AAUTH_SPEC_IDENTIFIERS=1
+```
+
+Migration order:
+
+1. Add draft-10 `match_sub` values to the 25 legacy grants (dual-match during
+   the transition, if Neotoma's verifier supports it).
+2. Set `ATELES_AAUTH_SPEC_IDENTIFIERS=1` and confirm admission still succeeds.
+3. Retire the legacy `match_sub` values.
+
+### Sub-agents (§10.2)
+
+`aauth:parent+discriminator@domain`, single level only — a sub-agent cannot
+have its own sub-agents. `lib/daemon_runtime/aauth_identifier.py` builds and
+validates these, but the *authorization* flow (a parent obtaining tokens via
+`subagent_token`) is not implemented; this maps onto our T3→T4 dispatch
+(Anthus invoking Cicada) if we adopt it.
+
+Per the spec, the local part is for operational readability only — parties MUST
+NOT parse it for protocol decisions. The `parent_agent` claim is authoritative,
+and we do not emit it yet.
 
 ---
 
 ## Files and their roles
 
-### Signing logic
-
 | File | Role |
 |---|---|
-| `execution/scripts/aauth_signer.py` | Full RFC 9421 signer. Produces `Signature-Key`, `Signature-Input`, `Signature`, `Content-Digest` headers. Used by the Cursor MCP proxy. |
-| `lib/daemon_runtime/aauth_signer.py` | Simplified signer for T3 daemons. Produces `X-AAuth-Token` (JWT-only, not full httpsig). Falls back gracefully to stub mode when keypair is absent. |
+| `lib/daemon_runtime/aauth_httpsig.py` | RFC 9421 signer: builds the signature base, mints the `aa-agent+jwt`, handles Ed25519 + ES256. |
+| `lib/daemon_runtime/aauth_signer.py` | `AAuthSigner` — loads `ateles-private/keys/<name>.jwk.json` (or legacy PEM) and returns headers; falls back to a logged stub when no key exists. |
+| `lib/daemon_runtime/aauth_identifier.py` | Builds, validates, and normalizes agent identifiers; owns the migration flag. |
+| `lib/daemon_runtime/grant_checker.py` | Loads `agent_grant` from Neotoma; checks operations, entity types, and tool/param constraints. |
+| `execution/scripts/mint_daemon_keypair.py` | Mints a keypair (Ed25519 default, `--alg ES256` available) into `ateles-private/keys/`, mode 0600. |
+| `execution/scripts/verify_aauth_signer.py` | Signer smoke test. |
+| `execution/mcp/mcp_tool_grant_proxy/proxy.py` | stdio MCP interceptor gating `tools/call` against the grant. |
+| `docs/aauth/keys.md` | Key layout and rotation. |
 
-These are two distinct implementations for two distinct contexts:
-- `execution/scripts/aauth_signer.py` — implements the **full AAuth wire format** (`@hellocoop/httpsig` compatible): signs `@method @authority @path content-type content-digest signature-key`. This is what Neotoma's verifier expects from an external MCP client. Consumes JWK-format keys.
-- `lib/daemon_runtime/aauth_signer.py` — implements a **lighter JWT-only path** for daemons. Consumes PEM-format keys from `ateles-private/keys/<daemon>.json`. Today the daemons that have keypairs (Apus, Formica, Monedula, Cicada, neotoma-agent, Ateles, Vanellus) sign locally; daemons without keypairs (Anthus, Tyto, Turdus, Apis) fall back to stub mode.
+Published endpoints (served from the website repo, not this one):
 
-### Identity provisioning
-
-| File | Role |
-|---|---|
-| `execution/scripts/aauth_provision_identity.py` | Generates an ES256 P-256 keypair, writes the private JWK to `.creds/`, updates `jwks.json` and `aauth-agent.json` additively. Run once per new agent subject. |
-
-Usage:
-```bash
-# Provision a new agent identity (or rotate with --force)
-.venv/bin/python execution/scripts/aauth_provision_identity.py \
-    --sub cursor@markmhendrickson.com \
-    --kid sw-cursor-1 \
-    --force
-```
-
-### Proxy layer (Cursor IDE → Neotoma)
-
-| File | Role |
-|---|---|
-| `execution/scripts/mcp_identity_proxy.py` | `stdio` MCP proxy between Cursor and Neotoma. With `--aauth` / `MCP_PROXY_AAUTH=1`, calls `aauth_signer.py` to add signature headers to every forwarded request. |
-| `execution/scripts/run_neotoma_identity_proxy.sh` | Launcher that prefers the local venv, dependency-checks AAuth libs, and passes `--aauth`. |
-| `execution/scripts/mcp_authenticated_proxy.py` | Alternate proxy variant with OAuth support. |
-| `execution/scripts/verify_neotoma_identity_proxy.py` | Smoke-tests the proxy end-to-end: checks that `GET /session` returns `signature_verified: true` and `admitted: true`. |
-
-Cursor picks up the proxy via `.cursor/mcp.json` → `neotoma-proxy` server entry, which sets:
-```
-MCP_PROXY_AAUTH=1
-NEOTOMA_AAUTH_SUB=cursor@markmhendrickson.com
-NEOTOMA_AAUTH_ISS=https://markmhendrickson.com
-NEOTOMA_AAUTH_KID=sw-cursor-1
-NEOTOMA_AAUTH_AUTHORITY_OVERRIDE=neotoma.markmhendrickson.com
-```
-
-### Daemon runtime
-
-| File | Role |
-|---|---|
-| `lib/daemon_runtime/aauth_signer.py` | `AAuthSigner` class. `from_key_file(agent_name)` loads the keypair from `ateles-private/keys/<name>.json`. `headers(method, path)` returns `{"X-AAuth-Token": "<jwt>"}` or `{}` (stub). |
-| `lib/daemon_runtime/agent_loader.py` | `AgentLoader` loads `agent_definition` from Neotoma, including `aauth_sub` and `agent_grant` fields. `AgentDefinition.aauth_sub` feeds the daemon's identity string. |
-| `lib/daemon_runtime/__init__.py` | Re-exports `AAuthSigner`, `AgentLoader`, `SSEClient` as the daemon startup API. |
-
-### Agent definitions (Neotoma)
-
-Each `agent_definition` entity in Neotoma carries:
-- `aauth_sub` — the agent's subject claim (e.g. `anthus@ateles-swarm`)
-- `agent_grant` — capability tier: `operator` | `service` | `public_read`
-
-Daemons load these at startup via `AgentLoader` and use `aauth_sub` as the identity in signed requests.
+- `https://markmhendrickson.com/.well-known/aauth-agent.json` — agent metadata
+- `https://markmhendrickson.com/.well-known/jwks.json` — public keys
 
 ---
 
-## Daemons using AAuth
+## Per-agent status
 
-All T3 daemons follow the same startup pattern from `lib/daemon_runtime`:
+26 agents have a keypair in `ateles-private/keys/`: anthus, apis, apus, aquila,
+buteo, cicada, corvus, cotinga, cyphorhinus, formica, fringilla, gorilla,
+gryllus, lanius, monedula, neotoma-agent, onychomys, pavo, phoenicurus, picus,
+sturnus, sylvia, turdus, tyto, vanellus, waxwing. Several also have a legacy
+PEM-format file alongside the canonical `.jwk.json`.
 
-```python
-from lib.daemon_runtime import AgentLoader, AAuthSigner
+**All existing keys are ES256, and only two (apus, buteo) carry an `alg`
+member.** Our signer backfills `alg` into `cnf.jwk` at signing time, so emitted
+tokens are conformant; but the key *files* are pre-draft-10, and anything that
+publishes them to a JWKS must add `alg` — §12.8.1 makes a JWKS key without
+`alg` unusable.
 
-agent_def = AgentLoader(DAEMON_NAME).load()
-# → agent_def.aauth_sub = "anthus@ateles-swarm"
-# → agent_def.agent_grant = "service"
+| Surface | Keypair | Published in JWKS | `agent_grant` |
+|---|---|---|---|
+| Cursor IDE (`cursor@markmhendrickson.com`) | ✅ | ✅ `sw-cursor-1` | ✅ `ent_36b1ccf3…` |
+| 26 swarm daemons/agents | ✅ | ❌ | ◐ 25 grants, legacy `match_sub` |
+| air.local laptop | ✅ | ❌ | ✅ `ent_9e3edbfd…` (thumbprint-pinned) |
 
-signer = AAuthSigner.from_key_file(DAEMON_NAME)
-# → loads ateles-private/keys/anthus.json if present
-# → returns stub signer if not (with logged warning)
-```
+Grants and keypairs do not line up one-to-one: some agents have a key but no
+grant, and one grant (`apus@ateles-swarm` against `https://neotoma.cursor.local`)
+is revoked. Reconciling the two lists is part of the migration below.
 
-Current daemon status (May 2026 — see the full topology table above for ground truth):
-
-| Daemon | `aauth_sub` | Keypair minted | JWKS published | Grant entity |
-|---|---|---|---|---|
-| Apus (mirror/webhook) | `apus@ateles-swarm` | ✅ | ❌ | ❌ |
-| Formica (issue triage) | `formica@ateles-swarm` | ✅ | ❌ | ❌ |
-| Monedula (payments) | `monedula@ateles-swarm` | ✅ | ❌ | ❌ |
-| neotoma-agent | `neotoma-agent@ateles-swarm` | ✅ | ❌ | ❌ |
-| Ateles (T2 operator) | `ateles@ateles-swarm` | ✅ | ❌ | ❌ |
-| Cicada (T4 code worker) | `cicada@ateles-swarm` | ✅ | ❌ | ✅ (github_harness:write on ateles) |
-| Vanellus (T4 PR steward) | `vanellus@ateles-swarm` | ✅ | ❌ | ✅ (github_harness:write on ateles + neotoma) |
-| Anthus (orchestrator) | `anthus@ateles-swarm` | ❌ stub | ❌ | ❌ |
-| Tyto, Turdus, Apis | `<name>@ateles-swarm` | ❌ stub | ❌ | ❌ |
-
-"Stub" means the daemon runs without per-agent signing — Neotoma attributes its observations to the operator-scoped auth instead. "No JWKS publish" means external resources can't verify the signature without out-of-band key distribution; Neotoma in-network can verify because it has access to the same `ateles-private/keys/` directory or has the key cached.
-
-Only the Cursor IDE proxy is **fully end-to-end active** (keypair + JWKS publish + grant):
-
-```
-GET /session → {
-  "aauth": {
-    "verified": true,
-    "admitted": true,
-    "grant_id": "ent_36b1ccf3efe5905bd75aca3c"
-  },
-  "attribution": {
-    "tier": "software",
-    "agent_sub": "cursor@markmhendrickson.com",
-    "agent_iss": "https://markmhendrickson.com"
-  },
-  "eligible_for_trusted_writes": true
-}
-```
-
----
-
-## Wire format (RFC 9421 + AAuth)
-
-When fully active, each outbound request from the Cursor proxy carries four headers:
-
-```http
-Content-Digest:  sha-256=:<base64(sha256(body))>:
-Signature-Key:   aasig=jwt;jwt="<aa-agent+jwt>"
-Signature-Input: aasig=("@method" "@authority" "@path" "content-type"
-                         "content-digest" "signature-key");created=<unix>;
-                         keyid="<jkt>";alg="ecdsa-p256-sha256"
-Signature:       aasig=:<base64(ecdsa-sig)>:
-```
-
-The `aa-agent+jwt` inside `Signature-Key` carries:
-```json
-{
-  "iss": "https://markmhendrickson.com",
-  "sub": "cursor@markmhendrickson.com",
-  "iat": 1714214400,
-  "exp": 1714214700,
-  "jkt": "<RFC7638-thumbprint>",
-  "cnf": { "jwk": { /* public key inline */ } }
-}
-```
-
-The `cnf.jwk` lets Neotoma verify the signature inline without a JWKS fetch, which matters during local development before the website is deployed.
-
----
-
-## Neotoma grant entity
-
-One `agent_grant` entity gates admission:
-
-```
-entity_id:   ent_36b1ccf3efe5905bd75aca3c
-match_sub:   cursor@markmhendrickson.com
-match_iss:   https://markmhendrickson.com
-capabilities:
-  store_structured:   *
-  create_relationship: *
-  correct:            *
-  retrieve:           *
-```
-
-No thumbprint pin — any valid ES256 key under the same `(sub, iss)` is admitted. This allows software and hardware keys to rotate without updating the grant.
-
----
-
-## Tool-level authorization (issue #26)
-
-Entity-level grants gate Neotoma operations. **Tool-level grants** extend the
-same `agent_grant` entity to gate arbitrary MCP tool calls — across any MCP
-server, not just Neotoma. This is what physically stops a Monedula invocation
-from calling `github_harness` tools even if that server is connected at dispatch.
-
-### Grant shape
-
-Tool capabilities are ordinary entries in the grant's `capabilities` array, with
-an `op` of the form `tool:<server>:<tool>` and an optional `param_constraints`
-map:
-
-```jsonc
-{
-  "match_sub": "monedula@ateles-swarm",
-  "match_iss": "https://markmhendrickson.com",
-  "status": "active",
-  "capabilities": [
-    { "op": "store_structured", "entity_types": ["transaction", "payment_profile"] },
-    { "op": "retrieve", "entity_types": ["*"] },
-
-    { "op": "tool:parquet:read_parquet",
-      "param_constraints": { "tables": ["transactions", "accounts"] } },
-    { "op": "tool:btc-wallet:btc_send_transfer",
-      "param_constraints": { "max_amount_sats": 500000, "to_allowlist": true } },
-    { "op": "tool:btc-wallet:btc_wallet_get_balance" }
-    // github_harness: explicitly absent → Monedula cannot touch GitHub
-  ]
-}
-```
-
-Rules:
-- **Absent = denied.** A tool with no matching `tool:<server>:<tool>` entry is blocked.
-- **`{}` (no `param_constraints`) = allowed, unconstrained.**
-- **Wildcards:** `tool:<server>:*` grants every tool on a server; `tool:*` grants all MCP tools.
-
-Supported `param_constraints` keys (extensible; unknown keys are ignored for
-forward-compatibility): `tables`, `max_amount_sats`, `to_allowlist`,
-`max_<field>`, `allowed_<field>`.
-
-### Enforcement: `mcp_tool_grant_proxy`
-
-`execution/mcp/mcp_tool_grant_proxy/proxy.py` is a generic stdio interceptor that
-sits between `claude --print` and a downstream MCP server. It forwards all MCP
-JSON-RPC traffic except `tools/call`, which it gates:
-
-1. Reads `ATELES_AGENT_SUB` (and optional `ATELES_AGENT_GRANT_ID`) from env.
-2. Loads the `agent_grant` via `lib/daemon_runtime.GrantChecker`.
-3. `check_tool(server, tool)` + `check_param_constraints(constraints, args)`.
-4. **Allowed** → forwards to downstream; **Denied** → returns an MCP `isError`
-   result *without forwarding*, so the side-effecting tool is never reached.
-5. Emits a `tool_call_observation` to Neotoma (`result: allowed | denied`) for a
-   unified cross-MCP audit trail.
-
-Launch (in `.mcp.json` or Anthus dispatch config):
-
-```jsonc
-{
-  "command": "python",
-  "args": [
-    "execution/mcp/mcp_tool_grant_proxy/proxy.py",
-    "--server-name", "parquet",
-    "--", "python", "path/to/parquet_mcp/server.py"
-  ]
-}
-```
-
-**Permissive fallback:** if Neotoma is unreachable, or the agent has *no* grant
-declaring *any* tool capability, calls pass through (advisory mode). This lets
-un-migrated agents keep working while migrated agents get hard enforcement —
-the boundary tightens per-agent as `tool:` capabilities are added to each grant.
-
-For owned MCP servers (`github_harness`, `mcpsrv_neotoma`, `parquet`),
-per-server enforcement (option A) can be layered in for defence-in-depth;
-`github_harness` already does this for its `op`-based repo scoping.
+Only the Cursor IDE identity is end-to-end published. The JWKS currently serves
+one key, so external verifiers cannot check daemon signatures; Neotoma can
+because it resolves keys in-network.
 
 ---
 
 ## What to do next
 
-### 1. Mint missing daemon keypairs
+1. **Publish daemon public keys to JWKS.** Convert each public key to JWK form
+   **with `alg`**, merge into the website's `jwks.json`, and extend
+   `subjects_supported` in `aauth-agent.json`.
 
-Anthus, Tyto, Turdus, Apis, Menura, Piculet, and Strix currently have no keypair on disk. To mint:
+2. **Migrate identifiers.** Follow the three-step order above. This is the
+   prerequisite for turning on `ATELES_AAUTH_SPEC_IDENTIFIERS`.
 
-```bash
-.venv/bin/python execution/scripts/aauth_provision_identity.py \
-    --sub anthus@ateles-swarm --kid sw-anthus-1
-```
+3. **Re-mint on Ed25519.** New keys default to it; the 24 existing ES256 keys
+   still satisfy the SHOULD, so this is rotation-at-leisure rather than urgent.
+   Ed25519 is the MUST that makes us interoperable with resources that only
+   implement the required algorithm.
 
-Note: this script writes a JWK-format key to `.creds/`. The daemon runtime currently expects a PEM-format key at `ateles-private/keys/<daemon>.json`. Either:
-- Add a converter step to translate JWK → PEM for `ateles-private/keys/`, OR
-- Update `lib/daemon_runtime/aauth_signer.py` to also load JWK format (eliminating the format split)
+4. **Handle `required_input`.** Parse the `invalid_input` error and retry with
+   the server's requested covered components instead of failing.
 
-### 2. Create `agent_grant` entities for remaining subs
+5. **Decide on the person-server model.** Dick Hardt is rolling out a live PS at
+   `person.hello.coop`, which makes evaluating missions and PS-asserted access
+   concrete rather than theoretical. The decision is whether to converge
+   `agent_grant`/`execution_policy` onto the standard governance layer or keep
+   ours and document the divergence.
 
-Today only Cursor, Cicada, and Vanellus have grants. Apus, Formica, Monedula, neotoma-agent, and Ateles sign locally but are not admitted — Neotoma falls back to operator-level attribution. Create one grant per sub, scoped to the operations that daemon needs:
+6. **Tighten grants.** Several still use `*` for `store_structured`/`correct`.
+   Per-entity-type allowlists turn admission into real containment.
 
-```bash
-neotoma store agent_grant \
-  --match_sub apus@ateles-swarm \
-  --match_iss https://markmhendrickson.com \
-  --capabilities '{"store_structured": "*", "create_relationship": "*"}'
-```
-
-### 3. Publish daemon public keys to the JWKS endpoint
-
-Today `https://markmhendrickson.com/.well-known/jwks.json` serves `sw-cursor-1` only. To extend trust to external verifiers, each daemon's public PEM needs to be converted to JWK form and merged into `execution/website/markmhendrickson/react-app/public/.well-known/jwks.json`, then the website redeployed. Subjects also need to be added to `aauth-agent.json` `subjects_supported`.
-
-### 4. Reconcile the two keypair formats
-
-The split between `.creds/*.jwk` and `ateles-private/keys/*.json` is incidental — both encode the same EC P-256 keypair in different envelopes. Picking one (likely JWK, since that's what the JWKS endpoint serves natively) and updating both signers to consume it would simplify the system and remove the conversion step in (3).
-
-### 5. Tighten grants to per-entity-type capabilities (and per-tool — see [ateles#26](https://github.com/markmhendrickson/ateles/issues/26))
-
-Today all populated grants use `*` for `store_structured` and `correct` capabilities — meaning any verified agent can write any entity type. The grant schema already supports finer-grained allowlists:
-
-```jsonc
-{
-  "match_sub": "monedula@ateles-swarm",
-  "match_iss": "https://markmhendrickson.com",
-  "capabilities": {
-    "store_structured":   ["transaction", "payment_profile", "daemon_report"],
-    "correct":            ["payment_profile"],
-    "retrieve":           ["transaction", "recurring_expense", "account_balance", "contact"],
-    "create_relationship": ["transaction->contact", "payment_profile->contact"]
-  }
-}
-```
-
-Per-agent allowlists turn the AAuth admission gate into a real policy layer: Monedula physically cannot write an `agent_definition` even if its prompt is hijacked. This is where AAuth shifts from "attribution-only" to "attribution + capability containment."
-
-Mapping work needed:
-- Per agent, list the entity types it legitimately reads (from `context_entity_types` on `agent_definition`)
-- Per agent, list the entity types it legitimately writes (from `operational_entity_types`)
-- Convert `*` grants to allowlists derived from those declarations
-- Add Neotoma-side enforcement test cases that confirm out-of-allowlist writes fail with structured `wrong_capability` errors
-
-The same grant entity will also carry a `tools` capability map covering MCP tool calls once [ateles#26](https://github.com/markmhendrickson/ateles/issues/26) lands — same allowlist principle, extended to `"parquet:read_parquet": { "tables": [...] }` style entries.
-
-### 6. YubiKey hardware tier (Phase 6) — multiple agents
-
-Hardware-attested keys produce `tier=hardware` in Neotoma rather than `tier=software`. Any agent that touches money, mutates global state, or speaks on the operator's behalf in public is a candidate. Same `(sub, iss)` as the software keypair, second `kid`, `cnf.attestation` from a WebAuthn ceremony, no grant update needed (existing grants admit any key under the matched `(sub, iss)` tuple).
-
-Planned hardware-tier agents in priority order:
-
-| Agent     | Why hardware                                                                                       | Suggested kid          |
-| --------- | -------------------------------------------------------------------------------------------------- | ---------------------- |
-| Cursor IDE | Operator's direct authoring surface — corrections, deletions, grants, schema changes               | `hw-cursor-yk-1`       |
-| Operator   | New subject `mark@markmhendrickson.com` — first-party operator writes outside the IDE              | `hw-operator-yk-1`     |
-| Monedula   | Touches money (Wise transfers, BTC sends) — hardware attestation raises bar for compromise         | `hw-monedula-yk-1`     |
-| Ateles  | Speaks for the operator on Telegram and routes pages — public-facing identity surface              | `hw-ateles-yk-1`    |
-| Apus       | Mirror pipeline that rewrites disk artifacts from Neotoma — chokepoint for behaviour propagation   | `hw-apus-yk-1`         |
-
-For T4 invocable agents (Cicada, Vanellus, Pavo, Corvus, etc.), hardware tier is less urgent — they're scoped by `agent_grant` to specific repos/operations, and they don't run as resident services that could be compromised long-term. Software tier remains appropriate for them.
-
-Hardware-tier rollout per agent:
-1. Mint a second keypair on a YubiKey via WebAuthn ceremony for the same `(sub, iss)`
-2. Publish the FIDO2 attestation alongside the public key in JWKS
-3. Verify Neotoma admits with `tier=hardware`
-4. Optionally: add `tier_required: hardware` to high-trust capabilities in `agent_grant` (e.g. Monedula's `store_structured: ["transaction"]` could require hardware while `retrieve: *` accepts software)
-
----
-
-## Key files quick-reference
-
-```
-ateles/
-├── .creds/                                ← gitignored
-│   └── aauth_agent_cursor.private.jwk     ← JWK format, mode 600 (Cursor IDE only)
-├── execution/
-│   ├── scripts/
-│   │   ├── aauth_provision_identity.py    ← generate JWK keypair + publish to JWKS
-│   │   ├── aauth_signer.py                ← full RFC 9421 signer (Cursor proxy)
-│   │   ├── mcp_identity_proxy.py          ← Cursor → Neotoma proxy with AAuth
-│   │   └── verify_neotoma_identity_proxy.py ← end-to-end smoke test
-│   └── website/markmhendrickson/react-app/public/.well-known/
-│       ├── aauth-agent.json               ← agent metadata endpoint
-│       └── jwks.json                      ← public keys endpoint (sw-cursor-1 only today)
-├── lib/
-│   └── daemon_runtime/
-│       ├── aauth_signer.py                ← daemon signer (PEM keys, stub-capable)
-│       ├── agent_loader.py                ← loads agent_definition incl. aauth_sub
-│       └── __init__.py                    ← re-exports AAuthSigner
-└── execution/daemons/
-    ├── anthus/anthus.py                   ← uses AAuthSigner.from_key_file("anthus") — stub today
-    ├── formica/formica.py                 ← uses AAuthSigner.from_key_file("formica") — keypair present
-    ├── apus/apus.py                       ← uses AAuthSigner.from_key_file("apus") — keypair present
-    └── ...                                ← same pattern in all T3 daemons
-
-ateles-private/           ← private repo, checked out alongside ateles
-└── keys/                                  ← PEM format, 7 keypairs present
-    └── <daemon>.json                      ← per-daemon private JWK (not yet minted)
-```
+7. **Hardware tier.** Unchanged from before: FIDO2-attested keys yield
+   `tier=hardware`. Priority order is Cursor, operator, Monedula (money),
+   Ateles (speaks publicly), Apus (rewrites disk artifacts).
 
 ---
 
 ## Related
 
-- [`docs/architecture.md`](architecture.md) — system layers and Neotoma integration overview
-- [`execution/reports/aauth/brief_for_dick_hardt_2026-04-27.md`](../execution/reports/aauth/brief_for_dick_hardt_2026-04-27.md) — implementation notes from the Cursor cutover
-- [`execution/reports/aauth/phase4_cutover_2026-04-27.md`](../execution/reports/aauth/phase4_cutover_2026-04-27.md) — validation evidence with live Neotoma response
-- AAuth spec: [aauth.fyi](https://aauth.fyi)
+- Spec: [aauth.dev](https://www.aauth.dev/) ·
+  [draft-10](https://www.ietf.org/archive/id/draft-hardt-oauth-aauth-protocol-10.html) ·
+  [datatracker](https://datatracker.ietf.org/doc/draft-hardt-oauth-aauth-protocol/)
+- Companion drafts, not yet evaluated: AAuth Bootstrapping (enrollment, key
+  refresh), AAuth R3 (per-call tool authorization), AAuth Events.
+- [`docs/aauth/keys.md`](aauth/keys.md) — key layout and rotation
+- [`docs/architecture.md`](architecture.md) — system layers
