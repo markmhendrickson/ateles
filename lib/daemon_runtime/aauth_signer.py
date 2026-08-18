@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .aauth_identifier import normalize as _normalize_sub
+from .aauth_identifier import normalize_for_wire as _normalize_sub
 
 log = logging.getLogger(__name__)
 

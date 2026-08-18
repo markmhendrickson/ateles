@@ -48,6 +48,27 @@ def agent_domain() -> str:
     return os.environ.get("ATELES_AAUTH_AGENT_DOMAIN", DEFAULT_AGENT_DOMAIN).lower()
 
 
+def spec_identifiers_enabled() -> bool:
+    """Whether outbound subjects use the draft-10 ``aauth:`` form.
+
+    Off by default, deliberately. Neotoma admits an agent by matching the
+    presented ``sub`` against ``agent_grant.match_sub``, and ~25 live grants
+    still carry the legacy ``<name>@ateles-swarm`` value. Flipping the wire
+    format before those grants are migrated would fail admission for every
+    daemon at once, so the new form is opt-in per environment:
+
+        ATELES_AAUTH_SPEC_IDENTIFIERS=1
+
+    Migration order is: add draft-10 ``match_sub`` values to the grants (or
+    dual-match), enable this flag, then retire the legacy values.
+    """
+    return os.environ.get("ATELES_AAUTH_SPEC_IDENTIFIERS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
 def build(local: str, domain: str | None = None) -> str:
     """Build ``aauth:<local>@<domain>``, validating both parts."""
     return validate(f"{_SCHEME}{local.lower()}@{(domain or agent_domain()).lower()}")
@@ -65,7 +86,21 @@ def normalize(sub: str, domain: str | None = None) -> str:
     legacy shapes: ``<name>@ateles-swarm`` and a bare ``<name>@<domain>`` that
     is missing only the scheme.
     """
+    return _to_spec_form(sub.strip(), domain)
+
+
+def normalize_for_wire(sub: str, domain: str | None = None) -> str:
+    """The subject to present on the wire, honouring the migration flag.
+
+    Returns the draft-10 form only when :func:`spec_identifiers_enabled`;
+    otherwise returns ``sub`` untouched so it still matches the legacy
+    ``agent_grant.match_sub`` values Neotoma admits against today.
+    """
     sub = sub.strip()
+    return _to_spec_form(sub, domain) if spec_identifiers_enabled() else sub
+
+
+def _to_spec_form(sub: str, domain: str | None = None) -> str:
     if sub.startswith(_SCHEME):
         return validate(sub)
     if is_legacy(sub):
@@ -141,5 +176,6 @@ def subagent(parent: str, discriminator: str) -> str:
 build_agent_identifier = build
 is_legacy_agent_identifier = is_legacy
 normalize_agent_identifier = normalize
+normalize_agent_identifier_for_wire = normalize_for_wire
 subagent_identifier = subagent
 validate_agent_identifier = validate

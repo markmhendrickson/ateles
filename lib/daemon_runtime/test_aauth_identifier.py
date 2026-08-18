@@ -78,3 +78,34 @@ def test_subagent_nesting_is_rejected() -> None:
     child = subagent("aauth:planner@vendor.example", "search1")
     with pytest.raises(InvalidAgentIdentifier, match="nesting"):
         subagent(child, "deeper")
+
+
+# ── migration gating ─────────────────────────────────────────────────────────
+
+
+def test_wire_form_defaults_to_legacy_subject(monkeypatch) -> None:
+    """Default must not change the wire: live agent_grants still match_sub
+    on the legacy value, so flipping early would fail admission everywhere."""
+    from daemon_runtime.aauth_identifier import normalize_for_wire
+
+    monkeypatch.delenv("ATELES_AAUTH_SPEC_IDENTIFIERS", raising=False)
+    assert normalize_for_wire("anthus@ateles-swarm") == "anthus@ateles-swarm"
+
+
+def test_wire_form_uses_spec_identifier_when_enabled(monkeypatch) -> None:
+    from daemon_runtime.aauth_identifier import normalize_for_wire
+
+    monkeypatch.setenv("ATELES_AAUTH_SPEC_IDENTIFIERS", "1")
+    monkeypatch.setenv("ATELES_AAUTH_AGENT_DOMAIN", "markmhendrickson.com")
+    assert (
+        normalize_for_wire("anthus@ateles-swarm")
+        == "aauth:anthus@markmhendrickson.com"
+    )
+
+
+def test_agent_domain_is_env_overridable(monkeypatch) -> None:
+    """A fork supplies its own provider domain without editing code."""
+    from daemon_runtime.aauth_identifier import build
+
+    monkeypatch.setenv("ATELES_AAUTH_AGENT_DOMAIN", "agent.example")
+    assert build("planner") == "aauth:planner@agent.example"

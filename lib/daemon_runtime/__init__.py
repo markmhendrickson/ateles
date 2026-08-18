@@ -54,6 +54,7 @@ from .aauth_identifier import (
     build_agent_identifier,
     is_legacy_agent_identifier,
     normalize_agent_identifier,
+    normalize_agent_identifier_for_wire,
     subagent_identifier,
     validate_agent_identifier,
 )
@@ -133,6 +134,7 @@ __all__ = [
     "build_agent_identifier",
     "is_legacy_agent_identifier",
     "normalize_agent_identifier",
+    "normalize_agent_identifier_for_wire",
     "subagent_identifier",
     "validate_agent_identifier",
     "GrantChecker",
