@@ -2283,6 +2283,13 @@ def test_confirm_gates_clear_on_pr_comment_retriggers_pr_pipeline(monkeypatch):
 
     # Lanius must be called at minimum (for gate waive + PR pipeline).
     assert store.waive_calls, "the dispatcher-side gate waive must have run"
+    # The waive must target the PARENT ISSUE (#50 from "Closes #50."), not the
+    # PR number itself — comment_on_pr means trigger.number is the PR, and the
+    # gate_status this waive mutates lives on the issue entity.
+    assert store.waive_calls[0][1] == 50, (
+        f"gate waive on a PR comment must target the parent issue number "
+        f"(50), not the PR/trigger number; got {store.waive_calls}"
+    )
 
 
 def test_confirm_gates_clear_is_case_insensitive_for_operator_login(monkeypatch):
@@ -2307,6 +2314,124 @@ def test_confirm_gates_clear_is_case_insensitive_for_operator_login(monkeypatch)
         )
     )
     assert store.waive_calls, "the dispatcher-side gate waive must have run"
+
+
+# ── _post_gate_waive_comment — direct httpx-mocked coverage ────────────────
+#
+# Phoenicurus QA (PR #299, round 1): the outcome→comment path was only ever
+# exercised through `_capture_waive_comments`, which bypasses the real
+# `_post_gate_waive_comment` HTTP calls entirely (list/GET, POST, PATCH,
+# no-token skip). These tests drive the real method against a mocked
+# httpx.AsyncClient so the GET-list/dedup, POST, PATCH, and no-token branches
+# are actually exercised.
+
+
+class _WaiveCommentHttpxClient:
+    """httpx.AsyncClient stub for _post_gate_waive_comment: GET list + POST/PATCH."""
+
+    def __init__(self, *, existing_comments=None):
+        self.existing_comments = existing_comments or []
+        self.post_calls: list[dict] = []
+        self.patch_calls: list[dict] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        pass
+
+    async def get(self, url, **kwargs):
+        return _FakeListResp(self.existing_comments)
+
+    async def post(self, url, **kwargs):
+        self.post_calls.append({"url": url, "json": kwargs.get("json", {})})
+        return _FakeResp(201)
+
+    async def patch(self, url, **kwargs):
+        self.patch_calls.append({"url": url, "json": kwargs.get("json", {})})
+        return _FakeResp(200)
+
+
+class _FakeListResp:
+    def __init__(self, comments):
+        self._comments = comments
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._comments
+
+
+def test_post_gate_waive_comment_posts_new_when_none_exists(monkeypatch):
+    """No prior gate-waive comment on the issue → POST a new one."""
+    from gate_waive import WaiveOutcome
+
+    http_client = _WaiveCommentHttpxClient(existing_comments=[])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: http_client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    outcome = WaiveOutcome(entity_found=True, targeted=["pm"], waived=["pm"], verified=True)
+
+    asyncio.run(
+        dispatcher._post_gate_waive_comment(_comment_trigger(), outcome)
+    )
+
+    assert not http_client.patch_calls, "no existing comment — must not PATCH"
+    assert len(http_client.post_calls) == 1, (
+        f"expected exactly one POST; got {http_client.post_calls}"
+    )
+    posted_body = http_client.post_calls[0]["json"]["body"]
+    assert "<!-- swarm-gate-waive-result -->" in posted_body
+    assert "pm" in posted_body
+
+
+def test_post_gate_waive_comment_edits_existing_comment(monkeypatch):
+    """A prior gate-waive comment on the issue → PATCH it in place (edit-not-duplicate)."""
+    from gate_waive import WaiveOutcome
+
+    http_client = _WaiveCommentHttpxClient(
+        existing_comments=[
+            {"id": 999, "body": "<!-- swarm-gate-waive-result -->\nold body"},
+        ]
+    )
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: http_client)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    outcome = WaiveOutcome(entity_found=True, targeted=["ux"], waived=["ux"], verified=True)
+
+    asyncio.run(
+        dispatcher._post_gate_waive_comment(_comment_trigger(), outcome)
+    )
+
+    assert not http_client.post_calls, "existing comment found — must not POST a duplicate"
+    assert len(http_client.patch_calls) == 1, (
+        f"expected exactly one PATCH; got {http_client.patch_calls}"
+    )
+    assert "999" in http_client.patch_calls[0]["url"]
+    assert "ux" in http_client.patch_calls[0]["json"]["body"]
+
+
+def test_post_gate_waive_comment_skips_without_token(monkeypatch):
+    """No GitHub token configured for the repo → comment is skipped, not attempted."""
+    from gate_waive import WaiveOutcome
+
+    http_client = _WaiveCommentHttpxClient(existing_comments=[])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: http_client)
+    monkeypatch.delenv("ATELES_AGENT_PAT", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    outcome = WaiveOutcome(entity_found=True, targeted=["arch"], waived=["arch"], verified=True)
+
+    asyncio.run(
+        dispatcher._post_gate_waive_comment(_comment_trigger(), outcome)
+    )
+
+    assert not http_client.post_calls
+    assert not http_client.patch_calls
 
 
 # ── Part B — Pavo pm self-sign-off prompt ──────────────────────────────────
