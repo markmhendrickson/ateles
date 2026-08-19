@@ -1092,6 +1092,13 @@ class SwarmDispatcher:
         # queue).  Created lazily so tests that construct a dispatcher without a
         # running loop still work; see ``_issue_pipeline_semaphore``.
         self._issue_semaphore: asyncio.Semaphore | None = None
+        # Re-dispatch bookkeeping for the stalled-review sweep, keyed by
+        # "owner/repo#N". In-memory on purpose: a daemon restart re-runs the
+        # startup resume sweep anyway, and losing the counter costs at most a
+        # few extra re-dispatches — strictly better than persisting a counter
+        # that could permanently suppress a PR the swarm should retry.
+        self._stall_retries: dict[str, int] = {}
+        self._stall_escalated: dict[str, bool] = {}
 
     async def handle_trigger(self, trigger: SwarmTrigger) -> None:
         """Entry point handed to the webhook gateway. Never raises."""
@@ -1526,6 +1533,203 @@ class SwarmDispatcher:
         if summary["scanned"]:
             log.info(f"[{DAEMON_NAME}] deferred-review sweep: {summary}")
         return summary
+
+    async def resume_stalled_reviews(self, repositories: list[str]) -> dict:
+        """Re-dispatch open PRs whose review died without leaving any marker.
+
+        The deferred sweep above only rescues PRs that got far enough to post a
+        ``review-deferred-until:`` marker. A review that dies EARLIER leaves
+        nothing behind — no marker, no formal review, no error anyone reads —
+        and with auto-merge keyed on a formal approval the PR simply sits.
+
+        Observed 2026-08-09 on ateles#408: Lanius omitted its verdict line, the
+        retry ran while Neotoma writes were failing (neotoma#2141), and no
+        verdict came back. Every check was green, the PR was mergeable, and it
+        sat for two days with zero formal approvals until a human went looking.
+        Nothing in the swarm was watching for "reviewed nothing, said nothing".
+
+        Candidate = an open PR that is
+          * older than ``stall_after_seconds`` (default 45m — comfortably past a
+            normal panel run, so an in-flight review is never re-dispatched),
+          * has NO formal review from anyone, and
+          * has no unmatured deferral marker (that is the other sweep's job).
+
+        Re-dispatch is idempotent by construction: ``_handle_pr`` re-runs the
+        panel, and a panel that succeeds posts the formal review whose absence
+        made the PR a candidate. So a recovered PR stops being a candidate; a PR
+        that keeps failing is re-tried each pass and, after
+        ``max_stall_retries``, escalated to the operator instead of looping
+        forever — an agent that cannot review a given PR will not start being
+        able to on the twentieth attempt, and silent infinite retry is how a
+        real defect stays invisible.
+
+        Fail-open and bounded, same discipline as the sibling sweeps: every
+        failure path logs and continues; a broken sweep must never stop the loop.
+        """
+        summary = {"scanned": 0, "resumed": 0, "escalated": 0, "failed": 0}
+        stall_after = int(os.environ.get("APIS_REVIEW_STALL_SECONDS", "2700"))
+        max_retries = int(os.environ.get("APIS_REVIEW_STALL_MAX_RETRIES", "3"))
+        now = datetime.now(timezone.utc)
+
+        for repository in repositories:
+            try:
+                candidates = await self._prs_with_stalled_review(
+                    repository, now, stall_after
+                )
+            except Exception as exc:
+                log.warning(
+                    f"[{DAEMON_NAME}] stalled-review sweep: could not scan "
+                    f"{repository} ({exc}) — skipping"
+                )
+                continue
+
+            summary["scanned"] += len(candidates)
+            for pr in candidates:
+                number = int(pr.get("number"))
+                ref = f"{repository}#{number}"
+                attempts = self._stall_retries.get(ref, 0)
+
+                if attempts >= max_retries:
+                    # Stop and tell the operator. Repeating a failing review
+                    # forever burns agent budget and buries the cause.
+                    if not self._stall_escalated.get(ref):
+                        log.error(
+                            f"[{DAEMON_NAME}] stalled-review sweep: {ref} still has "
+                            f"no formal review after {attempts} re-dispatches — "
+                            "not retrying. Operator attention needed."
+                        )
+                        self.notifier.send(
+                            f"🔴 {ref} has no formal review after {attempts} "
+                            "automatic re-dispatches. The review agent is failing "
+                            "on this PR — check the apis log for why. Merge is "
+                            "blocked until a review lands.",
+                            priority=Priority.BLOCKER,
+                        )
+                        self._stall_escalated[ref] = True
+                        summary["escalated"] += 1
+                    continue
+
+                log.warning(
+                    f"[{DAEMON_NAME}] stalled-review sweep: {ref} has no formal "
+                    f"review and no pending deferral — re-dispatching "
+                    f"(attempt {attempts + 1}/{max_retries})"
+                )
+                self._stall_retries[ref] = attempts + 1
+                try:
+                    trigger = SwarmTrigger(
+                        kind="pr_synchronize",
+                        repository=repository,
+                        number=number,
+                        title=pr.get("title", ""),
+                        body=pr.get("body") or "",
+                        author=(pr.get("user") or {}).get("login", ""),
+                        html_url=pr.get("html_url", ""),
+                        delivery_id=f"stall-resume-{number}-{attempts + 1}",
+                        action="synchronize",
+                        head_ref=(pr.get("head") or {}).get("ref", ""),
+                        base_ref=(pr.get("base") or {}).get("ref", ""),
+                    )
+                    await self._handle_pr(trigger)
+                    summary["resumed"] += 1
+                except Exception as exc:
+                    summary["failed"] += 1
+                    log.error(
+                        f"[{DAEMON_NAME}] stalled-review sweep: {ref} re-dispatch "
+                        f"failed ({exc})",
+                        exc_info=True,
+                    )
+        if summary["scanned"]:
+            log.info(f"[{DAEMON_NAME}] stalled-review sweep: {summary}")
+        return summary
+
+    async def _has_live_deferral_marker(
+        self, client: httpx.AsyncClient, repository: str, number: int
+    ) -> bool:
+        """True if `number`'s issue-comment thread ends on an unmatured
+        `review-deferred-until:` marker (no verdict or newer marker since).
+
+        Shares the walk-comments-in-order logic `_prs_with_matured_deferral`
+        uses to find matured deferrals, but only cares whether a LIVE deferral
+        marker exists at all — maturity is irrelevant here, since the deferred
+        sweep (`_prs_with_matured_deferral` / `resume_deferred_reviews`) already
+        owns re-dispatching once it matures. This just needs to say "hands off,
+        someone else's sweep is watching this one."
+        """
+        c_url = f"https://api.github.com/repos/{repository}/issues/{number}/comments"
+        try:
+            cresp = await client.get(
+                c_url,
+                params={"per_page": 100},
+                headers=self._github_headers(repository),
+            )
+            cresp.raise_for_status()
+        except Exception:
+            # Cannot tell → assume a marker might be live so we don't double-
+            # dispatch. Same "false negative costs a delay" bias as the caller.
+            return True
+        latest_iso = None
+        for c in cresp.json():
+            body = c.get("body", "")
+            m = self._REVIEW_DEFERRED_RE.search(body)
+            if m:
+                latest_iso = m.group(1)
+            elif _VANELLUS_COMMENT_MARKER in body:
+                latest_iso = None
+        return latest_iso is not None
+
+    async def _prs_with_stalled_review(
+        self, repository: str, now: datetime, stall_after_seconds: int
+    ) -> list[dict]:
+        """Open PRs older than the stall window with no formal review at all.
+
+        Deliberately conservative — a PR is only a candidate when ALL hold:
+          * updated_at is older than the stall window (an in-flight panel must
+            never be re-dispatched on top of itself);
+          * zero reviews of any state (a REQUEST_CHANGES is a working pipeline,
+            not a stall — the ball is with the author);
+          * no live `review-deferred-until:` marker (the deferred sweep owns
+            those — re-dispatching here too would double-handle the same PR).
+        """
+        out: list[dict] = []
+        list_url = f"https://api.github.com/repos/{repository}/pulls"
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                list_url,
+                params={"state": "open", "per_page": 100},
+                headers=self._github_headers(repository),
+            )
+            resp.raise_for_status()
+            for pr in resp.json() or []:
+                try:
+                    updated = datetime.fromisoformat(
+                        str(pr.get("updated_at", "")).replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    continue
+                if (now - updated).total_seconds() < stall_after_seconds:
+                    continue
+                if pr.get("draft"):
+                    continue
+                number = pr.get("number")
+                try:
+                    rv = await client.get(
+                        f"{list_url}/{number}/reviews",
+                        headers=self._github_headers(repository),
+                    )
+                    rv.raise_for_status()
+                    if rv.json():
+                        # Any formal review means the pipeline reached a verdict.
+                        continue
+                except Exception:
+                    # Cannot tell → do not re-dispatch. A false negative costs a
+                    # delay; a false positive re-runs a panel that may be fine.
+                    continue
+                if await self._has_live_deferral_marker(client, repository, number):
+                    # The deferred sweep already owns this PR; re-dispatching
+                    # here too would double-handle it (ateles#414).
+                    continue
+                out.append(pr)
+        return out
 
     async def _prs_with_matured_deferral(self, repository: str, now: datetime) -> dict:
         """Open PRs in `repository` split by whether their deferral has matured.
@@ -2028,12 +2232,17 @@ class SwarmDispatcher:
             notifier=self.notifier,
         )
         verdict = parse_gate_verdict(lanius.stdout)
-        if verdict is None and lanius.ok:
+        if verdict is None:
             # PR-87 self-dogfood finding: Lanius sometimes replies without the
             # mandatory verdict line. One sharper retry before failing open.
+            # Applies whether the skill run reported ok (verdict line simply
+            # missing) or not (e.g. it crashed) — either way there has been no
+            # verdict yet, and the retry is the one chance to get one before
+            # the fail-open path below kicks in.
             log.warning(
-                f"[{DAEMON_NAME}] {ref}: Lanius omitted the verdict line — "
-                "retrying once with an explicit reminder"
+                f"[{DAEMON_NAME}] {ref}: Lanius produced no verdict "
+                f"(lanius.ok={lanius.ok}) — retrying once with an explicit "
+                "reminder"
             )
             lanius = await run_skill(
                 "lanius",
@@ -2050,6 +2259,39 @@ class SwarmDispatcher:
                 notifier=self.notifier,
             )
             verdict = parse_gate_verdict(lanius.stdout)
+
+        if verdict is None:
+            # The retry above promised "one sharper retry before failing open"
+            # but nothing actually failed open: a still-missing verdict fell
+            # through to `if verdict == "blocked"`, which None fails, so the PR
+            # proceeded without gate inheritance ever resolving — and, in the
+            # observed case, without a formal review ever being posted. With
+            # auto-merge keyed on that formal review, the PR then sits
+            # indefinitely with nothing reporting a problem.
+            #
+            # Observed 2026-08-09 on ateles#408: Lanius omitted the verdict, the
+            # retry ran while Neotoma writes were failing (neotoma#2141), and no
+            # verdict came back. The PR stayed open for two days with 0 formal
+            # approvals while every check was green. A human eventually noticed.
+            #
+            # Fail OPEN, deliberately. `clear` means "gate inheritance did not
+            # block this" — it does not approve anything. The review panel still
+            # runs, the lenses still reach their own verdicts, and merge still
+            # requires a formal approval. The alternative (fail closed) would
+            # wedge every PR whenever the gate agent is flaky or Neotoma is
+            # briefly unwell, which is a worse failure than proceeding to a
+            # review that can still say no. This mirrors the guidance already
+            # given to Lanius in the retry prompt.
+            reason = (
+                "skill run failed" if not lanius.ok else "no verdict line after retry"
+            )
+            log.error(
+                f"[{DAEMON_NAME}] {ref}: gate inheritance unresolved ({reason}) — "
+                "failing OPEN to `clear` so the review panel still runs. Merge "
+                "remains gated on a formal approval."
+            )
+            verdict = "clear"
+
         # Gates Lanius reports as still-pending (from its GATE_PENDING: line on a
         # blocked verdict). Fed to select_panel so the owning lens is guaranteed
         # a seat under the cap — otherwise a carried-over gate can never clear
