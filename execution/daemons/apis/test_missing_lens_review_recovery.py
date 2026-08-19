@@ -313,3 +313,45 @@ def test_the_sweep_is_actually_called_by_the_daemon():
     assert source.index("resume_stalled_reviews(") < source.index(
         "resume_missing_lens_reviews("
     ), "ordering: the missing-lens pass runs after the stalled pass"
+
+
+@pytest.mark.asyncio
+async def test_a_redispatched_verdict_is_persisted_and_posted(monkeypatch):
+    """Both halves, in the order the primary panel loop uses them.
+
+    The arch lens caught this on #447: `_redispatch_missing_lens` posted the
+    recovered verdict to GitHub but skipped the `_persist_panel_reviews` write
+    its sibling call site pairs with. The verdict then existed for the
+    aggregation and not for the durable record — a quieter version of the same
+    "produced a result nothing consumes" failure this sweep exists to fix.
+    """
+    d = _dispatcher()
+    order: list[str] = []
+
+    class _Ok:
+        ok = True
+        stdout = "**APPROVE**"
+        error = None
+        returncode = 0
+
+    async def fake_run_skill(agent, *a, **k):  # noqa: ANN001
+        return _Ok()
+
+    async def fake_persist(trigger, reviews, agents):  # noqa: ANN001
+        order.append("persist")
+        assert reviews == [("security", "**APPROVE**")]
+        assert agents == {"security": "falco"}
+
+    async def fake_post(trigger, reviews, agents):  # noqa: ANN001
+        order.append("post")
+
+    monkeypatch.setattr(sd, "run_skill", fake_run_skill)
+    monkeypatch.setattr(d, "_persist_panel_reviews", fake_persist)
+    monkeypatch.setattr(d, "_post_missing_panel_comments", fake_post)
+
+    await d._redispatch_missing_lens("o/r", _pr(), "security")
+
+    assert order == ["persist", "post"], (
+        "a recovered verdict must be persisted to Neotoma as well as posted, "
+        "in the same order the primary panel loop uses"
+    )
