@@ -208,6 +208,39 @@ LENSES: tuple[Lens, ...] = (
             r"ssrf|xss|csrf|injection|traversal",
             r"(^|/)net/",
             r"webhook",
+            # Ateles' own security surfaces. Without these the lens fires on
+            # NOTHING in the repo it lives in: the patterns above this block
+            # mirror neotoma's classify_diff.js CONCERNS matcher, which
+            # enumerates neotoma's tree (src/services/auth/, src/middleware/,
+            # ...), and Ateles has no such paths. Measured after ateles#426
+            # merged: five consecutive real PRs — including #426 itself, which
+            # edits the dispatch path — seated pm/qa and never security.
+            #
+            # Deliberately NOT `execution/daemons/` wholesale. That would seat
+            # the security lens on every daemon PR, spending the panel cap and
+            # the reviewer's attention on routine changes until the lens is
+            # ignored. These name the surfaces where an Ateles defect is
+            # actually a security defect: identity and signing, capability
+            # grants, money movement, and the dispatch path that decides which
+            # agent runs with which token.
+            r"(^|/)aauth",  # AAuth signing / HTTP-signature identity
+            r"grant_checker",  # capability-grant enforcement
+            r"neotoma_signed|signed_fetch",  # signed outbound requests
+            r"(^|/)secrets_",  # secrets materialize / publish tooling
+            r"(^|/)monedula/",  # payment execution
+            r"(^|/)mcp/",  # MCP servers: they hold bearer tokens and build
+            # Authorization headers, so a change here is an auth-surface change
+            #
+            # NOT matched here, deliberately: swarm_dispatch.py, skill_runner.py,
+            # harness_router.py and the gateways. They ARE token-routing code,
+            # but they are also the swarm's busiest files — most edits are
+            # routing, ordering, or marker bookkeeping. Matching them by path
+            # seated the lens on 76% of the last 30 merged PRs, which spends the
+            # panel cap on routine changes until the lens is noise. They are
+            # covered by the CONTENT patterns above (token|credential|secret|
+            # signature, auth/, webhook) when an edit actually touches those
+            # concerns, and reachability-based selection (neotoma#2174) is the
+            # real fix for catching them when it does not.
         ),
         issue_patterns=(
             r"\b(security|vulnerabilit|ssrf|xss|csrf|injection|traversal|"
