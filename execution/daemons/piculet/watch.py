@@ -261,27 +261,37 @@ def _telegram(message: str) -> None:
         pass
 
 
-def _telegram_deduped(message: str) -> None:
-    """
-    Send a Telegram alert only if the message is new or hasn't been sent
-    recently. Suppresses repeated identical alerts within _TELEGRAM_REPEAT_INTERVAL,
-    but sends a reminder when the interval lapses so persistent issues stay visible.
-    Call _telegram_clear(message) when the condition resolves.
+def _should_notify(key: str) -> tuple[bool, str]:
+    """Rate-limit gate for a persistent-alert key, shared by ALL channels.
+
+    Returns (send?, suffix). Sends immediately the first time a key is seen,
+    then at most once per _TELEGRAM_REPEAT_INTERVAL (hourly), with a
+    "still ongoing" suffix on the reminders. Call _telegram_clear(key) when the
+    condition resolves so it fires fresh on recurrence.
+
+    Previously this gate only wrapped the Telegram path; the lib/notify (email)
+    path in log_error/log_warning was called unconditionally, so a per-loop
+    persistent error emailed every ~60s (thousands of duplicate emails). Both
+    channels now share this one gate.
     """
     now = time.monotonic()
-    state = _telegram_alert_state.get(message)
+    state = _telegram_alert_state.get(key)
     if state is None:
-        # New alert — send immediately
-        _telegram_alert_state[message] = (now, 1)
-        _telegram(message)
-    else:
-        first_sent, count = state
-        elapsed = now - first_sent
-        if elapsed >= _TELEGRAM_REPEAT_INTERVAL * count:
-            # Remind once per hour for persistent issues
-            count += 1
-            _telegram_alert_state[message] = (first_sent, count)
-            _telegram(f"{message} (still ongoing, {int(elapsed / 60)}m)")
+        _telegram_alert_state[key] = (now, 1)
+        return True, ""
+    first_sent, count = state
+    elapsed = now - first_sent
+    if elapsed >= _TELEGRAM_REPEAT_INTERVAL * count:
+        _telegram_alert_state[key] = (first_sent, count + 1)
+        return True, f" (still ongoing, {int(elapsed / 60)}m)"
+    return False, ""
+
+
+def _telegram_deduped(message: str) -> None:
+    """Deprecated shim — routes through the shared gate for back-compat."""
+    send, suffix = _should_notify(message)
+    if send:
+        _telegram(f"{message}{suffix}")
 
 
 def _telegram_clear(message: str) -> None:
@@ -290,17 +300,23 @@ def _telegram_clear(message: str) -> None:
 
 
 def log_error(message: str) -> None:
-    """Log at ERROR level and send a deduplicated Telegram alert + lib/notify."""
+    """Log at ERROR level; send a deduplicated alert on BOTH Telegram and
+    lib/notify (email) via the shared _should_notify gate."""
     log.error(message)
-    _telegram_deduped(f"🔴 [piculet] ERROR: {message}")
-    _notify_lib(f"piculet error: {message}", priority="blocker")
+    send, suffix = _should_notify(f"error:{message}")
+    if send:
+        _telegram(f"🔴 [piculet] ERROR: {message}{suffix}")
+        _notify_lib(f"piculet error: {message}{suffix}", priority="blocker")
 
 
 def log_warning(message: str) -> None:
-    """Log at WARNING level and send a deduplicated Telegram alert + lib/notify."""
+    """Log at WARNING level; send a deduplicated alert on BOTH Telegram and
+    lib/notify (email) via the shared _should_notify gate."""
     log.warning(message)
-    _telegram_deduped(f"🟡 [piculet] WARNING: {message}")
-    _notify_lib(f"piculet warning: {message}", priority="info")
+    send, suffix = _should_notify(f"warning:{message}")
+    if send:
+        _telegram(f"🟡 [piculet] WARNING: {message}{suffix}")
+        _notify_lib(f"piculet warning: {message}{suffix}", priority="info")
 
 
 # ---------------------------------------------------------------------------
