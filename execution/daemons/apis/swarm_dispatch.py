@@ -3721,6 +3721,71 @@ class SwarmDispatcher:
             )
             return False
 
+    async def check_workflow_owner_drift(self) -> list[tuple[str, str, str]]:
+        """Warn if any workflow names a gate owner the swarm cannot dispatch.
+
+        ateles#441. Run at startup, because the drift it detects is otherwise
+        invisible until a gate silently fails to sign — which took four days to
+        notice on #416, and two months to notice at all after the 2026-06-12
+        renames.
+
+        Fail-open and best-effort: a check that cannot read Neotoma must never
+        stop the daemon booting. Returns the drift rows (empty when clean) so
+        callers and tests assert on the result rather than on log output.
+        """
+        try:
+            store = IssueSpecStore(
+                self.config.neotoma_base_url, self.config.neotoma_token
+            )
+            data = await store._post(
+                "entities/query",
+                {
+                    "entity_type": "workflow_definition",
+                    "limit": 200,
+                    "include_snapshots": True,
+                },
+            )
+            if not data:
+                log.warning(
+                    f"[{DAEMON_NAME}] workflow-owner drift check: could not read "
+                    "workflow_definition entities — skipped"
+                )
+                return []
+            workflows = data.get("entities", []) or []
+            drift = workflow_owner_drift(workflows, dispatchable_agents())
+            if drift:
+                detail = ", ".join(
+                    f"{wf} gate '{gate}' -> '{owner}'" for wf, gate, owner in drift
+                )
+                # ERROR, not WARNING: every issue routed through an affected
+                # workflow stalls at that gate showing only `pending`, and the
+                # auto-build handoff stays blocked for as long as it does.
+                log.error(
+                    f"[{DAEMON_NAME}] WORKFLOW OWNER DRIFT — {len(drift)} gate(s) "
+                    f"name an agent that cannot be dispatched: {detail}. Issues "
+                    "on these workflows will stall at those gates with `pending` "
+                    "and no error."
+                )
+                self.notifier.send(
+                    f"Workflow gate owner drift ({len(drift)}): {detail}. Gates "
+                    "naming these agents can never sign — correct the "
+                    "workflow_definition entities.",
+                    priority=Priority.BLOCKER,
+                    handler=DAEMON_NAME,
+                )
+            else:
+                log.info(
+                    f"[{DAEMON_NAME}] workflow-owner drift check: "
+                    f"{len(workflows)} workflow(s) clean"
+                )
+            return drift
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] workflow-owner drift check failed ({exc}) — "
+                "continuing; this check must never block startup"
+            )
+            return []
+
     async def _fetch_pr(self, repository: str, pr_number: int) -> dict | None:
         """Fetch a PR object from the GitHub API; None on error (fail-open)."""
         url = f"https://api.github.com/repos/{repository}/pulls/{pr_number}"

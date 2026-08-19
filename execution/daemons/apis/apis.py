@@ -876,6 +876,24 @@ async def main() -> None:
                 exc_info=True,
             )
 
+    # 7b. Workflow gate-owner drift check (ateles#441). The workflow_definition
+    #     entities name the agent owning each gate; dispatch picks agents from
+    #     hardcoded rosters. Nothing compared them, so when two agents were
+    #     renamed on 2026-06-12 the workflows kept naming the retired ones and
+    #     their gates could never sign — silently, because `pending` is a valid
+    #     state. One issue sat that way four days; the auto-build handoff stays
+    #     blocked the whole time. Runs once at boot: config drift does not
+    #     appear mid-run, and a loud error at startup is what was missing.
+    #     Fire-and-forget and fail-open, like the sweeps around it.
+    async def workflow_drift_check() -> None:
+        try:
+            await dispatcher.check_workflow_owner_drift()
+        except Exception as exc:  # never let a config check kill startup
+            log.error(
+                f"[{DAEMON_NAME}] workflow-owner drift check failed: {exc}",
+                exc_info=True,
+            )
+
     # 8. Deferred-review resume sweep: a PR review throttled by a usage limit
     #    posts a `review-deferred-until:<ISO>` marker instead of a verdict. The
     #    reset is often hours out, so unlike the one-shot pipeline resume this
@@ -924,6 +942,7 @@ async def main() -> None:
         watchdog.run(notifier, watchdog_dispatch),
         resume_sweep(),
         deferred_review_sweep(),
+        workflow_drift_check(),
     )
 
 

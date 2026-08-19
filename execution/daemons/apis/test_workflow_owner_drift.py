@@ -108,3 +108,115 @@ def test_current_rosters_contain_the_renamed_agents():
     assert not ({"bombycilla", "gryllus"} & roster), (
         "the retired names must NOT be dispatchable, or the guard cannot fire"
     )
+
+
+# ---------------------------------------------------------------------------
+# The check must actually RUN — a detector with no caller is not a guard
+# ---------------------------------------------------------------------------
+
+
+class _Notifier:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    def send(self, msg: str, priority=None, handler=None) -> None:  # noqa: ANN001
+        self.sent.append(msg)
+
+
+def _dispatcher() -> sd.SwarmDispatcher:
+    return sd.SwarmDispatcher(notifier=_Notifier())
+
+
+def test_startup_check_reports_and_escalates_drift(monkeypatch):
+    """Loxia's finding on PR #442: the detector existed with no caller.
+
+    A guard nobody runs is the same failure it guards against — a mechanism
+    that looks like protection and never fires.
+    """
+    import asyncio
+
+    d = _dispatcher()
+
+    async def fake_post(self, path, payload):  # noqa: ANN001
+        assert payload["entity_type"] == "workflow_definition"
+        return {
+            "entities": [
+                {
+                    "snapshot": {
+                        "project": "ateles",
+                        "workflow_type": "feature",
+                        "gates": [
+                            {"gate_name": "arch", "owner_agent": "bombycilla"},
+                            {"gate_name": "pm", "owner_agent": "pavo"},
+                        ],
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(sd.IssueSpecStore, "_post", fake_post)
+
+    drift = asyncio.run(d.check_workflow_owner_drift())
+
+    assert [row[2] for row in drift] == ["bombycilla"]
+    assert d.notifier.sent, "drift must reach the operator, not only the log"
+    assert "bombycilla" in d.notifier.sent[0]
+
+
+def test_startup_check_is_quiet_when_clean(monkeypatch):
+    import asyncio
+
+    d = _dispatcher()
+
+    async def fake_post(self, path, payload):  # noqa: ANN001
+        return {
+            "entities": [
+                {
+                    "snapshot": {
+                        "project": "ateles",
+                        "workflow_type": "bug",
+                        "gates": [
+                            {"gate_name": "pm", "owner_agent": "pavo"},
+                            {"gate_name": "impl", "owner_agent": "cicada"},
+                        ],
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(sd.IssueSpecStore, "_post", fake_post)
+
+    assert asyncio.run(d.check_workflow_owner_drift()) == []
+    assert not d.notifier.sent, "a clean check must not page the operator"
+
+
+def test_startup_check_fails_open(monkeypatch):
+    """A check that cannot read Neotoma must never stop the daemon booting."""
+    import asyncio
+
+    d = _dispatcher()
+
+    async def boom(self, path, payload):  # noqa: ANN001
+        raise RuntimeError("neotoma unreachable")
+
+    monkeypatch.setattr(sd.IssueSpecStore, "_post", boom)
+
+    assert asyncio.run(d.check_workflow_owner_drift()) == []  # must not raise
+
+
+def test_non_panel_owners_are_still_live_agents():
+    """Loxia's second finding: the four hardcoded names can drift too.
+
+    `dispatchable_agents()` appends triage/PR/release owners that sit outside
+    the panel and spec rosters. That set is exactly the kind of list this guard
+    exists to catch drifting, so pin it against the agent-facing roster.
+    """
+    roster = sd.dispatchable_agents()
+    for agent in ("lanius", "vanellus", "struthio", "cicada"):
+        assert agent in roster
+    # lanius and vanellus are GitHub-facing, so they are independently anchored.
+    assert {"lanius", "vanellus"} <= set(sd.GITHUB_FACING_AGENTS)
+    # cicada is anchored by the spec sections it owns.
+    from issue_spec import SECTION_BY_AGENT
+
+    assert "cicada" in SECTION_BY_AGENT
