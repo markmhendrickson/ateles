@@ -1500,10 +1500,19 @@ class SwarmDispatcher:
         marker-only comment as the "No description provided." placeholder, so
         each one shows up as a blank swarm comment on the thread forever.
 
-        Bounded and fail-open, same discipline as the resume sweep: recently
-        closed issues only, every failure logs and continues, and the count is
-        returned for logging/tests. Open issues are untouched — a marker there
-        may belong to a live run, and reaping it would strand that pipeline.
+        Bounded and fail-open, same discipline as the resume sweep: every
+        failure logs and continues, and the count is returned for
+        logging/tests. Open issues are untouched — a marker there may belong
+        to a live run, and reaping it would strand that pipeline.
+
+        The bound is best-effort, not exhaustive: this reads the first page of
+        the 100 most-recently-updated closed issues, and the first page of each
+        one's comments. A marker below either cut-off is not reaped on this
+        pass. That is deliberate — the sweep runs on every boot, markers post
+        early in a thread, and the cost is one lingering cosmetic comment, so
+        an exhaustive crawl (N+1 requests per repo, unbounded) is not worth
+        paying at startup. Revisit if closed-issue volume grows enough that
+        orphans start surviving repeated boots.
         """
         cleared = 0
         for repository in repositories:
