@@ -57,6 +57,7 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 
 from lib.daemon_runtime import AgentDefinition, AgentLoader  # noqa: E402
 from harness_router import (  # noqa: E402
+    configured_providers,
     cool_down,
     cooling_providers,
     provider_candidates,
@@ -1240,6 +1241,24 @@ async def _run_skill_once(
                 os.unlink(_mcp_tmp_path)
             except OSError:
                 pass
+
+
+def usable_providers() -> set[str]:
+    """Providers that could actually serve a run right now.
+
+    The same view `run_skill` routes over: configured order ∩ providers whose
+    binary resolves, minus those cooling down after a capacity/auth failure.
+    Callers use this to decide whether a per-lens provider PREFERENCE can be
+    honored, so that pinning never turns into "the lens silently did not run"
+    (review_panel.resolve_lens_provider).
+    """
+    binaries = _provider_binaries()
+    cooling = cooling_providers()
+    return {
+        provider
+        for provider in configured_providers()
+        if binaries.get(provider) and provider not in cooling
+    }
 
 
 async def run_skill(

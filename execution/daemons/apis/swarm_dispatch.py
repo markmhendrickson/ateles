@@ -78,8 +78,19 @@ from review_learning import (
     parse_findings,
     propose_skill_updates,
 )
-from review_panel import LENSES, Lens, select_expectation_agents, select_panel
-from skill_runner import SkillResult, run_skill, write_dispatch_failure_log
+from review_panel import (
+    LENSES,
+    Lens,
+    resolve_lens_provider,
+    select_expectation_agents,
+    select_panel,
+)
+from skill_runner import (
+    SkillResult,
+    run_skill,
+    usable_providers,
+    write_dispatch_failure_log,
+)
 
 from lib.daemon_runtime.checkpoint_posture import PostureOutcome, evaluate_with_posture
 from lib.daemon_runtime.gating import load_policy
@@ -2137,6 +2148,9 @@ class SwarmDispatcher:
                     include_github_contract=True,
                     notifier=self.notifier,
                     cwd=qa_worktree,
+                    provider=resolve_lens_provider(
+                        lens, available_providers=usable_providers()
+                    ),
                 )
             finally:
                 await cleanup_pr_worktree(qa_worktree)
@@ -4810,9 +4824,21 @@ class SwarmDispatcher:
             f"You are a review panelist on PR {t.repository}#{t.number}: "
             f"{t.title}\n{t.html_url}\n\n"
             f"Review ONLY through your `{lens.lens}` lens: {lens.checks}\n"
-            "Do not run a generic full-file review — the Claude GHA already "
-            "covers correctness/security as the baseline.\n\n"
-            f"{expectation_block}\n\n"
+            + (
+                # The security lens is the one lens that MUST NOT defer to the
+                # CI baseline. The generic line below tells every other lens
+                # that correctness/security is already covered — pointing that
+                # at the security lens would instruct it to skip the work it
+                # exists to do (ateles#425).
+                "The CI baseline is NOT a substitute for this lens: it reviews "
+                "the diff, and your mandate is explicitly to look OUTSIDE the "
+                "diff for the sinks it did not touch. Do the full adversarial "
+                "pass.\n\n"
+                if lens.lens == "security"
+                else "Do not run a generic full-file review — the Claude GHA "
+                "already covers correctness/security as the baseline.\n\n"
+            )
+            + f"{expectation_block}\n\n"
             f"{comment_identity_block}\n\n"
             f"{blocking_rules}"
             f"{checkoff_block}"
