@@ -541,6 +541,61 @@ AGENT_GITHUB_LOGIN: dict[str, str] = {
 }
 
 
+def dispatchable_agents() -> set[str]:
+    """Every agent name the swarm can actually dispatch.
+
+    Derived from the SAME structures dispatch uses — the review panel's lenses
+    and the spec sections — plus the GitHub-facing roster and the release owner,
+    rather than a fourth hand-maintained list. A guard that keeps its own copy of
+    the roster drifts exactly like the thing it is guarding (ateles#441).
+    """
+    from issue_spec import SECTION_BY_AGENT
+    from review_panel import LENSES
+
+    agents = {lens.agent for lens in LENSES}
+    agents |= set(SECTION_BY_AGENT)
+    agents |= set(GITHUB_FACING_AGENTS)
+    # Owners that appear in workflow definitions but run outside the panel and
+    # spec paths: triage, PR stewardship, and release.
+    agents |= {"lanius", "vanellus", "struthio", "cicada"}
+    return agents
+
+
+def workflow_owner_drift(
+    workflows: list[dict], known_agents: set[str]
+) -> list[tuple[str, str, str]]:
+    """Gate owners a workflow names that no agent in the roster answers to.
+
+    ateles#441. `workflow_definition` entities name the agent that owns each
+    gate; dispatch picks agents from hardcoded rosters in `issue_spec.py` and
+    `review_panel.py`. Nothing compared the two, so when Bombycilla was renamed
+    Waxwing and Gryllus renamed Cicada on 2026-06-12, the workflows kept naming
+    the old ones and no code noticed.
+
+    The consequence is silent and slow: the renamed agent still runs, still
+    returns ok, still writes its section — and the gate never signs, because the
+    agent doing the work is not the owner the workflow expects. `pending` is a
+    legitimate state, so nothing errors. ateles#416 sat that way for four days,
+    and the auto-build handoff is gated on `_gates_green()`, so an unsignable
+    gate stalls every downstream PR indefinitely.
+
+    Returns ``(workflow_name, gate_name, owner_agent)`` per unknown owner. An
+    empty list means every declared owner is someone the swarm can actually
+    dispatch. Pure and side-effect free so the check is trivially testable.
+    """
+    drift: list[tuple[str, str, str]] = []
+    for wf in workflows:
+        snap = wf.get("snapshot") or wf
+        name = snap.get("canonical_name") or wf.get("canonical_name") or (
+            f"{snap.get('project', '?')}|{snap.get('workflow_type', '?')}"
+        )
+        for gate in snap.get("gates") or []:
+            owner = (gate.get("owner_agent") or "").strip()
+            if owner and owner not in known_agents:
+                drift.append((str(name), str(gate.get("gate_name") or "?"), owner))
+    return drift
+
+
 def agent_github_login(agent: str) -> str:
     """Canonical GitHub login for *agent*, scoped to the current operator.
 
@@ -3665,6 +3720,71 @@ class SwarmDispatcher:
                 f"failed ({exc}) — treating as not-clear"
             )
             return False
+
+    async def check_workflow_owner_drift(self) -> list[tuple[str, str, str]]:
+        """Warn if any workflow names a gate owner the swarm cannot dispatch.
+
+        ateles#441. Run at startup, because the drift it detects is otherwise
+        invisible until a gate silently fails to sign — which took four days to
+        notice on #416, and two months to notice at all after the 2026-06-12
+        renames.
+
+        Fail-open and best-effort: a check that cannot read Neotoma must never
+        stop the daemon booting. Returns the drift rows (empty when clean) so
+        callers and tests assert on the result rather than on log output.
+        """
+        try:
+            store = IssueSpecStore(
+                self.config.neotoma_base_url, self.config.neotoma_token
+            )
+            data = await store._post(
+                "entities/query",
+                {
+                    "entity_type": "workflow_definition",
+                    "limit": 200,
+                    "include_snapshots": True,
+                },
+            )
+            if not data:
+                log.warning(
+                    f"[{DAEMON_NAME}] workflow-owner drift check: could not read "
+                    "workflow_definition entities — skipped"
+                )
+                return []
+            workflows = data.get("entities", []) or []
+            drift = workflow_owner_drift(workflows, dispatchable_agents())
+            if drift:
+                detail = ", ".join(
+                    f"{wf} gate '{gate}' -> '{owner}'" for wf, gate, owner in drift
+                )
+                # ERROR, not WARNING: every issue routed through an affected
+                # workflow stalls at that gate showing only `pending`, and the
+                # auto-build handoff stays blocked for as long as it does.
+                log.error(
+                    f"[{DAEMON_NAME}] WORKFLOW OWNER DRIFT — {len(drift)} gate(s) "
+                    f"name an agent that cannot be dispatched: {detail}. Issues "
+                    "on these workflows will stall at those gates with `pending` "
+                    "and no error."
+                )
+                self.notifier.send(
+                    f"Workflow gate owner drift ({len(drift)}): {detail}. Gates "
+                    "naming these agents can never sign — correct the "
+                    "workflow_definition entities.",
+                    priority=Priority.BLOCKER,
+                    handler=DAEMON_NAME,
+                )
+            else:
+                log.info(
+                    f"[{DAEMON_NAME}] workflow-owner drift check: "
+                    f"{len(workflows)} workflow(s) clean"
+                )
+            return drift
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] workflow-owner drift check failed ({exc}) — "
+                "continuing; this check must never block startup"
+            )
+            return []
 
     async def _fetch_pr(self, repository: str, pr_number: int) -> dict | None:
         """Fetch a PR object from the GitHub API; None on error (fail-open)."""
