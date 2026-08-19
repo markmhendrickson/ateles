@@ -4812,14 +4812,38 @@ class SwarmDispatcher:
             )
 
         if not outcome.entity_found:
+            # ateles#416: this used to report and stop, naming a remedy nothing
+            # was scheduled to perform. Back-fill the entity and retry the waive
+            # once — a gate that cannot be signed OR waived is a dead end, and
+            # the PR closing that issue is unmergeable by every available path.
+            if await self.ensure_issue_entity(trigger.repository, issue_number):
+                log.info(
+                    f"[{DAEMON_NAME}] gate waive on {ref}: entity backfilled — "
+                    "retrying the waive"
+                )
+                outcome = await store.waive(
+                    trigger.repository, issue_number, PRE_IMPL_GATES
+                )
+                try:
+                    await self._post_gate_waive_comment(trigger, outcome)
+                except Exception as exc:  # noqa: BLE001 — comment best-effort
+                    log.warning(
+                        f"[{DAEMON_NAME}] could not post retried gate-waive "
+                        f"comment on {ref}: {exc}"
+                    )
+
+        if not outcome.entity_found:
             log.error(
                 f"[{DAEMON_NAME}] gate waive on {ref}: no Neotoma issue entity "
-                f"for {trigger.repository}#{issue_number} — nothing waived"
+                f"for {trigger.repository}#{issue_number} and backfill did not "
+                "produce one — nothing waived"
             )
             self.notifier.send(
                 f"Gate waive on {ref} FAILED — no Neotoma issue entity for "
-                f"{trigger.repository}#{issue_number}. The pipeline stays "
-                "blocked; the issue may never have been triaged.",
+                f"{trigger.repository}#{issue_number}, and automatic backfill "
+                "did not create one. Run `python3 execution/scripts/"
+                f"trigger_swarm_pr.py issue {issue_number}` to triage it "
+                "manually; the pipeline stays blocked until the entity exists.",
                 priority=Priority.BLOCKER,
                 handler=DAEMON_NAME,
             )
@@ -4846,6 +4870,109 @@ class SwarmDispatcher:
                 "(all pre-impl gates already clear)"
             )
         return outcome
+
+    async def ensure_issue_entity(
+        self, repository: str, issue_number: int
+    ) -> bool:
+        """Create the Neotoma issue entity for *issue_number* if it is missing.
+
+        ateles#416. Gate state lives on the issue entity, so when that entity
+        does not exist a gate can be neither SIGNED nor WAIVED — both operate on
+        an object that is not there. The waive path reported this and stopped:
+
+            no Neotoma issue entity was found for this issue, so there is no
+            `gate_status` to waive. The gate pipeline will keep blocking until
+            the issue is triaged
+
+        The remedy it names is real, but nothing was scheduled to perform it.
+        Triage fires on `issue.opened` only — one-shot, no sweep, no retry — so
+        an issue whose triage failed or predates the pipeline stays entity-less
+        permanently, and every PR closing it is permanently unmergeable.
+
+        Dispatches the Lanius new-issue protocol and RE-READS to confirm the
+        entity now exists, per the #285 rule: an LLM turn asked to persist a
+        mechanical mutation can silently no-op, so a dispatch returning ok is
+        not evidence the entity was created.
+
+        Returns True when the entity exists afterwards. Bounded by construction:
+        exactly one dispatch and one re-read, no internal loop — the caller owns
+        retry policy.
+        """
+        ref = f"{repository}#{issue_number}"
+        store = IssueGateStore(
+            self.config.neotoma_base_url, self.config.neotoma_token
+        )
+        if (await store.load(repository, issue_number)).found:
+            return True  # fast path: nothing to backfill
+
+        log.warning(
+            f"[{DAEMON_NAME}] {ref}: no Neotoma issue entity — dispatching "
+            "Lanius triage to backfill it (ateles#416)"
+        )
+        issue = await self._fetch_issue(repository, issue_number)
+        if issue is None:
+            log.error(
+                f"[{DAEMON_NAME}] {ref}: cannot backfill — GitHub issue could "
+                "not be read"
+            )
+            return False
+
+        trigger = SwarmTrigger(
+            kind="issue_opened",
+            repository=repository,
+            number=issue_number,
+            title=issue.get("title", ""),
+            body=issue.get("body") or "",
+            author=(issue.get("user") or {}).get("login", ""),
+            html_url=issue.get("html_url", ""),
+            delivery_id=f"entity-backfill-{issue_number}",
+            action="opened",
+        )
+        result = await run_skill(
+            "lanius",
+            self._lanius_issue_prompt(trigger),
+            github_token=_token_for_agent_on_repo("lanius", repository),
+            include_github_contract=True,
+            notifier=self.notifier,
+        )
+        if not result.ok:
+            log.error(
+                f"[{DAEMON_NAME}] {ref}: backfill triage failed "
+                f"({result.error or f'rc={result.returncode}'})"
+            )
+            return False
+
+        # Read back. Triage reporting success is not evidence the entity landed.
+        created = (await store.load(repository, issue_number)).found
+        if created:
+            log.info(f"[{DAEMON_NAME}] {ref}: issue entity backfilled")
+        else:
+            log.error(
+                f"[{DAEMON_NAME}] {ref}: backfill triage returned ok but the "
+                "entity still does not exist — gate ops remain blocked"
+            )
+        return created
+
+    async def _fetch_issue(
+        self, repository: str, issue_number: int
+    ) -> dict | None:
+        """Fetch a GitHub issue; None on error (caller decides what that means)."""
+        url = (
+            f"https://api.github.com/repos/{repository}/issues/{issue_number}"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    url, headers=self._github_headers(repository)
+                )
+                resp.raise_for_status()
+                return resp.json()
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] could not fetch {repository}#{issue_number}: "
+                f"{exc}"
+            )
+            return None
 
     async def _post_gate_waive_comment(
         self, trigger: SwarmTrigger, outcome: WaiveOutcome

@@ -2070,6 +2070,16 @@ class _FakeGateStore:
         self.owner_history: list[dict] = []
         self.waive_calls: list[tuple] = []
 
+    async def load(self, repo, issue_number):
+        """Mirror IssueGateStore.load — the backfill path (ateles#416) reads
+        before it writes, and reads again to verify the entity landed."""
+
+        class _State:
+            def __init__(self, found: bool) -> None:
+                self.found = found
+
+        return _State(self.entity_found)
+
     async def waive(self, repo, issue_number, pre_impl_gates):
         from gate_waive import (
             WaiveOutcome,
