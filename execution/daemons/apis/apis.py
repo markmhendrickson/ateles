@@ -876,6 +876,29 @@ async def main() -> None:
                 exc_info=True,
             )
 
+        # Same pass, separate concern: reap pipeline markers orphaned on CLOSED
+        # issues. `_clear_pipeline_inflight` is best-effort, so a GitHub blip or
+        # a kill between the last agent and the clear leaves one behind, and the
+        # resume sweep above only scans OPEN issues — so nothing ever reclaimed
+        # them. GitHub renders a marker-only comment as "No description
+        # provided.", so each orphan is a blank swarm comment on the thread
+        # forever. Kept out of `resume_interrupted_pipelines`' return value: it
+        # is housekeeping, not a resume outcome.
+        try:
+            cleared = await dispatcher._clear_closed_issue_markers(
+                list(dispatcher.config.resume_repositories)
+            )
+            if cleared:
+                log.info(
+                    f"[{DAEMON_NAME}] cleared {cleared} stale pipeline "
+                    "marker(s) on closed issues"
+                )
+        except Exception as exc:  # housekeeping must never kill startup
+            log.error(
+                f"[{DAEMON_NAME}] stale-marker sweep failed: {exc}",
+                exc_info=True,
+            )
+
     # 7b. Workflow gate-owner drift check (ateles#441). The workflow_definition
     #     entities name the agent owning each gate; dispatch picks agents from
     #     hardcoded rosters. Nothing compared them, so when two agents were
