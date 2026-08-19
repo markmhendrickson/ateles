@@ -212,7 +212,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
 # unbounded retry logging filled a 926 GB disk on 2026-08-18.
-log = configure_daemon_logging("piculet", also_stdout=True)
+log = configure_daemon_logging("piculet")
 
 
 # Dedup state for Telegram alerts — avoids repeat messages for persistent errors.

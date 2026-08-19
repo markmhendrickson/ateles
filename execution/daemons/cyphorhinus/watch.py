@@ -178,7 +178,7 @@ from lib.daemon_runtime.logging_setup import configure_daemon_logging
 
 # Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
 # unbounded retry logging filled a 926 GB disk on 2026-08-18.
-log = configure_daemon_logging("cyphorhinus", also_stdout=True)
+log = configure_daemon_logging("cyphorhinus")
 
 
 # Dedup state for Telegram alerts — avoids repeat messages for persistent errors.
