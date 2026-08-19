@@ -1642,6 +1642,41 @@ class SwarmDispatcher:
             log.info(f"[{DAEMON_NAME}] stalled-review sweep: {summary}")
         return summary
 
+    async def _has_live_deferral_marker(
+        self, client: httpx.AsyncClient, repository: str, number: int
+    ) -> bool:
+        """True if `number`'s issue-comment thread ends on an unmatured
+        `review-deferred-until:` marker (no verdict or newer marker since).
+
+        Shares the walk-comments-in-order logic `_prs_with_matured_deferral`
+        uses to find matured deferrals, but only cares whether a LIVE deferral
+        marker exists at all — maturity is irrelevant here, since the deferred
+        sweep (`_prs_with_matured_deferral` / `resume_deferred_reviews`) already
+        owns re-dispatching once it matures. This just needs to say "hands off,
+        someone else's sweep is watching this one."
+        """
+        c_url = f"https://api.github.com/repos/{repository}/issues/{number}/comments"
+        try:
+            cresp = await client.get(
+                c_url,
+                params={"per_page": 100},
+                headers=self._github_headers(repository),
+            )
+            cresp.raise_for_status()
+        except Exception:
+            # Cannot tell → assume a marker might be live so we don't double-
+            # dispatch. Same "false negative costs a delay" bias as the caller.
+            return True
+        latest_iso = None
+        for c in cresp.json():
+            body = c.get("body", "")
+            m = self._REVIEW_DEFERRED_RE.search(body)
+            if m:
+                latest_iso = m.group(1)
+            elif _VANELLUS_COMMENT_MARKER in body:
+                latest_iso = None
+        return latest_iso is not None
+
     async def _prs_with_stalled_review(
         self, repository: str, now: datetime, stall_after_seconds: int
     ) -> list[dict]:
@@ -1652,7 +1687,8 @@ class SwarmDispatcher:
             never be re-dispatched on top of itself);
           * zero reviews of any state (a REQUEST_CHANGES is a working pipeline,
             not a stall — the ball is with the author);
-          * no `review-deferred-until:` marker (the deferred sweep owns those).
+          * no live `review-deferred-until:` marker (the deferred sweep owns
+            those — re-dispatching here too would double-handle the same PR).
         """
         out: list[dict] = []
         list_url = f"https://api.github.com/repos/{repository}/pulls"
@@ -1687,6 +1723,10 @@ class SwarmDispatcher:
                 except Exception:
                     # Cannot tell → do not re-dispatch. A false negative costs a
                     # delay; a false positive re-runs a panel that may be fine.
+                    continue
+                if await self._has_live_deferral_marker(client, repository, number):
+                    # The deferred sweep already owns this PR; re-dispatching
+                    # here too would double-handle it (ateles#414).
                     continue
                 out.append(pr)
         return out
@@ -2192,12 +2232,17 @@ class SwarmDispatcher:
             notifier=self.notifier,
         )
         verdict = parse_gate_verdict(lanius.stdout)
-        if verdict is None and lanius.ok:
+        if verdict is None:
             # PR-87 self-dogfood finding: Lanius sometimes replies without the
             # mandatory verdict line. One sharper retry before failing open.
+            # Applies whether the skill run reported ok (verdict line simply
+            # missing) or not (e.g. it crashed) — either way there has been no
+            # verdict yet, and the retry is the one chance to get one before
+            # the fail-open path below kicks in.
             log.warning(
-                f"[{DAEMON_NAME}] {ref}: Lanius omitted the verdict line — "
-                "retrying once with an explicit reminder"
+                f"[{DAEMON_NAME}] {ref}: Lanius produced no verdict "
+                f"(lanius.ok={lanius.ok}) — retrying once with an explicit "
+                "reminder"
             )
             lanius = await run_skill(
                 "lanius",
