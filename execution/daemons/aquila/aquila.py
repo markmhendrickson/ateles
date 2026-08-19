@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import logging
 import os
 import sys
 import urllib.error
@@ -57,6 +56,8 @@ if _NEOTOMA_ENV_FILE.exists():
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+from lib.daemon_runtime.logging_setup import configure_daemon_logging
 
 _APIS_DIR = _REPO_ROOT / "execution" / "daemons" / "apis"
 if str(_APIS_DIR) not in sys.path:
@@ -103,13 +104,9 @@ DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("AQUILA_TIMEOUT_SECONDS", "1800"))
 # Telegram hard-caps messages at 4096 chars; chunk below that with headroom.
 _TELEGRAM_CHUNK = 3500
 
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler(sys.stdout)],
-)
-log = logging.getLogger("aquila")
+# Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
+# unbounded retry logging filled a 926 GB disk on 2026-08-18.
+log = configure_daemon_logging("aquila", also_stdout=True)
 
 
 # ---------------------------------------------------------------------------

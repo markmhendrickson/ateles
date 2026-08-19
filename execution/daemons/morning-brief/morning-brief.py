@@ -13,7 +13,6 @@ up to WAIT_MINUTES before falling back to a raw calendar summary.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import subprocess
 import sys
@@ -68,21 +67,15 @@ WAIT_POLL_SECONDS = 60
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-class _FlushingFileHandler(logging.FileHandler):
-    def emit(self, record: logging.LogRecord) -> None:
-        super().emit(record)
-        self.flush()
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
+from lib.daemon_runtime.logging_setup import configure_daemon_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [morning-brief] %(levelname)s %(message)s",
-    handlers=[
-        _FlushingFileHandler(LOG_FILE),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
-log = logging.getLogger(__name__)
+# Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
+# unbounded retry logging filled a 926 GB disk on 2026-08-18.
+log = configure_daemon_logging("morning-brief", also_stdout=True)
 
 # ---------------------------------------------------------------------------
 # Idempotency
