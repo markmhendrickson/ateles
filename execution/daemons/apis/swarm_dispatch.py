@@ -4967,7 +4967,7 @@ class SwarmDispatcher:
                 )
                 resp.raise_for_status()
                 return resp.json()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — fetch is best-effort
             log.warning(
                 f"[{DAEMON_NAME}] could not fetch {repository}#{issue_number}: "
                 f"{exc}"
