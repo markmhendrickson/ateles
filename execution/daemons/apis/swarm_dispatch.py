@@ -463,6 +463,85 @@ _REVIEW_VERDICT = re.compile(
 )
 
 
+# Vanellus writes this verbatim when a declared lens produced no verdict for a
+# round. Shared by the parsers and the recovery sweep so the two cannot drift.
+NOT_RECEIVED_TOKEN = "NOT RECEIVED"
+
+# The lens labels a panel can actually produce. Bounding the prose parser to
+# these means a malformed aggregation yields nothing rather than a fabricated
+# lens name — absence of a verdict must never be inferred loosely.
+_KNOWN_LENS_NAMES = frozenset(
+    {"pm", "ux", "arch", "qa", "security", "legal", "content"}
+)
+
+_BLOCKING_COUNT_RE = re.compile(r"Blocking:\s*(\d+)", re.IGNORECASE)
+
+# `pm: NOT RECEIVED`, `**security:** NOT RECEIVED`, `security = NOT RECEIVED`.
+# Bounded to one line so a paragraph mentioning two lenses cannot pair the wrong
+# name with the token.
+_NOT_RECEIVED_RE = re.compile(
+    r"\b(?P<lens>" + "|".join(sorted(_KNOWN_LENS_NAMES)) + r")\b"
+    r"\s*\**\s*[:=]\s*\**\s*" + NOT_RECEIVED_TOKEN,
+    re.IGNORECASE,
+)
+
+# Prose form Vanellus used on neotoma#2153: "the security lens verdict is
+# missing for this round". Deliberately does NOT accept an arbitrary word before
+# "lens": "every declared lens reported; no lens is missing" would otherwise
+# yield a lens called `declared`, and a false positive here re-dispatches an
+# agent that never needed running. Only names the panel actually has count, so
+# the parser cannot invent a lens.
+_MISSING_LENS_PROSE_RE = re.compile(
+    r"\b(?P<lens>" + "|".join(sorted(_KNOWN_LENS_NAMES)) + r")\s+lens\b"
+    r"[^.;\n]{0,60}?"
+    r"\b(?:verdict\s+is\s+missing|is\s+missing|not\s+received)\b",
+    re.IGNORECASE,
+)
+
+
+def parse_blocking_count(text: str) -> int | None:
+    """The `Blocking: N` count from an aggregation, or None if absent."""
+    m = _BLOCKING_COUNT_RE.search(text or "")
+    return int(m.group(1)) if m else None
+
+
+def parse_not_received_lenses(text: str) -> list[str]:
+    """Lens names an aggregation marks as having produced no verdict.
+
+    ateles#431. Order-preserving and deduplicated. Matches the structured
+    `<lens>: NOT RECEIVED` forms and the prose form Vanellus used on
+    neotoma#2153 ("the security lens verdict is missing for this round").
+    """
+    seen: list[str] = []
+    body = text or ""
+    for pattern in (_NOT_RECEIVED_RE, _MISSING_LENS_PROSE_RE):
+        for m in pattern.finditer(body):
+            lens = m.group("lens").strip().lower()
+            # `the`/`this` etc. can precede "lens" in prose; ignore stop-words
+            # rather than loosening the regex and inventing lens names.
+            if lens in {"the", "a", "one", "this", "that", "any", "each", "no"}:
+                continue
+            if lens not in seen:
+                seen.append(lens)
+    return seen
+
+
+def is_missing_lens_candidate(aggregation_body: str) -> bool:
+    """True when an aggregation cleared on content but withheld for a lens.
+
+    The exact neotoma#2153 shape: `Blocking: 0` from the lenses that DID
+    report, merge withheld solely because a declared lens never answered.
+
+    Both halves are required. A `Blocking: 0` with every lens present is simply
+    clear; a missing lens alongside real blockers is the blockers' problem, and
+    re-running the absent lens would not unblock it.
+    """
+    return (
+        parse_blocking_count(aggregation_body) == 0
+        and bool(parse_not_received_lenses(aggregation_body))
+    )
+
+
 def parse_review_verdict(stdout: str) -> str | None:
     """Extract the aggregated review verdict from Vanellus's output.
 
