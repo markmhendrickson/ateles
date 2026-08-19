@@ -140,3 +140,176 @@ def test_every_known_lens_name_parses():
     for lens in ("pm", "ux", "arch", "qa", "security", "legal"):
         body = f"**{lens}:** NOT RECEIVED\n**Blocking: 0**"
         assert sd.parse_not_received_lenses(body) == [lens], lens
+
+
+# ---------------------------------------------------------------------------
+# The sweep — the recovery half
+# ---------------------------------------------------------------------------
+
+import pytest
+
+
+class _Notifier:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    def send(self, msg: str, priority=None, handler=None) -> None:  # noqa: ANN001
+        self.sent.append(msg)
+
+
+def _dispatcher() -> sd.SwarmDispatcher:
+    return sd.SwarmDispatcher(notifier=_Notifier())
+
+
+def _pr(number: int = 2153) -> dict:
+    return {
+        "number": number,
+        "title": f"PR {number}",
+        "body": "",
+        "draft": False,
+        "user": {"login": "someone"},
+        "html_url": f"https://github.com/o/r/pull/{number}",
+        "head": {"ref": "feature"},
+        "base": {"ref": "main"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_redispatches_only_the_absent_lens(monkeypatch):
+    """The whole point: one lens, not the whole panel."""
+    d = _dispatcher()
+    called: list[tuple[int, str]] = []
+
+    async def fake_candidates(repo):  # noqa: ANN001
+        return [(_pr(), ["security"])]
+
+    async def fake_redispatch(repository, pr, lens):  # noqa: ANN001
+        called.append((int(pr["number"]), lens))
+
+    monkeypatch.setattr(d, "_prs_with_missing_lens", fake_candidates)
+    monkeypatch.setattr(d, "_redispatch_missing_lens", fake_redispatch)
+
+    summary = await d.resume_missing_lens_reviews(["o/r"])
+
+    assert called == [(2153, "security")]
+    assert summary["resumed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_retries_are_bounded_then_escalated_per_lens(monkeypatch):
+    d = _dispatcher()
+    monkeypatch.setenv("APIS_MISSING_LENS_MAX_RETRIES", "2")
+    calls: list[str] = []
+
+    async def fake_candidates(repo):  # noqa: ANN001
+        return [(_pr(), ["security"])]
+
+    async def fake_redispatch(repository, pr, lens):  # noqa: ANN001
+        calls.append(lens)
+
+    monkeypatch.setattr(d, "_prs_with_missing_lens", fake_candidates)
+    monkeypatch.setattr(d, "_redispatch_missing_lens", fake_redispatch)
+
+    for _ in range(5):
+        await d.resume_missing_lens_reviews(["o/r"])
+
+    assert len(calls) == 2, f"expected 2 bounded retries, got {len(calls)}"
+    assert any("no verdict after" in m for m in d.notifier.sent)
+    assert len(d.notifier.sent) == 1, "escalation must fire once, not every tick"
+
+
+@pytest.mark.asyncio
+async def test_a_second_lens_is_not_skipped_by_the_first_ones_exhaustion(
+    monkeypatch,
+):
+    """Retry state is per-lens.
+
+    A shared per-PR counter would carry the exhausted lens's count onto a
+    later, different missing lens and silently never run it.
+    """
+    d = _dispatcher()
+    monkeypatch.setenv("APIS_MISSING_LENS_MAX_RETRIES", "1")
+    calls: list[str] = []
+    lenses = ["security"]
+
+    async def fake_candidates(repo):  # noqa: ANN001
+        return [(_pr(), list(lenses))]
+
+    async def fake_redispatch(repository, pr, lens):  # noqa: ANN001
+        calls.append(lens)
+
+    monkeypatch.setattr(d, "_prs_with_missing_lens", fake_candidates)
+    monkeypatch.setattr(d, "_redispatch_missing_lens", fake_redispatch)
+
+    await d.resume_missing_lens_reviews(["o/r"])  # security attempt 1
+    await d.resume_missing_lens_reviews(["o/r"])  # security exhausted
+
+    lenses.append("qa")  # a different lens now goes missing
+    await d.resume_missing_lens_reviews(["o/r"])
+
+    assert "qa" in calls, "a newly-absent lens must still get its own attempts"
+
+
+@pytest.mark.asyncio
+async def test_sweep_is_fail_open(monkeypatch):
+    d = _dispatcher()
+
+    async def boom(repo):  # noqa: ANN001
+        raise RuntimeError("github unreachable")
+
+    monkeypatch.setattr(d, "_prs_with_missing_lens", boom)
+    summary = await d.resume_missing_lens_reviews(["o/r"])  # must not raise
+    assert summary["scanned"] == 0
+
+
+@pytest.mark.asyncio
+async def test_one_failing_lens_does_not_abort_the_rest(monkeypatch):
+    d = _dispatcher()
+    seen: list[str] = []
+
+    async def fake_candidates(repo):  # noqa: ANN001
+        return [(_pr(), ["security", "qa"])]
+
+    async def flaky(repository, pr, lens):  # noqa: ANN001
+        seen.append(lens)
+        if lens == "security":
+            raise RuntimeError("panel exploded")
+
+    monkeypatch.setattr(d, "_prs_with_missing_lens", fake_candidates)
+    monkeypatch.setattr(d, "_redispatch_missing_lens", flaky)
+
+    summary = await d.resume_missing_lens_reviews(["o/r"])
+
+    assert seen == ["security", "qa"]
+    assert summary["failed"] == 1 and summary["resumed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_refuses_to_dispatch_an_unknown_lens():
+    """Never guess a target. An unknown label is an error, not a best effort."""
+    d = _dispatcher()
+    with pytest.raises(ValueError, match="no panel lens named"):
+        await d._redispatch_missing_lens("o/r", _pr(), "wombat")
+
+
+def test_the_sweep_is_actually_called_by_the_daemon():
+    """A sweep with no caller is not a recovery path.
+
+    Loxia caught exactly this on PR #442: a detector defined, unit-tested, and
+    invoked from nowhere — the same failure the mechanism exists to prevent.
+    Asserting the wiring here means the omission fails a test instead of
+    shipping as apparent protection.
+    """
+    from pathlib import Path
+
+    source = Path(__file__).with_name("apis.py").read_text()
+    assert "resume_missing_lens_reviews(" in source, (
+        "resume_missing_lens_reviews is never called from apis.py — the sweep "
+        "would never run in production"
+    )
+    # It must sit in the periodic loop beside its siblings, not somewhere that
+    # runs once and never again.
+    assert "resume_stalled_reviews(" in source
+    assert source.index("resume_stalled_reviews(") < source.index(
+        "resume_missing_lens_reviews("
+    ), "ordering: the missing-lens pass runs after the stalled pass"

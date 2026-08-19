@@ -332,6 +332,21 @@ def select_expectation_agents(
     return out
 
 
+def lens_by_name(name: str) -> "Lens | None":
+    """The panel lens whose label matches *name*, or None.
+
+    ateles#431. The missing-lens sweep knows only the label Vanellus printed in
+    its aggregation ("security"), and needs the Lens to resolve the agent and
+    provider. Returning None for an unknown label keeps the sweep from
+    inventing a dispatch target.
+    """
+    wanted = (name or "").strip().lower()
+    for lens in LENSES:
+        if lens.lens.lower() == wanted:
+            return lens
+    return None
+
+
 def resolve_lens_provider(
     lens: Lens, available_providers: set[str] | None = None
 ) -> str | None:

@@ -81,6 +81,7 @@ from review_learning import (
 from review_panel import (
     LENSES,
     Lens,
+    lens_by_name,
     resolve_lens_provider,
     select_expectation_agents,
     select_panel,
@@ -1270,6 +1271,11 @@ class SwarmDispatcher:
         # that could permanently suppress a PR the swarm should retry.
         self._stall_retries: dict[str, int] = {}
         self._stall_escalated: dict[str, bool] = {}
+        # ateles#431. Per-lens, not per-PR: a PR can be held on one absent lens,
+        # recover, and later be held on a different one — a shared counter would
+        # carry the first lens's exhaustion onto the second and silently skip it.
+        self._missing_lens_retries: dict[str, dict[str, int]] = {}
+        self._missing_lens_escalated: dict[str, set[str]] = {}
 
     async def handle_trigger(self, trigger: SwarmTrigger) -> None:
         """Entry point handed to the webhook gateway. Never raises."""
@@ -1937,6 +1943,210 @@ class SwarmDispatcher:
             elif _VANELLUS_COMMENT_MARKER in body:
                 latest_iso = None
         return latest_iso is not None
+
+    async def _redispatch_missing_lens(
+        self, repository: str, pr: dict, lens_name: str
+    ) -> None:
+        """Run ONE panel lens against the PR's current head and post its verdict.
+
+        ateles#431. Deliberately not ``_handle_pr``: re-running the whole panel
+        re-derives verdicts that already landed, costs four agent runs to obtain
+        one, and (before #430) could republish a stale aggregation over a
+        current one.
+
+        Raises on failure so the caller counts it and the bounded retry applies.
+        """
+        lens = lens_by_name(lens_name)
+        if lens is None:
+            raise ValueError(
+                f"no panel lens named '{lens_name}' — refusing to guess a "
+                "dispatch target"
+            )
+
+        number = int(pr.get("number"))
+        trigger = SwarmTrigger(
+            kind="pr_synchronize",
+            repository=repository,
+            number=number,
+            title=pr.get("title", ""),
+            body=pr.get("body") or "",
+            author=(pr.get("user") or {}).get("login", ""),
+            html_url=pr.get("html_url", ""),
+            delivery_id=f"missing-lens-{lens_name}-{number}",
+            action="synchronize",
+            head_ref=(pr.get("head") or {}).get("ref", ""),
+            base_ref=(pr.get("base") or {}).get("ref", ""),
+        )
+
+        # The qa lens authors and runs an eval, so it needs a writable checkout;
+        # every other lens is diff-only. Same treatment as the panel loop.
+        worktree: str | None = None
+        if lens.agent == "phoenicurus":
+            worktree = await prepare_pr_worktree(repository, number, lens.agent)
+        try:
+            result = await run_skill(
+                lens.agent,
+                self._panelist_prompt(
+                    trigger, lens, "", None, has_worktree=bool(worktree)
+                ),
+                github_token=_token_for_agent_on_repo(lens.agent, repository),
+                include_github_contract=True,
+                notifier=self.notifier,
+                cwd=worktree,
+                provider=resolve_lens_provider(
+                    lens, available_providers=usable_providers()
+                ),
+            )
+        finally:
+            await cleanup_pr_worktree(worktree)
+
+        if not result.ok:
+            raise RuntimeError(
+                f"lens '{lens_name}' run failed: "
+                f"{result.error or f'rc={result.returncode}'}"
+            )
+
+        # Post the verdict as a review:<lens> comment so Vanellus can aggregate
+        # it. Without this the lens has run and the aggregation still cannot see
+        # it — the same "produced a result nothing consumes" failure this sweep
+        # exists to fix.
+        await self._post_missing_panel_comments(
+            trigger, [(lens.lens, result.stdout)], {lens.lens: lens.agent}
+        )
+
+    async def resume_missing_lens_reviews(self, repositories: list[str]) -> dict:
+        """Re-dispatch a lens that never answered on an otherwise-clear panel.
+
+        ateles#431. The third recovery sweep, targeting a state the other two
+        cannot see: the panel RAN, Vanellus aggregated ``Blocking: 0``, and merge
+        is withheld solely because a declared lens produced no verdict.
+
+        Observed on neotoma#2153 (2026-08-19): pm APPROVE, arch SIGNED_OFF, ux
+        COMMENT, security NOT RECEIVED. The hold is correct — a green
+        ``security_gates`` CI check is an automated gate, not the security
+        lens's judgement, and absence must never be read as clear. But nothing
+        re-ran the absent lens, so a content-clear PR sat with no mechanism
+        watching it:
+
+          * ``lenses_missing_comments`` reposts a CAPTURED verdict whose comment
+            failed to land; there is nothing to repost when none was produced.
+          * ``resume_stalled_reviews`` requires ZERO reviews — #2153 had four.
+          * ``resume_deferred_reviews`` needs a marker the missing lens never
+            wrote.
+          * an author push is no help: the code is already clear.
+
+        Re-dispatches ONLY the missing lens, never ``_handle_pr``. Re-running the
+        whole panel would re-derive verdicts that already landed and, before
+        #430, could republish a stale aggregation.
+
+        Bounded and escalate-once, mirroring ``resume_stalled_reviews``: a lens
+        that cannot run will not start working on the twentieth attempt, and
+        silent infinite retry is how a real defect stays invisible. Fail-open
+        throughout — a broken sweep must never stop the loop.
+        """
+        summary = {"scanned": 0, "resumed": 0, "escalated": 0, "failed": 0}
+        max_retries = int(os.environ.get("APIS_MISSING_LENS_MAX_RETRIES", "3"))
+
+        for repository in repositories:
+            try:
+                candidates = await self._prs_with_missing_lens(repository)
+            except Exception as exc:
+                log.warning(
+                    f"[{DAEMON_NAME}] missing-lens sweep: could not scan "
+                    f"{repository} ({exc}) — skipping"
+                )
+                continue
+
+            for pr, lenses in candidates:
+                number = int(pr.get("number"))
+                ref = f"{repository}#{number}"
+                summary["scanned"] += len(lenses)
+                escalated = self._missing_lens_escalated.setdefault(ref, set())
+                per_lens = self._missing_lens_retries.setdefault(ref, {})
+
+                for lens in lenses:
+                    if lens in escalated:
+                        continue
+                    attempts = per_lens.get(lens, 0)
+
+                    if attempts >= max_retries:
+                        log.error(
+                            f"[{DAEMON_NAME}] missing-lens sweep: {ref} lens "
+                            f"'{lens}' still produced no verdict after "
+                            f"{attempts} re-dispatches — not retrying."
+                        )
+                        self.notifier.send(
+                            f"🔴 {ref}: the '{lens}' lens has produced no verdict "
+                            f"after {attempts} automatic re-dispatches. The panel "
+                            "is otherwise clear (Blocking: 0), so merge is held "
+                            "only on this. A green CI gate is NOT a substitute — "
+                            "the lens verdict is still required.",
+                            priority=Priority.BLOCKER,
+                        )
+                        escalated.add(lens)
+                        summary["escalated"] += 1
+                        continue
+
+                    log.warning(
+                        f"[{DAEMON_NAME}] missing-lens sweep: {ref} is clear "
+                        f"(Blocking: 0) but lens '{lens}' never reported — "
+                        f"re-dispatching it (attempt {attempts + 1}/{max_retries})"
+                    )
+                    per_lens[lens] = attempts + 1
+                    try:
+                        await self._redispatch_missing_lens(repository, pr, lens)
+                        summary["resumed"] += 1
+                    except Exception as exc:
+                        summary["failed"] += 1
+                        log.error(
+                            f"[{DAEMON_NAME}] missing-lens sweep: {ref} lens "
+                            f"'{lens}' re-dispatch failed ({exc})",
+                            exc_info=True,
+                        )
+        return summary
+
+    async def _prs_with_missing_lens(
+        self, repository: str
+    ) -> list[tuple[dict, list[str]]]:
+        """Open PRs whose LATEST aggregation is clear but names an absent lens.
+
+        Reads the newest aggregation via ``latest_aggregation_comment`` over the
+        fully-paged comment list (#430) — reading the oldest would resurrect a
+        long-settled hold and re-dispatch a lens that has since reported.
+        """
+        list_url = f"https://api.github.com/repos/{repository}/pulls"
+        out: list[tuple[dict, list[str]]] = []
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                list_url,
+                params={"state": "open", "per_page": 50},
+                headers=self._github_headers(repository),
+            )
+            resp.raise_for_status()
+            for pr in resp.json():
+                if pr.get("draft"):
+                    continue
+                number = int(pr.get("number"))
+                try:
+                    comments = await self._all_issue_comments(
+                        repository, number, client
+                    )
+                except Exception as exc:
+                    log.warning(
+                        f"[{DAEMON_NAME}] missing-lens sweep: could not read "
+                        f"comments on {repository}#{number} ({exc}) — skipping"
+                    )
+                    continue
+                latest = latest_aggregation_comment(comments)
+                if not latest:
+                    continue
+                body = latest.get("body") or ""
+                if not is_missing_lens_candidate(body):
+                    continue
+                lenses = parse_not_received_lenses(body)
+                if lenses:
+                    out.append((pr, lenses))
+        return out
 
     async def _prs_with_stalled_review(
         self, repository: str, now: datetime, stall_after_seconds: int
