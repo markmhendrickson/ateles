@@ -863,6 +863,43 @@ def compose_fallback_comment(lens: str, agent: str, text: str) -> str:
 # dispatcher can detect whether the comment landed (dedup / missing-check).
 _VANELLUS_COMMENT_MARKER = "<!-- vanellus-aggregation -->"
 
+# Page cap for the comment scan (ateles#430). 50 pages = 5000 comments, far
+# beyond any real PR; it exists so a pathological thread cannot spin the loop,
+# and it logs when hit rather than truncating silently.
+_MAX_COMMENT_PAGES = 50
+
+
+def latest_aggregation_comment(comments: list[dict]) -> dict | None:
+    """Return the NEWEST Vanellus aggregation comment, or None if there is none.
+
+    ateles#430. GitHub's issue-comments endpoint SILENTLY IGNORES ``sort`` and
+    ``direction`` — it always returns oldest-first. Two call sites here passed
+    ``sort=created&direction=desc``, believed the response was newest-first, and
+    ``return``ed on the first marker match. On any PR with more than one
+    aggregation they therefore read the OLDEST verdict.
+
+    On neotoma#2153 that republished a nine-day-old ``REQUEST_CHANGES`` over a
+    current ``COMMENT / Blocking: 0``. The same bug in ``_pr_review_is_clear``
+    is worse, because it gates merges and fails UNSAFE: an early ``APPROVE``
+    superseded by a later ``REQUEST_CHANGES`` would read as clear and the PR
+    would merge on a withdrawn approval.
+
+    Selection is therefore client-side and never positional: collect every
+    marker-bearing comment, then take max ``created_at``, tie-breaking on max
+    ``id`` (monotonic per repo). Callers must page the full comment list before
+    calling — with >100 comments the newest aggregation can sit on a later page,
+    and sorting only what you fetched cannot find what was never returned.
+    """
+    candidates = [
+        c for c in comments if _VANELLUS_COMMENT_MARKER in (c.get("body") or "")
+    ]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda c: (str(c.get("created_at") or ""), int(c.get("id") or 0)),
+    )
+
 
 def vanellus_comment_missing(comment_bodies: list[str]) -> bool:
     """Return True when no Vanellus aggregation comment has landed on the PR.
@@ -1808,6 +1845,11 @@ class SwarmDispatcher:
             # dispatch. Same "false negative costs a delay" bias as the caller.
             return True
         latest_iso = None
+        # ateles#430 audit: this scan is CORRECT and must stay last-write-wins.
+        # GitHub returns issue comments oldest-first, so the final assignment is
+        # the newest marker. Do NOT "optimise" this into an early return on the
+        # first match — that is exactly the bug #430 fixed at the two sites that
+        # did so. The ordering assumption is the same; the traversal is not.
         for c in cresp.json():
             body = c.get("body", "")
             m = self._REVIEW_DEFERRED_RE.search(body)
@@ -3727,24 +3769,22 @@ class SwarmDispatcher:
         if verdict is not None:
             return verdict, False
 
-        url = (
-            f"https://api.github.com/repos/{t.repository}/issues/"
-            f"{t.number}/comments"
-        )
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(
-                    url,
-                    params={"per_page": 100, "sort": "created", "direction": "desc"},
-                    headers=self._github_headers(t.repository),
+                # ateles#430: page the full list, then select the NEWEST
+                # aggregation client-side. GitHub ignores sort/direction here,
+                # so position in the response says nothing about recency.
+                comments = await self._all_issue_comments(
+                    t.repository, t.number, client
                 )
-                resp.raise_for_status()
-                # Newest-first, mirroring _pr_review_is_clear: honour the LATEST
-                # aggregation, and scan past non-Vanellus comments to find it.
-                for comment in resp.json():
-                    body = comment.get("body", "")
-                    if _VANELLUS_COMMENT_MARKER not in body:
-                        continue
+                candidates = [
+                    c
+                    for c in comments
+                    if _VANELLUS_COMMENT_MARKER in (c.get("body") or "")
+                ]
+                comment = latest_aggregation_comment(comments)
+                if comment is not None:
+                    body = comment.get("body") or ""
                     fallback_verdict = parse_review_verdict(body)
                     if fallback_verdict is None:
                         # Marker present but no token — a prose-only aggregation.
@@ -3758,7 +3798,10 @@ class SwarmDispatcher:
                     log.info(
                         f"[{DAEMON_NAME}] {t.repository}#{t.number}: stdout had no "
                         f"verdict token — recovered {fallback_verdict!r} from the "
-                        "Vanellus aggregation comment (fallback fired)"
+                        "Vanellus aggregation comment (fallback fired) "
+                        f"[comment id={comment.get('id')} "
+                        f"created_at={comment.get('created_at')} "
+                        f"of {len(candidates)} candidate(s)]"
                     )
                     return fallback_verdict, True
                 log.warning(
@@ -3775,30 +3818,31 @@ class SwarmDispatcher:
     async def _pr_review_is_clear(self, repository: str, pr_number: int) -> bool:
         """True when the latest Vanellus aggregation on the PR is a clear verdict.
 
-        Reads the PR's comments NEWEST-FIRST (sort=created&direction=desc) and
-        returns the verdict of the first Vanellus-aggregation marker found — so
-        the latest verdict is honoured even on a PR with >100 comments (the
-        marker would otherwise sit on a later page of an oldest-first scan and be
-        missed). Fail-closed (False) on any error — we must never claim
-        merge-ready off a failed read.
+        Pages the PR's full comment list and selects the newest aggregation
+        CLIENT-SIDE by ``created_at`` (ateles#430). The previous implementation
+        passed ``sort=created&direction=desc`` and returned the first marker
+        match, believing that was newest-first. GitHub ignores both parameters
+        on this endpoint, so it read the OLDEST aggregation.
+
+        That failed UNSAFE on the one path where it matters most: an early
+        ``APPROVE`` superseded by a later ``REQUEST_CHANGES`` read as clear, and
+        the PR would merge on an approval the panel had already withdrawn.
+
+        Still fail-closed (False) on any error, and now also False when the page
+        cap is hit without finding a marker — never claim merge-ready off a read
+        that may have missed the verdict.
         """
-        url = (
-            f"https://api.github.com/repos/{repository}/issues/"
-            f"{pr_number}/comments"
-        )
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(
-                    url,
-                    params={"per_page": 100, "sort": "created", "direction": "desc"},
-                    headers=self._github_headers(repository),
+                comments = await self._all_issue_comments(
+                    repository, pr_number, client
                 )
-                resp.raise_for_status()
-                for comment in resp.json():  # newest-first
-                    body = comment.get("body", "")
-                    if _VANELLUS_COMMENT_MARKER in body:
-                        return review_verdict_is_clear(parse_review_verdict(body))
-                return False
+                comment = latest_aggregation_comment(comments)
+                if comment is None:
+                    return False
+                return review_verdict_is_clear(
+                    parse_review_verdict(comment.get("body") or "")
+                )
         except Exception as exc:
             log.warning(
                 f"[{DAEMON_NAME}] {repository}#{pr_number}: review-verdict read "
@@ -3870,6 +3914,51 @@ class SwarmDispatcher:
                 "continuing; this check must never block startup"
             )
             return []
+    async def _all_issue_comments(
+        self, repository: str, number: int, client: httpx.AsyncClient
+    ) -> list[dict]:
+        """Every comment on an issue/PR, following pagination to the last page.
+
+        ateles#430. Paging is not optional here: the newest aggregation is what
+        both callers need, and on a PR with >100 comments it sits on a later
+        page. Selecting the max over a truncated first page cannot find a
+        comment that was never returned — which is exactly the >100-comment case
+        ``_pr_review_is_clear``'s old docstring claimed ``direction=desc``
+        protected it from, using a parameter GitHub ignores.
+
+        Raises on HTTP error so each caller keeps its own established failure
+        posture (the fallback path degrades to "no verdict"; the merge gate
+        fails closed).
+        """
+        url = (
+            f"https://api.github.com/repos/{repository}/issues/{number}/comments"
+        )
+        out: list[dict] = []
+        page = 1
+        while page <= _MAX_COMMENT_PAGES:
+            resp = await client.get(
+                url,
+                params={"per_page": 100, "page": page},
+                headers=self._github_headers(repository),
+            )
+            resp.raise_for_status()
+            batch = resp.json()
+            if not batch:
+                break
+            out.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        else:
+            # Ran the page cap without a short page. Log rather than silently
+            # truncating: a bounded scan that hides its own bound is how the
+            # >100-comment gap stayed invisible in the first place.
+            log.warning(
+                f"[{DAEMON_NAME}] {repository}#{number}: comment scan hit the "
+                f"{_MAX_COMMENT_PAGES}-page cap ({len(out)} comments) — the "
+                "newest aggregation may lie beyond it"
+            )
+        return out
 
     async def _fetch_pr(self, repository: str, pr_number: int) -> dict | None:
         """Fetch a PR object from the GitHub API; None on error (fail-open)."""
