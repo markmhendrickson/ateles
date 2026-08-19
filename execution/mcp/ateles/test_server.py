@@ -736,12 +736,37 @@ class TestListCheckpoints(unittest.TestCase):
 
 class TestToolSchemas(unittest.TestCase):
 
-    def test_four_tools_defined(self):
-        self.assertEqual(len(srv.TOOLS), 4)
+    ACTION_TOOLS = {"get_swarm_roster", "route_task", "list_checkpoints", "resolve_checkpoint"}
+    # Read-only swarm observability. resolve_checkpoint stays the ONLY mutating
+    # tool: see the self-certification boundary note in server.py — a session
+    # must not be able to advance its own gate.
+    OBSERVABILITY_TOOLS = {"get_gate_status", "list_pipeline_queue", "get_dispatch_health"}
+
+    def test_tools_defined(self):
+        self.assertEqual(len(srv.TOOLS), len(self.ACTION_TOOLS | self.OBSERVABILITY_TOOLS))
 
     def test_tool_names(self):
         names = {t.name for t in srv.TOOLS}
-        self.assertEqual(names, {"get_swarm_roster", "route_task", "list_checkpoints", "resolve_checkpoint"})
+        self.assertEqual(names, self.ACTION_TOOLS | self.OBSERVABILITY_TOOLS)
+
+    def test_observability_tools_are_read_only(self):
+        """Guards the boundary, not just the wiring.
+
+        If a future tool starts writing gate state, this test should be the
+        thing that objects. _correct is the only write path in this server.
+        """
+        import inspect
+        for name in self.OBSERVABILITY_TOOLS:
+            fn = srv.TOOL_HANDLERS[name]
+            chain = inspect.getsource(fn)
+            for impl in ("_get_gate_status", "_list_pipeline_queue", "_get_dispatch_health"):
+                if impl in chain:
+                    chain += inspect.getsource(getattr(srv, impl))
+            self.assertNotIn("_correct(", chain, f"{name} must not write to Neotoma")
+
+    def test_get_gate_status_requires_issue_ref(self):
+        t = next(t for t in srv.TOOLS if t.name == "get_gate_status")
+        self.assertIn("issue_ref", t.inputSchema["required"])
 
     def test_route_task_requires_description(self):
         rt = next(t for t in srv.TOOLS if t.name == "route_task")
@@ -755,6 +780,110 @@ class TestToolSchemas(unittest.TestCase):
     def test_all_handlers_registered(self):
         for tool in srv.TOOLS:
             self.assertIn(tool.name, srv.TOOL_HANDLERS)
+
+
+class TestSwarmObservability(unittest.TestCase):
+    """Parsing/classification logic behind the read-only observability tools.
+
+    Each case here is a bug that actually occurred while building them, not a
+    hypothetical.
+    """
+
+    def test_parse_issue_ref_forms(self):
+        self.assertEqual(srv._parse_issue_ref("owner/repo#123"), ("owner/repo", 123, None))
+        self.assertEqual(srv._parse_issue_ref("ent_abc123"), (None, None, "ent_abc123"))
+        self.assertEqual(srv._parse_issue_ref("garbage"), (None, None, None))
+        self.assertEqual(srv._parse_issue_ref("owner/repo#notanumber"), (None, None, None))
+        self.assertEqual(srv._parse_issue_ref(""), (None, None, None))
+
+    def test_issue_match_tolerates_field_spellings(self):
+        """Prod entities disagree on field names; matching one spelling misses the rest."""
+        for number_field in ("issue_number", "github_number", "number"):
+            for repo_field in ("repo", "repository"):
+                snap = {repo_field: "o/r", number_field: 2169}
+                self.assertTrue(srv._issue_snapshot_matches(snap, "o/r", 2169))
+        self.assertFalse(srv._issue_snapshot_matches({"repo": "o/other", "number": 2169}, "o/r", 2169))
+
+    def test_blocking_gates_treats_absent_gate_as_unsigned(self):
+        """A gate missing from the map is unsigned, not cleared (the 2026-07-23 waive bug)."""
+        self.assertIn("arch", srv._blocking_gates({"pm": "signed_off"}))
+        self.assertEqual(
+            srv._blocking_gates(
+                {"pm": "signed_off", "ux": "not_required", "arch": "pending",
+                 "impl": "signed_off", "pr_review": "signed_off"}
+            ),
+            ["arch"],
+        )
+        self.assertEqual(
+            srv._blocking_gates(
+                {"pm": "signed_off", "ux": "not_required", "arch": "waived",
+                 "impl": "signed_off", "pr_review": "signed_off"}
+            ),
+            [],
+        )
+
+    def test_blocking_gates_reports_unknown_gates(self):
+        """A newly-added gate must not be invisible just because it is unknown here."""
+        self.assertIn("newgate", srv._blocking_gates({"newgate": "pending"}))
+
+    def test_owner_history_parses_list_and_json_string(self):
+        self.assertEqual(srv._parse_owner_history([{"a": 1}]), [{"a": 1}])
+        self.assertEqual(srv._parse_owner_history('[{"a": 1}]'), [{"a": 1}])
+        self.assertEqual(srv._parse_owner_history("not json"), [])
+        self.assertEqual(srv._parse_owner_history(None), [])
+
+    def test_owner_history_dedupes(self):
+        """neotoma#2169 stores its init and sign-off entries twice."""
+        entry = {"action": "signed_off", "agent": "vanellus"}
+        self.assertEqual(len(srv._dedupe_history([entry, dict(entry), {"action": "x"}])), 2)
+
+    def test_pipeline_marker_regex_matches_daemon_format(self):
+        """Must accept isoformat's '+00:00' and an absent stage suffix.
+
+        A regex that only allowed 'Z' would fail to match markers the daemon
+        actually writes — the exact trap called out in swarm_dispatch.py.
+        """
+        m = srv._PIPELINE_MARKER_RE.search(
+            "<!-- apis-pipeline-inflight:2026-08-19T11:17:21.937497+00:00:queued -->"
+        )
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(2), "queued")
+        legacy = srv._PIPELINE_MARKER_RE.search(
+            "<!-- apis-pipeline-inflight:2026-08-19T08:00:00.123456+00:00 -->"
+        )
+        self.assertIsNotNone(legacy)
+        self.assertIsNone(legacy.group(2))
+
+    def test_pipeline_state_ages_out_stale_markers(self):
+        """A marker whose clear failed must not read as a running pipeline."""
+        old = "2020-01-01T00:00:00+00:00"
+        srv._pipeline_markers  # noqa: B018
+        orig = srv._pipeline_markers
+        try:
+            srv._pipeline_markers = lambda repo, number: [
+                {"started_at": old, "stage": "inflight", "comment_id": 1}
+            ]
+            state = srv._pipeline_state_for("o/r", 1)
+            self.assertEqual(state["stage"], "stale")
+            self.assertEqual(state["reported_stage"], "inflight")
+        finally:
+            srv._pipeline_markers = orig
+
+    def test_pipeline_state_absent_marker_is_not_finished(self):
+        orig = srv._pipeline_markers
+        try:
+            srv._pipeline_markers = lambda repo, number: []
+            self.assertIsNone(srv._pipeline_state_for("o/r", 1)["stage"])
+        finally:
+            srv._pipeline_markers = orig
+
+    def test_bare_repo_name_is_not_queried(self):
+        """'ateles' is not addressable on the API and only yields 404 noise."""
+        self.assertEqual(srv._pipeline_markers("ateles", 272), [])
+
+    def test_get_gate_status_rejects_unparseable_ref(self):
+        out = srv._get_gate_status("garbage")
+        self.assertIn("error", out)
 
 
 if __name__ == "__main__":

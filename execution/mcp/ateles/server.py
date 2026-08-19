@@ -25,7 +25,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -529,6 +534,627 @@ def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
     }
 
 
+# ── Swarm observability (read-only) ──────────────────────────────────────────
+#
+# These three tools answer "is the swarm going to continue this?" — the question
+# that on 2026-08-19 required hand-retrieving an issue entity, grepping
+# apis.log, running launchctl, then grepping the log again to discover a queue
+# of six pipelines behind one serialized slot.
+#
+# READ-ONLY BY CONSTRUCTION. None of them writes gate state. Advancing a gate
+# from a session would let a session sign off its own work — precisely the
+# SELF-CERTIFICATION BOUNDARY the dispatcher maintains (ateles#230 arch §4, and
+# the boundary comment in execution/daemons/apis/swarm_dispatch.py, where even
+# a re-review never writes a gate: only the lens agent that owns a gate flips
+# it). Visibility is the safe half and is where nearly all the value is; if a
+# mutating counterpart is ever added it belongs behind the operator-approval
+# path resolve_checkpoint already uses, not as a free-form gate setter.
+
+# Gate order used for reporting. Mirrors the pre-impl → impl → review ordering
+# the dispatcher enforces; an absent gate is unsigned, not cleared.
+_GATE_ORDER = ("pm", "ux", "arch", "impl", "pr_review")
+
+# States that count as "this gate is not waiting on anyone".
+_CLEARED_GATE_STATES = {"signed_off", "not_required", "waived"}
+
+
+def _parse_issue_ref(issue_ref: str) -> tuple[str | None, int | None, str | None]:
+    """Split "owner/repo#123" into (repo, number, entity_id).
+
+    An "ent_..." value is returned as an entity id instead. Returns all-None
+    components it cannot parse, so the caller reports a usable error rather
+    than silently querying for nothing.
+    """
+    ref = (issue_ref or "").strip()
+    if not ref:
+        return None, None, None
+    if ref.startswith("ent_"):
+        return None, None, ref
+    if "#" in ref:
+        repo, _, num = ref.partition("#")
+        repo = repo.strip()
+        num = num.strip()
+        if repo and num.isdigit():
+            return repo, int(num), None
+    return None, None, None
+
+
+def _issue_snapshot_matches(snap: dict, repo: str, number: int) -> bool:
+    """True when *snap* is the issue entity for ``repo#number``.
+
+    Tolerates the duplicated field names seen in prod — ``repo``/``repository``
+    and ``issue_number``/``github_number``/``number`` — the same tolerance
+    execution/daemons/apis/gate_waive.py needs. Matching on only one spelling
+    silently misses entities that use the other.
+    """
+    snap_repo = snap.get("repo") or snap.get("repository") or ""
+    if str(snap_repo) != str(repo):
+        return False
+    for key in ("issue_number", "github_number", "number"):
+        value = snap.get(key)
+        if value is not None and str(value) == str(number):
+            return True
+    return False
+
+
+def _parse_owner_history(raw: Any) -> list[dict]:
+    """Normalize a stored ``owner_history`` into a list of dicts.
+
+    Prod stores this as either a list or a JSON-encoded string; mirrors
+    gate_waive.parse_owner_history.
+    """
+    if isinstance(raw, list):
+        return [e for e in raw if isinstance(e, dict)]
+    if isinstance(raw, str) and raw.strip():
+        try:
+            decoded = json.loads(raw)
+        except (ValueError, TypeError):
+            return []
+        if isinstance(decoded, list):
+            return [e for e in decoded if isinstance(e, dict)]
+    return []
+
+
+def _dedupe_history(entries: list[dict]) -> list[dict]:
+    """Drop exact duplicate history entries, preserving order.
+
+    Real entities carry them: ent_d03638842effc4f76ea05a1a (neotoma#2169) has
+    its legacy_gate_init and pr_review sign-off recorded twice, so a naive
+    "last 3" would report one event as three.
+    """
+    seen: set[str] = set()
+    out: list[dict] = []
+    for entry in entries:
+        key = json.dumps(entry, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(entry)
+    return out
+
+
+def _blocking_gates(gate_status: dict) -> list[str]:
+    """Gates that are not cleared, in gate order.
+
+    A total function over _GATE_ORDER: a gate missing from *gate_status* is
+    unsigned, not cleared. (The 2026-07-23 waive regression came from iterating
+    the stored map instead of the full gate list.) Unknown extra gates are
+    appended so a newly-added gate is never invisible here.
+    """
+    out = [g for g in _GATE_ORDER if str(gate_status.get(g, "")).strip().lower() not in _CLEARED_GATE_STATES]
+    out += [
+        g for g in sorted(gate_status)
+        if g not in _GATE_ORDER
+        and str(gate_status.get(g, "")).strip().lower() not in _CLEARED_GATE_STATES
+    ]
+    return out
+
+
+def _get_gate_status(issue_ref: str, history_limit: int = 5) -> dict:
+    repo, number, entity_id = _parse_issue_ref(issue_ref)
+    if not entity_id and not repo:
+        return {
+            "error": (
+                f"could not parse issue_ref '{issue_ref}' — expected "
+                "'owner/repo#123' or an 'ent_...' entity id"
+            )
+        }
+
+    entity: dict | None = None
+    if entity_id:
+        entity = _get(f"/entities/{entity_id}")
+        if entity is None:
+            return {
+                "error": f"issue entity {entity_id} not found or Neotoma unreachable",
+                "transport_error": _describe_transport_error(),
+            }
+    else:
+        # Field names vary per entity (repo/repository, issue_number/
+        # github_number), so the match is client-side. But an UNFILTERED scan is
+        # not enough on its own: the issue set exceeds the page limit, and
+        # neotoma#2169 sits past the first 500 rows — a plain scan reported
+        # "no issue entity found" for an issue that plainly exists. Query by
+        # number first (which does reach it), then fall back to the broad scan
+        # for entities the search index does not surface.
+        candidates = _retrieve_entities("issue", search=str(number), limit=100)
+        for ent in candidates:
+            if _issue_snapshot_matches(_snapshot_of(ent), repo or "", number or 0):
+                entity = ent
+                break
+        if entity is None:
+            for ent in _retrieve_entities("issue", limit=500):
+                if _issue_snapshot_matches(_snapshot_of(ent), repo or "", number or 0):
+                    entity = ent
+                    break
+        if entity is None:
+            err = _describe_transport_error()
+            return {
+                "error": (
+                    f"no issue entity found for {issue_ref}"
+                    if not err
+                    else f"could not read issue entities for {issue_ref}"
+                ),
+                # Distinguishing these matters: "no entity" invites creating
+                # one, "transport failed" invites a retry or an escalation.
+                "transport_error": err,
+            }
+
+    snap = _snapshot_of(entity)
+    eid = entity.get("entity_id", entity.get("id", ""))
+
+    gate_status = snap.get("gate_status") or {}
+    if isinstance(gate_status, str):
+        try:
+            gate_status = json.loads(gate_status)
+        except (ValueError, TypeError):
+            gate_status = {}
+    if not isinstance(gate_status, dict):
+        gate_status = {}
+
+    history = _dedupe_history(_parse_owner_history(snap.get("owner_history")))
+    # Stored oldest-first; the recent entries are the ones that explain "who
+    # has it now and why".
+    recent = history[-history_limit:] if history_limit > 0 else history
+
+    blocking = _blocking_gates(gate_status)
+    repo_name = str(snap.get("repo") or snap.get("repository") or "")
+    number_val = snap.get("github_number") or snap.get("issue_number") or snap.get("number")
+
+    pipeline = _pipeline_state_for(repo_name, number_val)
+
+    return {
+        "entity_id": eid,
+        "issue_ref": f"{repo_name}#{number_val}" if repo_name and number_val else issue_ref,
+        "title": snap.get("title", ""),
+        "status": snap.get("status", ""),
+        "github_url": snap.get("github_url", ""),
+        "current_owner": snap.get("current_owner", ""),
+        "gate_status": gate_status,
+        "blocking_gates": blocking,
+        "all_gates_cleared": not blocking,
+        "owner_history_recent": recent,
+        "owner_history_total": len(history),
+        "pipeline": pipeline,
+        "interpretation": _gate_interpretation(snap, blocking, pipeline),
+    }
+
+
+def _gate_interpretation(snap: dict, blocking: list[str], pipeline: dict) -> str:
+    """One line answering "is the swarm going to continue this?".
+
+    Deliberately conservative: it reports what the records show and never
+    promises the swarm will act.
+    """
+    owner = str(snap.get("current_owner") or "").strip()
+    if str(snap.get("status", "")).strip().lower() == "closed":
+        return "issue is closed"
+    stage = pipeline.get("stage")
+    if stage == "queued":
+        return (
+            "a pipeline is QUEUED for this issue — waiting on the issue-pipeline "
+            "slot, not on a gate"
+        )
+    if stage == "inflight":
+        return "a pipeline is INFLIGHT for this issue"
+    if not blocking:
+        return "all gates cleared — nothing gate-blocked here"
+    gates = ", ".join(blocking)
+    if owner:
+        return f"waiting on {owner} for gate(s): {gates}"
+    return f"waiting on gate(s): {gates} (no current_owner recorded)"
+
+
+# Marker the dispatcher posts on the issue before/inside the pipeline slot.
+# Format and regex mirror swarm_dispatch._PIPELINE_INFLIGHT_MARKER — the
+# timestamp group must accept "+" and ":" because datetime.isoformat() emits
+# "+00:00" rather than "Z". The stage group is optional so markers written by
+# an older daemon build (no stage suffix) still parse, defaulting to inflight.
+_PIPELINE_MARKER_RE = re.compile(
+    r"<!-- apis-pipeline-inflight:([0-9T:.+\-]+Z?)(?::(queued|inflight))? -->"
+)
+
+GITHUB_API = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+
+# Bound + parallelism for the queue sweep: one GitHub request per candidate.
+_PIPELINE_QUEUE_SCAN_LIMIT = int(os.environ.get("ATELES_PIPELINE_QUEUE_SCAN_LIMIT", "60"))
+_PIPELINE_QUEUE_WORKERS = int(os.environ.get("ATELES_PIPELINE_QUEUE_WORKERS", "12"))
+
+# Markers older than this are reported as stale rather than inflight. A real
+# pipeline is minutes-to-hours; a marker surviving a day means its clear failed.
+_PIPELINE_MARKER_STALE_SECONDS = float(
+    os.environ.get("ATELES_PIPELINE_MARKER_STALE_SECONDS", str(6 * 3600))
+)
+
+
+def _github_headers() -> dict[str, str]:
+    token = (
+        os.environ.get("APIS_GITHUB_TOKEN")
+        or os.environ.get("GITHUB_TOKEN")
+        or os.environ.get("GH_TOKEN")
+        or ""
+    )
+    headers = {"Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _pipeline_markers(repo: str, number: Any) -> list[dict]:
+    """Return parsed pipeline markers on an issue, oldest first.
+
+    Reads the durable GitHub marker rather than the daemon log: the log is
+    local to the daemon host and rotates, while the marker is written before
+    the semaphore is acquired specifically so a queued pipeline leaves a trace
+    that survives a restart (ateles#323).
+    """
+    # A bare repo name ("ateles") is not addressable on the GitHub API and only
+    # yields 404 noise; require the owner/repo form.
+    if not repo or not number or "/" not in str(repo):
+        return []
+    try:
+        resp = httpx.get(
+            f"{GITHUB_API}/repos/{repo}/issues/{number}/comments",
+            headers=_github_headers(),
+            params={"per_page": 100},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        comments = resp.json()
+    except Exception as exc:
+        log.warning("github comments read failed for %s#%s: %s", repo, number, exc)
+        return []
+
+    markers: list[dict] = []
+    for comment in comments if isinstance(comments, list) else []:
+        match = _PIPELINE_MARKER_RE.search(str(comment.get("body") or ""))
+        if match:
+            markers.append({
+                "started_at": match.group(1),
+                "stage": match.group(2) or "inflight",
+                "comment_id": comment.get("id"),
+            })
+    return markers
+
+
+def _pipeline_state_for(repo: str, number: Any) -> dict:
+    """Latest pipeline marker state for one issue.
+
+    The dispatcher DELETES the marker when the pipeline finishes, so a marker
+    still present means queued or inflight. Absence is reported as "none"
+    rather than "finished": we cannot distinguish "completed" from "never
+    started" from this signal alone, and claiming the stronger reading would
+    be exactly the kind of confident-but-wrong status this tool exists to stop.
+    """
+    markers = _pipeline_markers(repo, number)
+    if not markers:
+        return {"stage": None, "detail": "no pipeline marker present (not queued or inflight)"}
+    latest = markers[-1]
+    waited = _age_seconds(latest.get("started_at"))
+    stage = latest.get("stage")
+
+    # A marker the daemon failed to delete outlives its pipeline. Real cases
+    # exist: markmhendrickson/neotoma#2073 carries a marker from 2026-08-04
+    # whose clear failed ("could not clear in-flight pipeline marker"), so a
+    # naive read reports a fortnight-old marker as a running pipeline. Age it
+    # out instead of asserting a pipeline that is certainly gone — reporting
+    # "inflight" for a dead run is worse than reporting nothing.
+    if waited is not None and waited > _PIPELINE_MARKER_STALE_SECONDS:
+        return {
+            "stage": "stale",
+            "reported_stage": stage,
+            "marked_at": latest.get("started_at"),
+            "seconds_since_marked": waited,
+            "detail": (
+                f"marker is {waited / 3600:.1f}h old (> "
+                f"{_PIPELINE_MARKER_STALE_SECONDS / 3600:.0f}h) — treating as STALE, "
+                "not as a running pipeline; the daemon likely failed to clear it"
+            ),
+        }
+    return {
+        "stage": stage,
+        "marked_at": latest.get("started_at"),
+        "seconds_since_marked": waited,
+        "detail": (
+            f"pipeline marker present at stage '{stage}'"
+            + (f", {waited:.0f}s ago" if waited is not None else "")
+        ),
+    }
+
+
+def _age_seconds(timestamp: str | None) -> float | None:
+    if not timestamp:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - ts).total_seconds()
+
+
+
+def _swarm_repositories() -> list[str]:
+    """Repos the dispatcher watches, as "owner/repo" strings.
+
+    Mirrors the daemon's own configuration key so this tool follows the swarm
+    rather than hardcoding a repo list that would silently rot.
+    """
+    raw = os.environ.get("APIS_SWARM_REPOSITORIES") or os.environ.get(
+        "APIS_RESUME_REPOSITORIES", ""
+    )
+    repos = [r.strip() for r in raw.replace(",", " ").split() if "/" in r.strip()]
+    if repos:
+        return repos
+    owner = os.environ.get("ATELES_GITHUB_OWNER", "markmhendrickson")
+    return [f"{owner}/ateles", f"{owner}/neotoma"]
+
+
+def _recent_open_issues(repo: str, limit: int) -> tuple[list[dict], bool]:
+    """Most recently updated OPEN issues for *repo*, newest first.
+
+    Returns (issues, more_available). Pull requests are filtered out: the
+    GitHub issues endpoint returns both, and only issues carry pipeline
+    markers.
+    """
+    try:
+        resp = httpx.get(
+            f"{GITHUB_API}/repos/{repo}/issues",
+            headers=_github_headers(),
+            params={
+                "state": "open",
+                "sort": "updated",
+                "direction": "desc",
+                "per_page": min(100, max(1, limit)),
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        log.warning("github issue list failed for %s: %s", repo, exc)
+        return [], False
+    issues = [
+        i for i in (payload if isinstance(payload, list) else [])
+        if isinstance(i, dict) and not i.get("pull_request") and i.get("number")
+    ]
+    return issues[:limit], len(issues) >= limit
+
+
+def _list_pipeline_queue() -> dict:
+    """What holds the issue-pipeline slot, and what is queued behind it.
+
+    The signal that was previously only discoverable by grepping apis.log.
+    Built from the durable per-issue markers across the open issue set, so it
+    reflects state the daemon actually committed rather than log lines that
+    may have rotated away.
+    """
+    # Candidate set comes from GITHUB, not from Neotoma issue entities.
+    #
+    # This is the correctness point of the whole tool. A newly-opened issue has
+    # no Neotoma entity yet — the entity is created later in the pipeline — so
+    # an entity-derived candidate list structurally misses the newest issues,
+    # which are exactly the ones most likely to be sitting in the queue.
+    # Observed directly: ateles#435 and #436 were both logged QUEUED by the
+    # daemon and both carried queued markers, while neither had an issue entity
+    # to be found by. GitHub is the authority on which issues are open.
+    repos = _swarm_repositories()
+    candidates: list[tuple[str, Any, dict]] = []
+    truncated = False
+    per_repo = max(1, _PIPELINE_QUEUE_SCAN_LIMIT // max(1, len(repos)))
+    for repo in repos:
+        issues, more = _recent_open_issues(repo, per_repo)
+        truncated = truncated or more
+        candidates.extend((repo, i["number"], i) for i in issues)
+
+    inflight: list[dict] = []
+    queued: list[dict] = []
+    stale: list[dict] = []
+    with ThreadPoolExecutor(max_workers=_PIPELINE_QUEUE_WORKERS) as pool:
+        futures = {
+            pool.submit(_pipeline_state_for, repo, number): (repo, number, issue)
+            for repo, number, issue in candidates
+        }
+        for future in as_completed(futures):
+            repo, number, issue = futures[future]
+            try:
+                state = future.result()
+            except Exception as exc:  # a single bad issue must not sink the sweep
+                log.warning("pipeline state read failed for %s#%s: %s", repo, number, exc)
+                continue
+            stage = state.get("stage")
+            if stage not in ("queued", "inflight", "stale"):
+                continue
+            row = {
+                "issue_ref": f"{repo}#{number}",
+                "title": issue.get("title", ""),
+                "html_url": issue.get("html_url", ""),
+                "marked_at": state.get("marked_at"),
+                "waited_seconds": state.get("seconds_since_marked"),
+            }
+            if stage == "stale":
+                row["reported_stage"] = state.get("reported_stage")
+                row["detail"] = state.get("detail")
+                stale.append(row)
+            elif stage == "inflight":
+                inflight.append(row)
+            else:
+                queued.append(row)
+    stale.sort(key=lambda r: r.get("waited_seconds") or 0, reverse=True)
+
+    queued.sort(key=lambda r: r.get("waited_seconds") or 0, reverse=True)
+    inflight.sort(key=lambda r: r.get("waited_seconds") or 0, reverse=True)
+
+    capacity = int(os.environ.get("APIS_MAX_CONCURRENT_ISSUE_PIPELINES", "3"))
+    longest = queued[0]["waited_seconds"] if queued else None
+
+    return {
+        "slot_capacity": capacity,
+        "inflight_count": len(inflight),
+        "queued_count": len(queued),
+        "inflight": inflight,
+        "queued": queued,
+        "stale_markers": stale,
+        "longest_wait_seconds": longest,
+        "issues_scanned": len(candidates),
+        "scan_truncated": truncated,
+        "interpretation": (
+            (
+                f"{len(inflight)} pipeline(s) holding the slot (capacity {capacity}), "
+                f"{len(queued)} queued behind"
+                + (f"; longest wait {longest:.0f}s" if longest else "")
+                if (inflight or queued)
+                else "no pipeline currently queued or inflight"
+            )
+            + (
+                f"; {len(stale)} stale marker(s) ignored (daemon failed to clear them)"
+                if stale
+                else ""
+            )
+            + (
+                f"; scan limited to the {len(candidates)} most recent open issues"
+                if truncated
+                else ""
+            )
+        ),
+        "note": (
+            "Built from the durable apis-pipeline-inflight markers on each open "
+            "issue. A marker requires a readable GitHub token; without one this "
+            "reports empty rather than wrong. Markers older than the staleness "
+            "threshold are listed under stale_markers, NOT counted as running."
+        ),
+    }
+
+
+def _get_dispatch_health() -> dict:
+    """Is the dispatcher alive, when did it last dispatch, what recently failed."""
+    log_dir = Path(
+        os.environ.get(
+            "ATELES_LOG_DIR", str(Path.home() / "Library" / "Logs" / "ateles")
+        )
+    )
+    apis_log = log_dir / "apis.log"
+    failure_dir = Path(
+        os.environ.get("DISPATCH_FAILURE_LOG_DIR", str(log_dir / "dispatch-failures"))
+    )
+
+    result: dict[str, Any] = {"log_path": str(apis_log)}
+
+    # launchd liveness. `launchctl list <label>` exits non-zero when unloaded.
+    label = os.environ.get("ATELES_APIS_LAUNCHD_LABEL", "com.ateles.apis")
+    result["launchd_label"] = label
+    try:
+        proc = subprocess.run(
+            ["launchctl", "list", label],
+            capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode == 0:
+            pid = None
+            last_exit = None
+            for line in proc.stdout.splitlines():
+                stripped = line.strip()
+                if stripped.startswith('"PID"'):
+                    pid = stripped.split("=")[-1].strip().rstrip(";").strip()
+                elif stripped.startswith('"LastExitStatus"'):
+                    last_exit = stripped.split("=")[-1].strip().rstrip(";").strip()
+            result["loaded"] = True
+            result["pid"] = pid
+            result["last_exit_status"] = last_exit
+            result["running"] = bool(pid and pid not in ("0", "-"))
+        else:
+            result["loaded"] = False
+            result["running"] = False
+            result["detail"] = f"launchctl list {label} exited {proc.returncode}"
+    except Exception as exc:
+        # Not fatal: the MCP may run on a host without this daemon.
+        result["loaded"] = None
+        result["running"] = None
+        result["detail"] = f"launchctl unavailable: {type(exc).__name__}: {exc}"
+
+    # Last log activity. Read the tail only — apis.log runs to hundreds of MB,
+    # so reading it whole would stall the call.
+    if apis_log.exists():
+        try:
+            size = apis_log.stat().st_size
+            with apis_log.open("rb") as fh:
+                fh.seek(max(0, size - 200_000))
+                tail = fh.read().decode("utf-8", errors="replace").splitlines()
+            result["log_size_bytes"] = size
+            result["log_mtime_age_seconds"] = round(
+                datetime.now(timezone.utc).timestamp() - apis_log.stat().st_mtime, 1
+            )
+            recent = [ln for ln in tail if "issue pipeline for" in ln]
+            result["last_pipeline_log_lines"] = recent[-5:]
+        except Exception as exc:
+            result["log_read_error"] = f"{type(exc).__name__}: {exc}"
+    else:
+        result["log_size_bytes"] = None
+        result["detail_log"] = "apis.log not present on this host"
+
+    # Recent dispatch failures.
+    failures: list[dict] = []
+    if failure_dir.is_dir():
+        try:
+            entries = sorted(
+                (p for p in failure_dir.iterdir() if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for path in entries[:10]:
+                age = datetime.now(timezone.utc).timestamp() - path.stat().st_mtime
+                failures.append({
+                    "file": path.name,
+                    "age_seconds": round(age, 1),
+                    "size_bytes": path.stat().st_size,
+                })
+            result["dispatch_failure_total"] = len(entries)
+            result["dispatch_failures_last_24h"] = sum(
+                1
+                for p in entries
+                if datetime.now(timezone.utc).timestamp() - p.stat().st_mtime < 86400
+            )
+        except Exception as exc:
+            result["dispatch_failure_read_error"] = f"{type(exc).__name__}: {exc}"
+    else:
+        result["dispatch_failure_total"] = 0
+    result["dispatch_failure_dir"] = str(failure_dir)
+    result["recent_dispatch_failures"] = failures
+
+    running = result.get("running")
+    if running is True:
+        health = "dispatcher is loaded and running"
+    elif running is False:
+        health = "dispatcher is NOT running — nothing will be dispatched"
+    else:
+        health = "dispatcher liveness unknown (not launchd-managed on this host)"
+    recent_failures = result.get("dispatch_failures_last_24h")
+    if recent_failures:
+        health += f"; {recent_failures} dispatch failure(s) logged in the last 24h"
+    result["interpretation"] = health
+    return result
+
+
+
 # ── MCP Server setup ─────────────────────────────────────────────────────────
 
 TOOLS = [
@@ -610,6 +1236,53 @@ TOOLS = [
             "additionalProperties": False,
         },
     ),
+    Tool(
+        name="get_gate_status",
+        description=(
+            "Read-only. For an issue (an 'owner/repo#123' ref or an 'ent_...' entity id), "
+            "return its gate_status, current_owner, which gates are still blocking, the "
+            "most recent owner_history entries, and whether a pipeline is currently "
+            "queued or inflight for it. Answers 'is the swarm going to continue this, "
+            "and what is it waiting on?' in one call instead of a manual entity read. "
+            "This tool never writes gate state: a session must not sign off its own gates."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "issue_ref": {
+                    "type": "string",
+                    "description": "'owner/repo#123' or an 'ent_...' issue entity id",
+                },
+                "history_limit": {
+                    "type": "integer",
+                    "description": "How many recent owner_history entries to return (default 5).",
+                    "default": 5,
+                },
+            },
+            "required": ["issue_ref"],
+        },
+    ),
+    Tool(
+        name="list_pipeline_queue",
+        description=(
+            "Read-only. Report what currently holds the issue-pipeline slot, what is "
+            "queued behind it, and how long each has waited. This is otherwise only "
+            "discoverable by grepping the apis daemon log. Use it when work seems "
+            "stalled but no gate explains why — a queued pipeline is waiting on the "
+            "serialized slot, not on a reviewer."
+        ),
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="get_dispatch_health",
+        description=(
+            "Read-only. Report whether the apis dispatcher daemon is loaded and running, "
+            "its recent issue-pipeline log activity, and how many dispatch failures have "
+            "been logged recently. Use it to tell 'the swarm is working on it' apart from "
+            "'nothing is running at all'."
+        ),
+        inputSchema={"type": "object", "properties": {}},
+    ),
 ]
 
 TOOL_HANDLERS = {
@@ -621,6 +1294,11 @@ TOOL_HANDLERS = {
     "resolve_checkpoint": lambda args: _resolve_checkpoint(
         args["checkpoint_id"], args["action"]
     ),
+    "get_gate_status": lambda args: _get_gate_status(
+        args["issue_ref"], int(args.get("history_limit", 5) or 5)
+    ),
+    "list_pipeline_queue": lambda args: _list_pipeline_queue(),
+    "get_dispatch_health": lambda args: _get_dispatch_health(),
 }
 
 
