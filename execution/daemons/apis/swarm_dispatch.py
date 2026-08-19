@@ -1485,6 +1485,91 @@ class SwarmDispatcher:
             log.info(f"[{DAEMON_NAME}] resume sweep: {summary}")
         return summary
 
+    async def _clear_closed_issue_markers(self, repositories: list[str]) -> int:
+        """Delete pipeline markers left behind on CLOSED issues.
+
+        `_clear_pipeline_inflight` runs in a `finally`, but it is deliberately
+        best-effort: any failure (a Neotoma/GitHub blip, a token expiry, or the
+        daemon being killed between the last agent and the clear) only logs a
+        warning. The marker then outlives its run.
+
+        Nothing reclaimed those markers before this sweep. The resume sweep
+        scans `state=open` only — correctly, since a closed issue's pipeline is
+        moot — so a marker orphaned on an issue that later closed was never
+        looked at again. It is invisible in the API but GitHub renders a
+        marker-only comment as the "No description provided." placeholder, so
+        each one shows up as a blank swarm comment on the thread forever.
+
+        Bounded and fail-open, same discipline as the resume sweep: every
+        failure logs and continues, and the count is returned for
+        logging/tests. Open issues are untouched — a marker there may belong
+        to a live run, and reaping it would strand that pipeline.
+
+        The bound is best-effort, not exhaustive: this reads the first page of
+        the 100 most-recently-updated closed issues, and the first page of each
+        one's comments. A marker below either cut-off is not reaped on this
+        pass. That is deliberate — the sweep runs on every boot, markers post
+        early in a thread, and the cost is one lingering cosmetic comment, so
+        an exhaustive crawl (N+1 requests per repo, unbounded) is not worth
+        paying at startup. Revisit if closed-issue volume grows enough that
+        orphans start surviving repeated boots.
+        """
+        cleared = 0
+        for repository in repositories:
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.get(
+                        f"https://api.github.com/repos/{repository}/issues",
+                        params={
+                            "state": "closed",
+                            "per_page": 100,
+                            "sort": "updated",
+                            "direction": "desc",
+                        },
+                        headers=self._github_headers(repository),
+                    )
+                    resp.raise_for_status()
+                    for issue in resp.json():
+                        # /issues returns PRs too; a PR never carries this marker.
+                        if issue.get("pull_request"):
+                            continue
+                        number = issue.get("number")
+                        comments = await client.get(
+                            f"https://api.github.com/repos/{repository}/issues/"
+                            f"{number}/comments",
+                            params={"per_page": 100},
+                            headers=self._github_headers(repository),
+                        )
+                        comments.raise_for_status()
+                        for c in comments.json():
+                            body = c.get("body", "")
+                            # Only reap comments that are ONLY a marker. A real
+                            # agent comment that merely QUOTES a marker (Lanius
+                            # and Vanellus both do, when reporting gate drift)
+                            # carries operator-visible reasoning — deleting it
+                            # would destroy the audit trail.
+                            if not self._PIPELINE_INFLIGHT_RE.fullmatch(
+                                body.strip()
+                            ):
+                                continue
+                            await client.delete(
+                                f"https://api.github.com/repos/{repository}"
+                                f"/issues/comments/{c.get('id')}",
+                                headers=self._github_headers(repository),
+                            )
+                            cleared += 1
+                            log.info(
+                                f"[{DAEMON_NAME}] cleared a stale pipeline "
+                                f"marker on closed {repository}#{number}"
+                            )
+            except Exception as exc:
+                log.warning(
+                    f"[{DAEMON_NAME}] stale-marker sweep: could not scan "
+                    f"{repository} ({exc}) — skipping"
+                )
+                continue
+        return cleared
+
     async def _pipeline_advanced_past_triage(
         self, repository: str, number: int, resume_started_at: datetime
     ) -> bool:
