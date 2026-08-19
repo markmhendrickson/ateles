@@ -1114,10 +1114,12 @@ def test_ci_status_green_threads_ci_state_into_gate(monkeypatch):
 
 
 def test_pr_review_is_clear_reads_newest_first(monkeypatch):
-    # Loxia review nit: an unpaginated oldest-first scan misses the latest
-    # Vanellus marker on a >100-comment PR. We now fetch newest-first and take
-    # the FIRST marker — so a stale REQUEST_CHANGES followed by a newer APPROVE
-    # (which GitHub returns first under direction=desc) reads as clear.
+    # The intent below is right and unchanged: the LATEST aggregation decides.
+    # The mechanism was wrong (ateles#430). This test used to assert
+    # `direction == "desc"` and hand back a newest-first fixture — but GitHub
+    # IGNORES sort/direction on issue comments and always returns oldest-first,
+    # so the fixture asserted the bug. Selection is now client-side by
+    # created_at, and the fixture returns oldest-first like the real API.
     captured = {}
 
     class _Client:
@@ -1129,10 +1131,19 @@ def test_pr_review_is_clear_reads_newest_first(monkeypatch):
 
         async def get(self, url, **kwargs):
             captured["params"] = kwargs.get("params", {})
-            # Simulate direction=desc: newest (APPROVE) first, older one after.
-            bodies = [
-                "<!-- vanellus-aggregation -->\n**APPROVE**\nlgtm",
-                "<!-- vanellus-aggregation -->\n**REQUEST_CHANGES**\nold",
+            # OLDEST-FIRST, as GitHub actually returns: the stale
+            # REQUEST_CHANGES precedes the newer APPROVE.
+            rows = [
+                {
+                    "id": 1,
+                    "created_at": "2026-08-10T09:00:00Z",
+                    "body": "<!-- vanellus-aggregation -->\n**REQUEST_CHANGES**\nold",
+                },
+                {
+                    "id": 2,
+                    "created_at": "2026-08-19T09:00:00Z",
+                    "body": "<!-- vanellus-aggregation -->\n**APPROVE**\nlgtm",
+                },
             ]
 
             class _Resp:
@@ -1140,7 +1151,7 @@ def test_pr_review_is_clear_reads_newest_first(monkeypatch):
                     pass
 
                 def json(self_inner):
-                    return [{"body": b} for b in bodies]
+                    return rows if int(captured["params"].get("page", 1)) == 1 else []
 
             return _Resp()
 
@@ -1149,8 +1160,9 @@ def test_pr_review_is_clear_reads_newest_first(monkeypatch):
     d = SwarmDispatcher(_StubNotifier(), _config())
     result = asyncio.run(d._pr_review_is_clear("owner/repo", 87))
     assert result is True
-    # Confirms we requested newest-first, not a plain first-100 scan.
-    assert captured["params"].get("direction") == "desc"
+    # The inert sort/direction params are gone; recency is decided client-side.
+    assert "direction" not in captured["params"]
+    assert captured["params"].get("per_page") == 100
 
 
 # ── prompt generators — guardrails must survive refactors ────────────────────
@@ -6347,12 +6359,27 @@ def _comments_client(monkeypatch, bodies, *, calls=None, raises=None):
             if raises is not None:
                 raise raises
 
+            page = int((kwargs.get("params") or {}).get("page", 1))
+
             class _Resp:
                 def raise_for_status(self_inner):
                     pass
 
                 def json(self_inner):
-                    return [{"body": b} for b in bodies]
+                    # ateles#430: the reader pages now, so only page 1 carries
+                    # rows. Bodies are listed OLDEST-FIRST (as GitHub returns
+                    # them) and stamped with ascending created_at/id so
+                    # client-side recency selection has something to sort on.
+                    if page != 1:
+                        return []
+                    return [
+                        {
+                            "id": i + 1,
+                            "created_at": f"2026-08-{10 + i:02d}T09:00:00Z",
+                            "body": b,
+                        }
+                        for i, b in enumerate(bodies)
+                    ]
 
             return _Resp()
 
@@ -6438,19 +6465,26 @@ def test_resolve_verdict_requires_real_token_in_comment(monkeypatch):
 
 
 def test_resolve_verdict_reads_comments_newest_first(monkeypatch):
-    """The fallback must honour the LATEST aggregation, as _pr_review_is_clear does."""
+    """The fallback must honour the LATEST aggregation, as _pr_review_is_clear does.
+
+    Intent unchanged; mechanism corrected (ateles#430). The bodies are now
+    OLDEST-FIRST — stale REQUEST_CHANGES, then the newer APPROVE — matching what
+    GitHub actually returns. The old fixture handed them back newest-first and
+    asserted `direction == "desc"`, which encoded the bug: that parameter is
+    ignored on this endpoint.
+    """
     calls = []
     _comments_client(
         monkeypatch,
         [
-            f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nnewest",
             f"{_VANELLUS_COMMENT_MARKER}\n**REQUEST_CHANGES**\nstale",
+            f"{_VANELLUS_COMMENT_MARKER}\n**APPROVE**\nnewest",
         ],
         calls=calls,
     )
     d = _resolver(monkeypatch)
     assert asyncio.run(d._resolve_review_verdict(_trigger(), "")) == ("approve", True)
-    assert calls and calls[0][1].get("direction") == "desc", calls
+    assert calls and "direction" not in calls[0][1], calls
 
 
 def test_handle_pr_recovers_blocking_verdict_from_comment(monkeypatch):
