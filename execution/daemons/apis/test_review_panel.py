@@ -275,3 +275,23 @@ def test_security_provider_preference_is_env_overridable(monkeypatch):
     # Empty disables the preference outright.
     monkeypatch.setenv("ATELES_SECURITY_LENS_PROVIDER", "")
     assert resolve_lens_provider(security, {"claude", "cursor"}) is None
+
+
+def test_late_enable_of_the_provider_preference_is_honored(monkeypatch):
+    # Loxia review on PR #426: the env re-read ran AFTER an early
+    # `if not preferred: return None` on the import-frozen field, so a
+    # preference disabled at import and enabled later was silently ignored —
+    # the disable-then-enable direction of the very staleness the re-read
+    # exists to fix. Both directions must work at dispatch time.
+    from dataclasses import replace
+
+    from review_panel import resolve_lens_provider
+
+    security = next(l for l in LENSES if l.lens == "security")
+    frozen_disabled = replace(security, preferred_provider="")
+
+    monkeypatch.setenv("ATELES_SECURITY_LENS_PROVIDER", "codex")
+    assert resolve_lens_provider(frozen_disabled, {"claude", "codex"}) == "codex"
+
+    monkeypatch.setenv("ATELES_SECURITY_LENS_PROVIDER", "")
+    assert resolve_lens_provider(security, {"claude", "codex"}) is None

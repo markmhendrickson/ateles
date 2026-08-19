@@ -351,16 +351,17 @@ def resolve_lens_provider(
     preference is returned unvalidated — callers that cannot check availability
     are trusted to handle a failed run.
     """
-    preferred = (lens.preferred_provider or "").strip().lower()
-    if not preferred:
-        return None
-    # Re-read the env at dispatch time: the registry is built at import, so a
-    # deployment that sets ATELES_SECURITY_LENS_PROVIDER after module load (or
-    # in a test) would otherwise keep the value frozen at import time.
+    # Re-read the env BEFORE the empty check, not after: the registry is built
+    # at import, so the frozen field can be "" (preference disabled at import)
+    # while the env now names a provider. Checking the frozen value first would
+    # early-return and silently ignore a late enable — the disable-then-enable
+    # direction of the same staleness this re-read exists to fix.
     if lens.lens == "security":
         preferred = _security_lens_provider()
-        if not preferred:
-            return None
+    else:
+        preferred = (lens.preferred_provider or "").strip().lower()
+    if not preferred:
+        return None
     if available_providers is not None and preferred not in available_providers:
         log.warning(
             f"[apis] {lens.lens} lens prefers provider '{preferred}' but it is "
