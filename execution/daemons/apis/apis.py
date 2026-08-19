@@ -956,6 +956,25 @@ async def main() -> None:
                     f"[{DAEMON_NAME}] stalled-review sweep failed: {exc}",
                     exc_info=True,
                 )
+            # 4. Missing lens verdicts. The two sweeps above cover a review that
+            #    never ran and one that died mid-flight. This covers a THIRD
+            #    state neither can see: the panel ran, aggregated `Blocking: 0`,
+            #    and merge is withheld only because one declared lens produced
+            #    no verdict (neotoma#2153, security). The hold is correct — CI
+            #    green is not a lens judgement — but nothing re-ran the absent
+            #    lens, so a content-clear PR sat with no mechanism watching it.
+            #    Re-dispatches ONLY that lens; same cadence, same fail-open
+            #    discipline, runs last so a PR the earlier passes already
+            #    re-dispatched is not handled twice in one tick.
+            try:
+                await dispatcher.resume_missing_lens_reviews(
+                    list(dispatcher.config.resume_repositories)
+                )
+            except Exception as exc:
+                log.error(
+                    f"[{DAEMON_NAME}] missing-lens sweep failed: {exc}",
+                    exc_info=True,
+                )
             await asyncio.sleep(deferred_interval)
 
     log.info(f"[{DAEMON_NAME}] Subscribing to SSE: {SUBSCRIBE_ENTITY_TYPES}")
