@@ -871,24 +871,6 @@ def write_parquet_with_schema(
         # The "entry not a 2- or 3- tuple" error suggests schema building has issues
         # Using pandas default allows PyArrow to infer schema automatically
         df.to_parquet(file_path, index=False, engine="pyarrow")
-
-        # Original schema-based code (disabled due to persistent errors):
-        # if schema:
-        #     # Use explicit schema to ensure correct types
-        #     try:
-        #         table = pa.Table.from_pandas(
-        #             df, schema=schema, preserve_index=False, safe=False
-        #         )
-        #         pq.write_table(table, file_path)
-        #     except Exception as schema_error:
-        #         # If schema-based write fails, fall back to schema inference
-        #         print(f"Schema-based write failed: {schema_error}, falling back to inference", file=sys.stderr)
-        #         import traceback
-        #         traceback.print_exc(file=sys.stderr)
-        #         df.to_parquet(file_path, index=False, engine="pyarrow")
-        # else:
-        #     # Fallback to pandas default
-        #     df.to_parquet(file_path, index=False, engine="pyarrow")
     except Exception as e:
         import traceback
 
@@ -2100,36 +2082,29 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                         )
                 raise
 
-            # Temporarily disable audit log to isolate error
-            audit_entry = {"audit_id": "skipped", "error": "temporarily disabled"}
             # Create audit log entry (errors here won't fail the operation)
-            # try:
-            #     audit_entry = create_audit_entry(
-            #         operation="add",
-            #         data_type=data_type,
-            #         record_id=record_id,
-            #         affected_fields=list(record.keys()),
-            #         new_values=record,
-            #         snapshot_reference=str(snapshot_path) if snapshot_path else None,
-            #         notes="Added new record via MCP",
-            #     )
-            # except Exception as audit_error:
-            #     print(f"Warning: Audit log creation failed: {audit_error}", file=sys.stderr)
-            #     audit_entry = {"audit_id": "failed", "error": str(audit_error)}
+            audit_entry = create_audit_entry(
+                operation="add",
+                data_type=data_type,
+                record_id=record_id,
+                affected_fields=list(record.keys()),
+                new_values=record,
+                snapshot_reference=str(snapshot_path) if snapshot_path else None,
+                notes="Added new record via MCP",
+            )
 
-            # Temporarily disable embedding generation to isolate error
-            embedding_result = None
             # Automatically generate embeddings for the new record (non-blocking)
-            # try:
-            #     embedding_result = generate_embeddings_for_records(
-            #         data_type=data_type, records=[record], id_field=id_field
-            #     )
-            # except Exception as emb_error:
-            #     # Don't fail the operation if embedding generation fails
-            #     print(
-            #         f"Warning: Failed to generate embeddings for new record: {emb_error}",
-            #         file=sys.stderr,
-            #     )
+            embedding_result = None
+            try:
+                embedding_result = generate_embeddings_for_records(
+                    data_type=data_type, records=[record], id_field=id_field
+                )
+            except Exception as emb_error:
+                # Don't fail the operation if embedding generation fails
+                print(
+                    f"Warning: Failed to generate embeddings for new record: {emb_error}",
+                    file=sys.stderr,
+                )
 
             return [
                 TextContent(
