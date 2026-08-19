@@ -342,6 +342,242 @@ def _utterance_stitch_seconds() -> float:
     return _env_float("TRANSCRIBE_UTTERANCE_STITCH_SECONDS", 4.0)
 
 
+# Proper-noun corrections are OPERATOR-SPECIFIC vocabulary (the product,
+# company, and people names that recur in the operator's own meetings, plus the
+# ways the STT model mishears them). This repo is public, so it ships NO baked-in
+# vocabulary — the map is loaded at runtime, in priority order, from:
+#   1. TRANSCRIBE_PROPER_NOUNS env: "Canonical=variant1|variant2, Other=v3"
+#   2. TRANSCRIBE_PROPER_NOUNS_FILE: path to a JSON file, either a
+#      {"corrections": [{"canonical","variants_regex"}, ...]} object or a plain
+#      [["Canonical","regex"], ...] list.
+#   3. A Neotoma `transcription_vocabulary` entity (set
+#      TRANSCRIBE_VOCABULARY_ENTITY_ID, or it auto-resolves by name) — the
+#      canonical operator store, kept out of this public repo.
+# All sources are merged; later sources add to (never replace) earlier ones.
+# Each entry is (canonical, variants_regex); matching is case-insensitive and
+# word-bounded. Nothing here is operator data.
+
+
+def _proper_nouns_from_env() -> list[tuple[str, str]]:
+    raw = os.environ.get("TRANSCRIBE_PROPER_NOUNS", "").strip()
+    pairs: list[tuple[str, str]] = []
+    if not raw:
+        return pairs
+    for entry in raw.split(","):
+        if "=" in entry:
+            canon, variants = entry.split("=", 1)
+            canon, variants = canon.strip(), variants.strip()
+            if canon and variants:
+                pairs.append((canon, variants))
+    return pairs
+
+
+def _proper_nouns_from_file() -> list[tuple[str, str]]:
+    path = os.environ.get("TRANSCRIBE_PROPER_NOUNS_FILE", "").strip()
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        data = json.loads(open(path, encoding="utf-8").read())
+    except Exception:
+        return []
+    return _coerce_correction_pairs(data)
+
+
+def _proper_nouns_from_neotoma() -> list[tuple[str, str]]:
+    """
+    Load the operator's proper-noun vocabulary from a Neotoma
+    `transcription_vocabulary` entity. Best-effort and offline-safe: any failure
+    (no CLI, no auth, entity missing) returns an empty list without raising.
+    """
+    if os.environ.get("TRANSCRIBE_DISABLE_NEOTOMA_VOCAB", "").strip() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return []
+    if not shutil.which("neotoma"):
+        return []
+    entity_id = os.environ.get("TRANSCRIBE_VOCABULARY_ENTITY_ID", "").strip()
+    base = _neotoma_prod_base_url()
+    # `entities get <id>` when we have an id; otherwise `entities search <name>`.
+    if entity_id:
+        cmd = ["neotoma", "--base-url", base, "--api-only", "--json",
+               "entities", "get", entity_id]
+    else:
+        cmd = ["neotoma", "--base-url", base, "--api-only", "--json",
+               "entities", "search", "operator transcription proper-noun corrections",
+               "--type", "transcription_vocabulary"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        if result.returncode != 0 or not result.stdout.strip():
+            return []
+        data = json.loads(result.stdout)
+    except Exception:
+        return []
+    # Unwrap common shapes: {entities:[{snapshot:{snapshot:{corrections}}}]}, etc.
+    corrections = _find_corrections_field(data)
+    return _coerce_correction_pairs(corrections)
+
+
+def _find_corrections_field(obj: object) -> object:
+    """Depth-first search for a `corrections` list in a Neotoma response."""
+    if isinstance(obj, dict):
+        if isinstance(obj.get("corrections"), list):
+            return obj["corrections"]
+        for v in obj.values():
+            found = _find_corrections_field(v)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for v in obj:
+            found = _find_corrections_field(v)
+            if found:
+                return found
+    return None
+
+
+def _coerce_correction_pairs(data: object) -> list[tuple[str, str]]:
+    """Accept [{canonical,variants_regex}] or [[canonical, regex]] shapes."""
+    pairs: list[tuple[str, str]] = []
+    if isinstance(data, dict):
+        data = data.get("corrections", [])
+    for item in data or []:
+        if isinstance(item, dict):
+            canon = str(item.get("canonical", "")).strip()
+            variants = str(item.get("variants_regex", "")).strip()
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            canon, variants = str(item[0]).strip(), str(item[1]).strip()
+        else:
+            continue
+        if canon and variants:
+            pairs.append((canon, variants))
+    return pairs
+
+
+def _proper_noun_corrections() -> list[tuple[str, str]]:
+    """Merge the operator vocabulary from env + file + Neotoma (all optional)."""
+    return (
+        _proper_nouns_from_env()
+        + _proper_nouns_from_file()
+        + _proper_nouns_from_neotoma()
+    )
+
+
+def _apply_proper_noun_corrections(text: str) -> str:
+    """
+    Repair known STT mistranscriptions of proper nouns using the operator's
+    runtime-loaded vocabulary. Regex-based, word-bounded, case-insensitive. Runs
+    on the merged transcript, so it applies to every path (multichannel,
+    diarized, and the plain single-speaker case). A no-op when no vocabulary is
+    configured, so the public default corrects nothing.
+    """
+    if not text:
+        return text
+    for canon, variant_re in _proper_noun_corrections():
+        text = re.sub(rf"\b(?:{variant_re})\b", canon, text, flags=re.IGNORECASE)
+        # Collapse a doubled canonical an overlapping rule may have produced
+        # (e.g. a "<canon><digit>" rule firing on already-corrected text).
+        text = re.sub(re.escape(canon) + r"(\d)\1\b", canon + r"\1", text)
+    return text
+
+
+# Real English word-forming prefixes: never treat "<prefix>-<word>" as a
+# restart stutter (e.g. "re-read", "co-coordinate", "pre-preview" are real
+# closed-sense hyphenated words even when the root repeats the prefix).
+_REAL_PREFIXES = {
+    "re", "co", "pre", "de", "un", "non", "anti", "post", "sub", "mid",
+    "over", "under", "self", "ex", "pro", "semi", "multi", "inter", "intra",
+}
+
+
+def _clean_stutters(text: str) -> str:
+    """
+    Remove speech-disfluency stutter artifacts that ElevenLabs transcribes
+    faithfully but that hurt readability. CONSERVATIVE by design — it only
+    removes false-start fragments and immediate repeats; it never drops a whole
+    real word or filler ("um"/"uh"/"like" stay). Disable with
+    TRANSCRIBE_CLEAN_STUTTERS=0 for a verbatim transcript.
+
+    Handles:
+      - word-restart stubs: "b-before" -> "before", "s-set" -> "set",
+        "in- interacting" -> "interacting" (fragment is a prefix of the next word)
+      - hyphen/space false starts: "topolog- topology" -> "topology"
+      - immediate word repeats: "the, the, the" / "I I I" -> one
+    """
+    if os.environ.get("TRANSCRIBE_CLEAN_STUTTERS", "1").strip() in ("0", "false", "no"):
+        return text
+    if not text:
+        return text
+
+    # 1) Word-restart stub immediately followed (no space) by the full word,
+    #    where the stub is a leading fragment of that word: "b-before" ->
+    #    "before". Require the stub to be a case-insensitive prefix of the
+    #    following word so we don't delete real closed hyphenated terms.
+    #    BUT skip real English word-forming prefixes ("re-read", "co-coordinate",
+    #    "pre-preview") — there the hyphenated word is legitimate and the root
+    #    happens to repeat the prefix, so a naive prefix match would wrongly
+    #    collapse it and silently change meaning.
+    def _restart(m: re.Match) -> str:
+        stub, word = m.group(1), m.group(2)
+        if stub.lower() in _REAL_PREFIXES:
+            return m.group(0)
+        return word if word.lower().startswith(stub.lower()) else m.group(0)
+
+    text = re.sub(r"\b([A-Za-z]{1,})-([A-Za-z]+)\b", _restart, text)
+
+    # 2) Abandoned false-start fragment: a short stub ending in a hyphen, then a
+    #    SPACE, then another word — the speaker began a word, cut off, and said
+    #    something else ("s- you" -> "you", "th- what" -> "what", "in-- First" ->
+    #    "First"). Only fires with the space + trailing hyphen, so real closed
+    #    compounds ("high-level", "one-on-one", "Mm-hmm") — no space around the
+    #    hyphen — are never touched. The stub must NOT be a real word, so a real
+    #    short word that legitimately trails a dash ("So-- but", "I mean-- like",
+    #    "fine-- I think") is kept.
+    _REAL_SHORT_WORDS = {
+        "a", "an", "and", "as", "at", "be", "but", "by", "do", "for", "go",
+        "he", "i", "if", "in", "is", "it", "its", "me", "my", "no", "of", "on",
+        "or", "so", "to", "up", "us", "we", "yes", "you", "the", "this", "that",
+        "then", "them", "they", "here", "mean", "fine", "well", "like", "just",
+        "not", "now", "how", "why", "who", "our", "out", "she", "her", "his",
+        "was", "are", "all", "can", "did", "get", "got", "had", "has", "him",
+        "let", "may", "new", "one", "two", "way", "yet",
+    }
+
+    def _abandon(m: re.Match) -> str:
+        stub = m.group(1)
+        return "" if stub.lower() not in _REAL_SHORT_WORDS else m.group(0)
+
+    text = re.sub(r"\b([A-Za-z]{1,4})-{1,2}\s+(?=[A-Za-z])", _abandon, text)
+
+    # If the restart form left a space-separated prefix stutter
+    # ("topolog- topology"), collapse it too (prefix check, longer stubs only).
+    def _restart_spaced(m: re.Match) -> str:
+        stub, word = m.group(1), m.group(2)
+        return word if word.lower().startswith(stub.lower()) else m.group(0)
+
+    text = re.sub(r"\b([A-Za-z]{2,})-\s+([A-Za-z]+)\b", _restart_spaced, text)
+
+    # 2) Immediate identical word repeats (with optional comma/space between):
+    #    "the, the, the" -> "the", "I I I" -> "I". Case-insensitive match, keep
+    #    the first occurrence's casing.
+    text = re.sub(
+        r"\b(\w+)(?:[,\s]+\1\b)+",
+        lambda m: m.group(1),
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # 3) Tidy spacing/punctuation the removals may have left.
+    text = re.sub(r"\s+([,.?!])", r"\1", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
+
+
+def _postprocess_transcript(text: str) -> str:
+    """Standard post-merge cleanup: fix proper nouns, then de-stutter."""
+    return _clean_stutters(_apply_proper_noun_corrections(text))
+
+
 def _merge_word_events_by_utterance(
     events: list[dict],
     labels: dict | None = None,
@@ -784,6 +1020,14 @@ def _ffmpeg_split_audio_segments(
 def _parse_elevenlabs_stt_response(
     body: object, language: str | None
 ) -> tuple[str, str]:
+    """Parse the STT response, then fix proper nouns and clean stutters."""
+    text, lang = _parse_elevenlabs_stt_response_raw(body, language)
+    return _postprocess_transcript(text), lang
+
+
+def _parse_elevenlabs_stt_response_raw(
+    body: object, language: str | None
+) -> tuple[str, str]:
     if isinstance(body, dict) and "message" in body and "request_id" in body:
         if "text" not in body and "transcripts" not in body:
             raise RuntimeError(
@@ -953,6 +1197,11 @@ def transcribe_with_elevenlabs_speech_to_text(
     if effective_language:
         data["language_code"] = effective_language
 
+    # NOTE: ElevenLabs' keyterms/keywords biasing is rejected on this
+    # scribe_v2 + diarize path ("invalid_keyword"), so proper-noun accuracy is
+    # handled entirely by the post-transcription corrector
+    # (_apply_proper_noun_corrections), not a model-side hint.
+
     if verbose:
         mode = "multichannel" if use_multi_channel else "diarized"
         print(
@@ -1007,7 +1256,7 @@ def transcribe_with_elevenlabs_speech_to_text(
         finally:
             shutil.rmtree(split_dir, ignore_errors=True)
 
-        transcription_text = (
+        transcription_text = _postprocess_transcript(
             _merge_word_events_by_utterance(all_events, _channel_labels()) or ""
         )
         return {
@@ -1585,7 +1834,7 @@ def transcribe_audio_file(
         audio_duration = get_audio_duration(metadata_path)
 
         return {
-            "transcription_text": transcript_text,
+            "transcription_text": _postprocess_transcript(transcript_text),
             "language": transcript_language,
             "audio_duration_seconds": audio_duration,
             "file_size_bytes": file_size,
