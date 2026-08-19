@@ -860,26 +860,71 @@ class TestSwarmObservability(unittest.TestCase):
         srv._pipeline_markers  # noqa: B018
         orig = srv._pipeline_markers
         try:
-            srv._pipeline_markers = lambda repo, number: [
-                {"started_at": old, "stage": "inflight", "comment_id": 1}
-            ]
+            srv._pipeline_markers = lambda repo, number: (
+                [{"started_at": old, "stage": "inflight", "comment_id": 1}], None
+            )
             state = srv._pipeline_state_for("o/r", 1)
             self.assertEqual(state["stage"], "stale")
             self.assertEqual(state["reported_stage"], "inflight")
         finally:
             srv._pipeline_markers = orig
 
+    def test_read_failure_is_not_reported_as_absence(self):
+        """An auth failure must NOT read as "no pipeline running".
+
+        This is the fail-open shape the whole security workstream is about: a
+        check that cannot distinguish absence from failure and reports the
+        permissive answer. Reproduced live with an invalid GitHub token, which
+        previously yielded "no pipeline marker present".
+        """
+        orig = srv._pipeline_markers
+        try:
+            srv._pipeline_markers = lambda repo, number: ([], "HTTP 401 — token expired")
+            state = srv._pipeline_state_for("o/r", 1)
+            self.assertEqual(state["stage"], "unknown")
+            self.assertIn("401", state["error"])
+            self.assertNotIn("not queued or inflight", state.get("detail", ""))
+        finally:
+            srv._pipeline_markers = orig
+
+    def test_queue_reports_listing_failure_rather_than_all_clear(self):
+        """A failed issue LISTING yields zero candidates; that is not 'idle'."""
+        orig = srv._recent_open_issues
+        try:
+            srv._recent_open_issues = lambda repo, limit: ([], False, f"{repo}: HTTP 401")
+            out = srv._list_pipeline_queue()
+            self.assertIn("error", out)
+            self.assertIn("unknown, not idle", out["error"])
+            self.assertNotIn("queued_count", out)
+        finally:
+            srv._recent_open_issues = orig
+
+    def test_queue_flags_unreadable_issues_without_dropping_them(self):
+        orig_list, orig_markers = srv._recent_open_issues, srv._pipeline_markers
+        try:
+            srv._recent_open_issues = lambda repo, limit: (
+                [{"number": 1, "title": "t", "html_url": "u"}], False, None
+            )
+            srv._pipeline_markers = lambda repo, number: ([], "HTTP 403")
+            out = srv._list_pipeline_queue()
+            # Every candidate unreadable → an all-clear would be unfounded.
+            self.assertIn("error", out)
+            self.assertEqual(out["unreadable_count"], len(out["unreadable"]))
+            self.assertGreater(out["unreadable_count"], 0)
+        finally:
+            srv._recent_open_issues, srv._pipeline_markers = orig_list, orig_markers
+
     def test_pipeline_state_absent_marker_is_not_finished(self):
         orig = srv._pipeline_markers
         try:
-            srv._pipeline_markers = lambda repo, number: []
+            srv._pipeline_markers = lambda repo, number: ([], None)
             self.assertIsNone(srv._pipeline_state_for("o/r", 1)["stage"])
         finally:
             srv._pipeline_markers = orig
 
     def test_bare_repo_name_is_not_queried(self):
         """'ateles' is not addressable on the API and only yields 404 noise."""
-        self.assertEqual(srv._pipeline_markers("ateles", 272), [])
+        self.assertEqual(srv._pipeline_markers("ateles", 272), ([], None))
 
     def test_get_gate_status_rejects_unparseable_ref(self):
         out = srv._get_gate_status("garbage")

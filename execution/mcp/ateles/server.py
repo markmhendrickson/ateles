@@ -799,18 +799,26 @@ def _github_headers() -> dict[str, str]:
     return headers
 
 
-def _pipeline_markers(repo: str, number: Any) -> list[dict]:
-    """Return parsed pipeline markers on an issue, oldest first.
+def _pipeline_markers(repo: str, number: Any) -> tuple[list[dict], str | None]:
+    """Return (markers, error) for an issue, markers oldest first.
 
     Reads the durable GitHub marker rather than the daemon log: the log is
     local to the daemon host and rotates, while the marker is written before
     the semaphore is acquired specifically so a queued pipeline leaves a trace
     that survives a restart (ateles#323).
+
+    The second element is the reason the read failed, or None on success. It
+    exists because "no markers" and "I could not read the markers" are
+    different answers and only one of them is safe to act on. Collapsing them
+    into an empty list is the same fail-open shape this swarm's security work
+    is about: a check that cannot tell absence from failure, reporting the
+    permissive answer. An expired GitHub token would otherwise make every
+    issue look idle.
     """
     # A bare repo name ("ateles") is not addressable on the GitHub API and only
     # yields 404 noise; require the owner/repo form.
     if not repo or not number or "/" not in str(repo):
-        return []
+        return [], None
     try:
         resp = httpx.get(
             f"{GITHUB_API}/repos/{repo}/issues/{number}/comments",
@@ -820,9 +828,26 @@ def _pipeline_markers(repo: str, number: Any) -> list[dict]:
         )
         resp.raise_for_status()
         comments = resp.json()
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        if status == 404:
+            # Genuinely absent (or invisible to this token) — not a read failure
+            # we can distinguish, but an issue we cannot see has no marker we
+            # could act on either. Reported as a read failure to stay honest.
+            detail = f"HTTP 404 for {repo}#{number} (missing, or not visible to this token)"
+        elif status in (401, 403):
+            detail = (
+                f"HTTP {status} — GitHub token missing, expired, or lacking scope; "
+                "pipeline state is UNKNOWN, not absent"
+            )
+        else:
+            detail = f"HTTP {status}"
+        log.warning("github comments read failed for %s#%s: %s", repo, number, detail)
+        return [], detail
     except Exception as exc:
-        log.warning("github comments read failed for %s#%s: %s", repo, number, exc)
-        return []
+        detail = f"{type(exc).__name__}: {exc}"
+        log.warning("github comments read failed for %s#%s: %s", repo, number, detail)
+        return [], detail
 
     markers: list[dict] = []
     for comment in comments if isinstance(comments, list) else []:
@@ -833,7 +858,7 @@ def _pipeline_markers(repo: str, number: Any) -> list[dict]:
                 "stage": match.group(2) or "inflight",
                 "comment_id": comment.get("id"),
             })
-    return markers
+    return markers, None
 
 
 def _pipeline_state_for(repo: str, number: Any) -> dict:
@@ -845,7 +870,17 @@ def _pipeline_state_for(repo: str, number: Any) -> dict:
     started" from this signal alone, and claiming the stronger reading would
     be exactly the kind of confident-but-wrong status this tool exists to stop.
     """
-    markers = _pipeline_markers(repo, number)
+    markers, read_error = _pipeline_markers(repo, number)
+    if read_error:
+        # Never assert absence from a failed read.
+        return {
+            "stage": "unknown",
+            "error": read_error,
+            "detail": (
+                "could not determine pipeline state — the marker read failed. "
+                "This is NOT the same as 'no pipeline running'."
+            ),
+        }
     if not markers:
         return {"stage": None, "detail": "no pipeline marker present (not queued or inflight)"}
     latest = markers[-1]
@@ -910,12 +945,15 @@ def _swarm_repositories() -> list[str]:
     return [f"{owner}/ateles", f"{owner}/neotoma"]
 
 
-def _recent_open_issues(repo: str, limit: int) -> tuple[list[dict], bool]:
+def _recent_open_issues(repo: str, limit: int) -> tuple[list[dict], bool, str | None]:
     """Most recently updated OPEN issues for *repo*, newest first.
 
-    Returns (issues, more_available). Pull requests are filtered out: the
-    GitHub issues endpoint returns both, and only issues carry pipeline
-    markers.
+    Returns (issues, more_available, error). Pull requests are filtered out:
+    the GitHub issues endpoint returns both, and only issues carry pipeline
+    markers. The error is non-None when the LISTING itself failed — without
+    it, an unauthorized listing yields zero candidates and the sweep reports
+    "nothing queued", which is the fail-open answer one level above the
+    per-issue read.
     """
     try:
         resp = httpx.get(
@@ -932,13 +970,17 @@ def _recent_open_issues(repo: str, limit: int) -> tuple[list[dict], bool]:
         resp.raise_for_status()
         payload = resp.json()
     except Exception as exc:
-        log.warning("github issue list failed for %s: %s", repo, exc)
-        return [], False
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        detail = f"HTTP {status}" if status else f"{type(exc).__name__}: {exc}"
+        if status in (401, 403):
+            detail += " — GitHub token missing, expired, or lacking scope"
+        log.warning("github issue list failed for %s: %s", repo, detail)
+        return [], False, f"{repo}: {detail}"
     issues = [
         i for i in (payload if isinstance(payload, list) else [])
         if isinstance(i, dict) and not i.get("pull_request") and i.get("number")
     ]
-    return issues[:limit], len(issues) >= limit
+    return issues[:limit], len(issues) >= limit, None
 
 
 def _list_pipeline_queue() -> dict:
@@ -962,14 +1004,27 @@ def _list_pipeline_queue() -> dict:
     candidates: list[tuple[str, Any, dict]] = []
     truncated = False
     per_repo = max(1, _PIPELINE_QUEUE_SCAN_LIMIT // max(1, len(repos)))
+    list_errors: list[str] = []
     for repo in repos:
-        issues, more = _recent_open_issues(repo, per_repo)
+        issues, more, list_error = _recent_open_issues(repo, per_repo)
+        if list_error:
+            list_errors.append(list_error)
         truncated = truncated or more
         candidates.extend((repo, i["number"], i) for i in issues)
+
+    # Could not even enumerate the issues: report that, rather than an
+    # all-clear derived from an empty candidate set.
+    if list_errors and not candidates:
+        return {
+            "error": "could not list open issues — pipeline state is unknown, not idle",
+            "detail": list_errors,
+            "repositories": repos,
+        }
 
     inflight: list[dict] = []
     queued: list[dict] = []
     stale: list[dict] = []
+    unknown: list[dict] = []
     with ThreadPoolExecutor(max_workers=_PIPELINE_QUEUE_WORKERS) as pool:
         futures = {
             pool.submit(_pipeline_state_for, repo, number): (repo, number, issue)
@@ -983,6 +1038,13 @@ def _list_pipeline_queue() -> dict:
                 log.warning("pipeline state read failed for %s#%s: %s", repo, number, exc)
                 continue
             stage = state.get("stage")
+            if stage == "unknown":
+                unknown.append({
+                    "issue_ref": f"{repo}#{number}",
+                    "title": issue.get("title", ""),
+                    "error": state.get("error"),
+                })
+                continue
             if stage not in ("queued", "inflight", "stale"):
                 continue
             row = {
@@ -1005,6 +1067,18 @@ def _list_pipeline_queue() -> dict:
     queued.sort(key=lambda r: r.get("waited_seconds") or 0, reverse=True)
     inflight.sort(key=lambda r: r.get("waited_seconds") or 0, reverse=True)
 
+    # If every candidate failed to read, "no pipeline queued" is not a finding —
+    # it is a total absence of evidence, and must not be reported as an
+    # all-clear.
+    if candidates and len(unknown) == len(candidates):
+        return {
+            "error": "could not read pipeline state for ANY issue — state is unknown, not idle",
+            "detail": unknown[0].get("error") if unknown else None,
+            "unreadable": unknown,
+            "unreadable_count": len(unknown),
+            "issues_scanned": len(candidates),
+        }
+
     capacity = int(os.environ.get("APIS_MAX_CONCURRENT_ISSUE_PIPELINES", "3"))
     longest = queued[0]["waited_seconds"] if queued else None
 
@@ -1015,6 +1089,9 @@ def _list_pipeline_queue() -> dict:
         "inflight": inflight,
         "queued": queued,
         "stale_markers": stale,
+        "unreadable": unknown,
+        "unreadable_count": len(unknown),
+        "listing_errors": list_errors,
         "longest_wait_seconds": longest,
         "issues_scanned": len(candidates),
         "scan_truncated": truncated,
@@ -1034,6 +1111,12 @@ def _list_pipeline_queue() -> dict:
             + (
                 f"; scan limited to the {len(candidates)} most recent open issues"
                 if truncated
+                else ""
+            )
+            + (
+                f"; {len(unknown)} issue(s) UNREADABLE — their pipeline state is "
+                "unknown, not idle"
+                if unknown
                 else ""
             )
         ),
