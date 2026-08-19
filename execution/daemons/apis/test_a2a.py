@@ -229,7 +229,91 @@ def test_sign_agent_card_stub_unsigned():
     print("✓ sign_agent_card stub → unsigned card (no crash)")
 
 
+# ── Cross-surface parity: A2A path vs SSE path ──────────────────────────────
+
+
+def test_a2a_and_sse_routing_paths_agree():
+    """
+    apis.py's SSE dispatch path (dispatch_task) and a2a_executor.py's A2A path
+    (ApisTaskBridge.submit) both call routing.infer_tags_from_text /
+    routing.resolve_skill directly — there is no per-surface routing logic to
+    diverge. This test proves that structurally: it imports apis.py's bound
+    names (`_infer_tags_from_text`, `_resolve_skill`) alongside the A2A path's
+    equivalents and asserts identical output for the same input text, so a
+    future edit that reintroduces a second routing implementation on either
+    surface fails loudly here instead of silently drifting.
+    """
+    import apis as apis_module  # noqa: E402 - imported lazily to avoid apis.py's
+
+    # module-level side effects (e.g. env reads) affecting earlier tests
+    cases = [
+        ("Fix the failing CI build on the docker step.", ""),
+        ("Draft a newsletter announcing the new feature.", ""),
+        ("Pay the May studio rent invoice.", ""),
+        ("Log today's workout: 5k run.", ""),
+        ("Reconcile the Q2 expense report.", ""),
+    ]
+    for title, body in cases:
+        sse_tags = apis_module._infer_tags_from_text(title, body)
+        a2a_tags = ax.infer_tags_from_text(title, body)
+        assert sse_tags == a2a_tags, (title, sse_tags, a2a_tags)
+
+        sse_skill = apis_module._resolve_skill(sse_tags)
+        a2a_skill = ax.resolve_skill(a2a_tags)
+        assert sse_skill == a2a_skill, (title, sse_skill, a2a_skill)
+    print("✓ A2A and SSE paths produce identical routing output (≥3 inputs)")
+
+
 # ── a2a_gateway: authorization ──────────────────────────────────────────────
+
+
+def test_format_rejection_known_reasons():
+    for reason in ("missing_caller_identity", "grant_not_active", "missing_capability"):
+        text = gw._format_rejection(reason)
+        assert text.startswith(f"Rejected [{reason}]: ")
+        message, hint = gw.REJECTION_DETAIL[reason]
+        assert message in text and hint in text
+    print("✓ _format_rejection covers all three reject reasons")
+
+
+def test_format_rejection_unknown_reason_does_not_crash():
+    text = gw._format_rejection("some_future_reason")
+    assert text == "Rejected [some_future_reason]"
+    print("✓ _format_rejection degrades gracefully for an unmapped reason")
+
+
+def test_format_advisory_note():
+    assert gw._format_advisory_note("grant_check_unavailable_advisory") != ""
+    assert "advisory policy" in gw._format_advisory_note("grant_check_unavailable_advisory")
+    # a normal "ok" acceptance must NOT carry the disclosure — silent-allow
+    # must not look identical to normal success, but normal success must not
+    # look like advisory-allow either.
+    assert gw._format_advisory_note("ok") == ""
+    print("✓ _format_advisory_note only fires for the advisory reason")
+
+
+def test_format_submission_failure():
+    text = gw._format_submission_failure("neotoma_store_failed")
+    assert text.startswith("Task submission failed [neotoma_store_failed]: ")
+    message, hint = gw.SUBMISSION_ERROR_DETAIL["neotoma_store_failed"]
+    assert message in text and hint in text
+    print("✓ _format_submission_failure maps the known error code")
+
+
+def test_advisory_allow_response_differs_from_normal_accept():
+    """A caller must be able to tell advisory-allow apart from a normal
+    'ok' acceptance — the accept text itself must visibly differ."""
+    accepted_core = (
+        "Task accepted (id=t1, neotoma=ent_1, routed_to=cicada)."
+    )
+    normal_text = accepted_core + gw._format_advisory_note("ok")
+    advisory_text = accepted_core + gw._format_advisory_note(
+        "grant_check_unavailable_advisory"
+    )
+    assert normal_text != advisory_text
+    assert "advisory" not in normal_text
+    assert "advisory" in advisory_text
+    print("✓ advisory-allow response is textually distinct from normal accept")
 
 
 def test_authorize_caller():
@@ -298,6 +382,12 @@ _TESTS = [
     test_build_agent_card,
     test_sign_agent_card_verifies,
     test_sign_agent_card_stub_unsigned,
+    test_format_rejection_known_reasons,
+    test_format_rejection_unknown_reason_does_not_crash,
+    test_format_advisory_note,
+    test_format_submission_failure,
+    test_advisory_allow_response_differs_from_normal_accept,
+    test_a2a_and_sse_routing_paths_agree,
     test_authorize_caller,
 ]
 

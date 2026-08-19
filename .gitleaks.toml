@@ -241,6 +241,7 @@ paths = [
   "execution/daemons/formica/com.ateles.formica.plist",
   "execution/daemons/apis/apis.py",
   "execution/daemons/apis/com.ateles.apis.plist",
+  "execution/daemons/apis/com.ateles.apis-a2a.plist",
   "execution/daemons/turdus/turdus.py",
   "execution/daemons/turdus/com.ateles.turdus.plist",
   "execution/daemons/monedula/handlers/payment_profile.py",
