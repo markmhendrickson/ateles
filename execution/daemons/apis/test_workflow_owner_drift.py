@@ -220,3 +220,66 @@ def test_non_panel_owners_are_still_live_agents():
     from issue_spec import SECTION_BY_AGENT
 
     assert "cicada" in SECTION_BY_AGENT
+
+
+# ---------------------------------------------------------------------------
+# The shape the LIVE API actually returns
+# ---------------------------------------------------------------------------
+
+
+def test_gates_arriving_as_a_json_string():
+    """Neotoma returns list-valued snapshot fields as JSON STRINGS.
+
+    Every test above passed a parsed list, so all of them were green while the
+    deployed check raised `'str' object has no attribute 'get'` on every
+    startup — iterating the string yields characters. Fail-open swallowed it,
+    so the guard reported nothing and never ran. Three consecutive startups in
+    the daemon log before anyone looked.
+
+    A test fixture that does not match the real payload is the same failure the
+    guard exists to catch: something that looks like protection and is not.
+    """
+    import json
+
+    entity = {
+        "canonical_name": "workflow_definition:ateles|feature",
+        "snapshot": {
+            "project": "ateles",
+            "workflow_type": "feature",
+            "gates": json.dumps(
+                [
+                    {"gate_name": "pm", "owner_agent": "pavo"},
+                    {"gate_name": "arch", "owner_agent": "bombycilla"},
+                ]
+            ),
+        },
+    }
+    drift = sd.workflow_owner_drift([entity], {"pavo", "waxwing"})
+    assert drift == [
+        ("workflow_definition:ateles|feature", "arch", "bombycilla")
+    ]
+
+
+def test_malformed_gates_json_does_not_raise():
+    entity = {"canonical_name": "x", "snapshot": {"gates": "not json at all"}}
+    assert sd.workflow_owner_drift([entity], {"pavo"}) == []
+
+
+def test_gates_of_an_unexpected_type_do_not_raise():
+    for value in (42, {"gate_name": "pm"}, None):
+        entity = {"canonical_name": "x", "snapshot": {"gates": value}}
+        assert sd.workflow_owner_drift([entity], {"pavo"}) == []
+
+
+def test_non_dict_entries_inside_gates_are_skipped():
+    import json
+
+    entity = {
+        "canonical_name": "x",
+        "snapshot": {
+            "gates": json.dumps(["a string", {"gate_name": "arch", "owner_agent": "gryllus"}])
+        },
+    }
+    assert sd.workflow_owner_drift([entity], {"cicada"}) == [
+        ("x", "arch", "gryllus")
+    ]
