@@ -815,6 +815,20 @@ def main() -> None:
                     log.info(f"Neotoma back online after {duration}.")
                     _telegram(f"✅ [piculet] Neotoma back online (was down {duration})")
 
+                # Clear the edge-triggered alert unconditionally: a restart
+                # mid-outage leaves state on disk with _neotoma_alerted False in
+                # this fresh process, so gating recovery on that flag would strand
+                # the key and silence the NEXT outage forever.
+                if _lib_notifier is not None:
+                    try:
+                        _lib_notifier.resolve(
+                            "piculet:neotoma-unavailable",
+                            "Neotoma reachable again",
+                            "piculet",
+                        )
+                    except Exception:
+                        pass
+
                 # Reset failure tracking on success
                 _consecutive_neotoma_failures = 0
                 _neotoma_alerted = False
@@ -832,7 +846,26 @@ def main() -> None:
                     )
                 else:
                     _neotoma_alerted = True
-                    log_error(f"Neotoma unavailable — skipping poll: {exc}")
+                    log.error(f"Neotoma unavailable — skipping poll: {exc}")
+                    # Edge-triggered: one alert per outage, not one per poll.
+                    # The key is stable while the message is not — the Cloudflare
+                    # 403 body carries a fresh `instance` id every time, which
+                    # would defeat any text-based dedup.
+                    _telegram_deduped(
+                        f"🔴 [piculet] ERROR: Neotoma unavailable — skipping poll: {exc}"
+                    )
+                    if _lib_notifier is not None:
+                        try:
+                            from lib.notify import Priority
+
+                            _lib_notifier.send(
+                                f"piculet error: Neotoma unavailable — skipping poll: {exc}",
+                                priority=Priority.BLOCKER,
+                                handler="piculet",
+                                state_key="piculet:neotoma-unavailable",
+                            )
+                        except Exception:
+                            pass
                 time.sleep(POLL_INTERVAL_SECONDS)
                 continue
 
