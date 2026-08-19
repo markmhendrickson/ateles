@@ -215,8 +215,10 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 log = configure_daemon_logging("piculet")
 
 
-# Dedup state for Telegram alerts — avoids repeat messages for persistent errors.
+# Dedup state for operator alerts — avoids repeat messages for persistent errors.
 # Maps alert text → (first_sent_time, send_count). Cleared when the error resolves.
+# Shared across every channel (Telegram + lib/notify) so they agree on which
+# occurrences are "new" vs "suppressed" for the same underlying condition.
 _telegram_alert_state: dict[str, tuple[float, int]] = {}
 # Re-notify for the same persistent error after this many seconds (hourly reminder).
 _TELEGRAM_REPEAT_INTERVAL = 3600
@@ -261,6 +263,46 @@ def _telegram(message: str) -> None:
         pass
 
 
+def _alert_is_due(key: str) -> bool:
+    """
+    Return True if an alert for `key` should fire now: first sighting, or
+    the persistent-condition reminder interval has elapsed. Mutates
+    _telegram_alert_state (records send) as a side effect on True.
+
+    Shared rate-limit gate for every operator channel (Telegram + lib/notify)
+    so a single evaluation per condition decides both channels' fate — the
+    email path used to bypass this gate entirely and fire on every failed
+    poll, emailing the operator once per poll interval indefinitely.
+    """
+    now = time.monotonic()
+    state = _telegram_alert_state.get(key)
+    if state is None:
+        _telegram_alert_state[key] = (now, 1)
+        return True
+    first_sent, count = state
+    if now - first_sent >= _TELEGRAM_REPEAT_INTERVAL * count:
+        _telegram_alert_state[key] = (first_sent, count + 1)
+        return True
+    return False
+
+
+def _telegram_send_due(key: str, text: str) -> bool:
+    """
+    Send `text` over Telegram if `key` is due per _alert_is_due, appending the
+    "still ongoing" reminder suffix when this is a repeat (not first) send.
+    Returns whether the alert was due (i.e. whether anything was sent).
+    """
+    if not _alert_is_due(key):
+        return False
+    first_sent, count = _telegram_alert_state[key]
+    if count == 1:
+        _telegram(text)
+    else:
+        elapsed = time.monotonic() - first_sent
+        _telegram(f"{text} (still ongoing, {int(elapsed / 60)}m)")
+    return True
+
+
 def _telegram_deduped(message: str) -> None:
     """
     Send a Telegram alert only if the message is new or hasn't been sent
@@ -268,20 +310,7 @@ def _telegram_deduped(message: str) -> None:
     but sends a reminder when the interval lapses so persistent issues stay visible.
     Call _telegram_clear(message) when the condition resolves.
     """
-    now = time.monotonic()
-    state = _telegram_alert_state.get(message)
-    if state is None:
-        # New alert — send immediately
-        _telegram_alert_state[message] = (now, 1)
-        _telegram(message)
-    else:
-        first_sent, count = state
-        elapsed = now - first_sent
-        if elapsed >= _TELEGRAM_REPEAT_INTERVAL * count:
-            # Remind once per hour for persistent issues
-            count += 1
-            _telegram_alert_state[message] = (first_sent, count)
-            _telegram(f"{message} (still ongoing, {int(elapsed / 60)}m)")
+    _telegram_send_due(message, message)
 
 
 def _telegram_clear(message: str) -> None:
@@ -290,17 +319,27 @@ def _telegram_clear(message: str) -> None:
 
 
 def log_error(message: str) -> None:
-    """Log at ERROR level and send a deduplicated Telegram alert + lib/notify."""
+    """Log at ERROR level and alert the operator, deduplicated per channel.
+
+    A single _alert_is_due(message) evaluation (via _telegram_send_due) drives
+    both the Telegram send and the lib/notify (email) send, so they agree on
+    new-vs-suppressed for the same underlying condition.
+    """
     log.error(message)
-    _telegram_deduped(f"🔴 [piculet] ERROR: {message}")
-    _notify_lib(f"piculet error: {message}", priority="blocker")
+    if _telegram_send_due(message, f"🔴 [piculet] ERROR: {message}"):
+        _notify_lib(f"piculet error: {message}", priority="blocker")
 
 
 def log_warning(message: str) -> None:
-    """Log at WARNING level and send a deduplicated Telegram alert + lib/notify."""
+    """Log at WARNING level and alert the operator, deduplicated per channel.
+
+    A single _alert_is_due(message) evaluation (via _telegram_send_due) drives
+    both the Telegram send and the lib/notify (email) send, so they agree on
+    new-vs-suppressed for the same underlying condition.
+    """
     log.warning(message)
-    _telegram_deduped(f"🟡 [piculet] WARNING: {message}")
-    _notify_lib(f"piculet warning: {message}", priority="info")
+    if _telegram_send_due(message, f"🟡 [piculet] WARNING: {message}"):
+        _notify_lib(f"piculet warning: {message}", priority="info")
 
 
 # ---------------------------------------------------------------------------
