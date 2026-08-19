@@ -20,10 +20,25 @@ recommendation), so nothing here replaces CI review.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 
 log = logging.getLogger("apis.review_panel")
+
+# Provider the security lens prefers, so its adversarial pass does not run on
+# the same model that authored the code (Cicada/Gryllus default to `claude`).
+# Deployments that do not have a second provider authenticated can set this to
+# "" to disable the preference outright rather than eat a per-review fallback.
+_DEFAULT_SECURITY_LENS_PROVIDER = "codex"
+
+
+def _security_lens_provider() -> str:
+    """Resolve the security lens's preferred harness provider."""
+    raw = os.environ.get(
+        "ATELES_SECURITY_LENS_PROVIDER", _DEFAULT_SECURITY_LENS_PROVIDER
+    )
+    return raw.strip().lower()
 
 
 @dataclass(frozen=True)
@@ -39,6 +54,15 @@ class Lens:
     always: bool = False  # serves on every panel / pre-registers on every issue
     forward_looking: bool = False  # non-blocking; output routes to own queue
     min_changed_files: int = 0  # skip when the diff is smaller than this
+    # Harness provider this lens PREFERS (claude/codex/cursor — genuinely
+    # different models). A preference, never a hard pin: `run_skill(provider=)`
+    # narrows the candidate list to exactly one, so a pinned provider that is
+    # cooling or unavailable yields no candidates and the lens does not run at
+    # all. For a security lens that failure mode is the one thing worse than
+    # same-model review — the review silently does not happen. The dispatcher
+    # resolves this to a pin only when the provider is actually available, and
+    # otherwise falls back to normal routing with the divergence logged.
+    preferred_provider: str = ""
 
 
 # Lens registry. Order = priority when the panel is capped.
@@ -121,6 +145,82 @@ LENSES: tuple[Lens, ...] = (
         always=True,
     ),
     Lens(
+        agent="falco",
+        lens="security",
+        gate="",
+        checks=(
+            "ADVERSARIAL SECURITY REVIEW — your job is to REFUTE this change, "
+            "not to confirm it. Do not ask 'is this adequate?'; ask 'what is "
+            "the path that still fails open?' Assume the author's sweep of the "
+            "vulnerable class is INCOMPLETE until you have proven otherwise, "
+            "and treat a fix that is correct on the paths it touches as "
+            "unfinished until you have looked for the paths it did not. "
+            "Specifically: (1) ENUMERATE EVERY SINK of the pattern this change "
+            "addresses — grep the whole repo for the vulnerable call, not just "
+            "the files in the diff — and name the ones the fix did NOT cover, "
+            "including exported entry points that sit beside a guarded sibling; "
+            "(2) attack the guard's INPUT DOMAIN: alternate encodings and "
+            "normalizations of a value the guard rejects in its canonical form "
+            "(IPv4-mapped and IPv6-compressed addresses, percent-encoding, "
+            "unicode and case folding, trailing dots, redirects, DNS names that "
+            "resolve to a blocked address), and say which of them reach the "
+            "sink; (3) find every branch where an error, an unset env var, a "
+            "parse failure, or an unknown value yields ALLOW rather than DENY — "
+            "name each fail-open default explicitly; (4) check that the change "
+            "does not narrow an existing protection anywhere else. Report a "
+            "break you demonstrated as CONFIRMED and block on it; report a "
+            "break you can argue but not demonstrate as PLAUSIBLE and do not "
+            "block. A review that finds nothing must state which sinks and "
+            "which encodings you actually checked — 'looks fine' is not a "
+            "security review."
+        ),
+        diff_patterns=(
+            # Path-level security surfaces, kept in lock-step with the CONCERNS
+            # matcher in neotoma's scripts/security/classify_diff.js (which
+            # emits sensitive=true from these same paths). Replicated as regexes
+            # rather than shelling out to the classifier: the panel reviews any
+            # repo, runs from the Apis daemon checkout with no guarantee that
+            # the reviewed repo's node_modules or scripts are present, and a
+            # subprocess that fails would silently drop the security lens.
+            r"(^|/)src/actions\.ts$",
+            r"(^|/)services/root_landing/",
+            r"(^|/)middleware/",
+            r"(^|/)services/auth/",
+            r"(^|/)services/aauth/",
+            r"(^|/)services/subscriptions/",
+            r"(^|/)services/sync/",
+            r"(^|/)services/issues/gh_auth\.ts$",
+            r"(^|/)services/entity_submission/",
+            r"(^|/)access_policy\.ts$",
+            r"(^|/)local_auth\.ts$",
+            r"(^|/)sandbox_mode\.ts$",
+            r"(^|/)inspector_mount\.ts$",
+            r"openapi\.ya?ml$",
+            r"(^|/)scripts/security/",
+            r"protected_routes_manifest\.json$",
+            # Generic, repo-agnostic security surfaces so the lens is not
+            # neotoma-only: the panel also reviews ateles and future repos.
+            r"(^|/)auth/",
+            r"(^|/)security/",
+            r"\.env",
+            r"(^|/)(hooks|guards?)/",
+            r"token|credential|secret|password|crypto|signature|sanitiz|escape",
+            r"ssrf|xss|csrf|injection|traversal",
+            r"(^|/)net/",
+            r"webhook",
+        ),
+        issue_patterns=(
+            r"\b(security|vulnerabilit|ssrf|xss|csrf|injection|traversal|"
+            r"auth|authz|authentication|authorization|token|credential|secret|"
+            r"bypass|escalation|exploit|cve|ghsa|hardening|sanitiz)\b",
+        ),
+        # Prefer a different model than the one that most often authors the
+        # code under review (Cicada/Gryllus default to the claude provider), so
+        # the adversarial pass does not inherit the author's priors — the
+        # documented same-priors blind spot. Overridable per deployment.
+        preferred_provider=_security_lens_provider(),
+    ),
+    Lens(
         agent="corvus",
         lens="content",
         gate="",
@@ -182,13 +282,29 @@ def select_panel(
         for item in selected
         if not item.forward_looking and item.gate != "" and item.gate in pending
     ]
+    # The security lens owns no gate, so registry order alone would let the cap
+    # drop it exactly when it matters most: a BROAD security-touching PR pulls
+    # in arch/ux/legal too, and with the default cap of 4 the security lens —
+    # last in registry order — is the first thing dropped. A lens that is
+    # silently absent from the highest-risk reviews is worse than no lens, so
+    # once its trigger has fired it ranks alongside pending-gate owners rather
+    # than behind every other blocking lens (ateles#425).
+    security = [
+        item
+        for item in selected
+        if not item.forward_looking
+        and item.lens == "security"
+        and item not in gate_owners
+    ]
     other_blocking = [
         item
         for item in selected
-        if not item.forward_looking and item not in gate_owners
+        if not item.forward_looking
+        and item not in gate_owners
+        and item not in security
     ]
     forward = [item for item in selected if item.forward_looking]
-    panel = (gate_owners + other_blocking + forward)[:max_panel]
+    panel = (gate_owners + security + other_blocking + forward)[:max_panel]
     dropped = [item.lens for item in selected if item not in panel]
     if dropped:
         log.info(f"[apis] review panel capped at {max_panel}; dropped: {dropped}")
@@ -214,6 +330,46 @@ def select_expectation_agents(
         ):
             out.append(lens)
     return out
+
+
+def resolve_lens_provider(
+    lens: Lens, available_providers: set[str] | None = None
+) -> str | None:
+    """Resolve the harness provider to pin for `lens`, or None for normal routing.
+
+    Model diversity on the security lens is a PREFERENCE, deliberately not a
+    hard pin. `run_skill(provider=...)` narrows the candidate list to exactly
+    that one adapter, so pinning a provider that is unauthenticated, missing its
+    binary, or cooling down after a capacity failure produces zero candidates —
+    and the lens does not run at all. Silently skipping the security review is a
+    strictly worse outcome than running it on the same model that wrote the
+    code, so an unavailable preference degrades to normal weighted routing and
+    says so in the log rather than failing closed.
+
+    `available_providers` is the set the caller knows to be usable right now
+    (the dispatcher passes the live binary/headroom view). When omitted, the
+    preference is returned unvalidated — callers that cannot check availability
+    are trusted to handle a failed run.
+    """
+    # Re-read the env BEFORE the empty check, not after: the registry is built
+    # at import, so the frozen field can be "" (preference disabled at import)
+    # while the env now names a provider. Checking the frozen value first would
+    # early-return and silently ignore a late enable — the disable-then-enable
+    # direction of the same staleness this re-read exists to fix.
+    if lens.lens == "security":
+        preferred = _security_lens_provider()
+    else:
+        preferred = (lens.preferred_provider or "").strip().lower()
+    if not preferred:
+        return None
+    if available_providers is not None and preferred not in available_providers:
+        log.warning(
+            f"[apis] {lens.lens} lens prefers provider '{preferred}' but it is "
+            "unavailable — falling back to normal routing. The review still "
+            "runs, without model diversity."
+        )
+        return None
+    return preferred
 
 
 def _matches_diff(lens: Lens, changed_files: list[str]) -> bool:

@@ -18,6 +18,7 @@ The canonical, harness-neutral file for every `agent_definition` entity in Neoto
 | concierge | T4 |  | planned | ✅ | [concierge.md](concierge.md) |
 | corvus | T4 | Corvus | active | ✅ | [corvus.md](corvus.md) |
 | cotinga | T3 | Cotinga cotinga | active | ✅ | [cotinga.md](cotinga.md) |
+| falco | T4 | Falco | active | ✅ | [falco.md](falco.md) |
 | formica | T3 | Formica | active | ✅ | [formica.md](formica.md) |
 | fringilla | T4 | Fringilla | active | ✅ | [fringilla.md](fringilla.md) |
 | gorilla | T4 | Gorilla | active | ✅ | [gorilla.md](gorilla.md) |
@@ -44,4 +45,4 @@ The canonical, harness-neutral file for every `agent_definition` entity in Neoto
 | vanellus | T4 | Vanellus | active | ✅ | [vanellus.md](vanellus.md) |
 | waxwing | T4 | Bombycilla | active | ✅ | [waxwing.md](waxwing.md) |
 
-*39 agents. Generated from Neotoma — do not edit directly.*
+*40 agents. Generated from Neotoma — do not edit directly.*

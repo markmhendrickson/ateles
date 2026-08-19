@@ -146,3 +146,152 @@ def test_forward_looking_gate_contributor_keeps_seat_on_small_diff():
     # the parent issue keeps its panel seat even when the diff is small.
     panel = select_panel({"corvus"}, ["a.py"], max_panel=6)
     assert "corvus" in _agents(panel)
+
+
+# ── Security lens (ateles#425) ─────────────────────────────────────────────
+
+
+def test_security_lens_triggers_on_sensitive_paths():
+    # The CONCERNS surfaces from neotoma's scripts/security/classify_diff.js,
+    # which is what emits sensitive=true for the release security lane.
+    for path in (
+        "src/actions.ts",
+        "src/middleware/admission.ts",
+        "src/services/auth/bearer.ts",
+        "src/services/aauth/verify.ts",
+        "src/services/subscriptions/webhook_delivery.ts",
+        "src/services/sync/sync_webhook_outbound.ts",
+        "src/services/entity_submission/orchestrator.ts",
+        "src/services/access_policy.ts",
+        "src/services/local_auth.ts",
+        "src/services/inspector_mount.ts",
+        "openapi.yaml",
+        "scripts/security/classify_diff.js",
+    ):
+        panel = select_panel(set(), [path], max_panel=8)
+        assert "security" in [l.lens for l in panel], path
+
+
+def test_security_lens_stays_off_non_sensitive_diffs():
+    panel = select_panel(set(), ["README.md", "docs/guide.md"], max_panel=8)
+    assert "security" not in [l.lens for l in panel]
+
+
+def test_security_lens_survives_the_panel_cap():
+    # Regression: the security lens owns no gate, so plain registry order let
+    # the default cap of 4 drop it exactly on a BROAD security PR — the case
+    # that most needs it. Once its trigger fires it must keep a seat.
+    broad_security_diff = [
+        "src/services/auth/token.ts",  # security
+        "openapi.yaml",  # arch + security
+        "package.json",  # legal
+        "docs/guide.md",  # ux
+        "src/a.ts",
+        "src/b.ts",
+        "src/c.ts",
+    ]
+    for cap in (2, 3, 4, 5):
+        panel = select_panel(set(), broad_security_diff, max_panel=cap)
+        assert "security" in [l.lens for l in panel], f"dropped at cap={cap}"
+
+
+def test_pending_gate_owner_still_outranks_security():
+    # Security is prioritized over other blocking lenses, but NOT over a lens
+    # that owns a still-pending gate — that one must re-run or the gate can
+    # never clear (ateles#230).
+    panel = select_panel(
+        set(),
+        ["src/services/auth/token.ts", "openapi.yaml"],
+        max_panel=2,
+        pending_gates={"arch"},
+    )
+    assert "arch" in [l.lens for l in panel]
+
+
+def test_security_lens_carries_a_refutation_mandate():
+    # The whole point of the lens: it must ask "what fails open?", not
+    # "is this adequate?". Guard the mandate against being softened away.
+    security = next(l for l in LENSES if l.lens == "security")
+    checks = security.checks.lower()
+    for token in ("refute", "fails open", "incomplete", "confirmed", "plausible"):
+        assert token in checks, token
+
+
+def test_security_lens_owns_no_gate():
+    # It reviews; it does not sign off a pre-impl gate on the issue.
+    security = next(l for l in LENSES if l.lens == "security")
+    assert security.gate == ""
+    assert not security.forward_looking
+
+
+def test_security_issue_patterns_preregister_expectations():
+    lenses = select_expectation_agents(
+        "Fix SSRF in outbound webhook delivery",
+        "caller-supplied URL reaches fetch without the host guard",
+        [],
+    )
+    assert "security" in [l.lens for l in lenses]
+
+
+# ── Provider preference (model diversity) ──────────────────────────────────
+
+
+def test_security_lens_prefers_a_non_authoring_provider():
+    from review_panel import resolve_lens_provider
+
+    security = next(l for l in LENSES if l.lens == "security")
+    assert security.preferred_provider
+    # Honored when the provider is actually usable.
+    assert (
+        resolve_lens_provider(security, {"claude", "codex", "cursor"})
+        == security.preferred_provider
+    )
+
+
+def test_unavailable_preferred_provider_degrades_instead_of_skipping():
+    # A hard pin would make run_skill find zero candidates and the security
+    # review would silently not happen — strictly worse than reviewing on the
+    # authoring model. The preference must degrade to normal routing.
+    from review_panel import resolve_lens_provider
+
+    security = next(l for l in LENSES if l.lens == "security")
+    assert resolve_lens_provider(security, {"claude"}) is None
+
+
+def test_lenses_without_a_preference_use_normal_routing():
+    from review_panel import resolve_lens_provider
+
+    for lens in LENSES:
+        if lens.lens != "security":
+            assert resolve_lens_provider(lens, {"claude", "codex"}) is None
+
+
+def test_security_provider_preference_is_env_overridable(monkeypatch):
+    from review_panel import resolve_lens_provider
+
+    security = next(l for l in LENSES if l.lens == "security")
+    monkeypatch.setenv("ATELES_SECURITY_LENS_PROVIDER", "cursor")
+    assert resolve_lens_provider(security, {"claude", "cursor"}) == "cursor"
+    # Empty disables the preference outright.
+    monkeypatch.setenv("ATELES_SECURITY_LENS_PROVIDER", "")
+    assert resolve_lens_provider(security, {"claude", "cursor"}) is None
+
+
+def test_late_enable_of_the_provider_preference_is_honored(monkeypatch):
+    # Loxia review on PR #426: the env re-read ran AFTER an early
+    # `if not preferred: return None` on the import-frozen field, so a
+    # preference disabled at import and enabled later was silently ignored —
+    # the disable-then-enable direction of the very staleness the re-read
+    # exists to fix. Both directions must work at dispatch time.
+    from dataclasses import replace
+
+    from review_panel import resolve_lens_provider
+
+    security = next(l for l in LENSES if l.lens == "security")
+    frozen_disabled = replace(security, preferred_provider="")
+
+    monkeypatch.setenv("ATELES_SECURITY_LENS_PROVIDER", "codex")
+    assert resolve_lens_provider(frozen_disabled, {"claude", "codex"}) == "codex"
+
+    monkeypatch.setenv("ATELES_SECURITY_LENS_PROVIDER", "")
+    assert resolve_lens_provider(security, {"claude", "codex"}) is None
