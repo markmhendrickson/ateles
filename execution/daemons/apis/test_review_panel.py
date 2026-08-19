@@ -295,3 +295,59 @@ def test_late_enable_of_the_provider_preference_is_honored(monkeypatch):
 
     monkeypatch.setenv("ATELES_SECURITY_LENS_PROVIDER", "")
     assert resolve_lens_provider(security, {"claude", "codex"}) is None
+
+
+# ── Ateles-side security surfaces (ateles#426 follow-up) ───────────────────
+
+
+def test_security_lens_fires_on_ateles_own_security_surfaces():
+    # Regression: the lens shipped with diff_patterns mirroring neotoma's
+    # classify_diff.js, which enumerates NEOTOMA's tree. Ateles has no
+    # src/services/auth/ or src/middleware/, so in the repo the lens actually
+    # lives in it fired on NOTHING — five consecutive real PRs after the merge
+    # seated pm/qa and never security, including the PR that added the lens.
+    for path in (
+        ".claude/hooks/gmail_send_gate.py",
+        "execution/scripts/secrets_lib.py",
+        "lib/daemon_runtime/aauth_signer.py",
+        "lib/daemon_runtime/aauth_httpsig.py",
+        "lib/daemon_runtime/grant_checker.py",
+        "lib/daemon_runtime/neotoma_signed.py",
+        "lib/daemon_runtime/signed_fetch.mjs",
+        "execution/daemons/monedula/monedula.py",
+        "execution/daemons/monedula/handlers/payment_profile.py",
+        "execution/mcp/ateles/server.py",
+    ):
+        panel = select_panel(set(), [path], max_panel=8)
+        assert "security" in [l.lens for l in panel], path
+
+
+def test_security_lens_stays_off_routine_ateles_changes():
+    # The other half of the contract. A lens that fires on everything spends
+    # the panel cap on routine work until it is ignored — the failure mode that
+    # makes a security review worthless in a different way than not running.
+    for path in (
+        "execution/daemons/apis/apis.py",
+        "execution/daemons/tyto/tyto.py",
+        "execution/daemons/apis/test_routing.py",
+        "docs/agents/pavo.md",
+        "README.md",
+    ):
+        panel = select_panel(set(), [path], max_panel=8)
+        assert "security" not in [l.lens for l in panel], path
+
+
+def test_busiest_dispatch_files_are_not_matched_by_path_alone():
+    # swarm_dispatch/skill_runner/harness_router ARE token-routing code, but
+    # they are also the swarm's busiest files and most edits are routing or
+    # bookkeeping. Matching them by path seated the lens on 76% of the last 30
+    # merged PRs. They stay covered by the CONTENT patterns when an edit
+    # actually touches auth/token/signature concerns; reachability-based
+    # selection (neotoma#2174) is the real fix for the rest.
+    for path in (
+        "execution/daemons/apis/swarm_dispatch.py",
+        "execution/daemons/apis/skill_runner.py",
+        "execution/daemons/apis/harness_router.py",
+    ):
+        panel = select_panel(set(), [path], max_panel=8)
+        assert "security" not in [l.lens for l in panel], path
