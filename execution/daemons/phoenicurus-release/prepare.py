@@ -564,7 +564,7 @@ def existing_release_status(
             if ts is not None and (not best_has_ts or ts > best_ts):
                 best, best_ts, best_has_ts = candidate, ts, True
         return best
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as exc:
         log.warning(f"could not check existing release_result: {exc}")
     return None
 
