@@ -57,6 +57,7 @@ import httpx
 
 from gate_waive import (
     IssueGateStore,
+    parse_snapshot_list_field,
     WaiveOutcome,
     format_waive_comment,
 )
@@ -589,22 +590,12 @@ def workflow_owner_drift(
         name = snap.get("canonical_name") or wf.get("canonical_name") or (
             f"{snap.get('project', '?')}|{snap.get('workflow_type', '?')}"
         )
-        gates = snap.get("gates") or []
-        # Neotoma's /entities/query returns list-valued snapshot fields as JSON
-        # STRINGS, not parsed lists. Iterating the string yields characters, and
-        # `"[".get(...)` raises AttributeError — which fail-open swallowed, so
-        # the check reported nothing and never actually ran (found in the
-        # deployed daemon log, three consecutive startups).
-        if isinstance(gates, str):
-            try:
-                gates = json.loads(gates)
-            except (ValueError, TypeError):
-                gates = []
-        if not isinstance(gates, list):
-            gates = []
-        for gate in gates:
-            if not isinstance(gate, dict):
-                continue
+        # parse_snapshot_list_field, not a local decode: /entities/query returns
+        # list-valued snapshot fields as JSON STRINGS, and gate_waive.py had
+        # already solved this for the dict-shaped case. Writing a second decode
+        # here is how #442 shipped a reader that crashed on every startup while
+        # its siblings handled the same payload correctly (#450).
+        for gate in parse_snapshot_list_field(snap.get("gates")):
             owner = (gate.get("owner_agent") or "").strip()
             if owner and owner not in known_agents:
                 drift.append((str(name), str(gate.get("gate_name") or "?"), owner))
