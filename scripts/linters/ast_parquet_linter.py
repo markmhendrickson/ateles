@@ -110,7 +110,7 @@ class ParquetAccessChecker(ast.NodeVisitor):
                         "type": f"direct_parquet_{operation}",
                         "message": (
                             f"Direct parquet file {operation} detected at line {node.lineno}. "
-                            f"Use MCP server instead. See /shared/docs/agent-mcp-access-policy.md"
+                            f"Use MCP server instead. See docs/policies/agent-mcp-access-policy.md"
                         ),
                     }
                 )
@@ -215,7 +215,7 @@ def main():
             "\nAll parquet file access must go through the MCP server.", file=sys.stderr
         )
         print(
-            "See /shared/docs/agent-mcp-access-policy.md for details.", file=sys.stderr
+            "See docs/policies/agent-mcp-access-policy.md for details.", file=sys.stderr
         )
         sys.exit(1)
 

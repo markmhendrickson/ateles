@@ -100,7 +100,7 @@ stale, misplaced, or operator-personal files, see the [documentation plan](docum
   server *code* formerly under `docs/mcp/` has been **relocated** to top-level `mcp-servers/`.
 
 > **A note on what lives here.** Not everything under `docs/` is documentation. The vendored MCP server *code*
-> was relocated to top-level `mcp-servers/`; `docs/shared/` still holds a superseded foundation layer (kept
-> because parts are cited as live policy); off-topic and superseded material is under `docs/archive/`. See the
-> [documentation plan](documentation_plan.md) for the disposition of each. New documentation should follow the
-> P0–P5 structure above.
+> was relocated to top-level `mcp-servers/`; the live agent-policy docs now live under `docs/policies/`; and
+> off-topic, superseded, and legacy-foundation material (the former `docs/shared/`) is under `docs/archive/`.
+> See the [documentation plan](documentation_plan.md) for the disposition of each. New documentation should
+> follow the P0–P5 structure above.

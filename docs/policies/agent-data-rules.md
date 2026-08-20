@@ -6,6 +6,14 @@
 
 ---
 
+## Purpose
+
+Rules for data queries, modifications, snapshots, and adding entries.
+
+## Scope
+
+Applies to all agents reading or writing operator data — covers the decision tree, query rules, and snapshot / modification policy below.
+
 ## Data Query Decision Tree
 
 **BEFORE querying any data, follow this decision tree:**
