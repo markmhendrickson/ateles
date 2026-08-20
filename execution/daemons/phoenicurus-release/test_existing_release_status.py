@@ -36,6 +36,20 @@ import prepare  # noqa: E402
 SHA = "b" * 40
 
 
+@pytest.fixture(autouse=True)
+def _neotoma_base_url(monkeypatch):
+    """
+    `existing_release_status` builds `urllib.request.Request(f"{base}/...")`
+    itself before the mocked `urlopen` ever runs — with NEOTOMA_BASE_URL unset
+    (the default in a clean CI env) `base` is "", so the Request constructor
+    raises `ValueError: unknown url type` before the fake urlopen is reached.
+    Every test in this file needs a valid absolute base URL regardless of
+    whatever the host environment happens to have set, matching the pattern
+    in test_store_release_result.py / test_publish.py.
+    """
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
