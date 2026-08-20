@@ -48,7 +48,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
@@ -91,6 +91,12 @@ SPAWN_COUNT_FILE = Path(__file__).parent / ".phoenicurus_prepare_spawn_count"
 # spend a retry attempt on a non-attempt — see _live_peer_pid).
 SPAWN_PID_FILE = Path(__file__).parent / ".phoenicurus_prepare_spawn_pid"
 AGENT_LOG = LOG_DIR / "phoenicurus-prepare-agent.log"
+# Which blocking release_result entity_id we last escalated to the operator
+# for a stale block, so the on-merge path (rate-limited per COMMIT, not per
+# day — several merges can land while the same block is still stale) does not
+# re-notify on every merge. Cleared implicitly once a different entity_id (or
+# none) is the blocker.
+STALE_ESCALATION_FILE = Path(__file__).parent / ".phoenicurus_prepare_stale_escalated"
 
 NEOTOMA_REPO_ROOT = Path(
     os.environ.get("NEOTOMA_REPO_ROOT", str(Path.home() / "repos" / "neotoma"))
@@ -102,6 +108,14 @@ TELEGRAM_TOPIC = os.environ.get("TELEGRAM_TOPIC_PHOENICURUS", "") or os.environ.
 # Minimum unreleased commits before a release is worth preparing (avoid churning
 # a 1-commit patch every weekday). Override with PHOENICURUS_MIN_COMMITS.
 MIN_COMMITS = int(os.environ.get("PHOENICURUS_MIN_COMMITS", "1"))
+
+# A release_result blocking prep for longer than this is a stall, not a wait —
+# escalate to the operator instead of repeating the same quiet INFO line
+# forever. Default N=3 from the ateles#461 PM spec; change here if the number
+# needs to move. Override with PHOENICURUS_STALE_RELEASE_BLOCK_DAYS.
+STALE_RELEASE_BLOCK_DAYS = int(
+    os.environ.get("PHOENICURUS_STALE_RELEASE_BLOCK_DAYS", "3")
+)
 
 # Email notification (release RCs also go to the operator's inbox, not just
 # Telegram — mirrors the rest of the swarm, which emails via gws +send). The
@@ -156,6 +170,25 @@ def _already_ran_for_sha(sha: str) -> bool:
 def _mark_ran_for_sha(sha: str) -> None:
     if sha:
         MERGE_STATE_FILE.write_text(sha)
+
+
+def _already_escalated_stale_block(entity_id: str) -> bool:
+    """True if we already notified the operator about THIS blocking entity."""
+    return (
+        bool(entity_id)
+        and STALE_ESCALATION_FILE.exists()
+        and STALE_ESCALATION_FILE.read_text().strip() == entity_id
+    )
+
+
+def _mark_escalated_stale_block(entity_id: str) -> None:
+    if entity_id:
+        try:
+            STALE_ESCALATION_FILE.write_text(entity_id)
+        except OSError as exc:
+            # Losing this only costs us a repeat notification, never a missed
+            # one — never let it block the run.
+            log.warning(f"could not persist stale-escalation marker: {exc}")
 
 
 def _spawn_count(head: str) -> int:
@@ -396,11 +429,91 @@ def main_ci_green() -> bool | None:
 # Neotoma: is a release for this version already in flight?
 # ---------------------------------------------------------------------------
 
+# Statuses that represent a release genuinely in flight — anything else
+# (superseded, published, skipped, failed, …) never blocks prep.
+_BLOCKING_STATUSES = ("prepared", "pending_approval", "approved", "publishing")
 
-def existing_release_status(next_version_hint: str) -> str | None:
+
+def is_sentinel_version(version: str | None) -> bool:
     """
-    Return the status of any release_result already tracking work since the last
-    tag, so we don't re-prepare on top of a pending_approval release.
+    True for versions that are not a real release and must never gate prep —
+    test/CI artifacts like `v0.0.0-lint-check` (the ateles#461 incident: an
+    11-day-old lint-check sentinel blocked every real release). Permissive but
+    explicit: a class of value, not one hardcoded string, since more sentinels
+    of this shape are expected (e.g. `v0.0.0-ci-smoke`).
+    """
+    if not version:
+        return True
+    return version.startswith("v0.0.0-") or version.endswith("-lint-check")
+
+
+def _parse_ts(ts) -> float | None:
+    """Parse an epoch number or ISO-8601 string (with or without trailing Z)."""
+    if ts is None:
+        return None
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    if isinstance(ts, str):
+        s = ts.strip()
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _row_timestamp(row: dict) -> float | None:
+    """
+    Best available timestamp for a queried entity row, checked in priority
+    order (matching the convention in apis/task_watchdog.py's `_age_seconds`).
+
+    `release_result` has no declared status-transition field in its schema, so
+    this reads the envelope Neotoma attaches to every queried row rather than
+    a field this function would have to invent.
+    """
+    for key in (
+        "updated_at",
+        "last_observation_at",
+        "updated_date",
+        "computed_at",
+        "created_at",
+    ):
+        parsed = _parse_ts(row.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def existing_release_status(
+    next_version_hint: str = "",
+) -> tuple[str, str, str, float | None] | None:
+    """
+    Return (status, entity_id, version, age_days) for the release_result — if
+    any — that should block preparing `next_version_hint`, so we don't
+    re-prepare on top of a release already in flight for the SAME version.
+    `age_days` is None when no usable timestamp was found on the row.
+
+    Two modes, chosen by whether a hint is given:
+      - next_version_hint set: only a `release_result` whose version equals the
+        hint can block. A blocking status on an unrelated or sentinel version
+        (e.g. a stray `v0.0.0-lint-check` test artifact) must never gate prep
+        of a different, real release — that silent mismatch is ateles#461.
+      - next_version_hint empty/None: falls back to "any non-sentinel version
+        with a blocking status", never "any version at all" — a sentinel is
+        excluded even with no hint to compare against. `run_prepare` itself
+        uses THIS mode: the next RC's version is chosen later, inside the
+        spawned agent's semver bump, so it is not knowable at the call site
+        (`latest_tag()` is the LAST released version, not the one being
+        prepared — passing it as the hint would compare the wrong two
+        versions and never match a real in-flight RC). Passing an explicit
+        hint remains supported for any caller that DOES know the exact
+        version it's asking about.
+
+    Sentinel versions (see `is_sentinel_version`) are excluded in BOTH modes.
+    Entities are considered newest-first so the most recent blocking match
+    wins when several are present.
     """
     base = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
     is_loopback = "localhost" in base or "127.0.0.1" in base
@@ -419,11 +532,38 @@ def existing_release_status(next_version_hint: str) -> str | None:
         with urllib.request.urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read())
         entities = data.get("entities") if isinstance(data, dict) else data
-        for e in entities or []:
-            snap = e.get("snapshot") or e.get("fields") or e
+        now = datetime.now(timezone.utc).timestamp()
+        # Single pass, tracking the newest qualifying match — do not rely on
+        # incidental query order when several rows qualify. A row with no
+        # parseable timestamp is kept distinct from one dated 1970: it never
+        # LOSES to an actually-old timestamped row (which would silently bury
+        # a just-written, envelope-not-yet-populated blocker), but a row WITH
+        # a real timestamp always wins the comparison once one is found.
+        best: tuple[str, str, str, float | None] | None = None
+        best_ts: float | None = None
+        best_has_ts = False
+        for row in entities or []:
+            snap = row.get("snapshot") or row.get("fields") or row
+            if isinstance(snap, dict) and isinstance(snap.get("snapshot"), dict):
+                snap = snap["snapshot"]
             status = str(snap.get("status") or "")
-            if status in ("prepared", "pending_approval", "approved", "publishing"):
-                return status
+            if status not in _BLOCKING_STATUSES:
+                continue
+            version = str(snap.get("version") or "")
+            if is_sentinel_version(version):
+                continue
+            if next_version_hint and version != next_version_hint:
+                continue
+            entity_id = str(row.get("entity_id") or row.get("id") or "")
+            ts = _row_timestamp(row)
+            age_days = max(0.0, (now - ts) / 86400.0) if ts is not None else None
+            candidate = (status, entity_id, version, age_days)
+            if best is None:
+                best, best_ts, best_has_ts = candidate, ts, ts is not None
+                continue
+            if ts is not None and (not best_has_ts or ts > best_ts):
+                best, best_ts, best_has_ts = candidate, ts, True
+        return best
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
         log.warning(f"could not check existing release_result: {exc}")
     return None
@@ -651,12 +791,57 @@ def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
         return 0
 
     # Don't re-prepare if a release is already in flight awaiting approval.
-    inflight = existing_release_status(tag)
+    #
+    # Deliberately pass NO hint here rather than `tag`. `tag` is the LAST
+    # RELEASED version (latest_tag()); the version actually being prepared is
+    # chosen later, inside the spawned agent's semver bump, and is not known
+    # at this call site. Passing `tag` as the hint would make this compare
+    # the wrong two versions — a real in-flight release_result for the RC
+    # (e.g. v0.20.0) would never equal the last-released tag (e.g. v0.19.0),
+    # so the guard would never match and this daemon would spawn a second
+    # prepare agent on top of a real pending release. The no-hint mode
+    # ("any non-sentinel version blocks") is what this call site's actual
+    # information supports; sentinel/test entities (ateles#461) are still
+    # excluded in that mode by `is_sentinel_version`.
+    inflight = existing_release_status()
     if inflight:
+        status, entity_id, version, age_days = inflight
         log.info(
-            f"A release_result is already {inflight!r} — not preparing another. "
+            f"[phoenicurus-release] INFO A release_result is already '{status}' "
+            f"({version}, {entity_id}) — not preparing another. "
             "(Approve or skip the pending one first.)"
         )
+        if age_days is not None and age_days > STALE_RELEASE_BLOCK_DAYS:
+            log.warning(
+                f"[phoenicurus-release] WARNING release_result {entity_id} "
+                f"({version}) has blocked prep as '{status}' for "
+                f"{age_days:.1f} day(s), past the {STALE_RELEASE_BLOCK_DAYS}-day "
+                "stale threshold."
+            )
+            # Escalate once per blocking entity, not once per run. The
+            # on-merge path is rate-limited per COMMIT, not per day (see
+            # module docstring), so several merges can land while the same
+            # release_result is still stuck — without this, each one would
+            # re-page the operator about a block they already know about.
+            if not dry_run and _already_escalated_stale_block(entity_id):
+                log.info(
+                    f"[phoenicurus-release] INFO already escalated {entity_id} "
+                    "— not re-notifying the operator."
+                )
+            else:
+                log.warning(
+                    "[phoenicurus-release] WARNING escalating to the operator."
+                )
+                notify_operator(
+                    f"⚠️ Phoenicurus: release_result {entity_id} ({version}) has "
+                    f"been '{status}' for {age_days:.1f} day(s) — longer than the "
+                    f"{STALE_RELEASE_BLOCK_DAYS}-day stale threshold. This is "
+                    "blocking prep of every release since. Approve or skip it, or "
+                    "correct its status if it's stale (e.g. a test/sentinel "
+                    "artifact)."
+                )
+                if not dry_run:
+                    _mark_escalated_stale_block(entity_id)
         if not dry_run:
             _mark_ran(on_merge, head)
         return 0

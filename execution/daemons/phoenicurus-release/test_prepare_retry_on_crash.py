@@ -48,6 +48,7 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(prepare, "STATE_FILE", tmp_path / ".day")
     monkeypatch.setattr(prepare, "SPAWN_COUNT_FILE", tmp_path / ".spawns")
     monkeypatch.setattr(prepare, "SPAWN_PID_FILE", tmp_path / ".pid")
+    monkeypatch.setattr(prepare, "STALE_ESCALATION_FILE", tmp_path / ".stale")
     return tmp_path
 
 
@@ -106,7 +107,7 @@ def ready_to_spawn(isolated_state, monkeypatch):
     monkeypatch.setattr(prepare, "_head_sha", lambda: SHA)
     monkeypatch.setattr(prepare, "latest_tag", lambda: "v1.0.0")
     monkeypatch.setattr(prepare, "unreleased_commit_count", lambda _tag: 5)
-    monkeypatch.setattr(prepare, "existing_release_status", lambda _hint: None)
+    monkeypatch.setattr(prepare, "existing_release_status", lambda *_a: None)
     monkeypatch.setattr(prepare, "main_ci_green", lambda: True)
     monkeypatch.setattr(prepare, "notify_operator", lambda *_a, **_k: None)
     monkeypatch.setattr(prepare, "subprocess", _NoopSubprocess())
@@ -184,7 +185,9 @@ def test_successful_agent_stops_further_spawns(ready_to_spawn, monkeypatch):
     assert len(ready_to_spawn) == 1
 
     monkeypatch.setattr(
-        prepare, "existing_release_status", lambda _hint: "pending_approval"
+        prepare,
+        "existing_release_status",
+        lambda *_a: ("pending_approval", "ent_fake", "v1.0.0", None),
     )
     prepare.run_prepare(dry_run=False, force=False, on_merge=True)
 
