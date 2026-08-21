@@ -1362,6 +1362,7 @@ TOOLS = [
                 },
             },
             "required": ["issue_ref"],
+            "additionalProperties": False,
         },
     ),
     Tool(
@@ -1373,7 +1374,7 @@ TOOLS = [
             "stalled but no gate explains why — a queued pipeline is waiting on the "
             "serialized slot, not on a reviewer."
         ),
-        inputSchema={"type": "object", "properties": {}},
+        inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
     ),
     Tool(
         name="get_dispatch_health",
@@ -1383,7 +1384,7 @@ TOOLS = [
             "been logged recently. Use it to tell 'the swarm is working on it' apart from "
             "'nothing is running at all'."
         ),
-        inputSchema={"type": "object", "properties": {}},
+        inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
     ),
 ]
 

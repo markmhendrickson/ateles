@@ -764,6 +764,20 @@ class TestToolSchemas(unittest.TestCase):
                     chain += inspect.getsource(getattr(srv, impl))
             self.assertNotIn("_correct(", chain, f"{name} must not write to Neotoma")
 
+    def test_every_tool_schema_rejects_unknown_properties(self):
+        """Every inputSchema must set additionalProperties: false.
+
+        The four original tools did; the three observability tools shipped
+        without it, so a typo'd argument would be silently accepted instead of
+        rejected. Asserted over ALL tools rather than the three, so a future
+        tool cannot reintroduce the drift.
+        """
+        for tool in srv.TOOLS:
+            self.assertIs(
+                tool.inputSchema.get("additionalProperties"), False,
+                f"{tool.name} inputSchema must set additionalProperties: false",
+            )
+
     def test_get_gate_status_requires_issue_ref(self):
         t = next(t for t in srv.TOOLS if t.name == "get_gate_status")
         self.assertIn("issue_ref", t.inputSchema["required"])
