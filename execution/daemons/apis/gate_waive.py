@@ -47,7 +47,11 @@ log = logging.getLogger("apis.gate_waive")
 
 # Gate states that count as ALREADY CLEARED — never re-waive these.
 CLEARED_GATE_STATES: frozenset[str] = frozenset(
-    {"signed_off", "waived", "not_required", "skipped"}
+    # `not_applicable` appears in live gate_status values alongside
+    # `not_required` — both mean "this gate will never be signed because it does
+    # not apply here". Omitting it made a legitimately-cleared gate read as
+    # uncleared (ateles#460).
+    {"signed_off", "waived", "not_required", "not_applicable", "skipped"}
 )
 
 # The value a waived gate is set to.

@@ -2712,7 +2712,11 @@ def test_additive_spec_pr_opened_is_info_priority(monkeypatch):
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(swarm_dispatch, "select_expectation_agents",
                         lambda *a, **kw: [])
-    monkeypatch.setattr(SwarmDispatcher, "_gates_green", lambda self, lanius: True)
+    # ateles#460: _gates_green is async and takes (lanius, repository, number).
+    async def _always_green(self, lanius, repository, issue_number):
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "_gates_green", _always_green)
     monkeypatch.setattr(SwarmDispatcher, "_open_implementation_pr", fake_open_pr)
     monkeypatch.setattr(SwarmDispatcher, "_mark_pipeline_inflight",
                         lambda self, t, **kw: _async_none())
@@ -4659,6 +4663,26 @@ def _install_pipeline_stubs(monkeypatch, run_skill_impl, *, select_agents=None):
         monkeypatch.setattr(
             swarm_dispatch, "select_expectation_agents", select_agents
         )
+
+    # ateles#460: _gates_green now reads gate_status from the issue entity, not
+    # Lanius's stdout. These pipeline tests exercise the handoff, not the gate
+    # check, so give them an entity whose pre-impl gates are genuinely cleared.
+    # Tests that care about the gate check itself live in
+    # test_gates_green_reads_entity.py and stub this differently.
+    class _ClearGateState:
+        found = True
+        gate_status = {
+            "pm": "signed_off",
+            "ux": "signed_off",
+            "arch": "signed_off",
+        }
+
+    async def fake_gate_load(self, repo, issue_number):
+        return _ClearGateState()
+
+    monkeypatch.setattr(
+        swarm_dispatch.IssueGateStore, "load", fake_gate_load
+    )
 
     # Neutralize the GitHub-body mirror (no network); we test it separately.
     async def fake_mirror(self, trigger, state):
