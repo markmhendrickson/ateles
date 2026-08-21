@@ -2,20 +2,35 @@
 """
 ateles — MCP server for Ateles swarm routing and checkpoint management.
 
-Provides four tools that wrap multi-step Neotoma query patterns into single
-calls, so any connected agent gets reliable swarm interaction without
-re-deriving the roster/policy/checkpoint dance each session.
+Provides seven tools that wrap multi-step Neotoma/GitHub query patterns into
+single calls, so any connected agent gets reliable swarm interaction without
+re-deriving the roster/policy/checkpoint dance — or the entity-read plus
+log-grep dance — each session.
 
 Tools:
-  get_swarm_roster   — full roster (roles → agent names)
-  route_task         — resolve owning agent + definition + execution policy
-  list_checkpoints   — pending checkpoint_briefs awaiting operator
-  resolve_checkpoint — approve/reject a checkpoint with validation
+  get_swarm_roster    — full roster (roles → agent names)
+  route_task          — resolve owning agent + definition + execution policy
+  list_checkpoints    — pending checkpoint_briefs awaiting operator
+  resolve_checkpoint  — approve/reject a checkpoint with validation
+                        (the ONLY mutating tool)
+  get_gate_status     — an issue's gate_status, owner, blocking gates, history,
+                        and pipeline state                        [read-only]
+  list_pipeline_queue — who holds the issue-pipeline slot, who is queued, and
+                        how long each has waited                  [read-only]
+  get_dispatch_health — dispatcher liveness, recent activity, failures
+                                                                  [read-only]
 
-Environment:
-  NEOTOMA_BASE_URL       (default: https://neotoma.markmhendrickson.com)
-  NEOTOMA_BEARER_TOKEN   (required)
-  SWARM_ROSTER_KEY       (default: default)
+The observability tools never write gate state — see the SELF-CERTIFICATION
+BOUNDARY note above their implementations. Their reads fail CLOSED: a failed
+read reports "unknown" with a reason, never an empty all-clear.
+
+Environment (see README.md for the full operator-provisioning table):
+  NEOTOMA_BASE_URL          (default: https://neotoma.markmhendrickson.com)
+  NEOTOMA_BEARER_TOKEN      (required)
+  NEOTOMA_BEARER_TOKEN_PROD (promoted over the local token for a remote URL)
+  GITHUB_TOKEN              (required for queue visibility; also accepts
+                             APIS_GITHUB_TOKEN / GH_TOKEN)
+  SWARM_ROSTER_KEY          (default: default)
 
 Transport: stdio (launched by Claude Code as an MCP server subprocess).
 """
@@ -1122,9 +1137,13 @@ def _list_pipeline_queue() -> dict:
         ),
         "note": (
             "Built from the durable apis-pipeline-inflight markers on each open "
-            "issue. A marker requires a readable GitHub token; without one this "
-            "reports empty rather than wrong. Markers older than the staleness "
-            "threshold are listed under stale_markers, NOT counted as running."
+            "issue. Reads FAIL CLOSED: if the GitHub token is missing or the "
+            "issue listing/marker read fails, this returns an `error` (or lists "
+            "the affected issues under `unreadable` / `listing_errors`) rather "
+            "than an empty all-clear — an empty queue here means the queue is "
+            "genuinely empty, never that state could not be read. Markers older "
+            "than the staleness threshold are listed under stale_markers, NOT "
+            "counted as running."
         ),
     }
 
