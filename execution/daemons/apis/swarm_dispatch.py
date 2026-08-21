@@ -56,6 +56,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from gate_waive import (
+    CLEARED_GATE_STATES,
     IssueGateStore,
     WaiveOutcome,
     format_waive_comment,
@@ -2360,7 +2361,9 @@ class SwarmDispatcher:
         #    chain into an implementation PR so the PR gate pipeline takes over
         #    (and ultimately stops at the operator's merge approval). When OFF,
         #    STOP and notify that the spec is ready awaiting `build` approval.
-        gates_green = self._gates_green(lanius)
+        gates_green = await self._gates_green(
+            lanius, trigger.repository, trigger.number
+        )
         if self.config.auto_build and gates_green:
             pr_url = await self._open_implementation_pr(trigger, state)
             self.notifier.send(
@@ -2401,18 +2404,71 @@ class SwarmDispatcher:
                 handler=DAEMON_NAME,
             )
 
-    def _gates_green(self, lanius: SkillResult) -> bool:
-        """Best-effort read of whether pre-impl gates cleared after the sequence.
+    async def _gates_green(
+        self, lanius: SkillResult, repository: str, issue_number: int
+    ) -> bool:
+        """Whether every pre-impl gate is cleared in the SYSTEM OF RECORD.
 
-        Lanius owns gate_status; when its new-issue protocol ran cleanly and did
-        not emit a `GATE_INHERITANCE: blocked` verdict, we treat the gates as
-        green enough to hand off (the PR pipeline re-checks inheritance and the
-        merge boundary is still operator-gated regardless).  Conservative: any
-        Lanius failure or explicit blocked verdict returns False.
+        ateles#460. This used to read only Lanius's stdout: "green" meant
+        Lanius did not print `GATE_INHERITANCE: blocked`. That is a report
+        ABOUT gate state, not gate state, and the two diverge whenever a turn
+        ends without an explicit block while a gate is still `pending`.
+
+        Tolerable while auto-build was off, because the only consequence was a
+        notification. With it on, this decides whether an agent starts writing
+        code — and on the first two handoffs after enabling it, Cicada was
+        dispatched onto issues whose `gate_status` still showed `arch: pending`
+        (and once `ux: pending` too). Cicada refused both times and said so:
+
+            Apis auto-build dispatch claimed green pre-impl gates while live
+            gate_status still shows arch/ux pending
+
+        The Lanius verdict is kept as a VETO — an explicit `blocked` still
+        fails — but silence no longer passes. Fails CLOSED when the entity
+        cannot be read: declining to build costs a delay, building on unsigned
+        gates costs a PR nobody authorised.
         """
         if not lanius.ok:
             return False
-        return parse_gate_verdict(lanius.stdout) != "blocked"
+        if parse_gate_verdict(lanius.stdout) == "blocked":
+            return False
+
+        ref = f"{repository}#{issue_number}"
+        try:
+            store = IssueGateStore(
+                self.config.neotoma_base_url, self.config.neotoma_token
+            )
+            state = await store.load(repository, issue_number)
+        except Exception as exc:  # noqa: BLE001 — fail closed, never crash
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: gate_status read failed ({exc}) — "
+                "treating gates as NOT green (fail closed)"
+            )
+            return False
+
+        if not state.found:
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: no issue entity, so no gate_status to "
+                "check — treating gates as NOT green (fail closed)"
+            )
+            return False
+
+        unsigned = [
+            gate
+            for gate in PRE_IMPL_GATES
+            if (state.gate_status.get(gate) or "pending").strip().lower()
+            not in CLEARED_GATE_STATES
+        ]
+        if unsigned:
+            # Lanius said nothing and the record disagrees. That divergence is
+            # the bug's signature, so name it rather than failing quietly.
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: Lanius reported no block, but "
+                f"gate_status still has {', '.join(unsigned)} uncleared — "
+                "not handing off to build (ateles#460)"
+            )
+            return False
+        return True
 
     @staticmethod
     def _extract_section_text(stdout: str, section: SpecSection) -> str:
