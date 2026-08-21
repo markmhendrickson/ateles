@@ -126,7 +126,11 @@ def test_initialize_and_tools_list():
         assert 2 in responses, f"no tools/list response, stderr={_stderr_tail(proc)}"
         tools = responses[2]["result"]["tools"]
         names = {t["name"] for t in tools}
-        assert names == {"get_swarm_roster", "route_task", "list_checkpoints", "resolve_checkpoint"}, names
+        assert names == {
+            "get_swarm_roster", "route_task", "list_checkpoints", "resolve_checkpoint",
+            # Read-only swarm observability (see server.py).
+            "get_gate_status", "list_pipeline_queue", "get_dispatch_health",
+        }, names
         route_task = next(t for t in tools if t["name"] == "route_task")
         assert route_task["inputSchema"]["required"] == ["task_description"]
     finally:

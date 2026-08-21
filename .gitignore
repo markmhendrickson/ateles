@@ -41,6 +41,9 @@ node_modules/
 playwright/.auth/
 venv
 .venv*/
+# Built by execution/mcp/ateles/run_ateles_mcp.sh and CI (ateles-tests.yml).
+# Not matched by `.venv*/` above.
+.mcp-venv/
 execution/venv
 execution/homeassistant-venv
 
