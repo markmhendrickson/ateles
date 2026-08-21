@@ -82,6 +82,8 @@ execution/daemons/*/*.plist
 # Daemon runtime state
 execution/daemons/**/.monedula_last_run
 execution/daemons/**/.monedula_tg_offset
+execution/daemons/**/.mimus_cursor
+execution/daemons/**/.mimus_lock
 
 # Private docs submodule (not part of public repo)
 docs/private/
