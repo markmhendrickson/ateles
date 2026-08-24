@@ -74,7 +74,8 @@ Environment variables:
   RECORD_MEETING_DIARIZE    Set to 1 for ElevenLabs diarization, 0 for local;
                             unset routes from the audio channel count.
   TYTO_ANALYZE_ENABLED      Set to 0 to disable post-transcription meeting analysis (default: 1)
-  TYTO_ANALYZE_MEETING_SKILL  Path to analyze-meeting/SKILL.md (auto-detected from repo root)
+  TYTO_PROCESS_MEETING_SKILL  Path to process-meeting/SKILL.md (auto-detected from repo root)
+                              (legacy alias: TYTO_ANALYZE_MEETING_SKILL)
   TYTO_ANALYZE_NEOTOMA_SKILL  Path to analyze-neotoma-feedback/SKILL.md (auto-detected)
 """
 
@@ -238,13 +239,19 @@ TRANSCRIBE_SCRIPT = Path(
 # Set TYTO_ANALYZE_ENABLED=0 to disable post-transcription analysis.
 ANALYZE_ENABLED = os.environ.get("TYTO_ANALYZE_ENABLED", "1") != "0"
 
-# Path to the analyze-meeting skill SKILL.md (authoritative prompt)
-_default_analyze_meeting_skill = str(
-    _REPO_ROOT / ".claude" / "skills" / "analyze-meeting" / "SKILL.md"
+# Path to the process-meeting skill SKILL.md (authoritative prompt).
+# process-meeting supersedes analyze-meeting; TYTO_ANALYZE_MEETING_SKILL is still
+# honored as a legacy alias for TYTO_PROCESS_MEETING_SKILL.
+_default_process_meeting_skill = str(
+    _REPO_ROOT / ".claude" / "skills" / "process-meeting" / "SKILL.md"
 )
-ANALYZE_MEETING_SKILL_PATH = Path(
-    os.environ.get("TYTO_ANALYZE_MEETING_SKILL", _default_analyze_meeting_skill)
+PROCESS_MEETING_SKILL_PATH = Path(
+    os.environ.get("TYTO_PROCESS_MEETING_SKILL")
+    or os.environ.get("TYTO_ANALYZE_MEETING_SKILL")
+    or _default_process_meeting_skill
 )
+# Legacy alias retained so external callers referencing the old name keep working.
+ANALYZE_MEETING_SKILL_PATH = PROCESS_MEETING_SKILL_PATH
 _default_analyze_neotoma_skill = str(
     _REPO_ROOT / ".claude" / "skills" / "analyze-neotoma-feedback" / "SKILL.md"
 )
@@ -307,7 +314,7 @@ def _run_analysis(
     notifier: Notifier,
 ) -> None:
     """
-    Invoke `claude --print` to run /analyze-meeting (and /analyze-neotoma-feedback
+    Invoke `claude --print` to run /process-meeting (and /analyze-neotoma-feedback
     when the transcript is Neotoma-oriented) on the just-transcribed recording.
 
     Passes:
@@ -325,9 +332,9 @@ def _run_analysis(
         )
         return
 
-    if not ANALYZE_MEETING_SKILL_PATH.exists():
+    if not PROCESS_MEETING_SKILL_PATH.exists():
         log.warning(
-            f"[{DAEMON_NAME}] analyze-meeting skill not found: {ANALYZE_MEETING_SKILL_PATH} "
+            f"[{DAEMON_NAME}] process-meeting skill not found: {PROCESS_MEETING_SKILL_PATH} "
             "— skipping analysis."
         )
         return
@@ -343,7 +350,7 @@ def _run_analysis(
     )
 
     # Build the prompt: skill content + neotoma skill + invocation context
-    skill_content = ANALYZE_MEETING_SKILL_PATH.read_text(encoding="utf-8")
+    skill_content = PROCESS_MEETING_SKILL_PATH.read_text(encoding="utf-8")
 
     neotoma_skill_section = ""
     if ANALYZE_NEOTOMA_SKILL_PATH.exists():
@@ -364,7 +371,7 @@ def _run_analysis(
 ## Tyto pre-analysis instructions
 
 These instructions are injected by the Tyto daemon and MUST be followed before
-running the standard /analyze-meeting steps.
+running the standard /process-meeting phases.
 
 ### 1. Back-to-back meeting detection (REQUIRED before Step 1)
 
@@ -378,7 +385,7 @@ Rules:
   as a single meeting (standard flow).
 - If you detect **two or more distinct sessions** (e.g. farewell followed by a new
   greeting with different or partially overlapping participants) → treat each segment
-  as a **separate meeting**. Run the full /analyze-meeting pipeline independently for
+  as a **separate meeting**. Run the full /process-meeting pipeline independently for
   each segment, producing one `meeting_analysis` entity per segment. Number them:
   "Meeting 1 of N", "Meeting 2 of N", etc.
 - For each segment, note approximate start/end timestamps from the transcript
@@ -391,7 +398,7 @@ Rules:
 
 The recording file was created at: **{recording_ts_str}** (UTC).
 
-In Step 1 of /analyze-meeting, use `gws calendar events list --timezone Europe/Madrid`
+In Phase 4 of /process-meeting, use `gws calendar events list --timezone Europe/Madrid`
 to query events in a **±90-minute window** around this timestamp. Do this for EACH
 detected meeting segment (if multiple), using the segment's approximate start time.
 
@@ -413,7 +420,7 @@ If no calendar event matches within the ±90-minute window, note
         f"{tyto_instructions}"
         f"\n\n---\n\n"
         f"## Invocation\n\n"
-        f"/analyze-meeting {source_ref}\n\n"
+        f"/process-meeting {source_ref}\n\n"
         f"Recording file: {remote_path}\n"
         f"Recording timestamp: {recording_ts_str} UTC\n"
         f"Transcription entity: {transcription_entity_id or '(not stored — use file path)'}\n"

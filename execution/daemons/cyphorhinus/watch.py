@@ -313,7 +313,7 @@ def report_meeting_recording(recording: Path) -> None:
     meeting-recording-control.sh produces:
       <stem>.wav          — the raw audio
       <stem>.txt          — transcript sidecar (written by transcribe_audio.py)
-      <stem>_meeting_analysis.md  — analysis report (written by /analyze-meeting)
+      <stem>_meeting_processed.md — meeting report (written by /process-meeting)
     """
     stem = recording.stem
     parent = recording.parent
