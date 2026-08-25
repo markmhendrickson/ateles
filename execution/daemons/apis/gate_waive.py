@@ -392,7 +392,16 @@ class IssueGateStore:
 
         Both field spellings are tried because prod entities carry ``repo`` and
         ``repository``, ``issue_number`` (int) and ``github_number`` (string).
+
+        Combos are abandoned early only on evidence that the FIELD NAMES are
+        wrong for this corpus — a returned entity that carries neither spelling
+        of the number field. Deliberately NOT on "the page came back non-empty
+        but nothing matched": under the neotoma#2127 behaviour every query
+        returns unrelated entities, so treating that as a negative signal would
+        skip the remaining combos, including one that would have worked. The
+        cheap-looking early exit is the one that reintroduces the bug.
         """
+        seen_number_field = False
         for repo_field in ("repo", "repository"):
             for num_field in ("issue_number", "github_number"):
                 data = await self._post(
@@ -411,9 +420,25 @@ class IssueGateStore:
                     continue
                 for entity in data.get("entities", []):
                     snap = self._unwrap(entity)
+                    if any(
+                        snap.get(key) is not None
+                        for key in ("issue_number", "github_number")
+                    ):
+                        seen_number_field = True
                     # Re-verify: never trust the server-side filter blindly.
                     if self._matches(snap, repo, issue_number):
                         return entity, snap
+                if data.get("entities") and not seen_number_field:
+                    # Entities exist for this type but carry NEITHER number
+                    # spelling: the field names cannot resolve anything here.
+                    log.debug(
+                        "[apis.gate_waive] %s#%s: issue snapshots carry no "
+                        "issue_number/github_number — skipping remaining "
+                        "targeted combos, falling back to scan",
+                        repo,
+                        issue_number,
+                    )
+                    return None
         return None
 
     async def _load_by_scan(
