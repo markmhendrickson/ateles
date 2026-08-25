@@ -51,6 +51,30 @@ _DEFAULT_KEYS_DIR = Path(
 )
 
 
+def _warn_if_key_world_readable(agent_name: str, key_path: Path) -> None:
+    """Warn when a private-key file is readable by group or other.
+
+    The key layout (see module docstring and docs/aauth/keys.md) requires mode
+    0600 — the private scalar `d` / PEM must be owner-only. Nothing enforced it:
+    a key checked out or copied with looser permissions loaded silently, and a
+    world-readable signing key is a credential-exposure surface. This is a
+    warning, not a hard failure: Phase 1 tolerates a range of checkout states,
+    and refusing to sign would be a worse failure than signing with a key whose
+    permissions the operator can tighten. stat() failures are ignored — the
+    check must never be the reason a signer does not load.
+    """
+    try:
+        mode = key_path.stat().st_mode
+    except OSError:
+        return
+    if mode & 0o077:
+        log.warning(
+            f"[{agent_name}] AAuth key {key_path} is mode {oct(mode & 0o777)} — "
+            "group/other-readable. A private signing key must be 0600; run "
+            f"`chmod 600 {key_path}`. Signing continues, but the key is exposed."
+        )
+
+
 @dataclass
 class AAuthSigner:
     """
@@ -91,6 +115,8 @@ class AAuthSigner:
                 f"--name {name})"
             )
             return cls(sub=f"{name}@ateles-swarm")
+
+        _warn_if_key_world_readable(agent_name, key_path)
 
         try:
             data = json.loads(key_path.read_text())
