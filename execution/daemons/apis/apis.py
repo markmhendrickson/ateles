@@ -808,6 +808,31 @@ async def main() -> None:
         f"dispatch_timeout={DISPATCH_TIMEOUT_SECONDS}s"
     )
 
+    # Report whether the launchd environment matches the reviewed plist. Config
+    # that lives only in a deployment artifact drifts invisibly: on 2026-08-25
+    # ATELES_SWARM_AUTO_BUILD was absent from the repo plist while this daemon
+    # ran with =0, so the swarm stopped before every build for four days after
+    # the bug justifying that rollback (ateles#460) was fixed, and no reviewed
+    # file recorded the decision. Advisory: logs and continues, because a
+    # dispatch daemon that refuses to start is worse than one running a config
+    # difference. Set ATELES_ENFORCE_PLIST_CONFIG=1 to make it fatal.
+    #
+    # Only the SETUP is guarded. `warn_on_plist_drift` itself must run outside
+    # the try: it raises PlistConfigDriftError under enforcement, and a blanket
+    # `except Exception` would catch that and downgrade the abort to a warning —
+    # advertising a switch that can never fire (ateles#405).
+    try:
+        from lib.daemon_runtime.plist_drift import (  # noqa: PLC0415
+            warn_on_plist_drift,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[{DAEMON_NAME}] plist config check unavailable: {exc}")
+    else:
+        warn_on_plist_drift(
+            "com.ateles.apis",
+            Path(__file__).resolve().parent / "com.ateles.apis.plist",
+        )
+
     # 1. Load agent_definition from Neotoma
     agent_def = AgentLoader(DAEMON_NAME).load()
     log.info(
