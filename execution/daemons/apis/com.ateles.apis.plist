@@ -80,6 +80,12 @@
              approval can still trigger a merge via APIS_APPROVAL_TRIGGERS_MERGE. -->
         <key>APIS_AUTONOMY_AUTO_MERGE</key>
         <string>0</string>
+        <!-- An explicit operator approval performs the merge itself — distinct
+             from APIS_AUTONOMY_AUTO_MERGE above: the human act is still
+             required. Set to 0: matches swarm_dispatch.py's code default: no
+             approval path merges on its own until the operator opts in. -->
+        <key>APIS_APPROVAL_TRIGGERS_MERGE</key>
+        <string>0</string>
         <!-- Re-review a PR automatically after a fix round pushes new commits. -->
         <key>ATELES_SWARM_AUTO_REREVIEW</key>
         <string>1</string>
