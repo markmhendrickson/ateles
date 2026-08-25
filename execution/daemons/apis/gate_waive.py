@@ -42,6 +42,8 @@ from datetime import datetime, timezone
 
 import httpx
 
+from entity_lookup import resolve_entity
+
 log = logging.getLogger("apis.gate_waive")
 
 
@@ -57,13 +59,6 @@ CLEARED_GATE_STATES: frozenset[str] = frozenset(
 # The value a waived gate is set to.
 WAIVED = "waived"
 
-# Recency-scan bounds for the gate-entity fallback lookup (ateles#492).
-# 8 x 200 = 1,600 most-recently-observed issue entities. Sized to cover the
-# active window comfortably (~4,039 issue entities exist, the overwhelming
-# majority of them long-settled) while keeping a pathological miss bounded.
-# Exceeding the bound LOGS rather than returning a silent "not found".
-_SCAN_PAGE_SIZE = 200
-_SCAN_MAX_PAGES = 8
 
 
 # ── Pure helpers (no I/O — unit tested directly) ─────────────────────────────
@@ -366,139 +361,13 @@ class IssueGateStore:
         state.current_owner = str(snap.get("current_owner") or "")
         return state
 
-    @staticmethod
-    def _unwrap(entity: dict) -> dict:
-        """Return the flat field map for *entity*, tolerating one nesting level."""
-        snap = entity.get("snapshot") or {}
-        inner = snap.get("snapshot")
-        if isinstance(inner, dict):
-            return inner
-        return snap
-
-    async def _load_targeted(
-        self, repo: str, issue_number: int
-    ) -> tuple[dict, dict] | None:
-        """Resolve the issue entity with a SERVER-SIDE snapshot filter.
-
-        ``snapshot_filters`` (``{field: {op, value}}``) is the canonical,
-        wired filter path — it compiles to real ``snapshot->>field`` predicates
-        in Neotoma's query builder. It is NOT the flat ``filters`` map that
-        neotoma#2042 reports as silently stripped, nor the ``entity_ids`` array
-        of neotoma#2127. Kept distinct deliberately: a targeted lookup that
-        silently matched nothing would be indistinguishable from a genuinely
-        absent entity, so every result here is RE-VERIFIED client-side against
-        :meth:`_matches` before it is trusted, and a miss falls through to the
-        recency scan rather than being reported as "not found".
-
-        Both field spellings are tried because prod entities carry ``repo`` and
-        ``repository``, ``issue_number`` (int) and ``github_number`` (string).
-
-        Combos are abandoned early only on evidence that the FIELD NAMES are
-        wrong for this corpus — a returned entity that carries neither spelling
-        of the number field. Deliberately NOT on "the page came back non-empty
-        but nothing matched": under the neotoma#2127 behaviour every query
-        returns unrelated entities, so treating that as a negative signal would
-        skip the remaining combos, including one that would have worked. The
-        cheap-looking early exit is the one that reintroduces the bug.
-        """
-        seen_number_field = False
-        for repo_field in ("repo", "repository"):
-            for num_field in ("issue_number", "github_number"):
-                data = await self._post(
-                    "entities/query",
-                    {
-                        "entity_type": self.ENTITY_TYPE,
-                        "limit": 10,
-                        "include_snapshots": True,
-                        "snapshot_filters": {
-                            repo_field: {"op": "eq", "value": str(repo)},
-                            num_field: {"op": "eq", "value": str(issue_number)},
-                        },
-                    },
-                )
-                if not data:
-                    continue
-                for entity in data.get("entities", []):
-                    snap = self._unwrap(entity)
-                    if any(
-                        snap.get(key) is not None
-                        for key in ("issue_number", "github_number")
-                    ):
-                        seen_number_field = True
-                    # Re-verify: never trust the server-side filter blindly.
-                    if self._matches(snap, repo, issue_number):
-                        return entity, snap
-                if data.get("entities") and not seen_number_field:
-                    # Entities exist for this type but carry NEITHER number
-                    # spelling: the field names cannot resolve anything here.
-                    log.debug(
-                        "[apis.gate_waive] %s#%s: issue snapshots carry no "
-                        "issue_number/github_number — skipping remaining "
-                        "targeted combos, falling back to scan",
-                        repo,
-                        issue_number,
-                    )
-                    return None
-        return None
-
-    async def _load_by_scan(
-        self, repo: str, issue_number: int
-    ) -> tuple[dict, dict] | None:
-        """Fallback: page a RECENCY-SORTED listing and match client-side.
-
-        ateles#492: this previously fetched ONE unsorted page of 500 out of
-        ~4,039 ``issue`` entities. Default order is ``entity_id`` ascending —
-        not recency — so the window was an arbitrary slice that excluded
-        essentially every recently-created issue, and the gate check failed
-        closed for every new issue in both repos (21 logged occurrences).
-
-        Sorting by ``last_observation_at`` descending puts the issues a gate
-        check actually asks about at the front, and paging bounds the work
-        without silently truncating: the loop stops at ``_SCAN_MAX_PAGES``
-        and says so, rather than reporting a clean "not found".
-        """
-        for page in range(_SCAN_MAX_PAGES):
-            data = await self._post(
-                "entities/query",
-                {
-                    "entity_type": self.ENTITY_TYPE,
-                    "limit": _SCAN_PAGE_SIZE,
-                    "offset": page * _SCAN_PAGE_SIZE,
-                    "include_snapshots": True,
-                    "sort_by": "last_observation_at",
-                    "sort_order": "desc",
-                },
-            )
-            if not data:
-                return None
-            entities = data.get("entities") or []
-            for entity in entities:
-                snap = self._unwrap(entity)
-                if self._matches(snap, repo, issue_number):
-                    return entity, snap
-            # Short page (or empty) means the listing is exhausted.
-            if len(entities) < _SCAN_PAGE_SIZE:
-                return None
-        log.warning(
-            "[apis.gate_waive] %s#%s: scanned %d entities (%d pages) without a "
-            "match — the listing was NOT exhausted, so this is 'not found in "
-            "the scanned window', not 'no such entity'",
-            repo,
-            issue_number,
-            _SCAN_MAX_PAGES * _SCAN_PAGE_SIZE,
-            _SCAN_MAX_PAGES,
-        )
-        return None
-
     async def load(self, repo: str, issue_number: int) -> IssueGateState:
         """Retrieve the gate state for ``repo#issue_number``.
 
-        Two-step: a targeted ``snapshot_filters`` lookup first, then a
-        recency-sorted paged scan if that returns nothing. The fallback exists
-        because Neotoma's scoping arguments have a documented history of being
-        accepted and then ignored (neotoma#2042 `filters`, neotoma#2127
-        `entity_ids`, neotoma#2156 `entity_id`) — so this code must not depend
-        on the targeted path working, only benefit when it does.
+        Identity resolution is delegated to :func:`entity_lookup.resolve_entity`
+        (targeted ``snapshot_filters`` then recency-sorted scan) — see that
+        module for why the fallback exists and why a targeted hit is
+        re-verified rather than trusted.
 
         NOTE: prod exposes the read as POST ``/entities/query``, NOT
         ``/retrieve_entities`` (which 404s) — see issue_spec.py for the same
@@ -506,9 +375,18 @@ class IssueGateStore:
         with ``found == False``, which the caller reports rather than ignores.
         """
         state = IssueGateState(repo=repo, issue_number=issue_number)
-        hit = await self._load_targeted(repo, issue_number)
-        if hit is None:
-            hit = await self._load_by_scan(repo, issue_number)
+        hit = await resolve_entity(
+            self._post,
+            self.ENTITY_TYPE,
+            lambda snap: self._matches(snap, repo, issue_number),
+            [
+                {repo_field: repo, num_field: str(issue_number)}
+                for repo_field in ("repo", "repository")
+                for num_field in ("issue_number", "github_number")
+            ],
+            f"{repo}#{issue_number}",
+            ("issue_number", "github_number"),
+        )
         if hit is None:
             return state
         entity, snap = hit
