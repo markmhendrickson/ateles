@@ -193,3 +193,50 @@ async def test_matches_tolerates_both_field_spellings():
     assert not IssueGateStore._matches(
         {"repo": "other/repo", "issue_number": TARGET}, REPO, TARGET
     )
+
+
+@pytest.mark.asyncio
+async def test_targeted_combos_are_not_abandoned_on_a_nonmatching_page():
+    """A non-empty, non-matching page must NOT abandon the remaining combos.
+
+    Under the neotoma#2127 behaviour every targeted query comes back non-empty
+    with unrelated entities. Treating "non-empty but nothing matched" as a
+    negative signal — the obvious latency optimization — would skip the field
+    combos that follow, including one that resolves the entity. This pins the
+    trap: the corpus is reachable ONLY via the `repository`/`github_number`
+    spelling, while the earlier combos return noise.
+    """
+    target = {
+        "entity_id": "ent_target",
+        "snapshot": {
+            "snapshot": {
+                # No `repo` and no `issue_number`: only the LAST combo matches.
+                "repository": REPO,
+                "github_number": str(TARGET),
+                "gate_status": '{"pm": "signed_off"}',
+                "current_owner": "cicada",
+                "owner_history": [],
+            }
+        },
+    }
+    noise = [_issue_entity(n) for n in range(1, 6)]
+
+    class _NoisyFilter(_FakeStore):
+        async def _post(self, path: str, payload: dict):  # type: ignore[override]
+            self.queries.append(payload)
+            sf = payload.get("snapshot_filters") or {}
+            # Only the repository+github_number combo resolves; others return
+            # a non-empty page of unrelated entities (the #2127 shape).
+            if "repository" in sf and "github_number" in sf:
+                return {"entities": [target]}
+            if sf:
+                return {"entities": noise}
+            return {"entities": noise}
+
+    store = _NoisyFilter(noise + [target], supports_snapshot_filters=False)
+    state = await store.load(REPO, TARGET)
+
+    assert state.entity_id == "ent_target", (
+        "must keep trying field combos after a non-matching page"
+    )
+    assert state.gate_status["pm"] == "signed_off"
