@@ -26,6 +26,9 @@ from __future__ import annotations
 
 import pytest
 
+import logging
+
+from entity_lookup import SCAN_MAX_PAGES, SCAN_PAGE_SIZE
 from gate_waive import IssueGateStore
 
 
@@ -78,10 +81,15 @@ class _FakeStore(IssueGateStore):
                     matched.append(ent)
             return {"entities": matched[: payload.get("limit", 100)]}
 
+        # Unsorted (default) order is entity_id ASCENDING — the prod behaviour
+        # that put recent entities outside the old single-page window. Only an
+        # explicit recency sort reverses it.
         ordered = self.corpus
-        if payload.get("sort_by") == "last_observation_at":
-            if payload.get("sort_order") == "desc":
-                ordered = list(reversed(self.corpus))
+        if (
+            payload.get("sort_by") == "last_observation_at"
+            and payload.get("sort_order") == "desc"
+        ):
+            ordered = list(reversed(self.corpus))
         offset = payload.get("offset", 0)
         limit = payload.get("limit", 100)
         return {"entities": ordered[offset : offset + limit]}
@@ -240,3 +248,135 @@ async def test_targeted_combos_are_not_abandoned_on_a_nonmatching_page():
         "must keep trying field combos after a non-matching page"
     )
     assert state.gate_status["pm"] == "signed_off"
+
+
+# ── QA DoD (ateles#492): named required tests ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_issue_gate_store_load_finds_entity_outside_unsorted_first_500():
+    """DoD regression: the target sits outside an unsorted first-500 window."""
+    decoys = [_issue_entity(n) for n in range(1, 601)]
+    target = _issue_entity(TARGET)
+    store = _FakeStore(decoys + [target], supports_snapshot_filters=False)
+
+    state = await store.load(REPO, TARGET)
+
+    assert state.found is True
+    assert state.entity_id == f"ent_{TARGET:024d}"
+    assert state.gate_status["pm"] == "signed_off"
+    assert state.current_owner == "cicada"
+
+
+@pytest.mark.asyncio
+async def test_issue_gate_store_load_query_is_filtered_not_unbounded_scan():
+    """DoD: the FIRST query carries a server-side identity filter, not a scan."""
+    store = _FakeStore([_issue_entity(TARGET)], supports_snapshot_filters=True)
+    await store.load(REPO, TARGET)
+
+    first = store.queries[0]
+    sf = first.get("snapshot_filters")
+    assert sf, "first query must be server-side filtered"
+    assert first["limit"] <= 10, "a filtered identity lookup must not fetch 500"
+
+    # Across all targeted combos, both spellings of each field are covered.
+    targeted = [q for q in store.queries if q.get("snapshot_filters")]
+    fields = {f for q in targeted for f in q["snapshot_filters"]}
+    assert {"repo", "repository"} & fields
+    assert {"issue_number", "github_number"} & fields
+
+
+@pytest.mark.asyncio
+async def test_gate_load_logs_not_found_within_window_on_bounded_fallback_cap(caplog):
+    """DoD: exhausting the scan bound says so, instead of a bare not-found.
+
+    'entity not found' and 'not found within the fetched window' are different
+    diagnoses; #492 reports the original conflation sent its reporter chasing a
+    missing entity that was there all along.
+    """
+    # Every page is FULL and never matches, so the scan runs to its cap.
+    # Decoys only — TARGET must be genuinely absent so the cap is what ends the scan.
+    full_corpus = [
+        _issue_entity(n)
+        for n in range(1, SCAN_PAGE_SIZE * SCAN_MAX_PAGES + 50)
+        if n != TARGET
+    ]
+    store = _FakeStore(full_corpus, supports_snapshot_filters=False)
+
+    with caplog.at_level(logging.WARNING, logger="apis.entity_lookup"):
+        state = await store.load(REPO, TARGET)
+
+    assert not state.found
+    scans = [q for q in store.queries if q.get("sort_by") == "last_observation_at"]
+    assert len(scans) == SCAN_MAX_PAGES, "scan must run to its cap, then stop"
+
+    warning = "\n".join(r.getMessage() for r in caplog.records)
+    assert "NOT exhausted" in warning
+    assert "not found in the scanned window" in warning
+    assert "no such entity" in warning
+
+
+@pytest.mark.asyncio
+async def test_post_returning_none_degrades_to_empty_state():
+    """A dead transport must degrade to not-found, never raise or half-populate."""
+
+    class _Dead(_FakeStore):
+        async def _post(self, path: str, payload: dict):  # type: ignore[override]
+            self.queries.append(payload)
+            return None
+
+    store = _Dead([_issue_entity(TARGET)], supports_snapshot_filters=False)
+    state = await store.load(REPO, TARGET)
+
+    assert not state.found
+    assert state.gate_status == {}
+
+
+@pytest.mark.asyncio
+async def test_impl_gate_path_does_not_fail_closed_when_entity_exists_outside_window(
+    monkeypatch,
+):
+    """DoD caller-path test: the REAL fail-closed branch, not `load()` alone.
+
+    ateles#492's observable symptom was `_gates_green` taking the
+    "no issue entity ... fail closed" branch for an entity that existed with
+    green gates. Everything below `load()` is exercised for real here — only
+    the HTTP layer is stubbed — so this fails if the lookup regresses, which a
+    test that stubs `load()` itself (as `test_gates_green_reads_entity.py`
+    necessarily does for its own purpose) cannot catch.
+    """
+    import swarm_dispatch as sd
+
+    green = '{"pm": "signed_off", "ux": "not_required", "arch": "signed_off"}'
+    target = _issue_entity(TARGET, gates=green)
+    # The target sits past an unsorted first-500 window, as in prod.
+    corpus = [_issue_entity(n, gates=green) for n in range(1, 601)] + [target]
+
+    async def fake_post(self, path: str, payload: dict):  # noqa: ANN001
+        if payload.get("snapshot_filters"):
+            # The neotoma#2127 behaviour: filter ignored, success returned.
+            return {"entities": corpus[: payload.get("limit", 100)]}
+        ordered = corpus
+        if payload.get("sort_by") == "last_observation_at":
+            ordered = list(reversed(corpus))
+        offset = payload.get("offset", 0)
+        return {"entities": ordered[offset : offset + payload.get("limit", 100)]}
+
+    monkeypatch.setattr(sd.IssueGateStore, "_post", fake_post)
+
+    class _Notifier:
+        def send(self, msg, priority=None, handler=None):  # noqa: ANN001
+            pass
+
+    class _Ok:
+        ok = True
+        stdout = "Triage complete."
+        error = None
+        returncode = 0
+
+    dispatcher = sd.SwarmDispatcher(notifier=_Notifier())
+
+    assert await dispatcher._gates_green(_Ok(), REPO, TARGET) is True, (
+        "gates are signed off on an entity that exists — the impl handoff must "
+        "not take the 'no issue entity -> NOT green' branch"
+    )
