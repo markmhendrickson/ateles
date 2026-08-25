@@ -42,6 +42,8 @@ from datetime import datetime, timezone
 
 import httpx
 
+from entity_lookup import resolve_entity
+
 log = logging.getLogger("apis.issue_spec")
 
 
@@ -241,53 +243,73 @@ class IssueSpecStore:
             log.error("[apis.issue_spec] %s failed: %s", path, exc)
             return None
 
+    @staticmethod
+    def _matches(snap: dict, repo: str, issue_number: int) -> bool:
+        """True when *snap* is the issue_spec for ``repo#issue_number``.
+
+        Tolerates the duplicated field spellings seen in prod, matching the
+        equivalent predicate in gate_waive.py: ``repo``/``repository`` and
+        ``issue_number``/``github_number``.
+        """
+        snap_repo = snap.get("repo") or snap.get("repository") or ""
+        if str(snap_repo) != str(repo):
+            return False
+        for key in ("issue_number", "github_number"):
+            value = snap.get(key)
+            if value is not None and str(value) == str(issue_number):
+                return True
+        return False
+
     async def load(self, repo: str, issue_number: int, title: str) -> SpecState:
         """Retrieve the current spec for ``repo#number`` (or an empty state).
 
-        Matches on the ``repo`` + ``issue_number`` fields of the ``issue_spec``
-        snapshot.  A missing token, missing entity, or fetch error all degrade
-        to a fresh empty ``SpecState`` so the caller can still create it.
+        Identity resolution is delegated to :func:`entity_lookup.resolve_entity`
+        (targeted ``snapshot_filters`` then recency-sorted scan).
+
+        ateles#492 parity: this previously fetched ONE unsorted page of 200 and
+        scanned client-side. With 317 ``issue_spec`` entities in prod the corpus
+        is already past that page size, and the default ``entity_id`` ascending
+        order made the window exclude recent specs. A miss here does NOT fail
+        closed like the gate check — it degrades to an empty ``SpecState``, so
+        each lens CREATES a duplicate spec instead of CORRECTING the existing
+        one, silently. That makes a correct lookup more load-bearing here, not
+        less.
+
+        NOTE: the prod Neotoma REST surface exposes the read as POST
+        /entities/query, NOT /retrieve_entities (which 404s). The 404 was
+        silently degrading every load to an empty state, forcing a create on
+        each section and (because the tail of the pipeline runs after load)
+        could abort the completion/auto-build handoff.
         """
         state = SpecState(repo=repo, issue_number=issue_number, title=title)
-        # NOTE: the prod Neotoma REST surface exposes the read as POST
-        # /entities/query, NOT /retrieve_entities (which 404s). The 404 was
-        # silently degrading every load to an empty state, forcing a create on
-        # each section and (because the tail of the pipeline runs after load)
-        # could abort the completion/auto-build handoff. /entities/query
-        # returns the same {entities:[{snapshot:{...}}]} shape this parser
-        # expects.
-        data = await self._post(
-            "entities/query",
-            {
-                "entity_type": self.ENTITY_TYPE,
-                "limit": 200,
-                "include_snapshots": True,
-            },
+        hit = await resolve_entity(
+            self._post,
+            self.ENTITY_TYPE,
+            lambda snap: self._matches(snap, repo, issue_number),
+            [
+                {repo_field: repo, num_field: str(issue_number)}
+                for repo_field in ("repo", "repository")
+                for num_field in ("issue_number", "github_number")
+            ],
+            f"{repo}#{issue_number}",
+            ("issue_number", "github_number"),
         )
-        if not data:
+        if hit is None:
             return state
-        for entity in data.get("entities", []):
-            snap = entity.get("snapshot") or {}
-            if (
-                snap.get("repo") == repo
-                and str(snap.get("issue_number")) == str(issue_number)
-            ):
-                state.entity_id = entity.get("entity_id", "")
-                state.title = snap.get("title", title) or title
-                state.sections = {
-                    field: snap[field]
-                    for field in SECTION_FIELDS
-                    if snap.get(field)
-                }
-                seq = snap.get("sequence_state")
-                if isinstance(seq, list):
-                    state.sequence_state = [str(x) for x in seq]
-                elif isinstance(seq, str) and seq:
-                    # Tolerate a comma-joined string form from schema inference.
-                    state.sequence_state = [
-                        p.strip() for p in seq.split(",") if p.strip()
-                    ]
-                break
+        entity, snap = hit
+        state.entity_id = str(
+            entity.get("entity_id") or entity.get("id") or snap.get("entity_id") or ""
+        )
+        state.title = snap.get("title", title) or title
+        state.sections = {
+            field: snap[field] for field in SECTION_FIELDS if snap.get(field)
+        }
+        seq = snap.get("sequence_state")
+        if isinstance(seq, list):
+            state.sequence_state = [str(x) for x in seq]
+        elif isinstance(seq, str) and seq:
+            # Tolerate a comma-joined string form from schema inference.
+            state.sequence_state = [p.strip() for p in seq.split(",") if p.strip()]
         return state
 
     async def upsert_section(
