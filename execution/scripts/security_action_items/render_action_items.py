@@ -33,7 +33,17 @@ def resolve(item, repo):
         if not d:
             return (f"#{n}", f"https://github.com/{repo}/issues/{n}", "UNKNOWN", "(could not resolve)")
         return (f"#{n}", d["url"], d["state"], d["title"])
-    # manual / ghsa: no live source
+    # manual / ghsa: no live source.
+    #
+    # KNOWN GAP (ateles#516): this is the only status on the page that is typed
+    # by hand, and it drifted within an hour of the page first shipping — the
+    # client-instance deploy row still read "pending" after the deploy had
+    # completed and been verified. That is the same generated-file-drift class
+    # this renderer exists to prevent, surviving in the one corner it does not
+    # cover. #516 proposes resolving operator-action rows from Neotoma task
+    # entities the way issue rows resolve from GitHub, with honest per-row
+    # degradation when Neotoma is unreachable. Until then: if you edit a
+    # manual_status, check it against reality first.
     return (item.get("key", "—"), None, item.get("manual_status", "pending").upper(), item["title"])
 
 STATE_STYLE = {

@@ -29,6 +29,22 @@ issue/PR row is resolved from the GitHub API at render time.
   which put them outside the generator's reach — so a regeneration would have
   silently dropped them. If you find yourself hand-editing the page, that is the
   bug; change the source.
+### Known gap: `manual_status` is the last hand-typed status (ateles#516)
+
+Everything GitHub can answer for is resolved live. The six rows it cannot —
+four operator actions and two private advisories — carry a hand-typed
+`manual_status`, and that string drifted within an hour of the page first
+shipping: the client-instance deploy row read `pending` after the deploy had
+completed and been verified. [ateles#516](https://github.com/markmhendrickson/ateles/issues/516)
+proposes resolving operator-action rows from Neotoma `task` entities, the same
+way issue rows resolve from GitHub, with honest per-row degradation when
+Neotoma is unreachable. Until that lands, verify a `manual_status` against
+reality before you write it.
+
+Note the issue also records what was **rejected**: moving membership and
+grouping into Neotoma. Status resolution belongs there; editorial curation of a
+public page does not.
+
 - `manual_status` is permitted **only** for items with no public tracker:
   advisories deliberately held private until their fix ships, and operator
   actions (deploys, secret rotation, allowlist changes) that are not code
