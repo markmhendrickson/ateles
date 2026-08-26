@@ -15,9 +15,11 @@ on:
       - "execution/daemons/apis/**"
       - "execution/daemons/phoenicurus-release/**"
       - "execution/daemons/monedula/**"
+      - "execution/daemons/piculet/**"
       - "execution/mcp/**"
       - "lib/daemon_runtime/**"
       - "lib/approval/**"
+      - "lib/notify/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/ateles-tests.yml"
@@ -50,6 +52,8 @@ jobs:
         run: uv run --extra dev python -m pytest execution/daemons/monedula/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
+      - name: Run shared notify lib tests
+        run: uv run --extra dev python -m pytest lib/notify/ -q
 
   mcp-server-tests:
     runs-on: ubuntu-latest
