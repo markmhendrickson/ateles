@@ -2077,6 +2077,11 @@ class _FakeGateStore:
         class _State:
             def __init__(self, found: bool) -> None:
                 self.found = found
+                # This fake mirrors IssueGateState, which distinguishes an
+                # entity that exists from one whose gates were initialised.
+                # These fixtures model a fully triaged entity, so the two
+                # coincide; see test_entity_backfill.py for the split case.
+                self.triaged = found
 
         return _State(self.entity_found)
 
