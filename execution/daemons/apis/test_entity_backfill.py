@@ -47,11 +47,27 @@ def _dispatcher() -> sd.SwarmDispatcher:
 
 
 class _State:
-    def __init__(self, found: bool) -> None:
-        self.found = found
+    """Stub gate state.
+
+    A bool in a sequence means "entity present and triaged" (the pre-existing
+    shorthand). A ``(found, triaged)`` tuple models the case this module now
+    has to distinguish: an entity that exists but whose gates were never
+    initialised.
+    """
+
+    def __init__(self, spec) -> None:  # noqa: ANN001
+        if isinstance(spec, tuple):
+            self.found, self._triaged = spec
+        else:
+            self.found = spec
+            self._triaged = spec
+
+    @property
+    def triaged(self) -> bool:
+        return self.found and self._triaged
 
 
-def _stub_store(monkeypatch, found_sequence: list[bool]) -> dict:
+def _stub_store(monkeypatch, found_sequence: list) -> dict:
     """Make IssueGateStore.load return each value in turn; record call count."""
     calls = {"n": 0}
 
@@ -196,3 +212,107 @@ def test_the_waive_path_calls_the_backfill():
     assert "trigger_swarm_pr.py issue" in source, (
         "the escalation must give the operator an actual command to run"
     )
+
+
+# ── The un-triaged-entity case ───────────────────────────────────────────────
+#
+# A 2026-08-26 backlog audit found 176 issues whose entity EXISTS but carries no
+# gate_status: created via /store (CLI, MCP, sync) rather than the issue.opened
+# webhook that is triage's only trigger. The fast path tested `found`, so every
+# one short-circuited as success and triage was never dispatched — the entity
+# was present, so the backfill declared victory. Median age 21d / 54d.
+
+
+@pytest.mark.asyncio
+async def test_entity_without_gate_status_dispatches_triage(monkeypatch):
+    """Existence is not triage. An entity with no gates must dispatch Lanius."""
+    d = _dispatcher()
+    # present-but-un-triaged, then properly triaged after the dispatch
+    _stub_store(monkeypatch, [(True, False), (True, True)])
+    dispatched: list[str] = []
+
+    async def fake_fetch(self, repo, n):  # noqa: ANN001
+        return {"title": "t", "body": "b", "user": {"login": "u"}, "html_url": ""}
+
+    class _Ok:
+        ok = True
+        stdout = ""
+        error = None
+        returncode = 0
+
+    async def fake_run_skill(agent, *a, **k):  # noqa: ANN001
+        dispatched.append(agent)
+        return _Ok()
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_fetch_issue", fake_fetch)
+    monkeypatch.setattr(sd, "run_skill", fake_run_skill)
+
+    assert await d.ensure_issue_entity("o/r", 2105) is True
+    assert dispatched == ["lanius"], (
+        "an entity with no gate_status must dispatch triage, not short-circuit"
+    )
+
+
+@pytest.mark.asyncio
+async def test_gates_still_absent_after_triage_is_a_failure(monkeypatch):
+    """The #285 rule extended to gates.
+
+    Triage returning ok while gate_status is still empty is exactly the silent
+    no-op this module exists to catch. Reporting success would return the issue
+    to the invisible-stall state.
+    """
+    d = _dispatcher()
+    _stub_store(monkeypatch, [(True, False), (True, False)])
+
+    async def fake_fetch(self, repo, n):  # noqa: ANN001
+        return {"title": "t", "body": "b", "user": {"login": "u"}, "html_url": ""}
+
+    class _Ok:
+        ok = True
+        stdout = ""
+        error = None
+        returncode = 0
+
+    async def fake_run_skill(agent, *a, **k):  # noqa: ANN001
+        return _Ok()
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_fetch_issue", fake_fetch)
+    monkeypatch.setattr(sd, "run_skill", fake_run_skill)
+
+    assert await d.ensure_issue_entity("o/r", 2105) is False
+
+
+@pytest.mark.asyncio
+async def test_triaged_entity_is_still_a_no_op(monkeypatch):
+    """The fast path must survive: a fully triaged entity dispatches nothing."""
+    d = _dispatcher()
+    _stub_store(monkeypatch, [(True, True)])
+    dispatched: list[str] = []
+
+    async def fake_run_skill(agent, *a, **k):  # noqa: ANN001
+        dispatched.append(agent)
+
+    monkeypatch.setattr(sd, "run_skill", fake_run_skill)
+
+    assert await d.ensure_issue_entity("o/r", 414) is True
+    assert dispatched == []
+
+
+def test_triaged_predicate_distinguishes_existence_from_gates():
+    """IssueGateState.triaged is the real predicate; found is not sufficient."""
+    from gate_waive import IssueGateState
+
+    missing = IssueGateState(repo="o/r", issue_number=1)
+    assert not missing.found and not missing.triaged
+
+    untriaged = IssueGateState(repo="o/r", issue_number=2, entity_id="ent_x")
+    assert untriaged.found, "the entity exists"
+    assert not untriaged.triaged, "but no gates were ever initialised"
+
+    triaged = IssueGateState(
+        repo="o/r",
+        issue_number=3,
+        entity_id="ent_y",
+        gate_status={"pm": "pending"},
+    )
+    assert triaged.found and triaged.triaged

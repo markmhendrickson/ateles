@@ -5219,7 +5219,10 @@ class SwarmDispatcher:
     async def ensure_issue_entity(
         self, repository: str, issue_number: int
     ) -> bool:
-        """Create the Neotoma issue entity for *issue_number* if it is missing.
+        """Ensure *issue_number* has a Neotoma issue entity with gates initialised.
+
+        Creates the entity when missing, and dispatches triage when the entity
+        exists but was never triaged (no ``gate_status``).
 
         ateles#416. Gate state lives on the issue entity, so when that entity
         does not exist a gate can be neither SIGNED nor WAIVED — both operate on
@@ -5239,7 +5242,10 @@ class SwarmDispatcher:
         mechanical mutation can silently no-op, so a dispatch returning ok is
         not evidence the entity was created.
 
-        Returns True when the entity exists afterwards. Bounded by construction:
+        Returns True when the entity exists AND carries a ``gate_status``
+        afterwards — existence alone is not success, because an un-triaged
+        entity blocks the gates exactly as a missing one does. Bounded by
+        construction:
         exactly one dispatch and one re-read, no internal loop — the caller owns
         retry policy.
         """
@@ -5247,13 +5253,25 @@ class SwarmDispatcher:
         store = IssueGateStore(
             self.config.neotoma_base_url, self.config.neotoma_token
         )
-        if (await store.load(repository, issue_number)).found:
-            return True  # fast path: nothing to backfill
+        state = await store.load(repository, issue_number)
+        if state.triaged:
+            return True  # fast path: entity exists and its gates are initialised
 
-        log.warning(
-            f"[{DAEMON_NAME}] {ref}: no Neotoma issue entity — dispatching "
-            "Lanius triage to backfill it (ateles#416)"
-        )
+        if state.found:
+            # The entity exists but has no gate_status. Testing `found` here
+            # short-circuited this case as success, which is why entities
+            # created outside the `issue.opened` webhook (CLI / MCP / sync)
+            # stayed permanently un-triaged: the object was there, so the
+            # backfill declared victory without ever dispatching triage.
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: Neotoma issue entity exists but has "
+                "no gate_status — dispatching Lanius triage to initialise it"
+            )
+        else:
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: no Neotoma issue entity — dispatching "
+                "Lanius triage to backfill it (ateles#416)"
+            )
         issue = await self._fetch_issue(repository, issue_number)
         if issue is None:
             log.error(
@@ -5288,15 +5306,20 @@ class SwarmDispatcher:
             return False
 
         # Read back. Triage reporting success is not evidence the entity landed.
-        created = (await store.load(repository, issue_number)).found
-        if created:
-            log.info(f"[{DAEMON_NAME}] {ref}: issue entity backfilled")
+        after = await store.load(repository, issue_number)
+        if after.triaged:
+            log.info(f"[{DAEMON_NAME}] {ref}: issue entity triaged")
+        elif after.found:
+            log.error(
+                f"[{DAEMON_NAME}] {ref}: backfill triage returned ok but the "
+                "entity still has no gate_status — gate ops remain blocked"
+            )
         else:
             log.error(
                 f"[{DAEMON_NAME}] {ref}: backfill triage returned ok but the "
                 "entity still does not exist — gate ops remain blocked"
             )
-        return created
+        return after.triaged
 
     async def _fetch_issue(
         self, repository: str, issue_number: int

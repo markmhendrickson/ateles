@@ -267,6 +267,22 @@ class IssueGateState:
     def found(self) -> bool:
         return bool(self.entity_id)
 
+    @property
+    def triaged(self) -> bool:
+        """True when the entity exists AND triage has initialised its gates.
+
+        ``found`` answers "is there an object to write to"; ``triaged`` answers
+        "has the gate pipeline actually claimed this issue". They diverge for a
+        whole population of issues: entities created through ``/store`` (CLI,
+        MCP, sync) exist immediately, but triage fires only on a GitHub
+        ``issue.opened`` webhook, so their ``gate_status`` is never written.
+        Such an issue looks healthy to every ``found`` check while being
+        invisible to the gates — no owner, no pending gate, nothing to advance.
+
+        Callers recovering gate state must branch on this, not on ``found``.
+        """
+        return self.found and bool(self.gate_status)
+
 
 @dataclass
 class WaiveOutcome:
