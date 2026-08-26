@@ -315,6 +315,9 @@ class IssueGateStore:
     """
 
     ENTITY_TYPE = "issue"
+    # Upper bound on the legacy fallback scan (200/page). Generous versus the
+    # current corpus (~4.1k) while still bounding a gate check.
+    _MAX_SCAN_PAGES = 40
 
     def __init__(self, base_url: str, token: str):
         self.base_url = base_url.rstrip("/")
@@ -367,19 +370,40 @@ class IssueGateStore:
         ``/retrieve_entities`` (which 404s) — see issue_spec.py for the same
         gotcha. A missing token / entity / error degrades to an EMPTY state
         with ``found == False``, which the caller reports rather than ignores.
+
+        The lookup is filtered SERVER-side on the composite identity
+        (``github_number`` + ``repo``). It previously fetched an unpaginated
+        first page — ``limit: 500``, no cursor — and scanned it client-side.
+        With 4,144 issue entities in the corpus that reached roughly 12% of
+        them: any issue outside that arbitrary window read as "no entity", and
+        because every caller fails CLOSED, the result was a silent block
+        attributed to a missing entity rather than to a truncated read.
+        Filtering server-side returns exactly the one row and removes the
+        window entirely.
         """
         state = IssueGateState(repo=repo, issue_number=issue_number)
         data = await self._post(
             "entities/query",
             {
                 "entity_type": self.ENTITY_TYPE,
-                "limit": 500,
+                "limit": 10,
                 "include_snapshots": True,
+                "snapshot_filters": {
+                    "github_number": {"op": "eq", "value": issue_number},
+                    "repo": {"op": "eq", "value": repo},
+                },
             },
         )
-        if not data:
+        if data is None:
             return state
-        for entity in data.get("entities", []):
+        entities = data.get("entities", [])
+        if not entities:
+            # Fall back to an unfiltered scan for entities whose snapshot does
+            # not carry the composite fields (e.g. legacy rows keyed by
+            # local_issue_id or title). Bounded and paged, so a miss here means
+            # the entity genuinely is not there.
+            entities = await self._scan_for_issue(repo, issue_number)
+        for entity in entities:
             snap = entity.get("snapshot") or {}
             # Some responses nest the field map one level deeper.
             inner = snap.get("snapshot")
@@ -397,6 +421,44 @@ class IssueGateStore:
             state.current_owner = str(snap.get("current_owner") or "")
             break
         return state
+
+    async def _scan_for_issue(self, repo: str, issue_number: int) -> list[dict]:
+        """Paged fallback scan for entities lacking composite snapshot fields.
+
+        Uses cursor paging rather than a single truncated page, so "not found"
+        means absent rather than beyond an arbitrary window. Bounded by
+        ``_MAX_SCAN_PAGES`` so a pathological corpus cannot hang a gate check.
+        """
+        cursor = ""
+        for _ in range(self._MAX_SCAN_PAGES):
+            payload: dict = {
+                "entity_type": self.ENTITY_TYPE,
+                "limit": 200,
+                "include_snapshots": True,
+            }
+            if cursor:
+                payload["cursor"] = cursor
+            data = await self._post("entities/query", payload)
+            if not data:
+                return []
+            page = data.get("entities", [])
+            for entity in page:
+                snap = entity.get("snapshot") or {}
+                inner = snap.get("snapshot")
+                if isinstance(inner, dict):
+                    snap = inner
+                if self._matches(snap, repo, issue_number):
+                    return [entity]
+            cursor = data.get("next_cursor") or ""
+            if not cursor or not page:
+                return []
+        log.warning(
+            "[gate_waive] %s#%s: scan hit the %d-page bound without a match",
+            repo,
+            issue_number,
+            self._MAX_SCAN_PAGES,
+        )
+        return []
 
     def _encode_gate_status(
         self, state: IssueGateState, gate_status: dict[str, str]
