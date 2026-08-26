@@ -1,7 +1,13 @@
-# Security incident action-item renderer
+# Neotoma security action-item renderer
 
-Regenerates the **Security incident response — action items** rendered_page in
+Regenerates the **Neotoma security work — live status** rendered_page in
 Neotoma (`ent_a85f2b280fa4233291f6f81a`) from live GitHub state.
+
+The page is the **standing, cross-incident tracker** for Neotoma security work,
+not a per-incident list. It began with the work surfaced by the August 2026
+findings; later findings join the same list rather than starting a new page. It
+is shared with third parties, including a business partner, so treat the
+public-safety rule below as load-bearing.
 
 ## Why this exists
 
@@ -14,9 +20,15 @@ issue/PR row is resolved from the GitHub API at render time.
 
 ## Contract (read this before changing anything)
 
-- `manifest.json` holds **membership and grouping only** — which items belong on
-  the page and under which heading. It must NOT record status for anything
-  GitHub can answer.
+- `manifest.json` holds **membership, grouping, and the page framing** — which
+  items belong on the page and under which heading, plus `title`, `subtitle`,
+  and `scope_note`. It must NOT record status for anything GitHub can answer.
+- **Everything the page displays is generated**, including the `<h1>`, the
+  subtitle, the scope note, and the closing "How this page is generated"
+  section. On the first publish those were hand-written onto the page instead,
+  which put them outside the generator's reach — so a regeneration would have
+  silently dropped them. If you find yourself hand-editing the page, that is the
+  bug; change the source.
 - `manual_status` is permitted **only** for items with no public tracker:
   advisories deliberately held private until their fix ships, and operator
   actions (deploys, secret rotation, allowlist changes) that are not code
