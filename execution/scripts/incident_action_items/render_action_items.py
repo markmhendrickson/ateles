@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Regenerate the security-incident action-item page from live GitHub state.
+
+Status is never hand-maintained: every issue/PR row is resolved from the GitHub
+API at render time, so the page cannot drift the way a snapshot would. Only
+items GitHub cannot know about (advisories held private, operator actions)
+carry a manual_status from the manifest.
+
+Usage:
+  python3 render_action_items.py            # write html to stdout
+  python3 render_action_items.py --out F    # write to file
+"""
+import json, subprocess, sys, html, os, argparse
+from datetime import datetime, timezone
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+def gh_json(args):
+    try:
+        out = subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=30)
+        if out.returncode != 0: return None
+        return json.loads(out.stdout)
+    except Exception:
+        return None
+
+def resolve(item, repo):
+    """Return (label, url, state, title) with state resolved live where possible."""
+    k = item["kind"]
+    if k in ("issue", "pr"):
+        n = item["number"]
+        d = gh_json(["issue", "view", str(n), "--repo", repo, "--json", "number,state,title,url"]) \
+            or gh_json(["pr", "view", str(n), "--repo", repo, "--json", "number,state,title,url"])
+        if not d:
+            return (f"#{n}", f"https://github.com/{repo}/issues/{n}", "UNKNOWN", "(could not resolve)")
+        return (f"#{n}", d["url"], d["state"], d["title"])
+    # manual / ghsa: no live source
+    return (item.get("key", "—"), None, item.get("manual_status", "pending").upper(), item["title"])
+
+STATE_STYLE = {
+    "OPEN":   ("#8a6d00", "open"),
+    "CLOSED": ("#1a7f37", "closed"),
+    "MERGED": ("#1a7f37", "merged"),
+}
+
+def render(manifest, repo):
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    open_n = closed_n = 0
+    rows_by_group = []
+    for g in manifest["groups"]:
+        rows = []
+        for it in g["items"]:
+            label, url, state, title = resolve(it, repo)
+            norm = state.upper()
+            if norm in ("CLOSED", "MERGED"): closed_n += 1
+            elif norm == "OPEN": open_n += 1
+            rows.append((label, url, state, title, it.get("incident", ""), it.get("severity", "")))
+        rows_by_group.append((g["name"], g.get("note", ""), rows))
+
+    out = []
+    A = out.append
+    A(f'<p class="notice">Generated {html.escape(now)} from live GitHub state. '
+      f'Issue and pull-request status is resolved at render time rather than recorded here, so this page cannot go stale; '
+      f'items with no public tracker (advisories held private, operator actions) show a manually-maintained status.</p>')
+    A(f'<p><strong>{open_n} open</strong> · {closed_n} closed or merged · {open_n+closed_n} tracked in total.</p>')
+    for name, note, rows in rows_by_group:
+        A(f'<h3>{html.escape(name)}</h3>')
+        if note: A(f'<p>{html.escape(note)}</p>')
+        A('<div class="tw"><table>')
+        A('<tr><th>Item</th><th>Status</th><th>From</th><th>Tracked as</th></tr>')
+        for label, url, state, title, incident, severity in rows:
+            colour, word = STATE_STYLE.get(state.upper(), ("#57606a", state.lower()))
+            badge = f'<span style="color:{colour};font-weight:600">{html.escape(word)}</span>'
+            sev = f' <em>({html.escape(severity)})</em>' if severity else ''
+            link = f'<a href="{html.escape(url)}">{html.escape(label)}</a>' if url else html.escape(label)
+            A(f'<tr><td>{html.escape(title)}{sev}</td><td>{badge}</td>'
+              f'<td>{html.escape(incident)}</td><td>{link}</td></tr>')
+        A('</table></div>')
+    return "\n".join(out)
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("--out")
+    a = p.parse_args()
+    m = json.load(open(os.path.join(HERE, "manifest.json")))
+    body = render(m, m["repo"])
+    if a.out:
+        open(a.out, "w").write(body); print(f"wrote {a.out} ({len(body)} chars)", file=sys.stderr)
+    else:
+        print(body)

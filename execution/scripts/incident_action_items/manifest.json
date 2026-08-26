@@ -1,0 +1,69 @@
+{
+  "title": "Security incident response — action items",
+  "slug": "security-incident-action-items",
+  "repo": "markmhendrickson/neotoma",
+  "groups": [
+    {
+      "name": "Advisories (private disclosure)",
+      "note": "Vulnerabilities requiring a private GitHub Security Advisory before any public detail. Not GitHub issues by design.",
+      "items": [
+        {"kind":"ghsa","key":"jwt-unverified-fallback","title":"Unverified-JWT bearer fallback authenticated as any user","incident":"2026-08","severity":"Critical","fix_pr":2232,"manual_status":"fix merged; advisory not yet filed"},
+        {"kind":"ghsa","key":"failed-signin-session","title":"Failed sign-in did not invalidate an existing session","incident":"2026-08","severity":"High","fix_pr":2233,"manual_status":"fix in review; advisory not yet filed"}
+      ]
+    },
+    {
+      "name": "Code fixes",
+      "items": [
+        {"kind":"pr","number":2232,"incident":"2026-08"},
+        {"kind":"pr","number":2233,"incident":"2026-08"},
+        {"kind":"issue","number":2227,"incident":"2026-08"},
+        {"kind":"issue","number":2228,"incident":"2026-08"},
+        {"kind":"issue","number":2164,"incident":"2026-07"},
+        {"kind":"issue","number":2212,"incident":"2026-07"},
+        {"kind":"issue","number":2214,"incident":"2026-07"},
+        {"kind":"issue","number":2215,"incident":"2026-07"}
+      ]
+    },
+    {
+      "name": "Detection controls",
+      "note": "Make the pipeline see whole classes rather than single cases.",
+      "items": [
+        {"kind":"issue","number":2229,"incident":"2026-08"},
+        {"kind":"issue","number":2230,"incident":"2026-08"},
+        {"kind":"issue","number":2231,"incident":"2026-08"},
+        {"kind":"issue","number":2183,"incident":"2026-07"},
+        {"kind":"issue","number":2167,"incident":"2026-07"},
+        {"kind":"issue","number":2174,"incident":"2026-07"},
+        {"kind":"issue","number":2173,"incident":"2026-07"},
+        {"kind":"issue","number":2111,"incident":"2026-07"}
+      ]
+    },
+    {
+      "name": "Enforcement / governance",
+      "note": "Make verdicts bind instead of advise.",
+      "items": [
+        {"kind":"issue","number":2180,"incident":"2026-07"},
+        {"kind":"issue","number":2178,"incident":"2026-07"},
+        {"kind":"issue","number":2182,"incident":"2026-07"},
+        {"kind":"issue","number":2169,"incident":"2026-07"},
+        {"kind":"issue","number":2181,"incident":"2026-07"}
+      ]
+    },
+    {
+      "name": "Hygiene surfaced in passing",
+      "items": [
+        {"kind":"issue","number":2234,"incident":"2026-08"}
+      ]
+    },
+    {
+      "name": "Operator-only actions",
+      "note": "Not trackable as code changes; require operator credentials or judgement.",
+      "items": [
+        {"kind":"manual","key":"deploy","title":"Deploy the merged auth fixes to the hosted client instance","incident":"2026-08","manual_status":"pending"},
+        {"kind":"manual","key":"rotate","title":"Rotate bearer token and revoke outstanding session tokens","incident":"2026-08","manual_status":"pending"},
+        {"kind":"manual","key":"allowlist","title":"Add the partner's requested address to the instance allowlist","incident":"2026-08","manual_status":"pending — deliberately sequenced after deploy + rotation"},
+        {"kind":"manual","key":"file-ghsas","title":"File both private security advisories","incident":"2026-08","manual_status":"pending"}
+      ]
+    }
+  ]
+}
