@@ -170,7 +170,7 @@
           "key": "deploy",
           "title": "Deploy the merged auth fixes to the hosted client instance",
           "incident": "2026-08",
-          "manual_status": "pending"
+          "manual_status": "done 2026-08-26 — instance verified serving the fix commit"
         },
         {
           "kind": "manual",
