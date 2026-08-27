@@ -210,7 +210,7 @@
           "kind": "manual",
           "key": "curated-export",
           "title": "Propose an export path for curated state that preserves correction provenance",
-          "manual_status": "pending — scope corrected 2026-08-27 by enumeration; see the rendered-page row",
+          "manual_status": "pending — mechanism identified: the snapshot export preserves per-field provenance, the entity export deliberately drops it; test whether history survives as history",
           "incident": "2026-08"
         },
         {
@@ -246,6 +246,13 @@
           "key": "curated-inventory",
           "title": "Settle which lead-evaluation rubric version is canonical before migrating the records",
           "manual_status": "pending — 81 records span v3, v3.1 and v3.2, with ten unversioned",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "correction-history",
+          "title": "Verify whether correction history survives an export and re-import as history, not just as current state",
+          "manual_status": "pending — ~74% of sampled contacts carry more than one observation, so this is most of the graph",
           "incident": "2026-08"
         }
       ]
