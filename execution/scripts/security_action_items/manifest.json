@@ -81,6 +81,16 @@
           "kind": "issue",
           "number": 2235,
           "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2240,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2239,
+          "incident": "2026-08"
         }
       ]
     },
