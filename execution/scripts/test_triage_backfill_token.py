@@ -72,3 +72,28 @@ def test_empty_when_snapshot_lacks_token(monkeypatch):
     monkeypatch.delenv("NEOTOMA_BEARER_TOKEN", raising=False)
     mod = _fresh_module(monkeypatch, {"SOMETHING_ELSE": "x"})
     assert mod._token() == ""
+
+
+def test_dry_run_succeeds_with_env_cleared_and_sops_stubbed(monkeypatch, capsys):
+    """Effect-level check (ateles#524): the operator-visible outcome is that a
+    bare-shell dry-run actually runs — not just that ``_token()`` returns a
+    string. Env vars are cleared, secrets_lib is stubbed (no real age key),
+    ``find_untriaged`` is stubbed (no live httpx call), and ``--apply`` is
+    omitted. main() must complete without erroring via parser.error/SystemExit,
+    and its dry-run stdout must reflect the SOPS-sourced token path succeeding.
+    """
+    monkeypatch.delenv("NEOTOMA_BEARER_TOKEN_PROD", raising=False)
+    monkeypatch.delenv("NEOTOMA_BEARER_TOKEN", raising=False)
+    mod = _fresh_module(monkeypatch, {"NEOTOMA_BEARER_TOKEN_PROD": "sops-token"})
+
+    monkeypatch.setattr(mod, "find_untriaged", lambda base_url, token, repo: [42])
+    monkeypatch.setattr(
+        sys, "argv", ["triage_backfill_sweep.py", "--repo", "markmhendrickson/ateles"]
+    )
+
+    mod.main()  # must not raise SystemExit (parser.error) or any other exception
+
+    out = capsys.readouterr().out
+    assert "1 issue entities with no gate_status" in out
+    assert "DRY-RUN would dispatch triage: markmhendrickson/ateles#42" in out
+    assert "dry-run — pass --apply to dispatch" in out
