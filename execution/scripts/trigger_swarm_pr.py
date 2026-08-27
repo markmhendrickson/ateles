@@ -36,6 +36,47 @@ for p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 
 import httpx  # noqa: E402
 
+
+def _ensure_secrets_env() -> None:
+    """Populate swarm token env vars from the SOPS snapshot when absent.
+
+    The daemon launches with these already set, so its path is unchanged. But
+    this script is also an operator/CI tool, and DispatcherConfig reads the
+    token env vars at class-definition (import) time — so the fallback MUST run
+    before `swarm_dispatch` is imported below. Decrypts the age-encrypted
+    snapshot offline via secrets_lib (same mechanism the daemons use); only the
+    tokens the dispatcher needs are set, and only if not already present.
+    ateles#524.
+    """
+    wanted = (
+        "NEOTOMA_BEARER_TOKEN",
+        "NEOTOMA_BEARER_TOKEN_PROD",
+        "GITHUB_TOKEN",
+        "ATELES_AGENT_PAT",
+        "NEOTOMA_AGENT_PAT",
+    )
+    if all(os.environ.get(v) for v in ("NEOTOMA_BEARER_TOKEN", "GITHUB_TOKEN")):
+        return  # daemon / already-materialized shell: nothing to do
+    try:
+        import secrets_lib
+
+        pairs = secrets_lib.sops_decrypt_dotenv(secrets_lib.enc_file("neotoma"))
+    except Exception:
+        return  # no snapshot / no age key — leave env as-is; caller errors clearly
+    for var in wanted:
+        if not os.environ.get(var) and pairs.get(var):
+            os.environ[var] = pairs[var]
+    # trigger_swarm_pr authenticates GitHub with GITHUB_TOKEN or ATELES_AGENT_PAT;
+    # map the agent PAT into GITHUB_TOKEN if only the former materialized.
+    if not os.environ.get("GITHUB_TOKEN"):
+        for alt in ("ATELES_AGENT_PAT", "NEOTOMA_AGENT_PAT"):
+            if os.environ.get(alt):
+                os.environ["GITHUB_TOKEN"] = os.environ[alt]
+                break
+
+
+_ensure_secrets_env()
+
 from github_gateway import parse_github_event  # noqa: E402
 from swarm_dispatch import SwarmDispatcher  # noqa: E402
 from lib.notify import Notifier  # noqa: E402

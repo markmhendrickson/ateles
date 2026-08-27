@@ -48,10 +48,48 @@ DEFAULT_BASE_URL = os.environ.get(
 )
 
 
+_TOKEN_VARS = ("NEOTOMA_BEARER_TOKEN_PROD", "NEOTOMA_BEARER_TOKEN")
+
+
 def _token() -> str:
-    for var in ("NEOTOMA_BEARER_TOKEN_PROD", "NEOTOMA_BEARER_TOKEN"):
+    """Resolve the Neotoma bearer token.
+
+    The daemon launches with the token already in its environment, so the env
+    var is the primary source and its path is unchanged. But this script is
+    ALSO an operator/CI tool, and a human running it from a bare shell to
+    unblock a stuck issue (the #504 case) does not have that env var set. Rather
+    than error out — which blocked even the read-only dry-run — fall back to the
+    age-encrypted SOPS snapshot, decrypted OFFLINE with the local age key, the
+    same mechanism the daemons and CI use (secrets_lib). Only the one token is
+    read; the snapshot is not exported into the ambient environment. ateles#524.
+    """
+    for var in _TOKEN_VARS:
         if os.environ.get(var):
             return os.environ[var]
+    return _token_from_sops()
+
+
+def _token_from_sops() -> str:
+    """Read the Neotoma token from the age-encrypted SOPS snapshot, or return ""."""
+    try:
+        import secrets_lib  # execution/scripts is on sys.path via this file's dir
+    except Exception:
+        # secrets_lib lives beside this script; add its dir and retry once.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        try:
+            import secrets_lib
+        except Exception:
+            return ""
+    snapshot = secrets_lib.enc_file("neotoma")
+    if not snapshot.exists():
+        return ""
+    try:
+        pairs = secrets_lib.sops_decrypt_dotenv(snapshot)
+    except Exception:
+        return ""
+    for var in _TOKEN_VARS:
+        if pairs.get(var):
+            return pairs[var]
     return ""
 
 
@@ -140,7 +178,15 @@ def main() -> None:
 
     token = _token()
     if not token:
-        parser.error("NEOTOMA_BEARER_TOKEN_PROD (or _TOKEN) must be set")
+        import secrets_lib
+
+        parser.error(
+            "no Neotoma token available. Set NEOTOMA_BEARER_TOKEN_PROD (or "
+            "NEOTOMA_BEARER_TOKEN) in the environment, or make the SOPS "
+            f"snapshot decryptable: expected {secrets_lib.enc_file('neotoma')} "
+            f"and the age key at {secrets_lib.DEFAULT_AGE_KEY_FILE}. "
+            "(Override the snapshot location with ATELES_SECRETS_DIR.)"
+        )
 
     numbers = find_untriaged(args.base_url, token, args.repo)
     if args.limit:

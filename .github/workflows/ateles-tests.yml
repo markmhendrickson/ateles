@@ -18,6 +18,7 @@ on:
       - "execution/mcp/**"
       - "lib/daemon_runtime/**"
       - "lib/approval/**"
+      - "execution/scripts/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/ateles-tests.yml"
@@ -50,6 +51,11 @@ jobs:
         run: uv run --extra dev python -m pytest execution/daemons/monedula/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
+      # ateles#524 (qa lens, PR #527 round 2): execution/scripts/ has its own
+      # test_*.py files (SOPS token fallback, Loxia review, agent-doc render,
+      # transcription) but no lane ran them — this closes that gap.
+      - name: Run execution/scripts tests
+        run: uv run --extra dev python -m pytest execution/scripts/ -q
 
   mcp-server-tests:
     runs-on: ubuntu-latest

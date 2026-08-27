@@ -55,6 +55,11 @@ dev = [
     "pytest-mock>=3.11",
     "ruff>=0.5",
     "aiohttp>=3.9", # execution/daemons/apis test collection (see apis-gateway extra)
+    # execution/scripts/transcribe_audio.py imports openai + dotenv unconditionally
+    # at module load, so both are needed to collect test_transcribe_audio.py
+    # (ateles#524, PR #527 round 2 — execution/scripts/ had no CI lane at all).
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.scripts]
