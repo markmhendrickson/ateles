@@ -179,14 +179,14 @@
           "kind": "manual",
           "key": "release-pin",
           "title": "Cut a tagged release carrying the merged auth fix and pin the instance to it",
-          "manual_status": "pending — instance currently serves a fix commit, not a tag",
+          "manual_status": "done 2026-08-27 — instance pinned to v0.22.1, a tagged release carrying the auth fix",
           "incident": "2026-08"
         },
         {
           "kind": "manual",
           "key": "hosted-mode-flag",
-          "title": "Set the hosted-mode flag on the client instance so the outbound host guard applies there",
-          "manual_status": "pending — blocked on the guard landing",
+          "title": "Set the hosted-mode flag on the client instance, in the same change that lands the outbound host guard",
+          "manual_status": "pending — deliberately coupled to the guard landing; the guard is inert without it",
           "incident": "2026-08"
         },
         {
