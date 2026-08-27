@@ -1,7 +1,7 @@
 {
-  "title": "Neotoma security work — live status",
-  "subtitle": "The standing tracker for security work on Neotoma: advisories, code fixes, detection controls, enforcement gaps, and operator actions. Status is resolved from GitHub at render time rather than maintained by hand.",
-  "scope_note": "Scope: this page is not limited to a single incident. It began with the work surfaced by the August 2026 findings and is where security work is tracked from here, so later findings join this list rather than starting a new one.",
+  "title": "Neotoma security and migration — live status",
+  "subtitle": "The standing tracker for security and client-instance migration work on Neotoma: advisories, code fixes, detection controls, enforcement gaps, migration prerequisites, and operator actions. Status is resolved from GitHub at render time rather than maintained by hand.",
+  "scope_note": "Scope: this page is not limited to a single incident. It began with the work surfaced by the August 2026 findings, now also carries the client-instance migration that work prompted, and is where both are tracked from here, so later findings join this list rather than starting a new one.",
   "slug": "security-incident-action-items",
   "repo": "markmhendrickson/neotoma",
   "groups": [
@@ -71,6 +71,16 @@
           "kind": "issue",
           "number": 2215,
           "incident": "2026-07"
+        },
+        {
+          "kind": "pr",
+          "number": 2163,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2235,
+          "incident": "2026-08"
         }
       ]
     },
@@ -162,6 +172,61 @@
       ]
     },
     {
+      "name": "Client-instance migration",
+      "note": "Prerequisites for moving the hosted client instance into the client's own infrastructure. Tracked here because the migration was prompted by the security findings and shares their gates: a patched release, an owner that is not the nil UUID, a tested restore, and a log drain before any data is written.",
+      "items": [
+        {
+          "kind": "manual",
+          "key": "release-pin",
+          "title": "Cut a tagged release carrying the merged auth fix and pin the instance to it",
+          "manual_status": "pending — instance currently serves a fix commit, not a tag",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "hosted-mode-flag",
+          "title": "Set the hosted-mode flag on the client instance so the outbound host guard applies there",
+          "manual_status": "pending — blocked on the guard landing",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "transfer-method",
+          "title": "Recommend a transfer method: move as-is, fresh plus restore, or fresh plus re-ingest",
+          "manual_status": "pending — owed to the client with the transfer plan",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "curated-export",
+          "title": "Propose an export path for curated state that preserves correction provenance",
+          "manual_status": "pending — owed to the client with the transfer plan",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "backup-restore-drill",
+          "title": "Wire streaming backup and a log drain to client-owned storage, and prove a restore before data",
+          "manual_status": "pending",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "deploy-approval-role",
+          "title": "Offer the client a deploy-approval operator role, with a reserved security fast-track lane",
+          "manual_status": "pending — proposed in the reply; awaiting the client's decision",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "write-provenance",
+          "title": "Propose a mechanism for per-record write provenance, and say what read logging is possible",
+          "manual_status": "pending — owed to the client with the transfer plan",
+          "incident": "2026-08"
+        }
+      ]
+    },
+    {
       "name": "Operator-only actions",
       "note": "Not trackable as code changes; require operator credentials or judgement.",
       "items": [
@@ -192,6 +257,27 @@
           "title": "File both private security advisories",
           "incident": "2026-08",
           "manual_status": "pending"
+        },
+        {
+          "kind": "manual",
+          "key": "detection-issue",
+          "title": "File the detection and response issue covering log drain, retention, alerting, and forensics",
+          "manual_status": "pending — owed to the client by 2026-08-28",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "writeup-revision",
+          "title": "Revise the incident write-up: correct the review-gate status, the SQLi attribution, the merge account, and the broken links",
+          "manual_status": "pending — owed to the client by 2026-08-28",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "forensics-query",
+          "title": "Run the observation-log integrity query over the exposure window, counts and field names only",
+          "manual_status": "pending — awaiting the client's confirmation of the window bounds",
+          "incident": "2026-08"
         }
       ]
     }

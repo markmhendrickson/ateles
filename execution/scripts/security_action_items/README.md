@@ -1,10 +1,13 @@
-# Neotoma security action-item renderer
+# Neotoma security and migration action-item renderer
 
-Regenerates the **Neotoma security work — live status** rendered_page in
-Neotoma (`ent_a85f2b280fa4233291f6f81a`) from live GitHub state.
+Regenerates the **Neotoma security and migration — live status** rendered_page
+in Neotoma (`ent_a85f2b280fa4233291f6f81a`) from live GitHub state.
 
-The page is the **standing, cross-incident tracker** for Neotoma security work,
-not a per-incident list. It began with the work surfaced by the August 2026
+The page is the **standing, cross-incident tracker** for Neotoma security work
+**and the client-instance migration that work prompted**, not a per-incident
+list. Migration items live here rather than on their own page because they
+share the security gates: a patched release, an owner that is not the nil UUID,
+a tested restore, and a log drain before any data is written. It began with the work surfaced by the August 2026
 findings; later findings join the same list rather than starting a new page. It
 is shared with third parties, including a business partner, so treat the
 public-safety rule below as load-bearing.
