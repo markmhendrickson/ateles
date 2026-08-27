@@ -142,6 +142,11 @@
           "kind": "issue",
           "number": 2111,
           "incident": "2026-07"
+        },
+        {
+          "kind": "issue",
+          "number": 1872,
+          "incident": "2026-08"
         }
       ]
     },
@@ -258,6 +263,11 @@
           "key": "correction-history",
           "title": "Run the restore drill separately, since a move does not double as one",
           "manual_status": "pending — snapshot restored into a scratch app before the move",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2076,
           "incident": "2026-08"
         }
       ]
