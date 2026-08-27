@@ -210,7 +210,7 @@
           "kind": "manual",
           "key": "curated-export",
           "title": "Propose an export path for curated state that preserves correction provenance",
-          "manual_status": "pending — owed to the client with the transfer plan",
+          "manual_status": "pending — scope corrected 2026-08-27 by enumeration; see the rendered-page row",
           "incident": "2026-08"
         },
         {
@@ -232,6 +232,20 @@
           "key": "write-provenance",
           "title": "Propose a mechanism for per-record write provenance, and say what read logging is possible",
           "manual_status": "pending — owed to the client with the transfer plan",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "rendered-pages",
+          "title": "Carry the instance's 64 rendered pages into the transfer scope, triaged rather than copied wholesale",
+          "manual_status": "pending — 25 canonical BD assets, 9 policy/governance, 8 transcripts and recaps, 16 briefs and analyses, 6 superseded or draft",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "curated-inventory",
+          "title": "Settle which lead-evaluation rubric version is canonical before migrating the records",
+          "manual_status": "pending — 81 records span v3, v3.1 and v3.2, with ten unversioned",
           "incident": "2026-08"
         }
       ]
