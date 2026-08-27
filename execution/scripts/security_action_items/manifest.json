@@ -207,15 +207,15 @@
         {
           "kind": "manual",
           "key": "transfer-method",
-          "title": "Recommend a transfer method: move as-is, fresh plus restore, or fresh plus re-ingest",
-          "manual_status": "pending — owed to the client with the transfer plan",
+          "title": "Move the app into the client's org as-is, rather than rebuilding",
+          "manual_status": "recommended 2026-08-27 — the ownership objection does not hold: data sits under a real shared-graph UUID, not the nil sentinel, so there is nothing to rewrite",
           "incident": "2026-08"
         },
         {
           "kind": "manual",
           "key": "curated-export",
           "title": "Propose an export path for curated state that preserves correction provenance",
-          "manual_status": "pending — mechanism identified: the snapshot export preserves per-field provenance, the entity export deliberately drops it; test whether history survives as history",
+          "manual_status": "superseded by the move recommendation — a move carries the graph and the 64 rendered pages intact, so no export/replay is needed unless the client rejects it",
           "incident": "2026-08"
         },
         {
@@ -256,8 +256,8 @@
         {
           "kind": "manual",
           "key": "correction-history",
-          "title": "Decide the transfer method knowing history cannot round-trip until the import gap closes",
-          "manual_status": "blocked on the export/import round-trip gap; ~74% of sampled contacts carry multiple observations",
+          "title": "Run the restore drill separately, since a move does not double as one",
+          "manual_status": "pending — snapshot restored into a scratch app before the move",
           "incident": "2026-08"
         }
       ]
