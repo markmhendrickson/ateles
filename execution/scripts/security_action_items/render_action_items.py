@@ -15,6 +15,9 @@ from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# Default repo for items that do not override it; set by render().
+manifest_repo_hint = [""]
+
 def gh_json(args):
     try:
         out = subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=30)
@@ -24,15 +27,23 @@ def gh_json(args):
         return None
 
 def resolve(item, repo):
-    """Return (label, url, state, title) with state resolved live where possible."""
+    """Return (label, url, state, title) with state resolved live where possible.
+
+    An item may override the manifest-level repo with its own `repo` key, so a
+    page can track work that spans repositories (e.g. swarm-governance issues
+    filed against the harness rather than the product).
+    """
     k = item["kind"]
     if k in ("issue", "pr"):
+        repo = item.get("repo", repo)
         n = item["number"]
         d = gh_json(["issue", "view", str(n), "--repo", repo, "--json", "number,state,title,url"]) \
             or gh_json(["pr", "view", str(n), "--repo", repo, "--json", "number,state,title,url"])
         if not d:
             return (f"#{n}", f"https://github.com/{repo}/issues/{n}", "UNKNOWN", "(could not resolve)")
-        return (f"#{n}", d["url"], d["state"], d["title"])
+        owner_repo = repo.split("/")[-1]
+        label = f"#{n}" if repo == manifest_repo_hint[0] else f"{owner_repo}#{n}"
+        return (label, d["url"], d["state"], d["title"])
     # manual / ghsa: no live source.
     #
     # KNOWN GAP (ateles#516): this is the only status on the page that is typed
@@ -53,6 +64,7 @@ STATE_STYLE = {
 }
 
 def render(manifest, repo):
+    manifest_repo_hint[0] = repo
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     open_n = closed_n = 0
     rows_by_group = []
