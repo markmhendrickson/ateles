@@ -91,6 +91,11 @@
           "kind": "issue",
           "number": 2239,
           "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2250,
+          "incident": "2026-08"
         }
       ]
     },
@@ -251,8 +256,8 @@
         {
           "kind": "manual",
           "key": "correction-history",
-          "title": "Verify whether correction history survives an export and re-import as history, not just as current state",
-          "manual_status": "pending — ~74% of sampled contacts carry more than one observation, so this is most of the graph",
+          "title": "Decide the transfer method knowing history cannot round-trip until the import gap closes",
+          "manual_status": "blocked on the export/import round-trip gap; ~74% of sampled contacts carry multiple observations",
           "incident": "2026-08"
         }
       ]
