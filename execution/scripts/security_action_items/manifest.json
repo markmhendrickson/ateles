@@ -157,6 +157,16 @@
           "kind": "issue",
           "number": 1872,
           "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2254,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2255,
+          "incident": "2026-08"
         }
       ]
     },
