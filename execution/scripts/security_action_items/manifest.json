@@ -111,6 +111,11 @@
           "kind": "issue",
           "number": 2256,
           "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2257,
+          "incident": "2026-08"
         }
       ]
     },
@@ -203,6 +208,12 @@
         {
           "kind": "issue",
           "number": 544,
+          "repo": "markmhendrickson/ateles",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 548,
           "repo": "markmhendrickson/ateles",
           "incident": "2026-08"
         }
