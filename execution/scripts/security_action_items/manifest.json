@@ -210,6 +210,24 @@
           "number": 544,
           "repo": "markmhendrickson/ateles",
           "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "repo": "markmhendrickson/ateles",
+          "number": 549,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "repo": "markmhendrickson/ateles",
+          "number": 550,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "repo": "markmhendrickson/ateles",
+          "number": 551,
+          "incident": "2026-08"
         }
       ]
     },
