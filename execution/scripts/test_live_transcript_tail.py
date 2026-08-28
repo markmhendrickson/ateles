@@ -70,10 +70,14 @@ def test_slice_decision_stall_vs_remnant(available, stalled, expected):
 
 def test_main_wait_when_subthreshold_and_not_stalled(tmp_path, monkeypatch):
     """(a) available < MIN and not stalled → no record, no ffmpeg/transcribe."""
+    import os
+
     recording = tmp_path / "meet_system.mp4"
     recording.write_bytes(b"x")
     out = tmp_path / "out.jsonl"
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    # mtime fresh relative to frozen time.time()=1000 → age=1s << interval*2
+    os.utime(recording, (999.0, 999.0))
 
     # First sleep: interval. Second sleep would be the next loop — break via
     # KeyboardInterrupt after the continue path by making the second probe
@@ -84,25 +88,13 @@ def test_main_wait_when_subthreshold_and_not_stalled(tmp_path, monkeypatch):
         patch.object(lt, "probe_duration", side_effect=lambda _p: next(durations)),
         patch.object(lt.time, "sleep"),
         patch.object(lt.time, "time", return_value=1000.0),
-        patch.object(Path, "stat", wraps=recording.stat) as _stat,
         patch.object(lt, "subprocess") as mock_sub,
         patch.object(lt, "transcribe_slice") as mock_tx,
         patch.object(lt, "log") as mock_log,
     ):
-        # Fresh mtime so stalled=False (age << interval*2)
-        real_stat = recording.stat()
-
-        def _stat_side_effect(*_a, **_k):
-            st = MagicMock()
-            st.st_mtime = 999.0  # age = 1s << interval*2
-            st.st_size = real_stat.st_size
-            return st
-
-        with patch.object(Path, "stat", side_effect=_stat_side_effect):
-            # --start-at 0 so cursor is known; first loop available=1.0
-            rc = lt.main(
-                ["--file", str(recording), "--out", str(out), "--interval", "1", "--start-at", "0"]
-            )
+        rc = lt.main(
+            ["--file", str(recording), "--out", str(out), "--interval", "1", "--start-at", "0"]
+        )
 
     assert rc == 0
     assert not out.exists() or out.read_text() == ""
@@ -114,10 +106,14 @@ def test_main_wait_when_subthreshold_and_not_stalled(tmp_path, monkeypatch):
 
 def test_main_exit_clean_when_stalled_empty(tmp_path, monkeypatch, capsys):
     """(b) sub-threshold + stalled + available≈0 → clean exit, no JSONL line."""
+    import os
+
     recording = tmp_path / "meet_system.mp4"
     recording.write_bytes(b"x")
     out = tmp_path / "out.jsonl"
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    # Very old mtime vs frozen time.time()=10_000 → stalled
+    os.utime(recording, (0.0, 0.0))
 
     with (
         patch.object(lt, "probe_duration", return_value=0.01),
@@ -127,16 +123,9 @@ def test_main_exit_clean_when_stalled_empty(tmp_path, monkeypatch, capsys):
         patch.object(lt, "transcribe_slice") as mock_tx,
         patch.object(lt, "log") as mock_log,
     ):
-        def _stat_side_effect(*_a, **_k):
-            st = MagicMock()
-            st.st_mtime = 0.0  # very old → stalled
-            st.st_size = 1
-            return st
-
-        with patch.object(Path, "stat", side_effect=_stat_side_effect):
-            rc = lt.main(
-                ["--file", str(recording), "--out", str(out), "--interval", "1", "--start-at", "0"]
-            )
+        rc = lt.main(
+            ["--file", str(recording), "--out", str(out), "--interval", "1", "--start-at", "0"]
+        )
 
     assert rc == 0
     assert not out.exists() or out.read_text().strip() == ""
@@ -150,10 +139,13 @@ def test_main_exit_clean_when_stalled_empty(tmp_path, monkeypatch, capsys):
 
 def test_main_flush_final_remnant_writes_one_jsonl_line(tmp_path, monkeypatch):
     """(c) stalled with remnant in (0.05, MIN) → one final chunk then exit."""
+    import os
+
     recording = tmp_path / "meet_system.mp4"
     recording.write_bytes(b"x")
     out = tmp_path / "out.jsonl"
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    os.utime(recording, (0.0, 0.0))
 
     ffmpeg_ok = MagicMock(returncode=0, stderr="", stdout="")
 
@@ -165,16 +157,9 @@ def test_main_flush_final_remnant_writes_one_jsonl_line(tmp_path, monkeypatch):
         patch.object(lt, "transcribe_slice", return_value=(True, "final words")),
         patch.object(lt, "log") as mock_log,
     ):
-        def _stat_side_effect(*_a, **_k):
-            st = MagicMock()
-            st.st_mtime = 0.0
-            st.st_size = 1
-            return st
-
-        with patch.object(Path, "stat", side_effect=_stat_side_effect):
-            rc = lt.main(
-                ["--file", str(recording), "--out", str(out), "--interval", "1", "--start-at", "0"]
-            )
+        rc = lt.main(
+            ["--file", str(recording), "--out", str(out), "--interval", "1", "--start-at", "0"]
+        )
 
     assert rc == 0
     lines = [ln for ln in out.read_text().splitlines() if ln.strip()]
@@ -376,38 +361,14 @@ def test_success_after_failures_clears_streak_before_kill(tmp_path, monkeypatch)
 # --------------------------------------------------------------------------
 
 
-def _stat_with_growing_size(target: Path, *, before: int = 10, after: int = 20):
-    """Path.stat patch: real mtime; size grows between the 2nd and 3rd call on target.
-
-    find_growing_recording calls target.stat() three times for a single candidate:
-    sort key, size_before, size_after. Grow only on the third call.
-    """
-    original_stat = Path.stat
-    counts: dict[str, int] = {}
-
-    def sized_stat(self, *a, **k):
-        st = original_stat(self)
-        mock = MagicMock()
-        mock.st_mtime = st.st_mtime
-        key = str(self.resolve())
-        if self.resolve() == target.resolve():
-            counts[key] = counts.get(key, 0) + 1
-            mock.st_size = before if counts[key] < 3 else after
-        else:
-            mock.st_size = st.st_size
-        return mock
-
-    return sized_stat
-
-
 def test_find_growing_recording_returns_growing_file(tmp_path):
     f = tmp_path / "call_system.mp4"
     f.write_bytes(b"aa")
 
-    with (
-        patch.object(lt.time, "sleep"),
-        patch.object(Path, "stat", _stat_with_growing_size(f)),
-    ):
+    def grow(_seconds=0):
+        f.write_bytes(b"aa" + b"x" * 20)
+
+    with patch.object(lt.time, "sleep", side_effect=grow):
         got = lt.find_growing_recording(tmp_path, settle_probe=0.0)
     assert got == f
 
@@ -415,10 +376,9 @@ def test_find_growing_recording_returns_growing_file(tmp_path):
 def test_find_growing_recording_not_growing_returns_none(tmp_path):
     f = tmp_path / "call_system.mp4"
     f.write_bytes(b"aa")
-    # before == after → not growing
+    # sleep is a no-op; file size unchanged → not growing
     with (
         patch.object(lt.time, "sleep"),
-        patch.object(Path, "stat", _stat_with_growing_size(f, before=10, after=10)),
         patch.object(lt, "log") as mock_log,
     ):
         got = lt.find_growing_recording(tmp_path, settle_probe=0.0)
@@ -452,9 +412,9 @@ def test_find_growing_recording_picks_newest_mtime(tmp_path):
     os.utime(older, (older_t, older_t))
     os.utime(newer, (newer_t, newer_t))
 
-    with (
-        patch.object(lt.time, "sleep"),
-        patch.object(Path, "stat", _stat_with_growing_size(newer, before=10, after=50)),
-    ):
+    def grow_newer(_seconds=0):
+        newer.write_bytes(b"aa" + b"x" * 50)
+
+    with patch.object(lt.time, "sleep", side_effect=grow_newer):
         got = lt.find_growing_recording(tmp_path, settle_probe=0.0)
     assert got == newer
