@@ -1,6 +1,6 @@
 ---
 name: stream-transcript
-description: Start or stop a live transcript stream for an in-progress recording. On start, asks what the agent should watch for and under what write posture, launches the chunk tailer against the currently-growing Audio Hijack recording, and arms a Monitor so transcript chunks arrive in the session as they are spoken. On stop, ends the stream, reports where the live chunks and the authoritative transcript live, and offers to run /process-meeting. Detect-only with respect to the recorder — it never starts or stops Audio Hijack itself.
+description: Start or stop a live transcript stream for an in-progress recording. On start, asks what the agent should watch for and under what write posture, launches the chunk tailer against the currently-growing Audio Hijack recording, and arms a Monitor so transcript chunks arrive in the session as they are spoken. On stop, ends the stream, reports where the live chunks and the authoritative transcript live, and offers to run /analyze-meeting. Detect-only with respect to the recorder — it never starts or stops Audio Hijack itself.
 triggers:
   - stream transcript start
   - stream transcript stop
@@ -19,12 +19,12 @@ still happening, so the agent holds the conversation as context rather than
 reading it afterwards.
 
 This is the **live, advisory** half of meeting capture. The **authoritative**
-half is unchanged and still owned by Tyto + [`process-meeting`](../process-meeting/SKILL.md):
+half is unchanged and still owned by Tyto + [`analyze-meeting`](../analyze-meeting/SKILL.md):
 full-file, diarized, stored in Neotoma, reconciled against the graph.
 
 ## Relationship to the rest of the pipeline
 
-| | Live stream (this skill) | Post-hoc (Tyto → `process-meeting`) |
+| | Live stream (this skill) | Post-hoc (Tyto → `analyze-meeting`) |
 |---|---|---|
 | When | While recording | After the file settles |
 | Engine | Whisper only, no diarization | Best available, diarized |
@@ -123,7 +123,7 @@ the transcript as context, surface nothing unprompted.
 - **`surface-only`** (default) — never writes to Neotoma. Surfaces observations
   in-session.
 - **`provisional`** — may create entities *explicitly marked provisional* and may
-  *propose* corrections to existing ones. Reconciled at stop by `process-meeting`.
+  *propose* corrections to existing ones. Reconciled at stop by `analyze-meeting`.
 
 Under **neither** posture may a live chunk silently overwrite an established
 field on an existing entity. Neotoma is append-only, so a wrong value is
@@ -206,7 +206,7 @@ asked** and tell the operator streaming ended because recording stopped. This is
 the auto-stop: the operator stops Audio Hijack and the handoff happens on its
 own, rather than the feed dying silently mid-meeting.
 
-Do not auto-run `process-meeting` — stopping is mechanical, but spending a heavy
+Do not auto-run `analyze-meeting` — stopping is mechanical, but spending a heavy
 multi-phase analysis is the operator's call.
 
 ### 5. Confirm
@@ -274,7 +274,7 @@ the rough live transcript, not the authoritative one.** If errors > 0, show them
 > — a kwarg that never existed on that method, present in both checkouts'
 > `tyto.py`. Until that is fixed, **no recording is transcribed automatically**,
 > and the check below will keep finding nothing. Say so plainly rather than
-> reporting a transcript as merely "pending", and offer to run `/process-meeting`
+> reporting a transcript as merely "pending", and offer to run `/analyze-meeting`
 > directly on the recording file, which does not depend on Tyto. Tracked as task
 > `ent_ac9843d5c4807c927e02694f`. Delete this note once Tyto runs again.
 
@@ -298,19 +298,19 @@ F="<recording_path>"; s1=$(stat -f%z "$F"); sleep 4; s2=$(stat -f%z "$F")
 Never assert a transcript exists without verifying, and never fabricate an
 Inspector link.
 
-### 4. Offer `process-meeting`
+### 4. Offer `analyze-meeting`
 
 Once the authoritative transcript exists:
 
-> Full transcript is stored as `<entity_id>`. Run `/process-meeting <entity_id>`
+> Full transcript is stored as `<entity_id>`. Run `/analyze-meeting <entity_id>`
 > to metabolize it — graph reconciliation, tasks, sub-analyses, follow-up
 > recommendations?
 
-Offer; do not auto-invoke. `process-meeting` is a heavy, multi-phase run and it
+Offer; do not auto-invoke. `analyze-meeting` is a heavy, multi-phase run and it
 is the operator's call whether to spend it now.
 
 If the write posture was **`provisional`**, say so here explicitly and list what
-was created. `process-meeting` Phase 5 reconciles against existing entities and
+was created. `analyze-meeting` Phase 5 reconciles against existing entities and
 is the right place for those provisional rows to be confirmed or corrected.
 
 ---
@@ -331,5 +331,5 @@ is the right place for those provisional rows to be confirmed or corrected.
 - [`record_meeting`](../record_meeting/SKILL.md) — BlackHole capture path and the
   recording-disclosure ladder, which applies unchanged to Audio Hijack capture
   (local capture carries **no** built-in notice)
-- [`process-meeting`](../process-meeting/SKILL.md) — the authoritative pass
+- [`analyze-meeting`](../analyze-meeting/SKILL.md) — the authoritative pass
 - `execution/scripts/live_transcript_tail.py` — the tailer

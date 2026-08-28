@@ -56,9 +56,37 @@ DEFAULT_INTERVAL = int(os.environ.get("LIVE_TRANSCRIPT_INTERVAL", "30"))
 # waiting one more cycle yields a better transcript than pushing a fragment.
 MIN_SLICE_SECONDS = 5.0
 
+# Remnant below this (seconds) with a stalled file is treated as empty — exit
+# without a final ffmpeg/transcribe pass.
+STALL_EMPTY_SECONDS = 0.05
+
 
 def log(msg: str) -> None:
     print(f"[live-tail] {msg}", file=sys.stderr, flush=True)
+
+
+def slice_decision(
+    available: float,
+    stalled: bool,
+    *,
+    min_slice: float = MIN_SLICE_SECONDS,
+    stall_empty: float = STALL_EMPTY_SECONDS,
+) -> str:
+    """Decide what to do when evaluating the next live chunk.
+
+    Returns one of:
+      - ``"transcribe"`` — enough new audio; take a normal slice
+      - ``"wait"`` — sub-threshold and still growing; sleep another cycle
+      - ``"exit_clean"`` — stalled with essentially no remnant
+      - ``"flush_final"`` — stalled with a usable remnant; one last slice then exit
+    """
+    if available >= min_slice:
+        return "transcribe"
+    if not stalled:
+        return "wait"
+    if available <= stall_empty:
+        return "exit_clean"
+    return "flush_final"
 
 
 def is_remote_track(path: Path) -> bool:
@@ -123,6 +151,29 @@ def find_growing_recording(watch_dir: Path, settle_probe: float = 3.0) -> Path |
 # an ordinary meeting state (a pause, a break, someone reading), NOT a failure —
 # counting it toward the failure kill switch would stop the tailer mid-meeting.
 SILENCE_SENTINEL = "__silence__"
+
+
+def apply_transcription_result(
+    record: dict,
+    ok: bool,
+    payload: str,
+    consecutive_failures: int,
+) -> int:
+    """Update ``record`` from a ``transcribe_slice`` result; return new failure streak.
+
+    Silence is a normal meeting state: it neither increments nor resets the
+    consecutive-failure kill switch.
+    """
+    if ok:
+        record["text"] = payload
+        return 0
+    if payload == SILENCE_SENTINEL:
+        record["ok"] = True
+        record["text"] = ""
+        record["silence"] = True
+        return consecutive_failures
+    record["error"] = payload
+    return consecutive_failures + 1
 
 
 def transcribe_slice(wav_path: Path, env: dict) -> tuple[bool, str]:
@@ -229,24 +280,25 @@ def main(argv: list[str]) -> int:
 
             available = duration - cursor
             final_slice = False
+            # Too little new audio to be worth a chunk yet — but this is also
+            # what a finished recording looks like. Check for a stall across
+            # the WHOLE sub-threshold range: a recording that stops with a
+            # remnant in (0, MIN_SLICE_SECONDS) leaves `available` frozen
+            # there, so gating this on `available <= 0.05` would loop forever
+            # and never fire the caller's lifecycle watch.
             if available < MIN_SLICE_SECONDS:
-                # Too little new audio to be worth a chunk yet — but this is also
-                # what a finished recording looks like. Check for a stall across
-                # the WHOLE sub-threshold range: a recording that stops with a
-                # remnant in (0, MIN_SLICE_SECONDS) leaves `available` frozen
-                # there, so gating this on `available <= 0.05` would loop forever
-                # and never fire the caller's lifecycle watch.
                 try:
                     stalled = (time.time() - recording.stat().st_mtime) > (args.interval * 2)
                 except OSError:
                     stalled = True
-                if not stalled:
+                decision = slice_decision(available, stalled)
+                if decision == "wait":
                     continue
-                if available <= 0.05:
+                if decision == "exit_clean":
                     log("recording appears to have stopped — exiting")
                     break
-                # Stopped with a usable remnant: transcribe it so the meeting's
-                # final words are not dropped, then exit.
+                # flush_final: stop with a usable remnant — transcribe it so the
+                # meeting's final words are not dropped, then exit.
                 log(
                     f"recording appears to have stopped — flushing final "
                     f"{available:.1f}s slice"
@@ -286,20 +338,9 @@ def main(argv: list[str]) -> int:
                 "end_s": round(cursor + available, 2),
                 "ok": ok,
             }
-            if ok:
-                record["text"] = payload
-                consecutive_failures = 0
-            elif payload == SILENCE_SENTINEL:
-                # A quiet interval is a normal meeting state, not a failure: it
-                # neither counts toward the kill switch nor resets it. Recorded
-                # as ok with empty text so the JSONL stays a continuous timeline
-                # and consumers render nothing rather than an error.
-                record["ok"] = True
-                record["text"] = ""
-                record["silence"] = True
-            else:
-                record["error"] = payload
-                consecutive_failures += 1
+            consecutive_failures = apply_transcription_result(
+                record, ok, payload, consecutive_failures
+            )
 
             with out_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
