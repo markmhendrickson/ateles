@@ -142,6 +142,16 @@ regexes = [
   # pii-linkedin-profile: placeholder/example slugs (not real people) — e.g. the
   # `linkedin.com/in/XXX` normalization comment in linkedin_icp_priority_list.py.
   '''(?i)linkedin\.com/in/(?:xxx+|your-?[a-z]*|<[^>]+>|example|username|profile|handle|slug)\b''',
+  # generic-api-key false positive: security_action_items/manifest.json "key"
+  # field values for GHSA-kind items with no fix_pr (advisory-<incident>-<letter>
+  # display slugs, e.g. "advisory-2026-08-a"). Default gitleaks flags any
+  # hyphenated alphanumeric string of sufficient length/entropy assigned to a
+  # JSON field, regardless of field name or content — confirmed by testing that
+  # renaming the field ("id", "slug", "advisory_id") still flags it, so this is
+  # a value-shape false positive, not fixable by renaming. Anchored tightly
+  # (exact literal shape, 2-digit year+month, single trailing letter) so it can
+  # only ever match this display-slug pattern, never a real credential.
+  '''^advisory-2026-\d{2}-[a-z]$''',
 ]
 paths = [
   "execution/scripts/ga_last_7_days_report.py",
