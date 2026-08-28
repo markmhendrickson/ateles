@@ -1,0 +1,390 @@
+{
+  "title": "Neotoma security and migration — live status",
+  "subtitle": "The standing tracker for security and client-instance migration work on Neotoma: advisories, code fixes, detection controls, enforcement gaps, migration prerequisites, and operator actions. Status is resolved from GitHub at render time rather than maintained by hand.",
+  "scope_note": "Scope: this page is not limited to a single incident. It began with the work surfaced by the August 2026 findings, now also carries the client-instance migration that work prompted, and is where both are tracked from here, so later findings join this list rather than starting a new one.",
+  "slug": "security-incident-action-items",
+  "repo": "markmhendrickson/neotoma",
+  "groups": [
+    {
+      "name": "Advisories (private disclosure)",
+      "note": "Vulnerabilities requiring a private GitHub Security Advisory before any public detail. Not GitHub issues by design.",
+      "items": [
+        {
+          "kind": "ghsa",
+          "key": "advisory-2026-08-a",
+          "title": "Authentication issue held for private disclosure",
+          "incident": "2026-08",
+          "severity": "Critical",
+          "fix_pr": 2232,
+          "manual_status": "fix merged; advisory not yet filed"
+        },
+        {
+          "kind": "ghsa",
+          "key": "advisory-2026-08-b",
+          "title": "Session-handling issue held for private disclosure",
+          "incident": "2026-08",
+          "severity": "High",
+          "manual_status": "fix in review; advisory not yet filed"
+        }
+      ]
+    },
+    {
+      "name": "Code fixes",
+      "items": [
+        {
+          "kind": "pr",
+          "number": 2232,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "pr",
+          "number": 2233,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2227,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2228,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2164,
+          "incident": "2026-07"
+        },
+        {
+          "kind": "issue",
+          "number": 2212,
+          "incident": "2026-07"
+        },
+        {
+          "kind": "issue",
+          "number": 2214,
+          "incident": "2026-07"
+        },
+        {
+          "kind": "issue",
+          "number": 2215,
+          "incident": "2026-07"
+        },
+        {
+          "kind": "pr",
+          "number": 2163,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2235,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2240,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2239,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2250,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2252,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2253,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2260,
+          "incident": "2026-08"
+        }
+      ]
+    },
+    {
+      "name": "Detection controls",
+      "note": "Make the pipeline see whole classes rather than single cases.",
+      "items": [
+        {
+          "kind": "issue",
+          "number": 2229,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2230,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2231,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2183,
+          "incident": "2026-07"
+        },
+        {
+          "kind": "issue",
+          "number": 2167,
+          "incident": "2026-07"
+        },
+        {
+          "kind": "issue",
+          "number": 2174,
+          "incident": "2026-07"
+        },
+        {
+          "kind": "issue",
+          "number": 2173,
+          "incident": "2026-07"
+        },
+        {
+          "kind": "issue",
+          "number": 2111,
+          "incident": "2026-07"
+        },
+        {
+          "kind": "issue",
+          "number": 1872,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2254,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2255,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2259,
+          "incident": "2026-08"
+        }
+      ]
+    },
+    {
+      "name": "Enforcement / governance",
+      "note": "Make verdicts bind instead of advise.",
+      "items": [
+        {
+          "kind": "issue",
+          "number": 2180,
+          "incident": "2026-07"
+        },
+        {
+          "kind": "issue",
+          "number": 2178,
+          "incident": "2026-07"
+        },
+        {
+          "kind": "issue",
+          "number": 2182,
+          "incident": "2026-07"
+        },
+        {
+          "kind": "issue",
+          "number": 2169,
+          "incident": "2026-07"
+        },
+        {
+          "kind": "issue",
+          "number": 2181,
+          "incident": "2026-07"
+        },
+        {
+          "kind": "issue",
+          "number": 543,
+          "repo": "markmhendrickson/ateles",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 544,
+          "repo": "markmhendrickson/ateles",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "repo": "markmhendrickson/ateles",
+          "number": 549,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "repo": "markmhendrickson/ateles",
+          "number": 550,
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "repo": "markmhendrickson/ateles",
+          "number": 551,
+          "incident": "2026-08"
+        }
+      ]
+    },
+    {
+      "name": "Hygiene surfaced in passing",
+      "items": [
+        {
+          "kind": "issue",
+          "number": 2234,
+          "incident": "2026-08"
+        }
+      ]
+    },
+    {
+      "name": "Client-instance migration",
+      "note": "Prerequisites for moving the hosted client instance into the client's own infrastructure. Tracked here because the migration was prompted by the security findings and shares their gates: a patched release, an owner that is not the nil UUID, a tested restore, and a log drain before any data is written.",
+      "items": [
+        {
+          "kind": "manual",
+          "key": "release-pin",
+          "title": "Cut a tagged release carrying the merged auth fix and pin the instance to it",
+          "manual_status": "done 2026-08-27 — instance pinned to v0.22.1, a tagged release carrying the auth fix",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "hosted-mode-flag",
+          "title": "Set the hosted-mode flag on the client instance, in the same change that lands the outbound host guard",
+          "manual_status": "pending — deliberately coupled to the guard landing; the guard is inert without it",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "transfer-method",
+          "title": "Move the app into the client's org as-is, rather than rebuilding",
+          "manual_status": "recommended 2026-08-27 — the ownership objection does not hold: data sits under a real shared-graph UUID, not the nil sentinel, so there is nothing to rewrite",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "curated-export",
+          "title": "Propose an export path for curated state that preserves correction provenance",
+          "manual_status": "superseded by the move recommendation — a move carries the graph and the 64 rendered pages intact, so no export/replay is needed unless the client rejects it",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "backup-restore-drill",
+          "title": "Wire streaming backup and a log drain to client-owned storage, and prove a restore before data",
+          "manual_status": "pending",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "deploy-approval-role",
+          "title": "Offer the client a deploy-approval operator role, with a reserved security fast-track lane",
+          "manual_status": "pending — proposed in the reply; awaiting the client's decision",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "write-provenance",
+          "title": "Propose a mechanism for per-record write provenance, and say what read logging is possible",
+          "manual_status": "pending — owed to the client with the transfer plan",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "rendered-pages",
+          "title": "Carry the instance's 64 rendered pages into the transfer scope, triaged rather than copied wholesale",
+          "manual_status": "pending — 25 canonical BD assets, 9 policy/governance, 8 transcripts and recaps, 16 briefs and analyses, 6 superseded or draft",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "curated-inventory",
+          "title": "Settle which lead-evaluation rubric version is canonical before migrating the records",
+          "manual_status": "pending — 81 records span v3, v3.1 and v3.2, with ten unversioned",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "correction-history",
+          "title": "Run the restore drill separately, since a move does not double as one",
+          "manual_status": "pending — snapshot restored into a scratch app before the move",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "issue",
+          "number": 2076,
+          "incident": "2026-08"
+        }
+      ]
+    },
+    {
+      "name": "Operator-only actions",
+      "note": "Not trackable as code changes; require operator credentials or judgement.",
+      "items": [
+        {
+          "kind": "manual",
+          "key": "deploy",
+          "title": "Deploy the merged auth fixes to the hosted client instance",
+          "incident": "2026-08",
+          "manual_status": "done 2026-08-26 — instance verified serving the fix commit"
+        },
+        {
+          "kind": "manual",
+          "key": "rotate",
+          "title": "Rotate bearer token and revoke outstanding session tokens",
+          "incident": "2026-08",
+          "manual_status": "pending"
+        },
+        {
+          "kind": "manual",
+          "key": "allowlist",
+          "title": "Add the partner's requested address to the instance allowlist",
+          "incident": "2026-08",
+          "manual_status": "pending — deliberately sequenced after deploy + rotation"
+        },
+        {
+          "kind": "manual",
+          "key": "file-ghsas",
+          "title": "File both private security advisories",
+          "incident": "2026-08",
+          "manual_status": "pending"
+        },
+        {
+          "kind": "manual",
+          "key": "detection-issue",
+          "title": "File the detection and response issue covering log drain, retention, alerting, and forensics",
+          "manual_status": "pending — owed to the client by 2026-08-28",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "writeup-revision",
+          "title": "Revise the incident write-up: correct the review-gate status, the SQLi attribution, the merge account, and the broken links",
+          "manual_status": "pending — owed to the client by 2026-08-28",
+          "incident": "2026-08"
+        },
+        {
+          "kind": "manual",
+          "key": "forensics-query",
+          "title": "Run the observation-log integrity query over the exposure window, counts and field names only",
+          "manual_status": "pending — awaiting the client's confirmation of the window bounds",
+          "incident": "2026-08"
+        }
+      ]
+    }
+  ]
+}
