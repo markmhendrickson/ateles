@@ -61,7 +61,7 @@ def resolve(item, repo):
     # entities the way issue rows resolve from GitHub, with honest per-row
     # degradation when Neotoma is unreachable. Until then: if you edit a
     # manual_status, check it against reality first.
-    return (item.get("key", "—"), None, item.get("manual_status", "pending").upper(), item["title"])
+    return (item.get("key", "—"), None, item.get("manual_status", "pending"), item["title"])
 
 STATE_STYLE = {
     "OPEN":   ("#8a6d00", "open"),

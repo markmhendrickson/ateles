@@ -11,8 +11,8 @@
       "items": [
         {
           "kind": "ghsa",
-          "key": "jwt-unverified-fallback",
-          "title": "Unverified-JWT bearer fallback authenticated as any user",
+          "key": "advisory-2026-08-a",
+          "title": "Authentication issue held for private disclosure",
           "incident": "2026-08",
           "severity": "Critical",
           "fix_pr": 2232,
@@ -20,11 +20,10 @@
         },
         {
           "kind": "ghsa",
-          "key": "failed-signin-session",
-          "title": "Failed sign-in did not invalidate an existing session",
+          "key": "advisory-2026-08-b",
+          "title": "Session-handling issue held for private disclosure",
           "incident": "2026-08",
           "severity": "High",
-          "fix_pr": 2233,
           "manual_status": "fix in review; advisory not yet filed"
         }
       ]
