@@ -10,7 +10,12 @@ Usage:
   python3 render_action_items.py            # write html to stdout
   python3 render_action_items.py --out F    # write to file
 """
-import json, subprocess, sys, html, os, argparse
+import argparse
+import html
+import json
+import os
+import subprocess
+import sys
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -21,7 +26,8 @@ manifest_repo_hint = [""]
 def gh_json(args):
     try:
         out = subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=30)
-        if out.returncode != 0: return None
+        if out.returncode != 0:
+            return None
         return json.loads(out.stdout)
     except Exception:
         return None
@@ -66,15 +72,20 @@ STATE_STYLE = {
 def render(manifest, repo):
     manifest_repo_hint[0] = repo
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    open_n = closed_n = 0
+    open_n = closed_n = tracked_n = unknown_n = 0
     rows_by_group = []
     for g in manifest["groups"]:
         rows = []
         for it in g["items"]:
             label, url, state, title = resolve(it, repo)
             norm = state.upper()
-            if norm in ("CLOSED", "MERGED"): closed_n += 1
-            elif norm == "OPEN": open_n += 1
+            tracked_n += 1
+            if norm in ("CLOSED", "MERGED"):
+                closed_n += 1
+            elif norm == "OPEN":
+                open_n += 1
+            elif norm == "UNKNOWN":
+                unknown_n += 1
             rows.append((label, url, state, title, it.get("incident", ""), it.get("severity", "")))
         rows_by_group.append((g["name"], g.get("note", ""), rows))
 
@@ -90,10 +101,17 @@ def render(manifest, repo):
       f'Issue and pull-request status is resolved at render time rather than recorded here, so this page cannot go stale; '
       f'items with no public tracker (advisories held private, operator actions) show a manually-maintained status.</p>')
     A(f'<p class="notice">{html.escape(manifest["scope_note"])}</p>')
-    A(f'<p><strong>{open_n} open</strong> · {closed_n} closed or merged · {open_n+closed_n} tracked in total.</p>')
+    manual_n = tracked_n - open_n - closed_n - unknown_n
+    summary = (f'<strong>{open_n} open</strong> · {closed_n} closed or merged · '
+               f'{manual_n} with no public tracker · {tracked_n} tracked in total')
+    if unknown_n:
+        summary += (f'. <strong>{unknown_n} row(s) could not be resolved from GitHub</strong> — '
+                    f'their status below is unavailable, not clear')
+    A(f'<p>{summary}.</p>')
     for name, note, rows in rows_by_group:
         A(f'<h3>{html.escape(name)}</h3>')
-        if note: A(f'<p>{html.escape(note)}</p>')
+        if note:
+            A(f'<p>{html.escape(note)}</p>')
         A('<div class="tw"><table>')
         A('<tr><th>Item</th><th>Status</th><th>From</th><th>Tracked as</th></tr>')
         for label, url, state, title, incident, severity in rows:
@@ -136,9 +154,12 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--out")
     a = p.parse_args()
-    m = json.load(open(os.path.join(HERE, "manifest.json")))
+    with open(os.path.join(HERE, "manifest.json")) as fh:
+        m = json.load(fh)
     body = render(m, m["repo"])
     if a.out:
-        open(a.out, "w").write(body); print(f"wrote {a.out} ({len(body)} chars)", file=sys.stderr)
+        with open(a.out, "w") as fh:
+            fh.write(body)
+        print(f"wrote {a.out} ({len(body)} chars)", file=sys.stderr)
     else:
         print(body)
