@@ -193,8 +193,13 @@ The tailer's stderr names which of three exits happened:
 | stderr line | Meaning | Response |
 |---|---|---|
 | `recording appears to have stopped — exiting` | Operator stopped Audio Hijack | **Run the `stop` sequence automatically** |
+| `recording appears to have stopped — flushing final Ns slice` then `final slice written — exiting` | Same, with a trailing remnant shorter than one chunk | **Run the `stop` sequence automatically** — the last words are in the final chunk |
 | `could not probe duration — recording ended?` | File vanished or became unreadable | Run `stop`; note the anomaly |
-| `5 consecutive failures — stopping` | Transcription is broken, not the recording | Do **not** treat as meeting-over; surface the errors — the recording may still be running |
+| `5 consecutive failures — stopping` | Transcription is genuinely broken | Do **not** treat as meeting-over; surface the errors — the recording may still be running |
+
+Silence does **not** count toward that failure streak. A quiet interval is written
+as `{"ok": true, "text": "", "silence": true}` and renders as nothing, so a
+mid-meeting break cannot kill the tailer.
 
 **On the first case, run the `/stream-transcript stop` sequence without being
 asked** and tell the operator streaming ended because recording stopped. This is
@@ -316,7 +321,7 @@ is the right place for those provisional rows to be confirmed or corrected.
 |---|---|---|
 | `no active recording found` | Nothing growing in the watch dir | Operator starts the recorder |
 | Chunks stop arriving | Recording ended, or tailer died | Check `/tmp/livetail.err` |
-| 5 consecutive failures | Tailer self-stops by design | Read the error lines in the JSONL |
+| 5 consecutive failures | Tailer self-stops by design | Read the error lines in the JSONL (silence is excluded from this count) |
 | `ModuleNotFoundError: config` | `execution/scripts/config.py` missing | Untracked + gitignored; copy from a worktree |
 | Garbled text on non-speech | Whisper straining on music/noise | Expected; not a defect |
 | Operator's voice absent | Only the system track is sliced | By design; see the follow-up task |

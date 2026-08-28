@@ -119,8 +119,19 @@ def find_growing_recording(watch_dir: Path, settle_probe: float = 3.0) -> Path |
     return None
 
 
+# Returned in place of an error when a slice transcribes to nothing. Silence is
+# an ordinary meeting state (a pause, a break, someone reading), NOT a failure —
+# counting it toward the failure kill switch would stop the tailer mid-meeting.
+SILENCE_SENTINEL = "__silence__"
+
+
 def transcribe_slice(wav_path: Path, env: dict) -> tuple[bool, str]:
-    """Transcribe one slice. Returns (ok, text_or_error)."""
+    """Transcribe one slice.
+
+    Returns (ok, payload). On failure the payload is an error string, EXCEPT for
+    an empty transcript, which returns SILENCE_SENTINEL so the caller can tell a
+    quiet interval apart from a broken transcription path.
+    """
     python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
     try:
         result = subprocess.run(
@@ -145,7 +156,7 @@ def transcribe_slice(wav_path: Path, env: dict) -> tuple[bool, str]:
              if ln.strip() and not ln.startswith("Transcribing audio file:")]
     text = " ".join(ln.strip() for ln in lines).strip()
     if not text:
-        return False, "empty transcript (silence?)"
+        return False, SILENCE_SENTINEL
     return True, text
 
 
@@ -217,17 +228,30 @@ def main(argv: list[str]) -> int:
                 break
 
             available = duration - cursor
+            final_slice = False
             if available < MIN_SLICE_SECONDS:
-                # Recording stopped, or it is not producing audio fast enough yet.
+                # Too little new audio to be worth a chunk yet — but this is also
+                # what a finished recording looks like. Check for a stall across
+                # the WHOLE sub-threshold range: a recording that stops with a
+                # remnant in (0, MIN_SLICE_SECONDS) leaves `available` frozen
+                # there, so gating this on `available <= 0.05` would loop forever
+                # and never fire the caller's lifecycle watch.
+                try:
+                    stalled = (time.time() - recording.stat().st_mtime) > (args.interval * 2)
+                except OSError:
+                    stalled = True
+                if not stalled:
+                    continue
                 if available <= 0.05:
-                    try:
-                        stalled = (time.time() - recording.stat().st_mtime) > (args.interval * 2)
-                    except OSError:
-                        stalled = True
-                    if stalled:
-                        log("recording appears to have stopped — exiting")
-                        break
-                continue
+                    log("recording appears to have stopped — exiting")
+                    break
+                # Stopped with a usable remnant: transcribe it so the meeting's
+                # final words are not dropped, then exit.
+                log(
+                    f"recording appears to have stopped — flushing final "
+                    f"{available:.1f}s slice"
+                )
+                final_slice = True
 
             tmp = tempfile.NamedTemporaryFile(
                 suffix=f"_live{chunk_index:04d}.wav", delete=False, prefix="livetail_"
@@ -265,6 +289,14 @@ def main(argv: list[str]) -> int:
             if ok:
                 record["text"] = payload
                 consecutive_failures = 0
+            elif payload == SILENCE_SENTINEL:
+                # A quiet interval is a normal meeting state, not a failure: it
+                # neither counts toward the kill switch nor resets it. Recorded
+                # as ok with empty text so the JSONL stays a continuous timeline
+                # and consumers render nothing rather than an error.
+                record["ok"] = True
+                record["text"] = ""
+                record["silence"] = True
             else:
                 record["error"] = payload
                 consecutive_failures += 1
@@ -276,6 +308,10 @@ def main(argv: list[str]) -> int:
             # re-slice the same audio forever.
             cursor += available
             chunk_index += 1
+
+            if final_slice:
+                log("final slice written — exiting")
+                break
 
             if consecutive_failures >= 5:
                 log("5 consecutive failures — stopping (check the JSONL error lines)")
