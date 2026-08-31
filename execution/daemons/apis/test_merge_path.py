@@ -18,6 +18,8 @@ policy `fixed_means_behavior_verified_not_contract_accepted`
 (ent_db0b7855d47012084477fb00).
 """
 
+import asyncio
+
 import swarm_dispatch
 from lib.notify import Priority
 from swarm_dispatch import (
@@ -25,8 +27,10 @@ from swarm_dispatch import (
     body_has_blocking_findings,
     merge_authorization_clause,
     parse_merge_refusal,
+    review_blocks_merge,
     verdict_to_review_event,
 )
+from test_swarm_dispatch import _pr_dispatcher_with_stubs, _trigger
 
 
 # ── #595: body-derived blockers dominate a self-reported token ───────────────
@@ -281,3 +285,225 @@ def test_merge_refusal_escalation_never_raises():
         )
         == "authorized_but_unable"
     )
+
+
+# ── the merge path itself: routing must agree with the review it emitted ─────
+#
+# The tests above assert the ateles#595 cross-check at the HELPER surface
+# (`verdict_to_review_event`). That is not where the PR is decided. `_handle_pr`
+# emits the formal review AND then chooses between routing findings back and
+# gating for merge, and those two decisions were reading different inputs: the
+# review consulted the body, the branch consulted the token alone. Every test
+# below drives `_handle_pr` and asserts which downstream path actually fired,
+# because that is the observable effect the issue describes.
+
+_BLOCKING_AGGREGATION = (
+    "**COMMENT**\n\n"
+    "Blocking: 1\n\n"
+    "[BLOCKING] credential-scope: the subprocess inherits the whole .env\n"
+)
+
+
+def _handle_pr_calls(monkeypatch, stdout, *, auto_merge=False):
+    """Run _handle_pr on `stdout` and return the recorded downstream calls."""
+    calls = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout=stdout, calls=calls, auto_merge=auto_merge
+    )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    return calls
+
+
+def test_comment_token_with_blocking_body_routes_and_does_not_gate(monkeypatch):
+    """The defect, at the surface that decides the PR.
+
+    A `**COMMENT**` token above a `[BLOCKING]` finding submitted REQUEST_CHANGES
+    to GitHub — so `reviewDecision` blocked the PR — while the routing branch
+    read the token, called `review_verdict_is_clear("comment")` (True) and filed
+    the operator's merge-ready checkpoint. The blocker reached GitHub and never
+    reached a fix round: the two halves of the merge path disagreed about the
+    same review.
+    """
+    calls = _handle_pr_calls(monkeypatch, _BLOCKING_AGGREGATION)
+
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+    assert ("route", "comment") in calls, calls
+    assert not any(c[0] == "gate" for c in calls), calls
+
+
+def test_approve_token_with_blocking_body_routes_and_does_not_gate(monkeypatch):
+    """The same disagreement from the more dangerous token: an APPROVE carrying a
+    blocker would otherwise clear reviewDecision and page the operator as
+    merge-ready."""
+    stdout = "**APPROVE**\n\nlgtm overall\n[BLOCKING] auth: the token check is bypassable\n"
+
+    calls = _handle_pr_calls(monkeypatch, stdout)
+
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+    assert ("route", "approve") in calls, calls
+    assert not any(c[0] == "gate" for c in calls), calls
+
+
+def test_approve_with_only_non_blocking_findings_still_gates(monkeypatch):
+    """The false-positive guard, and the reason the marker regex carries a `NON-`
+    lookbehind: `[NON-BLOCKING]` CONTAINS `BLOCKING`. If advisory notes routed,
+    every clean PR would enter a fix round and the queue this fix exists to
+    unjam would jam harder."""
+    stdout = (
+        "**APPROVE**\n\nBlocking: 0\n\n"
+        "[NON-BLOCKING] naming: prefer `fetch_workflow`\n"
+        "[NON-BLOCKING] style: minor\n"
+    )
+
+    calls = _handle_pr_calls(monkeypatch, stdout)
+
+    assert ("review", "APPROVE") in calls, calls
+    assert ("gate", None) in calls, calls
+    assert not any(c[0] == "route" for c in calls), calls
+
+
+def test_blocking_body_routes_even_under_auto_merge(monkeypatch):
+    """Under APIS_AUTONOMY_AUTO_MERGE=1 the missed blocker was not merely wrong,
+    it was SILENT: `_gate_merge_readiness` early-returns on the flag, so taking
+    the gate path produced no checkpoint, no fix round and no page — the blocker
+    simply evaporated. Routing must not depend on the autonomy posture."""
+    calls = _handle_pr_calls(monkeypatch, _BLOCKING_AGGREGATION, auto_merge=True)
+
+    assert ("route", "comment") in calls, calls
+    assert not any(c[0] == "gate" for c in calls), calls
+
+
+def test_request_changes_event_implies_blocking_the_merge_path():
+    """The invariant that keeps the two surfaces from drifting again.
+
+    Whenever the formal review escalates to REQUEST_CHANGES, the merge path must
+    also block. Asserted as an IMPLICATION, not an equality, because ateles#241
+    deliberately keeps `blocked` on a clean body mapped to the inert COMMENT
+    (GitHub review state stays unescalated) while such a verdict must still route
+    findings back. Equality here would force one of those two behaviours to
+    change.
+    """
+    verdicts = ("approve", "request_changes", "comment", "blocked", None, "", "wat")
+    bodies = (
+        None,
+        "",
+        "**X**\n\nno findings at all",
+        "[BLOCKING] scope: out of bounds",
+        "[NON-BLOCKING] naming: nit",
+        "[NON-BLOCKING] naming: nit\n[BLOCKING] auth: bypassable",
+    )
+
+    for verdict in verdicts:
+        for body in bodies:
+            if verdict_to_review_event(verdict, body=body) == "REQUEST_CHANGES":
+                assert review_blocks_merge(verdict, body), (
+                    f"verdict={verdict!r} body={body!r} submits REQUEST_CHANGES to "
+                    "GitHub but does not block the merge path — the two surfaces "
+                    "have drifted apart again"
+                )
+
+    # The converse is intentionally false, and this is the one case that makes it
+    # so. Pinned here so a future "simplification" to an equality is a test
+    # failure rather than a silent change to ateles#241.
+    assert verdict_to_review_event("blocked", body="**BLOCKED**\nno markers") == "COMMENT"
+    assert review_blocks_merge("blocked", "**BLOCKED**\nno markers")
+
+
+def test_review_blocks_merge_preserves_the_token_only_behaviour():
+    """With no body supplied the predicate must reduce to the old token test, or
+    adopting it at the routing branch would itself be a behaviour change."""
+    assert review_blocks_merge("approve") is False
+    assert review_blocks_merge("comment") is False
+    assert review_blocks_merge("request_changes") is True
+    assert review_blocks_merge("blocked") is True
+    assert review_blocks_merge(None) is True
+
+
+def test_body_derived_blocker_with_no_parseable_lens_finding_pages_the_operator(
+    monkeypatch,
+):
+    """The new routing path must not swap one silence for another.
+
+    Routing on the body makes `_route_blocking_findings` reachable with a CLEAR
+    token for the first time. When the blocker was stated only in Vanellus's
+    aggregation, the per-lens reviews carry no parseable `[BLOCKING]` block, so
+    there is nothing to hand a fix agent. That case must page the operator and
+    hold the merge — the whole point of this issue is that a blocker reaching
+    nobody is the defect, and a routed-but-unactionable finding would reach
+    nobody just as effectively.
+    """
+    sent = []
+
+    class _N:
+        def send(self, message, priority=None, handler=None, **kw):
+            sent.append((message, priority))
+
+    async def fake_claim(self, trigger, kind):
+        return True
+
+    monkeypatch.setattr(
+        swarm_dispatch.SwarmDispatcher, "_claim_escalation", fake_claim
+    )
+    d = swarm_dispatch.SwarmDispatcher.__new__(swarm_dispatch.SwarmDispatcher)
+    d.notifier = _N()
+
+    asyncio.run(
+        d._route_blocking_findings(
+            _trigger(),
+            parent=80,
+            reviews=[("qa", "**COMMENT**\n\nlooks fine to me")],
+            verdict="comment",
+        )
+    )
+
+    assert sent, "a body-derived blocker with no parseable finding must page"
+    message, priority = sent[0]
+    assert priority is Priority.OPERATOR_DECISION
+    assert "Merge held" in message
+    # The old copy asserted the verdict "is not clear", which is now false on
+    # this path: the token was clear and the BODY blocked.
+    assert "is not clear" not in message
+
+
+# ── the CI-green merge gate reads the same predicate ─────────────────────────
+
+
+def test_ci_green_merge_gate_does_not_clear_on_a_blocking_aggregation(monkeypatch):
+    """`_pr_review_is_clear` is the third merge-path surface and it had the same
+    token-only defect while holding the body in hand.
+
+    It gates the CI-green path to merge-ready and fails UNSAFE, so a `**COMMENT**`
+    aggregation that lists its own `[BLOCKING]` finding must not read as clear —
+    otherwise a completed check advances a PR the panel blocked.
+    """
+    from test_aggregation_ordering import MARKER, _dispatcher
+
+    aggregation = {
+        "id": 1,
+        "created_at": "2026-08-19T09:00:00Z",
+        "body": (
+            f"{MARKER}\n**Vanellus**\n\n**COMMENT**\n\nBlocking: 1\n\n"
+            "[BLOCKING] credential-scope: loads the entire .env\n"
+        ),
+    }
+    d, _ = _dispatcher(monkeypatch, [[aggregation]])
+
+    assert asyncio.run(d._pr_review_is_clear("o/r", 1)) is False
+
+
+def test_ci_green_merge_gate_still_clears_a_genuinely_clean_aggregation(monkeypatch):
+    """Not a fail-closed-always change: an aggregation with no blocking findings
+    must still clear, or the CI-green path stops advancing anything."""
+    from test_aggregation_ordering import MARKER, _dispatcher
+
+    aggregation = {
+        "id": 1,
+        "created_at": "2026-08-19T09:00:00Z",
+        "body": (
+            f"{MARKER}\n**Vanellus**\n\n**APPROVE**\n\nBlocking: 0\n\n"
+            "[NON-BLOCKING] naming: prefer `fetch_workflow`\n"
+        ),
+    }
+    d, _ = _dispatcher(monkeypatch, [[aggregation]])
+
+    assert asyncio.run(d._pr_review_is_clear("o/r", 1)) is True

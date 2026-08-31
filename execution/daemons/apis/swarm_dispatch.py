@@ -579,8 +579,44 @@ def review_verdict_is_clear(verdict: str | None) -> bool:
 
     REQUEST_CHANGES / BLOCKED / None (unparseable) are all NOT clear — the PR is
     not merge-ready and blocking findings should route back for a fix.
+
+    Reads the TOKEN ONLY. Callers deciding the merge path must use
+    `review_blocks_merge`, which also consults the body — see its docstring.
     """
     return verdict in ("approve", "comment")
+
+
+def review_blocks_merge(verdict: str | None, body: str | None = None) -> bool:
+    """True when a review must route findings back instead of gating for merge.
+
+    The single predicate the merge path branches on. Extracted because the two
+    surfaces that act on the same review had drifted: `_emit_formal_review`
+    adopted the ateles#595 body cross-check while the routing branch in
+    `_handle_pr` still tested `review_verdict_is_clear(verdict)` alone. Since
+    `review_verdict_is_clear("comment")` is True, a Vanellus `**COMMENT**` above
+    a `[BLOCKING]` finding submitted REQUEST_CHANGES to GitHub — blocking the PR
+    under branch protection — while the dispatcher filed the operator's
+    merge-ready checkpoint and never routed the finding for a fix. Under
+    APIS_AUTONOMY_AUTO_MERGE=1 it was worse than wrong, it was silent:
+    `_gate_merge_readiness` early-returns, so the blocker produced no
+    checkpoint, no fix round and no page.
+
+    Blocks when EITHER input says so: the body carries a `[BLOCKING]` marker, or
+    the token itself is not clear. The body half is the ateles#595 authority
+    (a lens's own structured finding outranks its self-reported token); the token
+    half preserves the pre-existing behaviour for REQUEST_CHANGES / BLOCKED /
+    unparseable.
+
+    Related to but deliberately NOT equal to
+    `verdict_to_review_event(...) == REQUEST_CHANGES`. The ateles#241 asymmetry
+    keeps `blocked` on a clean body mapped to the inert COMMENT — GitHub review
+    state stays unescalated — yet such a review must still route findings back.
+    So the invariant between the two surfaces is an IMPLICATION, not an
+    equality: emitting REQUEST_CHANGES implies blocking the merge, never the
+    converse. `test_request_changes_event_implies_blocking_the_merge_path`
+    enforces it over every verdict x body-shape pair.
+    """
+    return body_has_blocking_findings(body) or not review_verdict_is_clear(verdict)
 
 
 # GitHub's Reviews API accepts exactly these three events.
@@ -3202,7 +3238,12 @@ class SwarmDispatcher:
                 auto_merge=self.config.auto_merge,
             )
 
-        if not review_verdict_is_clear(verdict):
+        # 5c. Route or gate. Reads the same body the formal review above read, via
+        #     the same predicate, so the two surfaces cannot disagree about the
+        #     same blocker: branching on the token alone let a `**COMMENT**` above
+        #     a `[BLOCKING]` finding block the PR on GitHub while the dispatcher
+        #     told the operator it was merge-ready.
+        if review_blocks_merge(verdict, vanellus_result.stdout):
             await self._route_blocking_findings(trigger, parent, reviews, verdict)
             return
 
@@ -3440,16 +3481,19 @@ class SwarmDispatcher:
                     by_lens.setdefault(lens, []).append(f)
 
         if not by_lens:
-            # Verdict was not clear but no parseable [BLOCKING] block exists
-            # (e.g. a BLOCKED "cannot proceed" or a malformed verdict). Don't
-            # guess a fix — escalate so a human reads the review. Only notify
-            # once per PR: a re-review of the same unparseable verdict must not
-            # re-ping the operator.
+            # The review blocked the merge path but no parseable [BLOCKING] block
+            # exists in the per-lens reviews. Three ways to get here: a BLOCKED
+            # "cannot proceed", a malformed verdict, or — since the routing
+            # branch reads the body too — a CLEAR token whose blocker was stated
+            # only in Vanellus's aggregation. Don't guess a fix; escalate so a
+            # human reads the review. Without this the body-derived blocker would
+            # simply land in a different silence than the one it came from.
+            # Only notify once per PR: a re-review must not re-ping the operator.
             if await self._claim_escalation(trigger, "unparseable-verdict"):
                 self.notifier.send(
-                    f"PR {ref}: review verdict `{verdict or 'unparseable'}` is "
-                    "not clear but no blocking findings could be parsed — needs "
-                    "your read. Merge held.",
+                    f"PR {ref}: review verdict `{verdict or 'unparseable'}` did "
+                    "not clear the merge path but no blocking findings could be "
+                    "parsed from the lens reviews — needs your read. Merge held.",
                     priority=Priority.OPERATOR_DECISION,
                     handler=DAEMON_NAME,
                 )
@@ -4426,6 +4470,13 @@ class SwarmDispatcher:
         Still fail-closed (False) on any error, and now also False when the page
         cap is hit without finding a marker — never claim merge-ready off a read
         that may have missed the verdict.
+
+        Reads the aggregation through `review_blocks_merge`, the same predicate
+        the panel path uses, so this gate cannot drift from it. It previously
+        tested the parsed TOKEN alone while holding the body that carried the
+        findings: a `**COMMENT**` aggregation listing a `[BLOCKING]` item read as
+        clear here, and since this is the CI-green path, a PR could reach
+        merge-ready on an aggregation that named its own blocker.
         """
         try:
             async with httpx.AsyncClient(timeout=30) as client:
@@ -4435,9 +4486,8 @@ class SwarmDispatcher:
                 comment = latest_aggregation_comment(comments)
                 if comment is None:
                     return False
-                return review_verdict_is_clear(
-                    parse_review_verdict(comment.get("body") or "")
-                )
+                body = comment.get("body") or ""
+                return not review_blocks_merge(parse_review_verdict(body), body)
         except Exception as exc:
             log.warning(
                 f"[{DAEMON_NAME}] {repository}#{pr_number}: review-verdict read "

@@ -10,9 +10,11 @@ Also covers the checkbox definition-of-done changes:
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime, timezone
 
 import httpx
+import pytest
 import swarm_dispatch
 from github_gateway import SwarmTrigger
 from lib.daemon_runtime.gating import CheckpointPosture, ExecutionPolicy
@@ -83,9 +85,26 @@ class _StubNotifier:
         self.sent_full.append((message, priority))
 
 
-def _config():
+def _config(**overrides):
     # No tokens: Neotoma stores and GitHub fallbacks short-circuit with a log.
-    return DispatchConfig(neotoma_token="", github_token="")
+    #
+    # The autonomy flags are pinned OFF rather than left to their defaults.
+    # DispatchConfig's defaults are evaluated from os.environ at IMPORT time, so
+    # an operator running the suite in a shell that exports
+    # APIS_AUTONOMY_AUTO_MERGE=1 (the live daemon's own posture) silently flipped
+    # them for every test — and `_gate_merge_readiness` early-returns under
+    # auto_merge, so the leak suppressed exactly the merge-path assertions this
+    # module makes. Pinning them here makes these tests read the same locally and
+    # in CI. Pass an override to exercise a flag deliberately.
+    return DispatchConfig(
+        **{
+            "neotoma_token": "",
+            "github_token": "",
+            "auto_merge": False,
+            "auto_rereview_on_push": False,
+            **overrides,
+        }
+    )
 
 
 # ── content_digest ──────────────────────────────────────────────────────────
@@ -197,10 +216,18 @@ def test_request_changes_is_the_only_escalating_mapping():
 # ── _handle_pr verdict branching ─────────────────────────────────────────────
 
 
-def _pr_dispatcher_with_stubs(monkeypatch, *, vanellus_stdout, calls):
+def _pr_dispatcher_with_stubs(
+    monkeypatch, *, vanellus_stdout, calls, auto_merge=False
+):
     """Dispatcher whose _handle_pr reaches the verdict branch, then records
     which downstream path (_route_blocking_findings vs _gate_merge_readiness)
-    fired, without doing real work in either."""
+    fired, without doing real work in either.
+
+    `auto_merge` drives the flag that decides whether a merge-ready PR gets a
+    checkpoint at all, so a test can assert routing still happens under the
+    autonomous posture — the case where a missed blocker is silent rather than
+    merely wrong.
+    """
 
     async def fake_run_skill(skill, prompt, **kwargs):
         # Lanius clears gate inheritance; panelists return trivial reviews;
@@ -226,7 +253,13 @@ def _pr_dispatcher_with_stubs(monkeypatch, *, vanellus_stdout, calls):
     async def fake_emit_review(self, trigger, verdict, body):
         # ateles#241: record the native review emission so tests can assert the
         # event fired (and with which verdict) without real GitHub I/O.
-        calls.append(("review", verdict_to_review_event(verdict)))
+        #
+        # `body` MUST be forwarded. Dropping it made this helper disagree with
+        # production: the real `_emit_formal_review` cross-checks the body
+        # (ateles#595), so a `**COMMENT**` above a `[BLOCKING]` finding recorded
+        # COMMENT here while GitHub received REQUEST_CHANGES — the stub silently
+        # hid the very disagreement these tests exist to catch.
+        calls.append(("review", verdict_to_review_event(verdict, body=body)))
         return "rev-1"
 
     async def fake_persist(self, *a, **k):
@@ -244,7 +277,7 @@ def _pr_dispatcher_with_stubs(monkeypatch, *, vanellus_stdout, calls):
     monkeypatch.setattr(SwarmDispatcher, "_post_missing_panel_comments", fake_persist)
     monkeypatch.setattr(SwarmDispatcher, "_preregistered_expectations",
                         lambda self, repo, parent: _async_return({}))
-    return SwarmDispatcher(_StubNotifier(), _config())
+    return SwarmDispatcher(_StubNotifier(), _config(auto_merge=auto_merge))
 
 
 def _async_return(value):
@@ -426,6 +459,14 @@ def test_auto_rereview_never_gates_merge_readiness(monkeypatch):
     assert any(c[0] == "route" for c in calls)
 
 
+@pytest.mark.skipif(
+    os.environ.get("ATELES_SWARM_AUTO_REREVIEW") is not None,
+    reason=(
+        "asserts the UNSET-env default, and DispatchConfig bakes its defaults "
+        "from os.environ at import time — a shell that exports the flag (the "
+        "live daemon's own posture) makes the premise false, not the code wrong"
+    ),
+)
 def test_auto_rereview_flag_defaults_off():
     """Default OFF — autonomy expansions are opt-in (ateles#80 rollout rule)."""
     assert DispatchConfig(neotoma_token="", github_token="").auto_rereview_on_push is False
