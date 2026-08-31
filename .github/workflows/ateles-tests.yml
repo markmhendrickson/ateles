@@ -53,9 +53,10 @@ jobs:
       # ateles#584 (qa lens, PR #596 round 1): the anthus orchestrator suite
       # (test_participation_state.py, test_dispatch_wiring.py,
       # test_orchestrator.py) was committed but collected by no lane. Its own
-      # step, not appended to another: several daemons ship same-named
-      # top-level modules (orchestrator.py among them), and under pytest's
-      # prepend import mode a shared invocation risks a module-name collision.
+      # step, for the same attributability reason as the apis step above — not
+      # because directories cannot share an invocation. Checked: a combined
+      # `pytest execution/daemons/` collects and passes, and no two daemons
+      # ship a same-named top-level module today.
       - name: Run anthus daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/anthus/ -q
       - name: Run shared approval lib tests
