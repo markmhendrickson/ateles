@@ -21,7 +21,7 @@ safe and reversible:
                    to supersede any operator- or Columba-authored policy.
 
 Decision logic is pure and unit-tested; Neotoma I/O mirrors participation.py
-(plain httpx against /store, /retrieve_entities, /correct with idempotency).
+(plain httpx against /store, /entities/query, /correct with idempotency).
 """
 
 from __future__ import annotations
@@ -252,7 +252,7 @@ async def _post(path: str, body: dict, bearer: str) -> dict | None:
 async def fetch_threshold(agent_sub: str, bearer: str) -> int:
     """Read drift_signal_threshold from the agent's agent_strategy, else default."""
     data = await _post(
-        "retrieve_entities",
+        "entities/query",
         {"entity_type": "agent_strategy", "limit": 50, "include_snapshots": True},
         bearer,
     )
@@ -270,7 +270,7 @@ async def fetch_threshold(agent_sub: str, bearer: str) -> int:
 async def fetch_agent_policies(agent_sub: str, bearer: str) -> list[dict]:
     """Return snapshots of all non-retired agent_policy entities for an agent."""
     data = await _post(
-        "retrieve_entities",
+        "entities/query",
         {"entity_type": "agent_policy", "limit": 200, "include_snapshots": True},
         bearer,
     )
@@ -524,7 +524,7 @@ async def fetch_recent_signals(
     text, keeping the fingerprint authoritative).
     """
     data = await _post(
-        "retrieve_entities",
+        "entities/query",
         {"entity_type": SIGNAL_ENTITY_TYPE, "limit": limit, "include_snapshots": True},
         bearer,
     )

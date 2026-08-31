@@ -6,6 +6,9 @@ handled a comma-separated string (.split(",")), which mangled array values.
 The .tools property must accept array, comma-string, and wildcard shapes.
 """
 
+import httpx
+
+import agent_loader as al
 from agent_loader import AgentDefinition
 
 
@@ -72,3 +75,185 @@ def test_empty_and_none_default_to_wildcard():
 
 def test_default_is_wildcard():
     assert AgentDefinition(name="t").tools == ["*"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Neotoma REST endpoint + failure-visibility regression coverage (ateles#606).
+#
+# Two defects, both of which presented as a HEALTHY daemon:
+#
+#   1. load_active_policies() POSTed to /retrieve_entities — an MCP TOOL name,
+#      not a REST route. Verified live against prod 2026-08-31: that path
+#      returns 404, /entities/query returns 200. The 404 was caught and logged
+#      at WARNING, so every agent dispatched with NO learned policies while the
+#      loader reported nothing wrong.
+#
+#   2. A failed agent_definition load returned a stub with an EMPTY
+#      prompt_markdown and a WILDCARD tool_allowlist, indistinguishable from a
+#      successful load. An agent could run with no role instructions and
+#      unrestricted tools while the daemon reported success.
+#
+# Both of these are "the suite is green and the feature never worked" shaped
+# (cf. ateles#602), so these tests assert the URL actually requested and the
+# observable difference between success and failure — not just a return value.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _Resp:
+    def __init__(self, payload, status=200):
+        self._payload = payload
+        self.status_code = status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"HTTP {self.status_code}",
+                request=httpx.Request("POST", "http://x"),
+                response=httpx.Response(self.status_code),
+            )
+
+    def json(self):
+        return self._payload
+
+
+def _no_signing(monkeypatch):
+    """Force the plain-httpx path so we observe the real URL."""
+    monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: False)
+
+
+def test_load_active_policies_posts_to_entities_query(monkeypatch):
+    """The policy read must hit /entities/query, never /retrieve_entities.
+
+    FAILS on origin/main: the URL is ".../retrieve_entities", which 404s live.
+    """
+    _no_signing(monkeypatch)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    seen = {}
+
+    def fake_post(url, **kwargs):
+        seen["url"] = url
+        return _Resp({"entities": []})
+
+    monkeypatch.setattr(al.httpx, "post", fake_post)
+    al.AgentLoader("apis").load_active_policies()
+
+    assert seen["url"].endswith("/entities/query"), seen["url"]
+    assert "retrieve_entities" not in seen["url"], (
+        "retrieve_entities is an MCP tool name, not a REST path — it 404s"
+    )
+
+
+def test_load_active_policies_returns_matching_agent_policy(monkeypatch):
+    """A successful query yields the agent's own active/provisional policies."""
+    _no_signing(monkeypatch)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    payload = {
+        "entities": [
+            {"snapshot": {"agent_sub": "apis@ateles-swarm", "status": "active",
+                          "rule": "mine"}},
+            {"snapshot": {"agent_sub": "other@ateles-swarm", "status": "active",
+                          "rule": "theirs"}},
+            {"snapshot": {"agent_sub": "apis@ateles-swarm", "status": "retired",
+                          "rule": "old"}},
+        ]
+    }
+    monkeypatch.setattr(al.httpx, "post", lambda url, **kw: _Resp(payload))
+
+    out = al.AgentLoader("apis").load_active_policies()
+    assert [p["rule"] for p in out] == ["mine"]
+
+
+def test_policy_404_does_not_present_as_no_policies(monkeypatch, caplog):
+    """A 404 must be logged at ERROR, not silently look like 'no policies'.
+
+    FAILS on origin/main: the failure is logged at WARNING, so a dead endpoint
+    is indistinguishable from an agent that genuinely has no policies.
+    """
+    _no_signing(monkeypatch)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    monkeypatch.setattr(al.httpx, "post", lambda url, **kw: _Resp({}, status=404))
+
+    with caplog.at_level("ERROR"):
+        out = al.AgentLoader("apis").load_active_policies()
+
+    assert out == []
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert errors, "a failed policy load must be logged at ERROR, not WARNING"
+
+
+def test_successful_load_is_not_a_stub(monkeypatch):
+    """A real definition carries its prompt and is not flagged as a stub."""
+    _no_signing(monkeypatch)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    payload = {
+        "entities": [
+            {
+                "entity_id": "ent_real",
+                "snapshot": {"name": "apis", "prompt_markdown": "# real prompt",
+                             "tool_allowlist": ["Bash"]},
+            }
+        ]
+    }
+    monkeypatch.setattr(al.httpx, "post", lambda url, **kw: _Resp(payload))
+
+    d = al.AgentLoader("apis").load()
+    assert d.is_stub is False
+    assert d.load_error == ""
+    assert d.prompt_markdown == "# real prompt"
+
+
+def test_failed_load_is_marked_as_a_stub_not_a_success(monkeypatch):
+    """A failed load must be DISTINGUISHABLE from a successful one.
+
+    FAILS on origin/main: AgentDefinition has no is_stub/load_error field, so a
+    stub with an empty prompt and wildcard tools is indistinguishable from a
+    real definition. A caller cannot tell it dispatched an agent with no prompt.
+    """
+    _no_signing(monkeypatch)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+
+    def boom(url, **kwargs):
+        raise httpx.ConnectError("neotoma unreachable")
+
+    monkeypatch.setattr(al.httpx, "post", boom)
+
+    d = al.AgentLoader("apis").load()
+    # The dangerous shape the stub actually has:
+    assert d.prompt_markdown == ""
+    assert d.tools == ["*"]
+    # ...must be flagged, or a caller reports success while running blind.
+    assert d.is_stub is True
+    assert d.load_error, "a stub must record WHY the load failed"
+
+
+def test_failed_load_is_logged_at_error(monkeypatch, caplog):
+    """Falling back to an empty prompt is an ERROR, not a WARNING.
+
+    FAILS on origin/main: the fallback is logged at WARNING.
+    """
+    _no_signing(monkeypatch)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    monkeypatch.setattr(
+        al.httpx, "post",
+        lambda url, **kw: (_ for _ in ()).throw(httpx.ConnectError("down")),
+    )
+
+    with caplog.at_level("ERROR"):
+        al.AgentLoader("apis").load()
+
+    msgs = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert any("FAILED" in m for m in msgs), msgs
+
+
+def test_no_matching_definition_is_also_a_stub(monkeypatch):
+    """A 200 with no matching name is still a failed load, not a definition."""
+    _no_signing(monkeypatch)
+    monkeypatch.setattr(al, "NEOTOMA_BEARER_TOKEN", "tok")
+    monkeypatch.setattr(
+        al.httpx, "post",
+        lambda url, **kw: _Resp({"entities": [{"entity_id": "e",
+                                               "snapshot": {"name": "someone-else"}}]}),
+    )
+
+    d = al.AgentLoader("apis").load()
+    assert d.is_stub is True
+    assert "no agent_definition" in d.load_error

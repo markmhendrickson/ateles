@@ -75,6 +75,12 @@ find ./strategy/operations -name "*.md" | \
 echo "  - Checking config sourcing (no hardcoded operator config)..."
 python scripts/linters/check_hardcoded_config.py || ERRORS=$((ERRORS + 1))
 
+# Neotoma REST paths (ateles#606 — MCP tool names like `retrieve_entities` are
+# not routes; they 404, and the 404 is usually swallowed into an empty result
+# so the caller reports success while reading nothing).
+echo "  - Checking Neotoma REST paths (no MCP tool names used as routes)..."
+python scripts/linters/check_neotoma_rest_paths.py || ERRORS=$((ERRORS + 1))
+
 # tool_allowlist grant grammar (ateles#255 — bash: prefix is silently dropped
 # by the CLI's --allowedTools parser; only Bash(<command>:*) is honored).
 # Requires live Neotoma; skipped (not failed) when NEOTOMA_BASE_URL is unset

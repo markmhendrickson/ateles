@@ -5,7 +5,13 @@ Each T3 daemon calls AgentLoader(name).load() at startup to get its
 configuration from Neotoma. No config files. Updating an agent's prompt
 or tool_allowlist is a Neotoma correct() call — no code commit.
 
-Falls back gracefully if Neotoma is unreachable (returns minimal default).
+If Neotoma is unreachable the loader returns a STUB definition rather than
+raising, so a daemon does not crash on a transient outage. A stub is a FAILURE,
+not a degraded success: it carries an empty ``prompt_markdown`` and a wildcard
+``tool_allowlist``, so an agent dispatched on one runs with no role instructions
+and unrestricted tools. Every stub is logged at ERROR and flagged
+``is_stub=True`` with a ``load_error`` reason. Callers MUST check ``is_stub``
+before treating a definition as loaded.
 """
 
 from __future__ import annotations
@@ -63,6 +69,17 @@ class AgentDefinition:
     raw: dict = field(default_factory=dict)
     # Observation ID that produced the current snapshot (for dispatch pinning, ateles#22)
     last_observation_id: str = ""
+    # True when this definition is the fallback stub rather than a real Neotoma
+    # load — i.e. the load FAILED. A stub carries prompt_markdown="" and
+    # tool_allowlist="*", so a caller that treats it as a definition dispatches
+    # an agent with NO prompt and UNRESTRICTED tools while reporting success.
+    # Callers MUST branch on this rather than assume load() succeeded.
+    is_stub: bool = False
+    # Why the load failed (transport error, 404, no matching entity). Empty on
+    # a successful load. Distinguishes "Neotoma said no rows" from "the request
+    # never succeeded" — the same distinction execution/mcp/ateles/server.py
+    # records via _last_transport_error.
+    load_error: str = ""
 
     @property
     def tools(self) -> list[str]:
@@ -179,10 +196,9 @@ class AgentLoader:
             data = self._neotoma("GET", url)
             return self._parse(entity_id, data)
         except Exception as exc:
-            log.warning(
-                f"[{self.agent_name}] Could not load agent_definition {entity_id}: {exc}"
+            return self._stub(
+                f"GET /entities/{entity_id} failed: {type(exc).__name__}: {exc}"
             )
-            return self._stub()
 
     def _load_by_name(self) -> AgentDefinition:
         """Search for agent_definition by name field via POST /entities/query.
@@ -211,15 +227,14 @@ class AgentLoader:
                         f"{ent['entity_id']} from Neotoma"
                     )
                     return self._parse(ent["entity_id"], {"snapshot": snap})
-            log.warning(
-                f"[{self.agent_name}] No agent_definition found in Neotoma — "
-                "using stub (run Phase 1 setup)"
+            return self._stub(
+                f"no agent_definition named {self.agent_name!r} in "
+                f"{len(entities)} result(s) from POST /entities/query"
             )
         except Exception as exc:
-            log.warning(
-                f"[{self.agent_name}] Neotoma search failed: {exc} — using stub"
+            return self._stub(
+                f"POST /entities/query failed: {type(exc).__name__}: {exc}"
             )
-        return self._stub()
 
     def _parse(self, entity_id: str, data: dict) -> AgentDefinition:
         snap = data.get("snapshot") or data.get("entity", {}).get("snapshot", {})
@@ -247,13 +262,28 @@ class AgentLoader:
             last_observation_id=str(last_obs_id) if last_obs_id else "",
         )
 
-    def _stub(self) -> AgentDefinition:
+    def _stub(self, reason: str = "unknown") -> AgentDefinition:
+        """Fallback definition for a FAILED load — never a successful one.
+
+        A stub has an EMPTY prompt_markdown and a WILDCARD tool_allowlist. An
+        agent dispatched on one runs with no role instructions and unrestricted
+        tools. That must never present as a normal load, so the stub is logged
+        at ERROR and marked ``is_stub`` with the failure reason attached for the
+        caller to branch on.
+        """
+        log.error(
+            f"[{self.agent_name}] agent_definition load FAILED ({reason}) — "
+            "falling back to a STUB with an EMPTY prompt and wildcard tools. "
+            "Any agent dispatched on this definition has no role instructions."
+        )
         return AgentDefinition(
             name=self.agent_name,
             aauth_sub=f"{self.agent_name}@ateles-swarm",
             agent_grant="service",
             tool_allowlist="*",
             status="active",
+            is_stub=True,
+            load_error=reason,
         )
 
     def load_active_policies(self) -> list[dict]:
@@ -274,9 +304,12 @@ class AgentLoader:
             return []
         agent_sub = f"{self.agent_name}@ateles-swarm"
         try:
+            # POST /entities/query is the canonical list route. /retrieve_entities
+            # is the MCP TOOL name, not a REST path, and 404s on the hosted
+            # instance — see _load_by_name and issue_spec.py for the same gotcha.
             data = self._neotoma(
                 "POST",
-                f"{NEOTOMA_BASE_URL}/retrieve_entities",
+                f"{NEOTOMA_BASE_URL}/entities/query",
                 {
                     "entity_type": "agent_policy",
                     "limit": 200,
@@ -284,12 +317,18 @@ class AgentLoader:
                 },
             )
         except Exception as exc:
-            log.warning(f"[{self.agent_name}] could not load agent_policy: {exc}")
+            log.error(
+                f"[{self.agent_name}] could not load agent_policy: {exc} — "
+                "dispatching WITHOUT this agent's learned policies"
+            )
             return []
 
         out: list[dict] = []
         for e in data.get("entities", []):
-            snap = e.get("snapshot") or {}
+            # /entities/query returns the field dict either flat under
+            # "snapshot" or nested one level deeper; accept both.
+            outer = e.get("snapshot") or {}
+            snap = outer.get("snapshot", outer) if isinstance(outer, dict) else {}
             if snap.get("agent_sub") != agent_sub:
                 continue
             if snap.get("status") not in ("active", "provisional"):
