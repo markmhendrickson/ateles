@@ -18,10 +18,30 @@ import re
 from collections.abc import Iterable
 
 # Domain tags → T4 skill mappings. First matching tag wins in _resolve_skill.
+#
+# Ordering is load-bearing: DOMAIN_PATTERNS below is walked in list order and
+# resolve_skill walks the resulting tags in that same order, so a SPECIALIST
+# domain must be declared ahead of the broad generalist (cicada-owned) domains,
+# which would otherwise swallow copy, GTM, content, compliance and release work.
 DOMAIN_ROUTES: dict[str, str] = {
+    # ── Specialist domains (each has a dedicated T4 owner) ───────────────────
     "finance": "monedula",  # payment EXECUTION (concrete amount + payee) → Monedula
-    "finance_analysis": "fringilla",  # review/reconcile/audit/report → Fringilla
+    "finance_analysis": "fringilla",  # review/reconcile/report → Fringilla
+    "tax": "picus",  # tax preparation / filings → Picus
     "health": "gorilla",  # workout logging / fitness tasks → Gorilla
+    "crm": "sturnus",  # relationship / contact management → Sturnus
+    "customer_intel": "hirundo",  # ICP / customer research → Hirundo
+    "gtm": "ciconia",  # launch / go-to-market → Ciconia
+    "copy": "manucode",  # positioning / messaging copy → Manucode
+    "content": "corvus",  # blog / social / editorial writing → Corvus
+    "design": "aythya",  # visual & brand design → Aythya
+    "devrel": "regulus",  # developer docs / onboarding → Regulus
+    "release": "struthio",  # release execution → Struthio
+    "compliance": "robin",  # session / process compliance audit → Robin
+    "policy": "columba",  # constitution & policy escalation → Columba
+    "personal": "nucifraga",  # personal / household enrichment → Nucifraga
+    "anchor_delivery": "ploceus",  # anchor-customer delivery → Ploceus
+    # ── Generalist domains (all → the issue worker) ──────────────────────────
     "ops": "cicada",  # ops/deploy tasks → issue worker
     "engineering": "cicada",  # engineering tasks → issue worker
     "agents": "cicada",  # agent/swarm tasks → issue worker
@@ -33,60 +53,278 @@ DOMAIN_ROUTES: dict[str, str] = {
 # An explicit task.assigned_to value always wins over tag inference. Maps an
 # agent name (as written in agent_definition.name / task.assigned_to) to the
 # skill Apis dispatches. Keep in sync with the active swarm roster.
-ASSIGNED_TO_ROUTES: dict[str, str] = {
-    "monedula": "monedula",
-    "fringilla": "fringilla",
-    "gorilla": "gorilla",
-    "cicada": "cicada",
-    "sturnus": "sturnus",
-}
+#
+# Derived from DOMAIN_ROUTES so an agent that owns a domain is, by construction,
+# also addressable by name — the two tables cannot drift apart (guarded by
+# test_routing.test_every_domain_owner_is_addressable_by_name).
+ASSIGNED_TO_ROUTES: dict[str, str] = {skill: skill for skill in DOMAIN_ROUTES.values()}
+
+# ── Negative-context guards ───────────────────────────────────────────────────
+#
+# Some domain keywords are a genuine domain signal in one context and ordinary
+# English in another ("audit the README", "insurance agent", "training
+# documentation"). A bare \b<word>\b pattern for these produces a SILENT
+# MISROUTE: the task resolves to a confident specialist who is the wrong owner.
+# That reads as covered and is strictly worse than resolving to no owner —
+# apis.dispatch_task escalates an unrouted task to BLOCKED and pages the
+# operator, so "no route" is visibly unowned, while a wrong route is not.
+#
+# Each entry is (tag, pattern): when the pattern matches the text the tag is
+# suppressed, even though its DOMAIN_PATTERNS entry matched. Guards are
+# deliberately narrow — they encode the specific collision observed, not a veto.
+DOMAIN_ANTIPATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    # "audit" is finance analysis only when it is not auditing something else.
+    (
+        "finance_analysis",
+        re.compile(
+            r"\b(readme|docs?|documentation|onboarding|accessibility|security|"
+            r"a11y|seo|content|copy|session|sessions|compliance|code|schema|"
+            r"test|tests|performance|dependency|dependencies|log|logs|"
+            r"permission|permissions|prompt|prompts|routing|coverage|"
+            r"accessibility)\b",
+            re.I,
+        ),
+    ),
+    # "agent" also means a human intermediary (insurance/estate/travel agent).
+    (
+        "agents",
+        re.compile(
+            r"\b(insurance|estate|travel|booking|rental|customs|literary)\s+agent\b",
+            re.I,
+        ),
+    ),
+    # "training" is health only outside a docs / machine-learning context.
+    (
+        "health",
+        re.compile(
+            r"\b(training\s+(doc|docs|documentation|material|materials|manual|"
+            r"guide|video|videos|course|deck)|"
+            r"(model|ml|llm|pipeline|data)\s+training|"
+            r"training\s+(data|run|loop|pipeline|job))\b",
+            re.I,
+        ),
+    ),
+]
 
 # Domain keyword patterns. Order matters: earlier patterns take precedence when
 # multiple match (see _resolve_skill, which walks tags in insertion order).
+# Specialist patterns come FIRST so the broad generalist patterns
+# (ops/engineering/product/neotoma/agents/comms) cannot swallow copy, GTM,
+# content, compliance, release or devrel work into cicada.
+#
+# Patterns must be SPECIFIC. A bare single word that also occurs in ordinary
+# English ("audit", "pay", "design", "post", "release", "build", "agent",
+# "content", "api") is how a silent misroute is born: prefer a multi-word
+# phrase, a qualified noun, or a DOMAIN_ANTIPATTERNS guard. Every pattern here
+# has a negative test in test_routing.py asserting what it must NOT claim.
 DOMAIN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # ── Specialist domains ───────────────────────────────────────────────────
     (
         re.compile(
-            r"\b(financial review|reconcile|reconciliation|audit|portfolio|"
-            r"fixed costs?|subscription review|quarterly review)\b",
+            r"\b(tax returns?|tax filings?|tax prep|tax preparation|"
+            r"tax declaration|tax year|tax residency|tax deductions?|"
+            r"modelo\s*\d+|irpf|vat return|withholding|hacienda|"
+            r"income tax|capital gains|tax advisor|tax preparer|"
+            r"quarterly filing|fiscal report)\b",
+            re.I,
+        ),
+        "tax",
+    ),
+    (
+        re.compile(
+            r"\b(financial review|reconcile|reconciliation|financial audit|"
+            r"spend audit|expense audit|portfolio|fixed costs?|"
+            r"subscription review|quarterly review|burn rate|cash flow|"
+            r"profit and loss|balance sheet|audit)\b",
             re.I,
         ),
         "finance_analysis",
     ),
     (
         re.compile(
-            r"\b(payment|invoice|transfer|wage|salary|rent|yoga|therapy|pay)\b", re.I
+            r"\b(payments?|invoices?|transfer|wages?|salary|rent|yoga|therapy|"
+            r"payout|remittance|reimburse|reimbursement)\b"
+            r"|\bpay\s+(the|a|an|out|off|for|back)\b",
+            re.I,
         ),
         "finance",
     ),
     (
         re.compile(
-            r"\b(workout|gym|fitness|lift|squat|bench|deadlift|training|"
-            r"reps|sets|cardio|gorilla)\b",
+            r"\b(workout|gym|fitness|squat|bench press|deadlift|"
+            r"reps|sets|cardio|gorilla|strength training|lift session|"
+            r"training)\b",
             re.I,
         ),
         "health",
     ),
     (
-        re.compile(r"\b(deploy|release|build|ci|pipeline|docker|kubernetes)\b", re.I),
+        re.compile(
+            r"\b(crm|contact records?|relationship hub|warm intro|"
+            r"follow[- ]up with|introduction to|contact enrichment|"
+            r"address book|reconnect with|relationship graph)\b",
+            re.I,
+        ),
+        "crm",
+    ),
+    (
+        re.compile(
+            r"\b(icp|ideal customer|customer interviews?|customer research|"
+            r"customer intelligence|user research|win[- ]loss|personas?|"
+            r"jobs[- ]to[- ]be[- ]done|market segment|segmentation|"
+            r"churn analysis|voice of customer)\b",
+            re.I,
+        ),
+        "customer_intel",
+    ),
+    (
+        re.compile(
+            r"\b(go[- ]to[- ]market|gtm|launch (plan|campaign|strategy)|"
+            r"product launch|campaign plan|pricing strategy|"
+            r"acquisition channel|growth experiment|funnel strategy|"
+            r"marketing plan|distribution strategy)\b",
+            re.I,
+        ),
+        "gtm",
+    ),
+    (
+        re.compile(
+            r"\b(positioning|value prop|value proposition|messaging|tagline|"
+            r"headline copy|landing page copy|marketing copy|copywriting|"
+            r"category narrative|brand voice|page copy|ad copy)\b"
+            r"|\brewrite the (headline|copy|tagline|landing page)\b",
+            re.I,
+        ),
+        "copy",
+    ),
+    (
+        re.compile(
+            r"\b(blog posts?|essay|newsletter issue|editorial|social posts?|"
+            r"thread draft|substack|article draft|content calendar)\b"
+            r"|\bwrite (a|an|the) (post|article|essay)\b"
+            r"|\bpublish (a|an|the) (post|article|essay)\b",
+            re.I,
+        ),
+        "content",
+    ),
+    (
+        re.compile(
+            r"\b(brand (colou?r|palette|identity|guidelines?)|"
+            r"colou?r palette|logo|typography|visual design|figma|wireframe|"
+            r"mockup|design system|style guide|illustration|iconography|"
+            r"ui design|ux design|visual identity)\b",
+            re.I,
+        ),
+        "design",
+    ),
+    (
+        re.compile(
+            r"\b(devrel|developer relations|developer docs|"
+            r"developer experience|getting started guide|quickstart|"
+            r"onboarding (path|docs|guide|flow|experience)|readme|"
+            r"api reference|tutorial|sample app|code examples?|"
+            r"contributor guide)\b",
+            re.I,
+        ),
+        "devrel",
+    ),
+    (
+        re.compile(
+            r"\b(release candidate|release notes|changelog|version bump|"
+            r"semver|release checklist|release process)\b"
+            r"|\b(cut|ship|tag)\s+(a|the)?\s*(v?\d+\.\d+\S*\s+)?release\b"
+            r"|\bpublish the (package|release)\b",
+            re.I,
+        ),
+        "release",
+    ),
+    (
+        re.compile(
+            r"\b(compliance|session audit|audit trail|rgpd|gdpr|"
+            r"retention policy|data protection|process adherence|"
+            r"governance review)\b",
+            re.I,
+        ),
+        "compliance",
+    ),
+    (
+        re.compile(
+            r"\b(constitution|policy (escalation|question|exception)|charter|"
+            r"escalation protocol|governing principle|principles document|"
+            r"ethical review)\b",
+            re.I,
+        ),
+        "policy",
+    ),
+    (
+        re.compile(
+            r"\b(dentist|doctor|appointment|household|groceries|grocery|"
+            r"personal errand|birthday|vacation|holiday booking|restaurant|"
+            r"haircut|dry cleaning|veterinar|school run)\b",
+            re.I,
+        ),
+        "personal",
+    ),
+    (
+        re.compile(
+            r"\b(anchor (customer|client|account)|client delivery|"
+            r"customer delivery|delivery milestone|design partner|"
+            r"pilot customer)\b",
+            re.I,
+        ),
+        "anchor_delivery",
+    ),
+    # ── Generalist domains (all → cicada) ────────────────────────────────────
+    (
+        re.compile(
+            r"\b(deploy|deployment|ci|pipeline|docker|kubernetes|"
+            r"build failure|provision|infrastructure|disk space|"
+            r"host maintenance|uptime)\b"
+            r"|\b(build|restart) the\b",
+            re.I,
+        ),
         "ops",
     ),
     (
-        re.compile(r"\b(bug|fix|error|crash|exception|regression|test)\b", re.I),
+        re.compile(
+            r"\b(bug|fix|error|crash|exception|regression|refactor|"
+            r"unit tests?|test suite|failing test|flaky test|stack trace)\b",
+            re.I,
+        ),
         "engineering",
     ),
     (
-        re.compile(r"\b(design|ux|ui|figma|wireframe|mockup|copy|content)\b", re.I),
+        re.compile(
+            r"\b(product spec|feature request|roadmap|user story|"
+            r"acceptance criteria|product requirements?)\b",
+            re.I,
+        ),
         "product",
     ),
     (
-        re.compile(r"\b(neotoma|schema|entity|migration|api|endpoint)\b", re.I),
+        re.compile(
+            r"\b(neotoma|entity schema|schema migration|db migration|"
+            r"entity type|mcp tool|api endpoint)\b",
+            re.I,
+        ),
         "neotoma",
     ),
     (
-        re.compile(r"\b(agent|daemon|skill|swarm|formica|apus|tyto|anthus)\b", re.I),
+        re.compile(
+            r"\b(daemon|skill|swarm|formica|apus|tyto|anthus|subagent)\b"
+            r"|\bagents?\b",
+            re.I,
+        ),
         "agents",
     ),
-    (re.compile(r"\b(email|newsletter|telegram|social|post|draft)\b", re.I), "comms"),
+    (
+        re.compile(
+            r"\b(email|newsletter|telegram|reply to)\b"
+            r"|\bdraft (a|an|the) (email|reply|message|note)\b",
+            re.I,
+        ),
+        "comms",
+    ),
 ]
 
 # Domains advertised on the A2A Agent Card's delegate-task skill. Derived from
@@ -172,11 +410,29 @@ def resolve_reviewers(paths: Iterable[str]) -> list[str]:
     return reviewers
 
 
+def _suppressed_tags(text: str) -> set[str]:
+    """Tags whose negative-context guard fires for this text.
+
+    See DOMAIN_ANTIPATTERNS: a keyword that is a domain signal in one context and
+    ordinary English in another is suppressed rather than allowed to produce a
+    confident wrong owner.
+    """
+    return {tag for tag, pattern in DOMAIN_ANTIPATTERNS if pattern.search(text)}
+
+
 def infer_tags_from_text(title: str, body: str = "") -> list[str]:
-    """Infer domain tags from task title + body (fallback when tags unset)."""
+    """Infer domain tags from task title + body (fallback when tags unset).
+
+    A tag whose DOMAIN_ANTIPATTERNS guard fires is dropped: an over-broad match
+    is a silent misroute, and no route (which apis.dispatch_task escalates to
+    BLOCKED and pages the operator about) is better than a wrong one.
+    """
     text = f"{title} {body}"
+    suppressed = _suppressed_tags(text)
     tags: list[str] = []
     for pattern, tag in DOMAIN_PATTERNS:
+        if tag in suppressed:
+            continue
         if pattern.search(text) and tag not in tags:
             tags.append(tag)
     return tags
