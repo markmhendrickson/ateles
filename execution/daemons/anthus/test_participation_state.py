@@ -15,6 +15,10 @@ Three distinct defects, one per section below:
    fails CLOSED into `unmet` — so the 404 silently marked every
    precondition-gated gate unmet and skipped it indefinitely.
 
+Also covers acceptance criterion 2 of #584 (signed at the pm gate): a
+gate already `satisfied` in loaded/seeded participation state must not be
+redispatched — see `test_known_satisfied_gate_is_not_redispatched`.
+
 Run with: pytest execution/daemons/anthus/test_participation_state.py -v
 """
 
@@ -235,6 +239,117 @@ def test_dispatch_is_held_when_participation_state_cannot_be_read(monkeypatch):
     )
     assert spawned == [], (
         f"no agent may be spawned when prior state is unknown; got spawns for {spawned}"
+    )
+
+
+def test_known_satisfied_gate_is_not_redispatched(monkeypatch):
+    """Acceptance criterion 2 of ateles#584 (the pm gate, signed at #584):
+
+    a seeded/persisted state is honored — a gate already `satisfied` in the
+    loaded participation state must NOT be redispatched, and the orchestrator
+    must move on to computing readiness for the next gate instead.
+
+    This is the positive counterpart to
+    `test_dispatch_is_held_when_participation_state_cannot_be_read`: there the
+    read fails and nothing may dispatch; here the read succeeds and returns a
+    gate that already ran, so THAT gate specifically must not be redispatched
+    or re-spawned. Reuses the same harness, with `fake_load_state_for`
+    returning a `satisfied` record instead of raising, and builds the
+    workflow from the real `orchestrator.WorkflowDefinition`/`Gate`
+    dataclasses (as `_precondition_workflow()` does below) rather than a
+    stub, so a field rename can't leave this passing against a shape that no
+    longer exists.
+    """
+    dispatched: list[str] = []
+    spawned: list[str] = []
+
+    workflow = orchestrator.WorkflowDefinition(
+        entity_id="ent_wf1",
+        project="ateles",
+        workflow_type="feature",
+        description="satisfied-gate fixture",
+        gates=[
+            orchestrator.Gate(
+                phase=1,
+                gate_name="pm",
+                owner_agent="pavo",
+                parallel_group=None,
+                join_gate=None,
+                required=True,
+                precondition=None,
+            )
+        ],
+        fast_paths=[],
+        legal_required=False,
+    )
+
+    async def fake_fetch_workflow_definitions(project):
+        return [workflow]
+
+    def fake_select_workflow(snap, workflows):
+        return workflows[0]
+
+    async def fake_resolve_unmet(wf, project):
+        return set()
+
+    async def fake_load_state_for(work_entity_id):
+        # A successful read, returning a gate that already ran to completion.
+        return {
+            "pm": {
+                "status": "satisfied",
+                "dispatched_at": "2026-08-30T10:00:00+00:00",
+                "satisfied_at": "2026-08-30T11:00:00+00:00",
+                "artifact_refs": ["ent_artifact1"],
+            }
+        }
+
+    async def fake_record_dispatched(**kwargs):
+        dispatched.append(kwargs.get("gate_name", "?"))
+
+    async def fake_spawn_agent(**kwargs):
+        spawned.append(kwargs.get("gate_name", "?"))
+
+    async def fake_fetch_comments(snap):
+        return []
+
+    async def fake_harvest(comments):
+        return None
+
+    monkeypatch.setattr(participation, "load_state_for", fake_load_state_for)
+    monkeypatch.setattr(participation, "record_dispatched", fake_record_dispatched)
+    monkeypatch.setattr(anthus, "_spawn_agent", fake_spawn_agent)
+    monkeypatch.setattr(anthus, "_fetch_comments", fake_fetch_comments)
+    monkeypatch.setattr(anthus, "_harvest_drift_signals", fake_harvest)
+
+    monkeypatch.setattr(
+        orchestrator, "fetch_workflow_definitions", fake_fetch_workflow_definitions
+    )
+    monkeypatch.setattr(orchestrator, "select_workflow", fake_select_workflow)
+    monkeypatch.setattr(orchestrator, "resolve_unmet_preconditions", fake_resolve_unmet)
+
+    # Ensure no stale in-process state short-circuits the hydration path, and
+    # that this test's seeded state can't leak from/into the held-dispatch test.
+    anthus._gate_states.pop("ent_work_satisfied", None)
+
+    ev = anthus.NeotomaEvent(
+        entity_type="issue",
+        entity_id="ent_work_satisfied",
+        action="created",
+        snapshot={"repo": "markmhendrickson/ateles", "github_number": 584},
+    )
+    asyncio.run(anthus._orchestrate_workflow_for(ev))
+
+    assert dispatched == [], (
+        "a gate already satisfied in persisted state must not be re-recorded "
+        f"as dispatched; got dispatches for {dispatched}"
+    )
+    assert spawned == [], (
+        "a gate already satisfied in persisted state must not spawn its agent "
+        f"again; got spawns for {spawned}"
+    )
+    assert anthus._gate_states["ent_work_satisfied"]["pm"].status == "satisfied", (
+        "the hydrated satisfied status must be preserved in in-memory state, "
+        "not reset to pending"
     )
 
 
