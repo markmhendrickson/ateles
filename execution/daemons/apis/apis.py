@@ -49,6 +49,15 @@ Environment variables:
   APIS_DISPATCH_TIMEOUT       Per-dispatch timeout in seconds (default: 1800)
   ATELES_REPO_PATH            Local path to ateles clone (default: ~/repos/ateles)
 
+Task reconciliation sweep (ateles#586 — see task_reconciler.py):
+  APIS_RECONCILE_ENABLED      "1" runs the level-triggered sweep that dispatches
+                              `pending` tasks the SSE create path never saw.
+                              Default 0 (off) — the first pass meets a backlog.
+  APIS_RECONCILE_INTERVAL_SECONDS  Sweep cadence (default: 900)
+  APIS_RECONCILE_MAX_PER_SWEEP     Max dispatches per pass (default: 5)
+  APIS_RECONCILE_GRACE_SECONDS     Min task age before eligible (default: 900)
+  APIS_RECONCILE_QUERY_LIMIT       Tasks fetched per pass (default: 500)
+
 GitHub trigger layer (ateles#80 — see github_gateway.py / swarm_dispatch.py):
   APIS_GITHUB_WEBHOOK_SECRET  HMAC secret for the GitHub webhook
   APIS_GITHUB_WEBHOOK_PORT    Webhook listen port (default: 8742)
@@ -291,6 +300,7 @@ from routing import (  # noqa: E402
 import github_gateway  # noqa: E402
 from skill_runner import run_skill  # noqa: E402
 from swarm_dispatch import SwarmDispatcher  # noqa: E402
+from task_reconciler import TaskReconciler  # noqa: E402
 from task_watchdog import TaskWatchdog  # noqa: E402
 
 
@@ -807,6 +817,18 @@ async def main() -> None:
         f"harness_providers={os.environ.get('APIS_HARNESS_PROVIDERS', 'claude,codex,cursor')} "
         f"dispatch_timeout={DISPATCH_TIMEOUT_SECONDS}s"
     )
+    # State this at boot either way: a reconciler that is off must say so, or its
+    # absence looks identical to a reconciler that ran and found nothing — the
+    # very ambiguity that hid the dead subscription for 88 days (ateles#589).
+    import task_reconciler as _reconcile_cfg
+
+    log.info(
+        f"[{DAEMON_NAME}] task reconciliation sweep: "
+        f"{'ENABLED' if _reconcile_cfg.ENABLED else 'DISABLED'} "
+        f"(interval={_reconcile_cfg.INTERVAL_SECONDS}s "
+        f"cap={_reconcile_cfg.MAX_PER_SWEEP}/sweep "
+        f"grace={_reconcile_cfg.GRACE_SECONDS}s)"
+    )
 
     # 1. Load agent_definition from Neotoma
     agent_def = AgentLoader(DAEMON_NAME).load()
@@ -856,6 +878,24 @@ async def main() -> None:
     watchdog = TaskWatchdog()
 
     async def watchdog_dispatch(task_id: str, snapshot: dict, trigger: str) -> None:
+        await dispatch_task(task_id, snapshot, trigger, notifier=notifier)
+
+    # 6b. Task reconciliation sweep (ateles#586/#589): the LEVEL-triggered
+    #     backstop under the edge-triggered SSE create path. The watchdog above
+    #     rescues work that started and stalled; it deliberately leaves
+    #     `pending` alone because "the SSE create path owns it" — which held
+    #     only while that path was alive. When the subscription is down (as it
+    #     was for 88 days), a task created in the gap gets its one `task.created`
+    #     event, nobody consumes it, and NOTHING ever looks at it again.
+    #
+    #     This sweep re-examines existing `pending` tasks and dispatches the
+    #     stranded ones through dispatch_task — no gate_override, so the same
+    #     confidence x blast-radius gate applies and high-blast work still holds
+    #     for an operator checkpoint. Bounded per pass and default-OFF; see
+    #     task_reconciler.py for the three-layer double-dispatch argument.
+    reconciler = TaskReconciler()
+
+    async def reconcile_dispatch(task_id: str, snapshot: dict, trigger: str) -> None:
         await dispatch_task(task_id, snapshot, trigger, notifier=notifier)
 
     # 7. Issue-pipeline resume sweep: the task watchdog above resumes `task`
@@ -982,6 +1022,7 @@ async def main() -> None:
         sse.stream(dispatch),
         github_gateway.serve(gateway_app, GITHUB_WEBHOOK_PORT),
         watchdog.run(notifier, watchdog_dispatch),
+        reconciler.run(reconcile_dispatch),
         resume_sweep(),
         deferred_review_sweep(),
         workflow_drift_check(),
