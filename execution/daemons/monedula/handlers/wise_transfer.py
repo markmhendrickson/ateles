@@ -24,6 +24,7 @@ import logging
 import os
 import subprocess
 from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -31,11 +32,23 @@ try:
     from ..handler_base import PaymentHandler
 except ImportError:
     from handler_base import PaymentHandler  # type: ignore[no-redef]
-from .payment_profile import PaymentProfile
+from .payment_profile import PaymentAmountError, PaymentProfile, parse_amount_eur
 
 log = logging.getLogger(__name__)
 
 WISE_BASE_URL = "https://api.transferwise.com"
+
+
+class TransferAmountMismatch(RuntimeError):
+    """Wise's own record of a transfer does not match the amount owed.
+
+    Raised after funding, so the money has already moved. It is raised rather
+    than logged because the caller's next step is to mark the task done, and a
+    task marked done is the record that the payment was correct and complete.
+    A short transfer that is also marked done is invisible — which is how
+    ateles#552 stayed undetected. Failing here keeps the task open and the
+    discrepancy visible.
+    """
 
 
 class WiseTransferHandler(PaymentHandler):
@@ -361,12 +374,44 @@ def _wise_get(token: str, path: str) -> Any:
         return json.loads(resp.read())
 
 
+def _json_dumps_with_decimals(body: dict) -> str:
+    """json.dumps(body), rendering any Decimal as an exact JSON number.
+
+    json.dumps() cannot encode a Decimal at all, and float(Decimal("133.60"))
+    is the binary approximation that Decimal exists to avoid. Rendering the
+    Decimal's own digits keeps the amount Wise receives identical to the
+    amount the profile declares: 133.60 stays 133.60 all the way to the wire.
+    """
+
+    def _default(value: Any) -> Any:
+        raise TypeError(f"cannot encode {type(value).__name__} for Wise")
+
+    def _encode(value: Any) -> str:
+        if isinstance(value, Decimal):
+            # format(..., "f") avoids scientific notation for any EUR amount.
+            return format(value, "f")
+        if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
+            return json.dumps(value)
+        if isinstance(value, str):
+            return json.dumps(value)
+        if isinstance(value, dict):
+            inner = ", ".join(
+                f"{json.dumps(str(k))}: {_encode(v)}" for k, v in value.items()
+            )
+            return "{" + inner + "}"
+        if isinstance(value, (list, tuple)):
+            return "[" + ", ".join(_encode(v) for v in value) + "]"
+        return json.dumps(value, default=_default)
+
+    return _encode(body)
+
+
 def _wise_post(token: str, path: str, body: dict) -> dict:
     import urllib.error
     import urllib.request
 
     url = f"{WISE_BASE_URL}{path}"
-    data = json.dumps(body).encode()
+    data = _json_dumps_with_decimals(body).encode()
     req = urllib.request.Request(
         url, data=data, headers=_wise_headers(token), method="POST"
     )
@@ -472,7 +517,11 @@ def _get_or_create_recipient(
     return account_id
 
 
-def _create_quote(token: str, profile_id: int, amount_eur: int) -> str:
+def _create_quote(token: str, profile_id: int, amount_eur: Decimal) -> str:
+    # amount_eur reaches Wise as an exact decimal number. It is never coerced
+    # to int or float on the way — that coercion is ateles#552, where int()
+    # truncated €133.60 to €133 and the transfer funded short in silence.
+    amount_eur = parse_amount_eur(amount_eur)
     body = {
         "sourceCurrency": "EUR",
         "targetCurrency": "EUR",
@@ -484,12 +533,29 @@ def _create_quote(token: str, profile_id: int, amount_eur: int) -> str:
     quote_uuid = result.get("id") or result.get("uuid")
     if not quote_uuid:
         raise RuntimeError(f"Wise quote returned no id: {result}")
+
+    # The quote is what fixes the amount for the transfer that follows, so
+    # check Wise priced the amount we asked for before anything is created
+    # against it. Wise echoes sourceAmount back; a missing echo is not treated
+    # as a mismatch here because the transfer record is reconciled separately.
+    quoted_raw = result.get("sourceAmount")
+    if quoted_raw is not None:
+        try:
+            quoted = parse_amount_eur(quoted_raw)
+        except PaymentAmountError:
+            quoted = None
+        if quoted is not None and quoted != amount_eur:
+            raise TransferAmountMismatch(
+                f"Wise quoted €{quoted} but €{amount_eur} was requested — "
+                f"refusing to create a transfer against a mispriced quote"
+            )
+
     return str(quote_uuid)
 
 
 def _create_transfer(
     token: str, target_account_id: int, quote_uuid: str, reference: str
-) -> int:
+) -> tuple[int, dict]:
     import uuid as _uuid
 
     body = {
@@ -506,7 +572,7 @@ def _create_transfer(
     transfer_id = result.get("id")
     if not transfer_id:
         raise RuntimeError(f"Wise /v1/transfers returned no id: {result}")
-    return int(transfer_id)
+    return int(transfer_id), result
 
 
 def _fund_transfer(token: str, profile_id: int, transfer_id: int) -> dict:
@@ -516,11 +582,70 @@ def _fund_transfer(token: str, profile_id: int, transfer_id: int) -> dict:
     )
 
 
+def _fetch_transfer(token: str, transfer_id: int) -> dict | None:
+    """Re-read a transfer from Wise after funding. None if it cannot be read.
+
+    A read failure must not be mistaken for a reconciled transfer, so the
+    caller falls back to the transfer record captured at creation rather than
+    skipping the check.
+    """
+    try:
+        result = _wise_get(token, f"/v1/transfers/{transfer_id}")
+        return result if isinstance(result, dict) else None
+    except Exception as exc:
+        log.warning(f"Could not re-read Wise transfer {transfer_id}: {exc}")
+        return None
+
+
+def _reported_source_amount(transfer: dict) -> Decimal | None:
+    """Extract Wise's own reported source amount from a transfer record.
+
+    Returns None when the response carries no recognisable amount field, which
+    the caller treats as un-reconcilable rather than as a match.
+    """
+    for key in ("sourceValue", "sourceAmount"):
+        raw = transfer.get(key)
+        if raw is None:
+            continue
+        try:
+            return parse_amount_eur(raw)
+        except Exception:
+            log.warning(f"Wise transfer field {key}={raw!r} is not a usable amount")
+            return None
+    return None
+
+
+def _reconcile_transfer_amount(
+    transfer: dict, expected_eur: Decimal, label: str = "payment"
+) -> None:
+    """Assert Wise sent exactly what was owed. Raises on any divergence.
+
+    Compared with Decimal equality after normalising the exponent, so that
+    Decimal("133.6") and Decimal("133.60") reconcile as the same money.
+    """
+    reported = _reported_source_amount(transfer)
+    if reported is None:
+        raise TransferAmountMismatch(
+            f"[{label}] Wise transfer record carries no source amount to "
+            f"reconcile against €{expected_eur} — cannot confirm the transfer "
+            f"funded the full amount"
+        )
+
+    if reported != expected_eur:
+        raise TransferAmountMismatch(
+            f"[{label}] TRANSFER AMOUNT MISMATCH: Wise reports €{reported} but "
+            f"€{expected_eur} was owed (short by €{expected_eur - reported}). "
+            f"The money has already moved — do not mark this payment complete."
+        )
+
+    log.info(f"[{label}] Reconciled: Wise sent €{reported}, matching the amount owed.")
+
+
 def _execute_wise_transfer(
     token: str,
     iban: str,
     recipient_name: str,
-    amount_eur: int,
+    amount_eur: Decimal,
     reference: str,
     label: str = "payment",
     legal_type: str = "PRIVATE",
@@ -539,11 +664,27 @@ def _execute_wise_transfer(
     quote_uuid = _create_quote(token, profile_id, amount_eur)
     log.info(f"[{label}] Wise quote_uuid: {quote_uuid}")
 
-    transfer_id = _create_transfer(token, account_id, quote_uuid, reference)
+    transfer_id, transfer_record = _create_transfer(
+        token, account_id, quote_uuid, reference
+    )
     log.info(f"[{label}] Wise transfer_id: {transfer_id}")
+
+    # Reconcile BEFORE funding where possible: the transfer record already
+    # carries Wise's own source amount, so a mismatch caught here is caught
+    # while the money is still in the balance.
+    _reconcile_transfer_amount(transfer_record, amount_eur, label=label)
 
     funding_result = _fund_transfer(token, profile_id, transfer_id)
     log.info(f"[{label}] Wise funding result: {funding_result}")
+
+    # Reconcile again against the funded transfer as Wise reports it now. This
+    # is the post-transfer check: it is what stops a short payment from
+    # reaching the done-marking path.
+    _reconcile_transfer_amount(
+        _fetch_transfer(token, transfer_id) or transfer_record,
+        amount_eur,
+        label=label,
+    )
 
     status = funding_result.get("status", "")
     if status in ("COMPLETED", "PROCESSING", "PENDING"):

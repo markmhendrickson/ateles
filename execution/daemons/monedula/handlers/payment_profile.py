@@ -11,7 +11,7 @@ Each profile is identified by a PREFIX (e.g. "THERAPY", "YOGA") and reads:
   <PREFIX>_CONTACT_ID     (wise only) Neotoma contact_id prefix for IBAN lookup
   <PREFIX>_CONTACT_CATEGORY  (wise only) Fallback category for contact lookup
   <PREFIX>_CONTACT_PLATFORM  (wise only) Fallback platform for contact lookup
-  <PREFIX>_AMOUNT_EUR     Transfer amount in EUR (integer)
+  <PREFIX>_AMOUNT_EUR     Transfer amount in EUR (decimal, max 2dp, e.g. 133.60)
   <PREFIX>_WISE_REFERENCE (wise only) Wise transfer reference string
   <PREFIX>_WISE_LEGAL_TYPE (wise only) Recipient legalType: PRIVATE (default) | BUSINESS
   <PREFIX>_BTC_ADDRESS    (btc only) Destination BTC address
@@ -46,6 +46,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Literal
 
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
@@ -62,13 +63,67 @@ log = logging.getLogger(__name__)
 _WISE_LEGAL_TYPES = {"PRIVATE", "BUSINESS"}
 
 
+# EUR is a two-decimal currency. This is the amount contract for the whole
+# Monedula money path: a profile amount carries at most cents, and anything
+# finer is refused rather than rounded. Rounding is what created ateles#552 —
+# int() truncated €133.60 to €133 and the transfer funded short in silence.
+AMOUNT_DECIMAL_PLACES = 2
+
+
+class PaymentAmountError(ValueError):
+    """A profile amount could not be represented exactly as a EUR amount.
+
+    Raised instead of coercing, because the failure modes are not symmetric:
+    a payment that never leaves is recoverable by rerunning it, whereas a
+    payment that left for the wrong amount is money gone with no record that
+    anything was wrong.
+    """
+
+
+def parse_amount_eur(raw: object) -> Decimal:
+    """Parse a raw profile amount into an exact 2dp-or-less EUR Decimal.
+
+    Always goes through str() before Decimal(): constructing a Decimal from a
+    float would inherit the binary rounding error the Decimal is here to
+    avoid, so a float source is stringified first and only then parsed.
+
+    Raises PaymentAmountError on anything that is not an exact EUR amount —
+    unparseable input, non-finite values, or more precision than cents.
+    """
+    if isinstance(raw, Decimal):
+        amount = raw
+    else:
+        try:
+            amount = Decimal(str(raw).strip())
+        except (InvalidOperation, ValueError, TypeError, ArithmeticError) as exc:
+            raise PaymentAmountError(f"amount_eur={raw!r} is not a valid number") from exc
+
+    if not amount.is_finite():
+        raise PaymentAmountError(f"amount_eur={raw!r} is not a finite amount")
+
+    # exponent < -2 means the value carries sub-cent precision. Quantizing it
+    # away would silently change how much money moves, so refuse instead.
+    if -amount.as_tuple().exponent > AMOUNT_DECIMAL_PLACES:
+        raise PaymentAmountError(
+            f"amount_eur={raw!r} has more than {AMOUNT_DECIMAL_PLACES} decimal "
+            f"places — EUR amounts are exact to the cent, and rounding a payment "
+            f"amount is never done implicitly"
+        )
+
+    # Normalise to exactly 2dp so every EUR amount has one representation.
+    # This never changes the value — the check above already guaranteed the
+    # amount carries no more than cents — it only pads 133.6 to 133.60 so the
+    # amount is formatted as money everywhere it is displayed or serialized.
+    return amount.quantize(Decimal(1).scaleb(-AMOUNT_DECIMAL_PLACES))
+
+
 @dataclass
 class PaymentProfile:
     prefix: str  # env var prefix, e.g. "THERAPY"
     label: str  # human label, e.g. "Therapy"
     calendar_keywords: list[str]  # event title match keywords
     payment_type: Literal["wise", "btc"]
-    amount_eur: int
+    amount_eur: Decimal
 
     # Wise-specific
     contact_id: str = ""  # Neotoma contact_id prefix for IBAN lookup
@@ -231,10 +286,14 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
 
         amount_raw = snap.get("amount_eur", 0)
         try:
-            amount_eur = int(amount_raw)
-        except (ValueError, TypeError):
-            log.warning(
-                f"payment_profile {label!r} invalid amount_eur={amount_raw!r} — skipped"
+            amount_eur = parse_amount_eur(amount_raw)
+        except PaymentAmountError as exc:
+            # Skipping is the refusal: a profile that never loads can never pay.
+            # The alternative — coercing to something payable — is exactly the
+            # silent truncation this guards against.
+            log.error(
+                f"payment_profile {label!r} REFUSED: {exc} — profile skipped, "
+                f"no payment will be attempted until the amount is corrected"
             )
             continue
 
@@ -366,10 +425,11 @@ def _load_profile(prefix: str) -> PaymentProfile | None:
 
     amount_raw = env("AMOUNT_EUR", "0")
     try:
-        amount_eur = int(amount_raw)
-    except ValueError:
-        log.warning(
-            f"[{prefix}] Invalid {prefix}_AMOUNT_EUR={amount_raw!r} — profile skipped"
+        amount_eur = parse_amount_eur(amount_raw)
+    except PaymentAmountError as exc:
+        log.error(
+            f"[{prefix}] REFUSED {prefix}_AMOUNT_EUR={amount_raw!r}: {exc} — "
+            f"profile skipped, no payment will be attempted until it is corrected"
         )
         return None
 
