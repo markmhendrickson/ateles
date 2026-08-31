@@ -40,6 +40,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -710,6 +711,127 @@ def _provider_failure_kind(*texts: str) -> str | None:
     return None
 
 
+
+# ── Codex sandbox: writable git roots + network (ateles#590) ──────────────────
+# `codex exec --sandbox workspace-write` grants write access to the working
+# directory, /tmp, and $TMPDIR — and nothing else. That is fine for a plain
+# clone, whose entire `.git` lives inside the workdir. It is not fine for a
+# LINKED WORKTREE, which is the layout this swarm mandates: the repo-isolation
+# guard and ateles#572 both push every dispatch into its own worktree so
+# concurrent agents cannot collide. In a linked worktree `.git` is a FILE
+# pointing at `<main clone>/.git/worktrees/<name>`, and the object database is
+# further out still, in `<main clone>/.git`. Both are outside the sandbox, so
+# every git write is denied:
+#
+#   fatal: Unable to create '.../worktrees/<name>/index.lock': Operation not permitted
+#   error: unable to create temporary file: Operation not permitted     (git add)
+#
+# Note that BOTH roots are required, and this was verified rather than assumed:
+# granting only the per-worktree gitdir still fails at `git add`, because loose
+# objects are written under the COMMON dir. Granting only the common dir leaves
+# index.lock denied. So the adapter grants exactly the two directories git
+# actually needs, and nothing more.
+#
+# Network is the second, independent cause: workspace-write denies it by
+# default, so `git push` and `gh` cannot resolve github.com ("Could not resolve
+# host"). It is re-enabled through the documented config key rather than by
+# dropping to --sandbox danger-full-access, which would also surrender
+# filesystem confinement everywhere on the operator's machine — a far larger
+# grant than the delivery path needs.
+
+
+def _git_roots_for_sandbox(cwd: str | None) -> list[str]:
+    """The directories git must be able to write to for a commit to succeed.
+
+    Returns the resolved gitdir and common-dir for ``cwd``, de-duplicated and
+    excluding anything already inside ``cwd`` (a plain clone needs no extra
+    grant — its ``.git`` is under the workdir and workspace-write covers it).
+
+    Returns ``[]`` when ``cwd`` is not a git repository or git is unavailable.
+    A dispatch into a non-repo is legitimate; it simply needs no git roots.
+    """
+    if not cwd:
+        return []
+    try:
+        workdir = Path(cwd).resolve()
+    except OSError:
+        return []
+
+    roots: list[str] = []
+    for flag in ("--git-dir", "--git-common-dir"):
+        try:
+            out = subprocess.run(
+                ["git", "-C", str(workdir), "rev-parse", flag],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return []
+        if out.returncode != 0:
+            return []
+        raw = out.stdout.strip()
+        if not raw:
+            continue
+        # `rev-parse` may answer with a path relative to cwd (".git").
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = workdir / candidate
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        # Already covered by the workdir grant — do not widen the sandbox for
+        # a path the sandbox already contains.
+        if resolved == workdir or workdir in resolved.parents:
+            continue
+        as_str = str(resolved)
+        if as_str not in roots:
+            roots.append(as_str)
+    return roots
+
+
+# Signatures of a child that did real work and then could not deliver it.
+# Each is a sandbox or network denial, not a code defect: the agent wrote
+# correct output and the harness refused to let it out. Matching any of these
+# turns a `returncode == 0` run into an explicit failure (ateles#590), because
+# the alternative — the pre-fix behaviour — was `ok: true` over an empty
+# delivery, the same class of lie as ateles#585 (envelope never written),
+# ateles#566 (401 reported ok) and ateles#560 (grant_checker failing open).
+_DELIVERY_DENIAL_SIGNATURES: tuple[tuple[str, str], ...] = (
+    (
+        r"unable to create '[^']*index\.lock': operation not permitted",
+        "sandbox denied the git index lock — the child could not commit",
+    ),
+    (
+        r"unable to create temporary file: operation not permitted",
+        "sandbox denied writes to the git object store — the child could not commit",
+    ),
+    (
+        r"could not resolve host: (?:github\.com|api\.github\.com)",
+        "sandbox denied network access — the child could not push or reach the GitHub API",
+    ),
+    (
+        r"fatal: could not read from remote repository",
+        "the child could not reach the git remote — nothing was pushed",
+    ),
+)
+
+
+def _delivery_failure_reason(*texts: str) -> str | None:
+    """Name the delivery denial in a child's output, if there is one.
+
+    Read-only over the child's own words: no assumption is made about what the
+    task was meant to deliver, so a task that never intended to commit is not
+    penalised — it simply never emits these lines.
+    """
+    blob = " ".join(text for text in texts if text).lower()
+    for pattern, reason in _DELIVERY_DENIAL_SIGNATURES:
+        if re.search(pattern, blob):
+            return reason
+    return None
+
+
 def _provider_command(
     provider: str,
     binary: str,
@@ -729,12 +851,28 @@ def _provider_command(
         f"{work_prompt}"
     )
     if provider == "codex":
+        # See the ateles#590 note above _git_roots_for_sandbox: without these
+        # two additions a codex child in a linked worktree writes correct code
+        # and then cannot commit, push, or open a PR.
+        git_roots = _git_roots_for_sandbox(cwd)
+        add_dir_flags: list[str] = []
+        for root in git_roots:
+            add_dir_flags += ["--add-dir", root]
+        if git_roots:
+            log.info(
+                "[apis] codex sandbox: granting git roots %s", ", ".join(git_roots)
+            )
         return (
             [
                 binary,
                 "exec",
                 "--sandbox",
                 "workspace-write",
+                # Delivery needs github.com. Scoped to the workspace-write
+                # policy rather than dropping the sandbox entirely.
+                "-c",
+                "sandbox_workspace_write.network_access=true",
+                *add_dir_flags,
                 "--ephemeral",
                 "--skip-git-repo-check",
                 "--color",
@@ -1129,13 +1267,36 @@ async def _run_skill_once(
             )
 
         duration_ms = int((time.monotonic_ns() - _start_ns) / 1_000_000)
+        _stdout_text = stdout.decode("utf-8", errors="replace")
+        _stderr_text = stderr.decode("utf-8", errors="replace")
+
+        # ── Delivery-failure detection (ateles#590) ──────────────────────────────
+        # A child that could not commit or push exits 0: it did everything it
+        # was permitted to do, and says so plainly in its own output. Reading
+        # only the exit code turns that into `ok: true` over an undelivered
+        # change — a dispatch that reports success while delivering nothing.
+        # The exit code is therefore necessary but not sufficient: a run is ok
+        # only if the process succeeded AND nothing in its output says the
+        # sandbox refused the delivery.
+        _delivery_denial = _delivery_failure_reason(_stdout_text, _stderr_text)
+        if _delivery_denial and proc.returncode == 0:
+            log.error(
+                f"[apis] {skill} dispatch via {provider} exited 0 but could not "
+                f"deliver: {_delivery_denial}"
+            )
+
         result = SkillResult(
             skill=skill,
-            ok=proc.returncode == 0,
+            ok=proc.returncode == 0 and _delivery_denial is None,
             returncode=proc.returncode,
-            stdout=stdout.decode("utf-8", errors="replace"),
-            stderr=stderr.decode("utf-8", errors="replace"),
+            stdout=_stdout_text,
+            stderr=_stderr_text,
             provider=provider,
+            error=(
+                _delivery_denial
+                if (_delivery_denial and proc.returncode == 0)
+                else ""
+            ),
         )
 
         # ── Dropped-allowlist-rule notification (ateles#255) ──────────────────────
