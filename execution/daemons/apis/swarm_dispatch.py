@@ -2122,13 +2122,19 @@ class SwarmDispatcher:
                         self._approved_escalated[notify_key] = True
                         report["escalated"] += 1
                         self.notifier.send(
-                            f"🔴 {ref} has NO review of any kind — most likely "
-                            "its body names no parent issue with a "
-                            "closes/fixes/resolves keyword, so gate inheritance "
-                            "blocked and no panel ever seated. This PR is not "
-                            "clean, it is UNEXAMINED, and it will look like the "
-                            "safest PR in the queue to anything that checks for "
-                            f"blocking findings. {pr.get('html_url', '')}",
+                            f"🔴 {ref} has NO FORMAL REVIEW and an empty "
+                            "reviewDecision. That is an absence of evidence, "
+                            "not evidence of cleanliness: this PR presents as "
+                            "the safest in the queue to anything that checks "
+                            "for blocking findings, while being the least "
+                            "verified. Two known causes, both observed on "
+                            "2026-08-31 — (a) the body names no parent issue "
+                            "with a closes/fixes/resolves keyword, so gate "
+                            "inheritance blocks and no panel seats (#599, "
+                            "#607); (b) a lens posted [BLOCKING] findings as a "
+                            "plain PR comment, which never becomes a formal "
+                            "review (#596, #602). Read the PR's actual "
+                            f"comments before trusting it. {pr.get('html_url', '')}",
                             priority=Priority.BLOCKER,
                             handler=DAEMON_NAME,
                         )

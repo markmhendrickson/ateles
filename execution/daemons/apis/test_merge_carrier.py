@@ -558,7 +558,13 @@ async def test_unreviewed_pr_pages_the_operator(monkeypatch):
     await d.report_pr_review_queue(["o/r"])
     blockers = d.notifier.at(sd.Priority.BLOCKER)
     assert len(blockers) == 1
-    assert "no review" in blockers[0].lower()
+    assert "no formal review" in blockers[0].lower()
+    # It must report the observation, not assert a single cause: #596 and
+    # #602 have a Closes keyword AND zero formal reviews (a lens posted
+    # [BLOCKING] findings as a plain comment). Naming one cause as "most
+    # likely" was wrong for those, so the message names both and tells the
+    # operator to read the comments.
+    assert "absence of evidence" in blockers[0].lower()
 
 
 def test_parent_issue_requires_a_closing_keyword():
