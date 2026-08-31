@@ -13,6 +13,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from lib.notify import Notifier, Priority  # noqa: E402
+from lib.notify import notifier as notifier_mod  # noqa: E402
 
 NO_SILENCE = {"silence_start": "", "silence_end": "", "timezone": "Europe/Madrid"}
 ALWAYS_SILENT = {
@@ -146,3 +147,69 @@ def test_email_skipped_when_no_operator_address(monkeypatch):
     monkeypatch.setattr("lib.notify.notifier.subprocess.run", fake_run)
     n.send("blocker", priority=Priority.BLOCKER, handler="apis")
     assert called["n"] == 0  # never shelled out without a recipient
+
+
+# --------------------------------------------------------------------------
+# Notifier.from_neotoma(telegram_topic_env=...) — per-daemon Telegram topic
+# --------------------------------------------------------------------------
+#
+# The regression: Tyto's call site passes telegram_topic_env="TELEGRAM_TOPIC_TYTO"
+# but the factory never accepted it, so every daemon startup died with
+#   TypeError: from_neotoma() got an unexpected keyword argument
+# and meeting transcription stayed down. These pin the factory's signature and
+# the value actually reaching the Notifier, plus the unchanged no-arg default
+# path that eight other daemons rely on.
+#
+# Hermetic: the Neotoma rubric fetch is patched out, so no network.
+
+
+def _no_network_rubric(monkeypatch):
+    """Stub the rubric fetch so from_neotoma() never touches the network."""
+    monkeypatch.setattr(
+        notifier_mod, "_load_rubric_from_neotoma", lambda: dict(NO_SILENCE)
+    )
+
+
+def test_from_neotoma_accepts_telegram_topic_env_without_typeerror(monkeypatch):
+    # The exact crash Tyto hit on every startup.
+    _no_network_rubric(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_TOPIC_TYTO", "4242")
+
+    n = Notifier.from_neotoma(telegram_topic_env="TELEGRAM_TOPIC_TYTO")
+
+    assert isinstance(n, Notifier)
+
+
+def test_from_neotoma_threads_topic_env_value_through_to_notifier(monkeypatch):
+    # Accepting the kwarg is not enough — the value must reach the instance,
+    # or alerts land in the shared default topic instead of the daemon's own.
+    _no_network_rubric(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_TOPIC_TYTO", "4242")
+
+    n = Notifier.from_neotoma(telegram_topic_env="TELEGRAM_TOPIC_TYTO")
+
+    assert n._topic_id == "4242"
+
+
+def test_from_neotoma_no_arg_default_path_is_unchanged(monkeypatch):
+    # Eight daemons call from_neotoma() with no argument; they must keep
+    # falling back to TELEGRAM_TOPIC_MONEDULA exactly as before.
+    _no_network_rubric(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_TOPIC_MONEDULA", "999")
+
+    n = Notifier.from_neotoma()
+
+    assert n._topic_id == "999"
+
+
+def test_from_neotoma_unset_topic_env_falls_back_to_default(monkeypatch):
+    # An unset/empty named env must degrade to the constructor default rather
+    # than blanking the topic — otherwise a misconfigured daemon silently
+    # loses its routing.
+    _no_network_rubric(monkeypatch)
+    monkeypatch.delenv("TELEGRAM_TOPIC_TYTO", raising=False)
+    monkeypatch.setenv("TELEGRAM_TOPIC_MONEDULA", "999")
+
+    n = Notifier.from_neotoma(telegram_topic_env="TELEGRAM_TOPIC_TYTO")
+
+    assert n._topic_id == "999"

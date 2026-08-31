@@ -129,10 +129,25 @@ class Notifier:
     # ── Factory ──────────────────────────────────────────────────────────────
 
     @classmethod
-    def from_neotoma(cls) -> Notifier:
-        """Load priority_rubric from Neotoma and construct Notifier."""
+    def from_neotoma(cls, telegram_topic_env: str | None = None) -> Notifier:
+        """Load priority_rubric from Neotoma and construct Notifier.
+
+        ``telegram_topic_env`` names the environment variable holding this
+        daemon's Telegram topic (thread) id — e.g. ``"TELEGRAM_TOPIC_TYTO"`` —
+        so a daemon's alerts land in its own forum topic instead of the shared
+        default. The constructor has always accepted ``telegram_topic_id``, but
+        the factory every daemon actually calls did not expose it, so callers
+        passing this kwarg crashed with TypeError on startup. Unset or empty
+        env falls back to the constructor's default (TELEGRAM_TOPIC_MONEDULA),
+        so daemons that call ``from_neotoma()`` with no argument are unchanged.
+        """
         rubric = _load_rubric_from_neotoma()
-        return cls(rubric=rubric)
+        topic_id = (
+            os.environ.get(telegram_topic_env, "").strip()
+            if telegram_topic_env
+            else ""
+        )
+        return cls(rubric=rubric, telegram_topic_id=topic_id or None)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
