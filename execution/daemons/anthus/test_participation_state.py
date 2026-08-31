@@ -1,7 +1,7 @@
 """
 Regression tests for ateles#584: Anthus participation state could never load.
 
-Two distinct defects, one per test class below:
+Three distinct defects, one per section below:
 
 1. `load_state_for` POSTed to `/retrieve_entities`, which does not exist on the
    prod HTTP surface (404). The entity-read route is `POST /entities/query`.
@@ -10,6 +10,10 @@ Two distinct defects, one per test class below:
    indistinguishable from "this work entity has no prior gates". The caller
    therefore hydrated nothing and dispatched every gate as though it had never
    run, risking re-dispatch of completed work, while Anthus looked healthy.
+
+3. `orchestrator.resolve_unmet_preconditions` carried the same dead route, and
+   fails CLOSED into `unmet` — so the 404 silently marked every
+   precondition-gated gate unmet and skipped it indefinitely.
 
 Run with: pytest execution/daemons/anthus/test_participation_state.py -v
 """
@@ -20,6 +24,7 @@ import asyncio
 
 import anthus
 import httpx
+import orchestrator
 import participation
 import pytest
 
@@ -207,8 +212,6 @@ def test_dispatch_is_held_when_participation_state_cannot_be_read(monkeypatch):
     monkeypatch.setattr(anthus, "_fetch_comments", fake_fetch_comments)
     monkeypatch.setattr(anthus, "_harvest_drift_signals", fake_harvest)
 
-    import orchestrator
-
     monkeypatch.setattr(
         orchestrator, "fetch_workflow_definitions", fake_fetch_workflow_definitions
     )
@@ -233,3 +236,141 @@ def test_dispatch_is_held_when_participation_state_cannot_be_read(monkeypatch):
     assert spawned == [], (
         f"no agent may be spawned when prior state is unknown; got spawns for {spawned}"
     )
+
+
+# ── Defect 3: the precondition read carried the same dead route ───────────────
+
+
+def _precondition_workflow() -> orchestrator.WorkflowDefinition:
+    """Two gates: `pm` declares no precondition, `release` declares one.
+
+    Built from the real `orchestrator` dataclasses rather than stubs, so a field
+    rename cannot let these tests keep passing against a shape that no longer
+    exists.
+    """
+    return orchestrator.WorkflowDefinition(
+        entity_id="ent_wf_precond",
+        project="ateles",
+        workflow_type="feature",
+        description="precondition fixture",
+        gates=[
+            orchestrator.Gate(
+                phase=1,
+                gate_name="pm",
+                owner_agent="pavo",
+                parallel_group=None,
+                join_gate=None,
+                required=True,
+                precondition=None,
+            ),
+            orchestrator.Gate(
+                phase=5,
+                gate_name="release",
+                owner_agent="struthio",
+                parallel_group=None,
+                join_gate=None,
+                required=True,
+                precondition={
+                    "entity_type": "release_criteria",
+                    "scope_field": "project",
+                },
+            ),
+        ],
+        fast_paths=[],
+        legal_required=False,
+    )
+
+
+def test_resolve_unmet_preconditions_uses_entities_query(monkeypatch):
+    """The precondition read must go to POST /entities/query.
+
+    On origin/main this fails: the call goes to /retrieve_entities, the fake
+    (like prod) 404s it, the `except` fails closed, and `release` lands in
+    `unmet` — so a gate whose precondition IS satisfied gets skipped forever.
+
+    Both assertions are load-bearing. `"release" not in unmet` is what a route
+    regression breaks; the `paths` assertion guards against that check passing
+    vacuously, since a missing bearer returns an empty set before any request
+    is issued.
+    """
+    paths: list[str] = []
+    payload = {"entities": [{"snapshot": {"project": "ateles"}}], "total": 1}
+
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(orchestrator, "NEOTOMA_BASE_URL", "https://neotoma.example")
+    monkeypatch.setattr(
+        orchestrator.httpx,
+        "AsyncClient",
+        lambda **kw: _RecordingClient(paths, payload),
+    )
+
+    unmet = asyncio.run(
+        orchestrator.resolve_unmet_preconditions(_precondition_workflow(), "ateles")
+    )
+
+    assert "release" not in unmet, (
+        "a gate whose precondition is satisfied must not be marked unmet"
+    )
+    assert "pm" not in unmet, (
+        "a gate that declares no precondition must never be skipped for one"
+    )
+    assert paths == ["https://neotoma.example/entities/query"], (
+        f"precondition read must POST to /entities/query, got {paths}"
+    )
+
+
+def test_resolve_unmet_preconditions_fails_closed_when_read_fails(monkeypatch):
+    """A failed precondition read must yield `unmet`, not an empty set.
+
+    This asymmetry with `load_state_for` is deliberate and worth pinning:
+    `participation.load_state_for` now fails LOUD (raises), but this path fails
+    CLOSED. A reader generalising the new fail-loud style into fail-open here
+    would dispatch release gates whose criteria were never checked.
+    """
+
+    class _AlwaysFails:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, json=None, **kwargs):
+            return _FakeResponse(404)
+
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(orchestrator, "NEOTOMA_BASE_URL", "https://neotoma.example")
+    monkeypatch.setattr(orchestrator.httpx, "AsyncClient", lambda **kw: _AlwaysFails())
+
+    unmet = asyncio.run(
+        orchestrator.resolve_unmet_preconditions(_precondition_workflow(), "ateles")
+    )
+
+    assert unmet == {"release"}
+
+
+def test_resolve_unmet_preconditions_unmet_when_project_does_not_match(monkeypatch):
+    """A healthy read that matches nothing must also yield `unmet`.
+
+    Without this, a dead route and a live route with no matching entity are
+    indistinguishable — both produce `unmet` — so the two tests above could not
+    tell them apart. This one pins the `scope_field` comparison and its
+    case normalisation rather than the transport.
+    """
+    paths: list[str] = []
+    payload = {"entities": [{"snapshot": {"project": "neotoma"}}], "total": 1}
+
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(orchestrator, "NEOTOMA_BASE_URL", "https://neotoma.example")
+    monkeypatch.setattr(
+        orchestrator.httpx,
+        "AsyncClient",
+        lambda **kw: _RecordingClient(paths, payload),
+    )
+
+    unmet = asyncio.run(
+        orchestrator.resolve_unmet_preconditions(_precondition_workflow(), "ateles")
+    )
+
+    assert paths == ["https://neotoma.example/entities/query"]
+    assert unmet == {"release"}
