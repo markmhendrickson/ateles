@@ -2,11 +2,12 @@
 EFFECT-level characterization of Monedula's Telegram consent gate (#554).
 
 Companion to `test_gate_channel_failure.py`, which stops at `_parse_reply`.
-These two tests cross the layers that file cannot reach: the poll layer that
-turns a channel error into `None`, and `main()`, where that `None` decides
-whether money moves. They are characterization pins on CURRENT behaviour —
-they assert nothing that does not already hold, and no production code changes
-with them.
+These three tests cross the layers that file cannot reach: the poll layer that
+turns a channel error into `None`; `main()`, where that `None` decides whether
+money moves; and the enforcement loop past `monedula.py:678`, which only a
+partial approval reaches and which neither of the other two enters. They are
+characterization pins on CURRENT behaviour — they assert nothing that does not
+already hold, and no production code changes with them.
 
 Why they exist: the QA lens mutated `monedula.py` to fail OPEN (a `None` reply
 approving every triggered handler) and to let HTTP 409 escape the poll layer,
@@ -173,3 +174,49 @@ def test_dead_channel_executes_no_payment(
     assert f"⏭️ Monedula: skipped all payments for {yesterday_str}." in sent_messages, (
         "the operator must see the skip; a silent return hides a broken gate"
     )
+
+
+# ── 3. main(): a partial approval must pay only the named handler ─────────────
+
+
+def test_partial_approval_executes_only_the_named_handler(
+    monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
+) -> None:
+    """Pins `monedula.py:685` — the per-handler enforcement itself.
+
+    Every other test in this suite leaves `approved` empty and returns at
+    `:678`, so the enforcement loop is never entered. Only a partial approval
+    reaches it: delete `if handler.name not in approved: continue` and this is
+    the sole assertion that goes red.
+
+    Both assertions are load-bearing. The `therapy` half alone passes
+    vacuously if execution never reaches the loop; the `yoga` half proves the
+    loop was entered and did pay the approved handler. `sent_messages` is
+    required even though the body reads it only for the confirmation — it is
+    the fixture that neutralises `STATE_FILE`, `_notify`, and the outbound
+    Telegram send.
+    """
+    yoga = _RecordingHandler("yoga")
+    therapy = _RecordingHandler("therapy")
+    fake_handlers = types.ModuleType("handlers")
+    fake_handlers.load_handlers = lambda: [yoga, therapy]
+    monkeypatch.setitem(sys.modules, "handlers", fake_handlers)
+
+    monkeypatch.setattr(
+        monedula,
+        "telegram_long_poll_once",
+        lambda *a, **k: "attended yoga",
+        raising=False,
+    )
+
+    monedula.main()
+
+    assert len(yoga.execute_calls) == 1, "the approved handler must be paid"
+    assert therapy.execute_calls == [], (
+        "an unapproved handler must not be paid on a partial approval"
+    )
+
+    yesterday_str = monedula._yesterday().isoformat()
+    assert any(
+        m.startswith(f"📋 Monedula results for {yesterday_str}:") for m in sent_messages
+    ), "a partial approval must still confirm what was paid"
