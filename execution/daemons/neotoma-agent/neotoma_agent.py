@@ -516,8 +516,15 @@ async def main() -> None:
             "observations attributed to operator token"
         )
 
-    # 2b. Check agent_grant status
+    # 2b. Check agent_grant status. An absent grant is not permission
+    # (ateles#560) — refuse to start rather than run unauthorised.
     grants = GrantChecker(agent_def.aauth_sub).load()
+    if grants.has_no_grant():
+        log.error(
+            f"[{DAEMON_NAME}] No agent_grant exists for {agent_def.aauth_sub} — "
+            "daemon cannot start; this agent is not authorised."
+        )
+        sys.exit(1)
     if grants.is_revoked():
         log.error(f"[{DAEMON_NAME}] Agent grant is revoked — daemon cannot start.")
         sys.exit(1)

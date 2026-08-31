@@ -405,8 +405,17 @@ async def main() -> None:
             "observations attributed to operator token"
         )
 
-    # 2b. Check agent_grant status — abort startup if suspended or revoked.
+    # 2b. Check agent_grant status — abort startup if absent, suspended, or
+    # revoked. An absent grant is not permission (ateles#560): an agent that was
+    # never granted anything, or whose grant was wiped (#533), must not start.
     grants = GrantChecker(agent_def.aauth_sub).load()
+    if grants.has_no_grant():
+        log.error(
+            f"[{DAEMON_NAME}] No agent_grant exists for {agent_def.aauth_sub} — "
+            "daemon cannot start; this agent is not authorised. Inspect with: "
+            "python execution/scripts/manage_grants.py list"
+        )
+        sys.exit(1)
     if grants.is_revoked():
         log.error(
             f"[{DAEMON_NAME}] Agent grant is revoked — daemon cannot start. "

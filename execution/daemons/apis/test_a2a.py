@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import json
 import sys
+import time
 from pathlib import Path
 
 _DAEMON_DIR = Path(__file__).resolve().parent
@@ -358,21 +359,70 @@ def test_authorize_caller():
     )
     assert not ok and reason == "grant_not_active"
 
-    # checker raises → advisory allow (current phase)
+    # checker raises → DENY (ateles#560). Delegation is a privileged boundary;
+    # "we could not check" must not become "we allowed it".
     def _boom(_sub):
         raise RuntimeError("neotoma down")
 
     ok, reason = gw.authorize_caller(
         "ext@a", require_auth=True, grant_checker_factory=_boom
     )
-    assert ok and reason == "grant_check_unavailable_advisory"
+    assert not ok and reason == "grant_check_failed"
     print("✓ authorize_caller all branches")
+
+
+def test_authorize_caller_denies_absent_grant():
+    """ateles#560 cross-surface parity: a caller with ZERO grants is denied at
+    the a2a boundary, and denied for absent-grant rather than unavailability.
+
+    Fails on origin/main, where a grantless caller reached `is_active == True`
+    via the checker's permissive-on-empty path and was allowed to delegate.
+    """
+    from lib.daemon_runtime.grant_checker import GrantChecker
+
+    def _grantless(sub):
+        c = GrantChecker(sub)
+        c._grants = []
+        c._loaded = True
+        c._load_error = None
+        c._loaded_at = time.time()
+        return c
+
+    ok, reason = gw.authorize_caller(
+        "ghost@ateles-swarm", require_auth=True, grant_checker_factory=_grantless
+    )
+    assert not ok, "a caller with no grant must not be able to delegate"
+    assert reason == "no_grant", f"expected no_grant, got {reason}"
+    print("✓ authorize_caller denies absent grant (#560)")
+
+
+def test_authorize_caller_denies_when_store_unreachable():
+    """ateles#560: an unreachable store is UNKNOWN, and delegation is
+    privileged, so it fails CLOSED — with a reason distinct from absent-grant."""
+    from lib.daemon_runtime.grant_checker import GrantChecker
+
+    def _offline(sub):
+        c = GrantChecker(sub)
+        c._grants = []
+        c._loaded = True
+        c._load_error = "connect timeout"
+        c._loaded_at = None
+        return c
+
+    ok, reason = gw.authorize_caller(
+        "offline@ateles-swarm", require_auth=True, grant_checker_factory=_offline
+    )
+    assert not ok, "privileged delegation must fail closed on an unknown grant"
+    assert reason != "no_grant", "unreachable must not be reported as absent-grant"
+    print("✓ authorize_caller denies on unreachable store, distinctly (#560)")
 
 
 # ── Runner ──────────────────────────────────────────────────────────────────
 
 _TESTS = [
     test_routing_infer_and_resolve,
+    test_authorize_caller_denies_absent_grant,
+    test_authorize_caller_denies_when_store_unreachable,
     test_parse_message_text,
     test_split_title_body,
     test_bridge_submit_creates_task,
