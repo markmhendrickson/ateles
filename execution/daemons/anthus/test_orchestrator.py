@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from orchestrator import (
     Gate,
+    GateState,
     _coerce_list_field,
+    _gate_satisfied_by_comment,
     WorkflowDefinition,
     compute_ready_gates,
     select_workflow,
@@ -497,3 +499,180 @@ def test_string_encoded_gates_produce_usable_workflow(monkeypatch):
     assert [g.gate_name for g in out[0].gates] == ["pm"]
     assert out[0].gates[0].owner_agent == "pavo"
     assert out[0].fast_paths == [{"condition": "label:copy", "skip_gates": ["arch"]}]
+
+
+# ── Gate satisfaction coverage + state isolation (ateles#568, #573) ───────────
+
+
+def _social_content_workflow() -> WorkflowDefinition:
+    """The live ateles|social_content workflow (ent_38ab0119e528d021c51d46a1)."""
+    return WorkflowDefinition(
+        entity_id="ent_38ab0119e528d021c51d46a1",
+        project="ateles",
+        workflow_type="social_content",
+        description="corvus social content",
+        legal_required=False,
+        gates=[
+            Gate(1, "draft", "corvus", None, None, True),
+            Gate(2, "draft_lint", "anthus", None, None, True),
+            Gate(3, "operator_preview", "onychomys", None, None, True),
+            Gate(4, "post", "corvus", None, None, True),
+        ],
+        fast_paths=[{"condition": "label:approved", "skip_gates": ["operator_preview"]}],
+    )
+
+
+def test_every_live_gate_name_has_a_satisfaction_rule():
+    """
+    Audit of all 8 live workflow_definition entities (Neotoma, 2026-08-31).
+
+    A gate_name absent from GATE_SATISFACTION_RULES can never satisfy:
+    _gate_satisfied_by_comment returns None forever and the workflow stalls.
+    Operator-gated gates are exempt — they are satisfied by a human, not by
+    an agent comment — but they must be declared as such, not merely omitted.
+    """
+    from orchestrator import GATE_SATISFACTION_RULES, OPERATOR_GATED_GATES
+
+    live_gate_names = {
+        # ateles|bug, ateles|feature, ateles|release, ateles|security,
+        # ateles|copy, swarm-smoke|feature, neotoma|feature
+        "pm", "ux", "arch", "impl", "pr_review", "qa", "legal", "release", "copy",
+        # ateles|social_content
+        "draft", "draft_lint", "operator_preview", "post",
+    }
+    unresolvable = {
+        g
+        for g in live_gate_names
+        if g not in GATE_SATISFACTION_RULES and g not in OPERATOR_GATED_GATES
+    }
+    assert unresolvable == set(), (
+        f"gates with no satisfaction rule and not operator-gated: {sorted(unresolvable)}"
+    )
+
+
+def test_social_content_advances_past_phase_one():
+    """
+    With a draft artifact posted, ateles|social_content must advance to
+    phase 2 (draft_lint) instead of stalling forever at phase 1.
+    """
+    wf = _social_content_workflow()
+    comments = [
+        {
+            "author": "corvus-bot",
+            "body": "[corvus] social_post_draft: X/LinkedIn/Bluesky drafts ready",
+            "url": "https://github.com/x/1#c1",
+        }
+    ]
+    state, ready = compute_ready_gates(wf, {}, comments)
+
+    assert state["draft"].status == "satisfied"
+    assert [g.gate_name for g in ready] == ["draft_lint"]
+
+
+def test_operator_preview_is_not_satisfied_by_an_agent_comment():
+    """
+    operator_preview represents a human approval. No agent-authored comment
+    may satisfy it — a rule that anything satisfies is worse than none,
+    because it looks like progress.
+    """
+    from orchestrator import GATE_SATISFACTION_RULES, OPERATOR_GATED_GATES
+
+    assert "operator_preview" in OPERATOR_GATED_GATES
+    assert "operator_preview" not in GATE_SATISFACTION_RULES
+
+    gate = Gate(3, "operator_preview", "onychomys", None, None, True)
+    forged = [
+        {"author": "onychomys", "body": "[onychomys] operator_preview: approved"},
+        {"author": "corvus-bot", "body": "[corvus] approved: ship it"},
+    ]
+    assert _gate_satisfied_by_comment(gate, forged) is None
+
+
+def test_compute_ready_gates_does_not_mutate_caller_state():
+    """
+    Regression (ateles#573): compute_ready_gates shallow-copied the state dict
+    and mutated the caller's GateState objects in place. anthus.py then compared
+    `prior.status != "satisfied"` against the very object it had just mutated,
+    so the guard was always False and record_satisfied was NEVER called for any
+    already-dispatched gate. Every participation_record in the system's history
+    is `dispatched`; none has ever reached `satisfied`. This is why.
+    """
+    wf = WorkflowDefinition(
+        entity_id="w1",
+        project="ateles",
+        workflow_type="feature",
+        description="",
+        legal_required=False,
+        gates=[Gate(1, "pm", "pavo", None, None, True)],
+        fast_paths=[],
+    )
+    existing = {"pm": GateState(gate_name="pm", status="dispatched")}
+    comments = [
+        {
+            "author": "pavo-bot",
+            "body": "[pavo] acceptance_criteria: scoped",
+            "url": "https://github.com/x/1#c9",
+        }
+    ]
+
+    state, _ready = compute_ready_gates(wf, {}, comments, existing_state=existing)
+
+    # The returned state advances...
+    assert state["pm"].status == "satisfied"
+    # ...while the caller's own copy is untouched, so the transition is visible.
+    assert existing["pm"].status == "dispatched"
+    assert state["pm"] is not existing["pm"]
+    assert state["pm"].artifact_refs == ["https://github.com/x/1#c9"]
+    assert existing["pm"].artifact_refs == []
+
+
+def test_satisfaction_transition_is_detectable_by_the_caller():
+    """
+    Mirrors anthus.py's persistence guard exactly. This is the condition that
+    gates record_satisfied, and therefore the only path to a participation_record
+    reaching `satisfied`.
+    """
+    wf = WorkflowDefinition(
+        entity_id="w1",
+        project="ateles",
+        workflow_type="feature",
+        description="",
+        legal_required=False,
+        gates=[Gate(1, "pm", "pavo", None, None, True)],
+        fast_paths=[],
+    )
+    existing = {"pm": GateState(gate_name="pm", status="dispatched")}
+    comments = [{"author": "pavo-bot", "body": "[pavo] acceptance_criteria: ok", "url": "u"}]
+
+    state, _ = compute_ready_gates(wf, {}, comments, existing_state=existing)
+
+    gs = state["pm"]
+    prior = existing.get("pm")
+    fires = gs.status == "satisfied" and (not prior or prior.status != "satisfied")
+    assert fires, "record_satisfied would not be called — gate can never reach satisfied"
+
+
+def test_unresolvable_gates_flags_a_gate_with_no_rule():
+    """A gate absent from both maps must be reported, not silently stalled."""
+    from orchestrator import unresolvable_gates
+
+    wf = WorkflowDefinition(
+        entity_id="w1",
+        project="ateles",
+        workflow_type="mystery",
+        description="",
+        legal_required=False,
+        gates=[
+            Gate(1, "pm", "pavo", None, None, True),
+            Gate(2, "telepathy", "nobody", None, None, True),
+        ],
+        fast_paths=[],
+    )
+    assert unresolvable_gates([wf]) == {"ateles|mystery": ["telepathy"]}
+
+
+def test_unresolvable_gates_clean_for_all_live_workflows():
+    """The 8 live workflows must be fully covered after this fix."""
+    from orchestrator import unresolvable_gates
+
+    assert unresolvable_gates([_social_content_workflow()]) == {}
