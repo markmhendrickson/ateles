@@ -67,7 +67,23 @@ PY
 
 **If a recording is already growing**, go straight to step 2.
 
-**If it prints `NONE`, do not stop and hand the problem back.** The operator has
+**`NONE` may be a false negative — check before believing it.**
+`find_growing_recording()` probes the newest track's size across a ~3s window,
+and Audio Hijack writes in buffered flushes, so a probe can land entirely
+between flushes on a recording that is very much live. This has misfired on
+real sessions. Before concluding nothing is recording, look for a
+recently-modified track:
+
+```bash
+ls -lt "$HOME/Documents/data/recordings"/*mic.mp4 \
+       "$HOME/Documents/data/recordings"/*system.mp4 2>/dev/null | head -5
+```
+
+If one was modified in the last minute or two, the operator **is** recording —
+skip the wait below and pass that file explicitly at step 3 with
+`--file <path>`, which bypasses auto-detect entirely.
+
+**If nothing recent is there either, do not stop and hand the problem back.** The operator has
 just asked to stream — they are about to start recording, or are reaching for it
 now. Tell them to start the Audio Hijack `Tyto` session, then **wait for it**:
 
@@ -135,9 +151,19 @@ a better take of the same audio. Only the stop-time pass can re-hear a sentence.
 ### 3. Launch the tailer
 
 ```bash
+# auto-detect the growing recording
 cd "$ATELES_REPO" && nohup execution/venv/bin/python execution/scripts/live_transcript_tail.py \
   --interval 30 --follow > /tmp/livetail.out 2> /tmp/livetail.err &
+
+# or name the recording explicitly, when auto-detect false-negatived (step 1)
+cd "$ATELES_REPO" && nohup execution/venv/bin/python execution/scripts/live_transcript_tail.py \
+  --file "$HOME/Documents/data/recordings/<REC>.mp4" \
+  --interval 30 --follow > /tmp/livetail.out 2> /tmp/livetail.err &
 ```
+
+`--file` skips detection altogether — the path is used as given, checked only
+for existence — so it is the recovery whenever the probe misses a live
+recording.
 
 `--interval 30` is a reasonable default: shorter means more, worse fragments;
 longer means staler context. The JSONL path is printed on stdout.
@@ -418,7 +444,7 @@ is the right place for those provisional rows to be confirmed or corrected.
 
 | Symptom | Cause | Response |
 |---|---|---|
-| `no active recording found` | Nothing growing in the watch dir | Operator starts the recorder |
+| `no active recording found — start recording first, or pass --file` | Nothing *appeared* to grow during the ~3s probe — either nothing is recording, or the probe landed between Audio Hijack's buffered flushes | Check the watch dir for a recently-modified `*mic.mp4` / `*system.mp4`. If one exists, relaunch with `--file <path>`; only if none does, the operator starts the recorder |
 | Chunks stop arriving | Recording ended, or tailer died | Check `/tmp/livetail.err` |
 | 5 consecutive failures | Tailer self-stops by design | Read the error lines in the JSONL (silence is excluded from this count) |
 | `ModuleNotFoundError: config` | `execution/scripts/config.py` missing | Untracked + gitignored; copy from a worktree |
