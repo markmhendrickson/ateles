@@ -4,11 +4,23 @@ Characterization tests for Monedula's consent gate under CHANNEL FAILURE (#554).
 These tests document current behaviour. They change nothing about the payment
 path — they pin down two facts established while investigating #554:
 
-  1. GOOD NEWS (fail-closed): when the Telegram channel cannot deliver a reply,
-     `_parse_reply` approves nothing, so `main()`'s
-     `if handler.name not in approved: continue` skips every payment. Money does
-     NOT move without approval. This test exists so that safety property can
-     never regress silently.
+  1. FAIL-CLOSED, AT THE PARSER LAYER ONLY: when the Telegram channel cannot
+     deliver a reply, `_parse_reply` approves nothing. Read the scope of that
+     claim carefully — every assertion in this file is on `_parse_reply`'s
+     return value. This file does NOT invoke `main()`, so it does NOT assert
+     the payment-blocking effect (`monedula.py:685`,
+     `if handler.name not in approved: continue`). If that line were deleted
+     tomorrow, every test here would still pass. This file is therefore NOT a
+     regression guard on the fail-closed property.
+
+     Most assertions below also restate coverage already committed on `main`
+     in `test_parse_reply.py` — `test_none_and_empty_skip_all`,
+     `test_no_skips_all`, `test_unrecognised_reply_skips_all`,
+     `test_attended_all_approves_everything`, `test_attended_single_session`.
+     The one input not covered there is whitespace-only `"   "`, which takes
+     the "unrecognised reply" branch rather than the empty-string branch. The
+     rest are restated here for narrative continuity with the #554
+     investigation, not because the behaviour was untested.
 
   2. THE DEFECT: a channel failure (HTTP 409 Conflict / poll timeout) and a
      deliberate operator decline produce *byte-identical* results — both yield
@@ -22,6 +34,16 @@ The real-world cause of the 409s: Telegram permits exactly ONE `getUpdates`
 consumer per bot token. Cyphorhinus runs KeepAlive (a permanent long-poll)
 while Monedula wakes every 900s and polls the same Bot API, so Monedula's poll
 loses the race and is rejected with HTTP 409 Conflict.
+
+NOT the #554 definition-of-done. Acceptance criteria 6 (effect-verified fix)
+and 7 (cross-surface parity) on #554 are entirely unsatisfied by this file and
+remain owed by the implementation PR. The channel-failure EFFECT tests — no
+`handler.execute`, escalation POST body, `_notify(priority="blocker")`, exit
+code 1 — belong in `execution/daemons/monedula/test_telegram_gate.py` per
+#554's QA plan. That file is started alongside this one with the two
+characterization pins the QA lens required (poll layer returns None on 409;
+a dead channel executes no payment); the escalation, exit-code, and dead-gate
+items of the QA plan's sign-off condition are still outstanding there.
 
 Run with: pytest execution/daemons/monedula/test_gate_channel_failure.py -v
 """
@@ -46,6 +68,12 @@ def test_http_409_conflict_approves_nothing() -> None:
 
     This is the actual production failure: 433 recorded 409s, 2026-06-13
     onward. Money must not move on it.
+
+    Deliberately the same assertion as `test_poll_timeout_approves_nothing`,
+    kept under a second name to label the production failure mode. That the
+    poll layer really does turn a 409 into `None` is pinned separately in
+    `test_telegram_gate.py::test_http_409_returns_none_from_poll_layer`; this
+    one only covers what the parser does with that `None`.
     """
     assert _parse_reply(None, NAMES) == set()
 
