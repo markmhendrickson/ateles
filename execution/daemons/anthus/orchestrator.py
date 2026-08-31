@@ -21,6 +21,7 @@ docs/swarm_orchestration_emergent.md.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -30,6 +31,42 @@ from typing import Any
 import httpx
 
 log = logging.getLogger("anthus.orchestrator")
+
+
+def _coerce_list_field(raw: Any, *, entity_id: str, field_name: str) -> list[Any]:
+    """
+    Return a snapshot list field as a real list of dicts.
+
+    Neotoma stores some `workflow_definition` list fields as a JSON *string*
+    rather than a JSON array — as of 2026-08-31, 5 of 8 live entities encode
+    `gates` that way and 1 encodes `fast_paths` that way. Iterating the string
+    yields single characters, so the caller's `g.get(...)` raised
+    `AttributeError: 'str' object has no attribute 'get'` on EVERY issue and
+    pull_request event, in a tight SSE replay loop. That aborted workflow
+    selection for every project, which is the whole job of this daemon.
+
+    Coerce here rather than at each use site, and degrade to an empty list on
+    anything unparseable so one malformed entity cannot take the daemon down.
+    """
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return []
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            log.warning(
+                f"{entity_id}: {field_name} is a string but not valid JSON — ignoring"
+            )
+            return []
+    if not isinstance(raw, list):
+        if raw is not None:
+            log.warning(
+                f"{entity_id}: {field_name} has unexpected type "
+                f"{type(raw).__name__} — ignoring"
+            )
+        return []
+    return [item for item in raw if isinstance(item, dict)]
 
 NEOTOMA_BASE_URL = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
 _BEARER_ENV = "NEOTOMA_BEARER_TOKEN"  # gitleaks:allow — env var name, not a secret
@@ -306,7 +343,11 @@ async def fetch_workflow_definitions(project: str) -> list[WorkflowDefinition]:
                 required=bool(g.get("required", True)),
                 precondition=g.get("precondition"),
             )
-            for g in snap.get("gates", [])
+            for g in _coerce_list_field(
+                snap.get("gates"),
+                entity_id=str(e.get("entity_id", "")),
+                field_name="gates",
+            )
         ]
         out.append(
             WorkflowDefinition(
@@ -315,7 +356,11 @@ async def fetch_workflow_definitions(project: str) -> list[WorkflowDefinition]:
                 workflow_type=str(snap.get("workflow_type", "")),
                 description=str(snap.get("description", "")),
                 gates=gates,
-                fast_paths=list(snap.get("fast_paths", [])),
+                fast_paths=_coerce_list_field(
+                    snap.get("fast_paths"),
+                    entity_id=str(e.get("entity_id", "")),
+                    field_name="fast_paths",
+                ),
                 legal_required=bool(snap.get("legal_required", False)),
             )
         )

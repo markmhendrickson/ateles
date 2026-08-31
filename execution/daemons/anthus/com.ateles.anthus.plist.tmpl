@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for the Anthus launchd job. Concrete plists are gitignored
+  (`execution/daemons/*/*.plist`) because they carry operator-absolute home
+  paths; render this by substituting <HOME> and installing to
+  ~/Library/LaunchAgents/com.ateles.anthus.plist.
+
+  Three things this template fixes, all of which kept Anthus dead from
+  2026-06-03 to 2026-08-31:
+
+  1. ProgramArguments must point at run_anthus_launchd.sh, which now exists on
+     main. The previously installed plist referenced it while the script lived
+     only on unmerged branches, so launchd reported status 127 forever.
+
+  2. The daemon must run from the DEPLOYMENT checkout (~/ateles-rc-src), like
+     every other live daemon (turdus, tyto, formica, monedula, neotoma-agent),
+     never from the shared main clone that interactive sessions dirty.
+
+  3. NEOTOMA_BASE_URL and NEOTOMA_SSE_SUBSCRIPTION_ID_ANTHUS are deliberately
+     NOT set here. lib/daemon_runtime/__init__.py loads ~/.config/neotoma/.env
+     (SOPS-materialized) at import time and overrides both empty values and
+     __PLACEHOLDER__ values, so the real subscription id and hosted base URL
+     come from the materialized env. Hardcoding a subscription id in the plist
+     is what produced the literal
+     `subscription_id=__NEOTOMA_SSE_SUBSCRIPTION_ID_ANTHUS__` in the 2026-06-03
+     logs when it drifted out of sync.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ateles.anthus</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string><HOME>/ateles-rc-src/execution/daemons/anthus/run_anthus_launchd.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string><HOME>/ateles-rc-src</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string><HOME></string>
+        <key>PATH</key>
+        <string><HOME>/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string><HOME>/Library/Logs/ateles/anthus.log</string>
+    <key>StandardErrorPath</key>
+    <string><HOME>/Library/Logs/ateles/anthus.log</string>
+</dict>
+</plist>

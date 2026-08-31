@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from orchestrator import (
     Gate,
+    _coerce_list_field,
     WorkflowDefinition,
     compute_ready_gates,
     select_workflow,
@@ -409,3 +410,90 @@ def test_dispatched_gate_can_be_satisfied_by_later_comment():
     assert len(state_v2["ux_design"].artifact_refs) == 1
     # arch still dispatched (no satisfying comment yet).
     assert state_v2["arch"].status == "dispatched"
+
+
+# ── Snapshot list-field coercion (regression: Anthus dead 2026-06-03 → 08-31) ──
+#
+# Neotoma stores some workflow_definition list fields as a JSON *string* rather
+# than a JSON array (as of 2026-08-31: 5 of 8 live entities for `gates`, 1 for
+# `fast_paths`). The parser iterated the raw value, so a string yielded
+# characters and `g.get(...)` raised "'str' object has no attribute 'get'" on
+# every issue/pull_request SSE event — aborting workflow selection entirely.
+
+
+def test_coerce_list_field_passes_through_real_list():
+    raw = [{"phase": 1, "gate_name": "pm"}]
+    assert _coerce_list_field(raw, entity_id="ent_x", field_name="gates") == raw
+
+
+def test_coerce_list_field_parses_json_encoded_string():
+    """The shape that killed the daemon: a list arriving as a JSON string."""
+    raw = '[{"phase": 1, "gate_name": "pm", "owner_agent": "pavo"}]'
+    out = _coerce_list_field(raw, entity_id="ent_x", field_name="gates")
+    assert out == [{"phase": 1, "gate_name": "pm", "owner_agent": "pavo"}]
+    # Critically, elements are dicts — not characters.
+    assert all(hasattr(item, "get") for item in out)
+
+
+def test_coerce_list_field_handles_missing_empty_and_malformed():
+    for raw in (None, "", "   ", "not json", '{"not": "a list"}', 42):
+        assert _coerce_list_field(raw, entity_id="ent_x", field_name="gates") == []
+
+
+def test_coerce_list_field_drops_non_dict_elements():
+    """One bad element must not take down the whole workflow."""
+    raw = '[{"gate_name": "pm"}, "stray", null, 7]'
+    assert _coerce_list_field(raw, entity_id="ent_x", field_name="gates") == [
+        {"gate_name": "pm"}
+    ]
+
+
+def test_string_encoded_gates_produce_usable_workflow(monkeypatch):
+    """End-to-end: a string-encoded snapshot parses into real Gate objects."""
+    import asyncio
+
+    import orchestrator as _orch
+
+    snapshot = {
+        "project": "ateles",
+        "status": "active",
+        "workflow_type": "feature",
+        "description": "d",
+        # Both fields in their string-encoded form.
+        "gates": (
+            '[{"phase":1,"gate_name":"pm","owner_agent":"pavo",'
+            '"parallel_group":null,"join_gate":null,"required":true}]'
+        ),
+        "fast_paths": '[{"condition": "label:copy", "skip_gates": ["arch"]}]',
+    }
+    payload = {"entities": [{"entity_id": "ent_str", "snapshot": snapshot}]}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return payload
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **k):
+            return _Resp()
+
+    monkeypatch.setattr(_orch.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(_orch, "NEOTOMA_BEARER", "test-token")
+
+    out = asyncio.run(_orch.fetch_workflow_definitions("ateles"))
+
+    assert len(out) == 1
+    assert [g.gate_name for g in out[0].gates] == ["pm"]
+    assert out[0].gates[0].owner_agent == "pavo"
+    assert out[0].fast_paths == [{"condition": "label:copy", "skip_gates": ["arch"]}]
