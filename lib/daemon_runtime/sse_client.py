@@ -227,9 +227,14 @@ class SSEClient:
                         try:
                             await handler(event)
                         except Exception as exc:
+                            # exc_info: without the traceback this logs only
+                            # the exception text, which names neither the file
+                            # nor the line — a handler fault then has to be
+                            # re-reproduced by hand before it can be read.
                             log.error(
                                 f"[{self.handler_name}] Handler error for "
-                                f"{event.entity_type}/{event.entity_id}: {exc}"
+                                f"{event.entity_type}/{event.entity_id}: {exc}",
+                                exc_info=True,
                             )
 
 
