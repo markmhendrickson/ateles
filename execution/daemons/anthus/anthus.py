@@ -133,6 +133,7 @@ async def _orchestrate_workflow_for(event) -> None:
         fetch_workflow_definitions,
         resolve_unmet_preconditions,
         select_workflow,
+        unresolvable_gates,
     )
 
     snap = event.snapshot or {}
@@ -144,6 +145,15 @@ async def _orchestrate_workflow_for(event) -> None:
     workflows = await fetch_workflow_definitions(project)
     if not workflows:
         return
+
+    # A gate with no satisfaction rule stalls its workflow forever, and does so
+    # silently. Surface it loudly rather than letting it sit (ateles#568).
+    for wf_key, gate_names in unresolvable_gates(workflows).items():
+        log.error(
+            f"[{DAEMON_NAME}] {wf_key}: gates {gate_names} have no entry in "
+            f"GATE_SATISFACTION_RULES and are not operator-gated — these gates "
+            f"can never satisfy and will stall the workflow at their phase."
+        )
     wf = select_workflow(snap, workflows)
     if wf is None:
         log.debug(

@@ -25,7 +25,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import httpx
@@ -243,7 +243,49 @@ GATE_SATISFACTION_RULES: dict[str, str] = {
     "compliance_supervisor": "compliance_verdict",
     "pr_review": "merge_decision",
     "release": "release_note",
+    # ── ateles|social_content (ent_38ab0119e528d021c51d46a1) ──
+    # All four were absent, so this workflow could never leave phase 1
+    # (ateles#568). Each rule below demands an artifact the gate's own work
+    # actually produces — none is satisfiable by merely commenting.
+    "draft": "social_post_draft",
+    "draft_lint": "lint_report",
+    "post": "published_post_link",
 }
+
+
+# Gates that only a human can satisfy. These are deliberately NOT in
+# GATE_SATISFACTION_RULES: there is no artifact an agent can post that
+# legitimately stands in for operator approval, and inventing one would
+# create false progress — worse than stalling, because it looks like
+# advancement. `operator_preview` is released either by the operator
+# applying the `approved` label (the workflow's declared fast_path) or by
+# an explicit operator waiver, never by an agent comment.
+OPERATOR_GATED_GATES: frozenset[str] = frozenset({"operator_preview"})
+
+
+def unresolvable_gates(workflows: list[WorkflowDefinition]) -> dict[str, list[str]]:
+    """
+    Return {workflow_key: [gate_name, ...]} for every gate that can never
+    satisfy — absent from GATE_SATISFACTION_RULES and not operator-gated.
+
+    Such a gate stalls its workflow at that phase forever and does so
+    SILENTLY: _gate_satisfied_by_comment simply returns None, which is
+    indistinguishable from "no satisfying artifact yet". Anthus calls this at
+    startup and logs an ERROR per finding, so a workflow_definition edited in
+    Neotoma to add a gate the code does not know about surfaces immediately
+    rather than after a two-month stall (ateles#568).
+    """
+    out: dict[str, list[str]] = {}
+    for wf in workflows:
+        missing = [
+            g.gate_name
+            for g in wf.gates
+            if g.gate_name not in GATE_SATISFACTION_RULES
+            and g.gate_name not in OPERATOR_GATED_GATES
+        ]
+        if missing:
+            out[f"{wf.project}|{wf.workflow_type}"] = missing
+    return out
 
 
 def _gate_satisfied_by_comment(gate: Gate, comments: list[dict]) -> str | None:
@@ -511,7 +553,17 @@ def compute_ready_gates(
     if unmet_preconditions:
         skips = skips | unmet_preconditions
 
-    state = dict(existing_state or {})
+    # Copy each GateState, not just the dict. A shallow `dict(...)` shares the
+    # GateState objects with the caller; mutating `gs.status` below would then
+    # also mutate the caller's `existing` map, so anthus.py's
+    # `prior.status != "satisfied"` guard compared an object against itself and
+    # was ALWAYS False. record_satisfied was therefore unreachable for every
+    # already-dispatched gate — the reason no participation_record in the
+    # system's history has ever reached `satisfied` (ateles#573).
+    state = {
+        name: replace(gs, artifact_refs=list(gs.artifact_refs))
+        for name, gs in (existing_state or {}).items()
+    }
     # Initialize state for any unseen gates.
     for g in workflow.gates:
         if g.gate_name in state:
