@@ -155,7 +155,14 @@ def _ok_run(*_a, **_k):
 
 
 def test_close_one_off_sent_archives_profile_and_marks_task_done(monkeypatch) -> None:
-    """A paid one-off must mark the task done and archive the profile."""
+    """A DELIVERED one-off must mark the task done and archive the profile.
+
+    Narrowed by ateles#575: the `sent` result driven here is now produced only
+    when Wise's own transfer record says the payment was delivered, not merely
+    when funding was accepted. The close-and-archive contract this test pins is
+    unchanged — what changed is which transfers reach it. See the sibling
+    test_awaiting_settlement_does_not_close_one_off for the other half.
+    """
     import subprocess as _sp
 
     from handlers.wise_transfer import _close_one_off, _update_task
@@ -213,6 +220,43 @@ def test_close_one_off_sent_archives_profile_and_marks_task_done(monkeypatch) ->
         "--status",
         "archived",
     ]
+
+
+def test_awaiting_settlement_does_not_close_one_off(monkeypatch) -> None:
+    """A submitted-but-undelivered transfer closes nothing (ateles#575).
+
+    The sibling of the test above: same one-off profile, same code path, and
+    the only difference is that Wise has not confirmed delivery. No --status
+    argv of any kind may be emitted — not done, not archived.
+    """
+    import subprocess as _sp
+
+    from handlers.wise_transfer import RESULT_AWAITING_SETTLEMENT, _update_task
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *a, **k):
+        calls.append(list(cmd))
+        return _ok_run()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/neotoma")
+    monkeypatch.setattr(
+        "handlers.wise_transfer._find_task_id", lambda _profile: "task_flight_1"
+    )
+
+    profile = _oneoff(TODAY, entity_id="prof_flight_1")
+    _update_task(
+        profile,
+        {"status": RESULT_AWAITING_SETTLEMENT, "transfer_id": "tr_1"},
+    )
+
+    status_updates = [
+        c for c in calls if "--status" in c and "entities" in c and "update" in c
+    ]
+    assert status_updates == [], (
+        f"an unsettled transfer must not done/archive; got {status_updates}"
+    )
 
 
 def test_update_task_manual_required_does_not_close_one_off(monkeypatch) -> None:

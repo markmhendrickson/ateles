@@ -10,10 +10,15 @@ triggered by calendar events.  Subclasses implement three methods:
 
 The result dict returned by execute() must include at least:
   {
-    "status":   "sent" | "failed" | "manual_required",
+    "status":   "sent" | "awaiting_settlement" | "failed" | "manual_required",
     "handler":  <handler name>,
     ...handler-specific fields...
   }
+
+"awaiting_settlement" means the payment was submitted to the rail but has not
+been confirmed delivered.  It must never close a task or archive a profile:
+the money has left, so the payment must not be retried, and it has not
+arrived, so the record must not say that it did (ateles#575).
 """
 
 from __future__ import annotations
@@ -55,8 +60,12 @@ class PaymentHandler(abc.ABC):
 
         Must return a dict with at least:
           {
-            "status":  "sent" | "failed" | "manual_required",
+            "status":  "sent" | "awaiting_settlement" | "failed" |
+                       "manual_required",
             "handler": self.name,
           }
+
+        "awaiting_settlement" is submitted-not-delivered and must not close
+        a task (ateles#575).
         Additional fields are handler-specific (e.g. txid, transfer_id, iban).
         """
