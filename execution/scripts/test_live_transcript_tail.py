@@ -1,8 +1,9 @@
 """Effect-level tests for live_transcript_tail.py.
 
 Covers remote-track filtering (mic exclusion), stall/remnant slice decisions,
-silence-vs-failure classification (kill-switch contract), and growing-recording
-discovery. Mirrors the config-stub + patch.object convention from
+silence-vs-failure classification (kill-switch contract), the silence gate's
+RMS parsing and p95 statistic (including meter-failure fallback), and
+growing-recording discovery. Mirrors the config-stub + patch.object convention from
 test_transcribe_audio.py — execution/scripts/config.py is untracked/gitignored.
 """
 
@@ -167,7 +168,12 @@ def test_main_flush_final_remnant_writes_one_jsonl_line(tmp_path, monkeypatch):
     record = json.loads(lines[0])
     assert record["ok"] is True
     assert record["text"] == "final words"
-    mock_run.assert_called_once()
+    # Two subprocess calls for the single final slice: the ffmpeg cut, then the
+    # silence gate's RMS measurement. Exactly one slice is cut.
+    cut_calls = [c for c in mock_run.call_args_list if "-ss" in c.args[0]]
+    rms_calls = [c for c in mock_run.call_args_list if "astats=metadata=1:reset=1:length=3" in " ".join(c.args[0])]
+    assert len(cut_calls) == 1
+    assert len(rms_calls) == 1
     assert any("flushing final" in str(c) for c in mock_log.call_args_list)
     assert any("final slice written" in str(c) for c in mock_log.call_args_list)
 
@@ -418,3 +424,81 @@ def test_find_growing_recording_picks_newest_mtime(tmp_path):
     with patch.object(lt.time, "sleep", side_effect=grow_newer):
         got = lt.find_growing_recording(tmp_path, settle_probe=0.0)
     assert got == newer
+
+# --------------------------------------------------------------------------
+# Case 4 — the silence gate's RMS parsing and p95 statistic
+# --------------------------------------------------------------------------
+
+
+def test_parse_rms_levels_extracts_values_from_astats_stderr():
+    """Real ffmpeg astats lines yield their RMS_level values, in order."""
+    stderr = (
+        "[Parsed_ametadata_1 @ 0x7f] lavfi.astats.Overall.RMS_level=-23.4\n"
+        "[Parsed_ametadata_1 @ 0x7f] lavfi.astats.Overall.RMS_level=-51.2\n"
+        "[Parsed_ametadata_1 @ 0x7f] lavfi.astats.Overall.RMS_level=-8\n"
+    )
+    assert lt.parse_rms_levels(stderr) == [-23.4, -51.2, -8.0]
+
+
+def test_parse_rms_levels_drops_infinite_and_handles_empty():
+    """Digital silence reports -inf; it must not poison the statistic."""
+    stderr = (
+        "lavfi.astats.Overall.RMS_level=-inf\n"
+        "lavfi.astats.Overall.RMS_level=-30.0\n"
+    )
+    assert lt.parse_rms_levels(stderr) == [-30.0]
+    assert lt.parse_rms_levels("") == []
+    assert lt.parse_rms_levels("no astats here at all") == []
+
+
+def test_sustained_rms_db_is_p95_not_mean_or_max():
+    """A pausing speaker must not read as silence, nor a click as speech."""
+    # 19 silent windows + 1 loud one: mean/median would say "silence".
+    values = [-70.0] * 19 + [-10.0]
+    assert lt.sustained_rms_db(values) == -10.0
+
+    # A speaker who pauses: p95 tracks the speech, not the gaps.
+    speech = [-60.0] * 5 + [-20.0] * 5
+    assert lt.sustained_rms_db(speech) == -20.0
+
+    # Single value degenerates to itself.
+    assert lt.sustained_rms_db([-42.0]) == -42.0
+
+
+def test_sustained_rms_db_empty_returns_none():
+    assert lt.sustained_rms_db([]) is None
+
+
+def test_measure_slice_rms_db_returns_none_when_ffmpeg_raises(tmp_path):
+    """A broken meter must return None so the caller transcribes anyway."""
+    wav = tmp_path / "slice.wav"
+    wav.write_bytes(b"x")
+
+    with (
+        patch.object(lt.subprocess, "run", side_effect=OSError("ffmpeg missing")),
+        patch.object(lt, "log"),
+    ):
+        assert lt.measure_slice_rms_db(wav) is None
+
+
+def test_measure_slice_rms_db_returns_none_on_unusable_output(tmp_path):
+    """No parseable RMS values is also a measurement failure, not silence."""
+    wav = tmp_path / "slice.wav"
+    wav.write_bytes(b"x")
+    proc = MagicMock(returncode=0, stderr="", stdout="")
+
+    with patch.object(lt.subprocess, "run", return_value=proc), patch.object(lt, "log"):
+        assert lt.measure_slice_rms_db(wav) is None
+
+
+def test_measure_slice_rms_db_returns_p95_of_parsed_levels(tmp_path):
+    """End to end: stderr in, sustained level out — no audio, no network."""
+    wav = tmp_path / "slice.wav"
+    wav.write_bytes(b"x")
+    stderr = "".join(
+        f"lavfi.astats.Overall.RMS_level={v}\n" for v in ([-65.0] * 19 + [-12.5])
+    )
+    proc = MagicMock(returncode=0, stderr=stderr, stdout="")
+
+    with patch.object(lt.subprocess, "run", return_value=proc), patch.object(lt, "log"):
+        assert lt.measure_slice_rms_db(wav) == -12.5
