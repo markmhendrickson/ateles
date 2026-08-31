@@ -975,6 +975,37 @@ async def main() -> None:
                     f"[{DAEMON_NAME}] missing-lens sweep failed: {exc}",
                     exc_info=True,
                 )
+            # 5. Unactioned revisions (ateles#511). The three sweeps above all
+            #    carry a PR TOWARD a verdict. This is the first that carries one
+            #    PAST a verdict: a PR at CHANGES_REQUESTED whose author pushed
+            #    the fix and whose review never looked again. Measured
+            #    2026-08-31: 23 of 47 open ateles PRs in that state, median 33d.
+            #    `resume_stalled_reviews` excludes them by design (it requires
+            #    ZERO reviews), so until now nothing watched this state at all.
+            #    Same cadence, same fail-open discipline.
+            try:
+                await dispatcher.resume_unactioned_revisions(
+                    list(dispatcher.config.resume_repositories)
+                )
+            except Exception as exc:
+                log.error(
+                    f"[{DAEMON_NAME}] revision sweep failed: {exc}",
+                    exc_info=True,
+                )
+            # 6. Approved-unmerged visibility (ateles#565). Reports only — it
+            #    never merges. An APPROVED PR presents as done, so nothing was
+            #    watching while three of them rotted CLEAN → DIRTY over 33-53
+            #    days. Runs last: it reports on the state the sweeps above have
+            #    already had their chance to change this tick.
+            try:
+                await dispatcher.report_pr_review_queue(
+                    list(dispatcher.config.resume_repositories)
+                )
+            except Exception as exc:
+                log.error(
+                    f"[{DAEMON_NAME}] approved-unmerged report failed: {exc}",
+                    exc_info=True,
+                )
             await asyncio.sleep(deferred_interval)
 
     log.info(f"[{DAEMON_NAME}] Subscribing to SSE: {SUBSCRIBE_ENTITY_TYPES}")
