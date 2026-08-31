@@ -502,3 +502,36 @@ def test_measure_slice_rms_db_returns_p95_of_parsed_levels(tmp_path):
 
     with patch.object(lt.subprocess, "run", return_value=proc), patch.object(lt, "log"):
         assert lt.measure_slice_rms_db(wav) == -12.5
+
+
+# --------------------------------------------------------------------------
+# Case 8 — durable-store invariant (transcribe_slice argv)
+# --------------------------------------------------------------------------
+
+
+def test_transcribe_slice_always_passes_no_store_and_no_diarize(tmp_path):
+    """The live tailer must never write to the durable store or diarize.
+
+    Pinned by behaviour, not by reading the source: every other main() test
+    mocks transcribe_slice wholesale, so nothing else exercises the real argv.
+    A live slice is a throwaway few-second fragment — storing it would pollute
+    the durable transcript record that the authoritative post-recording run
+    owns, and diarization on such a fragment is both meaningless and slow.
+
+    Hermetic: only subprocess.run is mocked, so no ffmpeg, no whisper, no
+    network, and no audio file is ever read.
+    """
+    wav = tmp_path / "slice.wav"
+    wav.write_bytes(b"x")
+    proc = MagicMock(returncode=0, stderr="", stdout="hello world\n")
+
+    with patch.object(lt.subprocess, "run", return_value=proc) as mock_run:
+        ok, payload = lt.transcribe_slice(wav, env={"PATH": "/usr/bin"})
+
+    assert ok is True
+    assert payload == "hello world"
+
+    mock_run.assert_called_once()
+    argv = mock_run.call_args.args[0]
+    assert "--no-store" in argv, f"--no-store missing from argv: {argv}"
+    assert "--no-diarize" in argv, f"--no-diarize missing from argv: {argv}"
