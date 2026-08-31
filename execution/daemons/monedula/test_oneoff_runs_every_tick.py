@@ -79,7 +79,7 @@ def _isolate_state(tmp_path, monkeypatch):
 
 def _install_handlers(monkeypatch, handlers):
     fake_mod = types.ModuleType("handlers")
-    fake_mod.load_handlers = lambda: handlers
+    fake_mod.load_handlers = lambda strandings=None: handlers
     monkeypatch.setitem(sys.modules, "handlers", fake_mod)
 
 

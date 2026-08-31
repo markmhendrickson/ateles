@@ -559,11 +559,41 @@ def _build_preview_message(
 
 
 # ---------------------------------------------------------------------------
+# Stranded profiles (ateles#553)
+# ---------------------------------------------------------------------------
+
+
+def escalate_strandings(strandings: list) -> list:
+    """Escalate active profiles the daemon cannot act on. Returns those filed.
+
+    Thin seam over ``strandings.escalate`` so the daemon's own module owns the
+    notifier wiring and a failure here can never take the payment run down —
+    an escalation that raises would turn a reporting defect into an outage.
+    """
+    if not strandings:
+        return []
+    try:
+        from strandings import escalate
+
+        return escalate(strandings, notify=_notify)
+    except Exception as exc:  # noqa: BLE001
+        log.exception(f"could not escalate stranded payment profiles: {exc}")
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def main() -> bool:
+    """Run one Monedula tick. Returns True for a clean run.
+
+    Returns False when an ACTIVE payment profile was stranded — i.e. a payment
+    that should have been possible was not. The entrypoint turns that into a
+    non-zero exit, so a run that could not pay no longer looks to launchd (or
+    to anyone reading the log) exactly like a run with nothing to do.
+    """
     log.info("Monedula starting.")
 
     yesterday = _yesterday()
@@ -573,7 +603,18 @@ def main() -> None:
     # Set MONEDULA_PROFILES=THERAPY,YOGA (and corresponding profile env vars).
     from handlers import load_handlers
 
-    all_handlers = load_handlers()
+    # Collect every ACTIVE profile the loader could not act on. Each of these
+    # used to be a bare WARNING and a `continue`: the run exited clean, so a
+    # payment that could not fire was indistinguishable from a day with
+    # nothing due. Escalated below (ateles#553).
+    strandings: list = []
+    all_handlers = load_handlers(strandings)
+
+    # Escalate before any early return below. A stranded profile is an
+    # operational defect regardless of whether the rest of the run had
+    # anything to do, and the "nothing to do" path returns early — which is
+    # precisely how these stayed invisible for 17 days.
+    escalate_strandings(strandings)
 
     # The daily claim gates the CALENDAR leg only — never the whole run.
     #
@@ -649,7 +690,7 @@ def main() -> None:
         log.info(
             "No payment handlers triggered and no due payment tasks — nothing to do."
         )
-        return
+        return not strandings
 
     if not triggered:
         log.info(
@@ -664,7 +705,7 @@ def main() -> None:
     # If there are only task reminders (no actionable calendar payments), don't wait for approval.
     if not triggered:
         log.info("Task reminders sent — no calendar payments to approve. Done.")
-        return
+        return not strandings
 
     # Wait for operator reply (2 minutes)
     reply = telegram_long_poll_once(timeout_sec=120)
@@ -675,7 +716,7 @@ def main() -> None:
     if not approved:
         log.info(f"No payments approved (reply={reply!r}) — skipping all.")
         telegram_send(f"⏭️ Monedula: skipped all payments for {yesterday_str}.")
-        return
+        return not strandings
 
     log.info(f"Approved handlers: {approved}")
 
@@ -703,7 +744,7 @@ def main() -> None:
     # Send confirmation
     if not all_results:
         telegram_send(f"⚠️ Monedula: no payments executed for {yesterday_str}.")
-        return
+        return not strandings
 
     confirmation_lines = [f"📋 Monedula results for {yesterday_str}:", ""]
     for handler, result in all_results:
@@ -718,13 +759,24 @@ def main() -> None:
     log.info("Sending confirmation to Telegram...")
     telegram_send(confirmation_msg)
     log.info("Monedula run complete.")
+    return not strandings
 
 
 if __name__ == "__main__":
     _notify("monedula started", priority="info")
     try:
-        main()
-        _notify("monedula run complete", priority="info")
+        clean = main()
+        if clean:
+            _notify("monedula run complete", priority="info")
+        else:
+            # A stranded profile means a payment did not happen. Exiting 0
+            # here is what let sixteen consecutive days of this read as
+            # sixteen clean runs (ateles#553).
+            log.error(
+                "Monedula run completed with STRANDED payment profiles — "
+                "see the escalations filed in Neotoma."
+            )
+            sys.exit(1)
     except Exception as exc:
         log.exception(f"Monedula fatal error: {exc}")
         _notify(f"monedula fatal error: {exc}", priority="blocker")

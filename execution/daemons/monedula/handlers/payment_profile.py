@@ -52,10 +52,6 @@ from typing import Literal
 # User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
 NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
 
-# Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
-# User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
-NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
-
 log = logging.getLogger(__name__)
 
 # Wise accepts only these legalType values when creating an IBAN recipient.
@@ -101,7 +97,9 @@ class PaymentProfile:
         return self.prefix.lower()
 
 
-def load_profiles_from_neotoma() -> list[PaymentProfile]:
+def load_profiles_from_neotoma(
+    strandings: list | None = None,
+) -> list[PaymentProfile]:
     """
     Load PaymentProfiles from Neotoma payment_profile entities (Phase 5+).
 
@@ -111,6 +109,16 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
     Falls back to empty list on any error — caller should then call
     load_profiles() to use env-var fallback.
 
+    ``strandings``, when supplied, is appended to with one ``Stranding`` per
+    ACTIVE profile that was rejected, and one for a failed fetch. Every
+    rejection below used to be a bare ``log.warning(...); continue``: the run
+    exited clean and the only trace was a line in an 8 MB log file, so a
+    payment that could not fire looked exactly like a day with nothing due
+    (ateles#553). The caller escalates whatever lands in this list.
+
+    Passing ``None`` keeps the historical warn-and-continue behaviour, which
+    is what the env-var fallback path and older callers expect.
+
     Required env vars:
       NEOTOMA_BEARER_TOKEN   Neotoma API auth token
       NEOTOMA_BASE_URL       Neotoma API base URL
@@ -118,6 +126,29 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
     import json
     import urllib.error
     import urllib.request
+
+    from strandings import (
+        REASON_BAD_AMOUNT,
+        REASON_BAD_LEGAL_TYPE,
+        REASON_BAD_PAYMENT_TYPE,
+        REASON_FETCH_FAILED,
+        REASON_MISSING_LABEL,
+        REASON_UNREACHABLE,
+        Stranding,
+    )
+
+    def _strand(entity_id: str, label: str, reason: str, detail: str) -> None:
+        """Record a rejected ACTIVE profile so the caller can escalate it."""
+        if strandings is None:
+            return
+        strandings.append(
+            Stranding(
+                entity_id=str(entity_id or ""),
+                label=label,
+                reason=reason,
+                detail=detail,
+            )
+        )
 
     bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "").strip()
     # No default: local hosting was retired 2026-08-04, and any fallback here is
@@ -175,9 +206,28 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
             f"Check NEOTOMA_BEARER_TOKEN (401/403) and that the request carries a "
             f"User-Agent (Cloudflare 1010 blocks urllib's default). {detail}"
         )
+        _strand(
+            "",
+            "(all profiles)",
+            REASON_FETCH_FAILED,
+            f"Neotoma rejected the payment_profile fetch with HTTP {exc.code}, so "
+            f"NO profiles were loaded and no payment can be proposed this run. "
+            f"Check NEOTOMA_BEARER_TOKEN and the request User-Agent.",
+        )
         return []
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-        log.warning(f"Neotoma payment_profile fetch failed: {exc}")
+        # A transport failure is not "no profiles configured" either. This
+        # branch fired 1,753 times at WARNING and escalated nothing: during
+        # those windows every profile was stranded at once, which is strictly
+        # worse than the single-profile case below.
+        log.error(f"Neotoma payment_profile fetch failed: {exc}")
+        _strand(
+            "",
+            "(all profiles)",
+            REASON_FETCH_FAILED,
+            f"Could not reach Neotoma to load payment profiles ({type(exc).__name__}), "
+            f"so NO profiles were loaded and no payment can be proposed this run.",
+        )
         return []
 
     items: list[dict] = []
@@ -197,6 +247,13 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
         if not label:
             log.warning(
                 f"payment_profile entity {item.get('entity_id')} missing label — skipped"
+            )
+            _strand(
+                item.get("entity_id"),
+                f"(unlabelled {item.get('entity_id')})",
+                REASON_MISSING_LABEL,
+                "Active payment_profile has no label, so it cannot be identified "
+                "to the operator or matched to a handler.",
             )
             continue
 
@@ -219,12 +276,27 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
                 f"payment_profile {label!r} is UNREACHABLE: no calendar_keywords "
                 f"(recurring trigger) and no due_date (one-off trigger) — skipped"
             )
+            _strand(
+                item.get("entity_id"),
+                label,
+                REASON_UNREACHABLE,
+                "Profile has neither calendar_keywords (the recurring, "
+                "attendance-gated trigger) nor due_date (the one-off trigger), so "
+                "matches() can never fire for it. Set one of the two.",
+            )
             continue
 
         payment_type_raw = str(snap.get("payment_type", "wise")).lower()
         if payment_type_raw not in ("wise", "btc"):
             log.warning(
                 f"payment_profile {label!r} unknown payment_type={payment_type_raw!r} — skipped"
+            )
+            _strand(
+                item.get("entity_id"),
+                label,
+                REASON_BAD_PAYMENT_TYPE,
+                f"payment_type={payment_type_raw!r} is not a rail Monedula can "
+                f"execute (expected 'wise' or 'btc').",
             )
             continue
         payment_type: Literal["wise", "btc"] = payment_type_raw  # type: ignore[assignment]
@@ -236,11 +308,25 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
             log.warning(
                 f"payment_profile {label!r} invalid amount_eur={amount_raw!r} — skipped"
             )
+            _strand(
+                item.get("entity_id"),
+                label,
+                REASON_BAD_AMOUNT,
+                "amount_eur is not a whole number of euros, so no transfer can "
+                "be constructed from this profile.",
+            )
             continue
 
         if amount_eur <= 0:
             log.warning(
                 f"payment_profile {label!r} amount_eur must be positive — skipped"
+            )
+            _strand(
+                item.get("entity_id"),
+                label,
+                REASON_BAD_AMOUNT,
+                "amount_eur must be positive; the profile is active but "
+                "describes no payable amount.",
             )
             continue
 
@@ -260,6 +346,13 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
                 f"payment_profile {label!r} invalid wise_legal_type="
                 f"{legal_type_raw!r} (expected one of {sorted(_WISE_LEGAL_TYPES)}) "
                 f"— skipped"
+            )
+            _strand(
+                item.get("entity_id"),
+                label,
+                REASON_BAD_LEGAL_TYPE,
+                f"wise_legal_type={legal_type_raw!r} is not accepted by Wise "
+                f"(expected one of {sorted(_WISE_LEGAL_TYPES)}).",
             )
             continue
 
@@ -293,15 +386,19 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
     return profiles
 
 
-def load_profiles_with_neotoma_fallback() -> list[PaymentProfile]:
+def load_profiles_with_neotoma_fallback(
+    strandings: list | None = None,
+) -> list[PaymentProfile]:
     """
     Load PaymentProfiles: try Neotoma first, fall back to env vars.
 
     Phase 5 entrypoint. Monedula callers should use this instead of
     load_profiles() to transparently prefer Neotoma-sourced profiles.
+
+    ``strandings`` is forwarded to the Neotoma loader; see its docstring.
     """
     try:
-        profiles = load_profiles_from_neotoma()
+        profiles = load_profiles_from_neotoma(strandings)
     except RuntimeError as exc:
         # Neotoma is unconfigured, not unreachable. That is loud in the log but
         # recoverable here, because env-var profiles are a real second source —
