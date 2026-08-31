@@ -155,6 +155,7 @@ if str(_DAEMON_DIR) not in sys.path:
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
     AgentLoader,
+    enforce_status_or_exit,
     append_turn,
     assess_readiness,
     create_run_conversation,
@@ -814,6 +815,10 @@ async def main() -> None:
         f"[{DAEMON_NAME}] agent_definition: status={agent_def.status} "
         f"grant={agent_def.agent_grant} sub={agent_def.aauth_sub}"
     )
+
+    # Enforce agent_definition.status (ateles#562). Previously this value was
+    # logged and then ignored, so a "retired" agent ran normally.
+    enforce_status_or_exit(agent_def, DAEMON_NAME)
 
     # 2. Load AAuth signer
     signer = AAuthSigner.from_key_file(DAEMON_NAME)

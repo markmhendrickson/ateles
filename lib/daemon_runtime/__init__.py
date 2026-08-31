@@ -50,7 +50,16 @@ if _NEOTOMA_ENV_FILE.exists():
                 _os.environ[_k] = _v
 
 from .aauth_signer import AAuthSigner
-from .agent_loader import AgentDefinition, AgentLoader
+from .agent_loader import (
+    REFUSING_STATUSES,
+    UNDEFINED_STATUS,
+    WARNING_STATUSES,
+    AgentDefinition,
+    AgentLoader,
+    StatusAction,
+    enforce_status_or_exit,
+    evaluate_status,
+)
 from .drift import (
     DriftCluster,
     DriftSignal,
@@ -116,6 +125,12 @@ from .task_lifecycle import (
 __all__ = [
     "AgentLoader",
     "AgentDefinition",
+    "StatusAction",
+    "REFUSING_STATUSES",
+    "WARNING_STATUSES",
+    "UNDEFINED_STATUS",
+    "evaluate_status",
+    "enforce_status_or_exit",
     "SSEClient",
     "NeotomaEvent",
     "hydrate_snapshot",

@@ -12,6 +12,24 @@ not a degraded success: it carries an empty ``prompt_markdown`` and a wildcard
 and unrestricted tools. Every stub is logged at ERROR and flagged
 ``is_stub=True`` with a ``load_error`` reason. Callers MUST check ``is_stub``
 before treating a definition as loaded.
+
+Status enforcement (ateles#562). ``agent_definition.status`` used to be read,
+logged, and then ignored — setting an agent to ``retired`` had no runtime
+effect. ``evaluate_status`` and ``enforce_status_or_exit`` below make it
+load-bearing, with three outcomes rather than two: RUN, REFUSE, and WARN.
+
+WARN exists because the field is decorative in BOTH directions today, so naive
+enforcement would halt production. As of 2026-08-31, 18 of 40 agent_definition
+entities are ``planned``, and several of them run continuously — ``neotoma-agent``
+has a daemon and a live grant while marked ``planned``, and ``lanius`` is the
+swarm's busiest dispatcher while marked ``planned``. Refusing on ``planned``
+would take those down on deploy.
+
+So only statuses that express an operator's intent to STOP the agent refuse:
+``retired`` and ``disabled``. ``planned`` warns loudly and keeps running, which
+surfaces the data problem without acting on data known to be wrong. Correcting
+those entities is tracked separately; once the data is accurate, ``planned``
+can be promoted into ``REFUSING_STATUSES`` in one line.
 """
 
 from __future__ import annotations
@@ -19,7 +37,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from dataclasses import dataclass, field
+from enum import Enum
 
 import httpx
 
@@ -47,6 +67,99 @@ def _auth_headers() -> dict[str, str]:
         if NEOTOMA_BEARER_TOKEN
         else {}
     )
+
+
+class StatusAction(str, Enum):
+    """What a daemon should do given its agent_definition.status (#562).
+
+    Three outcomes, not two. WARN is the state for "this status says the agent
+    should not be running, but the data is known to be unreliable" — it keeps
+    the daemon up while making the discrepancy visible, instead of either
+    silently ignoring the field (the #562 defect) or halting production on data
+    we already know is wrong.
+    """
+
+    RUN = "run"
+    REFUSE = "refuse"
+    WARN = "warn"
+
+
+# Statuses that express an operator's intent to STOP the agent. Only these
+# refuse to start. Keep this set narrow: every addition can halt a daemon.
+REFUSING_STATUSES = frozenset({"retired", "disabled", "revoked"})
+
+# Statuses that mean the agent is expected to run.
+RUNNING_STATUSES = frozenset({"active", "active-pending-deploy", "provisional"})
+
+# Statuses that SHOULD refuse on their plain meaning, but whose stored values
+# are currently unreliable enough that acting on them would cause an outage.
+#
+# As of 2026-08-31, 18 of 40 agent_definition entities are "planned", including
+# agents that demonstrably run in production (neotoma-agent has a daemon, a
+# LaunchAgent, and a live agent_grant; lanius is the swarm's busiest dispatcher).
+# The field is decorative in both directions — five "active" agents have never
+# been invoked. Until the entities are corrected, "planned" warns rather than
+# refuses. Promote it into REFUSING_STATUSES once the data is accurate.
+WARNING_STATUSES = frozenset({"planned", "proposed", "draft"})
+
+# Status assigned when no agent_definition could be loaded at all. Deliberately
+# NOT "active": a stub is an absence of information, and #562 notes the stub
+# previously defaulted to active with tool_allowlist="*", which made an
+# unregistered daemon look fully configured.
+UNDEFINED_STATUS = "undefined"
+
+
+def evaluate_status(status: str) -> tuple[StatusAction, str]:
+    """Map an agent_definition.status to an action and a human-readable reason.
+
+    Unrecognised statuses WARN rather than refuse: a status nobody anticipated
+    is missing information, and this function must not invent an outage from a
+    typo or a value added by a future migration.
+    """
+    s = (status or "").strip().lower()
+    if s in REFUSING_STATUSES:
+        return (
+            StatusAction.REFUSE,
+            f"agent_definition.status is {s!r} — the agent is not permitted to run",
+        )
+    if s in RUNNING_STATUSES:
+        return StatusAction.RUN, f"status={s}"
+    if s == UNDEFINED_STATUS or not s:
+        return (
+            StatusAction.WARN,
+            "no agent_definition could be loaded (running on a stub); the "
+            "agent is unregistered and its tool allowlist is unscoped",
+        )
+    if s in WARNING_STATUSES:
+        return (
+            StatusAction.WARN,
+            f"agent_definition.status is {s!r} but the daemon is running — "
+            "either the entity is stale or the daemon should not be deployed",
+        )
+    return (
+        StatusAction.WARN,
+        f"agent_definition.status is {s!r}, which is not a recognised status",
+    )
+
+
+def enforce_status_or_exit(agent_def: "AgentDefinition", daemon_name: str) -> None:
+    """Refuse to start when status says the agent must not run (#562).
+
+    Exits non-zero on REFUSE — matching the revoked-grant convention already
+    used at each of these call sites — and logs loudly on WARN. Call this
+    immediately after the startup status log line, before subscribing or
+    dispatching.
+    """
+    action, reason = evaluate_status(agent_def.status)
+    if action is StatusAction.REFUSE:
+        log.error(
+            f"[{daemon_name}] Refusing to start: {reason}. "
+            f"agent_definition={agent_def.entity_id or '<stub>'}. "
+            "Correct the entity's status, or unload this daemon's LaunchAgent."
+        )
+        sys.exit(1)
+    if action is StatusAction.WARN:
+        log.warning(f"[{daemon_name}] Status check: {reason}")
 
 
 @dataclass
@@ -270,6 +383,12 @@ class AgentLoader:
         tools. That must never present as a normal load, so the stub is logged
         at ERROR and marked ``is_stub`` with the failure reason attached for the
         caller to branch on.
+
+        Its status is UNDEFINED_STATUS, not "active" (ateles#562). A stub is an
+        absence of information; reporting it as active made an unregistered
+        daemon indistinguishable from a configured one in logs and in every
+        downstream status check. UNDEFINED_STATUS WARNs rather than refusing, so
+        a transient Neotoma outage still cannot invent an outage of its own.
         """
         log.error(
             f"[{self.agent_name}] agent_definition load FAILED ({reason}) — "
@@ -281,7 +400,7 @@ class AgentLoader:
             aauth_sub=f"{self.agent_name}@ateles-swarm",
             agent_grant="service",
             tool_allowlist="*",
-            status="active",
+            status=UNDEFINED_STATUS,
             is_stub=True,
             load_error=reason,
         )
