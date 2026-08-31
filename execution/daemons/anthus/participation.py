@@ -91,6 +91,21 @@ async def record_skipped(work_entity_id: str, gate_name: str, reason: str) -> No
     )
 
 
+class ParticipationStateUnavailable(RuntimeError):
+    """
+    Raised when participation state could not be read from Neotoma.
+
+    This is deliberately distinct from "the read succeeded and there are no
+    records yet". Both used to collapse into an empty dict, which made a failed
+    read indistinguishable from a genuinely fresh work entity — so the caller
+    hydrated nothing and dispatched every gate as if it had never run. See
+    ateles#584: a 404 on this read was logged as a WARNING while the dispatch
+    proceeded, so Anthus looked healthy while its gate bookkeeping was blind.
+
+    Callers must treat this as "hold the dispatch", never as "no prior state".
+    """
+
+
 async def load_state_for(work_entity_id: str) -> dict[str, dict[str, Any]]:
     """
     Fetch all participation_record entities for a work entity and return them
@@ -98,11 +113,16 @@ async def load_state_for(work_entity_id: str) -> dict[str, dict[str, Any]]:
 
     Each value is a plain dict with keys: gate_name, status, dispatched_at,
     satisfied_at, artifact_refs, error.
+
+    Returns an empty dict ONLY when the read succeeded and no records exist.
+    Raises ParticipationStateUnavailable when the state could not be read at
+    all — the caller must hold the dispatch rather than assume a clean slate.
     """
     bearer = _bearer()
     if not bearer:
-        log.warning(f"{_BEARER_ENV} not set; cannot load participation_records.")
-        return {}
+        raise ParticipationStateUnavailable(
+            f"{_BEARER_ENV} not set; cannot load participation_records."
+        )
 
     headers = {
         "Authorization": f"Bearer {bearer}",
@@ -110,8 +130,14 @@ async def load_state_for(work_entity_id: str) -> dict[str, dict[str, Any]]:
     }
     try:
         async with httpx.AsyncClient(headers=headers, timeout=15) as client:
+            # NOTE: the entity-read route is POST /entities/query. The prod
+            # HTTP surface does NOT expose /retrieve_entities (404) — that path
+            # only exists behind the MCP layer. /entities/query returns the
+            # same {entities, total, limit, offset} shape with the entity_type
+            # filter applied server-side and snapshots included. Same gotcha as
+            # orchestrator.fetch_workflow_definitions and apis/issue_spec.py.
             resp = await client.post(
-                f"{NEOTOMA_BASE_URL}/retrieve_entities",
+                f"{NEOTOMA_BASE_URL}/entities/query",
                 json={
                     "entity_type": "participation_record",
                     "limit": 200,
@@ -121,8 +147,10 @@ async def load_state_for(work_entity_id: str) -> dict[str, dict[str, Any]]:
             resp.raise_for_status()
             data = resp.json()
     except Exception as exc:
-        log.warning(f"load_state_for({work_entity_id}) failed: {exc}")
-        return {}
+        log.error(f"load_state_for({work_entity_id}) failed: {exc}")
+        raise ParticipationStateUnavailable(
+            f"could not read participation state for {work_entity_id}: {exc}"
+        ) from exc
 
     out: dict[str, dict[str, Any]] = {}
     for e in data.get("entities", []):

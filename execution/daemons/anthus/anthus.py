@@ -153,8 +153,32 @@ async def _orchestrate_workflow_for(event) -> None:
 
     # Hydrate in-memory state from persisted participation_records if we
     # don't have any in-process state yet for this work entity.
+    #
+    # A failed read is NOT a clean slate (ateles#584). If we cannot see which
+    # gates already ran, dispatching would risk re-running completed work, so
+    # we hold this work entity and retry on the next event rather than
+    # proceeding with empty state.
     if event.entity_id not in _gate_states:
-        persisted = await participation.load_state_for(event.entity_id)
+        try:
+            persisted = await participation.load_state_for(event.entity_id)
+        except participation.ParticipationStateUnavailable as exc:
+            log.error(
+                f"[{DAEMON_NAME}] holding dispatch for {event.entity_id}: "
+                f"participation state unavailable ({exc})"
+            )
+            # Best-effort alert. The HOLD itself is the safety property and
+            # must stand even if notification is unavailable (`_notifier` is
+            # bound in main(), so it is absent under tests and early startup).
+            try:
+                _notifier.send(
+                    f"Dispatch HELD on {event.entity_id}: participation state "
+                    f"could not be read ({exc})",
+                    priority=Priority.WARN,
+                    handler=DAEMON_NAME,
+                )
+            except Exception as notify_exc:
+                log.warning(f"[{DAEMON_NAME}] hold notification failed: {notify_exc}")
+            return
         if persisted:
             _gate_states[event.entity_id] = {
                 name: GateState(
