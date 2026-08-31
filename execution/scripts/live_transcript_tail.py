@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -59,6 +60,37 @@ MIN_SLICE_SECONDS = 5.0
 # Remnant below this (seconds) with a stalled file is treated as empty — exit
 # without a final ffmpeg/transcribe pass.
 STALL_EMPTY_SECONDS = 0.05
+
+# --- Silence gate -----------------------------------------------------------
+# Whisper does not return empty on silence — it HALLUCINATES subtitle boilerplate
+# ("thank you for watching", "please subscribe", full sentences in Japanese,
+# Korean, Ukrainian). Gating on measured level BEFORE transcription is the only
+# thing that actually stops it; post-hoc phrase filtering is a losing arms race
+# against an open-ended set of fabrications in arbitrary languages.
+#
+# Statistic: the 95th percentile of ffmpeg's windowed RMS, NOT the median and
+# NOT the peak. Measured on 39 labelled chunks of a real session:
+#   - median FAILS: a speaker who pauses between sentences leaves a 35s window
+#     with a median of -75 to -82 dB, indistinguishable from true silence.
+#   - peak FAILS: transient clicks push silent windows to -22 dB.
+#   - p95 separates: it asks "was there sustained energy in the loudest ~5% of
+#     this window", which is exactly what "someone spoke at some point" means.
+DEFAULT_SILENCE_THRESHOLD_DB = float(
+    os.environ.get("LIVE_TRANSCRIPT_SILENCE_THRESHOLD_DB", "-50")
+)
+RMS_PERCENTILE = 0.95
+_RMS_RE = re.compile(r"RMS_level=(-?[\d.]+)")
+
+# --- Follow mode ------------------------------------------------------------
+DEFAULT_FOLLOW = os.environ.get("LIVE_TRANSCRIPT_FOLLOW", "") == "1"
+DEFAULT_FOLLOW_TIMEOUT_MIN = float(
+    os.environ.get("LIVE_TRANSCRIPT_FOLLOW_TIMEOUT_MIN", "30")
+)
+# Resume is polled far faster than the chunk interval: it is a directory listing,
+# not a transcription. Detection latency costs nothing in lost audio (resume
+# starts at cursor 0) but it does delay the operator's first words reaching the
+# session, so keep it short.
+FOLLOW_POLL_SECONDS = 4.0
 
 
 def log(msg: str) -> None:
@@ -117,6 +149,78 @@ def probe_duration(path: Path) -> float | None:
         return None
 
 
+def parse_rms_levels(stderr: str) -> list[float]:
+    """Extract finite windowed RMS_level values (dB) from ffmpeg astats output."""
+    return [
+        float(m) for m in _RMS_RE.findall(stderr or "")
+        if "inf" not in m.lower()
+    ]
+
+
+def sustained_rms_db(values: list[float], percentile: float = RMS_PERCENTILE) -> float | None:
+    """Representative *sustained* level: the ``percentile`` of windowed RMS.
+
+    Deliberately not the mean/median (a pausing speaker drags those down to
+    silence levels) and not the max (a single click lifts silence to speech
+    levels). See DEFAULT_SILENCE_THRESHOLD_DB for the measured rationale.
+    """
+    if not values:
+        return None
+    ordered = sorted(values)
+    idx = min(len(ordered) - 1, int(percentile * len(ordered)))
+    return ordered[idx]
+
+
+def measure_slice_rms_db(wav_path: Path) -> float | None:
+    """Sustained RMS (dB) of a slice, or None if the measurement failed.
+
+    None is the caller's signal to transcribe anyway: a broken measurement must
+    never silently discard audio.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-i", str(wav_path),
+                "-af",
+                "astats=metadata=1:reset=1:length=3,"
+                "ametadata=print:key=lavfi.astats.Overall.RMS_level",
+                "-f", "null", "/dev/null",
+            ],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        log(f"RMS measurement failed ({exc}) — transcribing anyway")
+        return None
+
+    level = sustained_rms_db(parse_rms_levels(proc.stderr))
+    if level is None:
+        log("RMS measurement returned no usable values — transcribing anyway")
+    return level
+
+
+def track_kind(path: Path) -> str:
+    """Which Audio Hijack track a file belongs to ('mic', 'remote'/'system', …).
+
+    Used on resume so a paused *mic* recording resumes on the new *mic* file
+    rather than jumping tracks mid-session.
+    """
+    name = path.name.lower()
+    if "mic" in name:
+        return "mic"
+    for t in REMOTE_TRACK_NAMES:
+        if t in name:
+            return t
+    return ""
+
+
+def matches_track(path: Path, kind: str) -> bool:
+    return (
+        path.is_file()
+        and path.suffix.lower() in RECORDING_EXTENSIONS
+        and track_kind(path) == kind
+    )
+
+
 def find_growing_recording(watch_dir: Path, settle_probe: float = 3.0) -> Path | None:
     """Return the most recent remote/system track that is actively growing."""
     if not watch_dir.exists():
@@ -144,6 +248,44 @@ def find_growing_recording(watch_dir: Path, settle_probe: float = 3.0) -> Path |
         return newest
 
     log(f"newest recording is not growing (finished?): {newest.name}")
+    return None
+
+
+def wait_for_resume(
+    watch_dir: Path,
+    kind: str,
+    known: set[Path],
+    timeout_s: float,
+    *,
+    poll: float = FOLLOW_POLL_SECONDS,
+) -> Path | None:
+    """Block until a NEW recording of the same track appears; None on timeout.
+
+    Detection is on *file appearance*, not on confirmed growth. Audio Hijack
+    creates the file the moment recording starts, and the 3s growth probe used
+    at startup is known to false-negative on its buffered writes. Because resume
+    always re-slices from second zero, detecting a hair early costs nothing —
+    whereas waiting to confirm growth costs the operator's first sentence.
+    """
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        time.sleep(poll)
+        try:
+            current = {p for p in watch_dir.iterdir() if matches_track(p, kind)}
+        except OSError:
+            continue
+
+        fresh = sorted(current - known, key=lambda p: p.stat().st_mtime)
+        if not fresh:
+            continue
+
+        candidate = fresh[-1]
+        # A just-created file may not be a readable container yet. Keep polling
+        # rather than erroring out — the next pass usually succeeds.
+        if probe_duration(candidate) is None:
+            continue
+        return candidate
+
     return None
 
 
@@ -224,6 +366,17 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--start-at", type=float, default=None,
                     help="Cursor start in seconds (default: current duration — "
                          "only new audio is transcribed)")
+    ap.add_argument("--follow", action="store_true", default=DEFAULT_FOLLOW,
+                    help="On stop, pause and wait for the recording to resume "
+                         "instead of exiting (env LIVE_TRANSCRIPT_FOLLOW=1)")
+    ap.add_argument("--follow-timeout-min", type=float,
+                    default=DEFAULT_FOLLOW_TIMEOUT_MIN,
+                    help=f"Minutes to wait for a resume before exiting "
+                         f"(default: {DEFAULT_FOLLOW_TIMEOUT_MIN:g})")
+    ap.add_argument("--silence-threshold-db", type=float,
+                    default=DEFAULT_SILENCE_THRESHOLD_DB,
+                    help=f"Skip transcription below this sustained RMS in dB "
+                         f"(default: {DEFAULT_SILENCE_THRESHOLD_DB:g})")
     args = ap.parse_args(argv)
 
     if not TRANSCRIBE.exists():
@@ -263,11 +416,51 @@ def main(argv: list[str]) -> int:
 
     log(f"tailing: {recording.name}")
     log(f"chunk interval: {args.interval}s   starting at: {cursor:.0f}s")
+    log(f"silence gate: skip below {args.silence_threshold_db:g} dB sustained RMS")
+    if args.follow:
+        log(f"follow mode: on — pausing (not exiting) on stop, up to "
+            f"{args.follow_timeout_min:g} min per break")
     log(f"JSONL: {out_path}")
     print(str(out_path), flush=True)  # stdout: the path, for scripting
 
     chunk_index = 0
     consecutive_failures = 0
+
+    def append(record: dict) -> None:
+        with out_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    # Track kind + directory census, so a resume picks the same track (a paused
+    # *mic* recording resumes on the new *mic* file) and only counts files that
+    # did not already exist when the pause began.
+    kind = track_kind(recording)
+    watch_dir = args.dir
+
+    def pause_and_resume() -> Path | None:
+        """Emit a pause marker and block for a resume. None means give up."""
+        log("recording stopped — pausing, watching for resume")
+        append({"event": "paused", "t": datetime.now(tz=UTC).isoformat()})
+
+        try:
+            known = {p for p in watch_dir.iterdir() if matches_track(p, kind)}
+        except OSError:
+            known = set()
+        known.add(recording)
+
+        resumed = wait_for_resume(
+            watch_dir, kind, known, args.follow_timeout_min * 60.0
+        )
+        if resumed is None:
+            log(f"no resume within {args.follow_timeout_min:g} min — exiting")
+            return None
+
+        log(f"recording resumed — following {resumed.name}")
+        append({
+            "event": "resumed",
+            "t": datetime.now(tz=UTC).isoformat(),
+            "file": str(resumed),
+        })
+        return resumed
 
     try:
         while True:
@@ -276,6 +469,12 @@ def main(argv: list[str]) -> int:
             duration = probe_duration(recording)
             if duration is None:
                 log("could not probe duration — recording ended?")
+                if args.follow:
+                    resumed = pause_and_resume()
+                    if resumed is None:
+                        break
+                    recording, cursor = resumed, 0.0
+                    continue
                 break
 
             available = duration - cursor
@@ -295,6 +494,18 @@ def main(argv: list[str]) -> int:
                 if decision == "wait":
                     continue
                 if decision == "exit_clean":
+                    if args.follow:
+                        resumed = pause_and_resume()
+                        if resumed is None:
+                            break
+                        # Resume at second ZERO of the new file, not at its
+                        # current duration. Detection takes a few seconds and the
+                        # operator starts talking the instant they hit record —
+                        # starting at the cursor would drop exactly those words.
+                        # A longer-than-interval first chunk is the intended
+                        # cost of losing nothing.
+                        recording, cursor = resumed, 0.0
+                        continue
                     log("recording appears to have stopped — exiting")
                     break
                 # flush_final: stop with a usable remnant — transcribe it so the
@@ -311,6 +522,8 @@ def main(argv: list[str]) -> int:
             tmp.close()
             tmp_path = Path(tmp.name)
 
+            rms_db: float | None = None
+            skipped_silent = False
             try:
                 proc = subprocess.run(
                     [
@@ -325,7 +538,15 @@ def main(argv: list[str]) -> int:
                 if proc.returncode != 0:
                     ok, payload = False, f"ffmpeg slice failed: {(proc.stderr or '').strip()[:200]}"
                 else:
-                    ok, payload = transcribe_slice(tmp_path, env)
+                    # Gate BEFORE transcribing. A measurement failure returns
+                    # None and falls through to transcription — never drop audio
+                    # because the meter broke.
+                    rms_db = measure_slice_rms_db(tmp_path)
+                    if rms_db is not None and rms_db < args.silence_threshold_db:
+                        skipped_silent = True
+                        ok, payload = True, ""
+                    else:
+                        ok, payload = transcribe_slice(tmp_path, env)
             except subprocess.TimeoutExpired:
                 ok, payload = False, "ffmpeg slice timed out"
             finally:
@@ -338,12 +559,21 @@ def main(argv: list[str]) -> int:
                 "end_s": round(cursor + available, 2),
                 "ok": ok,
             }
-            consecutive_failures = apply_transcription_result(
-                record, ok, payload, consecutive_failures
-            )
+            if skipped_silent:
+                # Same shape as post-hoc silence, plus the measurement that
+                # caused the skip. Not a failure: does not touch the streak.
+                record["text"] = ""
+                record["silence"] = True
+                record["skipped"] = "below_threshold"
+                record["rms_db"] = round(rms_db, 1)
+            else:
+                if rms_db is not None:
+                    record["rms_db"] = round(rms_db, 1)
+                consecutive_failures = apply_transcription_result(
+                    record, ok, payload, consecutive_failures
+                )
 
-            with out_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            append(record)
 
             # Advance regardless of transcription success: a failed chunk must not
             # re-slice the same audio forever.
@@ -351,6 +581,15 @@ def main(argv: list[str]) -> int:
             chunk_index += 1
 
             if final_slice:
+                # The remnant is flushed either way — the operator's last words
+                # reach the session before the pause marker.
+                if args.follow:
+                    log("final slice written")
+                    resumed = pause_and_resume()
+                    if resumed is None:
+                        break
+                    recording, cursor = resumed, 0.0
+                    continue
                 log("final slice written — exiting")
                 break
 

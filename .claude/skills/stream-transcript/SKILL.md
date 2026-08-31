@@ -136,11 +136,90 @@ a better take of the same audio. Only the stop-time pass can re-hear a sentence.
 
 ```bash
 cd "$ATELES_REPO" && nohup execution/venv/bin/python execution/scripts/live_transcript_tail.py \
-  --interval 30 > /tmp/livetail.out 2> /tmp/livetail.err &
+  --interval 30 --follow > /tmp/livetail.out 2> /tmp/livetail.err &
 ```
 
 `--interval 30` is a reasonable default: shorter means more, worse fragments;
 longer means staler context. The JSONL path is printed on stdout.
+
+Pass `--follow` (see [Pause and resume](#pause-and-resume-taking-a-break))
+whenever the operator might take a break. It is the difference between a break
+ending the stream and a break being a break.
+
+### 3b. The silence gate
+
+Whisper **does not return empty on silence — it fabricates.** Observed on real
+silent audio from this machine: "Bon Appetit!", "thank you for watching",
+"please subscribe", and fluent sentences in Japanese, Korean, and Ukrainian.
+Each one also costs an API call.
+
+So the tailer measures each slice's **sustained RMS before transcribing** and
+skips the call entirely below a threshold. Level-gating is what actually fixes
+this; filtering the output afterwards cannot, because the fabrications are an
+open-ended set in arbitrary languages — you would be pattern-matching against
+every subtitle cliché in every language Whisper knows, forever, and still
+missing new ones.
+
+| | |
+|---|---|
+| Default threshold | **-50 dB**, env `LIVE_TRANSCRIPT_SILENCE_THRESHOLD_DB` or `--silence-threshold-db` |
+| Statistic | 95th percentile of ffmpeg's windowed RMS |
+| On skip | JSONL gets `{"silence": true, "skipped": "below_threshold", "rms_db": -58.2}` |
+| On measurement failure | **Transcribes anyway** — never drop audio because the meter broke |
+
+Skipped slices advance the cursor normally and do **not** count toward the
+consecutive-failure kill switch.
+
+**Why the 95th percentile and not the median or the peak.** Measured across 39
+labelled chunks of a real session:
+
+- **Median fails.** A speaker who pauses between sentences leaves a 35s window
+  with a median of -75 to -82 dB — identical to true silence. Gating on the
+  median would have discarded most of a real meeting.
+- **Peak fails.** Transient clicks push genuinely silent windows to -22 dB,
+  indistinguishable from speech.
+- **p95 works.** It asks "was there sustained energy in the loudest ~5% of this
+  window", which is what "someone spoke at some point in here" actually means.
+
+On that session the separation at p95 was: real speech **-24 to -38 dB** (single
+quietest real chunk -46 dB), hallucinated silence **-52 to -57 dB**. -50 dB was
+the only threshold tested that skipped zero real speech and passed zero
+hallucinations. Note this is measured on the **mic** track; a different mic,
+gain, or room may shift the range, so re-measure before assuming the default
+transfers. If real speech starts getting skipped, lower the threshold.
+
+### Pause and resume (taking a break)
+
+With `--follow`, **stopping the recorder is the supported way to take a break.**
+The operator stops Audio Hijack, does something else, starts it again, and the
+transcript continues in the same JSONL — no new session, no manual restart.
+
+| Event | JSONL line | What it means |
+|---|---|---|
+| Break starts | `{"event": "paused", "t": …}` | **A break, NOT end-of-meeting** |
+| Break ends | `{"event": "resumed", "t": …, "file": …}` | The operator is back |
+
+**Treat `paused` as a break, not as the meeting ending.** Do not run the `stop`
+sequence, do not offer `analyze-meeting`, do not summarize as though it is over.
+Hold context and wait. On `resumed`, carry on with the same watch list and write
+posture — the operator should be able to just start talking.
+
+Mechanics worth knowing:
+
+- **Resume re-slices from second zero of the new file**, not from the moment of
+  detection. The operator starts talking the instant they hit record; anything
+  else would drop exactly those words. The first post-resume chunk is therefore
+  often longer than the interval — that is the point, not a defect.
+- Resume is polled every ~4s and triggers on **file appearance**, not confirmed
+  growth (`find_growing_recording`'s 3s probe false-negatives on Audio Hijack's
+  buffered writes). Measured detection latency: ~3s.
+- It resumes on the **same track** — a paused `*mic.mp4` waits for a new
+  `*mic.mp4` and ignores a new `*system.mp4`.
+- The wait is bounded by `--follow-timeout-min` (default 30, env
+  `LIVE_TRANSCRIPT_FOLLOW_TIMEOUT_MIN`). On timeout the tailer exits normally so
+  the lifecycle watch fires.
+
+Without `--follow`, behavior is unchanged: the tailer exits on stop.
 
 ### 4. Arm the Monitor
 
@@ -155,12 +234,20 @@ for line in sys.stdin:
     if not line: continue
     try: r = json.loads(line)
     except Exception: print('MALFORMED: ' + line[:200]); continue
-    if r.get('ok'):
+    if r.get('event') == 'paused':
+        print('=== RECORDING PAUSED — operator is taking a break, NOT end of meeting')
+    elif r.get('event') == 'resumed':
+        print('=== RECORDING RESUMED — operator is back')
+    elif r.get('ok'):
+        if r.get('silence'): continue
         print(f\"[{r['start_s']:.0f}-{r['end_s']:.0f}s] {r.get('text','')}\")
     else:
         print(f\"[TRANSCRIPTION ERROR chunk {r.get('chunk')}] {r.get('error')}\")
 "
 ```
+
+The `event` branches are load-bearing: without them a pause and a resume are
+invisible in the feed and a break looks exactly like the meeting going quiet.
 
 Use `persistent: true` — a meeting outruns the default timeout.
 
@@ -176,6 +263,11 @@ The tailer exits on its own when the recording stops. Without a second watch,
 nobody notices: the chunk Monitor just goes quiet, and quiet is indistinguishable
 from a lull in the conversation.
 
+Under `--follow` the tailer does **not** exit on a stop — it pauses. So this
+watch fires only on a real ending (resume timeout, or the operator stopping the
+stream), which is what you want: a break must not trigger the `stop` sequence.
+The `paused` / `resumed` events arrive through the chunk Monitor instead.
+
 Arm a `run_in_background` Bash wait on the tailer process. It fires exactly once,
 when the tailer exits:
 
@@ -188,18 +280,25 @@ Use `run_in_background: true` (not Monitor) — this is a single notification on
 terminal condition, which is what background Bash is for. Monitor is for repeated
 events.
 
-The tailer's stderr names which of three exits happened:
+The tailer's stderr names what happened:
 
 | stderr line | Meaning | Response |
 |---|---|---|
-| `recording appears to have stopped — exiting` | Operator stopped Audio Hijack | **Run the `stop` sequence automatically** |
+| `recording stopped — pausing, watching for resume` | `--follow`: operator is taking a break | **Do nothing.** Not end-of-meeting; hold context and wait |
+| `recording resumed — following <file>` | `--follow`: operator is back | Resume as before, same watch list |
+| `no resume within N min — exiting` | `--follow`: break outlasted the timeout | **Run the `stop` sequence** |
+| `recording appears to have stopped — exiting` | Operator stopped Audio Hijack (no `--follow`) | **Run the `stop` sequence automatically** |
 | `recording appears to have stopped — flushing final Ns slice` then `final slice written — exiting` | Same, with a trailing remnant shorter than one chunk | **Run the `stop` sequence automatically** — the last words are in the final chunk |
-| `could not probe duration — recording ended?` | File vanished or became unreadable | Run `stop`; note the anomaly |
+| `could not probe duration — recording ended?` | File vanished or became unreadable | Run `stop`; note the anomaly. Under `--follow` this pauses instead |
 | `5 consecutive failures — stopping` | Transcription is genuinely broken | Do **not** treat as meeting-over; surface the errors — the recording may still be running |
 
-Silence does **not** count toward that failure streak. A quiet interval is written
-as `{"ok": true, "text": "", "silence": true}` and renders as nothing, so a
-mid-meeting break cannot kill the tailer.
+The first three lines only ever appear with `--follow`. **Only the lines marked
+"run the `stop` sequence" end the meeting** — a pause does not.
+
+Neither kind of silence counts toward the failure streak. A quiet interval that
+reached Whisper is written as `{"ok": true, "text": "", "silence": true}`; one
+skipped before transcription adds `"skipped": "below_threshold"` and `rms_db`.
+Both render as nothing, so a mid-meeting lull cannot kill the tailer.
 
 **On the first case, run the `/stream-transcript stop` sequence without being
 asked** and tell the operator streaming ended because recording stopped. This is
@@ -325,6 +424,10 @@ is the right place for those provisional rows to be confirmed or corrected.
 | `ModuleNotFoundError: config` | `execution/scripts/config.py` missing | Untracked + gitignored; copy from a worktree |
 | Garbled text on non-speech | Whisper straining on music/noise | Expected; not a defect |
 | Operator's voice absent | Only the system track is sliced | By design; see the follow-up task |
+| Subtitle boilerplate ("thank you for watching", "please subscribe") or unprompted Japanese/Korean/Ukrainian | Whisper hallucinating on silence | Should now be gated out before the API call. If it still appears, the slice measured above threshold — **raise** the threshold and re-measure |
+| Real speech missing, JSONL shows `"skipped": "below_threshold"` | Threshold too aggressive for this mic/room | **Lower** `LIVE_TRANSCRIPT_SILENCE_THRESHOLD_DB`; check the logged `rms_db` against the -50 dB default |
+| Stream ends when the operator takes a break | `--follow` not passed | Relaunch with `--follow` |
+| Nothing after `paused` | Break outlasted `--follow-timeout-min`, or the resumed recording is a different track | Check `/tmp/livetail.err` for the timeout line |
 
 ## Related
 
