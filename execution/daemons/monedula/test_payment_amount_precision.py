@@ -34,7 +34,9 @@ from handlers.payment_profile import (
     parse_amount_eur,
 )
 from handlers.wise_transfer import (
+    AMOUNT_MISMATCH_ERROR_CODE,
     TransferAmountMismatch,
+    WiseTransferHandler,
     _create_quote,
     _execute_wise_transfer,
     _json_dumps_with_decimals,
@@ -45,6 +47,11 @@ from handlers.wise_transfer import (
 # the regression anchored to the live failure rather than to a synthetic case.
 SHORT_FUNDED_A = "133.60"
 SHORT_FUNDED_B = "1153.30"
+
+# Assembled in parts so the repo's PII scanner sees no IBAN-shaped literal
+# (rule pii-iban in .gitleaks.toml), matching test_wise_legal_type.py. Nothing
+# here validates an IBAN — it only has to be a non-empty payee identifier.
+IBAN = " ".join(["XX00", "0000", "0000", "0000", "0000", "00"])
 
 
 class _Capture:
@@ -192,7 +199,9 @@ def test_reconcile_passes_on_equal_value_different_exponent() -> None:
 def test_reconcile_raises_on_short_transfer() -> None:
     """The exact #552 shape: Wise reports 133, 133.60 was owed."""
     with pytest.raises(TransferAmountMismatch) as exc:
-        _reconcile_transfer_amount({"sourceValue": "133"}, Decimal(SHORT_FUNDED_A), label="t")
+        _reconcile_transfer_amount(
+            {"sourceValue": "133"}, Decimal(SHORT_FUNDED_A), label="t"
+        )
     assert "0.60" in str(exc.value)
 
 
@@ -293,6 +302,146 @@ def test_post_funding_mismatch_still_raises(monkeypatch) -> None:
         _execute_wise_transfer(
             "tok", "XX00", "Payee", Decimal(SHORT_FUNDED_A), "ref", label="t"
         )
+
+
+# ── Handler: a mismatch never reaches the task-update path ───────────────────
+#
+# The tests above stop at _execute_wise_transfer, which only proves that no
+# `sent` result is produced. WiseTransferHandler.execute() is where the
+# exception is turned into a status, and `manual_required` also calls
+# _update_task() — which writes "Payment sent …" onto the task and rolls its
+# due_date. So "no `sent`" is not sufficient: the handler-level status is what
+# decides whether a short payment gets recorded as handled.
+
+
+def _handler_profile(**overrides) -> PaymentProfile:
+    """A wise profile whose payee resolves from the profile, not from parquet."""
+    fields = {
+        "prefix": "HANDLERTEST",
+        "label": "Handlertest",
+        "calendar_keywords": ["handlerkw"],
+        "payment_type": "wise",
+        "amount_eur": Decimal(SHORT_FUNDED_A),
+        "wise_iban": IBAN,
+        "wise_recipient_name": "Handler Payee",
+        "wise_reference": "Handler ref",
+        "neotoma_task_id": "ent_handler_task",
+    }
+    fields.update(overrides)
+    return PaymentProfile(**fields)  # type: ignore[arg-type]
+
+
+@pytest.fixture
+def handler_env(monkeypatch):
+    monkeypatch.setenv("WISE_API_TOKEN", "test-wise-token")
+    monkeypatch.delenv("DATA_DIR", raising=False)
+    return monkeypatch
+
+
+@pytest.fixture
+def task_updates(monkeypatch) -> list[dict]:
+    """Records every _update_task call so tests can assert on the count."""
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        "handlers.wise_transfer._update_task",
+        lambda profile, result: calls.append(result),
+    )
+    return calls
+
+
+def test_handler_mismatch_returns_failed_and_skips_task_update(
+    handler_env, task_updates
+) -> None:
+    """A mismatch yields status='failed' with a stable code and no task update."""
+    handler_env.setattr(
+        "handlers.wise_transfer._execute_wise_transfer",
+        lambda *a, **k: (_ for _ in ()).throw(
+            TransferAmountMismatch("Wise reports €133 but €133.60 was owed")
+        ),
+    )
+
+    result = WiseTransferHandler(_handler_profile()).execute({})
+
+    assert result["status"] == "failed"
+    assert result["status"] != "manual_required"
+    assert result["error_code"] == AMOUNT_MISMATCH_ERROR_CODE
+    assert task_updates == []
+
+
+def test_handler_mismatch_confirmation_flags_the_moved_money(
+    handler_env, task_updates
+) -> None:
+    """The operator message must not read as 'nothing happened, retry'."""
+    handler_env.setattr(
+        "handlers.wise_transfer._execute_wise_transfer",
+        lambda *a, **k: (_ for _ in ()).throw(
+            TransferAmountMismatch("Wise reports €133 but €133.60 was owed")
+        ),
+    )
+    handler = WiseTransferHandler(_handler_profile())
+
+    message = handler.format_confirmation(handler.execute({}))
+
+    assert "AMOUNT MISMATCH" in message
+    assert "payment sent" not in message.lower()
+
+
+def test_handler_other_failure_still_requires_manual_action(
+    handler_env, task_updates
+) -> None:
+    """Only the mismatch is special-cased — every other error keeps its behaviour.
+
+    A network or auth failure means the money did NOT move, so the task update
+    (which notes the attempt and rolls the schedule) is still correct there.
+    """
+    handler_env.setattr(
+        "handlers.wise_transfer._execute_wise_transfer",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("Wise API 503")),
+    )
+
+    result = WiseTransferHandler(_handler_profile()).execute({})
+
+    assert result["status"] == "manual_required"
+    assert "error_code" not in result
+    assert len(task_updates) == 1
+
+
+def test_handler_sent_result_updates_the_task_once(handler_env, task_updates) -> None:
+    """A reconciled transfer still gets exactly one task update."""
+    handler_env.setattr(
+        "handlers.wise_transfer._execute_wise_transfer",
+        lambda *a, **k: {
+            "status": "sent",
+            "transfer_id": 7,
+            "amount_eur": Decimal(SHORT_FUNDED_A),
+        },
+    )
+
+    result = WiseTransferHandler(_handler_profile()).execute({})
+
+    assert result["status"] == "sent"
+    assert len(task_updates) == 1
+    assert task_updates[0]["amount_eur"] == Decimal(SHORT_FUNDED_A)
+
+
+def test_handler_passes_the_untruncated_amount_to_wise(
+    handler_env, task_updates
+) -> None:
+    """Effect-level at the handler boundary: cents survive execute()."""
+    seen: dict = {}
+
+    def _record(token, iban, name, amount_eur, reference, **kwargs):
+        seen["amount_eur"] = amount_eur
+        return {"status": "sent", "transfer_id": 7, "amount_eur": amount_eur}
+
+    handler_env.setattr("handlers.wise_transfer._execute_wise_transfer", _record)
+
+    WiseTransferHandler(_handler_profile(amount_eur=Decimal(SHORT_FUNDED_B))).execute(
+        {}
+    )
+
+    assert seen["amount_eur"] == Decimal(SHORT_FUNDED_B)
+    assert seen["amount_eur"] != Decimal("1153")
 
 
 # ── Profile dataclass carries Decimal end to end ─────────────────────────────

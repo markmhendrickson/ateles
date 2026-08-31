@@ -15,6 +15,12 @@ Wise API flow:
 
 On any Wise step failure, returns status="manual_required" with full payment
 details so the operator can execute manually.
+
+The one exception is an amount mismatch (TransferAmountMismatch), which returns
+status="failed" instead. "manual_required" triggers a Neotoma task update, and
+on a mismatch the money may already have moved for the wrong amount — updating
+the task there is the half of ateles#552 that made the short transfers
+invisible.
 """
 
 from __future__ import annotations
@@ -38,16 +44,26 @@ log = logging.getLogger(__name__)
 
 WISE_BASE_URL = "https://api.transferwise.com"
 
+# Stable machine-readable code for the amount-mismatch outcome. Callers and
+# alerting match on this rather than on the human-readable error text, which is
+# free to change.
+AMOUNT_MISMATCH_ERROR_CODE = "wise_transfer_amount_mismatch"
+
 
 class TransferAmountMismatch(RuntimeError):
     """Wise's own record of a transfer does not match the amount owed.
 
-    Raised after funding, so the money has already moved. It is raised rather
-    than logged because the caller's next step is to mark the task done, and a
-    task marked done is the record that the payment was correct and complete.
-    A short transfer that is also marked done is invisible — which is how
-    ateles#552 stayed undetected. Failing here keeps the task open and the
-    discrepancy visible.
+    Raised at the quote, at transfer creation, and again after funding. The
+    post-funding case means the money has already moved, so it is raised rather
+    than logged: the caller's next step is to mark the task done, and a task
+    marked done is the record that the payment was correct and complete. A
+    short transfer that is also marked done is invisible — which is how
+    ateles#552 stayed undetected.
+
+    WiseTransferHandler.execute() maps this to status="failed" with
+    error_code=AMOUNT_MISMATCH_ERROR_CODE, deliberately outside the set of
+    statuses that trigger a Neotoma task update, so the task keeps its original
+    due_date and no note claims a payment that did not happen as specified.
     """
 
 
@@ -157,6 +173,26 @@ class WiseTransferHandler(PaymentHandler):
                 label=self.name,
                 legal_type=self.profile.wise_legal_type,
             )
+        except TransferAmountMismatch as exc:
+            # Handled apart from every other failure because `manual_required`
+            # reaches _update_task(), and _update_task() writes "Payment sent
+            # <date>: €<amount>" onto the task and rolls its due_date to the
+            # next occurrence. On an amount mismatch the money HAS moved, for
+            # the wrong amount — so that note is a false record and the rolled
+            # due_date retires a payment that was never made correctly. That
+            # combination is ateles#552. `failed` is outside the update set, so
+            # the task keeps its original due_date and no note claims success.
+            log.error(f"[{self.name}] AMOUNT MISMATCH — task NOT updated: {exc}")
+            result = {
+                "status": "failed",
+                "handler": self.name,
+                "error_code": AMOUNT_MISMATCH_ERROR_CODE,
+                "error": str(exc),
+                "amount_eur": self.profile.amount_eur,
+                "iban": iban,
+                "recipient_name": recipient_name,
+                "reference": self.profile.wise_reference,
+            }
         except Exception as exc:
             log.error(f"[{self.name}] Wise transfer exception: {exc}")
             result = {
@@ -202,6 +238,18 @@ class WiseTransferHandler(PaymentHandler):
                 f"  IBAN: {iban}\n"
                 f"  Amount: €{amount}\n"
                 f"  Reference: {reference}"
+            )
+        elif result.get("error_code") == AMOUNT_MISMATCH_ERROR_CODE:
+            # A plain "payment failed" would read as "nothing happened", and the
+            # operator would retry. The money may already have left for the
+            # wrong amount, so say what the actual state is before they do.
+            return (
+                f"🚨 {self.profile.label} payment AMOUNT MISMATCH — "
+                f"task NOT marked complete.\n"
+                f"  {result.get('error', 'amount mismatch')}\n"
+                f"  Owed: €{amount}\n"
+                f"  Reference: {reference}\n"
+                f"  Check Wise for a partial transfer before retrying."
             )
         else:
             error = result.get("error", "unknown error")
