@@ -401,8 +401,12 @@ async def resolve_unmet_preconditions(
             if not entity_type:
                 continue
             try:
+                # POST /entities/query, NOT /retrieve_entities (404s on the
+                # prod HTTP surface — ateles#584). This read fails CLOSED into
+                # `unmet`, so pointing it at a dead route silently marked every
+                # precondition-gated gate unmet and skipped it forever.
                 resp = await client.post(
-                    f"{NEOTOMA_BASE_URL}/retrieve_entities",
+                    f"{NEOTOMA_BASE_URL}/entities/query",
                     json={
                         "entity_type": entity_type,
                         "limit": 50,

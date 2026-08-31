@@ -15,6 +15,7 @@ on:
       - "execution/daemons/apis/**"
       - "execution/daemons/phoenicurus-release/**"
       - "execution/daemons/monedula/**"
+      - "execution/daemons/anthus/**"
       - "execution/mcp/**"
       - "lib/daemon_runtime/**"
       - "lib/approval/**"
@@ -49,6 +50,15 @@ jobs:
         run: uv run --extra dev python -m pytest execution/daemons/phoenicurus-release/ -q
       - name: Run monedula daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/monedula/ -q
+      # ateles#584 (qa lens, PR #596 round 1): the anthus orchestrator suite
+      # (test_participation_state.py, test_dispatch_wiring.py,
+      # test_orchestrator.py) was committed but collected by no lane. Its own
+      # step, for the same attributability reason as the apis step above — not
+      # because directories cannot share an invocation. Checked: a combined
+      # `pytest execution/daemons/` collects and passes, and no two daemons
+      # ship a same-named top-level module today.
+      - name: Run anthus daemon tests
+        run: uv run --extra dev python -m pytest execution/daemons/anthus/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
       # ateles#524 (qa lens, PR #527 round 2): execution/scripts/ has its own
