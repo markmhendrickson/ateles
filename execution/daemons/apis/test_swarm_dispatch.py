@@ -6609,3 +6609,178 @@ def test_vanellus_prompt_defaults_to_forbidding_merge():
     # Omitting the parameter must fail closed, not open.
     prompt = swarm_dispatch.SwarmDispatcher._vanellus_prompt(_trigger(), 80, ["pm"])
     assert "DO NOT MERGE" in prompt
+
+
+# --- ateles: blocking findings recovered from the durable PR comments -------
+#
+# ateles#292 gave the VERDICT a comment fallback but left the FINDINGS reading
+# stdout alone. Overnight 2026-08-31 that cost 9 of 12 PRs their auto-fix
+# round: each recovered `request_changes` from the aggregation comment, then
+# escalated "no blocking findings could be parsed" while a well-formed
+# [BLOCKING] block sat on the PR in a review:<lens> comment.
+
+
+def _stub_comment_recovery(monkeypatch, comments):
+    """Make _all_issue_comments return `comments` without touching GitHub."""
+    async def fake_all(self, repo, number, client):
+        return comments
+
+    monkeypatch.setattr(SwarmDispatcher, "_all_issue_comments", fake_all)
+
+
+def test_route_findings_recovers_blocking_from_review_lens_comment(monkeypatch):
+    """Empty lens stdout + a review:<lens> comment ⇒ fix round, not escalation."""
+    dispatched = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        dispatched.append(skill)
+        return SkillResult(skill, True, 0, "guidance", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    async def fake_claim(self, trigger, kind):
+        raise AssertionError(f"must not escalate {kind!r} — findings recoverable")
+
+    _stub_comment_recovery(monkeypatch, [
+        {"body": "review:qa\n[BLOCKING] coverage: the fixed call sites are "
+                 "untested\ndetail from the durable comment"},
+    ])
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    # The panelist ran, but its captured stdout came back empty.
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=[("qa", "")],
+                                   verdict="request_changes")
+    )
+    assert "cicada" in dispatched
+    assert not any("no blocking findings" in m for m in notifier.sent)
+
+
+def test_route_findings_recovers_from_aggregation_comment(monkeypatch):
+    """No review:<lens> comment either — the aggregation comment still carries
+    the findings, and the "(qa)" category suffix routes them to the qa lens."""
+    captured = {}
+    dispatched = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        dispatched.append(skill)
+        if skill == "cicada":
+            captured["prompt"] = prompt
+            return SkillResult(skill, True, 0, "applied", "")
+        # The lens agent fails, so Cicada receives the RAW recovered findings —
+        # proving the aggregation-comment text is what reached the fix round.
+        return SkillResult(skill, False, 1, "", "boom")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    _stub_comment_recovery(monkeypatch, [
+        {"body": swarm_dispatch._VANELLUS_COMMENT_MARKER
+                 + "\nVERDICT: REQUEST_CHANGES\n"
+                 "[BLOCKING] regression-coverage (qa): three fixed call sites "
+                 "are unguarded\nthe detail"},
+    ])
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=[("qa", "")],
+                                   verdict="request_changes")
+    )
+    # Routed to the qa lens (from the "(qa)" category suffix), then to Cicada
+    # with the recovered finding text.
+    assert _lens_agent("qa") in dispatched
+    assert "cicada" in dispatched
+    assert "three fixed call sites" in captured.get("prompt", "")
+
+
+def test_route_findings_still_escalates_when_comments_have_none(monkeypatch):
+    """A genuinely unparseable verdict must still escalate — the recovery
+    fallback widens the SOURCE, never the finding regex."""
+    dispatched = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        dispatched.append(skill)
+        return SkillResult(skill, True, 0, "x", "")
+
+    async def fake_claim(self, trigger, kind):
+        assert kind == "unparseable-verdict"
+        return True
+
+    _stub_comment_recovery(monkeypatch, [
+        {"body": "review:qa\nBLOCKED — cannot proceed, no structured findings."},
+    ])
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=[("qa", "")],
+                                   verdict="blocked")
+    )
+    assert dispatched == []
+    assert any("no blocking findings could be parsed" in m for m in notifier.sent)
+
+
+def test_route_findings_comment_fetch_failure_escalates(monkeypatch):
+    """A GitHub hiccup during recovery must escalate, not swallow the block."""
+    async def fake_all(self, repo, number, client):
+        raise RuntimeError("502 from GitHub")
+
+    async def fake_claim(self, trigger, kind):
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "_all_issue_comments", fake_all)
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    asyncio.run(
+        d._route_blocking_findings(_trigger(), parent=80, reviews=[("qa", "")],
+                                   verdict="request_changes")
+    )
+    assert any("no blocking findings could be parsed" in m for m in notifier.sent)
+
+
+def test_route_findings_prefers_stdout_when_present(monkeypatch):
+    """When stdout already carries findings the recovery path never runs."""
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "guidance", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    async def fake_all(self, repo, number, client):
+        raise AssertionError("recovery must not run when stdout has findings")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+    monkeypatch.setattr(SwarmDispatcher, "_all_issue_comments", fake_all)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(
+        d._route_blocking_findings(
+            _trigger(), parent=80,
+            reviews=[("qa", "[BLOCKING] coverage: no test\nadd one")],
+            verdict="request_changes",
+        )
+    )
