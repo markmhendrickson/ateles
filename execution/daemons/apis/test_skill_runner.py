@@ -2284,16 +2284,15 @@ class TestCrossHarnessRouting:
             "WORK",
             cwd="/repo",
         )
-        # ateles#590 added the network grant. `/repo` is not a git repo here,
-        # so no --add-dir appears; TestCodexSandboxGitRoots covers that case
-        # against a real linked worktree.
+        # ateles#590 added the network grant, but #601's review scoped it to
+        # delivery-bearing dispatches: the default carries NO network flag.
+        # `/repo` is not a git repo here, so no --add-dir appears;
+        # TestCodexSandboxGitRoots covers that against a real linked worktree.
         assert cmd == [
             "/bin/codex",
             "exec",
             "--sandbox",
             "workspace-write",
-            "-c",
-            "sandbox_workspace_write.network_access=true",
             "--ephemeral",
             "--skip-git-repo-check",
             "--color",
@@ -2526,14 +2525,27 @@ class TestCodexSandboxGitRoots:
         assert common in granted, f"--add-dir missing common gitdir: {cmd}"
         assert per_wt in granted, f"--add-dir missing worktree gitdir: {cmd}"
 
-    def test_codex_command_enables_network_for_push(self, tmp_path) -> None:
+    def test_codex_command_enables_network_only_when_asked(self, tmp_path) -> None:
         """workspace-write denies network by default, so git push / gh cannot
-        resolve github.com. Delivery needs it enabled."""
+        resolve github.com. Delivery needs it enabled — but ONLY for a dispatch
+        that delivers.
+
+        #590 asks for this "without granting blanket network access to every
+        dispatch", and the PR body's own alternatives table rejects the
+        widening; granting it unconditionally contradicted both (#601 pm lens).
+        """
         _, wt = self._worktree(tmp_path)
-        cmd, _ = skill_runner._provider_command(
+        flag = "sandbox_workspace_write.network_access=true"
+
+        off, _ = skill_runner._provider_command(
             "codex", "/bin/codex", "system", "work", cwd=str(wt)
         )
-        assert "sandbox_workspace_write.network_access=true" in cmd
+        assert flag not in off, "network must be denied by default"
+
+        on, _ = skill_runner._provider_command(
+            "codex", "/bin/codex", "system", "work", cwd=str(wt), network=True
+        )
+        assert flag in on, "a delivery-bearing dispatch still gets network"
 
     def test_sandbox_is_not_widened_to_full_access(self, tmp_path) -> None:
         """The fix must stay inside workspace-write. Reaching for
@@ -2607,8 +2619,14 @@ class TestDeliveryFailureIsReportedAsFailure:
             is None
         )
 
-    def _dispatch_with_child_output(self, stdout: bytes, returncode: int = 0):
-        """run_skill against a fake child that prints `stdout` and exits 0."""
+    def _dispatch_with_child_output(
+        self, stdout: bytes, returncode: int = 0, stderr: bytes = b""
+    ):
+        """run_skill against a fake child that prints `stdout` and exits 0.
+
+        `stderr` is where git actually writes its denial lines, and is the only
+        stream the detector reads — see test_quoted_denial_on_stdout_is_not_a_denial.
+        """
         instance = MagicMock()
         instance.load.return_value = _make_def()
 
@@ -2617,7 +2635,7 @@ class TestDeliveryFailureIsReportedAsFailure:
             proc.returncode = returncode
 
             async def _communicate(input=None):
-                return stdout, b""
+                return stdout, stderr
 
             proc.communicate = _communicate
             return proc
@@ -2639,8 +2657,8 @@ class TestDeliveryFailureIsReportedAsFailure:
     def test_rc_zero_with_denied_commit_reports_not_ok(self) -> None:
         """THE defect: rc=0, real work done, nothing delivered, ok:true."""
         result = self._dispatch_with_child_output(
-            b"Added the function and the tests; 12 passed.\n"
-            + self.INDEX_LOCK.encode()
+            b"Added the function and the tests; 12 passed.\n",
+            stderr=self.INDEX_LOCK.encode(),
         )
         assert result.ok is False, "a dispatch that could not commit reported ok"
         assert result.returncode == 0
@@ -2648,10 +2666,33 @@ class TestDeliveryFailureIsReportedAsFailure:
 
     def test_rc_zero_with_denied_push_reports_not_ok(self) -> None:
         result = self._dispatch_with_child_output(
-            b"Committed locally.\n" + self.NO_NETWORK.encode()
+            b"Committed locally.\n", stderr=self.NO_NETWORK.encode()
         )
         assert result.ok is False
         assert result.error, "ok:false must always carry a reason"
+
+    def test_quoted_denial_on_stdout_is_not_a_denial(self) -> None:
+        """An agent that READS about a denial has not suffered one.
+
+        The detector searched a joined stdout+stderr blob for the signatures
+        wherever they appeared, so an agent dispatched to read ateles#601, its
+        diff, or an issue quoting the reproduction was reported as a failed
+        delivery — and, because that flips ok to False on an rc=0 run, its whole
+        stdout then reached the capacity/auth classifier, which could cool a
+        provider and replay side-effecting work on the operator's other quota
+        (#601, two lenses compounding).
+
+        git writes these lines to stderr; quoted prose arrives on stdout.
+        """
+        quoted = (
+            b"I read the PR. It reports:\n"
+            + self.INDEX_LOCK.encode()
+            + b"\nand explains the --add-dir fix. Nothing to change.\n"
+        )
+        result = self._dispatch_with_child_output(quoted, stderr=b"")
+
+        assert result.ok is True, "quoting a denial is not being denied"
+        assert result.error == ""
 
     def test_clean_run_still_reports_ok(self) -> None:
         """The guard must not turn every successful dispatch into a failure."""

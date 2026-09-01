@@ -800,15 +800,18 @@ def _git_roots_for_sandbox(cwd: str | None) -> list[str]:
 # ateles#566 (401 reported ok) and ateles#560 (grant_checker failing open).
 _DELIVERY_DENIAL_SIGNATURES: tuple[tuple[str, str], ...] = (
     (
-        r"unable to create '[^']*index\.lock': operation not permitted",
+        r"(?:fatal|error): unable to create '[^']*index\.lock': "
+        r"operation not permitted",
         "sandbox denied the git index lock — the child could not commit",
     ),
     (
-        r"unable to create temporary file: operation not permitted",
+        r"(?:fatal|error): unable to create temporary file: "
+        r"operation not permitted",
         "sandbox denied writes to the git object store — the child could not commit",
     ),
     (
-        r"could not resolve host: (?:github\.com|api\.github\.com)",
+        r"fatal: unable to access '[^']*': could not resolve host: "
+        r"(?:github\.com|api\.github\.com)",
         "sandbox denied network access — the child could not push or reach the GitHub API",
     ),
     (
@@ -825,10 +828,21 @@ def _delivery_failure_reason(*texts: str) -> str | None:
     task was meant to deliver, so a task that never intended to commit is not
     penalised — it simply never emits these lines.
     """
-    blob = " ".join(text for text in texts if text).lower()
-    for pattern, reason in _DELIVERY_DENIAL_SIGNATURES:
-        if re.search(pattern, blob):
-            return reason
+    # Matched per LINE, anchored at the start, because that is where git emits
+    # these — "fatal: ..." and "error: ..." begin a line. Searching a joined
+    # blob matched the strings wherever they appeared, including quoted inside
+    # ordinary prose: this PR's own body and diff both trip three of the four
+    # signatures, so any agent dispatched to read them was reported as a failed
+    # delivery (ateles#601 pm lens, reproduced). Anchoring is what separates
+    # "git said this" from "someone wrote this down".
+    for text in texts:
+        if not text:
+            continue
+        for line in text.lower().splitlines():
+            stripped = line.strip()
+            for pattern, reason in _DELIVERY_DENIAL_SIGNATURES:
+                if re.match(pattern, stripped):
+                    return reason
     return None
 
 
@@ -839,8 +853,15 @@ def _provider_command(
     work_prompt: str,
     *,
     cwd: str | None,
+    network: bool = False,
 ) -> tuple[list[str], bytes | None]:
-    """Build one provider's noninteractive command and initial stdin payload."""
+    """Build one provider's noninteractive command and initial stdin payload.
+
+    ``network`` opens the codex sandbox's network access for THIS dispatch only.
+    #590 asks for it "without granting blanket network access to every
+    dispatch", so it is off by default and the caller turns it on for the
+    dispatches whose task actually involves GitHub delivery.
+    """
     if provider == "claude":
         return [binary, "--print", "--append-system-prompt", system_prompt], None
 
@@ -862,16 +883,22 @@ def _provider_command(
             log.info(
                 "[apis] codex sandbox: granting git roots %s", ", ".join(git_roots)
             )
+        # Delivery needs github.com — but only a delivery-bearing dispatch does.
+        # Scoped to the workspace-write policy rather than dropping the sandbox,
+        # and to the dispatches that need it rather than to all of them (#590:
+        # "without granting blanket network access to every dispatch").
+        network_flags = (
+            ["-c", "sandbox_workspace_write.network_access=true"] if network else []
+        )
+        if network:
+            log.info("[apis] codex sandbox: network enabled for this dispatch")
         return (
             [
                 binary,
                 "exec",
                 "--sandbox",
                 "workspace-write",
-                # Delivery needs github.com. Scoped to the workspace-write
-                # policy rather than dropping the sandbox entirely.
-                "-c",
-                "sandbox_workspace_write.network_access=true",
+                *network_flags,
                 *add_dir_flags,
                 "--ephemeral",
                 "--skip-git-repo-check",
@@ -1041,8 +1068,16 @@ async def _run_skill_once(
             log.debug(f"[apis] degraded harness_event write failed: {exc}")
 
     # ── Build provider command ─────────────────────────────────────────────────
+    # A dispatch carrying the GitHub contract is one whose task involves
+    # commit/push/PR — the delivery path #590 is about. Everything else runs
+    # with the sandbox's default network denial.
     cmd, stdin_payload = _provider_command(
-        provider, binary, system_prompt, prompt, cwd=cwd
+        provider,
+        binary,
+        system_prompt,
+        prompt,
+        cwd=cwd,
+        network=include_github_contract,
     )
 
     # ── Stage 6: inject Neotoma MCP config so dispatched child can reach Neotoma ─
@@ -1278,7 +1313,12 @@ async def _run_skill_once(
         # The exit code is therefore necessary but not sufficient: a run is ok
         # only if the process succeeded AND nothing in its output says the
         # sandbox refused the delivery.
-        _delivery_denial = _delivery_failure_reason(_stdout_text, _stderr_text)
+        # STDERR ONLY. git writes these lines to stderr; an agent that merely
+        # QUOTES one — reading this PR, an issue, or a transcript — emits it on
+        # stdout as prose. Scanning both made "the child read about a denial"
+        # indistinguishable from "the child was denied", and the reproduction
+        # transcript in #601's own body is a verbatim instance of that.
+        _delivery_denial = _delivery_failure_reason(_stderr_text)
         if _delivery_denial and proc.returncode == 0:
             log.error(
                 f"[apis] {skill} dispatch via {provider} exited 0 but could not "
