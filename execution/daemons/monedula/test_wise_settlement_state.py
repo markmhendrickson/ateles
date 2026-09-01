@@ -606,3 +606,57 @@ def test_result_payload_shape_is_identical_across_branches(monkeypatch) -> None:
     unsettled = _run("PENDING", "processing", monkeypatch)
     assert set(settled) == set(unsettled)
     assert settled["status"] != unsettled["status"]
+
+
+# ── manual_required must never assert a completed payment (#604 review) ─────
+#
+# Every pre-existing manual_required fired BEFORE money moved, which is why the
+# generic "Payment sent" note was tolerable. The settlement states make a
+# post-funding failure reachable: it raises into execute()'s generic handler,
+# becomes manual_required, and reached _update_task — which wrote "Payment sent
+# <date>: €<amount>" and rolled the due_date for a transfer Wise reported dead.
+# That is the exact ateles#552 behaviour this PR exists to remove, reintroduced
+# on the branch the PR itself creates (found by the security lens, by execution).
+
+
+def test_manual_required_never_claims_the_payment_was_sent(monkeypatch, calls) -> None:
+    result = {
+        "status": "manual_required",
+        "handler": "invoice",
+        "error": "transfer bounced_back after funding",
+        "amount_eur": Decimal("100.00"),
+        "transfer_id": 7,
+    }
+
+    _update_task(_profile(), result)
+
+    written = " ".join(notes(calls))
+    assert "Payment sent" not in written, (
+        "a manual_required is not a completed payment — this is ateles#552"
+    )
+    assert "NOT COMPLETED" in written
+    assert "bounced_back after funding" in written, "the reason must reach the task"
+
+
+def test_manual_required_does_not_roll_a_recurring_due_date(monkeypatch, calls) -> None:
+    """Rolling the due date retires a payment that never completed.
+
+    The next occurrence is stubbed to a real date: without it the roll is
+    unreachable for an unrelated reason and the assertion would pass whether or
+    not the guard exists.
+    """
+    monkeypatch.setattr(
+        "handlers.wise_transfer._find_next_event_due_date", lambda _p: "2026-09-30"
+    )
+    result = {
+        "status": "manual_required",
+        "handler": "invoice",
+        "error": "transfer bounced_back after funding",
+        "amount_eur": Decimal("100.00"),
+        "transfer_id": 7,
+    }
+
+    _update_task(_recurring(), result)
+
+    assert due_dates(calls) == [], "a failed payment must keep its original due_date"
+    assert status_updates(calls) == [], "no done, no archived"

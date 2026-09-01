@@ -1050,6 +1050,19 @@ def _update_task(profile: PaymentProfile, result: dict) -> None:
             f"AWAITING SETTLEMENT (wise_status={result.get('wise_status', '')}, "
             f"wise_transfer_status={result.get('wise_transfer_status', '')})"
         )
+    elif status == "manual_required":
+        # NEVER "Payment sent" for a manual_required. Before the settlement
+        # states existed every manual_required fired BEFORE money moved, which
+        # is why the generic note was tolerable; now a transfer can fail AFTER
+        # funding and reach here, and asserting a completed payment over it is
+        # the ateles#552 defect this PR was written to remove (ateles#604
+        # review, demonstrated by execution).
+        note = (
+            f"Payment NOT COMPLETED {today.isoformat()}: "
+            f"€{amount} Wise transfer_id={transfer_id} ref={reference} — "
+            f"{result.get('error', 'manual intervention required')}; "
+            f"task left open, due_date not rolled, operator decision required"
+        )
     else:
         note = (
             f"Payment sent {today.isoformat()}: "
@@ -1063,6 +1076,13 @@ def _update_task(profile: PaymentProfile, result: dict) -> None:
     # no --status done, no --status archived, no --due-date roll.
     if status == RESULT_AWAITING_SETTLEMENT:
         _mark_awaiting_settlement(profile, result, neotoma)
+        return
+
+    # Same for a manual_required: the note above records what happened, and
+    # nothing further is written. Rolling the due_date here would retire a
+    # payment that did not complete — and if the failure came after funding,
+    # the money has already moved.
+    if status == "manual_required":
         return
 
     # A one-off invoice has no "next" occurrence: close the task and archive the

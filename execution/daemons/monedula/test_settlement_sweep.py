@@ -199,7 +199,13 @@ def test_failed_transfer_leaves_task_open_and_does_not_rearm(
     payment again, on a transfer whose money may or may not have come back.
     Re-payment is an operator decision.
     """
-    _wire(monkeypatch, [_parked()], {"status": "bounced_back"})
+    # Second observation: the first already latched bounced_back onto the
+    # profile, so this read is the confirming one.
+    _wire(
+        monkeypatch,
+        [_parked(pending_failed_status="bounced_back")],
+        {"status": "bounced_back"},
+    )
 
     records = settlement.sweep_pending_settlements("tok", today=TODAY)
 
@@ -209,6 +215,78 @@ def test_failed_transfer_leaves_task_open_and_does_not_rearm(
     assert ("status", "active") not in got
     assert status_updates(calls) == []  # no done, no archived
     assert any("FAILED" in n for n in notes(calls))
+    assert no_wise_post == []
+
+
+# ── the two-observation failure guard (ateles#604 review) ───────────────────
+#
+# The module documented this guard and did not implement it: `_resolve_one`
+# acted on the FIRST failed read, wrote payment_failed and cleared
+# pending_transfer_id — after which nothing re-read the transfer, so a
+# transient was permanent. The operator's own ledger has bounced_back appearing
+# ~20s after funding and resolving back to processing on the next poll, which
+# is exactly the case that would have been declared dead.
+
+
+def test_a_single_failed_read_records_no_terminal_outcome(
+    monkeypatch, calls, no_wise_post
+) -> None:
+    """First observation latches the status and writes nothing terminal."""
+    _wire(monkeypatch, [_parked()], {"status": "bounced_back"})
+
+    records = settlement.sweep_pending_settlements("tok", today=TODAY)
+
+    assert records[0]["outcome"] == "failed_pending_confirmation"
+    got = {(f, v) for _e, f, v in corrections(calls)}
+    assert ("pending_failed_status", "bounced_back") in got, "the read must be latched"
+    assert ("status", "payment_failed") not in got, "one read is not a verdict"
+    assert not any(f == "pending_transfer_id" for _e, f, _v in corrections(calls)), (
+        "clearing the transfer id on one read makes the error permanent"
+    )
+    assert status_updates(calls) == []
+    assert no_wise_post == []
+
+
+def test_a_transient_failure_that_recovers_clears_the_latch(
+    monkeypatch, calls, no_wise_post
+) -> None:
+    """bounced_back -> processing must not leave the profile pre-confirmed.
+
+    This is the transient the guard exists for. Without clearing, an unrelated
+    failure months later would be treated as already-confirmed on its first
+    read — the same one-read verdict by another route.
+    """
+    _wire(
+        monkeypatch,
+        [_parked(pending_failed_status="bounced_back")],
+        {"status": "processing"},
+    )
+
+    records = settlement.sweep_pending_settlements("tok", today=TODAY)
+
+    assert records[0]["outcome"] == "in_flight"
+    assert ("pending_failed_status", "") in {
+        (f, v) for _e, f, v in corrections(calls)
+    }, "a recovered transfer must clear the latch"
+    assert no_wise_post == []
+
+
+def test_two_different_failed_statuses_do_not_confirm_each_other(
+    monkeypatch, calls, no_wise_post
+) -> None:
+    """The guard requires the SAME status twice, not merely two failures."""
+    _wire(
+        monkeypatch,
+        [_parked(pending_failed_status="bounced_back")],
+        {"status": "charged_back"},
+    )
+
+    records = settlement.sweep_pending_settlements("tok", today=TODAY)
+
+    assert records[0]["outcome"] == "failed_pending_confirmation"
+    got = {(f, v) for _e, f, v in corrections(calls)}
+    assert ("pending_failed_status", "charged_back") in got
+    assert ("status", "payment_failed") not in got
     assert no_wise_post == []
 
 

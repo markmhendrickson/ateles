@@ -106,9 +106,40 @@ def _resolve_one(
         return record
 
     if state == "failed":
+        # Two consecutive observations of the SAME failed status before any
+        # terminal outcome is written — the guard the module docstring and
+        # WISE_TRANSFER_FAILED both promise, which was documented but never
+        # implemented (ateles#604 review, found independently by two lenses).
+        # The operator's ledger has bounced_back appearing ~20s after funding
+        # and resolving back to processing on the next poll, so acting on one
+        # read declares a healthy transfer dead, writes payment_failed, and
+        # clears pending_transfer_id — after which nothing re-reads the
+        # transfer and the error is permanent.
+        seen = record["wise_status"]
+        if (profile.pending_failed_status or "") != seen:
+            set_entity_field(
+                neotoma, profile.entity_id, "pending_failed_status", seen
+            )
+            record["outcome"] = "failed_pending_confirmation"
+            log.warning(
+                "[monedula] %s: Wise reports %s for transfer %s — holding for a "
+                "second confirming read before recording a terminal failure",
+                profile.label,
+                seen,
+                transfer_id,
+            )
+            return record
+
         record["outcome"] = "failed"
         _on_failed(profile, transfer_id, record["wise_status"], neotoma, today)
         return record
+
+    # A transfer that came back from a failed status clears the latch: the
+    # first observation is only evidence while it is still the current state.
+    # Without this a bounce months ago would silently pre-confirm an unrelated
+    # failure later, which is the same one-read verdict by another route.
+    if profile.pending_failed_status:
+        set_entity_field(neotoma, profile.entity_id, "pending_failed_status", "")
 
     # in_flight or unreadable — write nothing at all. The transfer is still on
     # its way (or Wise could not be read), and either way there is nothing yet

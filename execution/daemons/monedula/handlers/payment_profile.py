@@ -165,6 +165,13 @@ class PaymentProfile:
     # and pending_transfer_at to age the wait for operator escalation.
     pending_transfer_id: str = ""
     pending_transfer_at: str = ""  # ISO YYYY-MM-DD the transfer was submitted
+    # The last failed status observed for pending_transfer_id, if any. A failed
+    # read is never acted on alone: the operator's ledger records bounced_back
+    # appearing ~20s after funding and resolving back to processing on the next
+    # poll, so a one-read verdict would declare a healthy transfer dead. The
+    # sweep requires the SAME failed status on two consecutive observations,
+    # and this field is what carries the first one across ticks (and restarts).
+    pending_failed_status: str = ""
 
     # Neotoma task
     neotoma_task_id: str = ""
@@ -280,6 +287,7 @@ def _profile_from_entity(item: dict) -> PaymentProfile | None:
         entity_id=str(item.get("entity_id") or "").strip(),
         pending_transfer_id=str(snap.get("pending_transfer_id") or "").strip(),
         pending_transfer_at=str(snap.get("pending_transfer_at") or "").strip(),
+        pending_failed_status=str(snap.get("pending_failed_status") or "").strip(),
         neotoma_task_id=snap.get("neotoma_task_id", ""),
         task_keywords=task_keywords,
     )
