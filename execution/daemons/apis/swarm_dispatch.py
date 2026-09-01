@@ -2249,7 +2249,9 @@ class SwarmDispatcher:
             log.info(f"[{DAEMON_NAME}] revision sweep: {summary}")
         return summary
 
-    async def report_pr_review_queue(self, repositories: list[str]) -> dict:
+    async def report_pr_review_queue(
+        self, repositories: list[str], now: datetime | None = None
+    ) -> dict:
         """Surface APPROVED-unmerged PRs before they rot into a conflict.
 
         ateles#565. Three of the four APPROVED PRs found on 2026-08-31 had gone
@@ -2285,6 +2287,13 @@ class SwarmDispatcher:
         the moment the operator's available action changed.
 
         Fail-open: a broken report must never stop the loop.
+
+        ``now`` is the reference instant every age is measured against, and
+        defaults to the wall clock. Production never passes it; tests do, so
+        that a frozen review timestamp and the reference date move together.
+        Without it a test's expected age drifts by a day every calendar day —
+        which is exactly how this signature came to exist (see the note on
+        ``NOW`` in test_merge_carrier.py).
         """
         stale_days = int(os.environ.get("APIS_APPROVED_STALE_DAYS", "3"))
         report: dict = {
@@ -2299,7 +2308,7 @@ class SwarmDispatcher:
             "escalated": 0,
             "prs": [],
         }
-        now = datetime.now(timezone.utc)
+        now = now or datetime.now(timezone.utc)
 
         for repository in repositories:
             try:
