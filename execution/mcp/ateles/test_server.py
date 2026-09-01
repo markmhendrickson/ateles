@@ -965,7 +965,7 @@ class TestMergeGate(unittest.TestCase):
     OLD = "bb4340a6112233445566778899aabbccddeeff00"
 
     def _fake_github(self, *, pr=None, reviews=None, status=None, runs=None,
-                     comments=None, repo_meta=None, errors=None):
+                     comments=None, repo_meta=None, repo_meta_err=None, errors=None):
         """Route _github_get by path, the way the live API would."""
         errors = errors or {}
 
@@ -984,6 +984,8 @@ class TestMergeGate(unittest.TestCase):
             if "/pulls/" in path:
                 return (pr if pr is not None else self._pr()), None
             # /repos/{owner}/{repo}
+            if repo_meta_err:
+                return None, repo_meta_err
             return (repo_meta if repo_meta is not None else {"default_branch": "main"}), None
 
         return _get
@@ -1168,6 +1170,46 @@ class TestMergeGate(unittest.TestCase):
         )
         self.assertFalse(gate["mergeable"])
 
+    def test_mergeable_false_blocks(self):
+        """The real-merge-conflict path — distinct from mergeable=None."""
+        gate = self._evaluate(
+            pr=self._pr(mergeable=False, mergeable_state="dirty"),
+            reviews=[self._review("APPROVED", self.HEAD)],
+        )
+        self.assertFalse(gate["mergeable"])
+        self.assertTrue(any("not mergeable" in b and "dirty" in b
+                            for b in gate["blockers"]))
+
+    def test_branch_protection_blocked_state_blocks(self):
+        """mergeable_state == 'blocked' is a fifth, independent condition —
+        the branch-protection signal `gh pr merge` can't see. mergeable=True
+        is deliberate here: it proves this isn't just condition 2 restated.
+        """
+        gate = self._evaluate(
+            pr=self._pr(mergeable=True, mergeable_state="blocked"),
+            reviews=[self._review("APPROVED", self.HEAD)],
+        )
+        self.assertFalse(gate["mergeable"])
+        self.assertTrue(any("branch protection reports the PR as blocked" in b
+                            for b in gate["blockers"]))
+
+    def test_closed_pr_blocks(self):
+        gate = self._evaluate(
+            pr=self._pr(state="closed"),
+            reviews=[self._review("APPROVED", self.HEAD)],
+        )
+        self.assertFalse(gate["mergeable"])
+        self.assertTrue(any("is closed, not open" in b for b in gate["blockers"]))
+
+    def test_default_branch_lookup_failure_blocks(self):
+        gate = self._evaluate(
+            reviews=[self._review("APPROVED", self.HEAD)],
+            repo_meta_err="HTTP 403",
+        )
+        self.assertFalse(gate["mergeable"])
+        self.assertTrue(any("could not read the default branch" in b
+                            for b in gate["blockers"]))
+
     def test_draft_blocks(self):
         gate = self._evaluate(
             pr=self._pr(draft=True), reviews=[self._review("APPROVED", self.HEAD)]
@@ -1181,6 +1223,16 @@ class TestMergeGate(unittest.TestCase):
         )
         self.assertFalse(gate["mergeable"])
         self.assertTrue(gate["bypass_notice"])
+
+    def test_unreadable_bypass_notice_blocks(self):
+        """Fail closed, same as the unreadable-reviews/unreadable-checks cases."""
+        gate = self._evaluate(
+            reviews=[self._review("APPROVED", self.HEAD)],
+            errors={"/comments": "HTTP 403 — token lacking scope"},
+        )
+        self.assertFalse(gate["mergeable"])
+        self.assertTrue(any("could not check for the pipeline-bypass notice" in b
+                            for b in gate["blockers"]))
 
     def test_already_merged_is_reported_not_retried(self):
         gate = self._evaluate(pr=self._pr(merged=True))
