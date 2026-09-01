@@ -16,11 +16,14 @@ All times are in the rubric's configured timezone (default: Europe/Madrid).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
+import tempfile
 from datetime import datetime, time
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 try:
@@ -113,7 +116,24 @@ class Notifier:
         self._notify_to = (
             os.environ.get("ATELES_NOTIFY_TO", "").strip() or self._operator_email
         )
-        self._digest_queue: list[str] = []
+        # The digest queue is PERSISTENT and self-flushing.
+        #
+        # It used to be a plain in-memory list with `flush_digest()` as its only
+        # drain — and `flush_digest()` had zero non-test callers anywhere in the
+        # tree. Every daemon is a long-lived process, so an OPERATOR_DECISION
+        # raised inside the silence window was appended to that list and then
+        # never delivered, never persisted, and lost entirely on restart.
+        # Measured on apis.log 2026-09-01: 45 "queuing for digest" lines, 0
+        # digests ever sent. That is the mechanism behind the "escalation was
+        # written somewhere nobody reads" failure (ateles#565, #583) — an
+        # auto-fix-exhausted PR pinged the operator into a list that had no
+        # reader. Backing it with a file and draining it opportunistically on
+        # the next send means a queued escalation survives a restart and leaves
+        # the queue without needing a scheduler that does not exist.
+        self._digest_path = Path(
+            os.environ.get("ATELES_DIGEST_QUEUE_PATH", "").strip()
+            or Path(tempfile.gettempdir()) / "ateles-notify-digest.json"
+        )
         self._apprise: Any = None
         if HAS_APPRISE:
             self._apprise = apprise.Apprise()
@@ -167,6 +187,9 @@ class Notifier:
         tag = f"[{handler}] " if handler else ""
         full_message = f"{tag}{message}"
 
+        # Give the persisted queue a reader on every send (see _maybe_flush_digest).
+        self._maybe_flush_digest()
+
         if prio == Priority.CRITICAL:
             # Critical always fires immediately, even in silence window
             return self._deliver(full_message, force=True)
@@ -183,29 +206,94 @@ class Notifier:
                 log.info(
                     "[notify] Operator decision in silence window — queuing for digest"
                 )
-                self._digest_queue.append(f"⚠️ {full_message}")
+                self._queue_digest(f"⚠️ {full_message}")
                 return False
             return self._deliver(f"⚠️ {full_message}", force=False)
 
         if prio == Priority.WARN:
             if self._in_silence_window() and not bypass_silence:
-                self._digest_queue.append(f"⚠ {full_message}")
+                self._queue_digest(f"⚠ {full_message}")
                 return False
             return self._deliver(f"⚠ {full_message}", force=False)
 
         # INFO — always digest
-        self._digest_queue.append(full_message)
+        self._queue_digest(full_message)
         log.debug(f"[notify] Queued for digest: {full_message!r}")
         return False
 
+    # ── Digest queue (file-backed) ───────────────────────────────────────────
+
+    @property
+    def _digest_queue(self) -> list[str]:
+        """Read the persisted queue. Fail-open: unreadable state => empty."""
+        try:
+            raw = json.loads(self._digest_path.read_text())
+            return [str(x) for x in raw] if isinstance(raw, list) else []
+        except FileNotFoundError:
+            return []
+        except Exception as exc:  # noqa: BLE001 — never crash a notification
+            log.warning("[notify] digest queue unreadable (%s) — treating as empty", exc)
+            return []
+
+    def _queue_digest(self, message: str) -> None:
+        """Append to the persisted queue, atomically. Never raises."""
+        try:
+            items = self._digest_queue
+            items.append(message)
+            self._digest_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._digest_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(items))
+            tmp.replace(self._digest_path)
+        except Exception as exc:  # noqa: BLE001
+            # Losing the queue write must not lose the alert: say so loudly.
+            log.error(
+                "[notify] could not persist digest item (%s) — message not "
+                "queued and will NOT be delivered: %r",
+                exc,
+                message[:200],
+            )
+
     def flush_digest(self) -> bool:
-        """Send all queued digest messages as a single Telegram message."""
-        if not self._digest_queue:
+        """Send all queued digest messages as a single message.
+
+        Clears the persisted queue only after a successful delivery, so a
+        failed send leaves the items for the next attempt instead of dropping
+        them silently.
+        """
+        items = self._digest_queue
+        if not items:
             return False
-        body = "\n".join(f"• {m}" for m in self._digest_queue)
-        header = f"📋 Digest ({len(self._digest_queue)} items)\n\n"
-        self._digest_queue.clear()
-        return self._deliver(header + body, force=True)
+        body = "\n".join(f"• {m}" for m in items)
+        header = f"📋 Digest ({len(items)} items)\n\n"
+        ok = self._deliver(header + body, force=True)
+        if ok:
+            try:
+                self._digest_path.unlink(missing_ok=True)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[notify] digest sent but queue not cleared: %s", exc)
+        else:
+            log.warning(
+                "[notify] digest delivery failed — keeping %d item(s) queued",
+                len(items),
+            )
+        return ok
+
+    def _maybe_flush_digest(self) -> None:
+        """Drain the queue opportunistically, on any send.
+
+        Nothing in the tree ever called `flush_digest()`, so queued items were
+        immortal. Daemons do emit notifications continuously, so piggy-backing
+        the drain on the next send gives the queue a real reader without
+        introducing a scheduler. Also drains once the silence window has ended,
+        which is when the operator can actually act on what was held back.
+        """
+        try:
+            if not self._digest_queue:
+                return
+            if self.should_flush_digest() or not self._in_silence_window():
+                self.flush_digest()
+        except Exception as exc:  # noqa: BLE001 — a drain must never break a send
+            log.warning("[notify] opportunistic digest flush failed: %s", exc)
 
     def should_flush_digest(self) -> bool:
         """True if current time matches a digest window (within 5 min)."""
