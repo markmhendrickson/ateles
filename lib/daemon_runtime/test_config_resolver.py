@@ -42,12 +42,20 @@ def _isolate(tmp_path, monkeypatch):
 
 
 def _no_neotoma(monkeypatch):
-    monkeypatch.setattr(cr, "_fetch_from_neotoma", lambda daemon: ({}, None))
+    monkeypatch.setattr(
+        cr, "_fetch_from_neotoma", lambda daemon: ({}, None, "error")
+    )
 
 
 def _neotoma_returns(monkeypatch, values, entity_id="ent_test"):
     monkeypatch.setattr(
-        cr, "_fetch_from_neotoma", lambda daemon: (values, entity_id)
+        cr, "_fetch_from_neotoma", lambda daemon: (values, entity_id, "ok")
+    )
+
+
+def _neotoma_empty(monkeypatch):
+    monkeypatch.setattr(
+        cr, "_fetch_from_neotoma", lambda daemon: ({}, None, "empty")
     )
 
 
@@ -233,10 +241,11 @@ def test_exact_daemon_name_match_required(monkeypatch):
             }
 
     monkeypatch.setattr(cr.httpx, "post", lambda *a, **k: _Resp())
-    values, entity_id = cr._fetch_from_neotoma("apis")
+    values, entity_id, status = cr._fetch_from_neotoma("apis")
 
     assert values == {}
     assert entity_id is None
+    assert status == "empty"
 
 
 def test_fetch_uses_entities_query_post(monkeypatch):
@@ -262,6 +271,18 @@ def test_fetch_uses_entities_query_post(monkeypatch):
 
     assert seen["url"].endswith("/entities/query")
     assert seen["json"]["entity_type"] == "daemon_configuration"
+
+
+def test_reachable_neotoma_no_entity_env_resolved_not_degraded(monkeypatch):
+    """Reachable Neotoma with zero matching entities is not degradation."""
+    _neotoma_empty(monkeypatch)
+    monkeypatch.setenv("SUB_ENV", "from-env")
+
+    got = resolve("apis", [ConfigSpec(key="sse_subscription_id", env_var="SUB_ENV")])
+
+    assert got.get("sse_subscription_id") == "from-env"
+    assert got.source_of("sse_subscription_id") == "env"
+    assert got.degraded is False
 
 
 # ── the guard must survive the real entrypoint ──────────────────────────────

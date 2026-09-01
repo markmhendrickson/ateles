@@ -60,7 +60,9 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+FetchStatus = Literal["ok", "empty", "error"]
 
 import httpx
 
@@ -208,11 +210,15 @@ def _unwrap_query_snapshot(ent: dict) -> dict:
     return snap if isinstance(snap, dict) else {}
 
 
-def _fetch_from_neotoma(daemon: str) -> tuple[dict, str | None]:
+def _fetch_from_neotoma(daemon: str) -> tuple[dict, str | None, FetchStatus]:
     """Fetch the `daemon_configuration` entity for this daemon.
 
-    Returns (config_values, entity_id). Time-boxed; returns ({}, None) on any
-    failure so the caller can fall through to cache. Never raises.
+    Returns (config_values, entity_id, fetch_status) where fetch_status is:
+      - ``ok`` — matching entity found
+      - ``empty`` — Neotoma responded but no matching entity (Phase 1 default)
+      - ``error`` — HTTP/timeout/parse failure; caller should treat as degraded
+
+    Time-boxed; never raises.
     """
     url = f"{NEOTOMA_BASE_URL}/entities/query"
     body = {
@@ -235,7 +241,7 @@ def _fetch_from_neotoma(daemon: str) -> tuple[dict, str | None]:
             f"[{daemon}] could not fetch daemon_configuration from Neotoma "
             f"({type(exc).__name__}: {exc}) — falling back to cache/env"
         )
-        return {}, None
+        return {}, None, "error"
 
     entities = data.get("entities") or data.get("results") or []
     for ent in entities:
@@ -249,13 +255,13 @@ def _fetch_from_neotoma(daemon: str) -> tuple[dict, str | None]:
         if not isinstance(values, dict):
             log.warning(f"[{daemon}] daemon_configuration.config is not an object")
             values = {}
-        return values, ent.get("entity_id") or ent.get("id")
+        return values, ent.get("entity_id") or ent.get("id"), "ok"
 
     log.warning(
         f"[{daemon}] no daemon_configuration entity with daemon_name=={daemon!r} "
         f"(searched {len(entities)} candidate(s) via POST /entities/query)"
     )
-    return {}, None
+    return {}, None, "empty"
 
 
 def resolve(
@@ -273,8 +279,9 @@ def resolve(
 
     remote: dict = {}
     entity_id: str | None = None
+    fetch_status: FetchStatus = "empty"
     if allow_neotoma:
-        remote, entity_id = _fetch_from_neotoma(daemon)
+        remote, entity_id, fetch_status = _fetch_from_neotoma(daemon)
 
     if remote:
         _write_cache(daemon, remote, entity_id)
@@ -283,11 +290,16 @@ def resolve(
     else:
         cached, cache_age = _read_cache(daemon)
         result.cache_age_seconds = cache_age
-        result.degraded = allow_neotoma
+        result.degraded = allow_neotoma and fetch_status == "error"
         if cached and cache_age is not None and cache_age > CACHE_STALE_WARN_SECONDS:
+            neotoma_reason = (
+                "Neotoma unreachable"
+                if fetch_status == "error"
+                else "no daemon_configuration entity in Neotoma"
+            )
             log.warning(
                 f"[{daemon}] using config cache written "
-                f"{cache_age / 86400:.1f} days ago — Neotoma unreachable and this "
+                f"{cache_age / 86400:.1f} days ago — {neotoma_reason} and this "
                 f"config may be stale"
             )
 
