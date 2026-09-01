@@ -14,6 +14,7 @@ Loads transcribe_audio as a module, stubbing the ``config`` import it expects
 imported and exercised directly.
 """
 
+import json
 import os
 import sys
 import types
@@ -382,3 +383,173 @@ def test_elevenlabs_multichannel_regression_guard():
     text, _lang = ta._parse_elevenlabs_stt_response(body, "en")
     assert "Vexcorp" in text
     assert "Vexcorb" not in text
+
+
+# ---------------------------------------------------------------------------
+# Content-addressed transcription idempotency (ateles#625)
+#
+# The keys used to be sha256(absolute_path). Moving or renaming a recording
+# therefore changed its key, so the file silently re-transcribed and re-uploaded:
+# duplicate entities plus real API spend, with no error raised. These tests pin
+# the property that actually matters — the key follows the BYTES, not the path.
+# ---------------------------------------------------------------------------
+
+
+def _write_audio(path: Path, payload: bytes = b"RIFFfake-audio-bytes-0123456789") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    return path
+
+
+def test_idempotency_key_survives_a_move(tmp_path):
+    """The same bytes at a new path must produce the same key.
+
+    This is the exact migration case: recordings move to a staging dir on their
+    way to object storage. Under path-keying this assertion fails and the file
+    re-transcribes.
+    """
+    original = _write_audio(tmp_path / "here" / "meeting.m4a")
+    key_before = ta._transcription_idempotency_key(original)
+
+    moved = tmp_path / "there" / "renamed-by-the-migration.m4a"
+    moved.parent.mkdir(parents=True, exist_ok=True)
+    original.rename(moved)
+
+    assert ta._transcription_idempotency_key(moved) == key_before
+
+
+def test_file_idempotency_key_survives_a_move(tmp_path):
+    """The audio-upload key must be content-addressed too.
+
+    A path-keyed file key re-uploads the same bytes under a second source id.
+    """
+    original = _write_audio(tmp_path / "a" / "rec.m4a")
+    key_before = ta._transcription_file_idempotency_key(original)
+
+    moved = tmp_path / "b" / "rec.m4a"
+    moved.parent.mkdir(parents=True, exist_ok=True)
+    original.rename(moved)
+
+    assert ta._transcription_file_idempotency_key(moved) == key_before
+
+
+def test_different_content_gets_a_different_key(tmp_path):
+    """Content-addressing must still separate genuinely different recordings."""
+    one = _write_audio(tmp_path / "one.m4a", b"first recording bytes")
+    two = _write_audio(tmp_path / "two.m4a", b"second recording bytes")
+
+    assert ta._transcription_idempotency_key(one) != ta._transcription_idempotency_key(two)
+
+
+def test_same_content_at_two_paths_shares_a_key(tmp_path):
+    """A copy is the same recording; it must not transcribe twice."""
+    payload = b"identical audio payload"
+    one = _write_audio(tmp_path / "x" / "rec.m4a", payload)
+    two = _write_audio(tmp_path / "y" / "different-name.m4a", payload)
+
+    assert ta._transcription_idempotency_key(one) == ta._transcription_idempotency_key(two)
+
+
+def test_key_is_stable_across_repeated_calls(tmp_path):
+    audio = _write_audio(tmp_path / "rec.m4a")
+    assert ta._transcription_idempotency_key(audio) == ta._transcription_idempotency_key(audio)
+
+
+def test_missing_file_falls_back_to_path_keying(tmp_path):
+    """An unreadable file must still yield a key rather than raising.
+
+    Hashing needs bytes; when they are not there, degrade to the old path key
+    rather than crashing a transcription run.
+    """
+    missing = tmp_path / "not-here.m4a"
+    key = ta._transcription_idempotency_key(missing)
+    assert key.startswith("transcription-audio-")
+
+
+def test_is_already_transcribed_looks_up_by_content_hash(tmp_path, monkeypatch):
+    """The dedupe lookup must query the content hash, not the absolute path.
+
+    Keying the WRITE on content while the READ still asks for the old path means
+    every moved file looks new, re-transcribes, and only then collides — which is
+    the silent duplicate-spend path this fix exists to close.
+    """
+    audio = _write_audio(tmp_path / "deep" / "rec.m4a")
+    seen = {}
+
+    def fake_cli_json(args):
+        seen["args"] = args
+        return {"entities": [{"entity_id": "ent_x"}]}
+
+    monkeypatch.setattr(ta, "_neotoma_cli_json", fake_cli_json)
+    assert ta.is_already_transcribed(audio) is True
+
+    args = seen["args"]
+    identifier = args[args.index("--identifier") + 1]
+    by_field = args[args.index("--by") + 1]
+
+    assert identifier == ta._audio_content_hash(audio)
+    assert by_field == "audio_content_sha256"
+    assert str(audio.resolve()) not in args
+
+
+def test_is_already_transcribed_finds_a_moved_recording(tmp_path, monkeypatch):
+    """End-to-end of the defect: transcribe at path A, move to B, must dedupe.
+
+    The stub stands in for Neotoma, indexing stored recordings by the identifier
+    the writer used. Under path-keying the lookup for B misses and the file
+    re-transcribes; under content-addressing it hits.
+    """
+    audio = _write_audio(tmp_path / "orig" / "session.m4a")
+    stored = {ta._transcription_idempotency_key(audio): True}
+
+    def fake_cli_json(args):
+        identifier = args[args.index("--identifier") + 1]
+        key = f"transcription-audio-{identifier}"
+        return {"entities": [{"entity_id": "ent_x"}] if key in stored else []}
+
+    monkeypatch.setattr(ta, "_neotoma_cli_json", fake_cli_json)
+
+    moved = tmp_path / "archive" / "2026-09-01-session.m4a"
+    moved.parent.mkdir(parents=True, exist_ok=True)
+    audio.rename(moved)
+
+    assert ta.is_already_transcribed(moved) is True
+
+
+def test_stored_entity_records_the_content_hash(tmp_path, monkeypatch):
+    """The hash must be persisted, or the lookup has nothing to match against."""
+    audio = _write_audio(tmp_path / "rec.m4a")
+    captured = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = json.dumps(
+            {"structured": {"entities": [{"entity_id": "ent_stored", "entity_type": "transcription"}]}}
+        )
+        stderr = ""
+
+    def fake_run(cmd, *a, **kw):
+        for i, tok in enumerate(cmd):
+            if tok == "--file":
+                captured["entities"] = json.loads(Path(cmd[i + 1]).read_text())
+        return _Proc()
+
+    monkeypatch.setattr(ta.subprocess, "run", fake_run)
+    monkeypatch.setattr(ta, "_neotoma_prod_cli_argv", lambda args: ["neotoma", *args])
+    monkeypatch.setattr(ta.shutil, "which", lambda name: "/usr/bin/neotoma")
+    monkeypatch.setattr(ta, "_neotoma_auth_preflight", lambda: (True, "ok"))
+    monkeypatch.setattr(ta, "_write_transcript_sidecars", lambda *a, **k: None)
+
+    ta.save_transcription(
+        audio,
+        {
+            "transcription_text": "hello",
+            "language": "en",
+            "audio_duration_seconds": 1.0,
+            "file_size_bytes": 10,
+        },
+        attach_audio_file=False,
+    )
+
+    entity = captured["entities"][0]
+    assert entity["audio_content_sha256"] == ta._audio_content_hash(audio)

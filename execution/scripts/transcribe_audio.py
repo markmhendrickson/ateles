@@ -1974,13 +1974,54 @@ def _json_safe_nonnegative_int(value) -> int:
     return max(0, x)
 
 
+# Read in blocks: recordings run to hundreds of MB and a whole-file read would
+# spike RSS on the daemon host for no gain.
+_HASH_BLOCK_BYTES = 1024 * 1024
+
+
+def _audio_content_hash(audio_path: Path) -> str | None:
+    """sha256 of the audio BYTES, or None when they cannot be read.
+
+    Returning None rather than raising keeps an unreadable file on the old
+    path-keyed behaviour instead of failing a transcription run outright.
+    """
+    try:
+        digest = hashlib.sha256()
+        with open(audio_path, "rb") as fh:
+            while chunk := fh.read(_HASH_BLOCK_BYTES):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
 def _transcription_idempotency_key(audio_path: Path) -> str:
-    digest = hashlib.sha256(str(audio_path.resolve()).encode()).hexdigest()
+    """Idempotency key for the ``transcription`` entity, keyed on CONTENT.
+
+    This was ``sha256(absolute_path)`` until ateles#625. Under path-keying,
+    moving or renaming a recording changed its key, so the file silently
+    re-transcribed and re-uploaded — duplicate entities plus real API spend,
+    with no error raised. That blocked the move to object storage, where every
+    file changes path by definition.
+
+    Falls back to the path digest when the bytes are unreadable, so a missing
+    file degrades to the old behaviour rather than crashing.
+    """
+    digest = _audio_content_hash(audio_path)
+    if digest is None:
+        digest = hashlib.sha256(str(audio_path.resolve()).encode()).hexdigest()
     return f"transcription-audio-{digest}"
 
 
 def _transcription_file_idempotency_key(audio_path: Path) -> str:
-    digest = hashlib.sha256(str(audio_path.resolve()).encode()).hexdigest()
+    """Idempotency key for the uploaded audio source, keyed on CONTENT.
+
+    Path-keyed, this re-uploaded identical bytes under a second source id every
+    time a recording moved.
+    """
+    digest = _audio_content_hash(audio_path)
+    if digest is None:
+        digest = hashlib.sha256(str(audio_path.resolve()).encode()).hexdigest()
     return f"transcription-wav-{digest}"
 
 
@@ -2134,27 +2175,45 @@ def apply_transcription_neotoma_relationships(
 
 
 def is_already_transcribed(audio_path: Path) -> bool:
+    """Return True if Neotoma already holds a ``transcription`` for these BYTES.
+
+    Keyed on content, matching the idempotency keys above (ateles#625). Keying
+    the write on content while this read still asked for the absolute path would
+    be worse than either alone: a moved file would look new, re-transcribe at
+    full API cost, and only then collide on store.
+
+    Falls back to the legacy ``audio_file_path`` lookup when the bytes cannot be
+    hashed, and also when the content lookup misses — rows stored before this
+    change carry no ``audio_content_sha256``, and treating them as new would
+    re-transcribe the entire existing archive.
     """
-    Return True if Neotoma already has a ``transcription`` for this absolute audio path.
-    """
-    data = _neotoma_cli_json(
-        [
-            "entities",
-            "search",
-            "--identifier",
-            str(audio_path.resolve()),
-            "--entity-type",
-            "transcription",
-            "--by",
-            "audio_file_path",
-            "--limit",
-            "1",
-        ]
-    )
-    if not data:
-        return False
-    entities = data.get("entities") or []
-    return len(entities) > 0
+
+    def _hit(identifier: str, by_field: str) -> bool:
+        data = _neotoma_cli_json(
+            [
+                "entities",
+                "search",
+                "--identifier",
+                identifier,
+                "--entity-type",
+                "transcription",
+                "--by",
+                by_field,
+                "--limit",
+                "1",
+            ]
+        )
+        if not data:
+            return False
+        return len(data.get("entities") or []) > 0
+
+    content_hash = _audio_content_hash(audio_path)
+    if content_hash and _hit(content_hash, "audio_content_sha256"):
+        return True
+
+    # Legacy rows predate content hashing; match them on the path they were
+    # stored under. A miss here is a genuine "not transcribed yet".
+    return _hit(str(audio_path.resolve()), "audio_file_path")
 
 
 def _write_transcript_sidecars(
@@ -2279,6 +2338,10 @@ def save_transcription(
         "import_source_file": audio_path.name,
         "audio_file_path": str(resolved_audio),
         "audio_file_path_data_dir_relative": audio_file_path_rel,
+        # Path-independent identity. The path fields above stay for provenance,
+        # but this is what dedupe matches on, so a recording that moves to object
+        # storage is still recognised as already transcribed (ateles#625).
+        "audio_content_sha256": _audio_content_hash(audio_path),
         "audio_file_name": audio_path.name,
         "original_source_file": original_source_file or audio_path.name,
         "source_directory": source_directory,
