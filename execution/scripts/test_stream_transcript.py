@@ -994,3 +994,82 @@ def test_a_completed_with_no_pending_span_falls_back_safely():
     boundaries = st.TurnBoundaries()
     start_s, end_s, vad_closed = boundaries.claim(42.0)
     assert (start_s, end_s) == (42.0, 42.0) and vad_closed is False
+
+
+# ---------------------------------------------------------------------------
+# The optional VAD dependency must degrade LOUDLY, not silently
+# ---------------------------------------------------------------------------
+
+
+def test_a_missing_local_vad_still_returns_none_rather_than_raising():
+    """Degrading to RMS alone is deliberate: the gate still works without VAD.
+
+    Sending too much audio costs money; failing closed loses the operator's
+    words. So a missing optional package must never take the stream down.
+    """
+    assert st.load_speech_detector(enabled=False) is None
+
+
+def test_the_degraded_state_reaches_the_operator_visible_channel():
+    """A stderr log is a write-only channel (ateles#583).
+
+    The operator watches the JSONL through the session Monitor, not the
+    daemon's stderr. When the VAD is missing the transcript is measurably more
+    fabrication-prone, so that fact has to arrive where the operator is
+    actually looking.
+    """
+    record = st.degraded_vad_record(0)
+    assert record["ok"] is False
+    assert record["source"] == "stream"
+    # Not fatal — the stream continues on RMS alone.
+    assert record["fatal"] is False
+    assert "webrtcvad" in record["error"]
+
+
+def test_the_degradation_notice_names_the_consequence_not_just_the_cause():
+    """"VAD unavailable" tells an operator nothing actionable on its own."""
+    error = st.degraded_vad_record(0)["error"].lower()
+    assert "rms" in error
+    assert "fabricat" in error
+
+
+def test_the_vad_is_consulted_only_on_audio_that_already_passed_rms():
+    """The VAD rejects loud non-speech; it must not second-guess silence.
+
+    Consulting it below the RMS threshold would let it VETO the hangover that
+    keeps word endings and gives server VAD its turn boundary.
+    """
+
+    class _NeverSpeech:
+        name = "never"
+
+        def __init__(self):
+            self.calls = 0
+
+        def is_speech(self, payload):
+            self.calls += 1
+            return False
+
+    detector = _NeverSpeech()
+    gate = st.InputGate(vad=detector)
+    # Silence: below threshold, so the VAD is never asked.
+    for i in range(10):
+        gate.should_send(_pcm(0), i * 0.1)
+    assert detector.calls == 0
+
+
+def test_webrtcvad_is_declared_optional_in_the_manifest():
+    """A venv rebuild must not lose it silently (it was in no manifest).
+
+    Optional is the correct group: `load_speech_detector` degrades to RMS
+    rather than failing, so this must never become a hard runtime dependency.
+    """
+    manifest = (
+        Path(__file__).resolve().parents[2] / "pyproject.toml"
+    ).read_text(encoding="utf-8")
+    assert "webrtcvad" in manifest
+    optional = manifest.split("[project.optional-dependencies]", 1)[1]
+    assert "webrtcvad" in optional.split("[project.scripts]", 1)[0]
+    # And NOT among the core install_requires.
+    core = manifest.split("dependencies = [", 1)[1].split("]", 1)[0]
+    assert "webrtcvad" not in core

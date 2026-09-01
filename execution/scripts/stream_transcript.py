@@ -360,11 +360,7 @@ def load_speech_detector(enabled: bool = True) -> SpeechDetector | None:
     try:
         return SpeechDetector()
     except ImportError:
-        log(
-            "local VAD unavailable (pip install webrtcvad) — input gating will "
-            "use the RMS threshold alone; loud non-speech will still reach the "
-            "model and may be transcribed as fabrication"
-        )
+        log(DEGRADED_VAD_MESSAGE)
         return None
 
 
@@ -719,6 +715,25 @@ def error_record(index: int, message: str, *, fatal: bool = False) -> dict:
     }
 
 
+DEGRADED_VAD_MESSAGE = (
+    "local VAD unavailable (pip install 'ateles[vad]', or webrtcvad directly) "
+    "— input gating is running on the RMS threshold alone; loud non-speech can "
+    "still reach the model and be transcribed as fabrication"
+)
+
+
+def degraded_vad_record(index: int) -> dict:
+    """The missing-VAD notice, on the channel the operator actually watches.
+
+    ``load_speech_detector`` already logs this to stderr, but stderr is a
+    write-only channel (ateles#583): the operator reads the JSONL through the
+    session Monitor. A degraded gate changes the transcript the operator is
+    about to trust, so it belongs where they are looking — non-fatal, because
+    the RMS gate still works and the stream continues.
+    """
+    return error_record(index, DEGRADED_VAD_MESSAGE)
+
+
 def health_record(index: int, problems: list[str], summary: dict) -> dict:
     return {
         "chunk": index,
@@ -943,6 +958,11 @@ async def stream_session(
     def append(record: dict) -> None:
         with open(out_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    if use_local_vad and gate.vad is None:
+        # Degraded, not broken: say so where the operator is reading.
+        append(degraded_vad_record(index))
+        index += 1
 
     proc = await asyncio.create_subprocess_exec(
         *build_capture_command(device, recording_path),

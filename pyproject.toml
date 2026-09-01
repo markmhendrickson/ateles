@@ -32,6 +32,19 @@ a2a = ["a2a-sdk>=0.3.0", "uvicorn>=0.30.0"]
 apis-gateway = ["aiohttp>=3.9"]
 # File-watching daemons — folds scripts/requirements.txt.
 watch = ["watchdog>=3.0.0"]
+# OPTIONAL local voice-activity detection for the streaming transcript path
+# (execution/scripts/stream_transcript.py). Deliberately optional: the input
+# gate degrades to its RMS threshold alone when this is absent, and announces
+# the degradation on the operator-visible JSONL rather than only to stderr.
+#
+# Measured value, on the labelled corpus, is currently ZERO: webrtcvad changed
+# no suppression outcome across 56 labelled chunks, and on the case it was
+# added for (a fabricated chunk at -31.6 dBFS) it scores the fabrication as
+# MORE speech-like (0.75) than genuine operator speech (0.42) at every
+# aggressiveness level. Kept installable, and wired, so the finding stays
+# reproducible — but nothing should depend on it until a detector that
+# actually discriminates replaces it. See ateles#631.
+vad = ["webrtcvad>=2.0.10"]
 # Reference MCP servers under docs/mcp/* — union of their runtime deps so
 # `pip install ateles[mcp-examples]` can run them. Each server still keeps its
 # own requirements.txt for standalone use; removing those once this extra is
