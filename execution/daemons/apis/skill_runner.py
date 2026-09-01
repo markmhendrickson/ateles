@@ -70,18 +70,6 @@ NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
 
 log = logging.getLogger("apis.skill_runner")
 
-# Lazily-built shared ledger for undefined-role dedup. Lazy because skill_runner
-# is imported by tooling that must not touch the state file on import.
-_ROLE_LEDGER = None
-
-
-def _role_ledger(factory):
-    """Return the process-wide ledger used to dedup undefined-role reports."""
-    global _ROLE_LEDGER
-    if _ROLE_LEDGER is None:
-        _ROLE_LEDGER = factory()
-    return _ROLE_LEDGER
-
 CLAUDE_BIN = os.environ.get("APIS_CLAUDE_BIN") or shutil.which("claude")
 _CODEX_APP_BIN = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
 CODEX_BIN = (
@@ -1062,9 +1050,12 @@ async def _run_skill_once(
         # role that stays undefined does not go quiet forever).
         _should_notify = True
         try:
-            from unroutable_ledger import UnroutableLedger
+            from unroutable_ledger import shared_ledger
 
-            _should_notify = _role_ledger(UnroutableLedger).note_undefined_role(str(_role))
+            # The SHARED instance — never a second UnroutableLedger() on the same
+            # file. Two instances each save their own stale view and drop each
+            # other's records (Loxia review, ateles#656).
+            _should_notify = shared_ledger().note_undefined_role(str(_role))
         except Exception as exc:  # noqa: BLE001 — dedup must never block the warning
             log.debug(f"[apis] undefined-role dedup unavailable: {exc}")
         if notifier is not None and _should_notify:

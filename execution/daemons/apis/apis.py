@@ -304,18 +304,36 @@ import github_gateway  # noqa: E402
 from skill_runner import run_skill  # noqa: E402
 from swarm_dispatch import SwarmDispatcher  # noqa: E402
 from task_reconciler import TaskReconciler  # noqa: E402
-from unroutable_ledger import UnroutableLedger  # noqa: E402
+from unroutable_ledger import shared_ledger  # noqa: E402
 
 # Dedup + aggregation for no-owner escalations. Disk-backed so a restart does
 # not re-page the operator about the whole standing backlog (ateles#636's
 # lesson: state that looks recorded but is not).
-_unroutable = UnroutableLedger()
+#
+# MUST be the shared instance: skill_runner writes undefined-role records to the
+# same file, and two instances each saving their own stale view silently drop
+# each other's records.
+_unroutable = shared_ledger()
 
 # Event-level idempotency for `task.created`. Bounded so a long-lived dispatcher
 # cannot grow it without limit; the ledger above is what makes escalation dedup
 # survive a restart, so this set only needs to cover redelivery bursts.
 _CREATED_SEEN_MAX = 2000
 _created_seen: dict[str, float] = {}
+
+
+_announced: dict[str, float] = {}
+
+
+def _announced_created(entity_id: str) -> bool:
+    """True when the INFO 'Task created' notice already went out for this task."""
+    if entity_id in _announced:
+        return True
+    if len(_announced) >= _CREATED_SEEN_MAX:
+        for eid in sorted(_announced, key=_announced.get)[: _CREATED_SEEN_MAX // 2]:
+            _announced.pop(eid, None)
+    _announced[entity_id] = time.time()
+    return False
 
 
 def _seen_created(entity_id: str) -> bool:
@@ -854,11 +872,17 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
                 "already handled this process; skipping"
             )
             return
-        notifier.send(
-            f"Task created: {title[:80]}\n  {entity_id}",
-            priority=Priority.INFO,
-            handler=DAEMON_NAME,
-        )
+        # The INFO notice is deduped SEPARATELY from the dispatch claim above.
+        # An unhydrated event must not claim the dispatch (its redelivery still
+        # needs handling), but it must not re-announce the task either: a task
+        # whose early deliveries all 502 would otherwise emit several
+        # "Task created: (untitled)" pages before a readable copy arrives.
+        if not _announced_created(entity_id):
+            notifier.send(
+                f"Task created: {title[:80]}\n  {entity_id}",
+                priority=Priority.INFO,
+                handler=DAEMON_NAME,
+            )
         await dispatch_task(
             entity_id, snapshot, trigger="created", notifier=notifier,
             snapshot_hydrated=event.hydrated,

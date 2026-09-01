@@ -266,3 +266,29 @@ def test_handle_event_idempotency_only_claims_hydrated_events(monkeypatch):
     # A second READABLE delivery is a true duplicate and must be collapsed.
     asyncio.run(apis.handle_event(ok, n))
     assert sum(1 for e, h in seen if e == "ent_z" and h) == 1
+
+
+def test_unhydrated_redeliveries_do_not_repeat_the_created_notice(monkeypatch):
+    """Loxia review: a task whose early deliveries all 502 emitted one
+    'Task created: (untitled)' INFO page per redelivery, because the announce
+    was gated on the dispatch claim, which an unhydrated event must not take."""
+    from lib.daemon_runtime.sse_client import NeotomaEvent
+
+    async def _noop_hydrate(ev):
+        return ev
+
+    async def _noop_dispatch(*a, **k):
+        return None
+
+    monkeypatch.setattr(apis, "hydrate_snapshot", _noop_hydrate)
+    monkeypatch.setattr(apis, "dispatch_task", _noop_dispatch)
+    monkeypatch.setattr(apis, "_announced", {})
+    n = _Notifier()
+
+    for _ in range(5):
+        ev = NeotomaEvent(entity_type="task", entity_id="ent_502", action="created")
+        ev.hydrated = False
+        asyncio.run(apis.handle_event(ev, n))
+
+    created = [m for m in n.sent if m.startswith("Task created")]
+    assert len(created) == 1, f"announced {len(created)} times: {created}"

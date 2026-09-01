@@ -100,6 +100,28 @@ class HydrationUnknown(Exception):
     """
 
 
+_SHARED: "UnroutableLedger | None" = None
+
+
+def shared_ledger() -> "UnroutableLedger":
+    """The ONE ledger instance for this process.
+
+    Both writers — apis.dispatch_task (unroutable tasks) and
+    skill_runner (undefined roles) — must go through this. They previously each
+    built their own `UnroutableLedger()` on the same default file, and since
+    `save()` serializes tasks + roles + unreadable together from one instance's
+    memory while `load()` runs once behind a `_loaded` latch, each save wrote
+    back its own stale view and silently dropped the other's records. That is
+    precisely the "stale in-memory copy deletes another writer's entries" hazard,
+    and it reintroduced the ateles#636 failure this module exists to prevent:
+    a dropped task is re-escalated on the next restart.
+    """
+    global _SHARED
+    if _SHARED is None:
+        _SHARED = UnroutableLedger()
+    return _SHARED
+
+
 def _default_ledger_path() -> Path:
     return Path(
         os.environ.get(
@@ -245,12 +267,35 @@ class UnroutableLedger:
         pages after a restart, which must not be traded for a dead dispatcher."""
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            # MERGE ON WRITE. `shared_ledger()` is the intended single owner, but
+            # this file is written by two logically distinct writers (unroutable
+            # tasks and undefined roles), and a whole-file overwrite from one
+            # instance's memory silently deletes whatever the other recorded. So
+            # never write a field this instance has not touched: re-read and
+            # union first. Belt-and-braces against a future caller constructing
+            # its own instance — the failure mode is invisible data loss that
+            # only shows up as a re-page after the next restart.
+            tasks, roles, unreadable = dict(self._seen), dict(self._roles), dict(self._unreadable)
+            try:
+                prior = json.loads(self.path.read_text())
+            except (FileNotFoundError, ValueError, OSError):
+                prior = {}
+            if isinstance(prior, dict):
+                for key, mine in (
+                    ("tasks", tasks), ("roles", roles), ("unreadable", unreadable)
+                ):
+                    theirs = prior.get(key)
+                    if isinstance(theirs, dict):
+                        # Ours wins on conflict (it is the newer decision);
+                        # theirs survives for every key we know nothing about.
+                        for k, v in theirs.items():
+                            mine.setdefault(k, v)
             payload = json.dumps(
                 {
                     "version": 1,
-                    "tasks": self._seen,
-                    "roles": self._roles,
-                    "unreadable": self._unreadable,
+                    "tasks": tasks,
+                    "roles": roles,
+                    "unreadable": unreadable,
                 },
                 sort_keys=True,
             )

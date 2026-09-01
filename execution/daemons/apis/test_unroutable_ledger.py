@@ -227,3 +227,51 @@ def test_string_path_still_persists(tmp_path):
     assert led.note("ent_a", "t", [], None, now=1000.0) is True
     assert path.exists(), "a str path silently disabled persistence"
     assert UnroutableLedger(path=str(path)).note("ent_a", "t", [], None, now=1002.0) is False
+
+
+# ── the two writers must not clobber each other (Loxia review, ateles#656) ───
+#
+# apis.dispatch_task records unroutable TASKS; skill_runner records undefined
+# ROLES. Both write the same file. When each held its own UnroutableLedger, the
+# `_loaded` latch froze a stale view per instance and every save() wrote all
+# three fields back from that stale memory — silently dropping the other
+# writer's records, and re-escalating the dropped task on the next restart.
+
+
+def test_two_instances_on_one_file_do_not_clobber(tmp_path):
+    """The raw hazard, stated directly against two independent instances."""
+    path = tmp_path / "l.json"
+    a = UnroutableLedger(path=path)
+    b = UnroutableLedger(path=path)
+    b.load()                                    # b latches an empty view at T0
+    a.note("ent_a", "t", [], None, now=1000.0)  # a writes a task
+    b.note_undefined_role("pavo", now=1001.0)   # b writes a role
+
+    disk = json.loads(path.read_text())
+    assert "pavo" in disk["roles"]
+    assert "ent_a" in disk["tasks"], "the role write dropped the task record"
+
+
+def test_shared_ledger_returns_one_instance():
+    from unroutable_ledger import shared_ledger
+
+    assert shared_ledger() is shared_ledger()
+
+
+def test_shared_ledger_keeps_both_writers_records(tmp_path, monkeypatch):
+    """Through the SHARED accessor both writers actually use, then reloaded."""
+    import unroutable_ledger as ul
+
+    path = tmp_path / "l.json"
+    monkeypatch.setattr(ul, "_SHARED", None)
+    monkeypatch.setenv("APIS_UNROUTABLE_LEDGER", str(path))
+    monkeypatch.setattr(ul, "_default_ledger_path", lambda: path)
+
+    ul.shared_ledger().note("ent_a", "t", [], None, now=1000.0)
+    ul.shared_ledger().note_undefined_role("pavo", now=1001.0)
+
+    reloaded = UnroutableLedger(path=path)
+    reloaded.load()
+    # Neither writer's dedup was lost: both re-notes are suppressed.
+    assert reloaded.note("ent_a", "t", [], None, now=1002.0) is False
+    assert reloaded.note_undefined_role("pavo", now=1002.0) is False
