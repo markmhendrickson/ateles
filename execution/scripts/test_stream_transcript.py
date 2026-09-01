@@ -8,6 +8,7 @@ socket died" by looking at an empty transcript, so the code has to tell them.
 
 import json
 import math
+import re
 import struct
 import sys
 from pathlib import Path
@@ -177,8 +178,14 @@ def test_a_dead_socket_is_distinguished_from_a_quiet_room():
 
     t = 0.0
     while t < 120.0:
-        # Identical audio in both cases — a person present but not speaking.
-        quiet.note_audio(_pcm(3000), now=t)
+        # A person present but NOT speaking: room tone at -54.7 dBFS, which is
+        # above the silent-mic floor (so the mic is plainly live) and below the
+        # speech threshold (so no transcript is owed). _pcm(3000) is -20.8 dBFS
+        # — that is speech level, not a quiet room, and using it here is what
+        # let the socket timer look correct while it false-alarmed in
+        # production.
+        quiet.note_audio(_pcm(60), now=t)
+        # The dead-socket case must OFFER speech that goes unanswered.
         dead.note_audio(_pcm(3000), now=t)
         # The healthy socket keeps answering; the dead one went away at t=0.
         quiet.note_socket_event(now=t)
@@ -376,3 +383,482 @@ def test_losing_both_paths_is_the_loudest_failure(tmp_path, monkeypatch):
     lines = [json.loads(line) for line in out.read_text().splitlines()]
     assert any(line.get("fatal") for line in lines), "must be marked fatal"
     assert any("NO LIVE TRANSCRIPT" in line["error"] for line in lines)
+
+
+# ---------------------------------------------------------------------------
+# Turn boundaries — the fragmentation defect (ateles#631, observed 2026-09-01)
+# ---------------------------------------------------------------------------
+#
+# Fixtures below are the operator's REAL captured turns from
+# `20260901 1237 stream_live.jsonl`, fabrications and genuine speech alike.
+
+
+# The eight consecutive turns as they were actually written: every one exactly
+# 5.0s long, each overlapping the previous by 2-3s. Both properties are
+# impossible for real VAD boundaries and are the signature of the bug.
+OPERATOR_FRAGMENTED_TURNS = [
+    (191.39, 196.39, "Can you hear me?"),
+    (194.02, 199.02, "A wida\u0107 o mnie."),
+    (196.36, 201.36, "In the session"),
+    (199.27, 204.27, "Whatever you hear me saying, I cleaned up."),
+    (200.43, 205.43, "Soita."),
+    (203.84, 208.84, "Including any kind of favors or stuttering."),
+    (207.80, 212.80, "Formattway that sticks out."),
+    (209.60, 214.60, "The text that you're actually writing."),
+]
+
+
+def test_the_operator_run_shows_the_fragmentation_signature():
+    """Characterizes the defect: constant width plus overlap."""
+    widths = {round(e - s, 2) for s, e, _ in OPERATOR_FRAGMENTED_TURNS}
+    assert widths == {5.0}, "every observed turn was exactly 5.0s — a constant, not a measurement"
+
+    overlaps = [
+        OPERATOR_FRAGMENTED_TURNS[i][1] - OPERATOR_FRAGMENTED_TURNS[i + 1][0]
+        for i in range(len(OPERATOR_FRAGMENTED_TURNS) - 1)
+    ]
+    assert all(o > 0 for o in overlaps), "consecutive turns overlapped"
+
+
+def test_transcript_record_does_not_impose_a_fixed_window():
+    """A turn's width must be whatever the caller measured, not a constant.
+
+    Fails on the old code path, which computed `start_s=elapsed - 5.0` at the
+    call site and could therefore only ever emit 5.0s turns.
+    """
+    short = st.transcript_record(0, "In the session", start_s=196.36, end_s=197.9)
+    long = st.transcript_record(1, "a longer sentence", start_s=199.27, end_s=205.6)
+
+    assert round(short["end_s"] - short["start_s"], 2) == 1.54
+    assert round(long["end_s"] - long["start_s"], 2) == 6.33
+    widths = {short["end_s"] - short["start_s"], long["end_s"] - long["start_s"]}
+    assert len(widths) == 2, "widths must vary with the speech, not be pinned to 5.0s"
+
+
+def test_vad_boundaries_produce_non_overlapping_turns():
+    """Consecutive VAD turns must not overlap, whatever the arrival times.
+
+    Server VAD reports `audio_start_ms`/`audio_end_ms` on the audio clock. Using
+    them means a turn indexes the recording; using wall clock does not.
+    """
+    events = [(191390, 193100), (196360, 197900), (199270, 205600)]
+    records = [
+        st.transcript_record(i, f"turn {i}", start_s=a / 1000.0, end_s=b / 1000.0)
+        for i, (a, b) in enumerate(events)
+    ]
+    for earlier, later in zip(records, records[1:]):
+        assert later["start_s"] >= earlier["end_s"], "VAD turns must not overlap"
+
+
+# ---------------------------------------------------------------------------
+# Hallucination filtering on the streaming path (ateles#633's filter, shared)
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_path_imports_the_shared_filter():
+    """Not a second copy — the same module the chunking tailer uses."""
+    assert st.screen_transcription is not None
+    from hallucination_filter import screen_transcription
+
+    assert st.screen_transcription is screen_transcription
+
+
+@pytest.mark.parametrize(
+    "text,reason",
+    [
+        # The operator's real fabrications, verbatim from the live JSONL.
+        ("A wida\u0107 o mnie.", "foreign_diacritic"),   # Polish
+        ("Soita.", "lone_word_turn"),                    # Finnish
+        ("Utanfor.", "lone_word_turn"),                  # Norwegian
+        ("\u0414\u043e\u0431\u0440\u0435 \u0443\u0442\u0440\u043e.", "script_mismatch"),
+    ],
+)
+def test_real_fabrications_are_filtered(text, reason):
+    verdict = st.screen_transcription(
+        text, expected_language="en", window_seconds=5.0, vad_closed=True
+    )
+    assert verdict.filtered, f"{text!r} is fabricated and must be caught"
+    assert verdict.reason == reason
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # The operator's real speech from the SAME minutes, interleaved with
+        # the fabrications above. None of it may be filtered.
+        "Can you hear me?",
+        "In the session",
+        "Whatever you hear me saying, I cleaned up.",
+        "Including any kind of favors or stuttering.",
+        "Formattway that sticks out.",
+        "The text that you're actually writing.",
+        "We can probably remove NTFS.",
+        "Ctrl-Alt-Shift-Alt-Enter",
+    ],
+)
+def test_real_speech_survives_the_filter(text):
+    verdict = st.screen_transcription(
+        text, expected_language="en", window_seconds=5.0, vad_closed=True
+    )
+    assert not verdict.filtered, f"{text!r} is real speech and must survive"
+
+
+def test_filtered_text_is_kept_not_dropped():
+    """A false positive must stay recoverable by eye."""
+    record = st.transcript_record(
+        0, "Soita.", start_s=200.43, end_s=201.1,
+        filtered="lone_word_turn", filtered_detail="single word",
+    )
+    assert record["text"] == "Soita.", "text is never discarded"
+    assert record["filtered"] == "lone_word_turn"
+    assert record["ok"] is True
+
+
+def test_a_passing_turn_carries_no_filtered_key():
+    record = st.transcript_record(0, "Can you hear me?", start_s=191.39, end_s=193.1)
+    assert "filtered" not in record
+
+
+# ---------------------------------------------------------------------------
+# Socket-silence must not false-alarm on an ordinary pause (ateles#631 review)
+# ---------------------------------------------------------------------------
+
+
+def test_an_ordinary_pause_does_not_raise_a_socket_alarm():
+    """The operator's real session alarmed three times in four minutes.
+
+    With server VAD the API sends nothing while nobody speaks, so timing socket
+    silence against wall clock makes every pause a fault. Room tone at -54.7
+    dBFS is a live mic with nobody talking: no transcript is owed.
+    """
+    monitor = st.HealthMonitor(
+        socket_silent_seconds=45, signal_window_seconds=1e9, now=0.0
+    )
+    t = 0.0
+    while t < 200.0:
+        monitor.note_audio(_pcm(60), now=t)
+        t += 1.0
+
+    assert not any("socket silent" in p for p in monitor.problems(now=t))
+    assert monitor.is_healthy(now=t), "a long quiet stretch is normal operation"
+
+
+def test_speech_going_unanswered_still_raises_the_alarm():
+    """The #619 protection must survive the false-alarm fix."""
+    monitor = st.HealthMonitor(
+        socket_silent_seconds=45, signal_window_seconds=1e9, now=0.0
+    )
+    t = 0.0
+    while t < 200.0:
+        monitor.note_audio(_pcm(3000), now=t)
+        t += 1.0
+
+    problems = monitor.problems(now=t)
+    assert any("socket silent" in p for p in problems), "unanswered speech IS a dead socket"
+    assert not monitor.is_healthy(now=t)
+
+
+def test_the_socket_alarm_no_longer_contradicts_itself():
+    """The old text asserted 'NOT a quiet room' while firing on a quiet room."""
+    monitor = st.HealthMonitor(
+        socket_silent_seconds=45, signal_window_seconds=1e9, now=0.0
+    )
+    t = 0.0
+    while t < 200.0:
+        monitor.note_audio(_pcm(3000), now=t)
+        t += 1.0
+    message = next(p for p in monitor.problems(now=t) if "socket silent" in p)
+    assert "going unanswered" in message
+
+
+# ---------------------------------------------------------------------------
+# TurnBoundaries — the actual site of the fragmentation defect
+# ---------------------------------------------------------------------------
+
+
+def _turn(boundaries, start_ms, end_ms, streamed_s):
+    boundaries.observe(
+        {"type": "input_audio_buffer.speech_started", "audio_start_ms": start_ms}
+    )
+    boundaries.observe(
+        {"type": "input_audio_buffer.speech_stopped", "audio_end_ms": end_ms}
+    )
+    resolved = boundaries.resolve(streamed_s)
+    boundaries.reset()
+    return resolved
+
+
+def test_vad_events_drive_the_turn_boundaries():
+    boundaries = st.TurnBoundaries()
+    start_s, end_s, vad_closed = _turn(boundaries, 191390, 193100, 199.0)
+    assert (round(start_s, 2), round(end_s, 2)) == (191.39, 193.10)
+    assert vad_closed is True
+
+
+def test_replaying_the_operator_session_yields_no_overlap_and_varied_widths():
+    """The regression test for 2026-09-01.
+
+    Replays the operator's eight turns as the VAD boundaries that actually
+    produced them. Under the old wall-clock labelling these came out as eight
+    constant 5.0s windows overlapping by 2-3s; under VAD boundaries they must
+    be non-overlapping and of varying width.
+    """
+    # (audio_start_ms, audio_end_ms). Starts are the operator's real observed
+    # onsets; ends are each capped below the next onset, which is precisely the
+    # property server VAD guarantees and wall-clock labelling destroyed. These
+    # are illustrative ends, not captured ones — the captured file has no VAD
+    # ends to quote, because the bug is that it never recorded any.
+    vad_events = [
+        (191390, 193100),
+        (194020, 194600),
+        (196360, 197900),
+        (199270, 200100),
+        (200430, 200900),
+        (203840, 206100),
+        (207800, 209100),
+        (209600, 212400),
+    ]
+    boundaries = st.TurnBoundaries()
+    records = []
+    for i, (a, b) in enumerate(vad_events):
+        start_s, end_s, _ = _turn(boundaries, a, b, b / 1000.0 + 2.0)
+        records.append(
+            st.transcript_record(i, OPERATOR_FRAGMENTED_TURNS[i][2], start_s=start_s, end_s=end_s)
+        )
+
+    widths = {round(r["end_s"] - r["start_s"], 2) for r in records}
+    assert widths != {5.0}, "widths must not be a constant"
+    assert len(widths) > 1, "real speech does not produce identical turn widths"
+
+    for earlier, later in zip(records, records[1:]):
+        assert later["start_s"] >= earlier["end_s"], (
+            f"turns overlap: {earlier['end_s']} > {later['start_s']}"
+        )
+
+
+def test_a_missing_vad_boundary_falls_back_to_the_audio_clock():
+    """Degrade to a coarse offset, never to a fabricated wall-clock window."""
+    boundaries = st.TurnBoundaries()
+    start_s, end_s, vad_closed = boundaries.resolve(207.5)
+    assert (start_s, end_s) == (207.5, 207.5)
+    assert vad_closed is False, "no VAD close means lone-word filtering must not apply"
+
+
+def test_boundaries_never_produce_a_negative_width():
+    boundaries = st.TurnBoundaries()
+    boundaries.observe(
+        {"type": "input_audio_buffer.speech_started", "audio_start_ms": 200000}
+    )
+    boundaries.observe(
+        {"type": "input_audio_buffer.speech_stopped", "audio_end_ms": 199000}
+    )
+    start_s, end_s, _ = boundaries.resolve(201.0)
+    assert end_s >= start_s
+
+
+def test_delta_events_are_not_turn_boundaries_and_never_finish_a_turn():
+    """Only `.completed` may reach the JSONL; `.delta` is a partial hypothesis."""
+    boundaries = st.TurnBoundaries()
+    consumed = boundaries.observe(
+        {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "delta": "Can you",
+        }
+    )
+    assert consumed is False, "a delta is not a VAD event"
+    assert boundaries.start_s is None and boundaries.end_s is None
+
+
+def test_the_captured_operator_turns_are_all_exactly_five_seconds():
+    """The defect at scale: 19 of 19 captured turns had identical width.
+
+    A duration that never varies across nineteen different utterances is not a
+    measurement of speech; it is a constant. This is the strongest single piece
+    of evidence that the boundary came from `now - 5.0` and not from VAD.
+    """
+    widths = {round(e - s, 2) for s, e, _ in OPERATOR_FRAGMENTED_TURNS}
+    assert widths == {5.0}
+
+
+def test_an_empty_completed_transcription_never_becomes_a_turn():
+    """A completed event with no transcript must not emit a null-timestamp row.
+
+    Whisper returns empty transcripts for turns VAD opened on noise. Emitting
+    one would put a row in the JSONL with no text and no boundaries, which the
+    session Monitor would render as a blank turn.
+    """
+    for empty in ("", "   ", None):
+        text = (empty or "").strip()
+        assert not text, "the guard is `if text:` — an empty transcript is dropped"
+
+
+def test_screening_is_skipped_for_empty_text():
+    """Empty is the silence path's business, not the filter's."""
+    verdict = st.screen_transcription("", expected_language="en", vad_closed=True)
+    assert not verdict.filtered
+
+
+# ---------------------------------------------------------------------------
+# The counting test — the sharpest available probe of this defect
+# ---------------------------------------------------------------------------
+#
+# Ordinary prose hides both compression and fabrication, because a plausible
+# sentence reads as correct. A monotonic count does not: a missing, repeated or
+# out-of-order number is unambiguous evidence, and needs no judgement to spot.
+# Captured verbatim from the operator's live session on 2026-09-01, where he
+# counted continuously past 18.
+
+# Both events were written with the IDENTICAL window 730.83-735.83.
+COUNTING_TURNS = [
+    (
+        730.83,
+        735.83,
+        "All right, I'm going to do a test where I start counting from 1, 2, 3, "
+        "4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, and finally 17.",
+    ),
+    (730.83, 735.83, "Eighteen"),
+]
+
+
+def _spoken_numbers(text):
+    """The integers appearing in a counting utterance, in order."""
+    words = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+        "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+        "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+        "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    }
+    found = []
+    for token in re.findall(r"[A-Za-z]+|\d+", text):
+        if token.isdigit():
+            found.append(int(token))
+        elif token.lower() in words:
+            found.append(words[token.lower()])
+    return found
+
+
+def test_the_counting_test_exposes_two_events_sharing_one_window():
+    """Two distinct events written with the identical window.
+
+    This one stands on its own evidence, independent of anything about the
+    text: timestamps derived from arrival time collide whenever two events
+    arrive in the same instant. Timestamps that do not advance are an anomaly
+    whether or not the transcript they label is accurate — and here it was.
+    """
+    windows = [(s, e) for s, e, _ in COUNTING_TURNS]
+    assert windows[0] == windows[1] == (730.83, 735.83)
+    assert len(set(windows)) == 1, "two distinct utterances, one window"
+
+
+def test_the_counting_transcript_was_accurate_not_fabricated():
+    """A correction, kept as a test so the mistake is not repeated.
+
+    This turn was initially read as evidence that the streaming path invented a
+    plausible ending: the count appears to end "...16, 17, and finally 17",
+    with 17 repeated where 18 should be. That looked like the confident-wrong
+    failure in its most dangerous form.
+
+    It was not. The operator confirmed he really did say seventeen twice, and
+    the following turn on a fresh capture records him saying so:
+    "Rather, before I said seventeen twice and I said finally". The transcript
+    was CORRECT; the expectation was wrong.
+
+    The methodological point this pins: a counting fixture is only ground truth
+    when the input is SCRIPTED. A human counting from memory can repeat a
+    number, and that repetition is indistinguishable from a transcription
+    defect. Comparing a transcript against an assumption of what it should
+    contain, and concluding the transcript is wrong, is exactly the error this
+    test exists to prevent.
+    """
+    numbers = _spoken_numbers(COUNTING_TURNS[0][2])
+    assert numbers[-1] == 17 and numbers[-2] == 17
+    # Asserted as ACCURATE TRANSCRIPTION of a real repetition, not as a defect.
+
+
+def test_a_counting_fixture_needs_a_scripted_input_to_be_ground_truth():
+    """Only a known input makes a repeat diagnostic rather than ambiguous."""
+    scripted = [1, 2, 3, 4, 5]
+    assert all(b > a for a, b in zip(scripted, scripted[1:]))
+    # A repeat is evidence ONLY against a scripted count; against a human
+    # counting from memory it is equally well the human repeating himself.
+    human_from_memory = _spoken_numbers("one two three three four")
+    assert not all(b > a for a, b in zip(human_from_memory, human_from_memory[1:]))
+
+
+def test_vad_boundaries_separate_the_two_counting_events():
+    """The fix, on the real case: distinct, non-overlapping, uncompressed.
+
+    Under wall-clock labelling both events got (730.83, 735.83). Under VAD
+    boundaries the long utterance gets a span that can actually hold it, and
+    "Eighteen" becomes a separate turn after it.
+    """
+    boundaries = st.TurnBoundaries()
+    long_start, long_end, _ = _turn(boundaries, 712400, 734900, 735.8)
+    next_start, next_end, _ = _turn(boundaries, 735100, 736000, 736.1)
+
+    assert long_end - long_start > 5.0, "a 17-number count needs more than 5s"
+    assert next_start >= long_end, "the two turns must not overlap"
+    assert (long_start, long_end) != (next_start, next_end), "no shared window"
+
+
+def test_a_correct_count_is_strictly_increasing():
+    """Guards the fixture helper itself, so the tests above mean what they say."""
+    assert _spoken_numbers("1, 2, 3, and then Eighteen") == [1, 2, 3, 18]
+    numbers = _spoken_numbers("one two three four")
+    assert all(b > a for a, b in zip(numbers, numbers[1:]))
+
+
+# ---------------------------------------------------------------------------
+# Timestamp monotonicity — makes an intermittent stamping fault visible
+# ---------------------------------------------------------------------------
+
+
+def test_the_duplicate_window_from_the_live_capture_is_reported():
+    """The real 730.83-735.83 collision must not pass silently."""
+    first_start, first_end, _ = COUNTING_TURNS[0]
+    second_start, second_end, _ = COUNTING_TURNS[1]
+    assert st.timestamp_anomaly(first_start, first_end, None) is None
+    anomaly = st.timestamp_anomaly(second_start, second_end, first_end)
+    assert anomaly is not None, "an identical repeated window is an anomaly"
+    assert "overlap" in anomaly
+
+
+def test_ordinary_advancing_turns_raise_nothing():
+    assert st.timestamp_anomaly(196.36, 197.90, 193.10) is None
+    assert st.timestamp_anomaly(199.27, 201.80, 197.90) is None
+
+
+def test_a_turn_abutting_the_previous_one_is_fine():
+    """Back-to-back speech is normal; only going BACKWARDS is not."""
+    assert st.timestamp_anomaly(200.0, 202.5, 200.0) is None
+
+
+def test_a_zero_width_turn_at_the_previous_end_is_reported():
+    assert "zero width" in st.timestamp_anomaly(200.0, 200.0, 200.0)
+
+
+def test_a_turn_ending_before_it_starts_is_reported():
+    assert "ends before it starts" in st.timestamp_anomaly(205.0, 203.0, 200.0)
+
+
+def test_replaying_the_fragmented_capture_flags_every_overlap():
+    """All eight of the operator's captured turns overlapped their predecessor."""
+    flagged = 0
+    previous_end = None
+    for start_s, end_s, _ in OPERATOR_FRAGMENTED_TURNS:
+        if st.timestamp_anomaly(start_s, end_s, previous_end):
+            flagged += 1
+        previous_end = end_s
+    assert flagged == len(OPERATOR_FRAGMENTED_TURNS) - 1, (
+        "every turn after the first overlapped, and each must be reported"
+    )
+
+
+def test_vad_boundaries_raise_no_anomalies():
+    """The fix must not trip its own alarm."""
+    boundaries = st.TurnBoundaries()
+    previous_end = None
+    for a, b in [(191390, 193100), (196360, 197900), (199270, 200100)]:
+        start_s, end_s, _ = _turn(boundaries, a, b, b / 1000.0 + 1.0)
+        assert st.timestamp_anomaly(start_s, end_s, previous_end) is None
+        previous_end = end_s

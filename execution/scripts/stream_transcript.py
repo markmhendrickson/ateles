@@ -46,6 +46,11 @@ from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 
+# The filter is a sibling module, shared verbatim with the chunking tailer.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from hallucination_filter import screen_transcription
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 FALLBACK_TAILER = REPO_ROOT / "execution" / "scripts" / "live_transcript_tail.py"
 
@@ -71,6 +76,10 @@ STREAM_CHUNK_BYTES = BYTES_PER_SECOND // 10
 REALTIME_URL = "wss://api.openai.com/v1/realtime?intent=transcription"
 DEFAULT_MODEL = os.environ.get("STREAM_TRANSCRIPT_MODEL", "gpt-4o-transcribe")
 
+# The language the session is expected to be in. Drives the hallucination
+# filter's language and orthography checks.
+DEFAULT_LANGUAGE = os.environ.get("STREAM_TRANSCRIPT_LANGUAGE", "en")
+
 # --- Health thresholds ------------------------------------------------------
 # A socket fails in more ways than a subprocess, so these are deliberately
 # tighter than the chunking tailer's. Each answers a DIFFERENT question; the
@@ -86,6 +95,12 @@ SIGNAL_WINDOW_SECONDS = float(os.environ.get("STREAM_TRANSCRIPT_SIGNAL_WINDOW_S"
 # above it. This is the check that catches "the file is growing but there is
 # nothing in it" — growth alone is NOT health.
 SILENT_INPUT_DBFS = float(os.environ.get("STREAM_TRANSCRIPT_SILENT_DBFS", "-65"))
+
+# Above this dBFS the capture is carrying speech, so a transcript IS expected.
+# The operator's verified speech measures -21 to -37 dBFS; room tone with nobody
+# talking sits well below. -50 leaves margin under his quietest verified line
+# without admitting ordinary room noise.
+SPEECH_PRESENT_DBFS = float(os.environ.get("STREAM_TRANSCRIPT_SPEECH_DBFS", "-50"))
 
 RECORDING_EXTENSIONS = {".aac", ".m4a", ".mp4", ".wav"}
 
@@ -140,15 +155,18 @@ class HealthMonitor:
         socket_silent_seconds: float = SOCKET_SILENT_SECONDS,
         signal_window_seconds: float = SIGNAL_WINDOW_SECONDS,
         silent_dbfs: float = SILENT_INPUT_DBFS,
+        speech_dbfs: float = SPEECH_PRESENT_DBFS,
         now: float | None = None,
     ) -> None:
         self.stall_seconds = stall_seconds
         self.socket_silent_seconds = socket_silent_seconds
         self.signal_window_seconds = signal_window_seconds
         self.silent_dbfs = silent_dbfs
+        self.speech_dbfs = speech_dbfs
         start = time.monotonic() if now is None else now
         self.last_audio_at = start
         self.last_socket_at = start
+        self.last_speech_at = start
         self.started_at = start
         self.bytes_streamed = 0
         self.transcripts = 0
@@ -166,6 +184,13 @@ class HealthMonitor:
         level = pcm16_dbfs(payload)
         if level is not None:
             self._levels.append((now, level))
+            # A dead socket and a quiet room both produce "no transcript". The
+            # only thing that separates them is whether any speech was OFFERED.
+            # Track the last moment the capture carried speech-level audio, so
+            # the socket-silence timer can run against speech rather than
+            # against wall clock (ateles#631 review).
+            if level >= self.speech_dbfs:
+                self.last_speech_at = now
         self._trim(now)
 
     def note_socket_event(self, now: float | None = None) -> None:
@@ -205,12 +230,28 @@ class HealthMonitor:
                 f"(threshold {self.stall_seconds:.0f}s) — the recorder may have died"
             )
 
+        # Silence on the socket is only a FAULT if speech was offered and went
+        # unanswered. With server VAD the API deliberately sends nothing while
+        # nobody is speaking, so timing this against wall clock fires on every
+        # ordinary pause — which is what it did on the operator's real session
+        # (ateles#631 review): three alarms in four minutes, each of them a
+        # working stream and a quiet room. An alert that fires on healthy
+        # operation gets ignored, which is the #619 failure arriving from the
+        # opposite direction.
+        #
+        # Correlating with the capture's own RMS makes the alert mean what it
+        # says: it uses the same bytes already being teed, and it detects a
+        # genuinely dead socket in seconds rather than 45, because speech that
+        # goes unanswered is the actual evidence.
         socket_gap = now - self.last_socket_at
-        if socket_gap > self.socket_silent_seconds:
+        unanswered_speech = now - self.last_speech_at
+        if socket_gap > self.socket_silent_seconds and unanswered_speech < socket_gap:
             found.append(
-                f"socket silent: no event from the transcription socket for "
-                f"{socket_gap:.0f}s (threshold {self.socket_silent_seconds:.0f}s) — "
-                f"this is NOT the same as a quiet room; the socket itself is unresponsive"
+                f"socket silent: speech has been arriving for "
+                f"{unanswered_speech:.0f}s with no event from the transcription "
+                f"socket in {socket_gap:.0f}s (threshold "
+                f"{self.socket_silent_seconds:.0f}s) — audio is being offered and "
+                f"is going unanswered, so this is the socket, not a quiet room"
             )
 
         # Only meaningful once a full window has actually elapsed.
@@ -264,8 +305,117 @@ class HealthMonitor:
 # ---------------------------------------------------------------------------
 
 
-def transcript_record(index: int, text: str, *, start_s: float, end_s: float) -> dict:
-    return {
+class TurnBoundaries:
+    """Tracks VAD speech boundaries so a turn indexes the recording.
+
+    The Realtime API reports ``input_audio_buffer.speech_started`` /
+    ``speech_stopped`` with ``audio_start_ms`` / ``audio_end_ms`` — offsets on
+    the AUDIO clock, i.e. positions in the very byte stream being tee'd to the
+    durable recording. Those are the only honest boundaries for a turn.
+
+    Deriving them from wall clock instead is what fragmented the operator's
+    session on 2026-09-01: `start_s = now - 5.0` labelled every turn exactly
+    5.0s long, and because turns arrive faster than they are spoken (the socket
+    answers 1-3s after speech ends) consecutive turns overlapped by 2-3s. A
+    sentence then reads as several overlapping slivers, so the operator's
+    meaning arrives in pieces — the very defect the streaming path exists to
+    fix, in a new form.
+
+    Kept as a separate object rather than closure state so the boundary logic is
+    testable without a live socket.
+    """
+
+    def __init__(self) -> None:
+        self.start_s: float | None = None
+        self.end_s: float | None = None
+
+    @staticmethod
+    def _seconds(event: dict, key: str) -> float | None:
+        ms = event.get(key)
+        return float(ms) / 1000.0 if isinstance(ms, (int, float)) else None
+
+    def observe(self, event: dict) -> bool:
+        """Consume a VAD event. True when it was one (and should not fall through)."""
+        etype = event.get("type", "")
+        if etype == "input_audio_buffer.speech_started":
+            self.start_s = self._seconds(event, "audio_start_ms")
+            self.end_s = None
+            return True
+        if etype == "input_audio_buffer.speech_stopped":
+            self.end_s = self._seconds(event, "audio_end_ms")
+            return True
+        return False
+
+    def resolve(self, streamed_s: float) -> tuple[float, float, bool]:
+        """Boundaries for the turn now completing, plus whether VAD closed it.
+
+        ``streamed_s`` — seconds of audio actually streamed — is the fallback,
+        NOT wall clock: it is a position on the same audio clock, so a missing
+        boundary degrades to a coarse offset rather than a fabricated one.
+        """
+        start_s = self.start_s if self.start_s is not None else streamed_s
+        end_s = self.end_s if self.end_s is not None else streamed_s
+        if end_s < start_s:
+            end_s = start_s
+        return start_s, end_s, self.end_s is not None
+
+    def reset(self) -> None:
+        self.start_s = None
+        self.end_s = None
+
+
+def timestamp_anomaly(
+    start_s: float, end_s: float, previous_end_s: float | None
+) -> str | None:
+    """Why this turn's stamps are not a valid advance on the last one, if so.
+
+    Turn boundaries must be monotonic and must not duplicate. Two consecutive
+    events sharing an identical window is a real anomaly regardless of whether
+    the text is accurate — and on 2026-09-01 it was accurate, which is exactly
+    the problem: the corruption was invisible without a counting test.
+
+    Making it LOUD is the point. An intermittent stamping fault that only shows
+    up under a probe nobody runs is indistinguishable from no fault at all, and
+    the whole lesson of #619 is that a failure which does not announce itself
+    gets discovered far too late.
+    """
+    if end_s < start_s:
+        return f"turn ends before it starts ({start_s:.2f} > {end_s:.2f})"
+    if previous_end_s is None:
+        return None
+    if start_s == previous_end_s and end_s == previous_end_s:
+        return f"turn has zero width at the previous end ({start_s:.2f})"
+    if start_s < previous_end_s:
+        return (
+            f"turn starts at {start_s:.2f}, before the previous turn ended at "
+            f"{previous_end_s:.2f} — boundaries must not overlap"
+        )
+    return None
+
+
+def transcript_record(
+    index: int,
+    text: str,
+    *,
+    start_s: float,
+    end_s: float,
+    filtered: str | None = None,
+    filtered_detail: str | None = None,
+) -> dict:
+    """One finished turn.
+
+    ``start_s``/``end_s`` MUST come from the VAD speech boundaries the server
+    reports, not from wall clock. Deriving them from arrival time produced the
+    fragmentation defect of 2026-09-01: every turn was labelled exactly 5.0s
+    long and consecutive turns overlapped by 2-3s, because the label was the
+    constant ``(now - 5.0, now)`` rather than a measurement of anything. The
+    audio boundaries are the only honest source — they index the recording.
+
+    A turn caught by the hallucination filter keeps its text and gains
+    ``filtered``; nothing is ever silently dropped, so a false positive stays
+    visible and the filter's accuracy stays measurable against the JSONL.
+    """
+    record = {
         "chunk": index,
         "t": datetime.now(tz=UTC).isoformat(),
         "start_s": round(start_s, 2),
@@ -274,6 +424,11 @@ def transcript_record(index: int, text: str, *, start_s: float, end_s: float) ->
         "text": text,
         "source": "stream",
     }
+    if filtered:
+        record["filtered"] = filtered
+        if filtered_detail:
+            record["filtered_detail"] = filtered_detail
+    return record
 
 
 def error_record(index: int, message: str, *, fatal: bool = False) -> dict:
@@ -488,6 +643,7 @@ async def stream_session(
     *,
     model: str = DEFAULT_MODEL,
     api_key: str,
+    expected_language: str = DEFAULT_LANGUAGE,
     health_poll: float = 5.0,
 ) -> tuple[int, HealthMonitor]:
     """Capture once, tee to disk and socket, append transcripts to the JSONL."""
@@ -495,7 +651,6 @@ async def stream_session(
 
     monitor = HealthMonitor()
     index = 0
-    stream_started = time.monotonic()
 
     def append(record: dict) -> None:
         with open(out_path, "a", encoding="utf-8") as fh:
@@ -539,6 +694,9 @@ async def stream_session(
 
             async def pump_events() -> None:
                 nonlocal index
+                boundaries = TurnBoundaries()
+                previous_end_s: float | None = None
+
                 async for raw in ws:
                     monitor.note_socket_event()
                     try:
@@ -546,20 +704,58 @@ async def stream_session(
                     except json.JSONDecodeError:
                         continue
                     etype = event.get("type", "")
+
+                    if boundaries.observe(event):
+                        continue
+
+                    # Only COMPLETED turns reach the JSONL. `.delta` events are
+                    # partial hypotheses for the same utterance; writing them
+                    # would emit each sentence several times over.
                     if etype.endswith("input_audio_transcription.completed"):
                         text = (event.get("transcript") or "").strip()
                         if text:
-                            elapsed = time.monotonic() - stream_started
+                            # Fall back to the audio actually streamed so far
+                            # rather than to wall clock: bytes_streamed is a
+                            # position on the same audio clock the VAD reports
+                            # on, so a missing boundary degrades to a slightly
+                            # coarse offset instead of a fabricated one.
+                            streamed_s = monitor.bytes_streamed / BYTES_PER_SECOND
+                            start_s, end_s, vad_closed = boundaries.resolve(streamed_s)
+
+                            anomaly = timestamp_anomaly(start_s, end_s, previous_end_s)
+                            if anomaly:
+                                log(f"TIMESTAMP ANOMALY: {anomaly}")
+                                append(
+                                    error_record(
+                                        index, f"timestamp anomaly: {anomaly}"
+                                    )
+                                )
+                                index += 1
+                            previous_end_s = end_s
+
+                            verdict = screen_transcription(
+                                text,
+                                expected_language=expected_language,
+                                window_seconds=max(0.0, end_s - start_s),
+                                vad_closed=vad_closed,
+                            )
+                            if verdict.filtered:
+                                log(
+                                    f"filtered ({verdict.reason}): {text[:60]!r}"
+                                )
                             append(
                                 transcript_record(
                                     index,
                                     text,
-                                    start_s=max(0.0, elapsed - 5.0),
-                                    end_s=elapsed,
+                                    start_s=start_s,
+                                    end_s=end_s,
+                                    filtered=verdict.reason,
+                                    filtered_detail=verdict.detail,
                                 )
                             )
                             index += 1
                             monitor.note_transcript()
+                            boundaries.reset()
                     elif etype == "error":
                         message = (event.get("error") or {}).get(
                             "message", "unknown socket error"
@@ -614,6 +810,11 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument(
+        "--language",
+        default=DEFAULT_LANGUAGE,
+        help="language the session is expected to be in (drives the hallucination filter)",
+    )
+    parser.add_argument(
         "--fallback-only",
         action="store_true",
         help="skip streaming entirely and run the chunking tailer",
@@ -662,6 +863,7 @@ def main(argv: list[str]) -> int:
                 out_path,
                 model=args.model,
                 api_key=api_key,
+                expected_language=args.language,
             )
         )
     except KeyboardInterrupt:
