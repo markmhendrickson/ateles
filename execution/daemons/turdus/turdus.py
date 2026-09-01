@@ -60,6 +60,7 @@ if str(_REPO_ROOT) not in sys.path:
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
     AgentLoader,
+    enforce_status_or_exit,
     SSEClient,  # noqa: F401 — imported for consistency; Turdus uses polling not SSE
 )
 from lib.notify import Notifier, Priority  # noqa: E402
@@ -1123,6 +1124,10 @@ async def main() -> None:
         f"[{DAEMON_NAME}] agent_definition: status={agent_def.status} "
         f"grant={agent_def.agent_grant} sub={agent_def.aauth_sub}"
     )
+
+    # Enforce agent_definition.status (ateles#562). Previously this value was
+    # logged and then ignored, so a "retired" agent ran normally.
+    enforce_status_or_exit(agent_def, DAEMON_NAME)
 
     # 2. Load AAuth signer
     signer = AAuthSigner.from_key_file(DAEMON_NAME)
