@@ -951,5 +951,242 @@ class TestSwarmObservability(unittest.TestCase):
         self.assertIn("error", out)
 
 
+class TestPointOfUseFactHints(unittest.TestCase):
+    """Conditional check_swarm_fact hints on existing tool results.
+
+    The NEGATIVE cases are the point of this class. A hint that fires on every
+    call is a stale doc with extra steps — uniformly present, uniformly
+    ignored. Every positive test below is paired with at least one negative
+    proving the hint stays silent when its condition is absent, because that
+    silence is the whole design and nothing else enforces it.
+    """
+
+    H = srv.HINT_FIELD
+
+    # ── get_dispatch_health: dispatcher down ─────────────────────────────
+
+    def test_dispatcher_down_hints_at_daemons_check(self):
+        out = srv.apply_fact_hints("get_dispatch_health", {"running": False})
+        self.assertIn("check_swarm_fact check=daemons", out[self.H])
+
+    def test_dispatcher_running_and_fresh_emits_no_hint(self):
+        """The negative that matters most: a healthy dispatcher is silent."""
+        out = srv.apply_fact_hints(
+            "get_dispatch_health", {"running": True, "log_mtime_age_seconds": 12.0}
+        )
+        self.assertNotIn(self.H, out)
+
+    def test_dispatcher_liveness_unknown_emits_no_hint(self):
+        """launchctl unreachable is NOT a stopped dispatcher.
+
+        Fabricating the premise here would be exactly the transport-failure-as-
+        data-absence confusion _last_transport_error was added to prevent.
+        """
+        out = srv.apply_fact_hints(
+            "get_dispatch_health",
+            {"running": None, "detail": "launchctl unavailable: FileNotFoundError"},
+        )
+        self.assertNotIn(self.H, out)
+
+    # ── get_dispatch_health: running but stale ───────────────────────────
+
+    def test_running_but_stale_log_hints_at_checkout_freshness(self):
+        out = srv.apply_fact_hints(
+            "get_dispatch_health",
+            {"running": True, "log_mtime_age_seconds": 60 * 3600},
+        )
+        self.assertIn("check_swarm_fact check=checkout_freshness", out[self.H])
+
+    def test_running_with_no_log_age_emits_no_hint(self):
+        """apis.log absent means the age was never observed, not that it is old."""
+        out = srv.apply_fact_hints(
+            "get_dispatch_health",
+            {"running": True, "detail_log": "apis.log not present on this host"},
+        )
+        self.assertNotIn(self.H, out)
+
+    def test_stale_threshold_is_not_crossed_just_below(self):
+        out = srv.apply_fact_hints(
+            "get_dispatch_health",
+            {"running": True,
+             "log_mtime_age_seconds": srv._STALE_DISPATCH_LOG_SECONDS - 1},
+        )
+        self.assertNotIn(self.H, out)
+
+    def test_down_dispatcher_takes_precedence_over_staleness(self):
+        """One hint, not two — a down dispatcher's log is stale by definition."""
+        out = srv.apply_fact_hints(
+            "get_dispatch_health",
+            {"running": False, "log_mtime_age_seconds": 99 * 3600},
+        )
+        self.assertIn("check=daemons", out[self.H])
+        self.assertNotIn("checkout_freshness", out[self.H])
+
+    # ── route_task ───────────────────────────────────────────────────────
+
+    def test_release_route_hints_at_deploy_triggers(self):
+        out = srv.apply_fact_hints(
+            "route_task",
+            {"matched_role": "release_manager", "matched_via": "keyword"},
+        )
+        self.assertIn("check_swarm_fact check=deploy_triggers", out[self.H])
+
+    def test_non_deploy_route_emits_no_hint(self):
+        out = srv.apply_fact_hints(
+            "route_task", {"matched_role": "code", "matched_via": "keyword"}
+        )
+        self.assertNotIn(self.H, out)
+
+    def test_fallback_route_emits_no_hint(self):
+        """A fallback did not identify deploy work; a hint would invent it."""
+        out = srv.apply_fact_hints(
+            "route_task", {"matched_role": "dispatcher", "matched_via": "fallback"}
+        )
+        self.assertNotIn(self.H, out)
+
+    def test_deploy_role_reached_by_fallback_emits_no_hint(self):
+        out = srv.apply_fact_hints(
+            "route_task", {"matched_role": "release_manager", "matched_via": "fallback"}
+        )
+        self.assertNotIn(self.H, out)
+
+    def test_every_deploy_role_hints(self):
+        for role in srv._DEPLOY_ROLES:
+            with self.subTest(role=role):
+                out = srv.apply_fact_hints(
+                    "route_task", {"matched_role": role, "matched_via": "keyword"}
+                )
+                self.assertIn("deploy_triggers", out.get(self.H, ""))
+
+    # ── get_gate_status ──────────────────────────────────────────────────
+
+    def test_all_gates_cleared_hints_at_deploy_triggers(self):
+        out = srv.apply_fact_hints(
+            "get_gate_status",
+            {"status": "open", "all_gates_cleared": True, "pipeline": {"stage": None}},
+        )
+        self.assertIn("check_swarm_fact check=deploy_triggers", out[self.H])
+
+    def test_blocked_issue_emits_no_hint(self):
+        """The answer is 'a reviewer'; a deploy hint would sit beside it as noise."""
+        out = srv.apply_fact_hints(
+            "get_gate_status",
+            {"status": "open", "all_gates_cleared": False,
+             "blocking_gates": ["arch"], "pipeline": {"stage": None}},
+        )
+        self.assertNotIn(self.H, out)
+
+    def test_closed_issue_emits_no_hint(self):
+        out = srv.apply_fact_hints(
+            "get_gate_status",
+            {"status": "closed", "all_gates_cleared": True, "pipeline": {"stage": None}},
+        )
+        self.assertNotIn(self.H, out)
+
+    def test_inflight_pipeline_emits_no_hint(self):
+        out = srv.apply_fact_hints(
+            "get_gate_status",
+            {"status": "open", "all_gates_cleared": True,
+             "pipeline": {"stage": "inflight"}},
+        )
+        self.assertNotIn(self.H, out)
+
+    def test_queued_pipeline_emits_no_hint(self):
+        out = srv.apply_fact_hints(
+            "get_gate_status",
+            {"status": "open", "all_gates_cleared": True,
+             "pipeline": {"stage": "queued"}},
+        )
+        self.assertNotIn(self.H, out)
+
+    # ── tools that deliberately get no hint ──────────────────────────────
+
+    def test_unhinted_tools_are_never_annotated(self):
+        """Each of these was considered and deliberately left out."""
+        for name in ("get_swarm_roster", "list_pipeline_queue", "list_checkpoints",
+                     "resolve_checkpoint", "check_swarm_fact"):
+            with self.subTest(tool=name):
+                out = srv.apply_fact_hints(
+                    name, {"running": False, "all_gates_cleared": True,
+                           "matched_role": "release_manager", "matched_via": "keyword"}
+                )
+                self.assertNotIn(self.H, out)
+
+    def test_every_hint_emitter_maps_to_a_real_tool(self):
+        names = {t.name for t in srv.TOOLS}
+        for name in srv.HINT_EMITTERS:
+            self.assertIn(name, names)
+
+    # ── general invariants ───────────────────────────────────────────────
+
+    def test_error_results_are_never_hinted(self):
+        """An error describes a read that did not happen — nothing to hint off."""
+        out = srv.apply_fact_hints(
+            "get_gate_status",
+            {"error": "no issue entity found", "transport_error": "not_found: ..."},
+        )
+        self.assertNotIn(self.H, out)
+
+    def test_hint_does_not_alter_the_result_data(self):
+        payload = {"running": False, "pid": None, "launchd_label": "com.ateles.apis"}
+        out = srv.apply_fact_hints("get_dispatch_health", dict(payload))
+        for key, value in payload.items():
+            self.assertEqual(out[key], value)
+
+    def test_hint_is_a_separate_field_not_folded_into_interpretation(self):
+        """A hint must never be mistakable for part of the data."""
+        out = srv.apply_fact_hints(
+            "get_dispatch_health",
+            {"running": False, "interpretation": "dispatcher is NOT running"},
+        )
+        self.assertEqual(out["interpretation"], "dispatcher is NOT running")
+        self.assertIn(self.H, out)
+
+    def test_hints_stay_one_line(self):
+        cases = [
+            ("get_dispatch_health", {"running": False}),
+            ("get_dispatch_health", {"running": True, "log_mtime_age_seconds": 99 * 3600}),
+            ("route_task", {"matched_role": "release_manager", "matched_via": "keyword"}),
+            ("get_gate_status", {"status": "open", "all_gates_cleared": True,
+                                 "pipeline": {}}),
+        ]
+        for name, payload in cases:
+            with self.subTest(tool=name):
+                hint = srv.apply_fact_hints(name, payload)[self.H]
+                self.assertNotIn("\n", hint)
+                self.assertLess(len(hint), 220)
+                self.assertIn("check_swarm_fact", hint)
+
+    def test_non_dict_result_passes_through(self):
+        self.assertEqual(srv.apply_fact_hints("get_dispatch_health", []), [])
+
+    def test_emitter_exception_does_not_break_the_call(self):
+        """The hint is an addition to an answer that was already correct."""
+        def boom(_result):
+            raise RuntimeError("emitter is broken")
+
+        with patch.dict(srv.HINT_EMITTERS, {"get_dispatch_health": boom}):
+            out = srv.apply_fact_hints("get_dispatch_health", {"running": False})
+        self.assertEqual(out, {"running": False})
+
+    def test_hints_are_absent_from_a_real_dispatch_health_call(self):
+        """End-to-end through the real tool, on a host with no such daemon.
+
+        Guards the wiring as well as the gate: a result whose liveness is
+        unknown must come back clean.
+        """
+        with patch.dict(os.environ, {
+            "ATELES_APIS_LAUNCHD_LABEL": "com.ateles.definitely-not-a-real-label",
+            "ATELES_LOG_DIR": str(_HERE / "no-such-log-dir"),
+        }):
+            result = srv._get_dispatch_health()
+        hinted = srv.apply_fact_hints("get_dispatch_health", result)
+        if result.get("running") is None:
+            self.assertNotIn(self.H, hinted)
+        else:
+            # Label is unloaded → running is False → the daemons hint is right.
+            self.assertIn("check=daemons", hinted[self.H])
+
+
 if __name__ == "__main__":
     unittest.main()

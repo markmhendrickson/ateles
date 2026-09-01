@@ -28,6 +28,11 @@ The observability tools never write gate state — see the SELF-CERTIFICATION
 BOUNDARY note above their implementations. Their reads fail CLOSED: a failed
 read reports "unknown" with a reason, never an empty all-clear.
 
+Some results additionally carry a one-line `fact_check_hint` pointing at the
+check_swarm_fact check that would verify what the result implies — but ONLY
+when a condition in that result makes the hint true. See the POINT-OF-USE FACT
+HINTS section below for why an unconditional hint would be actively harmful.
+
 Environment (see README.md for the full operator-provisioning table):
   NEOTOMA_BASE_URL          (default: https://neotoma.markmhendrickson.com)
   NEOTOMA_BEARER_TOKEN      (required)
@@ -269,6 +274,208 @@ def _role_priority(role: str) -> int:
         return len(ROLE_TIE_BREAK) - ROLE_TIE_BREAK.index(role)
     except ValueError:
         return 0
+
+
+# ── Point-of-use fact hints ──────────────────────────────────────────────────
+#
+# ateles#638 chose the check_swarm_fact TOOL LISTING as the primary mechanism,
+# and noted in the same breath that point-of-use hints bind more strongly: a
+# listing requires the agent to think to ask, while a hint arrives unprompted
+# in a result the agent already asked for. The listing's advantage is coverage
+# (it is present even for facts no tool call touches); the hint's advantage is
+# that it fires at the moment the wrong belief is about to form. These are
+# complements, and this is the hint half.
+#
+# THE ONE RULE: a hint fires only on a REAL CONDITION IN THE RESULT.
+#
+# An unconditional hint — one attached to every call of a tool — is a stale
+# doc with extra steps. It is confidently present, uniformly ignored after the
+# third sighting, and indistinguishable from noise. The evidence that this is
+# not hypothetical is in this very server: SERVER_INSTRUCTIONS rule 1
+# ("Dispatch, don't do inline") is loaded into every connected session and was
+# violated six-plus times in a single day. Adding an always-on hint would
+# reproduce exactly the failure the conditional design exists to escape, so
+# every emitter below is gated on a specific observed fact, and every gate has
+# a negative test proving the hint stays silent without it.
+#
+# SECOND RULE: a hint must not fabricate its own premise.
+#
+# The server already separates "the source said no" from "the source was
+# unreachable" (_last_transport_error, added because a 404 was being reported
+# to agents as data absence). Hints inherit that distinction. A launchctl that
+# could not be run is not a stopped dispatcher, and must never produce a hint
+# asserting one. In practice this means every gate below tests for an explicit
+# positive observation (`is False`, a parsed number, a matched role) and
+# treats None/absent as "no hint", never as a trigger.
+
+# Where hints are attached on a result dict. A dedicated key, never merged into
+# `interpretation`, so a hint can never be mistaken for part of the data.
+HINT_FIELD = "fact_check_hint"
+
+# A dispatcher that claims to be running but whose log has not moved in this
+# long is the shape of a stale deployment checkout (CLAUDE.md: three
+# occurrences on ~/ateles-rc-src, where a merged fix never reached the running
+# daemon). Deliberately generous — a genuinely idle swarm is normal, and this
+# must fire on "suspiciously silent", not on "quiet afternoon".
+_STALE_DISPATCH_LOG_SECONDS = float(
+    os.environ.get("ATELES_STALE_DISPATCH_LOG_SECONDS", str(24 * 3600))
+)
+
+# Roles whose work IS a deploy, a release, or a change to a repo that ships.
+# An agent routed here will next need to know what actually triggers a ship —
+# the assumption that got answered wrong in ateles#638 case #1 ("publishing a
+# release is the only way to deploy", when workflow_dispatch was in the same
+# `on:` block), and twice again this session: a deploy that went to a client
+# app rather than the operator's instance, and a stale fly.toml that downgraded
+# a live instance.
+_DEPLOY_ROLES = frozenset({"release_manager", "neotoma_repo", "mirror"})
+
+
+def _attach_hint(result: dict, hint: str) -> dict:
+    """Attach one short hint to *result*, in place.
+
+    Hints accumulate rather than overwrite, but stay one line each — they ride
+    ALONGSIDE the result and must never crowd it out. Nothing here inspects or
+    rewrites the data itself.
+    """
+    existing = result.get(HINT_FIELD)
+    result[HINT_FIELD] = f"{existing} {hint}".strip() if existing else hint
+    return result
+
+
+def _dispatch_health_hint(result: dict) -> str | None:
+    """Hint for get_dispatch_health, or None when no condition is met.
+
+    Two gates, both requiring a positive observation:
+
+    1. `running is False` — launchd was READ and reported the dispatcher down.
+       The result can say "nothing will be dispatched" but not why, and the
+       three numbers behind that question are routinely conflated: verified
+       2026-08-31, 18 daemon dirs in the repo, 17 loaded in launchd, 10
+       actually running. `check=daemons` splits "in repo but never loaded"
+       from "loaded but crashed", which are different repairs.
+
+       `running is None` is the launchctl-unreachable case and is deliberately
+       NOT a trigger — an unreadable dispatcher is not a stopped one, and a
+       hint claiming otherwise would be the fabrication this design forbids.
+
+    2. running, but the log has not moved in a long time — the signature of a
+       deployment checkout that drifted, where the daemon is alive and running
+       code that predates the fix. Requires BOTH the running observation and a
+       parsed age, so it cannot fire on a healthy or an unreadable dispatcher.
+    """
+    running = result.get("running")
+    if running is False:
+        return (
+            "Dispatcher reported down — call check_swarm_fact check=daemons to "
+            "tell 'in repo but never loaded' apart from 'loaded but crashed'."
+        )
+    if running is True:
+        age = result.get("log_mtime_age_seconds")
+        if isinstance(age, (int, float)) and age >= _STALE_DISPATCH_LOG_SECONDS:
+            return (
+                f"Dispatcher is running but its log has not moved in {age / 3600:.0f}h "
+                "— call check_swarm_fact check=checkout_freshness on the daemon's "
+                "checkout before concluding the swarm is merely idle."
+            )
+    return None
+
+
+def _route_task_hint(result: dict) -> str | None:
+    """Hint for route_task, or None.
+
+    Fires only when the ROUTED ROLE is one whose work ships something. Not on
+    the keyword, and not on every route: a task routed to `code` or `qa` gets
+    nothing, because nothing about that result invites a claim about the deploy
+    path. A fallback route to `dispatcher` gets nothing either — the router did
+    not identify deploy work, and a hint there would be inventing a premise the
+    match does not support.
+    """
+    if result.get("matched_role") in _DEPLOY_ROLES and result.get("matched_via") == "keyword":
+        return (
+            "This routes to release/deploy work — call check_swarm_fact "
+            "check=deploy_triggers for what ACTUALLY ships, rather than assuming "
+            "a release publish is required."
+        )
+    return None
+
+
+def _gate_status_hint(result: dict) -> str | None:
+    """Hint for get_gate_status, or None.
+
+    Fires at exactly one point: the issue is open, every gate is cleared, and
+    no pipeline is queued or inflight. That is the moment the live question
+    becomes "so what ships this?" — and the moment ateles#638 case #1 was
+    answered by inference.
+
+    A still-blocked issue gets nothing: the answer there is "a reviewer", and a
+    deploy hint would be noise sitting next to the gate that actually matters.
+    A closed issue gets nothing. An error result never reaches here.
+    """
+    if str(result.get("status", "")).strip().lower() == "closed":
+        return None
+    if not result.get("all_gates_cleared"):
+        return None
+    stage = (result.get("pipeline") or {}).get("stage")
+    if stage in ("queued", "inflight"):
+        return None
+    return (
+        "All gates cleared and no pipeline running — call check_swarm_fact "
+        "check=deploy_triggers for what actually ships this; a merge is not a deploy."
+    )
+
+
+# Tool name → hint function. A tool absent from this map gets no hint, which is
+# the default and the right answer for most of them:
+#
+#   get_swarm_roster    — a Neotoma read; no claim about live infrastructure
+#                         follows from a roster, so there is no wrong belief to
+#                         pre-empt.
+#   list_pipeline_queue — already fails closed with explicit errors naming the
+#                         unreadable issues. A fact check adds nothing its own
+#                         `error`/`unreadable` fields do not already say.
+#   list_checkpoints /
+#   resolve_checkpoint  — the operator's decision queue. A hint here competes
+#                         with the decision itself for the agent's attention,
+#                         which is the one place that trade is clearly bad.
+#   check_swarm_fact    — hinting at itself is circular.
+#
+# Adding a tool here requires a condition in ITS result that makes the hint
+# true, plus a negative test proving silence without it. "It might be useful"
+# is not a condition.
+HINT_EMITTERS = {
+    "get_dispatch_health": _dispatch_health_hint,
+    "route_task": _route_task_hint,
+    "get_gate_status": _gate_status_hint,
+}
+
+
+def apply_fact_hints(tool_name: str, result: Any) -> Any:
+    """Attach a point-of-use hint to *result* when one is warranted.
+
+    Read-only with respect to the data: it adds one key and mutates nothing
+    else. Never raises — a broken hint must not take down the tool call it
+    rides on, since the hint is strictly an addition to an answer that was
+    already correct without it.
+    """
+    if not isinstance(result, dict):
+        return result
+    # An error result describes a read that did not happen. Hinting off it
+    # would be reasoning from absent data — the exact transport-failure-vs-
+    # data-absence confusion _last_transport_error exists to prevent.
+    if "error" in result:
+        return result
+    emitter = HINT_EMITTERS.get(tool_name)
+    if emitter is None:
+        return result
+    try:
+        hint = emitter(result)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("hint emitter for %s failed: %s", tool_name, exc)
+        return result
+    if hint:
+        _attach_hint(result, hint)
+    return result
 
 
 # ── Tool implementations ─────────────────────────────────────────────────────
@@ -1501,6 +1708,12 @@ async def main():
         if not handler:
             return [TextContent(type="text", text=json.dumps({"error": f"unknown tool: {name}"}))]
         result = handler(arguments or {})
+        # Point-of-use hints attach HERE, at the single dispatch point, rather
+        # than inside each tool. The tool implementations stay untouched, so
+        # the read-only guard over them still reads what it always did, and a
+        # hint can never accidentally become part of a tool's own return
+        # contract.
+        result = apply_fact_hints(name, result)
         return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
     options = server.create_initialization_options()
