@@ -48,6 +48,13 @@ class NeotomaEvent:
     action: str = ""  # created | updated | deleted
     snapshot: dict = field(default_factory=dict)
     raw: dict = field(default_factory=dict)
+    # True once ``snapshot`` is known to reflect what Neotoma actually holds:
+    # either the stream embedded it, or hydrate_snapshot fetched it successfully.
+    # False means "we do not know what is in this entity" — which is NOT the same
+    # as "this entity is empty", and callers that route on snapshot fields must
+    # not treat the two alike. See ateles no-owner loop: a 502 during hydration
+    # left snapshot={} and Apis escalated a fully-tagged task as unroutable.
+    hydrated: bool = False
 
     @classmethod
     def from_raw(cls, data: dict) -> NeotomaEvent:
@@ -57,6 +64,11 @@ class NeotomaEvent:
             entity_id=data.get("entity_id", ""),
             action=data.get("action", ""),
             snapshot=data.get("snapshot") or {},
+            # A snapshot embedded in the event is authoritative; without one we
+            # have not yet read the entity, so hydrated stays False until
+            # hydrate_snapshot succeeds.
+            hydrated=isinstance(data.get("snapshot"), dict)
+            and bool(data.get("snapshot")),
             raw=data,
         )
 
@@ -84,7 +96,10 @@ async def hydrate_snapshot(event: NeotomaEvent) -> NeotomaEvent:
     unchanged (with an empty snapshot) rather than raising, so a transient
     Neotoma blip never crashes the dispatch loop.
     """
-    if event.snapshot or not event.entity_id:
+    if event.snapshot:
+        event.hydrated = True
+        return event
+    if not event.entity_id:
         return event
 
     headers: dict = {}
@@ -101,10 +116,17 @@ async def hydrate_snapshot(event: NeotomaEvent) -> NeotomaEvent:
         # the top-level "snapshot" key (title, tags, assigned_to, ...).
         snapshot = data.get("snapshot")
         event.snapshot = snapshot if isinstance(snapshot, dict) else {}
+        # The read succeeded, so the snapshot — even an empty one — is what
+        # Neotoma holds. Only now may a caller route on its absence of fields.
+        event.hydrated = True
     except Exception as exc:  # noqa: BLE001 — never crash the dispatch loop
+        # Deliberately leave hydrated=False. Returning an empty snapshot with no
+        # marker is what let a transient 502 be read as "this task has no tags".
+        event.hydrated = False
         log.warning(
             f"[sse] could not hydrate snapshot for {event.entity_type}/"
-            f"{event.entity_id}: {exc}"
+            f"{event.entity_id}: {exc} — snapshot UNKNOWN (not empty); "
+            "callers must not route on it"
         )
     return event
 

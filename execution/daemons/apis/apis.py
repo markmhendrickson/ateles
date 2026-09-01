@@ -73,6 +73,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 # ── Env bootstrap (launchd does not source shell profiles) ───────────────────
@@ -299,9 +300,35 @@ from routing import (  # noqa: E402
 )
 
 import github_gateway  # noqa: E402
+
 from skill_runner import run_skill  # noqa: E402
 from swarm_dispatch import SwarmDispatcher  # noqa: E402
 from task_reconciler import TaskReconciler  # noqa: E402
+from unroutable_ledger import UnroutableLedger  # noqa: E402
+
+# Dedup + aggregation for no-owner escalations. Disk-backed so a restart does
+# not re-page the operator about the whole standing backlog (ateles#636's
+# lesson: state that looks recorded but is not).
+_unroutable = UnroutableLedger()
+
+# Event-level idempotency for `task.created`. Bounded so a long-lived dispatcher
+# cannot grow it without limit; the ledger above is what makes escalation dedup
+# survive a restart, so this set only needs to cover redelivery bursts.
+_CREATED_SEEN_MAX = 2000
+_created_seen: dict[str, float] = {}
+
+
+def _seen_created(entity_id: str) -> bool:
+    """True when this process already handled a `task.created` for `entity_id`."""
+    if entity_id in _created_seen:
+        return True
+    if len(_created_seen) >= _CREATED_SEEN_MAX:
+        # Drop the oldest half rather than clearing: clearing would let the
+        # entire recent burst through again in one go.
+        for eid in sorted(_created_seen, key=_created_seen.get)[: _CREATED_SEEN_MAX // 2]:
+            _created_seen.pop(eid, None)
+    _created_seen[entity_id] = time.time()
+    return False
 from task_watchdog import TaskWatchdog  # noqa: E402
 
 
@@ -364,6 +391,7 @@ async def dispatch_task(
     trigger: str,
     notifier: Notifier,
     gate_override: bool = False,
+    snapshot_hydrated: bool | None = None,
 ) -> None:
     """
     Route a task to the appropriate T4 skill and spawn it via a bundled-plan CLI.
@@ -379,6 +407,12 @@ async def dispatch_task(
         trigger:       Event that triggered dispatch ("created", "due_today", "approved")
         notifier:      Notifier for dispatch-failure + checkpoint alerts
         gate_override: When True, bypass the gate (operator already approved)
+        snapshot_hydrated: Whether `snapshot` is known to reflect what Neotoma
+            holds. False means the read FAILED and the snapshot is unknown — an
+            unroutable verdict drawn from it would be an artifact of the failed
+            read, so the escalation is deferred. None means "not applicable"
+            (callers that fetched the snapshot themselves, e.g. the reconciler
+            and the watchdog, which only ever hold real query results).
     """
     title = snapshot.get("title", "(untitled)")
     current_status = snapshot.get("status")
@@ -407,14 +441,31 @@ async def dispatch_task(
     role = _resolve_role(existing_tags, assigned_to=assigned_to)
 
     if skill is None:
+        # ── Guard: never escalate "no owner" on a snapshot we never read ─────
+        # `snapshot_hydrated=False` means the GET failed (502 / read timeout),
+        # not that the task has no tags. Those were spelled the same way, so a
+        # transient Neotoma blip made a fully-tagged task look unroutable:
+        # ent_c192afd8760fd9f3fbd3c08c has a title, a description and five tags
+        # and was escalated three times — its real tags logged at 16:22:05, then
+        # `tags=[]` at 16:25:25 right after a 502. Defer instead; the reconciler
+        # sweep re-examines tasks left `pending`, so deferring loses nothing.
+        if snapshot_hydrated is False:
+            log.warning(
+                f"[{DAEMON_NAME}] task {entity_id!r} could not be hydrated "
+                f"(trigger={trigger}) — NOT escalating 'no owner' on an unread "
+                "snapshot; leaving it pending for the reconciler sweep"
+            )
+            return
+
         # No inferable owner. Previously this was a silent log-and-skip — the task
-        # fell on the floor. Now it escalates: mark BLOCKED (so the watchdog leaves
-        # it for the operator rather than retrying a fundamentally unroutable task)
-        # and page for routing/assignment.
+        # fell on the floor. Then it escalated once per delivered event, which on
+        # 6.2x duplicate delivery meant 123 pages for 35 tasks. Now it escalates
+        # once per task, aggregated, and re-asserts on a timer so a standing
+        # backlog cannot fade into apparent health (#583/#636).
         log.info(
             f"[{DAEMON_NAME}] No route for task {entity_id!r} "
             f"(trigger={trigger}, tags={existing_tags}, assigned_to={assigned_to}) "
-            "— escalating (no owner)"
+            "— unroutable (no owner)"
         )
         set_task_status(
             entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
@@ -422,11 +473,13 @@ async def dispatch_task(
             reason=f"no route/owner (tags={existing_tags}, assigned_to={assigned_to})",
             key_suffix=trigger,
         )
-        notifier.send(
-            f"Task has no owner — needs routing or assignment: {title[:70]}\n  {entity_id}",
-            priority=Priority.BLOCKER,
-            handler=DAEMON_NAME,
-        )
+        # Stage it; the aggregated report goes out on the window boundary.
+        if _unroutable.note(entity_id, title, existing_tags, assigned_to):
+            report = _unroutable.drain()
+            if report:
+                notifier.send(
+                    report, priority=Priority.BLOCKER, handler=DAEMON_NAME
+                )
         return
 
     job = _activity.started(f"routing task {entity_id} → {skill}: {title[:60]}")
@@ -767,12 +820,26 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
     status = snapshot.get("status", "")
 
     if action == "created":
+        # Neotoma redelivers `task.created` for the same entity — measured
+        # 2026-09-01 at 218 events for 35 distinct tasks (6.2x). The redelivery
+        # itself is upstream, but re-running the whole create path per copy is
+        # not: it re-notified, re-dispatched and re-escalated each time. Collapse
+        # duplicates here so the create path runs once per entity per process.
+        if _seen_created(entity_id):
+            log.debug(
+                f"[{DAEMON_NAME}] duplicate task.created for {entity_id} — "
+                "already handled this process; skipping"
+            )
+            return
         notifier.send(
             f"Task created: {title[:80]}\n  {entity_id}",
             priority=Priority.INFO,
             handler=DAEMON_NAME,
         )
-        await dispatch_task(entity_id, snapshot, trigger="created", notifier=notifier)
+        await dispatch_task(
+            entity_id, snapshot, trigger="created", notifier=notifier,
+            snapshot_hydrated=event.hydrated,
+        )
 
     elif action == "updated":
         # Tasks dispatch on creation (and on due_today when AUTO_EXECUTE is set);
@@ -799,7 +866,8 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
                 f"[{DAEMON_NAME}] AUTO_EXECUTE=1 — dispatching due task {entity_id}"
             )
             await dispatch_task(
-                entity_id, snapshot, trigger="due_today", notifier=notifier
+                entity_id, snapshot, trigger="due_today", notifier=notifier,
+                snapshot_hydrated=event.hydrated,
             )
         else:
             log.info(
@@ -1053,6 +1121,22 @@ async def main() -> None:
                 )
             await asyncio.sleep(deferred_interval)
 
+    # Flush any aggregated unroutable report whose window has closed. Without
+    # this the last report in a burst would wait for the NEXT unroutable task to
+    # push it out — a report that exists and is never delivered is the silence
+    # failure of #583/#636 arriving by a different route.
+    async def unroutable_flush() -> None:
+        while True:
+            await asyncio.sleep(30)
+            try:
+                report = _unroutable.drain()
+                if report:
+                    notifier.send(
+                        report, priority=Priority.BLOCKER, handler=DAEMON_NAME
+                    )
+            except Exception as exc:  # noqa: BLE001 — never kill the daemon
+                log.warning(f"[{DAEMON_NAME}] unroutable flush failed: {exc}")
+
     log.info(f"[{DAEMON_NAME}] Subscribing to SSE: {SUBSCRIBE_ENTITY_TYPES}")
     await asyncio.gather(
         sse.stream(dispatch),
@@ -1062,6 +1146,7 @@ async def main() -> None:
         resume_sweep(),
         deferred_review_sweep(),
         workflow_drift_check(),
+        unroutable_flush(),
     )
 
 
