@@ -105,12 +105,17 @@ class _FakeHttp:
         *,
         profile_amount: object,
         transfer_source_value: str | None = None,
+        transfer_status: str = "outgoing_payment_sent",
     ) -> None:
         self.profile_amount = profile_amount
         # What Wise claims the transfer is worth, at creation and after funding.
         # Defaults to the owed amount so a scenario only has to name a
         # divergence when it wants one.
         self.transfer_source_value = transfer_source_value or OWED
+        # Whether Wise reports the transfer delivered. Defaults to delivered so
+        # this eval's scenarios vary the AMOUNT and hold settlement constant;
+        # settlement state is covered by test_wise_settlement_state.py.
+        self.transfer_status = transfer_status
         self.neotoma_requests: list[tuple[str, str]] = []
         self.wise_requests: list[tuple[str, str, str | None]] = []
         # Bodies as the handler built them, before serialization — this is where
@@ -194,11 +199,17 @@ class _FakeHttp:
             return {
                 "id": WISE_TRANSFER_ID,
                 "sourceValue": self.transfer_source_value,
+                # Wise reports the transfer delivered. A `sent` result requires
+                # this, not merely accepted funding (ateles#575) — and this
+                # eval's subject is the AMOUNT, so it holds delivery constant
+                # to keep the scenario's divergence isolated to the amount.
+                "status": self.transfer_status,
             }
         if url.endswith("/v1/transfers"):
             return {
                 "id": WISE_TRANSFER_ID,
                 "sourceValue": self.transfer_source_value,
+                "status": self.transfer_status,
             }
         raise AssertionError(f"unexpected Wise URL in eval: {method} {url}")
 

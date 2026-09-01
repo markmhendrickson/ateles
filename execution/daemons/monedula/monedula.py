@@ -502,6 +502,7 @@ def _build_preview_message(
     triggered: list[tuple],
     yesterday_str: str,
     due_tasks: list[dict] | None = None,
+    settlement_lines: list[str] | None = None,
 ) -> str:
     """Build the Telegram preview message for all triggered payments."""
     lines = [f"💸 Monedula — payment check for {yesterday_str}", ""]
@@ -540,8 +541,22 @@ def _build_preview_message(
                 lines.append(f"    {short_desc}")
         lines.append("")
 
+    # Transfers submitted but not yet confirmed delivered (ateles#575).
+    if settlement_lines:
+        lines.append("⏳ *Awaiting settlement*")
+        lines.append("")
+        lines += settlement_lines
+        lines.append("")
+
     # Reply instructions — attendance-gated. A bare "yes" is intentionally
     # not accepted; the operator must confirm attendance per session.
+    #
+    # Only rendered when there is something to approve. With nothing triggered
+    # this message is a reminder or a settlement digest, and asking to "confirm
+    # & pay all" against an empty list invites an approval for nothing.
+    if not triggered:
+        return "\n".join(lines).rstrip()
+
     handler_names = list(dict.fromkeys([h.name for h, _ in triggered]))
     lines += [
         "Reply (confirm attendance — pays only for sessions you attended):",
@@ -574,6 +589,33 @@ def main() -> None:
     from handlers import load_handlers
 
     all_handlers = load_handlers()
+
+    # Resolve transfers left in flight by an earlier tick (ateles#575).
+    #
+    # This runs BEFORE the "nothing to do" early return below, and that
+    # placement is load-bearing: behind it, a quiet day would never resolve an
+    # in-flight transfer, and awaiting_settlement would become a state nothing
+    # exits — a task parked forever, which is worse than the bug it replaces.
+    settlement_records: list[dict] = []
+    _wise_token = os.environ.get("WISE_API_TOKEN", "").strip()
+    if not _wise_token:
+        log.warning(
+            "WISE_API_TOKEN not set — skipping settlement sweep; any in-flight "
+            "transfer stays unresolved this tick."
+        )
+    else:
+        try:
+            from settlement import sweep_pending_settlements
+
+            settlement_records = sweep_pending_settlements(_wise_token)
+        except Exception as exc:
+            # A sweep failure must never take payment detection down with it.
+            log.exception(f"Settlement sweep failed: {exc}")
+            _notify(
+                f"monedula: settlement sweep failed ({exc}) — in-flight transfers "
+                f"were NOT resolved this tick",
+                priority="blocker",
+            )
 
     # The daily claim gates the CALENDAR leg only — never the whole run.
     #
@@ -644,10 +686,18 @@ def main() -> None:
     # Fetch due payment tasks from Neotoma, scoped to profile-linked task IDs only.
     due_tasks = fetch_due_payment_tasks(all_handlers)
 
+    # Settlement outcomes worth telling the operator about. A transfer quietly
+    # still in flight is not one — reporting it every tick would train the
+    # operator to skim past the block that also carries the failures.
+    from settlement import format_settlement_lines
+
+    settlement_lines = format_settlement_lines(settlement_records)
+
     # Abort early only if there's truly nothing to show
-    if not triggered and not due_tasks:
+    if not triggered and not due_tasks and not settlement_lines:
         log.info(
-            "No payment handlers triggered and no due payment tasks — nothing to do."
+            "No payment handlers triggered, no due payment tasks, and nothing to "
+            "report on settlement — nothing to do."
         )
         return
 
@@ -657,7 +707,12 @@ def main() -> None:
         )
 
     # Build and send preview
-    preview_msg = _build_preview_message(triggered, yesterday_str, due_tasks=due_tasks)
+    preview_msg = _build_preview_message(
+        triggered,
+        yesterday_str,
+        due_tasks=due_tasks,
+        settlement_lines=settlement_lines,
+    )
     log.info("Sending payment preview to Telegram...")
     telegram_send(preview_msg)
 

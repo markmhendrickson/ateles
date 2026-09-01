@@ -62,6 +62,19 @@ log = logging.getLogger(__name__)
 # Wise accepts only these legalType values when creating an IBAN recipient.
 _WISE_LEGAL_TYPES = {"PRIVATE", "BUSINESS"}
 
+# payment_profile.status vocabulary.
+#
+# Only ACTIVE profiles are matched for payment. AWAITING_SETTLEMENT parks a
+# profile whose transfer has been submitted to Wise but not yet delivered — it
+# is the double-payment guard for the in-flight window (ateles#575), because
+# load_profiles_from_neotoma() matches active profiles only. PAYMENT_FAILED is
+# terminal-until-an-operator-acts: re-arming a failed payment automatically is
+# a double-payment risk, so it stays a human decision.
+PROFILE_STATUS_ACTIVE = "active"
+PROFILE_STATUS_AWAITING_SETTLEMENT = "awaiting_settlement"
+PROFILE_STATUS_PAYMENT_FAILED = "payment_failed"
+PROFILE_STATUS_ARCHIVED = "archived"
+
 
 # EUR is a two-decimal currency. This is the amount contract for the whole
 # Monedula money path: a profile amount carries at most cents, and anything
@@ -146,6 +159,20 @@ class PaymentProfile:
     one_off: bool = False  # archive the profile after a successful transfer
     entity_id: str = ""  # Neotoma payment_profile entity id (for archiving)
 
+    # In-flight settlement state (ateles#575). Set on the profile when a Wise
+    # transfer has been submitted but Wise has not yet reported it delivered.
+    # The settlement sweep reads pending_transfer_id to resolve the final state
+    # and pending_transfer_at to age the wait for operator escalation.
+    pending_transfer_id: str = ""
+    pending_transfer_at: str = ""  # ISO YYYY-MM-DD the transfer was submitted
+    # The last failed status observed for pending_transfer_id, if any. A failed
+    # read is never acted on alone: the operator's ledger records bounced_back
+    # appearing ~20s after funding and resolving back to processing on the next
+    # poll, so a one-read verdict would declare a healthy transfer dead. The
+    # sweep requires the SAME failed status on two consecutive observations,
+    # and this field is what carries the first one across ticks (and restarts).
+    pending_failed_status: str = ""
+
     # Neotoma task
     neotoma_task_id: str = ""
     task_keywords: list[str] = field(default_factory=list)
@@ -156,12 +183,130 @@ class PaymentProfile:
         return self.prefix.lower()
 
 
-def load_profiles_from_neotoma() -> list[PaymentProfile]:
+def _profile_from_entity(item: dict) -> PaymentProfile | None:
+    """Build a PaymentProfile from one Neotoma payment_profile entity.
+
+    Returns None — with a log line naming the reason — for any entity that
+    cannot become a payable profile. Every rejection here is a refusal to pay:
+    a profile that never loads can never move money for the wrong reason.
+
+    The status filter is deliberately NOT applied here; the caller owns which
+    statuses it wants, so a parked profile is validated exactly as a live one.
+    """
+    import json
+
+    snap: dict = item.get("snapshot") or {}
+
+    label = snap.get("label", "")
+    prefix = snap.get("prefix", label.upper().replace(" ", "_"))
+    if not label:
+        log.warning(
+            f"payment_profile entity {item.get('entity_id')} missing label — skipped"
+        )
+        return None
+
+    keywords_raw: list | str = snap.get("calendar_keywords", [])
+    if isinstance(keywords_raw, str):
+        try:
+            keywords_raw = json.loads(keywords_raw)
+        except (ValueError, TypeError):
+            keywords_raw = [k.strip() for k in keywords_raw.split(",") if k.strip()]
+    calendar_keywords = [str(k).strip().lower() for k in keywords_raw if k]
+
+    due_date = str(snap.get("due_date") or "").strip()
+    one_off = bool(snap.get("one_off")) or (not calendar_keywords and bool(due_date))
+
+    # A profile needs at least one trigger: calendar keywords (recurring,
+    # attendance-gated) or a due date (one-off invoice). With neither it is
+    # unreachable — matches() can never fire — so say so plainly.
+    if not calendar_keywords and not due_date:
+        log.warning(
+            f"payment_profile {label!r} is UNREACHABLE: no calendar_keywords "
+            f"(recurring trigger) and no due_date (one-off trigger) — skipped"
+        )
+        return None
+
+    payment_type_raw = str(snap.get("payment_type", "wise")).lower()
+    if payment_type_raw not in ("wise", "btc"):
+        log.warning(
+            f"payment_profile {label!r} unknown payment_type={payment_type_raw!r} — skipped"
+        )
+        return None
+    payment_type: Literal["wise", "btc"] = payment_type_raw  # type: ignore[assignment]
+
+    amount_raw = snap.get("amount_eur", 0)
+    try:
+        amount_eur = parse_amount_eur(amount_raw)
+    except PaymentAmountError as exc:
+        # Skipping is the refusal: a profile that never loads can never pay.
+        # The alternative — coercing to something payable — is exactly the
+        # silent truncation this guards against.
+        log.error(
+            f"payment_profile {label!r} REFUSED: {exc} — profile skipped, "
+            f"no payment will be attempted until the amount is corrected"
+        )
+        return None
+
+    if amount_eur <= 0:
+        log.warning(f"payment_profile {label!r} amount_eur must be positive — skipped")
+        return None
+
+    task_kw_raw: list | str = snap.get("task_keywords", [])
+    if isinstance(task_kw_raw, str):
+        try:
+            task_kw_raw = json.loads(task_kw_raw)
+        except (ValueError, TypeError):
+            task_kw_raw = [k.strip() for k in task_kw_raw.split(",") if k.strip()]
+    task_keywords = [str(k).strip().lower() for k in task_kw_raw if k] or calendar_keywords
+
+    legal_type_raw = str(snap.get("wise_legal_type") or "PRIVATE").strip().upper()
+    if legal_type_raw not in _WISE_LEGAL_TYPES:
+        log.warning(
+            f"payment_profile {label!r} invalid wise_legal_type="
+            f"{legal_type_raw!r} (expected one of {sorted(_WISE_LEGAL_TYPES)}) "
+            f"— skipped"
+        )
+        return None
+
+    return PaymentProfile(
+        prefix=prefix,
+        label=label,
+        calendar_keywords=calendar_keywords,
+        payment_type=payment_type,
+        amount_eur=amount_eur,
+        contact_id=snap.get("contact_id", ""),
+        contact_category=snap.get("contact_category", ""),
+        contact_platform=snap.get("contact_platform", ""),
+        wise_reference=snap.get("wise_reference", ""),
+        wise_legal_type=legal_type_raw,
+        wise_iban=str(snap.get("wise_iban") or "").strip(),
+        wise_recipient_name=str(snap.get("wise_recipient_name") or "").strip(),
+        btc_address=snap.get("btc_address", ""),
+        due_date=due_date,
+        one_off=one_off,
+        entity_id=str(item.get("entity_id") or "").strip(),
+        pending_transfer_id=str(snap.get("pending_transfer_id") or "").strip(),
+        pending_transfer_at=str(snap.get("pending_transfer_at") or "").strip(),
+        pending_failed_status=str(snap.get("pending_failed_status") or "").strip(),
+        neotoma_task_id=snap.get("neotoma_task_id", ""),
+        task_keywords=task_keywords,
+    )
+
+
+def load_profiles_from_neotoma(
+    statuses: tuple[str, ...] = (PROFILE_STATUS_ACTIVE,),
+) -> list[PaymentProfile]:
     """
     Load PaymentProfiles from Neotoma payment_profile entities (Phase 5+).
 
-    Queries Neotoma for active payment_profile entities belonging to this
-    operator, constructs PaymentProfile objects from snapshot fields.
+    Queries Neotoma for payment_profile entities belonging to this operator and
+    constructs PaymentProfile objects from snapshot fields.
+
+    *statuses* selects which profile statuses are returned. The default is
+    ACTIVE only, which is what the payment leg must ever see: a profile parked
+    in awaiting_settlement, paused, archived or payment_failed must not match,
+    preview, or pay. The filter fails CLOSED — any status not named here is
+    skipped, so a status value nobody anticipated cannot move money.
 
     Falls back to empty list on any error — caller should then call
     load_profiles() to use env-var fallback.
@@ -243,113 +388,61 @@ def load_profiles_from_neotoma() -> list[PaymentProfile]:
 
     profiles: list[PaymentProfile] = []
     for item in items:
-        snap: dict = item.get("snapshot") or {}
-        if snap.get("status", "active") not in ("active",):
-            continue  # skip paused/archived
-
-        label = snap.get("label", "")
-        prefix = snap.get("prefix", label.upper().replace(" ", "_"))
-        if not label:
-            log.warning(
-                f"payment_profile entity {item.get('entity_id')} missing label — skipped"
-            )
-            continue
-
-        keywords_raw: list | str = snap.get("calendar_keywords", [])
-        if isinstance(keywords_raw, str):
-            try:
-                keywords_raw = json.loads(keywords_raw)
-            except (ValueError, TypeError):
-                keywords_raw = [k.strip() for k in keywords_raw.split(",") if k.strip()]
-        calendar_keywords = [str(k).strip().lower() for k in keywords_raw if k]
-
-        due_date = str(snap.get("due_date") or "").strip()
-        one_off = bool(snap.get("one_off")) or (not calendar_keywords and bool(due_date))
-
-        # A profile needs at least one trigger: calendar keywords (recurring,
-        # attendance-gated) or a due date (one-off invoice). With neither it is
-        # unreachable — matches() can never fire — so say so plainly.
-        if not calendar_keywords and not due_date:
-            log.warning(
-                f"payment_profile {label!r} is UNREACHABLE: no calendar_keywords "
-                f"(recurring trigger) and no due_date (one-off trigger) — skipped"
-            )
-            continue
-
-        payment_type_raw = str(snap.get("payment_type", "wise")).lower()
-        if payment_type_raw not in ("wise", "btc"):
-            log.warning(
-                f"payment_profile {label!r} unknown payment_type={payment_type_raw!r} — skipped"
-            )
-            continue
-        payment_type: Literal["wise", "btc"] = payment_type_raw  # type: ignore[assignment]
-
-        amount_raw = snap.get("amount_eur", 0)
-        try:
-            amount_eur = parse_amount_eur(amount_raw)
-        except PaymentAmountError as exc:
-            # Skipping is the refusal: a profile that never loads can never pay.
-            # The alternative — coercing to something payable — is exactly the
-            # silent truncation this guards against.
-            log.error(
-                f"payment_profile {label!r} REFUSED: {exc} — profile skipped, "
-                f"no payment will be attempted until the amount is corrected"
-            )
-            continue
-
-        if amount_eur <= 0:
-            log.warning(
-                f"payment_profile {label!r} amount_eur must be positive — skipped"
-            )
-            continue
-
-        task_kw_raw: list | str = snap.get("task_keywords", [])
-        if isinstance(task_kw_raw, str):
-            try:
-                task_kw_raw = json.loads(task_kw_raw)
-            except (ValueError, TypeError):
-                task_kw_raw = [k.strip() for k in task_kw_raw.split(",") if k.strip()]
-        task_keywords = [
-            str(k).strip().lower() for k in task_kw_raw if k
-        ] or calendar_keywords
-
-        legal_type_raw = str(snap.get("wise_legal_type") or "PRIVATE").strip().upper()
-        if legal_type_raw not in _WISE_LEGAL_TYPES:
-            log.warning(
-                f"payment_profile {label!r} invalid wise_legal_type="
-                f"{legal_type_raw!r} (expected one of {sorted(_WISE_LEGAL_TYPES)}) "
-                f"— skipped"
-            )
-            continue
-
-        profiles.append(
-            PaymentProfile(
-                prefix=prefix,
-                label=label,
-                calendar_keywords=calendar_keywords,
-                payment_type=payment_type,
-                amount_eur=amount_eur,
-                contact_id=snap.get("contact_id", ""),
-                contact_category=snap.get("contact_category", ""),
-                contact_platform=snap.get("contact_platform", ""),
-                wise_reference=snap.get("wise_reference", ""),
-                wise_legal_type=legal_type_raw,
-                wise_iban=str(snap.get("wise_iban") or "").strip(),
-                wise_recipient_name=str(snap.get("wise_recipient_name") or "").strip(),
-                btc_address=snap.get("btc_address", ""),
-                due_date=due_date,
-                one_off=one_off,
-                entity_id=str(item.get("entity_id") or "").strip(),
-                neotoma_task_id=snap.get("neotoma_task_id", ""),
-                task_keywords=task_keywords,
-            )
+        snap_status = str(
+            (item.get("snapshot") or {}).get("status", PROFILE_STATUS_ACTIVE)
         )
+        if snap_status not in statuses:
+            continue  # not a status this caller asked for
+
+        profile = _profile_from_entity(item)
+        if profile is not None:
+            profiles.append(profile)
 
     log.info(
-        f"Loaded {len(profiles)} payment profile(s) from Neotoma: "
-        f"{[p.name for p in profiles]}"
+        f"Loaded {len(profiles)} payment profile(s) from Neotoma "
+        f"(statuses={list(statuses)}): {[p.name for p in profiles]}"
     )
     return profiles
+
+
+def load_profiles_awaiting_settlement() -> list[PaymentProfile]:
+    """Load profiles parked awaiting settlement, for the settlement sweep.
+
+    Drops — loudly — any parked profile whose pending_transfer_id cannot be
+    resolved to a Wise transfer. A profile parked with no resolvable transfer
+    id can never leave awaiting_settlement on its own, so it must be visible to
+    the operator rather than silently retried or silently stuck.
+
+    There is no env-var equivalent: in-flight state is written by the daemon to
+    Neotoma, and the env loader is a static-config fallback that cannot carry
+    per-run state.
+    """
+    parked = load_profiles_from_neotoma(statuses=(PROFILE_STATUS_AWAITING_SETTLEMENT,))
+    resolvable: list[PaymentProfile] = []
+    for profile in parked:
+        if _valid_transfer_id(profile.pending_transfer_id) is None:
+            log.warning(
+                f"payment_profile {profile.label!r} is parked in "
+                f"{PROFILE_STATUS_AWAITING_SETTLEMENT} with an unusable "
+                f"pending_transfer_id={profile.pending_transfer_id!r} — it cannot be "
+                f"resolved against Wise and will stay parked until corrected by hand"
+            )
+            continue
+        resolvable.append(profile)
+    return resolvable
+
+
+def _valid_transfer_id(raw: object) -> int | None:
+    """Return a positive int Wise transfer id, or None if *raw* is not one.
+
+    Validity, not str.isdigit(): "0" and "-1" are numeric and are not transfer
+    ids, and a GET against either would be a request that can only fail.
+    """
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 def load_profiles_with_neotoma_fallback() -> list[PaymentProfile]:
@@ -358,6 +451,12 @@ def load_profiles_with_neotoma_fallback() -> list[PaymentProfile]:
 
     Phase 5 entrypoint. Monedula callers should use this instead of
     load_profiles() to transparently prefer Neotoma-sourced profiles.
+
+    Env-var fallback applies only when Neotoma has no payment_profile entities
+    at all. An empty *active* list is not the same: parked profiles
+    (awaiting_settlement) intentionally empty the active set, and reconstructing
+    from env would drop status, entity_id and pending_transfer_id — bypassing
+    the double-payment guard this PR relies on (ateles#604 review).
     """
     try:
         profiles = load_profiles_from_neotoma()
@@ -369,6 +468,25 @@ def load_profiles_with_neotoma_fallback() -> list[PaymentProfile]:
         profiles = []
     if profiles:
         return profiles
+
+    try:
+        any_in_neotoma = load_profiles_from_neotoma(
+            statuses=(
+                PROFILE_STATUS_ACTIVE,
+                PROFILE_STATUS_AWAITING_SETTLEMENT,
+                PROFILE_STATUS_PAYMENT_FAILED,
+                PROFILE_STATUS_ARCHIVED,
+            )
+        )
+    except RuntimeError:
+        any_in_neotoma = []
+    if any_in_neotoma:
+        log.info(
+            "Neotoma has %d payment profile(s) but none are active — "
+            "skipping env-var fallback to preserve parked-state guard",
+            len(any_in_neotoma),
+        )
+        return []
 
     log.info("No Neotoma payment profiles found — falling back to env vars")
     return load_profiles()

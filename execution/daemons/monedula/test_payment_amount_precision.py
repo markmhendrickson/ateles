@@ -247,7 +247,13 @@ def test_short_transfer_blocks_the_sent_result(monkeypatch) -> None:
 
 
 def test_matching_transfer_still_completes(monkeypatch) -> None:
-    """Reconciliation does not block a correct transfer."""
+    """Reconciliation does not block a correct transfer.
+
+    The fetched record carries status=outgoing_payment_sent because a `sent`
+    result now requires Wise to have confirmed delivery, not merely to have
+    accepted the funding (ateles#575). The reconciliation contract this test
+    exists for is unchanged: a matching amount does not raise.
+    """
     monkeypatch.setattr("handlers.wise_transfer._get_wise_profile_id", lambda t: 1)
     monkeypatch.setattr(
         "handlers.wise_transfer._get_or_create_recipient", lambda *a, **k: 99
@@ -263,7 +269,11 @@ def test_matching_transfer_still_completes(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "handlers.wise_transfer._fetch_transfer",
-        lambda *a, **k: {"id": 7, "sourceValue": SHORT_FUNDED_A},
+        lambda *a, **k: {
+            "id": 7,
+            "sourceValue": SHORT_FUNDED_A,
+            "status": "outgoing_payment_sent",
+        },
     )
 
     result = _execute_wise_transfer(

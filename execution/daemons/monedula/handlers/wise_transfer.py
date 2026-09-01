@@ -38,7 +38,12 @@ try:
     from ..handler_base import PaymentHandler
 except ImportError:
     from handler_base import PaymentHandler  # type: ignore[no-redef]
-from .payment_profile import PaymentAmountError, PaymentProfile, parse_amount_eur
+from .payment_profile import (
+    PROFILE_STATUS_AWAITING_SETTLEMENT,
+    PaymentAmountError,
+    PaymentProfile,
+    parse_amount_eur,
+)
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +53,106 @@ WISE_BASE_URL = "https://api.transferwise.com"
 # alerting match on this rather than on the human-readable error text, which is
 # free to change.
 AMOUNT_MISMATCH_ERROR_CODE = "wise_transfer_amount_mismatch"
+
+# ---------------------------------------------------------------------------
+# Settlement state (ateles#575)
+# ---------------------------------------------------------------------------
+#
+# Funding a Wise transfer and Wise delivering it are two different events,
+# minutes to days apart, and the funding response describes only the first.
+#
+# _fund_transfer() POSTs to /v3/profiles/{id}/transfers/{id}/payments and reads
+# `status` off the PAYMENT object. COMPLETED there means "the money left the
+# balance", not "the transfer settled". PENDING and PROCESSING mean not even
+# that. Before ateles#575 all three collapsed into result status "sent", which
+# drove the task to done and archived the profile.
+#
+# So the funding status is not the settlement signal for ANY of its values, and
+# a fix that merely stopped honouring PENDING/PROCESSING would leave the same
+# defect on the COMPLETED path. The operator's own hand-run ledger records the
+# case directly: a transfer funded with payment status COMPLETED and sat at
+# transfer status "processing" afterwards.
+#
+# Settlement is therefore decided by the TRANSFER record's own status, read
+# back from Wise; the funding status only distinguishes "accepted" from "the
+# call failed outright".
+FUNDING_ACCEPTED = frozenset({"COMPLETED", "PENDING", "PROCESSING"})
+
+# Wise's own transfer-record statuses (lowercase on the wire). This is the
+# settlement signal.
+#
+# Only outgoing_payment_sent is settled. Everything not explicitly named in one
+# of these two sets — including "unknown" — is treated as still in flight, so
+# the classifier fails towards "keep watching" rather than towards "delivered".
+#
+# A "failed" classification is never acted on from a single read. The operator's
+# hand-run ledger records bounced_back appearing ~20s after funding and
+# resolving back to processing on the next poll, so a one-read verdict would
+# have declared a healthy transfer dead. The sweep requires the same failed
+# status on two consecutive observations before it records a terminal outcome.
+WISE_TRANSFER_SETTLED = frozenset({"outgoing_payment_sent"})
+WISE_TRANSFER_FAILED = frozenset(
+    {"cancelled", "funds_refunded", "bounced_back", "charged_back"}
+)
+
+# Handler result status for a transfer submitted but not yet delivered. It is
+# NOT a failure and NOT a success: the money has left the balance, so it must
+# not be retried, and it has not arrived, so the task must not be closed.
+RESULT_AWAITING_SETTLEMENT = "awaiting_settlement"
+
+# How long an unsettled transfer may sit before the sweep reports it as suspect
+# rather than merely in flight. Wise itself can take minutes to days.
+DEFAULT_SETTLEMENT_ALERT_DAYS = 5
+
+
+def settlement_alert_days() -> int:
+    """Days before an in-flight transfer is reported suspect.
+
+    Read at call time so tests and the operator can set it per run. An
+    unparseable value falls back to the default with a warning — a bad env var
+    must not decide how long money stays unwatched.
+    """
+    raw = os.environ.get("MONEDULA_SETTLEMENT_ALERT_DAYS", "").strip()
+    if not raw:
+        return DEFAULT_SETTLEMENT_ALERT_DAYS
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning(
+            f"MONEDULA_SETTLEMENT_ALERT_DAYS={raw!r} is not an integer — "
+            f"using {DEFAULT_SETTLEMENT_ALERT_DAYS}"
+        )
+        return DEFAULT_SETTLEMENT_ALERT_DAYS
+    if value < 0:
+        log.warning(
+            f"MONEDULA_SETTLEMENT_ALERT_DAYS={raw!r} is negative — "
+            f"using {DEFAULT_SETTLEMENT_ALERT_DAYS}"
+        )
+        return DEFAULT_SETTLEMENT_ALERT_DAYS
+    return value
+
+
+def classify_transfer_state(transfer: dict | None) -> str:
+    """Classify a Wise transfer record: settled | failed | in_flight | unreadable.
+
+    "unreadable" is deliberately distinct from "in_flight": a Wise read that
+    failed says nothing about the transfer, and conflating the two would let a
+    network error look like a state observation. Neither ever classifies as
+    settled — only an explicit WISE_TRANSFER_SETTLED status does. A transfer is
+    declared delivered because Wise said so, never because nothing said
+    otherwise.
+    """
+    if not isinstance(transfer, dict):
+        return "unreadable"
+    raw = transfer.get("status")
+    if raw is None:
+        return "unreadable"
+    status = str(raw).strip().lower()
+    if status in WISE_TRANSFER_SETTLED:
+        return "settled"
+    if status in WISE_TRANSFER_FAILED:
+        return "failed"
+    return "in_flight"
 
 
 class TransferAmountMismatch(RuntimeError):
@@ -116,12 +221,24 @@ class WiseTransferHandler(PaymentHandler):
         iban = contact.get("iban", "…") if contact else "…"
         task_id = _find_task_id(self.profile)
         iban_preview = (iban[:10] + "…") if len(iban) > 10 else iban
-        return (
-            f"💳 {self.profile.label}\n"
-            f"  €{self.profile.amount_eur} Wise → {name} (IBAN: {iban_preview})\n"
-            f"  Task: {task_id or '(unknown)'}\n"
-            f"  Event: {summary}"
-        )
+        lines = [
+            f"💳 {self.profile.label}",
+            f"  €{self.profile.amount_eur} Wise → {name} (IBAN: {iban_preview})",
+            f"  Task: {task_id or '(unknown)'}",
+            f"  Event: {summary}",
+        ]
+        # Defence in depth for the double-payment guard: a parked profile
+        # should never reach a preview at all, because the loader matches
+        # active profiles only. If one does, the operator must see that money
+        # is already in flight before approving a second transfer.
+        if self.profile.pending_transfer_id:
+            submitted = self.profile.pending_transfer_at or "an earlier run"
+            lines.append(
+                f"  ⚠️ ALREADY IN FLIGHT: Wise transfer "
+                f"{self.profile.pending_transfer_id} submitted {submitted} and not "
+                f"yet settled — do NOT approve this again."
+            )
+        return "\n".join(lines)
 
     def execute(self, match: dict) -> dict[str, Any]:
         """Execute Wise transfer. Returns result dict with status and details."""
@@ -207,7 +324,11 @@ class WiseTransferHandler(PaymentHandler):
 
         result["handler"] = self.name
 
-        if result.get("status") in ("sent", "manual_required"):
+        if result.get("status") in (
+            "sent",
+            RESULT_AWAITING_SETTLEMENT,
+            "manual_required",
+        ):
             _update_task(self.profile, result)
 
         return result
@@ -225,6 +346,24 @@ class WiseTransferHandler(PaymentHandler):
                 f"  Recipient: {name}\n"
                 f"  Amount: €{amount}\n"
                 f"  Reference: {reference}"
+            )
+        elif status == RESULT_AWAITING_SETTLEMENT:
+            # Neither ✅ nor ❌: the money left the balance and Wise has not
+            # confirmed delivery. Saying "sent" here is the ateles#575 defect
+            # in prose, and saying "failed" would invite a re-send of a
+            # transfer that is still on its way.
+            transfer_id = result.get("transfer_id", "unknown")
+            name = result.get("recipient_name", "recipient")
+            wise_state = result.get("wise_transfer_status") or "in flight"
+            return (
+                f"⏳ {self.profile.label} transfer submitted — awaiting settlement.\n"
+                f"  Transfer ID: {transfer_id}\n"
+                f"  Recipient: {name}\n"
+                f"  Amount: €{amount}\n"
+                f"  Reference: {reference}\n"
+                f"  Wise transfer status: {wise_state}\n"
+                f"  The task stays open until Wise confirms delivery. "
+                f"Do not re-send this payment."
             )
         elif status == "manual_required":
             iban = result.get("iban", "see contacts")
@@ -725,19 +864,30 @@ def _execute_wise_transfer(
     funding_result = _fund_transfer(token, profile_id, transfer_id)
     log.info(f"[{label}] Wise funding result: {funding_result}")
 
-    # Reconcile again against the funded transfer as Wise reports it now. This
-    # is the post-transfer check: it is what stops a short payment from
-    # reaching the done-marking path.
-    _reconcile_transfer_amount(
-        _fetch_transfer(token, transfer_id) or transfer_record,
-        amount_eur,
-        label=label,
-    )
+    # One post-funding read, used for BOTH the amount reconciliation and the
+    # settlement classification. Reading twice would let the two decisions judge
+    # different records, so the transfer that reconciles is not necessarily the
+    # transfer whose state is classified.
+    funded_record = _fetch_transfer(token, transfer_id) or transfer_record
 
-    status = funding_result.get("status", "")
-    if status in ("COMPLETED", "PROCESSING", "PENDING"):
+    # Reconcile against the funded transfer as Wise reports it now. This runs
+    # BEFORE any status decision: a short payment must not reach the
+    # done-marking path regardless of how it settles (ateles#552).
+    _reconcile_transfer_amount(funded_record, amount_eur, label=label)
+
+    status = str(funding_result.get("status", "") or "")
+    if status not in FUNDING_ACCEPTED:
+        raise RuntimeError(
+            f"Wise funding status unexpected: {status} — full result: {funding_result}"
+        )
+
+    transfer_state = classify_transfer_state(funded_record)
+
+    def _result(result_status: str) -> dict:
+        # One payload builder for every branch, so a consumer that reads a
+        # field on the sent path cannot find it missing on the unsettled one.
         return {
-            "status": "sent",
+            "status": result_status,
             "transfer_id": transfer_id,
             "quote_uuid": quote_uuid,
             "account_id": account_id,
@@ -746,11 +896,32 @@ def _execute_wise_transfer(
             "recipient_name": recipient_name,
             "reference": reference,
             "wise_status": status,
+            "wise_transfer_status": str(
+                (funded_record or {}).get("status", "") or ""
+            ),
         }
-    else:
+
+    if transfer_state == "settled":
+        log.info(f"[{label}] Wise reports the transfer delivered — payment complete.")
+        return _result("sent")
+
+    if transfer_state == "failed":
+        # Fail loudly rather than parking: the caller's except turns this into
+        # manual_required, which leaves the task open and tells the operator.
         raise RuntimeError(
-            f"Wise funding status unexpected: {status} — full result: {funding_result}"
+            f"Wise transfer {transfer_id} reports status "
+            f"{funded_record.get('status')!r} after funding — the payment did not "
+            f"go through and needs manual attention"
         )
+
+    # in_flight or unreadable: the money has left the balance and Wise has not
+    # said it arrived. Not a success and not a failure — the one state that
+    # must not be collapsed into either.
+    log.info(
+        f"[{label}] transfer {transfer_id} submitted, awaiting settlement "
+        f"(funding={status}, transfer={transfer_state})"
+    )
+    return _result(RESULT_AWAITING_SETTLEMENT)
 
 
 # ---------------------------------------------------------------------------
@@ -805,45 +976,100 @@ def _find_task_id(profile: PaymentProfile) -> str:
     return ""
 
 
+def note_task(profile: PaymentProfile, task_id: str, neotoma: str, text: str) -> bool:
+    """Write a note onto a Neotoma task. Returns True on success.
+
+    Shared by the execute path and the settlement sweep so both write notes
+    through one implementation and one argv shape.
+    """
+    if not task_id:
+        return False
+    ok = _neotoma_set_field(neotoma, task_id, "notes", text)
+    if ok:
+        log.info(f"[{profile.name}] Neotoma task {task_id} notes updated.")
+    return ok
+
+
 def _update_task(profile: PaymentProfile, result: dict) -> None:
-    """Update the Neotoma payment task: add note and roll due_date."""
+    """Update the Neotoma payment task: add note, park or close, roll due_date."""
     import shutil
 
+    status = result.get("status")
     neotoma = shutil.which("neotoma")
     if not neotoma:
         log.warning(f"[{profile.name}] neotoma CLI not found — skipping task update")
+        # Parking is not conditional on the task update working. The money is
+        # in flight either way, and an unparked profile re-previews the same
+        # invoice on the next tick — so this early return must not skip it.
+        if status == RESULT_AWAITING_SETTLEMENT:
+            log.error(
+                f"[{profile.name}] CANNOT PARK PROFILE: neotoma CLI not found while a "
+                f"transfer is in flight (transfer_id={result.get('transfer_id')}). "
+                f"This profile may re-trigger — set its status to "
+                f"{PROFILE_STATUS_AWAITING_SETTLEMENT} by hand."
+            )
+            _escalate(
+                f"monedula: transfer {result.get('transfer_id')} is in flight for "
+                f"{profile.label} but the profile could NOT be parked (neotoma CLI "
+                f"missing) — it may be re-previewed for payment. Park it by hand."
+            )
         return
 
     task_id = _find_task_id(profile)
     if not task_id:
         log.warning(f"[{profile.name}] Could not find task ID — skipping task update")
+        # Same reasoning: a profile whose task cannot be resolved still has
+        # money in flight, and is the least observable path on which to leave
+        # it active.
+        if status == RESULT_AWAITING_SETTLEMENT:
+            _mark_awaiting_settlement(profile, result, neotoma)
         return
 
     today = date.today()
     transfer_id = result.get("transfer_id", "unknown")
     amount = profile.amount_eur
     reference = profile.wise_reference
-    note = (
-        f"Payment sent {today.isoformat()}: "
-        f"€{amount} Wise transfer_id={transfer_id} ref={reference}"
-    )
-
-    try:
-        res = subprocess.run(
-            [neotoma, "--api-only", "entities", "update", task_id, "--notes", note],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=os.environ,
+    if status == RESULT_AWAITING_SETTLEMENT:
+        note = (
+            f"Payment submitted {today.isoformat()}: "
+            f"€{amount} Wise transfer_id={transfer_id} ref={reference} — "
+            f"AWAITING SETTLEMENT (wise_status={result.get('wise_status', '')}, "
+            f"wise_transfer_status={result.get('wise_transfer_status', '')})"
         )
-        if res.returncode != 0:
-            log.warning(
-                f"[{profile.name}] neotoma notes update failed: {res.stderr.strip()[:200]}"
-            )
-        else:
-            log.info(f"[{profile.name}] Neotoma task {task_id} notes updated.")
-    except Exception as exc:
-        log.warning(f"[{profile.name}] neotoma update error: {exc}")
+    elif status == "manual_required":
+        # NEVER "Payment sent" for a manual_required. Before the settlement
+        # states existed every manual_required fired BEFORE money moved, which
+        # is why the generic note was tolerable; now a transfer can fail AFTER
+        # funding and reach here, and asserting a completed payment over it is
+        # the ateles#552 defect this PR was written to remove (ateles#604
+        # review, demonstrated by execution).
+        note = (
+            f"Payment NOT COMPLETED {today.isoformat()}: "
+            f"€{amount} Wise transfer_id={transfer_id} ref={reference} — "
+            f"{result.get('error', 'manual intervention required')}; "
+            f"task left open, due_date not rolled, operator decision required"
+        )
+    else:
+        note = (
+            f"Payment sent {today.isoformat()}: "
+            f"€{amount} Wise transfer_id={transfer_id} ref={reference}"
+        )
+
+    note_task(profile, task_id, neotoma, note)
+
+    # A submitted-but-unsettled transfer closes nothing and rolls nothing. The
+    # single branch that satisfies "never mark done on an unsettled transfer":
+    # no --status done, no --status archived, no --due-date roll.
+    if status == RESULT_AWAITING_SETTLEMENT:
+        _mark_awaiting_settlement(profile, result, neotoma)
+        return
+
+    # Same for a manual_required: the note above records what happened, and
+    # nothing further is written. Rolling the due_date here would retire a
+    # payment that did not complete — and if the failure came after funding,
+    # the money has already moved.
+    if status == "manual_required":
+        return
 
     # A one-off invoice has no "next" occurrence: close the task and archive the
     # profile so the next daily run cannot pay the same invoice twice.
@@ -859,34 +1085,166 @@ def _update_task(profile: PaymentProfile, result: dict) -> None:
 
     next_due = _find_next_event_due_date(profile)
     if next_due:
-        try:
-            res = subprocess.run(
-                [
-                    neotoma,
-                    "--api-only",
-                    "entities",
-                    "update",
-                    task_id,
-                    "--due-date",
-                    next_due,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=os.environ,
+        if _neotoma_set_field(neotoma, task_id, "due_date", next_due):
+            log.info(f"[{profile.name}] Neotoma task due_date set to {next_due}.")
+        else:
+            log.warning(
+                f"[{profile.name}] neotoma due_date correction failed for task {task_id}"
             )
-            if res.returncode != 0:
-                log.warning(
-                    f"[{profile.name}] neotoma due_date update failed: {res.stderr.strip()[:200]}"
-                )
-            else:
-                log.info(f"[{profile.name}] Neotoma task due_date set to {next_due}.")
-        except Exception as exc:
-            log.warning(f"[{profile.name}] neotoma due_date update error: {exc}")
     else:
         log.warning(
             f"[{profile.name}] Could not find next event date — due_date not updated."
         )
+
+
+def _escalate(message: str) -> None:
+    """Surface an operator-visible blocker. Never raises.
+
+    Imported lazily and defensively: the handler module is imported by tests
+    and by the daemon alike, and a notifier that is unavailable must not turn a
+    money-path warning into a crash.
+    """
+    try:
+        from lib.notify import Notifier, Priority  # type: ignore[import-not-found]
+
+        notifier = Notifier.from_neotoma()
+        if notifier is None:
+            raise RuntimeError("no notifier configured")
+        notifier.send(message, priority=Priority.BLOCKER, handler="monedula")
+    except Exception as exc:  # notifier absent, misconfigured, or offline
+        log.error(f"ESCALATION NOT DELIVERED ({exc}): {message}")
+
+
+def _neotoma_set_field(neotoma: str, entity_id: str, field: str, value: str) -> bool:
+    """Set one snapshot field on a Neotoma entity. Returns True on success.
+
+    Uses `corrections create` for every snapshot write. CLI 0.16.0 has no
+    `entities update` subcommand at all — status, notes, due_date and the
+    in-flight guard fields all go through correction observations.
+    """
+    if not entity_id:
+        log.warning(f"cannot set {field}: no entity id")
+        return False
+    try:
+        res = subprocess.run(
+            [
+                neotoma,
+                "--api-only",
+                "corrections",
+                "create",
+                "--entity-id",
+                entity_id,
+                "--field-name",
+                field,
+                "--corrected-value",
+                str(value),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=os.environ,
+        )
+        if res.returncode != 0:
+            log.error(
+                f"neotoma correction failed ({entity_id}.{field}={value}): "
+                f"{res.stderr.strip()[:200]}"
+            )
+            return False
+        return True
+    except Exception as exc:
+        log.error(f"neotoma correction error ({entity_id}.{field}={value}): {exc}")
+        return False
+
+
+def _mark_awaiting_settlement(
+    profile: PaymentProfile, result: dict, neotoma: str
+) -> None:
+    """Park a profile whose transfer is in flight. Never raises.
+
+    Parking is the double-payment guard: load_profiles_from_neotoma() matches
+    active profiles only, so a parked profile cannot re-match, re-preview or
+    re-pay while its transfer is on its way.
+
+    A failed park is escalated rather than merely logged. If the status
+    correction does not land, the profile stays active with money in flight AND
+    the preview's in-flight warning — which reads pending_transfer_id, written
+    by the same failing call — is missing too. Both defences fail together, so
+    the operator's Telegram approval becomes the only thing between an
+    unsettled transfer and a second one.
+
+    It never raises: the money has already moved, and a bookkeeping failure
+    must not be reported to the caller as a payment failure.
+    """
+    transfer_id = str(result.get("transfer_id", "") or "")
+    if not profile.entity_id:
+        log.error(
+            f"[{profile.name}] CANNOT PARK PROFILE: no entity id, transfer "
+            f"{transfer_id} is in flight — this profile may re-trigger."
+        )
+        _escalate(
+            f"monedula: transfer {transfer_id} is in flight for {profile.label} but "
+            f"the profile has no entity id and could NOT be parked — it may be "
+            f"re-previewed for payment."
+        )
+        return
+
+    status_ok = _neotoma_set_field(
+        neotoma,
+        profile.entity_id,
+        "status",
+        PROFILE_STATUS_AWAITING_SETTLEMENT,
+    )
+    _neotoma_set_field(neotoma, profile.entity_id, "pending_transfer_id", transfer_id)
+    _neotoma_set_field(
+        neotoma, profile.entity_id, "pending_transfer_at", date.today().isoformat()
+    )
+
+    if status_ok:
+        log.info(
+            f"[{profile.name}] parked awaiting settlement (transfer {transfer_id})."
+        )
+        return
+
+    log.error(
+        f"[{profile.name}] PARK FAILED: profile {profile.entity_id} is still active "
+        f"while transfer {transfer_id} is in flight — archive or park it by hand "
+        f"before the next tick."
+    )
+    _escalate(
+        f"monedula: transfer {transfer_id} is in flight for {profile.label} but the "
+        f"profile could NOT be parked — it may be re-previewed for payment. Park "
+        f"profile {profile.entity_id} by hand."
+    )
+
+
+# Public delegates. settlement.py drives the same operations without reaching
+# across modules for private names, and they resolve at call time so a test
+# that monkeypatches the underscore-prefixed function still takes effect.
+
+
+def fetch_transfer(token: str, transfer_id: int) -> dict | None:
+    return _fetch_transfer(token, transfer_id)
+
+
+def close_one_off(profile: PaymentProfile, task_id: str, neotoma: str) -> None:
+    _close_one_off(profile, task_id, neotoma)
+
+
+def set_entity_field(neotoma: str, entity_id: str, field: str, value: str) -> bool:
+    return _neotoma_set_field(neotoma, entity_id, field, value)
+
+
+def find_task_id(profile: PaymentProfile) -> str:
+    return _find_task_id(profile)
+
+
+def find_next_event_due_date(profile: PaymentProfile) -> str | None:
+    return _find_next_event_due_date(profile)
+
+
+def escalate(message: str) -> None:
+    """Surface an operator-visible blocker. Public delegate for settlement.py."""
+    _escalate(message)
 
 
 def _close_one_off(profile: PaymentProfile, task_id: str, neotoma: str) -> None:
@@ -899,35 +1257,18 @@ def _close_one_off(profile: PaymentProfile, task_id: str, neotoma: str) -> None:
     failure. The risk it leaves is a duplicate preview, not a duplicate payment:
     the operator still has to approve by name at the Telegram gate.
     """
-    for args, what in (
-        (["entities", "update", task_id, "--status", "done"], "task status=done"),
-        (
-            ["entities", "update", profile.entity_id, "--status", "archived"],
-            "profile status=archived",
-        ),
+    for entity_id, value, what in (
+        (task_id, "done", "task status=done"),
+        (profile.entity_id, "archived", "profile status=archived"),
     ):
-        if args[2] in ("", None):
+        if not entity_id:
             log.warning(f"[{profile.name}] cannot set {what}: no entity id")
             continue
-        try:
-            res = subprocess.run(
-                [neotoma, "--api-only", *args],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=os.environ,
-            )
-            if res.returncode != 0:
-                log.error(
-                    f"[{profile.name}] ONE-OFF CLEANUP FAILED ({what}): "
-                    f"{res.stderr.strip()[:200]} — this profile may re-trigger; "
-                    f"archive it by hand."
-                )
-            else:
-                log.info(f"[{profile.name}] one-off {what} set.")
-        except Exception as exc:
+        if _neotoma_set_field(neotoma, entity_id, "status", value):
+            log.info(f"[{profile.name}] one-off {what} set.")
+        else:
             log.error(
-                f"[{profile.name}] ONE-OFF CLEANUP ERROR ({what}): {exc} — "
+                f"[{profile.name}] ONE-OFF CLEANUP FAILED ({what}) — "
                 f"this profile may re-trigger; archive it by hand."
             )
 
