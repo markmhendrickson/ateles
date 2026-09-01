@@ -1469,6 +1469,15 @@ class SwarmDispatcher:
         # carry the first lens's exhaustion onto the second and silently skip it.
         self._missing_lens_retries: dict[str, dict[str, int]] = {}
         self._missing_lens_escalated: dict[str, set[str]] = {}
+        # ateles#511. Keyed by "owner/repo#N@<head sha>", not by ref: a new push
+        # is a new attempt and must reset the budget, or three failures on one
+        # revision would permanently suppress every later revision of that PR.
+        self._revision_retries: dict[str, int] = {}
+        self._revision_escalated: dict[str, bool] = {}
+        # ateles#565. Keyed by "owner/repo#N:<mergeable_state>" so a CLEAN PR
+        # that later rots to DIRTY pages again — that transition changes what
+        # the operator can actually do about it.
+        self._approved_escalated: dict[str, bool] = {}
 
     async def handle_trigger(self, trigger: SwarmTrigger) -> None:
         """Entry point handed to the webhook gateway. Never raises."""
@@ -2097,6 +2106,331 @@ class SwarmDispatcher:
             log.info(f"[{DAEMON_NAME}] stalled-review sweep: {summary}")
         return summary
 
+    async def resume_unactioned_revisions(self, repositories: list[str]) -> dict:
+        """Re-arm a PR whose CHANGES_REQUESTED feedback was addressed by a push.
+
+        ateles#511, task ``ent_4f11684cbf315fcd03900b10``. The fourth recovery
+        sweep, and the first that carries a PR PAST a verdict rather than toward
+        one. Measured 2026-08-31: 23 of 47 open ateles PRs sit at
+        CHANGES_REQUESTED, median 33 days, oldest 67. Over half the queue was
+        reviewed successfully, received actionable feedback, and then nothing
+        consumed it.
+
+        Why the existing sweeps cannot see this state:
+          * ``resume_stalled_reviews`` requires ZERO reviews — these have one.
+          * ``resume_deferred_reviews`` needs a marker that was never written.
+          * ``resume_missing_lens_reviews`` needs a clear aggregation naming an
+            absent lens — here the aggregation is present and blocking.
+
+        Candidate = open PR, standing CHANGES_REQUESTED, head commit NEWER than
+        that review, revision settled for ``APIS_REVISION_STALE_SECONDS``.
+        Re-dispatch hands the outstanding review body to Cicada via
+        ``run_skill("cicada", ...)`` — deliberately NOT ``_handle_pr``. #511
+        rules the re-panel out: the PR already has a verdict carrying actionable
+        findings, so what is missing is someone acting on them rather than
+        another opinion, and re-paneling would spend a full panel run per stuck
+        PR across a 23-PR backlog. Cicada's push then re-runs the panel through
+        the normal ``pr_synchronize`` path, so the PR leaves this candidate set
+        either way (a fresh review is newer than the push).
+
+        Bounded and escalate-once, mirroring ``resume_stalled_reviews``: a PR
+        the panel cannot get through will not start working on the twentieth
+        attempt, and silent infinite retry is how a real defect stays invisible.
+        Fail-open throughout — a broken sweep must never stop the loop.
+        """
+        summary = {"scanned": 0, "resumed": 0, "escalated": 0, "failed": 0}
+        stale_after = int(os.environ.get("APIS_REVISION_STALE_SECONDS", "2700"))
+        max_retries = int(os.environ.get("APIS_REVISION_MAX_RETRIES", "3"))
+        now = datetime.now(timezone.utc)
+
+        for repository in repositories:
+            try:
+                candidates = await self._prs_with_unactioned_revisions(
+                    repository, now, stale_after
+                )
+            except Exception as exc:
+                log.warning(
+                    f"[{DAEMON_NAME}] revision sweep: could not scan "
+                    f"{repository} ({exc}) — skipping"
+                )
+                continue
+
+            summary["scanned"] += len(candidates)
+            for pr in candidates:
+                number = int(pr.get("number"))
+                ref = f"{repository}#{number}"
+                # Keyed by head SHA, not by ref: a NEW push is a new attempt and
+                # must reset the budget. Keying by ref alone would let three
+                # failures on one revision permanently suppress every later
+                # revision of the same PR — the PR would be silently dead while
+                # its author kept pushing fixes nobody ever reviewed.
+                head_sha = ((pr.get("head") or {}).get("sha")) or ""
+                key = f"{ref}@{head_sha}"
+                attempts = self._revision_retries.get(key, 0)
+
+                if attempts >= max_retries:
+                    if not self._revision_escalated.get(key):
+                        log.error(
+                            f"[{DAEMON_NAME}] revision sweep: {ref} still blocked "
+                            f"after {attempts} re-dispatches against {head_sha[:8]} "
+                            "— not retrying. Operator attention needed."
+                        )
+                        self.notifier.send(
+                            f"🔴 {ref}: the author pushed a revision answering the "
+                            f"requested changes, but {attempts} automatic "
+                            "re-reviews failed to produce a verdict. The PR is "
+                            "stuck at CHANGES_REQUESTED with its feedback already "
+                            "addressed — check the apis log for why the panel "
+                            "cannot complete.",
+                            priority=Priority.BLOCKER,
+                            handler=DAEMON_NAME,
+                        )
+                        self._revision_escalated[key] = True
+                        summary["escalated"] += 1
+                    continue
+
+                log.warning(
+                    f"[{DAEMON_NAME}] revision sweep: {ref} has CHANGES_REQUESTED "
+                    f"from {pr.get('_blocking_review_at')} and a revision pushed "
+                    f"at {pr.get('_revision_pushed_at')} that nothing re-reviewed "
+                    f"— re-arming (attempt {attempts + 1}/{max_retries})"
+                )
+                self._revision_retries[key] = attempts + 1
+                try:
+                    trigger = SwarmTrigger(
+                        kind="pr_synchronize",
+                        repository=repository,
+                        number=number,
+                        title=pr.get("title", ""),
+                        body=pr.get("body") or "",
+                        author=(pr.get("user") or {}).get("login", ""),
+                        html_url=pr.get("html_url", ""),
+                        delivery_id=(
+                            f"revision-resume-{number}-{head_sha[:8]}-{attempts + 1}"
+                        ),
+                        action="synchronize",
+                        head_ref=(pr.get("head") or {}).get("ref", ""),
+                        base_ref=(pr.get("base") or {}).get("ref", ""),
+                    )
+                    # Re-dispatch CICADA against the outstanding feedback — NOT
+                    # `_handle_pr`. #511 rules the re-panel out explicitly
+                    # ("do not call _handle_pr or re-panel", and re-paneling CR
+                    # PRs is listed as out of scope): the PR already HAS a
+                    # verdict with actionable findings, so what is missing is
+                    # someone acting on them, not another opinion. Re-paneling
+                    # would also spend a full panel run per stuck PR across a
+                    # 23-PR backlog.
+                    result = await run_skill(
+                        "cicada",
+                        self._cicada_fix_prompt(
+                            trigger,
+                            self._parent_issue_number(pr.get("body") or ""),
+                            attempts + 1,
+                            pr.get("_blocking_review_body") or "",
+                        ),
+                        github_token=_token_for_agent_on_repo("cicada", repository),
+                        include_github_contract=True,
+                        notifier=self.notifier,
+                    )
+                    if not result.ok:
+                        raise RuntimeError(
+                            f"cicada re-dispatch did not complete: "
+                            f"{result.error or 'no reason given'}"
+                        )
+                    summary["resumed"] += 1
+                except Exception as exc:
+                    summary["failed"] += 1
+                    log.error(
+                        f"[{DAEMON_NAME}] revision sweep: {ref} re-dispatch failed "
+                        f"({exc})",
+                        exc_info=True,
+                    )
+        if summary["scanned"]:
+            log.info(f"[{DAEMON_NAME}] revision sweep: {summary}")
+        return summary
+
+    async def report_pr_review_queue(self, repositories: list[str]) -> dict:
+        """Surface APPROVED-unmerged PRs before they rot into a conflict.
+
+        ateles#565. Three of the four APPROVED PRs found on 2026-08-31 had gone
+        CLEAN → DIRTY purely through elapsed time (33, 47 and 53 days). Nothing
+        in the swarm was watching, because an APPROVED PR *presents as done* —
+        unlike CHANGES_REQUESTED, which at least presents as needing work. The
+        only reason those four were found at all was an ad-hoc query.
+
+        This sweep does NOT merge. Merging stays an operator act (see
+        ``_merge_pr``'s two flag-gated callers); an approved PR going stale is
+        reported, never landed. What it does is make the state visible and
+        distinguish, durably, WHY a given approved PR is still open:
+
+          ``clean``    → mergeable now; merge is the only remaining step
+          ``dirty``    → already rotted; needs a rebase before it can merge
+          ``blocked``  → a required check or branch protection is holding it
+          ``behind``   → base moved; needs an update but no conflict yet
+          ``unstable`` → non-required check failing
+          ``unknown``  → GitHub had not finished computing mergeability
+
+        Escalation is tiered so the report stays worth reading. A PR that just
+        got approved is INFO. One that has been approved past
+        ``APIS_APPROVED_STALE_DAYS`` (default 3) while still CLEAN is the
+        actionable case — mergeable, nobody merging it, and every day it waits
+        is a day it can rot — so it pages at BLOCKER. One already DIRTY pages at
+        BLOCKER too, but says rebase rather than merge, because merge is no
+        longer available to the operator without one.
+
+        Escalate-once per (PR, state): a PR that is re-reported every ten
+        minutes trains the operator to ignore the channel, which is the failure
+        this sweep exists to fix. The state is part of the key so a CLEAN PR
+        that later rots to DIRTY does page again — that transition is exactly
+        the moment the operator's available action changed.
+
+        Fail-open: a broken report must never stop the loop.
+        """
+        stale_days = int(os.environ.get("APIS_APPROVED_STALE_DAYS", "3"))
+        report: dict = {
+            "scanned": 0,
+            "approved_unmerged": 0,
+            "stale": 0,
+            "rotted": 0,
+            # ateles#599/#607: PRs no panel ever reviewed. Counted separately
+            # from approved_unmerged on purpose — conflating "nobody objected"
+            # with "someone approved" is the whole hazard.
+            "unreviewed": 0,
+            "escalated": 0,
+            "prs": [],
+        }
+        now = datetime.now(timezone.utc)
+
+        for repository in repositories:
+            try:
+                candidates = await self._approved_unmerged_prs(repository, now)
+            except Exception as exc:
+                log.warning(
+                    f"[{DAEMON_NAME}] approved-unmerged report: could not scan "
+                    f"{repository} ({exc}) — skipping"
+                )
+                continue
+
+            report["scanned"] += 1
+            for pr in candidates:
+                number = int(pr.get("number"))
+                ref = f"{repository}#{number}"
+
+                # Unreviewed is its own state, reported before the approved
+                # branch so it can never be mistaken for one. Absence of a
+                # blocking finding is NOT approval — nobody looked.
+                if pr.get("_unreviewed"):
+                    report["unreviewed"] += 1
+                    report["prs"].append(
+                        {
+                            "ref": ref,
+                            "number": number,
+                            "repository": repository,
+                            "title": pr.get("title", ""),
+                            "html_url": pr.get("html_url", ""),
+                            "approved_unmerged_age_days": 0,
+                            "mergeable_state": "n/a",
+                            "unreviewed": True,
+                            "rotted": False,
+                            "stale": False,
+                            "blocker": "never_reviewed",
+                        }
+                    )
+                    notify_key = f"{ref}:unreviewed"
+                    if not self._approved_escalated.get(notify_key):
+                        self._approved_escalated[notify_key] = True
+                        report["escalated"] += 1
+                        self.notifier.send(
+                            f"🔴 {ref} has NO FORMAL REVIEW and an empty "
+                            "reviewDecision. That is an absence of evidence, "
+                            "not evidence of cleanliness: this PR presents as "
+                            "the safest in the queue to anything that checks "
+                            "for blocking findings, while being the least "
+                            "verified. Two known causes, both observed on "
+                            "2026-08-31 — (a) the body names no parent issue "
+                            "with a closes/fixes/resolves keyword, so gate "
+                            "inheritance blocks and no panel seats (#599, "
+                            "#607); (b) a lens posted [BLOCKING] findings as a "
+                            "plain PR comment, which never becomes a formal "
+                            "review (#596, #602). Read the PR's actual "
+                            f"comments before trusting it. {pr.get('html_url', '')}",
+                            priority=Priority.BLOCKER,
+                            handler=DAEMON_NAME,
+                        )
+                    continue
+
+                age = int(pr.get("_approved_age_days") or 0)
+                state = str(pr.get("_mergeable_state") or "unknown")
+                rotted = state in ("dirty", "blocked")
+                stale = age >= stale_days
+
+                entry = {
+                    "ref": ref,
+                    "number": number,
+                    "repository": repository,
+                    "title": pr.get("title", ""),
+                    "html_url": pr.get("html_url", ""),
+                    "approved_at": pr.get("_approved_at"),
+                    "approved_unmerged_age_days": age,
+                    "mergeable_state": state,
+                    "rotted": rotted,
+                    "stale": stale,
+                    # The operator-facing verdict: what THEY would have to do.
+                    "blocker": (
+                        "rebase_required"
+                        if state == "dirty"
+                        else "checks_or_protection"
+                        if state == "blocked"
+                        else "merge_pending_operator"
+                        if state == "clean"
+                        else "mergeability_unknown"
+                    ),
+                }
+                report["prs"].append(entry)
+                report["approved_unmerged"] += 1
+                if stale:
+                    report["stale"] += 1
+                if rotted:
+                    report["rotted"] += 1
+
+                if not (stale or rotted):
+                    continue
+                notify_key = f"{ref}:{state}"
+                if self._approved_escalated.get(notify_key):
+                    continue
+                self._approved_escalated[notify_key] = True
+                report["escalated"] += 1
+                if state == "dirty":
+                    message = (
+                        f"🔴 {ref} was APPROVED {age}d ago and has since rotted to "
+                        "CONFLICTING — it can no longer be merged without a rebase. "
+                        f"{pr.get('html_url', '')}"
+                    )
+                elif state == "blocked":
+                    message = (
+                        f"🔴 {ref} has been APPROVED {age}d and is blocked by a "
+                        "required check or branch protection — approval alone will "
+                        f"not land it. {pr.get('html_url', '')}"
+                    )
+                else:
+                    message = (
+                        f"🔴 {ref} has been APPROVED and mergeable ({state}) for "
+                        f"{age}d with nothing merging it. Merge is the only "
+                        "remaining step and it needs you — every further day is a "
+                        f"day it can rot into a conflict. {pr.get('html_url', '')}"
+                    )
+                self.notifier.send(
+                    message, priority=Priority.BLOCKER, handler=DAEMON_NAME
+                )
+
+        if report["approved_unmerged"]:
+            log.info(
+                f"[{DAEMON_NAME}] approved-unmerged report: "
+                f"{report['approved_unmerged']} approved and unmerged "
+                f"({report['stale']} stale, {report['rotted']} rotted)"
+            )
+        return report
+
     async def _has_live_deferral_marker(
         self, client: httpx.AsyncClient, repository: str, number: int
     ) -> bool:
@@ -2455,6 +2789,290 @@ class SwarmDispatcher:
                 else:
                     result["not_yet"] += 1
         return result
+
+    # ── merge carrier: past-verdict sweeps (ateles#511, #565) ────────────────
+    #
+    # The three sweeps above (deferred / stalled / missing-lens) all carry a PR
+    # TOWARD a verdict. None of them carries one PAST a verdict, and until this
+    # block there was no mechanism that did. Measured 2026-08-31: 23 open PRs at
+    # CHANGES_REQUESTED (median 33d, oldest 67d) and 4 APPROVED-and-unmerged for
+    # 12/33/47/53 days, three of which rotted from CLEAN to DIRTY while waiting.
+    # That is not a review-capacity problem — every one of those PRs was reviewed
+    # successfully. It is the absence of a carrier.
+
+    async def _prs_with_unactioned_revisions(
+        self, repository: str, now: datetime, stale_after_seconds: int
+    ) -> list[dict]:
+        """Open PRs at CHANGES_REQUESTED whose head has moved SINCE that review.
+
+        The sibling of ``_prs_with_stalled_review``, targeting the state that
+        sweep excludes by design. ``resume_stalled_reviews`` requires ZERO
+        reviews, because re-running a panel on an already-reviewed PR would just
+        re-post the same verdict. Correct — but it leaves "reviewed, feedback
+        addressed, nothing re-armed it" with no watcher at all.
+
+        A PR is a candidate only when ALL hold:
+          * the LATEST review from each reviewer nets out to CHANGES_REQUESTED
+            (a later APPROVED from the same reviewer clears it — GitHub's own
+            reviewDecision semantics; taking the newest review per reviewer is
+            what keeps a re-approved PR from being re-armed forever);
+          * a commit landed on the head AFTER that review — this is the whole
+            signal. Without a newer push the ball is legitimately with the
+            author, and re-dispatching would nag an agent to redo work nobody
+            asked for. WITH a newer push, the author answered and the review
+            never looked again;
+          * that push is older than ``stale_after_seconds`` (default 45m), so a
+            push whose re-review is still in flight is never double-handled.
+
+        Deliberately NOT keyed on PR age. A 60-day-old PR whose author never
+        pushed is not a carrier failure — it is abandoned work, and quietly
+        re-dispatching it would bury that fact under a fresh review round. The
+        push is what distinguishes "answered" from "abandoned".
+        """
+        out: list[dict] = []
+        list_url = f"https://api.github.com/repos/{repository}/pulls"
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                list_url,
+                params={"state": "open", "per_page": 100},
+                headers=self._github_headers(repository),
+            )
+            resp.raise_for_status()
+            for pr in resp.json() or []:
+                if pr.get("draft"):
+                    continue
+                number = pr.get("number")
+                try:
+                    rv = await client.get(
+                        f"{list_url}/{number}/reviews",
+                        params={"per_page": 100},
+                        headers=self._github_headers(repository),
+                    )
+                    rv.raise_for_status()
+                    reviews = rv.json() or []
+                except Exception:
+                    # Cannot tell → do not re-dispatch. Same bias as the sibling
+                    # sweeps: a false negative costs a delay, a false positive
+                    # burns a panel run on a PR that may be perfectly fine.
+                    continue
+
+                blocking_at = self._changes_requested_since(reviews)
+                if blocking_at is None:
+                    continue
+
+                pushed_at = await self._head_commit_time(client, repository, pr)
+                if pushed_at is None or pushed_at <= blocking_at:
+                    # No revision since the block: the ball is with the author.
+                    continue
+                if (now - pushed_at).total_seconds() < stale_after_seconds:
+                    # The revision is fresh — a re-review may still be running.
+                    continue
+                pr["_blocking_review_at"] = blocking_at.isoformat()
+                pr["_revision_pushed_at"] = pushed_at.isoformat()
+                # Carry the outstanding feedback itself: the re-dispatch hands
+                # it to Cicada as guidance, so a candidate without it would send
+                # the agent to the PR with nothing to act on.
+                pr["_blocking_review_body"] = self._changes_requested_body(reviews)
+                out.append(pr)
+        return out
+
+    @staticmethod
+    def _changes_requested_body(reviews: list[dict]) -> str:
+        """Body of the standing CHANGES_REQUESTED review, for the fix prompt.
+
+        Latest-per-reviewer, matching ``_changes_requested_since``: the review
+        that still blocks is the one whose findings the author must answer.
+        """
+        latest: dict[str, dict] = {}
+        for review in reviews:
+            login = ((review.get("user") or {}).get("login")) or ""
+            state = (review.get("state") or "").upper()
+            if not login or state == "COMMENTED":
+                continue
+            prev = latest.get(login)
+            if prev is None or (review.get("submitted_at") or "") >= (
+                prev.get("submitted_at") or ""
+            ):
+                latest[login] = review
+        bodies = [
+            (r.get("body") or "").strip()
+            for r in latest.values()
+            if (r.get("state") or "").upper() == "CHANGES_REQUESTED"
+        ]
+        return "\n\n---\n\n".join(b for b in bodies if b)
+
+    @staticmethod
+    def _changes_requested_since(reviews: list[dict]) -> datetime | None:
+        """Timestamp of the standing CHANGES_REQUESTED, or None if not blocked.
+
+        Mirrors GitHub's own ``reviewDecision``: only the LATEST review per
+        reviewer counts, and a reviewer's APPROVED supersedes their own earlier
+        CHANGES_REQUESTED. COMMENT reviews are ignored entirely — GitHub does
+        not treat them as dismissing a block, and neither may we, or a drive-by
+        comment would silently clear a real blocking finding.
+
+        Returns the newest still-standing CHANGES_REQUESTED submission time.
+        """
+        latest_by_reviewer: dict[str, tuple[datetime, str]] = {}
+        for review in reviews:
+            state = str(review.get("state", "")).upper()
+            if state not in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+                # COMMENT / PENDING never change the standing decision.
+                continue
+            login = ((review.get("user") or {}).get("login")) or ""
+            raw = str(review.get("submitted_at") or "")
+            try:
+                at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            prev = latest_by_reviewer.get(login)
+            if prev is None or at >= prev[0]:
+                latest_by_reviewer[login] = (at, state)
+        blocking = [
+            at
+            for at, state in latest_by_reviewer.values()
+            if state == "CHANGES_REQUESTED"
+        ]
+        return max(blocking) if blocking else None
+
+    async def _head_commit_time(
+        self, client: httpx.AsyncClient, repository: str, pr: dict
+    ) -> datetime | None:
+        """Committer time of the PR's head commit, or None if unreadable.
+
+        Uses the COMMITTER date, not the author date: a rebase or an amend
+        rewrites the committer date while preserving the author date, and it is
+        the push we care about — "did the branch move after the review" — not
+        when the change was originally written.
+        """
+        sha = ((pr.get("head") or {}).get("sha")) or ""
+        if not sha:
+            return None
+        try:
+            resp = await client.get(
+                f"https://api.github.com/repos/{repository}/commits/{sha}",
+                headers=self._github_headers(repository),
+            )
+            resp.raise_for_status()
+            raw = (
+                ((resp.json() or {}).get("commit") or {}).get("committer") or {}
+            ).get("date") or ""
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    async def _approved_unmerged_prs(
+        self, repository: str, now: datetime
+    ) -> list[dict]:
+        """Open PRs whose standing decision is APPROVED and that are not merged.
+
+        Each returned dict carries ``_approved_at``, ``_approved_age_days`` and
+        ``_mergeable_state`` (GitHub's ``mergeable_state``: clean / dirty /
+        blocked / behind / unstable / unknown).
+
+        ``mergeable_state`` is only present on the SINGLE-PR endpoint, and
+        GitHub computes it lazily — a first read frequently returns "unknown"
+        while the background job runs. We report unknown honestly rather than
+        retrying into a guess; a sweep that runs every 10 minutes will have it
+        on the next pass, and a fabricated "clean" is far worse than a late one.
+        """
+        out: list[dict] = []
+        unreviewed: list[dict] = []
+        list_url = f"https://api.github.com/repos/{repository}/pulls"
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                list_url,
+                params={"state": "open", "per_page": 100},
+                headers=self._github_headers(repository),
+            )
+            resp.raise_for_status()
+            for pr in resp.json() or []:
+                if pr.get("draft"):
+                    continue
+                number = pr.get("number")
+                try:
+                    rv = await client.get(
+                        f"{list_url}/{number}/reviews",
+                        params={"per_page": 100},
+                        headers=self._github_headers(repository),
+                    )
+                    rv.raise_for_status()
+                    reviews = rv.json() or []
+                except Exception:
+                    continue
+                approved_at = self._standing_approval_at(reviews)
+                if approved_at is None:
+                    # Not approved. Before moving on, catch the inverse hazard:
+                    # a PR with NO reviews at all is not "clear", it is
+                    # UNLOOKED-AT, and to any check of the form "are there
+                    # unresolved blocking findings?" it presents as the safest
+                    # PR in the queue. Measured 2026-08-31: 4 of 13 same-day
+                    # PRs (ateles#599, #607, neotoma#2270, #2271) had no parent
+                    # issue, so gate inheritance blocked and no panel ever
+                    # seated. ateles#599 touches the payment path.
+                    #
+                    # Same tri-state discipline as ateles#560: unknown must
+                    # never collapse into pass. Reported, never merged.
+                    if not reviews:
+                        pr["_unreviewed"] = True
+                        unreviewed.append(pr)
+                    continue
+                detail: dict = {}
+                try:
+                    dresp = await client.get(
+                        f"{list_url}/{number}",
+                        headers=self._github_headers(repository),
+                    )
+                    dresp.raise_for_status()
+                    detail = dresp.json() or {}
+                except Exception:
+                    detail = {}
+                if detail.get("merged"):
+                    continue
+                pr["_approved_at"] = approved_at.isoformat()
+                pr["_approved_age_days"] = max(
+                    0, int((now - approved_at).total_seconds() // 86400)
+                )
+                pr["_mergeable_state"] = str(
+                    detail.get("mergeable_state") or "unknown"
+                ).lower()
+                out.append(pr)
+        # Unreviewed PRs ride back on the same return so the caller can report
+        # them as a DISTINCT state. They are deliberately not merged into `out`:
+        # they are not approved, and an "approved" list that quietly contained
+        # never-reviewed PRs would be the exact confusion this guards against.
+        return out + unreviewed
+
+    @staticmethod
+    def _standing_approval_at(reviews: list[dict]) -> datetime | None:
+        """Submission time of the standing approval, or None if not approved.
+
+        Same latest-review-per-reviewer rule as ``_changes_requested_since``.
+        A PR counts as approved only when at least one reviewer's latest review
+        is APPROVED and NO reviewer's latest is CHANGES_REQUESTED — one standing
+        block outranks any number of approvals, exactly as GitHub decides it.
+        """
+        latest_by_reviewer: dict[str, tuple[datetime, str]] = {}
+        for review in reviews:
+            state = str(review.get("state", "")).upper()
+            if state not in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+                continue
+            login = ((review.get("user") or {}).get("login")) or ""
+            raw = str(review.get("submitted_at") or "")
+            try:
+                at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            prev = latest_by_reviewer.get(login)
+            if prev is None or at >= prev[0]:
+                latest_by_reviewer[login] = (at, state)
+        states = [state for _, state in latest_by_reviewer.values()]
+        if "CHANGES_REQUESTED" in states:
+            return None
+        approvals = [
+            at for at, state in latest_by_reviewer.values() if state == "APPROVED"
+        ]
+        return max(approvals) if approvals else None
 
     async def _issues_with_inflight_marker(self, repository: str) -> list[dict]:
         """Open issues in `repository` carrying a pipeline marker, in either
