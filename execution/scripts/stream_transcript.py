@@ -159,6 +159,46 @@ MAX_PLAUSIBLE_TURN_SECONDS = float(
     os.environ.get("STREAM_TRANSCRIPT_MAX_TURN_S", "30")
 )
 
+# How long the SERVER must hear silence before it closes a turn.
+#
+# Left unset, the API applies its own default of 500ms, which is shorter than
+# an ordinary mid-sentence pause: the operator draws breath, the server closes
+# the turn, and one sentence is transcribed as several fragments. Those
+# fragments then decode without the surrounding clause that disambiguates them,
+# which is why SHORT turns come back garbled while long ones come back clean.
+#
+# 1000ms is derived from the gap distribution of a real session rather than
+# picked. Across 32 turn boundaries the gaps are sharply bimodal: 22 fall below
+# 0.79s (pauses inside a sentence) and the rest sit at 1.46s and above (genuine
+# utterance boundaries). Nothing at all lands between 0.79s and 1.46s, so any
+# value inside that empty band separates the two populations identically —
+# 800ms and 1200ms merge exactly the same 22 boundaries. 1000ms is the middle
+# of the band, which is the value most tolerant of a speaker who pauses a
+# little longer or a little shorter than this sample.
+#
+# The cost is latency: a turn is reported one threshold-delay after its last
+# word, so the added wait is the increase over the 500ms default, not the whole
+# value. This stays well inside GATE_HANGOVER_SECONDS (2.0s), so the local RMS
+# gate is still forwarding audio while the server waits out the silence — a
+# threshold above the hangover would starve the server of the very silence it
+# is waiting for and turns would stop closing at all.
+VAD_SILENCE_DURATION_MS = int(
+    os.environ.get("STREAM_TRANSCRIPT_VAD_SILENCE_MS", "1000")
+)
+
+# How much audio BEFORE the detected speech onset the server keeps.
+#
+# Speech often opens on a low-energy consonant that crosses the VAD threshold
+# a beat after the word actually starts. With too little padding the onset is
+# clipped and the decode loses the very phoneme that identifies the word — a
+# separate contributor to garbled short turns from the silence threshold above.
+# 300ms matches the API default; it is set EXPLICITLY so the value is visible
+# and tunable rather than inherited silently, which is the defect this whole
+# block exists to correct.
+VAD_PREFIX_PADDING_MS = int(
+    os.environ.get("STREAM_TRANSCRIPT_VAD_PREFIX_PADDING_MS", "300")
+)
+
 GATE_HANGOVER_SECONDS = float(
     os.environ.get("STREAM_TRANSCRIPT_GATE_HANGOVER_S", "2.0")
 )
@@ -781,13 +821,24 @@ def build_capture_command(device: str, recording_path: Path) -> list[str]:
     ]
 
 
-def session_update_message(model: str = DEFAULT_MODEL) -> dict:
+def session_update_message(
+    model: str = DEFAULT_MODEL,
+    silence_duration_ms: int | None = None,
+    prefix_padding_ms: int | None = None,
+) -> dict:
     """The Realtime session config.
 
     `server_vad` is load-bearing for BOTH correctness and cost: it closes turns
     on silence (fixing the 42% mid-sentence truncation) and it keeps billing on
     speech rather than wall clock. With `turn_detection: null` you commit
     whatever you stream, silence included, and pay for all of it.
+
+    Its TUNING is load-bearing too, and used not to be sent at all. Naming only
+    the type left `silence_duration_ms` on the API default of 500ms, short
+    enough that an ordinary mid-sentence pause closed the turn and split one
+    sentence into fragments too short to decode in context. Both values are now
+    explicit, so the configuration the session runs under is visible in the
+    request rather than inherited from a default that can change underneath us.
 
     The `OpenAI-Beta: realtime=v1` era shape now fails closed with
     `beta_api_shape_disabled`; this is the current one (ateles#625).
@@ -800,7 +851,19 @@ def session_update_message(model: str = DEFAULT_MODEL) -> dict:
                 "input": {
                     "format": {"type": "audio/pcm", "rate": SAMPLE_RATE},
                     "transcription": {"model": model},
-                    "turn_detection": {"type": "server_vad"},
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "silence_duration_ms": (
+                            VAD_SILENCE_DURATION_MS
+                            if silence_duration_ms is None
+                            else silence_duration_ms
+                        ),
+                        "prefix_padding_ms": (
+                            VAD_PREFIX_PADDING_MS
+                            if prefix_padding_ms is None
+                            else prefix_padding_ms
+                        ),
+                    },
                 }
             },
         },
@@ -937,6 +1000,8 @@ async def stream_session(
     expected_language: str = DEFAULT_LANGUAGE,
     use_local_vad: bool = True,
     gate_dbfs: float = INPUT_GATE_DBFS,
+    vad_silence_ms: int = VAD_SILENCE_DURATION_MS,
+    vad_prefix_padding_ms: int = VAD_PREFIX_PADDING_MS,
     raw_event_log: Path | None = None,
     health_poll: float = 5.0,
 ) -> tuple[int, HealthMonitor]:
@@ -952,6 +1017,13 @@ async def stream_session(
     log(
         f"input gate: sending only above {gate.threshold_dbfs:g} dBFS sustained"
         + (f", local VAD {gate.vad.name}" if gate.vad else ", no local VAD")
+    )
+    # Beside the input gate, because the two decide together which audio
+    # becomes a turn: the gate picks what is SENT, server VAD picks where the
+    # turns are CUT. Reading one without the other explains neither.
+    log(
+        f"server VAD: closing turns after {vad_silence_ms}ms silence, "
+        f"keeping {vad_prefix_padding_ms}ms before onset"
     )
     index = 0
 
@@ -977,7 +1049,15 @@ async def stream_session(
             additional_headers={"Authorization": f"Bearer {api_key}"},
             max_size=None,
         ) as ws:
-            await ws.send(json.dumps(session_update_message(model)))
+            await ws.send(
+                json.dumps(
+                    session_update_message(
+                        model,
+                        silence_duration_ms=vad_silence_ms,
+                        prefix_padding_ms=vad_prefix_padding_ms,
+                    )
+                )
+            )
             monitor.note_socket_event()
             log(f"socket open (model={model}, server_vad on)")
 
@@ -1132,7 +1212,10 @@ async def stream_session(
     return 0, monitor
 
 
-def main(argv: list[str]) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI surface, separated from `main` so a test can assert that a flag
+    actually reaches the socket rather than only that it parses.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default=os.environ.get("STREAM_TRANSCRIPT_DEVICE", ":3"))
     parser.add_argument("--dir", type=Path, default=DEFAULT_DIR)
@@ -1159,6 +1242,25 @@ def main(argv: list[str]) -> int:
         ),
     )
     parser.add_argument(
+        "--vad-silence-ms",
+        type=int,
+        default=VAD_SILENCE_DURATION_MS,
+        help=(
+            "silence the server must hear before closing a turn (default: "
+            f"{VAD_SILENCE_DURATION_MS}). Lower splits sentences at "
+            "mid-sentence pauses; higher reports each turn later"
+        ),
+    )
+    parser.add_argument(
+        "--vad-prefix-padding-ms",
+        type=int,
+        default=VAD_PREFIX_PADDING_MS,
+        help=(
+            "audio kept before the detected speech onset, so low-energy word "
+            f"beginnings are not clipped (default: {VAD_PREFIX_PADDING_MS})"
+        ),
+    )
+    parser.add_argument(
         "--language",
         default=DEFAULT_LANGUAGE,
         help="language the session is expected to be in (drives the hallucination filter)",
@@ -1173,7 +1275,11 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="fail loudly instead of degrading to chunking",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
 
     args.dir.mkdir(parents=True, exist_ok=True)
     recording = next_recording_path(args.dir)
@@ -1215,6 +1321,8 @@ def main(argv: list[str]) -> int:
                 expected_language=args.language,
                 use_local_vad=not args.no_local_vad,
                 gate_dbfs=args.input_gate_dbfs,
+                vad_silence_ms=args.vad_silence_ms,
+                vad_prefix_padding_ms=args.vad_prefix_padding_ms,
                 raw_event_log=args.raw_event_log,
             )
         )
