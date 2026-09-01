@@ -184,6 +184,74 @@ def test_tool_call_degrades_gracefully_without_token():
             pass
 
 
+def test_fact_hint_rides_over_the_wire_only_when_warranted():
+    """Point-of-use hints, end-to-end through the real protocol.
+
+    Two assertions in one call pair, because both halves of the design need
+    proving at the effect level and not just in-process:
+
+      - get_dispatch_health against a launchd label that does not exist comes
+        back with a hint pointing at check_swarm_fact, in a field of its own.
+      - get_swarm_roster with no token comes back as a structured error and
+        carries NO hint — an unreadable source must never be dressed up as an
+        observed condition.
+    """
+    proc = _start_server()
+    try:
+        _send_and_collect(
+            proc,
+            [
+                {
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "smoke-test", "version": "0.0.1"},
+                    },
+                },
+            ],
+            expect_ids={1},
+        )
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}) + "\n")
+        proc.stdin.flush()
+
+        responses = _send_and_collect(
+            proc,
+            [
+                {
+                    "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": "get_dispatch_health", "arguments": {}},
+                },
+                {
+                    "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                    "params": {"name": "get_swarm_roster", "arguments": {}},
+                },
+            ],
+            expect_ids={2, 3},
+        )
+        assert 2 in responses, f"no dispatch-health response, stderr={_stderr_tail(proc)}"
+        health = json.loads(responses[2]["result"]["content"][0]["text"])
+        hint = health.get("fact_check_hint")
+        if health.get("running") is False:
+            assert hint and "check_swarm_fact" in hint, f"expected a hint, got {health}"
+            # The hint must be its own field, never folded into the data.
+            assert "check_swarm_fact" not in health.get("interpretation", ""), health
+        else:
+            # Liveness unknown or healthy — both must stay silent.
+            assert hint is None, f"unwarranted hint on {health.get('running')!r}: {hint}"
+
+        assert 3 in responses, f"no roster response, stderr={_stderr_tail(proc)}"
+        roster = json.loads(responses[3]["result"]["content"][0]["text"])
+        assert "error" in roster, f"expected graceful error, got {roster}"
+        assert "fact_check_hint" not in roster, f"error results must not be hinted: {roster}"
+    finally:
+        proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def _run_all() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0

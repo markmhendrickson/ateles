@@ -2249,7 +2249,9 @@ class SwarmDispatcher:
             log.info(f"[{DAEMON_NAME}] revision sweep: {summary}")
         return summary
 
-    async def report_pr_review_queue(self, repositories: list[str]) -> dict:
+    async def report_pr_review_queue(
+        self, repositories: list[str], now: datetime | None = None
+    ) -> dict:
         """Surface APPROVED-unmerged PRs before they rot into a conflict.
 
         ateles#565. Three of the four APPROVED PRs found on 2026-08-31 had gone
@@ -2299,7 +2301,7 @@ class SwarmDispatcher:
             "escalated": 0,
             "prs": [],
         }
-        now = datetime.now(timezone.utc)
+        now = now or datetime.now(timezone.utc)
 
         for repository in repositories:
             try:
