@@ -58,10 +58,11 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 
 from lib.daemon_runtime import AgentDefinition, AgentLoader  # noqa: E402
 from harness_router import (  # noqa: E402
+    candidate_pairs,
     configured_providers,
     cool_down,
     cooling_providers,
-    provider_candidates,
+    effective_floor,
 )
 
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
@@ -651,6 +652,45 @@ def notify_dispatch_failure(
         return False
 
 
+def notify_capability_floor_unmet(
+    notifier, *, skill: str, stage: str, min_tier: int
+) -> bool:
+    """
+    Escalate ONCE per (stage, tier) per window when no model meets the floor.
+
+    Deliberately aggregated, not per-dispatch. On 2026-09-01 a single exhausted
+    quota bucket produced 56 usage-limit events in one day; a notification per
+    event would have been 56 pages, and the swarm had already exhausted the
+    operator's Gmail quota that morning. ``lib.notify`` still has no rate
+    limiting of its own (issue #645), so the discipline has to live here.
+
+    The signature omits the skill so every role blocked by the SAME exhausted
+    tier collapses into one alert: the operator needs to know "nothing can serve
+    strong-tier work", not which twelve roles discovered it independently.
+    """
+    if notifier is None:
+        return False
+    try:
+        signature = f"capability-floor:{stage}:{min_tier}"
+        if not _should_notify_dispatch_failure(signature):
+            log.debug(f"[apis] capability-floor escalation suppressed: {signature}")
+            return False
+        message = (
+            f"Stage {stage!r} is BLOCKED: no subscription-backed model meets its "
+            f"capability floor (min_tier={min_tier}), so {skill} did not run. "
+            "Work at this tier is stalled until quota resets or another provider "
+            "is restored. Nothing was run on a weaker model — this stage refuses "
+            "to downgrade rather than produce a verdict you cannot trust."
+        )
+        from lib.notify import Priority
+
+        notifier.send(message, priority=Priority.BLOCKER, handler="apis")
+        return True
+    except Exception as exc:  # noqa: BLE001 — never break dispatch
+        log.debug(f"[apis] capability-floor notifier.send failed: {exc}")
+        return False
+
+
 # ── SkillResult ────────────────────────────────────────────────────────────────
 
 
@@ -663,6 +703,12 @@ class SkillResult:
     stderr: str
     error: str = ""  # non-process failure: missing binary / SKILL.md / timeout
     provider: str = ""
+    # The model that actually produced this result. "" means the provider's
+    # ambient default. Recorded so a verdict carries the identity of whatever
+    # judged it: a review that fell back to a weaker model must be visibly
+    # distinguishable from one that ran on the intended model, since the
+    # auto-merge path otherwise treats the two as equal evidence.
+    model: str = ""
     attempted_providers: tuple[str, ...] = ()
 
 
@@ -865,9 +911,14 @@ def _provider_command(
     work_prompt: str,
     *,
     cwd: str | None,
+    model: str = "",
     network: bool = False,
 ) -> tuple[list[str], bytes | None]:
     """Build one provider's noninteractive command and initial stdin payload.
+
+    ``model`` empty means "pass no model flag", leaving the CLI on its ambient
+    default — the behaviour every provider had before per-model fallback, and
+    still the norm for claude and codex.
 
     ``network`` opens the codex sandbox's network access for THIS dispatch only.
     #590 asks for it "without granting blanket network access to every
@@ -875,7 +926,10 @@ def _provider_command(
     dispatches whose task actually involves GitHub delivery.
     """
     if provider == "claude":
-        return [binary, "--print", "--append-system-prompt", system_prompt], None
+        cmd = [binary, "--print", "--append-system-prompt", system_prompt]
+        if model:
+            cmd += ["--model", model]
+        return cmd, None
 
     composite_prompt = (
         f"{system_prompt}\n\n"
@@ -961,6 +1015,7 @@ async def _run_skill_once(
     prompt: str,
     *,
     provider: str,
+    model: str = "",
     role: str | None = None,
     task_entity_id: str = "",
     timeout: int | None = None,
@@ -1106,6 +1161,7 @@ async def _run_skill_once(
         system_prompt,
         prompt,
         cwd=cwd,
+        model=model,
         network=include_github_contract,
     )
 
@@ -1504,6 +1560,8 @@ async def run_skill(
     include_github_contract: bool = False,
     cwd: str | None = None,
     provider: str | None = None,
+    stage: str | None = None,
+    requested_tier: object = None,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
 
@@ -1515,28 +1573,56 @@ async def run_skill(
 
     Passing ``provider`` pins the invocation to one adapter, primarily for
     diagnostics and focused tests.
+
+    ``stage`` names the pipeline stage this run serves (a review lens name, a
+    gate name, ``routing``, ...) and selects the STATIC capability floor from
+    ``harness_router.stage_floor``. It defaults to ``skill`` so existing call
+    sites keep working unchanged.
+
+    ``requested_tier`` is a capability floor requested by the agent that
+    completed the PREVIOUS stage — e.g. an implementer that touched the payment
+    path asking for a top-tier reviewer. It can only RAISE the floor, never
+    lower it (``harness_router.effective_floor``), so an agent cannot cheapen
+    the review of its own work. Treat it as a proposal from an untrusted writer;
+    the dispatcher decides.
+
+    When no model meets the floor, the run FAILS rather than silently
+    downgrading. A review that ran on a weaker model and approved a PR is worse
+    than one that did not run, because auto-merge cannot tell the difference.
     """
     binaries = _provider_binaries()
-    candidates = provider_candidates(binaries, preferred=provider)
+    min_tier = effective_floor(stage or skill, requested_tier)
+    candidates = candidate_pairs(
+        binaries, preferred=provider, min_tier=min_tier
+    )
     if not candidates:
         configured = os.environ.get(
             "APIS_HARNESS_PROVIDERS", "claude,codex,cursor"
         )
         cooling = ",".join(sorted(cooling_providers())) or "none"
         msg = (
-            "no subscription-backed harness provider has usable headroom "
-            f"(configured={configured}; cooling={cooling})"
+            "no subscription-backed harness provider has a model meeting the "
+            f"capability floor for stage {stage or skill!r} "
+            f"(min_tier={min_tier}; configured={configured}; cooling={cooling}). "
+            "Refusing to run this stage on a weaker model."
+        )
+        log.error(f"[apis] {skill}: {msg}")
+        notify_capability_floor_unmet(
+            notifier, skill=skill, stage=stage or skill, min_tier=min_tier
         )
         return SkillResult(skill, False, None, "", "", error=msg)
 
     attempted: list[str] = []
     last_result: SkillResult | None = None
-    for selected in candidates:
-        attempted.append(selected)
+    for selected, selected_model in candidates:
+        attempted.append(
+            f"{selected}:{selected_model}" if selected_model else selected
+        )
         result = await _run_skill_once(
             skill,
             prompt,
             provider=selected,
+            model=selected_model,
             role=role,
             task_entity_id=task_entity_id,
             timeout=timeout,
@@ -1547,13 +1633,28 @@ async def run_skill(
             cwd=cwd,
         )
         result.attempted_providers = tuple(attempted)
-        # A successful agent may legitimately discuss "usage limits" in its
-        # answer. Only inspect stdout when the process itself failed; stderr and
-        # explicit runner errors remain diagnostic on every result.
-        failure_kind = _provider_failure_kind(
-            result.error,
-            result.stderr,
-            result.stdout if not result.ok else "",
+        result.model = selected_model
+        # Classify ONLY failed runs. A process that exited 0 and returned output
+        # did the work, and no amount of chatter on its streams changes that.
+        #
+        # Scanning a SUCCESSFUL run's stderr is how a working provider got thrown
+        # away on 2026-09-01: Codex writes MCP connection noise to stderr —
+        # including an "AUTH_REQUIRED / Missing Bearer token" line from an
+        # unrelated MCP server it failed to attach — while completing the task
+        # normally. Apis logged "dispatch via codex ok (748B stdout)" and then,
+        # one line later, "codex auth failure; trying next provider", discarding
+        # a good result and cooling down a healthy provider. That is what the
+        # 8 "codex auth failure" events were; Codex itself authenticates fine.
+        #
+        # The stdout half of this was already guarded for the same reason (an
+        # agent may legitimately discuss "usage limits" in its answer); stderr
+        # needed the identical treatment.
+        failure_kind = (
+            None
+            if result.ok
+            else _provider_failure_kind(
+                result.error, result.stderr, result.stdout
+            )
         )
         launch_failure = result.error.startswith(f"{selected} launch failed:")
 
@@ -1562,11 +1663,13 @@ async def run_skill(
         if failure_kind is None and not launch_failure:
             return result
 
-        cool_down(selected)
+        cool_down(selected, model=selected_model)
         last_result = result
         log.warning(
-            f"[apis] {skill}: {selected} {failure_kind or 'launch'} failure; "
-            "trying next subscription-backed provider"
+            f"[apis] {skill}: {selected}"
+            f"{'/' + selected_model if selected_model else ''} "
+            f"{failure_kind or 'launch'} failure; trying next "
+            "subscription-backed model/provider"
         )
 
     assert last_result is not None  # candidates was non-empty

@@ -351,3 +351,39 @@ def test_busiest_dispatch_files_are_not_matched_by_path_alone():
     ):
         panel = select_panel(set(), [path], max_panel=8)
         assert "security" not in [l.lens for l in panel], path
+
+
+# ── Verdict provenance (2026-09-01) ───────────────────────────────────────────
+
+
+def _result(*, stdout: str, provider: str = "", model: str = ""):
+    from skill_runner import SkillResult
+
+    return SkillResult(
+        "falco", True, 0, stdout, "", provider=provider, model=model
+    )
+
+
+def test_verdict_records_the_fallback_model_that_produced_it() -> None:
+    from swarm_dispatch import _stamp_review_model
+
+    body = _stamp_review_model(
+        _result(stdout="APPROVE", provider="cursor", model="composer-2.5")
+    )
+
+    assert "cursor/composer-2.5" in body
+    assert body.endswith("APPROVE")
+
+
+def test_verdict_on_ambient_default_is_still_attributed() -> None:
+    from swarm_dispatch import _stamp_review_model
+
+    assert "codex/(provider default)" in _stamp_review_model(
+        _result(stdout="CHANGES_REQUESTED", provider="codex")
+    )
+
+
+def test_stamp_never_swallows_a_review_with_unknown_provenance() -> None:
+    from swarm_dispatch import _stamp_review_model
+
+    assert _stamp_review_model(_result(stdout="APPROVE")) == "APPROVE"
