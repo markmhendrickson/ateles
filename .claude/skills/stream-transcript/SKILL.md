@@ -278,8 +278,13 @@ for line in sys.stdin:
         print('=== RECORDING PAUSED — operator is taking a break, NOT end of meeting')
     elif r.get('event') == 'resumed':
         print('=== RECORDING RESUMED — operator is back')
+    elif r.get('event') == 'fatal_transcription_failures':
+        print(f\"=== TAILER STOPPED: {r.get('consecutive_failures')} consecutive failures — {r.get('last_error')}\")
     elif r.get('ok'):
         if r.get('silence'): continue
+        if r.get('filtered'):
+            print(f\"[HALLUCINATION {r['filtered']}] {r.get('text','')[:60]}\")
+            continue
         print(f\"[{r['start_s']:.0f}-{r['end_s']:.0f}s] {r.get('text','')}\")
     else:
         print(f\"[TRANSCRIPTION ERROR chunk {r.get('chunk')}] {r.get('error')}\")
@@ -288,6 +293,10 @@ for line in sys.stdin:
 
 The `event` branches are load-bearing: without them a pause and a resume are
 invisible in the feed and a break looks exactly like the meeting going quiet.
+
+**Never treat a `filtered` chunk as something the operator said.** It carries a
+`filtered` reason and keeps its text so a false positive stays visible and
+recoverable — print it distinctly, never as speech, and never drop the line.
 
 Use `persistent: true` — a meeting outruns the default timeout.
 
@@ -330,7 +339,7 @@ The tailer's stderr names what happened:
 | `recording appears to have stopped — exiting` | Operator stopped Audio Hijack (no `--follow`) | **Run the `stop` sequence automatically** |
 | `recording appears to have stopped — flushing final Ns slice` then `final slice written — exiting` | Same, with a trailing remnant shorter than one chunk | **Run the `stop` sequence automatically** — the last words are in the final chunk |
 | `could not probe duration — recording ended?` | File vanished or became unreadable | Run `stop`; note the anomaly. Under `--follow` this pauses instead |
-| `5 consecutive failures — stopping` | Transcription is genuinely broken | Do **not** treat as meeting-over; surface the errors — the recording may still be running |
+| `3 consecutive transcription failures — STOPPING` | Transcription is genuinely broken | Do **not** treat as meeting-over; surface the errors — the recording may still be running. The tailer also exits **non-zero** and appends `{"event": "fatal_transcription_failures", ...}` to the JSONL, so a watcher can detect this without reading stderr |
 
 The first three lines only ever appear with `--follow`. **Only the lines marked
 "run the `stop` sequence" end the meeting** — a pause does not.
@@ -471,11 +480,12 @@ is the right place for those provisional rows to be confirmed or corrected.
 |---|---|---|
 | `no active recording found — start recording first, or pass --file` | Nothing *appeared* to grow during the ~3s probe — either nothing is recording, or the probe landed between Audio Hijack's buffered flushes | Check the watch dir for a recently-modified `*mic.mp4` / `*system.mp4`. If one exists, relaunch with `--file <path>`; only if none does, the operator starts the recorder |
 | Chunks stop arriving | Recording ended, or tailer died | Check `/tmp/livetail.err` |
-| 5 consecutive failures | Tailer self-stops by design | Read the error lines in the JSONL (silence is excluded from this count) |
-| `ModuleNotFoundError: config` | `execution/scripts/config.py` missing | Untracked + gitignored; copy from a worktree |
+| 3 consecutive failures | Tailer self-stops by design, exits non-zero, writes `event: fatal_transcription_failures` | Read the error lines in the JSONL (silence is excluded from this count). Tune with `--max-consecutive-failures` / `LIVE_TRANSCRIPT_MAX_CONSECUTIVE_FAILURES` |
+| `no usable Python interpreter for transcribe_audio.py — refusing to start` | Neither `execution/venv` nor `.venv` can import the transcriber's dependencies — the usual cause in a git worktree | Create `execution/venv`, or set `LIVE_TRANSCRIPT_PYTHON` to an interpreter that can. The tailer now refuses to start rather than failing every chunk silently |
 | Garbled text on non-speech | Whisper straining on music/noise | Expected; not a defect |
-| Operator's voice absent | Only the system track is sliced | By design; see the follow-up task |
-| Subtitle boilerplate ("thank you for watching", "please subscribe") or unprompted Japanese/Korean/Ukrainian | Whisper hallucinating on silence | Should now be gated out before the API call. If it still appears, the slice measured above threshold — **raise** the threshold and re-measure |
+| Operator's voice absent, agent's voice present | The **system** track was selected — that is the computer's OUTPUT | Startup now logs the selected track and prints a loud `WARNING: SYSTEM/REMOTE TRACK` block. Auto-detect prefers `mic` when both grow; relaunch with `--file '<session> mic.mp4'` |
+| Subtitle boilerplate ("thank you for watching", "please subscribe") or unprompted Japanese/Korean/Ukrainian/Georgian | Whisper hallucinating on noise | Two defences. The loudness gate skips most before the API call; anything that gets past it is caught by the **post-transcription filter** and marked `"filtered": "<reason>"` in the JSONL. Filtered chunks keep their text — treat them as non-speech, but they stay reviewable |
+| A chunk you know was real speech carries `"filtered"` | Filter false positive | Report it with the text and `rms_db`. The chunk is NOT lost — it is in the JSONL with its `filtered_detail`. `--no-hallucination-filter` turns the marking off |
 | Real speech missing, JSONL shows `"skipped": "below_threshold"` | Threshold too aggressive for this mic/room | **Lower** `LIVE_TRANSCRIPT_SILENCE_THRESHOLD_DB`; check the logged `rms_db` against the -50 dB default |
 | Stream ends when the operator takes a break | `--follow` not passed | Relaunch with `--follow` |
 | Nothing after `paused` | Break outlasted `--follow-timeout-min`, or the resumed recording is a different track | Check `/tmp/livetail.err` for the timeout line |
