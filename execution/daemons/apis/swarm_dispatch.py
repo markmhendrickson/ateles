@@ -469,6 +469,21 @@ _REVIEW_VERDICT = re.compile(
 # round. Shared by the parsers and the recovery sweep so the two cannot drift.
 NOT_RECEIVED_TOKEN = "NOT RECEIVED"
 
+# The steward writes this verbatim when a merge it was authorized to perform was
+# refused by a control outside the autonomy model — a local tool-permission
+# classifier, a missing grant, a branch-protection denial. ateles#565: on PR
+# #452 that refusal was recorded only in a review body, so it reached nobody and
+# the PR sat APPROVED and CLEAN for eleven days. Shared by the prompt and the
+# parser so the two cannot drift.
+MERGE_REFUSED_MARKER = "MERGE REFUSED:"
+
+# The durable outcomes of a merge attempt. `authorized_but_unable` is the state
+# ateles#565 says is missing: the autonomy flag AUTHORIZED the merge and a
+# separate control denied the mechanism. From the outside that was previously
+# indistinguishable from the flag simply being off, which is why nobody noticed.
+MERGE_STATE_AUTHORIZED_BUT_UNABLE = "authorized_but_unable"
+MERGE_STATE_NOT_AUTHORIZED = "not_authorized"
+
 # The lens labels a panel can actually produce. Bounding the prose parser to
 # these means a malformed aggregation yields nothing rather than a fabricated
 # lens name — absence of a verdict must never be inferred loosely.
@@ -564,8 +579,44 @@ def review_verdict_is_clear(verdict: str | None) -> bool:
 
     REQUEST_CHANGES / BLOCKED / None (unparseable) are all NOT clear — the PR is
     not merge-ready and blocking findings should route back for a fix.
+
+    Reads the TOKEN ONLY. Callers deciding the merge path must use
+    `review_blocks_merge`, which also consults the body — see its docstring.
     """
     return verdict in ("approve", "comment")
+
+
+def review_blocks_merge(verdict: str | None, body: str | None = None) -> bool:
+    """True when a review must route findings back instead of gating for merge.
+
+    The single predicate the merge path branches on. Extracted because the two
+    surfaces that act on the same review had drifted: `_emit_formal_review`
+    adopted the ateles#595 body cross-check while the routing branch in
+    `_handle_pr` still tested `review_verdict_is_clear(verdict)` alone. Since
+    `review_verdict_is_clear("comment")` is True, a Vanellus `**COMMENT**` above
+    a `[BLOCKING]` finding submitted REQUEST_CHANGES to GitHub — blocking the PR
+    under branch protection — while the dispatcher filed the operator's
+    merge-ready checkpoint and never routed the finding for a fix. Under
+    APIS_AUTONOMY_AUTO_MERGE=1 it was worse than wrong, it was silent:
+    `_gate_merge_readiness` early-returns, so the blocker produced no
+    checkpoint, no fix round and no page.
+
+    Blocks when EITHER input says so: the body carries a `[BLOCKING]` marker, or
+    the token itself is not clear. The body half is the ateles#595 authority
+    (a lens's own structured finding outranks its self-reported token); the token
+    half preserves the pre-existing behaviour for REQUEST_CHANGES / BLOCKED /
+    unparseable.
+
+    Related to but deliberately NOT equal to
+    `verdict_to_review_event(...) == REQUEST_CHANGES`. The ateles#241 asymmetry
+    keeps `blocked` on a clean body mapped to the inert COMMENT — GitHub review
+    state stays unescalated — yet such a review must still route findings back.
+    So the invariant between the two surfaces is an IMPLICATION, not an
+    equality: emitting REQUEST_CHANGES implies blocking the merge, never the
+    converse. `test_request_changes_event_implies_blocking_the_merge_path`
+    enforces it over every verdict x body-shape pair.
+    """
+    return body_has_blocking_findings(body) or not review_verdict_is_clear(verdict)
 
 
 # GitHub's Reviews API accepts exactly these three events.
@@ -574,7 +625,59 @@ _REVIEW_EVENT_REQUEST_CHANGES = "REQUEST_CHANGES"
 _REVIEW_EVENT_COMMENT = "COMMENT"
 
 
-def verdict_to_review_event(verdict: str | None) -> str:
+def parse_merge_refusal(text: str | None) -> str | None:
+    """The stated reason a merge was refused, or None when none was reported.
+
+    ateles#565. The steward is instructed (see `merge_authorization_clause`) to
+    lead the line with `MERGE REFUSED:` when a control outside the autonomy
+    model denies the merge, so a refusal that previously died in a review body
+    becomes a parseable signal the dispatcher can escalate.
+
+    Bounded to one line: a refusal reason is a sentence, and letting it run to
+    the end of a long aggregation would page the operator with the whole review.
+    """
+    if not text:
+        return None
+    m = _MERGE_REFUSED_RE.search(text)
+    if not m:
+        return None
+    reason = m.group("reason").strip().strip("*`").strip()
+    return reason or "no reason given"
+
+
+_MERGE_REFUSED_RE = re.compile(
+    re.escape(MERGE_REFUSED_MARKER) + r"\s*(?P<reason>[^\n]{0,300})",
+    re.IGNORECASE,
+)
+
+
+def body_has_blocking_findings(body: str | None) -> bool:
+    """True when a review body carries at least one `[BLOCKING]` finding.
+
+    ateles#595. `[BLOCKING] <category>: <summary>` is the structured field the
+    review contract already defines (skill_runner.py) for exactly this purpose,
+    so it — not the lens's self-reported verdict token — is the authority on
+    whether a review blocks.
+
+    Anchored to the marker rather than a substring search: `[NON-BLOCKING]`
+    CONTAINS `BLOCKING`, so a naive `in` check would promote every advisory note
+    into a merge-blocking REQUEST_CHANGES and jam the queue this fix exists to
+    unjam. Reuses review_learning's marker shape so the two cannot drift.
+    """
+    if not body:
+        return False
+    return bool(_BLOCKING_MARKER_RE.search(body))
+
+
+# `[BLOCKING] category: summary`, optionally wrapped in markdown emphasis as
+# lenses actually write it (`**[BLOCKING] credential-scope:**` on ateles#558).
+# The negative lookbehind on `NON-` is the whole trick — see the docstring.
+_BLOCKING_MARKER_RE = re.compile(
+    r"(?<!NON-)(?<!NON_)\[BLOCKING\]", re.IGNORECASE
+)
+
+
+def verdict_to_review_event(verdict: str | None, body: str | None = None) -> str:
     """Map an aggregated panel verdict onto a native GitHub review event.
 
     This is the load-bearing half of ateles#241: it turns a parsed-prose verdict
@@ -594,12 +697,101 @@ def verdict_to_review_event(verdict: str | None) -> str:
     point: escalating on a mis-parse would block a good PR under branch
     protection, and de-escalating a real REQUEST_CHANGES would defeat the
     feature. Everything ambiguous lands on the inert COMMENT.
+
+    ateles#595 — body cross-check. When `body` is supplied and contains at least
+    one `[BLOCKING]` marker, the body WINS and REQUEST_CHANGES is returned
+    regardless of the token. On ateles#558 the legal lens posted `**COMMENT**`
+    above a `[BLOCKING] credential-scope` finding; the token mapped to
+    `--comment`, so a real blocker never reached `reviewDecision` and an
+    aggregator trusting tokens over bodies counted that lens clear.
+
+    The cross-check only ever ESCALATES, never de-escalates: a body with no
+    blocking findings leaves every mapping above untouched, so the one-input
+    asymmetry still holds everywhere the lens and its own findings agree.
+    `body` is optional so ateles#241's existing callers are unaffected.
     """
+    if body_has_blocking_findings(body):
+        if verdict != "request_changes":
+            log.warning(
+                f"[{DAEMON_NAME}] lens verdict '{verdict or 'unparseable'}' "
+                "contradicts its own [BLOCKING] findings — submitting "
+                "REQUEST_CHANGES on the body (ateles#595)"
+            )
+        return _REVIEW_EVENT_REQUEST_CHANGES
     if verdict == "approve":
         return _REVIEW_EVENT_APPROVE
     if verdict == "request_changes":
         return _REVIEW_EVENT_REQUEST_CHANGES
     return _REVIEW_EVENT_COMMENT
+
+
+def merge_authorization_clause(
+    *, auto_merge: bool, pending_gates: set[str] | None = None
+) -> str:
+    """The merge-authorization paragraph handed to the PR steward.
+
+    ateles#594 gap 3. Extracted from `_vanellus_prompt` so the autonomy clause
+    is derived from BOTH inputs that govern it — the flag and the parent issue's
+    gate state — in one testable place, rather than from the flag alone.
+
+    The defect this closes: on ateles#592 the dispatch asserted
+    "AUTONOMY — YOU MAY MERGE" while the parent issue #585 still had
+    `pm: pending` and `impl: pending`. Lanius's fail-open-for-review path is
+    correct and was not the bug; the bug is that a fail-open REVIEW state
+    propagated into merge AUTHORIZATION language. Nothing stood between that
+    clause and a bad merge except the steward re-deriving the gate itself.
+
+    This is ateles#332 inverted: there the prompt forbade a merge the flag
+    allowed, producing neither a merge nor an escalation. Authorization language
+    must never contradict gate state in EITHER direction — so clear gates never
+    upgrade a flag-off posture either.
+    """
+    pending = {g.strip().lower() for g in (pending_gates or set()) if g.strip()}
+
+    if auto_merge and not pending:
+        # Flag ON: the dispatcher deliberately files NO merge checkpoint (see
+        # _gate_merge_readiness, which returns early on auto_merge), so if this
+        # prompt still said "DO NOT MERGE" nothing would merge AND no checkpoint
+        # would be raised — strictly worse than the flag being off. Authorize
+        # the merge here, with the hard stops intact.
+        return (
+            "AUTONOMY — YOU MAY MERGE. Auto-merge is enabled "
+            "(APIS_AUTONOMY_AUTO_MERGE=1). Merge via `gh pr merge --squash` "
+            "ONLY when ALL hold: parent-issue gate inheritance passes (pm/ux/"
+            "arch signed_off, waived, or not_required), every REQUIRED "
+            "branch-protection check is green, the PR's base is the repository "
+            "DEFAULT branch (never merge a stacked PR whose base is another "
+            "open PR's head — state the required merge order instead), and a "
+            "head-SHA-matched verdict is APPROVE with Blocking: 0. If any "
+            "fails, do NOT merge — post the verdict naming the blocker and "
+            "stop. Releases remain human-gated; merging to main is not a "
+            "release.\n\n"
+            "IF THE MERGE IS REFUSED by a tool-permission gate or any control "
+            "outside this authorization, do NOT work around it and do NOT "
+            "record the refusal only in your review body — say so explicitly "
+            "and prominently in your reply, beginning the line with "
+            f"`{MERGE_REFUSED_MARKER}`, so the dispatcher escalates it to the "
+            "operator. A refusal nobody sees leaves the PR to rot into a merge "
+            "conflict (ateles#565)."
+        )
+
+    if auto_merge and pending:
+        # ateles#594 gap 3: authorization the gate forbids.
+        return (
+            "AUTONOMY — DO NOT MERGE. Auto-merge is enabled "
+            "(APIS_AUTONOMY_AUTO_MERGE=1), but the parent issue still has "
+            f"pre-impl gate(s) PENDING: {', '.join(sorted(pending))}. Gate "
+            "inheritance outranks the autonomy flag, so authorization is "
+            "withheld for this PR. Recommend and stop: post your aggregated "
+            "verdict naming the pending gate(s) as the blocker."
+        )
+
+    return (
+        "AUTONOMY GUARDRAIL — DO NOT MERGE. Merge is operator-gated: a "
+        "blocking checkpoint_brief is filed at the merge boundary; the "
+        "operator merges or instructs you to. This overrides any merge "
+        "instruction in your standing protocol."
+    )
 
 
 # ── Per-agent GitHub account registry (#109) ─────────────────────────────────
@@ -2965,6 +3157,11 @@ class SwarmDispatcher:
                 [p.lens for p in panel],
                 reviews,
                 auto_merge=self.config.auto_merge,
+                # ateles#594 gap 3: the autonomy clause must be derived from
+                # gate state too, not the flag alone. Lanius's fail-open-for-
+                # review path (above) is correct, but that fail-open must not
+                # propagate into merge AUTHORIZATION language.
+                pending_gates=pending_gates,
             ),
             github_token=_token_for_agent_on_repo("vanellus", trigger.repository),
             include_github_contract=True,
@@ -3025,7 +3222,28 @@ class SwarmDispatcher:
         #     driven by the parsed verdict.
         await self._emit_formal_review(trigger, verdict, vanellus_result.stdout)
 
-        if not review_verdict_is_clear(verdict):
+        # 5b. ateles#565: a merge the steward was AUTHORIZED to perform and
+        #     could not. On PR #452 that refusal (a local permission classifier
+        #     denying the Bash tool) was written only into a review body, so it
+        #     reached nobody and the PR sat APPROVED and CLEAN for eleven days.
+        #     Escalate it as a blocker — the operator is the only party who can
+        #     act on it. Best-effort, before the routing branch so it fires on
+        #     BOTH paths.
+        refusal = parse_merge_refusal(vanellus_result.stdout)
+        if refusal:
+            self.record_merge_refusal(
+                repository=trigger.repository,
+                number=trigger.number,
+                reason=refusal,
+                auto_merge=self.config.auto_merge,
+            )
+
+        # 5c. Route or gate. Reads the same body the formal review above read, via
+        #     the same predicate, so the two surfaces cannot disagree about the
+        #     same blocker: branching on the token alone let a `**COMMENT**` above
+        #     a `[BLOCKING]` finding block the PR on GitHub while the dispatcher
+        #     told the operator it was merge-ready.
+        if review_blocks_merge(verdict, vanellus_result.stdout):
             await self._route_blocking_findings(trigger, parent, reviews, verdict)
             return
 
@@ -3055,7 +3273,10 @@ class SwarmDispatcher:
           verdict still lands. Resolves once per-agent accounts (#109) ship.
         - 422 on a closed/merged PR — a race between the panel and a merge.
         """
-        event = verdict_to_review_event(verdict)
+        # ateles#595: the body, not the self-reported token, is the authority on
+        # whether this review blocks. A `**COMMENT**` above a `[BLOCKING]`
+        # finding must reach reviewDecision as REQUEST_CHANGES.
+        event = verdict_to_review_event(verdict, body=body)
         ref = f"{t.repository}#{t.number}"
 
         if not _token_for_repo(t.repository) and not self.config.github_token:
@@ -3260,16 +3481,19 @@ class SwarmDispatcher:
                     by_lens.setdefault(lens, []).append(f)
 
         if not by_lens:
-            # Verdict was not clear but no parseable [BLOCKING] block exists
-            # (e.g. a BLOCKED "cannot proceed" or a malformed verdict). Don't
-            # guess a fix — escalate so a human reads the review. Only notify
-            # once per PR: a re-review of the same unparseable verdict must not
-            # re-ping the operator.
+            # The review blocked the merge path but no parseable [BLOCKING] block
+            # exists in the per-lens reviews. Three ways to get here: a BLOCKED
+            # "cannot proceed", a malformed verdict, or — since the routing
+            # branch reads the body too — a CLEAR token whose blocker was stated
+            # only in Vanellus's aggregation. Don't guess a fix; escalate so a
+            # human reads the review. Without this the body-derived blocker would
+            # simply land in a different silence than the one it came from.
+            # Only notify once per PR: a re-review must not re-ping the operator.
             if await self._claim_escalation(trigger, "unparseable-verdict"):
                 self.notifier.send(
-                    f"PR {ref}: review verdict `{verdict or 'unparseable'}` is "
-                    "not clear but no blocking findings could be parsed — needs "
-                    "your read. Merge held.",
+                    f"PR {ref}: review verdict `{verdict or 'unparseable'}` did "
+                    "not clear the merge path but no blocking findings could be "
+                    "parsed from the lens reviews — needs your read. Merge held.",
                     priority=Priority.OPERATOR_DECISION,
                     handler=DAEMON_NAME,
                 )
@@ -3347,6 +3571,76 @@ class SwarmDispatcher:
             f"[{DAEMON_NAME}] {ref}: dispatched auto-fix round {this_round} "
             f"({len(by_lens)} lens(es) → Cicada); awaiting its push to re-review"
         )
+
+    def record_merge_refusal(
+        self,
+        *,
+        repository: str,
+        number: int,
+        reason: str,
+        auto_merge: bool,
+    ) -> str:
+        """Escalate a refused merge and return its durable authorization state.
+
+        ateles#565. PR #452 was APPROVED, CLEAN, mergeable, and unmerged: the
+        steward attempted the merge, a local permission classifier denied the
+        Bash tool that would perform it, and the refusal was written only into a
+        review body. The classifier sits DOWNSTREAM of the agent's decision to
+        merge and UPSTREAM of the `gh pr merge` call — entirely outside the
+        swarm's autonomy model — so `APIS_AUTONOMY_AUTO_MERGE=1` authorized a
+        merge whose mechanism was then denied, and the flag could not see it.
+
+        The agent's judgement not to route around the denial was correct. The
+        defect is that the refusal was terminal AND silent: an APPROVED-unmerged
+        PR presents as done, so nothing surfaced it, and #210/#226/#335 rotted
+        from MERGEABLE into CONFLICTING through nothing but elapsed time.
+
+        Returns `authorized_but_unable` when the flag authorized the merge —
+        distinct and queryable, per the issue's acceptance criteria. Under
+        flag-off the refusal is the DESIGNED posture (a checkpoint_brief already
+        carries it to the operator), so it records `not_authorized` and does not
+        page; paging BLOCKER on every by-design hold would train the operator to
+        ignore the channel that matters.
+
+        Fail-open like the sweeps around it: a broken notifier must never turn a
+        merge refusal into a crashed dispatch.
+        """
+        ref = f"{repository}#{number}"
+        state = (
+            MERGE_STATE_AUTHORIZED_BUT_UNABLE
+            if auto_merge
+            else MERGE_STATE_NOT_AUTHORIZED
+        )
+
+        if not auto_merge:
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: merge not performed ({state}) — {reason}"
+            )
+            return state
+
+        log.error(
+            f"[{DAEMON_NAME}] {ref}: merge AUTHORIZED but refused ({state}) — "
+            f"{reason}"
+        )
+        try:
+            self.notifier.send(
+                f"PR {ref}: merge was AUTHORIZED "
+                "(APIS_AUTONOMY_AUTO_MERGE=1) but REFUSED by a control outside "
+                f"the autonomy model — {reason}.\n\n"
+                "The PR is approved and cannot land on its own. You are the "
+                "only party who can act on this: merge it by hand, or grant "
+                "the mechanism. Left alone an approved PR rots into a merge "
+                "conflict and the merge becomes a rebase-and-re-review "
+                "(ateles#565).",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+        except Exception as exc:  # a refusal must never crash the dispatch
+            log.error(
+                f"[{DAEMON_NAME}] {ref}: merge-refusal escalation failed: {exc}",
+                exc_info=True,
+            )
+        return state
 
     async def _gate_merge_readiness(
         self,
@@ -4176,6 +4470,13 @@ class SwarmDispatcher:
         Still fail-closed (False) on any error, and now also False when the page
         cap is hit without finding a marker — never claim merge-ready off a read
         that may have missed the verdict.
+
+        Reads the aggregation through `review_blocks_merge`, the same predicate
+        the panel path uses, so this gate cannot drift from it. It previously
+        tested the parsed TOKEN alone while holding the body that carried the
+        findings: a `**COMMENT**` aggregation listing a `[BLOCKING]` item read as
+        clear here, and since this is the CI-green path, a PR could reach
+        merge-ready on an aggregation that named its own blocker.
         """
         try:
             async with httpx.AsyncClient(timeout=30) as client:
@@ -4185,9 +4486,8 @@ class SwarmDispatcher:
                 comment = latest_aggregation_comment(comments)
                 if comment is None:
                     return False
-                return review_verdict_is_clear(
-                    parse_review_verdict(comment.get("body") or "")
-                )
+                body = comment.get("body") or ""
+                return not review_blocks_merge(parse_review_verdict(body), body)
         except Exception as exc:
             log.warning(
                 f"[{DAEMON_NAME}] {repository}#{pr_number}: review-verdict read "
@@ -5899,6 +6199,7 @@ class SwarmDispatcher:
         lenses: list[str],
         reviews: list[tuple[str, str]] | None = None,
         auto_merge: bool = False,
+        pending_gates: set[str] | None = None,
     ) -> str:
         # The captured lens reviews are embedded INLINE below so the aggregator
         # never has to re-fetch them via `gh`. Vanellus runs diff-only
@@ -5937,25 +6238,8 @@ class SwarmDispatcher:
             "Repeat the full aggregated verdict text in your reply here (the "
             "dispatcher parses it and posts the comment for you if your gh "
             "call fails).\n\n"
-            + (
-                # Flag ON: the dispatcher deliberately files NO merge checkpoint
-                # (see _gate_merge_readiness, which returns early on auto_merge),
-                # so if this prompt still said "DO NOT MERGE" nothing would merge
-                # AND no checkpoint would be raised — strictly worse than the flag
-                # being off. Authorize the merge here, with the hard stops intact.
-                "AUTONOMY — YOU MAY MERGE. Auto-merge is enabled "
-                "(APIS_AUTONOMY_AUTO_MERGE=1). Merge via `gh pr merge --squash` "
-                "ONLY when ALL hold: parent-issue gate inheritance passes (pm/ux/"
-                "arch signed_off, waived, or not_required), every REQUIRED "
-                "branch-protection check is green, and a head-SHA-matched verdict "
-                "is APPROVE with Blocking: 0. If any fails, do NOT merge — post "
-                "the verdict naming the blocker and stop. Releases remain "
-                "human-gated; merging to main is not a release."
-                if auto_merge
-                else "AUTONOMY GUARDRAIL — DO NOT MERGE. Merge is operator-gated: a "
-                "blocking checkpoint_brief is filed at the merge boundary; the "
-                "operator merges or instructs you to. This overrides any merge "
-                "instruction in your standing protocol."
+            + merge_authorization_clause(
+                auto_merge=auto_merge, pending_gates=pending_gates
             )
         )
 
