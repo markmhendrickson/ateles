@@ -150,15 +150,19 @@ a better take of the same audio. Only the stop-time pass can re-hear a sentence.
 
 ### 3. Launch the tailer
 
+Pass `--out` explicitly. The tailer also prints the JSONL path on stdout, but
+stdout is redirected to `/tmp/livetail.out` here — so naming the path yourself
+is what lets step 4 tail a path you already know, with nothing to parse back.
+
 ```bash
 # auto-detect the growing recording
 cd "$ATELES_REPO" && nohup execution/venv/bin/python execution/scripts/live_transcript_tail.py \
-  --interval 30 --follow > /tmp/livetail.out 2> /tmp/livetail.err &
+  --interval 30 --follow --out /tmp/livetail.jsonl > /tmp/livetail.out 2> /tmp/livetail.err &
 
 # or name the recording explicitly, when auto-detect false-negatived (step 1)
 cd "$ATELES_REPO" && nohup execution/venv/bin/python execution/scripts/live_transcript_tail.py \
   --file "$HOME/Documents/data/recordings/<REC>.mp4" \
-  --interval 30 --follow > /tmp/livetail.out 2> /tmp/livetail.err &
+  --interval 30 --follow --out /tmp/livetail.jsonl > /tmp/livetail.out 2> /tmp/livetail.err &
 ```
 
 `--file` skips detection altogether — the path is used as given, checked only
@@ -166,7 +170,17 @@ for existence — so it is the recovery whenever the probe misses a live
 recording.
 
 `--interval 30` is a reasonable default: shorter means more, worse fragments;
-longer means staler context. The JSONL path is printed on stdout.
+longer means staler context.
+
+Confirm the tailer came up before arming the Monitor — a failed launch is
+otherwise indistinguishable from a quiet meeting:
+
+```bash
+sleep 2; cat /tmp/livetail.out; echo "--- stderr ---"; tail -5 /tmp/livetail.err
+```
+
+If `/tmp/livetail.jsonl` does not appear, read `/tmp/livetail.err` — do not arm
+the Monitor against a path nothing is writing.
 
 Pass `--follow` (see [Pause and resume](#pause-and-resume-taking-a-break))
 whenever the operator might take a break. It is the difference between a break
@@ -253,7 +267,7 @@ Tail the JSONL from the beginning, rendering chunks and surfacing transcription
 errors:
 
 ```bash
-tail -f -n +1 "<jsonl_path>" | python3 -u -c "
+tail -f -n +1 /tmp/livetail.jsonl | python3 -u -c "
 import sys, json
 for line in sys.stdin:
     line = line.strip()
@@ -326,8 +340,19 @@ reached Whisper is written as `{"ok": true, "text": "", "silence": true}`; one
 skipped before transcription adds `"skipped": "below_threshold"` and `rms_db`.
 Both render as nothing, so a mid-meeting lull cannot kill the tailer.
 
-**On the first case, run the `/stream-transcript stop` sequence without being
-asked** and tell the operator streaming ended because recording stopped. This is
+**On a terminal state — and only these — run the `/stream-transcript stop`
+sequence without being asked:**
+
+- `recording appears to have stopped — exiting`
+- `recording appears to have stopped — flushing final Ns slice` → `final slice written — exiting`
+- `no resume within N min — exiting`
+- `could not probe duration — recording ended?` **without** `--follow`
+
+**`paused` and `resumed` are explicitly NOT terminal.** Neither is
+`5 consecutive failures — stopping`: that is a broken transcription path, not a
+finished meeting — surface the errors and say the recording may still be running.
+
+On a terminal state, tell the operator streaming ended because recording stopped. This is
 the auto-stop: the operator stops Audio Hijack and the handoff happens on its
 own, rather than the feed dying silently mid-meeting.
 
@@ -375,7 +400,7 @@ finding nothing is expected, not an error.
 ```bash
 python3 -c "
 import json,sys
-p='<jsonl_path>'
+p='/tmp/livetail.jsonl'
 ok=err=0; chunks=[]
 for line in open(p, encoding='utf-8'):
     line=line.strip()

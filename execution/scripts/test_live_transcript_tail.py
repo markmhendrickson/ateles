@@ -535,3 +535,85 @@ def test_transcribe_slice_always_passes_no_store_and_no_diarize(tmp_path):
     argv = mock_run.call_args.args[0]
     assert "--no-store" in argv, f"--no-store missing from argv: {argv}"
     assert "--no-diarize" in argv, f"--no-diarize missing from argv: {argv}"
+
+
+# --------------------------------------------------------------------------
+# Case 10 — build_subprocess_env() credential scope (#558 legal review)
+#
+# The tailer hands an env to the transcribe_audio.py subprocess. The
+# SOPS-materialized dotenv it reads also holds GitHub PATs, Telegram and Wise
+# tokens, the Neotoma bearer token and the wallet mnemonic. Only
+# OPENAI_API_KEY may cross that boundary. Guard the narrow contract, not the
+# current key list, so adding a secret to the dotenv cannot silently widen it.
+# --------------------------------------------------------------------------
+
+
+_DOTENV_WITH_UNRELATED_SECRETS = "\n".join(
+    [
+        "# operator secrets",
+        "OPENAI_API_KEY=sk-openai-value",
+        # Values are synthetic. Quoting is deliberate but kept off any
+        # credential-shaped key name: gitleaks' `protected-patterns` rule
+        # matches a quoted literal after a key like *_TOKEN, so a quoted
+        # fixture there fails the secret gate on this public repo. The
+        # double- and single-quoted forms below still cover the parser's
+        # quote stripping.
+        "NEOTOMA_BEARER_TOKEN=neotoma-placeholder",
+        'NEOTOMA_MNEMONIC="word word word"',
+        "NEOTOMA_EXTRA_VALUE='single quoted'",
+        "export ATELES_AGENT_PAT=ghp-secret",
+        "WISE_API_TOKEN=wise-secret",
+        "TELEGRAM_BOT_TOKEN=tg-secret",
+        "",
+        "MALFORMED_LINE_NO_EQUALS",
+    ]
+)
+
+
+def _write_dotenv(tmp_path: Path) -> Path:
+    p = tmp_path / "dotenv"
+    p.write_text(_DOTENV_WITH_UNRELATED_SECRETS, encoding="utf-8")
+    return p
+
+
+def test_build_subprocess_env_extracts_only_openai_key(tmp_path):
+    env = lt.build_subprocess_env(materialized=_write_dotenv(tmp_path), base_env={})
+    assert env["OPENAI_API_KEY"] == "sk-openai-value"
+
+
+@pytest.mark.parametrize(
+    "leaked",
+    [
+        "NEOTOMA_BEARER_TOKEN",
+        "NEOTOMA_MNEMONIC",
+        "ATELES_AGENT_PAT",
+        "WISE_API_TOKEN",
+        "TELEGRAM_BOT_TOKEN",
+    ],
+)
+def test_build_subprocess_env_never_leaks_unrelated_secrets(tmp_path, leaked):
+    env = lt.build_subprocess_env(materialized=_write_dotenv(tmp_path), base_env={})
+    assert leaked not in env, f"{leaked} must not reach the transcription subprocess"
+
+
+def test_build_subprocess_env_loads_no_key_outside_the_allowlist(tmp_path):
+    """The contract is the allowlist itself, not one enumerated key."""
+    env = lt.build_subprocess_env(materialized=_write_dotenv(tmp_path), base_env={})
+    assert set(env) <= set(lt.SUBPROCESS_SECRET_KEYS)
+
+
+def test_build_subprocess_env_inherits_base_env_and_prefers_it(tmp_path):
+    env = lt.build_subprocess_env(
+        materialized=_write_dotenv(tmp_path),
+        base_env={"PATH": "/usr/bin", "OPENAI_API_KEY": "already-set"},
+    )
+    assert env["PATH"] == "/usr/bin"
+    # An explicitly-set key wins over the dotenv.
+    assert env["OPENAI_API_KEY"] == "already-set"
+
+
+def test_build_subprocess_env_tolerates_missing_dotenv(tmp_path):
+    env = lt.build_subprocess_env(
+        materialized=tmp_path / "absent", base_env={"PATH": "/usr/bin"}
+    )
+    assert env == {"PATH": "/usr/bin"}
