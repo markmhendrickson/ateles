@@ -93,6 +93,71 @@ def test_session_uses_the_current_api_shape():
     assert "input" in msg["session"]["audio"]
 
 
+def _turn_detection(msg: dict) -> dict:
+    return msg["session"]["audio"]["input"]["turn_detection"]
+
+
+def test_session_sends_vad_tuning_explicitly():
+    """Naming only the type left silence_duration_ms on the API default of
+    500ms, which closes a turn on an ordinary mid-sentence pause. Both values
+    must appear in the request rather than being inherited.
+    """
+    turn_detection = _turn_detection(st.session_update_message())
+    assert "silence_duration_ms" in turn_detection, (
+        "unset means the API default of 500ms, which splits sentences"
+    )
+    assert "prefix_padding_ms" in turn_detection
+    assert turn_detection["silence_duration_ms"] == st.VAD_SILENCE_DURATION_MS
+    assert turn_detection["prefix_padding_ms"] == st.VAD_PREFIX_PADDING_MS
+
+
+def test_silence_threshold_sits_in_the_measured_empty_band():
+    """The default is derived, not picked. Real-session turn gaps are bimodal:
+    mid-sentence pauses below 0.79s, genuine boundaries at 1.46s and above.
+    A default outside that empty band would cut one of the two populations.
+    """
+    assert 790 < st.VAD_SILENCE_DURATION_MS < 1460
+
+
+def test_silence_threshold_stays_within_the_gate_hangover():
+    """The local RMS gate keeps forwarding audio for GATE_HANGOVER_SECONDS
+    after speech drops. A silence threshold longer than that would starve the
+    server of the silence it is waiting for and turns would stop closing.
+    """
+    assert st.VAD_SILENCE_DURATION_MS < st.GATE_HANGOVER_SECONDS * 1000
+
+
+def test_session_vad_tuning_is_overridable():
+    """The operator tunes this without a code change."""
+    msg = st.session_update_message(
+        silence_duration_ms=1500, prefix_padding_ms=450
+    )
+    turn_detection = _turn_detection(msg)
+    assert turn_detection["silence_duration_ms"] == 1500
+    assert turn_detection["prefix_padding_ms"] == 450
+    assert turn_detection["type"] == "server_vad"
+
+
+def test_vad_tuning_flags_reach_the_session_message():
+    """A flag that parses but never reaches the socket is not configurable.
+    Guards the arg -> stream_session -> session_update_message chain.
+    """
+    args = st.build_parser().parse_args(
+        ["--vad-silence-ms", "900", "--vad-prefix-padding-ms", "250"]
+    )
+    assert args.vad_silence_ms == 900
+    assert args.vad_prefix_padding_ms == 250
+
+    turn_detection = _turn_detection(
+        st.session_update_message(
+            silence_duration_ms=args.vad_silence_ms,
+            prefix_padding_ms=args.vad_prefix_padding_ms,
+        )
+    )
+    assert turn_detection["silence_duration_ms"] == 900
+    assert turn_detection["prefix_padding_ms"] == 250
+
+
 # ---------------------------------------------------------------------------
 # Signal level — growth is NOT health
 # ---------------------------------------------------------------------------
