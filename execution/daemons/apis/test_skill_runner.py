@@ -2699,3 +2699,69 @@ class TestDeliveryFailureIsReportedAsFailure:
         result = self._dispatch_with_child_output(b"All done. 12 passed.\n")
         assert result.ok is True
         assert result.error == ""
+
+
+# ── A successful run is never reclassified as a provider failure ──────────────
+# Regression for 2026-09-01: Codex completed a dispatch (rc=0, 748B of stdout)
+# and was then discarded as an "auth failure" because its stderr carried MCP
+# connection noise containing "AUTH_REQUIRED". A healthy provider was cooled
+# down and its finished work thrown away.
+
+
+class TestSuccessfulRunIsNotReclassified:
+    async def _run(self, monkeypatch, *, returncode: int, stderr: bytes):
+        import skill_runner
+
+        async def _fake_once(skill, prompt, *, provider, model="", **kwargs):
+            return skill_runner.SkillResult(
+                skill,
+                returncode == 0,
+                returncode,
+                "the agent's real answer",
+                stderr.decode(),
+                provider=provider,
+            )
+
+        monkeypatch.setattr(skill_runner, "_run_skill_once", _fake_once)
+        monkeypatch.setattr(
+            skill_runner,
+            "_provider_binaries",
+            lambda: {"codex": "/bin/codex", "claude": None, "cursor": None},
+        )
+        import harness_router
+
+        monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+        monkeypatch.delenv("APIS_STAGE_MIN_TIER", raising=False)
+        monkeypatch.delenv("APIS_HARNESS_HEADROOM", raising=False)
+        harness_router.reset_state()
+        return await skill_runner.run_skill("lanius", "do the thing")
+
+    @pytest.mark.asyncio
+    async def test_auth_noise_on_a_zero_exit_run_is_ignored(
+        self, monkeypatch
+    ) -> None:
+        noise = (
+            b'ERROR rmcp::transport::worker: worker quit with fatal: '
+            b'HTTP 401: {"error_code":"AUTH_REQUIRED",'
+            b'"message":"Missing Bearer token"}'
+        )
+        result = await self._run(monkeypatch, returncode=0, stderr=noise)
+
+        assert result.ok is True
+        assert result.provider == "codex"
+        assert result.stdout == "the agent's real answer"
+        # The provider must remain usable — cooling it is what removed a
+        # working harness from the pool for an hour at a time.
+        import harness_router
+
+        assert "codex" not in harness_router.cooling_providers()
+
+    @pytest.mark.asyncio
+    async def test_a_genuinely_failed_run_is_still_classified(
+        self, monkeypatch
+    ) -> None:
+        result = await self._run(
+            monkeypatch, returncode=1, stderr=b"You've hit your usage limit"
+        )
+
+        assert result.ok is False

@@ -491,6 +491,28 @@ _KNOWN_LENS_NAMES = frozenset(
     {"pm", "ux", "arch", "qa", "security", "legal", "content"}
 )
 
+def _stamp_review_model(result) -> str:
+    """Prefix a review verdict with the provider/model that produced it.
+
+    A verdict is evidence, and evidence needs a provenance line. When the panel
+    falls back to a weaker model the resulting APPROVE or CHANGES_REQUESTED is
+    not equivalent to one from the intended model — but downstream (the
+    aggregation agent, the operator reading the PR, any future merge policy)
+    sees only text. Without this stamp a degraded review is indistinguishable
+    from a full-strength one, which is the "reports success while producing
+    nothing" failure in a new costume.
+
+    Returns the body unchanged when the provider is unknown, so this can never
+    swallow a review.
+    """
+    body = result.stdout or ""
+    provider = getattr(result, "provider", "") or ""
+    if not provider:
+        return body
+    model = getattr(result, "model", "") or "(provider default)"
+    return f"_Reviewed by {provider}/{model}._\n\n{body}"
+
+
 _BLOCKING_COUNT_RE = re.compile(r"Blocking:\s*(\d+)", re.IGNORECASE)
 
 # `pm: NOT RECEIVED`, `**security:** NOT RECEIVED`, `security = NOT RECEIVED`.
@@ -2523,6 +2545,10 @@ class SwarmDispatcher:
                 provider=resolve_lens_provider(
                     lens, available_providers=usable_providers()
                 ),
+                # Recovery re-runs the SAME lens, so it must be held to the same
+                # capability floor. A re-dispatch that quietly downgrades would
+                # defeat the floor precisely on the retry path.
+                stage=lens.lens,
             )
         finally:
             await cleanup_pr_worktree(worktree)
@@ -3730,11 +3756,19 @@ class SwarmDispatcher:
                     provider=resolve_lens_provider(
                         lens, available_providers=usable_providers()
                     ),
+                    # The lens name IS the stage: `security` and `arch` decide
+                    # whether code is safe to merge and carry a strong floor,
+                    # while `content` does not. Without this the panel would
+                    # happily review on whatever model had headroom.
+                    stage=lens.lens,
                 )
             finally:
                 await cleanup_pr_worktree(qa_worktree)
             if result.ok:
-                reviews.append((lens.lens, result.stdout))
+                # Stamp the reviewing model onto the verdict. An approval from a
+                # fallback model is weaker evidence than one from the intended
+                # model, and the merge path cannot weigh what it cannot see.
+                reviews.append((lens.lens, _stamp_review_model(result)))
 
         # 2b. Persist the captured reviews and backfill any review:<lens>
         #     comment the panelist could not post itself (PR-87 self-dogfood
