@@ -736,10 +736,17 @@ class TestListCheckpoints(unittest.TestCase):
 
 class TestToolSchemas(unittest.TestCase):
 
-    ACTION_TOOLS = {"get_swarm_roster", "route_task", "list_checkpoints", "resolve_checkpoint"}
-    # Read-only swarm observability. resolve_checkpoint stays the ONLY mutating
-    # tool: see the self-certification boundary note in server.py — a session
-    # must not be able to advance its own gate.
+    ACTION_TOOLS = {
+        "get_swarm_roster", "route_task", "list_checkpoints", "resolve_checkpoint",
+        "merge_pr",
+    }
+    # Read-only swarm observability. resolve_checkpoint stays the only tool that
+    # writes Neotoma gate state: see the self-certification boundary note in
+    # server.py — a session must not be able to advance its own gate.
+    #
+    # merge_pr mutates GitHub, not gate state. It signs nothing off; it reads
+    # verdicts other agents wrote and either performs the mechanical merge or
+    # refuses. So it is an action tool, and it must NOT appear below.
     OBSERVABILITY_TOOLS = {"get_gate_status", "list_pipeline_queue", "get_dispatch_health"}
 
     def test_tools_defined(self):
@@ -943,6 +950,298 @@ class TestSwarmObservability(unittest.TestCase):
     def test_get_gate_status_rejects_unparseable_ref(self):
         out = srv._get_gate_status("garbage")
         self.assertIn("error", out)
+
+
+class TestMergeGate(unittest.TestCase):
+    """The merge gate — modelled on the eight merges of 2026-09-01.
+
+    Seven of those eight PRs carried reviewDecision=CHANGES_REQUESTED at the
+    moment they were merged, and five went through in one shell loop that
+    discarded the merge output. Every case below is a shape that actually
+    occurred, or the inverse error that the same blind spot permits.
+    """
+
+    HEAD = "9f27f169aa11bb22cc33dd44ee55ff6677889900"
+    OLD = "bb4340a6112233445566778899aabbccddeeff00"
+
+    def _fake_github(self, *, pr=None, reviews=None, status=None, runs=None,
+                     comments=None, repo_meta=None, errors=None):
+        """Route _github_get by path, the way the live API would."""
+        errors = errors or {}
+
+        def _get(path, params=None):
+            for frag, err in errors.items():
+                if frag in path:
+                    return None, err
+            if path.endswith("/reviews"):
+                return (reviews if reviews is not None else []), None
+            if "/status" in path:
+                return (status if status is not None else {"state": "success", "statuses": []}), None
+            if "check-runs" in path:
+                return (runs if runs is not None else {"check_runs": []}), None
+            if "/comments" in path:
+                return (comments if comments is not None else []), None
+            if "/pulls/" in path:
+                return (pr if pr is not None else self._pr()), None
+            # /repos/{owner}/{repo}
+            return (repo_meta if repo_meta is not None else {"default_branch": "main"}), None
+
+        return _get
+
+    def _pr(self, **over):
+        base = {
+            "head": {"sha": self.HEAD},
+            "base": {"ref": "main"},
+            "state": "open",
+            "merged": False,
+            "draft": False,
+            "mergeable": True,
+            "mergeable_state": "clean",
+            "title": "t",
+            "html_url": "u",
+        }
+        base.update(over)
+        return base
+
+    def _review(self, state, sha, user="lanius", at="2026-09-01T10:00:00Z"):
+        return {"state": state, "commit_id": sha, "user": {"login": user}, "submitted_at": at}
+
+    def _evaluate(self, **kw):
+        with patch("server._github_get", self._fake_github(**kw)):
+            return srv._evaluate_merge_gate("markmhendrickson/ateles", 598)
+
+    # ── parsing ──────────────────────────────────────────────────────────────
+
+    def test_bare_number_is_rejected_as_ambiguous(self):
+        out = srv._merge_pr("#598")
+        self.assertIn("error", out)
+
+    def test_qualified_ref_parses(self):
+        self.assertEqual(
+            srv._parse_pr_ref("markmhendrickson/ateles#598"),
+            ("markmhendrickson/ateles", 598),
+        )
+
+    # ── the 2026-09-01 case: stale CHANGES_REQUESTED ─────────────────────────
+
+    def test_stale_changes_requested_blocks(self):
+        """PR #598's shape: blocking review on an OLDER commit than the head.
+
+        `gh pr merge` printed CHANGES_REQUESTED and merged anyway. The verdict
+        was probably superseded — but 'probably' is the untested assumption.
+        """
+        gate = self._evaluate(reviews=[self._review("CHANGES_REQUESTED", self.OLD)])
+        self.assertFalse(gate["mergeable"])
+        self.assertTrue(any("not re-reviewed against the current head" in b
+                            for b in gate["blockers"]))
+        self.assertEqual(len(gate["review"]["stale_blocking"]), 1)
+
+    def test_live_changes_requested_blocks_and_cannot_be_waived(self):
+        with patch("server._github_get", self._fake_github(
+                reviews=[self._review("CHANGES_REQUESTED", self.HEAD)])):
+            out = srv._merge_pr("markmhendrickson/ateles#598",
+                                acknowledge_stale_review=True, dry_run=False)
+        self.assertFalse(out["merged"])
+        self.assertTrue(any("standing against the current head" in b
+                            for b in out["blockers"]))
+
+    def test_acknowledge_stale_review_clears_only_the_stale_blocker(self):
+        with patch("server._github_get", self._fake_github(reviews=[
+                self._review("CHANGES_REQUESTED", self.OLD),
+                self._review("APPROVED", self.HEAD, user="vanellus"),
+        ])):
+            out = srv._merge_pr("markmhendrickson/ateles#598",
+                                acknowledge_stale_review=True)
+        self.assertTrue(out["mergeable"])
+        self.assertEqual(out["action"], "would_merge")
+        self.assertTrue(out["waived_blockers"])
+
+    # ── the inverse error: absence of review reads as absence of blockers ────
+
+    def test_unreviewed_pr_is_unsigned_not_cleared(self):
+        gate = self._evaluate(reviews=[])
+        self.assertFalse(gate["mergeable"])
+        self.assertTrue(any("UNSIGNED" in b for b in gate["blockers"]))
+
+    def test_approval_on_older_sha_does_not_vouch_for_current_head(self):
+        gate = self._evaluate(reviews=[self._review("APPROVED", self.OLD)])
+        self.assertFalse(gate["mergeable"])
+        self.assertTrue(any("does not vouch" in b for b in gate["blockers"]))
+
+    def test_approved_on_current_head_passes(self):
+        gate = self._evaluate(reviews=[self._review("APPROVED", self.HEAD)])
+        self.assertEqual(gate["blockers"], [])
+        self.assertTrue(gate["mergeable"])
+
+    def test_commented_does_not_displace_a_standing_approval(self):
+        """COMMENTED never carries a decision, so it must not unseat APPROVED."""
+        reviews = [
+            self._review("APPROVED", self.HEAD, at="2026-09-01T10:00:00Z"),
+            self._review("COMMENTED", self.HEAD, at="2026-09-01T11:00:00Z"),
+        ]
+        gate = self._evaluate(reviews=reviews)
+        self.assertTrue(gate["mergeable"])
+
+    def test_latest_review_per_reviewer_wins(self):
+        reviews = [
+            self._review("CHANGES_REQUESTED", self.HEAD, at="2026-09-01T09:00:00Z"),
+            self._review("APPROVED", self.HEAD, at="2026-09-01T10:00:00Z"),
+        ]
+        gate = self._evaluate(reviews=reviews)
+        self.assertTrue(gate["mergeable"])
+
+    # ── fail closed ──────────────────────────────────────────────────────────
+
+    def test_unreadable_reviews_block_rather_than_read_as_clear(self):
+        gate = self._evaluate(errors={"/reviews": "HTTP 403 — token lacking scope"})
+        self.assertFalse(gate["mergeable"])
+        self.assertTrue(any("review state could not be read" in b
+                            for b in gate["blockers"]))
+
+    def test_unreadable_checks_block(self):
+        gate = self._evaluate(
+            reviews=[self._review("APPROVED", self.HEAD)],
+            errors={"/status": "HTTP 403"},
+        )
+        self.assertFalse(gate["mergeable"])
+
+    def test_failing_checks_block(self):
+        gate = self._evaluate(
+            reviews=[self._review("APPROVED", self.HEAD)],
+            runs={"check_runs": [{"name": "lint", "status": "completed",
+                                  "conclusion": "failure"}]},
+        )
+        self.assertFalse(gate["mergeable"])
+        self.assertEqual(gate["checks"]["state"], "failing")
+
+    def test_pending_checks_block(self):
+        gate = self._evaluate(
+            reviews=[self._review("APPROVED", self.HEAD)],
+            runs={"check_runs": [{"name": "tests", "status": "in_progress"}]},
+        )
+        self.assertFalse(gate["mergeable"])
+        self.assertEqual(gate["checks"]["state"], "pending")
+
+    def test_empty_combined_status_pending_is_not_a_block(self):
+        """A repo using only check-runs has combined state 'pending' forever.
+
+        Live case: markmhendrickson/ateles#631 — five green check-runs, zero
+        legacy statuses, combined state "pending". Counting that as pending
+        blocks every PR in every Actions-only repo.
+        """
+        gate = self._evaluate(
+            reviews=[self._review("APPROVED", self.HEAD)],
+            status={"state": "pending", "statuses": []},
+            runs={"check_runs": [{"name": "pytest", "status": "completed",
+                                  "conclusion": "success"}]},
+        )
+        self.assertEqual(gate["checks"]["state"], "green")
+        self.assertTrue(gate["mergeable"])
+
+    def test_combined_pending_with_a_real_context_still_blocks(self):
+        gate = self._evaluate(
+            reviews=[self._review("APPROVED", self.HEAD)],
+            status={"state": "pending",
+                    "statuses": [{"context": "ci/legacy", "state": "pending"}]},
+        )
+        self.assertEqual(gate["checks"]["state"], "pending")
+        self.assertFalse(gate["mergeable"])
+
+    def test_no_checks_configured_is_green(self):
+        gate = self._evaluate(reviews=[self._review("APPROVED", self.HEAD)])
+        self.assertEqual(gate["checks"]["state"], "green")
+
+    # ── structural conditions ────────────────────────────────────────────────
+
+    def test_stacked_pr_base_blocks(self):
+        gate = self._evaluate(
+            pr=self._pr(base={"ref": "feat/parent"}),
+            reviews=[self._review("APPROVED", self.HEAD)],
+        )
+        self.assertFalse(gate["mergeable"])
+        self.assertTrue(any("not the default branch" in b for b in gate["blockers"]))
+
+    def test_null_mergeable_is_not_yes(self):
+        gate = self._evaluate(
+            pr=self._pr(mergeable=None),
+            reviews=[self._review("APPROVED", self.HEAD)],
+        )
+        self.assertFalse(gate["mergeable"])
+
+    def test_draft_blocks(self):
+        gate = self._evaluate(
+            pr=self._pr(draft=True), reviews=[self._review("APPROVED", self.HEAD)]
+        )
+        self.assertFalse(gate["mergeable"])
+
+    def test_bypass_notice_blocks(self):
+        gate = self._evaluate(
+            reviews=[self._review("APPROVED", self.HEAD)],
+            comments=[{"body": "note\n<!-- pipeline-bypass-notice -->"}],
+        )
+        self.assertFalse(gate["mergeable"])
+        self.assertTrue(gate["bypass_notice"])
+
+    def test_already_merged_is_reported_not_retried(self):
+        gate = self._evaluate(pr=self._pr(merged=True))
+        self.assertTrue(gate["already_merged"])
+        self.assertFalse(gate["mergeable"])
+
+    def test_all_blockers_reported_at_once(self):
+        """Not short-circuited: fixing one blocker must not reveal the next."""
+        gate = self._evaluate(
+            pr=self._pr(base={"ref": "feat/x"}, draft=True),
+            reviews=[],
+            runs={"check_runs": [{"name": "lint", "status": "completed",
+                                  "conclusion": "failure"}]},
+        )
+        self.assertGreaterEqual(len(gate["blockers"]), 4)
+
+    # ── the mutation boundary ────────────────────────────────────────────────
+
+    def test_dry_run_is_the_default_and_merges_nothing(self):
+        with patch("server._github_get", self._fake_github(
+                reviews=[self._review("APPROVED", self.HEAD)])):
+            with patch("server.httpx.put") as put:
+                out = srv._merge_pr("markmhendrickson/ateles#598")
+        put.assert_not_called()
+        self.assertFalse(out["merged"])
+        self.assertEqual(out["action"], "would_merge")
+
+    def test_refused_gate_never_calls_the_merge_endpoint(self):
+        with patch("server._github_get", self._fake_github(reviews=[])):
+            with patch("server.httpx.put") as put:
+                out = srv._merge_pr("markmhendrickson/ateles#598", dry_run=False)
+        put.assert_not_called()
+        self.assertEqual(out["action"], "refused")
+
+    def test_passing_gate_with_dry_run_false_merges(self):
+        resp = httpx.Response(
+            200, json={"merged": True, "sha": "deadbeef"},
+            request=httpx.Request("PUT", "http://test/m"),
+        )
+        with patch("server._github_get", self._fake_github(
+                reviews=[self._review("APPROVED", self.HEAD)])):
+            with patch("server.httpx.put", return_value=resp):
+                out = srv._merge_pr("markmhendrickson/ateles#598", dry_run=False)
+        self.assertTrue(out["merged"])
+        self.assertEqual(out["merge_sha"], "deadbeef")
+
+    def test_http_200_without_merged_true_is_not_a_merge(self):
+        """A status code is not a landed state."""
+        resp = httpx.Response(
+            200, json={"merged": False, "message": "not mergeable"},
+            request=httpx.Request("PUT", "http://test/m"),
+        )
+        with patch("server._github_get", self._fake_github(
+                reviews=[self._review("APPROVED", self.HEAD)])):
+            with patch("server.httpx.put", return_value=resp):
+                out = srv._merge_pr("markmhendrickson/ateles#598", dry_run=False)
+        self.assertFalse(out["merged"])
+        self.assertEqual(out["action"], "merge_refused_by_github")
+
+    def test_invalid_method_rejected(self):
+        self.assertIn("error", srv._merge_pr("o/r#1", method="rm -rf"))
 
 
 if __name__ == "__main__":
