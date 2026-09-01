@@ -319,21 +319,19 @@ def test_the_script_check_alone_would_miss_the_polish_fabrication():
     assert non_latin_ratio("A widać o mnie.") == 0.0
 
 
-@pytest.mark.parametrize("text", ["Soita.", "Utanfor."])
-def test_a_lone_word_in_a_vad_closed_turn_is_caught(text):
-    """Finnish and Norwegian fabrications, both bare Latin with no diacritic."""
-    verdict = screen_transcription(text, expected_language="en", vad_closed=True)
-    assert verdict.filtered
-    assert verdict.reason == "lone_word_turn"
+@pytest.mark.parametrize("text", ["Soita.", "Utanfor.", "Eighteen", "root", "system"])
+def test_a_lone_word_is_never_filtered(text):
+    """A rejected signal, pinned so it is not reintroduced.
 
-
-@pytest.mark.parametrize("text", ["Soita.", "Utanfor.", "Okay."])
-def test_a_lone_word_is_NOT_filtered_without_a_vad_close(text):
-    """A fixed-width chunk can clip a sentence to one word; VAD cannot.
-
-    This is why the signal is gated: the chunking tailer must never enable it.
+    `lone_word_turn` caught the Finnish and Norwegian fabrications, but measured
+    against the operator's real streaming captures it also ate "Eighteen" and
+    "seventeen" from a counting test, plus "root", "system" and "that": five
+    false positives against two true positives. Single-word utterances are
+    ordinary in dictation and technical speech. A lone word is NOT evidence of
+    fabrication, and these two fabrications are simply not catchable on output —
+    which is what input gating is for.
     """
-    verdict = screen_transcription(text, expected_language="en", vad_closed=False)
+    verdict = screen_transcription(text, expected_language="en", vad_closed=True)
     assert not verdict.filtered
 
 

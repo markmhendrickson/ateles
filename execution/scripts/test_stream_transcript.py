@@ -468,8 +468,7 @@ def test_streaming_path_imports_the_shared_filter():
     [
         # The operator's real fabrications, verbatim from the live JSONL.
         ("A wida\u0107 o mnie.", "foreign_diacritic"),   # Polish
-        ("Soita.", "lone_word_turn"),                    # Finnish
-        ("Utanfor.", "lone_word_turn"),                  # Norwegian
+        ("Sanaşılarızatifektir.", "foreign_diacritic"),  # Turkish
         ("\u0414\u043e\u0431\u0440\u0435 \u0443\u0442\u0440\u043e.", "script_mismatch"),
     ],
 )
@@ -506,11 +505,11 @@ def test_real_speech_survives_the_filter(text):
 def test_filtered_text_is_kept_not_dropped():
     """A false positive must stay recoverable by eye."""
     record = st.transcript_record(
-        0, "Soita.", start_s=200.43, end_s=201.1,
-        filtered="lone_word_turn", filtered_detail="single word",
+        0, "A widać o mnie.", start_s=194.02, end_s=195.1,
+        filtered="foreign_diacritic", filtered_detail="'ć' outside en/es",
     )
-    assert record["text"] == "Soita.", "text is never discarded"
-    assert record["filtered"] == "lone_word_turn"
+    assert record["text"] == "A widać o mnie.", "text is never discarded"
+    assert record["filtered"] == "foreign_diacritic"
     assert record["ok"] is True
 
 
@@ -862,3 +861,22 @@ def test_vad_boundaries_raise_no_anomalies():
         start_s, end_s, _ = _turn(boundaries, a, b, b / 1000.0 + 1.0)
         assert st.timestamp_anomaly(start_s, end_s, previous_end) is None
         previous_end = end_s
+
+
+@pytest.mark.parametrize("text", ["Soita.", "Utanfor."])
+def test_bare_latin_single_word_fabrications_are_NOT_catchable_on_output(text):
+    """An honest limit, asserted rather than glossed over.
+
+    Both are real fabrications from the operator's session, and the output
+    filter cannot catch them: ordinary Latin letters, correctly spelled, in a
+    plausible register. The one signal that did catch them also ate real
+    single-word speech ("Eighteen", "root", "system") at a 5:2
+    false-positive-to-true-positive ratio, so it was removed rather than tuned.
+
+    This is exactly the argument for gating the INPUT. A decoder handed silence
+    or noise always emits something, and no amount of output inspection
+    separates a one-word fabrication from a one-word utterance. Stopping the
+    noise reaching the model is the only defence that works on this class.
+    """
+    verdict = st.screen_transcription(text, expected_language="en", vad_closed=True)
+    assert not verdict.filtered

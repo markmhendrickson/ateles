@@ -102,6 +102,53 @@ SILENT_INPUT_DBFS = float(os.environ.get("STREAM_TRANSCRIPT_SILENT_DBFS", "-65")
 # without admitting ordinary room noise.
 SPEECH_PRESENT_DBFS = float(os.environ.get("STREAM_TRANSCRIPT_SPEECH_DBFS", "-50"))
 
+# --- Input gate -------------------------------------------------------------
+# The single most effective defence against fabrication, and the one this path
+# lost when it stopped chunking.
+#
+# `live_transcript_tail.py` measures a window and NEVER SENDS it when it is
+# below threshold, so the model cannot invent from silence. Streaming a
+# continuous PCM feed removed that: every second of room tone, breathing and
+# keyboard noise reaches the decoder, and an autoregressive decoder has no
+# "emit nothing" option — it always produces some token sequence. That is
+# exactly where caption boilerplate and foreign-language text come from.
+# Measured across the operator's live sessions: 96 of 781 turns (12.3%) were
+# non-Latin script in English-only sessions, and that excludes the Latin-script
+# fabrications, so the true rate is higher.
+#
+# Gating the INPUT stops most fabrications being generated at all; the output
+# filter then catches what survives. Neither alone is sufficient.
+#
+# The threshold and the STATISTIC are both inherited from the chunking path
+# rather than reinvented (LIVE_TRANSCRIPT_SILENCE_THRESHOLD_DB = -50 dB on the
+# p95 of windowed RMS). The statistic is load-bearing: measured on 39 labelled
+# chunks, the median fails (a speaker pausing between sentences drags a window
+# to -75 dB, indistinguishable from true silence) and the peak fails (a single
+# click lifts silent windows to -22 dB). p95 asks "was there sustained energy
+# in the loudest ~5%", which is what "someone spoke" actually means.
+INPUT_GATE_DBFS = float(
+    os.environ.get(
+        "STREAM_TRANSCRIPT_INPUT_GATE_DBFS",
+        os.environ.get("LIVE_TRANSCRIPT_SILENCE_THRESHOLD_DB", "-50"),
+    )
+)
+
+# The gate decides over a rolling window rather than per 100ms frame, because a
+# frame is far shorter than the pause between two words. Gating per frame would
+# chop the gaps out of ordinary speech and desync the server's own VAD.
+GATE_WINDOW_SECONDS = float(
+    os.environ.get("STREAM_TRANSCRIPT_GATE_WINDOW_S", "1.5")
+)
+
+# Once speech is detected, keep sending for this long after it drops below the
+# threshold. Speech ends in low-energy consonants and trailing vowels; cutting
+# at the instant RMS dips would clip word endings and rob the server VAD of the
+# silence it needs to CLOSE a turn — which would reintroduce the mid-sentence
+# truncation this path exists to fix.
+GATE_HANGOVER_SECONDS = float(
+    os.environ.get("STREAM_TRANSCRIPT_GATE_HANGOVER_S", "2.0")
+)
+
 RECORDING_EXTENSIONS = {".aac", ".m4a", ".mp4", ".wav"}
 
 
@@ -132,6 +179,179 @@ def pcm16_dbfs(payload: bytes) -> float | None:
     if mean_square <= 0:
         return -math.inf
     return 20.0 * math.log10(math.sqrt(mean_square) / 32768.0)
+
+
+class InputGate:
+    """Decides which audio is worth sending to the transcription socket.
+
+    Two layers, because they fail on different things:
+
+    * **RMS** (layer 1) — catches silence and room tone. Cheap, and it removes
+      the bulk. This is the defence the chunking path had and this path lost.
+    * **Local VAD** (layer 2) — catches LOUD non-speech, which RMS structurally
+      cannot. The decisive counterexample is in the corpus: a fabricated
+      Georgian chunk arrived at -31.6 dBFS, inside the operator's verified
+      speech range of -28 to -37 dBFS. No threshold separates -31.6 from -31.2;
+      volume is not the distinguishing property, spectral shape is.
+
+    Both run BEFORE the socket, so noise never crosses the wire and the decoder
+    is never asked to describe it. An autoregressive decoder has no "emit
+    nothing" option — given any input it produces some token sequence, which is
+    where caption boilerplate and foreign-language text come from.
+
+    Interaction with the server's own VAD is the main implementation risk, and
+    it is why this gate is deliberately conservative:
+
+    * It decides over a rolling window, never per 100ms frame, so it cannot chop
+      the gaps out of ordinary speech.
+    * It applies a HANGOVER after speech drops below threshold, so word endings
+      survive and the server still receives the trailing silence it needs to
+      CLOSE a turn. Cutting audio the instant RMS dips would starve server VAD
+      of its turn boundary and reintroduce mid-sentence truncation — the very
+      defect this path exists to fix.
+    * When no local VAD is installed it degrades to RMS alone rather than
+      failing closed. Sending too much audio costs money; sending too little
+      loses the operator's words.
+    """
+
+    def __init__(
+        self,
+        *,
+        threshold_dbfs: float = INPUT_GATE_DBFS,
+        window_seconds: float = GATE_WINDOW_SECONDS,
+        hangover_seconds: float = GATE_HANGOVER_SECONDS,
+        vad: "SpeechDetector | None" = None,
+    ) -> None:
+        self.threshold_dbfs = threshold_dbfs
+        self.window_seconds = window_seconds
+        self.hangover_seconds = hangover_seconds
+        self.vad = vad
+        self._levels: deque[tuple[float, float]] = deque()
+        self._open_until: float | None = None
+        self.frames_sent = 0
+        self.frames_suppressed = 0
+
+    def _sustained_dbfs(self, now: float) -> float | None:
+        """p95 of windowed RMS — the statistic the chunking path calibrated.
+
+        Not the median (a speaker pausing between sentences drags it to silence
+        levels) and not the peak (one keyboard click lifts silence to speech
+        levels).
+        """
+        cutoff = now - self.window_seconds
+        while self._levels and self._levels[0][0] < cutoff:
+            self._levels.popleft()
+        if not self._levels:
+            return None
+        ordered = sorted(level for _, level in self._levels)
+        idx = min(len(ordered) - 1, int(0.95 * len(ordered)))
+        return ordered[idx]
+
+    def should_send(self, payload: bytes, now: float) -> bool:
+        """Whether this frame goes to the socket."""
+        level = pcm16_dbfs(payload)
+        if level is None:
+            # A measurement we could not take must never silently discard
+            # audio — the chunking path takes the same position.
+            self.frames_sent += 1
+            return True
+        self._levels.append((now, level))
+
+        sustained = self._sustained_dbfs(now)
+        loud_enough = sustained is not None and sustained >= self.threshold_dbfs
+
+        speechlike = True
+        if loud_enough and self.vad is not None:
+            # Only consulted on audio that already passed RMS: the VAD is there
+            # to reject loud non-speech, not to second-guess silence.
+            speechlike = self.vad.is_speech(payload)
+
+        if loud_enough and speechlike:
+            self._open_until = now + self.hangover_seconds
+
+        send = self._open_until is not None and now < self._open_until
+        if send:
+            self.frames_sent += 1
+        else:
+            self.frames_suppressed += 1
+        return send
+
+    def summary(self) -> dict:
+        total = self.frames_sent + self.frames_suppressed
+        return {
+            "frames_sent": self.frames_sent,
+            "frames_suppressed": self.frames_suppressed,
+            "suppressed_fraction": (
+                round(self.frames_suppressed / total, 3) if total else 0.0
+            ),
+            "threshold_dbfs": self.threshold_dbfs,
+            "vad": self.vad.name if self.vad else None,
+        }
+
+
+class SpeechDetector:
+    """Local VAD over the PCM already being tee'd.
+
+    Wraps ``webrtcvad`` when it is installed. Kept behind a tiny interface so
+    the gate has no hard dependency: the operator's machine may not have it, and
+    a missing optional package must not take the live transcript down with it.
+    """
+
+    def __init__(self, aggressiveness: int = 2) -> None:
+        import webrtcvad  # imported lazily; optional dependency
+
+        self._vad = webrtcvad.Vad(aggressiveness)
+        self.name = f"webrtcvad(aggressiveness={aggressiveness})"
+
+    # webrtcvad only accepts 10/20/30ms frames at 8/16/32/48kHz. The capture is
+    # 24kHz, so frames are resampled by decimation to 12kHz-equivalent... which
+    # webrtcvad does not accept either. Rather than resample badly, the frame is
+    # split into the largest supported size and any sub-frame voting speech
+    # makes the whole frame speech (biased towards KEEPING audio).
+    _FRAME_MS = 20
+
+    def is_speech(self, payload: bytes) -> bool:
+        rate = 16000
+        frame_bytes = int(rate * (self._FRAME_MS / 1000.0)) * SAMPLE_WIDTH
+        pcm = _resample_pcm16(payload, SAMPLE_RATE, rate)
+        if len(pcm) < frame_bytes:
+            return True  # too little to judge — keep it
+        for offset in range(0, len(pcm) - frame_bytes + 1, frame_bytes):
+            try:
+                if self._vad.is_speech(pcm[offset:offset + frame_bytes], rate):
+                    return True
+            except Exception:  # noqa: BLE001 — a VAD fault must not drop audio
+                return True
+        return False
+
+
+def _resample_pcm16(payload: bytes, src_rate: int, dst_rate: int) -> bytes:
+    """Nearest-sample resample. Crude, but a VAD decision does not need better."""
+    usable = len(payload) - (len(payload) % SAMPLE_WIDTH)
+    if usable <= 0 or src_rate == dst_rate:
+        return payload[:usable]
+    samples = struct.unpack(f"<{usable // SAMPLE_WIDTH}h", payload[:usable])
+    ratio = src_rate / dst_rate
+    out_len = int(len(samples) / ratio)
+    if out_len <= 0:
+        return b""
+    picked = [samples[min(len(samples) - 1, int(i * ratio))] for i in range(out_len)]
+    return struct.pack(f"<{len(picked)}h", *picked)
+
+
+def load_speech_detector(enabled: bool = True) -> SpeechDetector | None:
+    """The local VAD when available, else None (gate degrades to RMS alone)."""
+    if not enabled:
+        return None
+    try:
+        return SpeechDetector()
+    except ImportError:
+        log(
+            "local VAD unavailable (pip install webrtcvad) — input gating will "
+            "use the RMS threshold alone; loud non-speech will still reach the "
+            "model and may be transcribed as fabrication"
+        )
+        return None
 
 
 class HealthMonitor:
@@ -644,12 +864,22 @@ async def stream_session(
     model: str = DEFAULT_MODEL,
     api_key: str,
     expected_language: str = DEFAULT_LANGUAGE,
+    use_local_vad: bool = True,
+    gate_dbfs: float = INPUT_GATE_DBFS,
     health_poll: float = 5.0,
 ) -> tuple[int, HealthMonitor]:
     """Capture once, tee to disk and socket, append transcripts to the JSONL."""
     import websockets
 
     monitor = HealthMonitor()
+    gate = InputGate(
+        threshold_dbfs=gate_dbfs,
+        vad=load_speech_detector(enabled=use_local_vad),
+    )
+    log(
+        f"input gate: sending only above {gate.threshold_dbfs:g} dBFS sustained"
+        + (f", local VAD {gate.vad.name}" if gate.vad else ", no local VAD")
+    )
     index = 0
 
     def append(record: dict) -> None:
@@ -682,7 +912,12 @@ async def stream_session(
                     payload = await proc.stdout.read(STREAM_CHUNK_BYTES)
                     if not payload:
                         break
+                    # Health always sees EVERY frame: the monitor's job is to
+                    # know what the capture is really carrying, which the gate
+                    # must not be able to hide from it.
                     monitor.note_audio(payload)
+                    if not gate.should_send(payload, time.monotonic()):
+                        continue
                     await ws.send(
                         json.dumps(
                             {
@@ -799,6 +1034,7 @@ async def stream_session(
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(proc.wait(), timeout=10)
         log(f"capture stopped; recording kept at {recording_path}")
+        log(f"input gate: {json.dumps(gate.summary())}")
 
     return 0, monitor
 
@@ -809,6 +1045,20 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--dir", type=Path, default=DEFAULT_DIR)
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--no-local-vad",
+        action="store_true",
+        help="disable the local VAD pre-filter (RMS input gating still applies)",
+    )
+    parser.add_argument(
+        "--input-gate-dbfs",
+        type=float,
+        default=INPUT_GATE_DBFS,
+        help=(
+            "suppress audio below this sustained dBFS instead of sending it to "
+            f"the model (default: {INPUT_GATE_DBFS:g}, calibrated per device)"
+        ),
+    )
     parser.add_argument(
         "--language",
         default=DEFAULT_LANGUAGE,
@@ -864,6 +1114,8 @@ def main(argv: list[str]) -> int:
                 model=args.model,
                 api_key=api_key,
                 expected_language=args.language,
+                use_local_vad=not args.no_local_vad,
+                gate_dbfs=args.input_gate_dbfs,
             )
         )
     except KeyboardInterrupt:

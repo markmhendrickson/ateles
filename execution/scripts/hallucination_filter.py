@@ -36,14 +36,15 @@ Four signals, ordered by observed catch rate on two days of real chunks:
    script — so signal 1b passes it through. Measured over 629 real chunks that
    the script check does not catch: 4 flagged, all 4 genuine fabrications, 0
    false positives.
-6. ``lone_word_turn`` — a VAD-closed turn whose entire content is one word.
-   Observed: "Soita." (Finnish). Server VAD closes a turn on a silence
-   boundary, so a turn it considered complete that decodes to a single bare
-   word is noise, not speech. Measured over the same 629 chunks: 3 flagged
-   ("P", "y", "Soita."), all 3 non-speech, 0 false positives. This is gated on
-   ``vad_closed`` because it is only sound reasoning for the streaming path —
-   a fixed-width chunk can legitimately clip a window down to one word, which
-   is why the chunking tailer must never pass ``vad_closed=True``.
+A sixth signal, ``lone_word_turn``, was built and then REJECTED on measurement.
+The reasoning was that server VAD closes a turn on silence, so a complete turn
+of one bare word is noise — and it did catch "Soita." (Finnish) and "Utanfor."
+(Norwegian). But measured against the operator's streaming captures it also
+filtered "Eighteen" and "seventeen" (a counting test), "root", "system" and
+"that": 5 false positives against 2 true positives. Single-word utterances are
+ordinary in dictation and in technical speech, and a filter that eats them is
+worse than the fabrications it removes. Kept here as a note so it is not
+rediscovered and reintroduced: a lone word is NOT evidence of fabrication.
 
 **Nothing is ever silently dropped.** A caught chunk keeps its text and gains a
 ``filtered`` reason, so a false positive stays recoverable by eye and the
@@ -378,29 +379,6 @@ def foreign_diacritics(
     return seen
 
 
-# --- 6. Lone-word turn (streaming path only) --------------------------------
-
-_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
-
-
-def is_lone_word_turn(text: str, *, vad_closed: bool) -> bool:
-    """True when server VAD closed a turn containing exactly one word.
-
-    Only meaningful when the turn boundary came from VAD. VAD closes on a
-    silence boundary, so it is asserting "this utterance is complete" — and a
-    complete utterance of one bare word, surrounded by silence on both sides, is
-    the decoder emitting something from noise.
-
-    A fixed-width chunk carries no such assertion: a 30s window can clip a
-    sentence down to one word purely because the timer fired there. That is why
-    the chunking tailer must pass ``vad_closed=False`` (the default) and this
-    signal stays off for it.
-    """
-    if not vad_closed:
-        return False
-    return len(_WORD_RE.findall(text)) == 1
-
-
 # --- Filter -----------------------------------------------------------------
 
 
@@ -427,13 +405,18 @@ def screen_transcription(
     expected_language: str | None = "en",
     detected_language: str | None = None,
     window_seconds: float | None = None,
-    vad_closed: bool = False,
+    vad_closed: bool = False,  # noqa: ARG001 — see the rejected lone_word_turn note
     plausible_languages: tuple[str, ...] = DEFAULT_PLAUSIBLE_LANGUAGES,
 ) -> FilterVerdict:
     """Screen one transcription result for hallucination signatures.
 
     Returns a verdict; the caller marks the record and keeps the text. Order is
     by catch rate, so the recorded reason names the strongest signal present.
+
+    ``vad_closed`` says whether server VAD closed this turn. No signal currently
+    uses it — the one that did (``lone_word_turn``) was rejected on measurement,
+    see the module docstring. It stays in the signature because callers on the
+    streaming path already know the answer and a future signal may need it.
     """
     stripped = (text or "").strip()
     if not stripped:
@@ -484,14 +467,7 @@ def screen_transcription(
     if has_no_letters(stripped):
         return FilterVerdict(True, "no_speech_content", "no alphabetic characters")
 
-    # 4b. A VAD-closed turn of exactly one word is noise, not speech.
-    if is_lone_word_turn(stripped, vad_closed=vad_closed):
-        return FilterVerdict(
-            True, "lone_word_turn",
-            f"{stripped[:40]!r} is a single word in a VAD-closed turn",
-        )
-
-    # 4c. Too short for a long window.
+    # 4b. Too short for a long window.
     if is_too_short_for_window(stripped, window_seconds):
         return FilterVerdict(
             True, "too_short_for_window",
