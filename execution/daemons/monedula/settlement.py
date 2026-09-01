@@ -42,6 +42,7 @@ from handlers.payment_profile import (
 from handlers.wise_transfer import (
     classify_transfer_state,
     close_one_off,
+    escalate,
     fetch_transfer,
     find_next_event_due_date,
     find_task_id,
@@ -227,34 +228,20 @@ def _on_failed(
 def _set_due_date(
     profile: PaymentProfile, task_id: str, neotoma: str, next_due: str
 ) -> None:
-    import os
-    import subprocess
-
-    try:
-        res = subprocess.run(
-            [
-                neotoma,
-                "--api-only",
-                "entities",
-                "update",
-                task_id,
-                "--due-date",
-                next_due,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=os.environ,
-        )
-        if res.returncode != 0:
-            log.warning(
-                f"[{profile.name}] neotoma due_date update failed: "
-                f"{res.stderr.strip()[:200]}"
-            )
-        else:
-            log.info(f"[{profile.name}] Neotoma task due_date set to {next_due}.")
-    except Exception as exc:
-        log.warning(f"[{profile.name}] neotoma due_date update error: {exc}")
+    if not task_id:
+        log.warning(f"[{profile.name}] cannot roll due_date: no task id")
+        return
+    if set_entity_field(neotoma, task_id, "due_date", next_due):
+        log.info(f"[{profile.name}] Neotoma task due_date set to {next_due}.")
+        return
+    log.error(
+        f"[{profile.name}] SETTLEMENT DUE_DATE FAILED: task {task_id} still shows "
+        f"the pre-payment due_date after transfer settled — roll it by hand."
+    )
+    escalate(
+        f"monedula: {profile.label} transfer settled but due_date could NOT be "
+        f"rolled to {next_due} on task {task_id} — the record under-claims."
+    )
 
 
 def sweep_pending_settlements(token: str, *, today: date | None = None) -> list[dict]:

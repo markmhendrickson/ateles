@@ -99,11 +99,11 @@ def _wire(monkeypatch, profiles, transfer):
 
 
 def status_updates(calls) -> list[tuple[str, str]]:
-    out = []
-    for c in calls:
-        if "entities" in c and "update" in c and "--status" in c:
-            out.append((c[c.index("update") + 1], c[c.index("--status") + 1]))
-    return out
+    return [
+        (entity_id, value)
+        for entity_id, field, value in corrections(calls)
+        if field == "status" and value in ("done", "archived")
+    ]
 
 
 def corrections(calls) -> list[tuple[str, str, str]]:
@@ -119,11 +119,11 @@ def corrections(calls) -> list[tuple[str, str, str]]:
 
 
 def notes(calls) -> list[str]:
-    return [c[c.index("--notes") + 1] for c in calls if "--notes" in c]
+    return [value for _e, field, value in corrections(calls) if field == "notes"]
 
 
 def due_dates(calls) -> list[str]:
-    return [c[c.index("--due-date") + 1] for c in calls if "--due-date" in c]
+    return [value for _e, field, value in corrections(calls) if field == "due_date"]
 
 
 # ── settled ──────────────────────────────────────────────────────────────────
@@ -165,7 +165,9 @@ def test_settled_recurring_restores_active_and_rolls_due_date(
     got = {(f, v) for _e, f, v in corrections(calls)}
     assert ("status", "active") in got
     assert ("pending_transfer_id", "") in got
-    assert due_dates(calls) == ["2026-09-30"]
+    assert ("task_x", "2026-09-30") in {
+        (entity_id, value) for entity_id, field, value in corrections(calls) if field == "due_date"
+    }
     assert ("task_x", "done") not in status_updates(calls)
     assert no_wise_post == []
 
@@ -185,6 +187,38 @@ def test_settled_recurring_with_no_next_event_still_unparks(
     got = {(f, v) for _e, f, v in corrections(calls)}
     assert ("status", "active") in got
     assert ("pending_transfer_id", "") in got
+
+
+def test_settled_due_date_failure_escalates(monkeypatch) -> None:
+    """Unlike the pre-fix path, a failed due_date roll must reach the operator."""
+    import subprocess as _sp
+
+    profile = _parked(
+        prefix="THERAPY",
+        label="Therapy",
+        calendar_keywords=["therapy"],
+        due_date="",
+        one_off=False,
+        entity_id="prof_r",
+    )
+    _wire(monkeypatch, [profile], {"status": "outgoing_payment_sent"})
+    monkeypatch.setattr(settlement, "find_next_event_due_date", lambda _p: "2026-09-30")
+    monkeypatch.setattr(settlement, "find_task_id", lambda _p: "task_x")
+    monkeypatch.setattr(settlement.shutil, "which", lambda _n: "/usr/bin/neotoma")
+
+    class _Fail:
+        returncode = 1
+        stderr = "boom"
+        stdout = ""
+
+    monkeypatch.setattr(_sp, "run", lambda *a, **k: _Fail())
+    escalations: list[str] = []
+    monkeypatch.setattr(settlement, "escalate", lambda msg: escalations.append(msg))
+
+    settlement.sweep_pending_settlements("tok", today=TODAY)
+
+    assert escalations, "a failed due_date roll must reach the operator"
+    assert "2026-09-30" in escalations[0]
 
 
 # ── failed ───────────────────────────────────────────────────────────────────

@@ -451,6 +451,12 @@ def load_profiles_with_neotoma_fallback() -> list[PaymentProfile]:
 
     Phase 5 entrypoint. Monedula callers should use this instead of
     load_profiles() to transparently prefer Neotoma-sourced profiles.
+
+    Env-var fallback applies only when Neotoma has no payment_profile entities
+    at all. An empty *active* list is not the same: parked profiles
+    (awaiting_settlement) intentionally empty the active set, and reconstructing
+    from env would drop status, entity_id and pending_transfer_id — bypassing
+    the double-payment guard this PR relies on (ateles#604 review).
     """
     try:
         profiles = load_profiles_from_neotoma()
@@ -462,6 +468,25 @@ def load_profiles_with_neotoma_fallback() -> list[PaymentProfile]:
         profiles = []
     if profiles:
         return profiles
+
+    try:
+        any_in_neotoma = load_profiles_from_neotoma(
+            statuses=(
+                PROFILE_STATUS_ACTIVE,
+                PROFILE_STATUS_AWAITING_SETTLEMENT,
+                PROFILE_STATUS_PAYMENT_FAILED,
+                PROFILE_STATUS_ARCHIVED,
+            )
+        )
+    except RuntimeError:
+        any_in_neotoma = []
+    if any_in_neotoma:
+        log.info(
+            "Neotoma has %d payment profile(s) but none are active — "
+            "skipping env-var fallback to preserve parked-state guard",
+            len(any_in_neotoma),
+        )
+        return []
 
     log.info("No Neotoma payment profiles found — falling back to env vars")
     return load_profiles()

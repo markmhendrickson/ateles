@@ -984,24 +984,10 @@ def note_task(profile: PaymentProfile, task_id: str, neotoma: str, text: str) ->
     """
     if not task_id:
         return False
-    try:
-        res = subprocess.run(
-            [neotoma, "--api-only", "entities", "update", task_id, "--notes", text],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=os.environ,
-        )
-        if res.returncode != 0:
-            log.warning(
-                f"[{profile.name}] neotoma notes update failed: {res.stderr.strip()[:200]}"
-            )
-            return False
+    ok = _neotoma_set_field(neotoma, task_id, "notes", text)
+    if ok:
         log.info(f"[{profile.name}] Neotoma task {task_id} notes updated.")
-        return True
-    except Exception as exc:
-        log.warning(f"[{profile.name}] neotoma update error: {exc}")
-        return False
+    return ok
 
 
 def _update_task(profile: PaymentProfile, result: dict) -> None:
@@ -1099,30 +1085,12 @@ def _update_task(profile: PaymentProfile, result: dict) -> None:
 
     next_due = _find_next_event_due_date(profile)
     if next_due:
-        try:
-            res = subprocess.run(
-                [
-                    neotoma,
-                    "--api-only",
-                    "entities",
-                    "update",
-                    task_id,
-                    "--due-date",
-                    next_due,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=os.environ,
+        if _neotoma_set_field(neotoma, task_id, "due_date", next_due):
+            log.info(f"[{profile.name}] Neotoma task due_date set to {next_due}.")
+        else:
+            log.warning(
+                f"[{profile.name}] neotoma due_date correction failed for task {task_id}"
             )
-            if res.returncode != 0:
-                log.warning(
-                    f"[{profile.name}] neotoma due_date update failed: {res.stderr.strip()[:200]}"
-                )
-            else:
-                log.info(f"[{profile.name}] Neotoma task due_date set to {next_due}.")
-        except Exception as exc:
-            log.warning(f"[{profile.name}] neotoma due_date update error: {exc}")
     else:
         log.warning(
             f"[{profile.name}] Could not find next event date — due_date not updated."
@@ -1150,10 +1118,9 @@ def _escalate(message: str) -> None:
 def _neotoma_set_field(neotoma: str, entity_id: str, field: str, value: str) -> bool:
     """Set one snapshot field on a Neotoma entity. Returns True on success.
 
-    Uses `corrections create` rather than `entities update`: the CLI's
-    `entities update` exposes only --status, --notes and --due-date, so an
-    arbitrary snapshot field (pending_transfer_id, pending_transfer_at) has to
-    go through a correction observation.
+    Uses `corrections create` for every snapshot write. CLI 0.16.0 has no
+    `entities update` subcommand at all — status, notes, due_date and the
+    in-flight guard fields all go through correction observations.
     """
     if not entity_id:
         log.warning(f"cannot set {field}: no entity id")
@@ -1275,6 +1242,11 @@ def find_next_event_due_date(profile: PaymentProfile) -> str | None:
     return _find_next_event_due_date(profile)
 
 
+def escalate(message: str) -> None:
+    """Surface an operator-visible blocker. Public delegate for settlement.py."""
+    _escalate(message)
+
+
 def _close_one_off(profile: PaymentProfile, task_id: str, neotoma: str) -> None:
     """Mark a one-off task done and archive its profile after a paid transfer.
 
@@ -1285,35 +1257,18 @@ def _close_one_off(profile: PaymentProfile, task_id: str, neotoma: str) -> None:
     failure. The risk it leaves is a duplicate preview, not a duplicate payment:
     the operator still has to approve by name at the Telegram gate.
     """
-    for args, what in (
-        (["entities", "update", task_id, "--status", "done"], "task status=done"),
-        (
-            ["entities", "update", profile.entity_id, "--status", "archived"],
-            "profile status=archived",
-        ),
+    for entity_id, value, what in (
+        (task_id, "done", "task status=done"),
+        (profile.entity_id, "archived", "profile status=archived"),
     ):
-        if args[2] in ("", None):
+        if not entity_id:
             log.warning(f"[{profile.name}] cannot set {what}: no entity id")
             continue
-        try:
-            res = subprocess.run(
-                [neotoma, "--api-only", *args],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=os.environ,
-            )
-            if res.returncode != 0:
-                log.error(
-                    f"[{profile.name}] ONE-OFF CLEANUP FAILED ({what}): "
-                    f"{res.stderr.strip()[:200]} — this profile may re-trigger; "
-                    f"archive it by hand."
-                )
-            else:
-                log.info(f"[{profile.name}] one-off {what} set.")
-        except Exception as exc:
+        if _neotoma_set_field(neotoma, entity_id, "status", value):
+            log.info(f"[{profile.name}] one-off {what} set.")
+        else:
             log.error(
-                f"[{profile.name}] ONE-OFF CLEANUP ERROR ({what}): {exc} — "
+                f"[{profile.name}] ONE-OFF CLEANUP FAILED ({what}) — "
                 f"this profile may re-trigger; archive it by hand."
             )
 

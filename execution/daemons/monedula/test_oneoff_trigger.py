@@ -182,43 +182,57 @@ def test_close_one_off_sent_archives_profile_and_marks_task_done(monkeypatch) ->
     profile = _oneoff(TODAY, entity_id="prof_paid_1")
     _update_task(profile, {"status": "sent", "transfer_id": "tr_1"})
 
-    status_updates = [
-        c
-        for c in calls
-        if len(c) >= 6
-        and c[1:4] == ["--api-only", "entities", "update"]
-        and "--status" in c
+    status_corrections = [
+        (entity_id, value)
+        for entity_id, field, value in _corrections(calls)
+        if field == "status"
     ]
-    assert any(
-        c[4] == "task_paid_1" and c[c.index("--status") + 1] == "done"
-        for c in status_updates
-    ), f"expected task done update; got {status_updates}"
-    assert any(
-        c[4] == "prof_paid_1" and c[c.index("--status") + 1] == "archived"
-        for c in status_updates
-    ), f"expected profile archived update; got {status_updates}"
+    assert ("task_paid_1", "done") in status_corrections, (
+        f"expected task done correction; got {status_corrections}"
+    )
+    assert ("prof_paid_1", "archived") in status_corrections, (
+        f"expected profile archived correction; got {status_corrections}"
+    )
 
-    # Direct SUT path (same two status updates, no notes call).
+    # Direct SUT path (same two status corrections, no notes call).
     calls.clear()
     _close_one_off(profile, "task_paid_1", "/usr/bin/neotoma")
     assert len(calls) == 2
     assert calls[0] == [
         "/usr/bin/neotoma",
         "--api-only",
-        "entities",
-        "update",
+        "corrections",
+        "create",
+        "--entity-id",
         "task_paid_1",
-        "--status",
+        "--field-name",
+        "status",
+        "--corrected-value",
         "done",
     ]
     assert calls[1] == [
         "/usr/bin/neotoma",
         "--api-only",
-        "entities",
-        "update",
+        "corrections",
+        "create",
+        "--entity-id",
         "prof_paid_1",
-        "--status",
+        "--field-name",
+        "status",
+        "--corrected-value",
         "archived",
+    ]
+
+
+def _corrections(calls: list[list[str]]) -> list[tuple[str, str, str]]:
+    return [
+        (
+            c[c.index("--entity-id") + 1],
+            c[c.index("--field-name") + 1],
+            c[c.index("--corrected-value") + 1],
+        )
+        for c in calls
+        if "corrections" in c and "create" in c
     ]
 
 
@@ -251,11 +265,13 @@ def test_awaiting_settlement_does_not_close_one_off(monkeypatch) -> None:
         {"status": RESULT_AWAITING_SETTLEMENT, "transfer_id": "tr_1"},
     )
 
-    status_updates = [
-        c for c in calls if "--status" in c and "entities" in c and "update" in c
+    status_corrections = [
+        (entity_id, value)
+        for entity_id, field, value in _corrections(calls)
+        if field == "status" and value in ("done", "archived")
     ]
-    assert status_updates == [], (
-        f"an unsettled transfer must not done/archive; got {status_updates}"
+    assert status_corrections == [], (
+        f"an unsettled transfer must not done/archive; got {status_corrections}"
     )
 
 
@@ -280,11 +296,13 @@ def test_update_task_manual_required_does_not_close_one_off(monkeypatch) -> None
     profile = _oneoff(TODAY, entity_id="prof_manual_1")
     _update_task(profile, {"status": "manual_required"})
 
-    status_updates = [
-        c for c in calls if "--status" in c and "entities" in c and "update" in c
+    status_corrections = [
+        (entity_id, value)
+        for entity_id, field, value in _corrections(calls)
+        if field == "status" and value in ("done", "archived")
     ]
-    assert status_updates == [], (
-        f"manual_required must not done/archive; got {status_updates}"
+    assert status_corrections == [], (
+        f"manual_required must not done/archive; got {status_corrections}"
     )
 
 
@@ -307,7 +325,7 @@ def test_close_one_off_empty_ids_warn_without_crash(monkeypatch, caplog) -> None
     with caplog.at_level(logging.WARNING):
         _close_one_off(profile, "", "/usr/bin/neotoma")
 
-    assert calls == [], f"empty ids must not call neotoma update; got {calls}"
+    assert calls == [], f"empty ids must not call neotoma correction; got {calls}"
     assert any("no entity id" in r.message for r in caplog.records)
 
 
@@ -340,4 +358,4 @@ def test_close_one_off_subprocess_failure_logged_not_raised(
         _close_one_off(profile, "task_fail_1", "/usr/bin/neotoma")  # must not raise
 
     assert any("ONE-OFF CLEANUP FAILED" in r.message for r in caplog.records)
-    assert any("ONE-OFF CLEANUP ERROR" in r.message for r in caplog.records)
+    assert sum("ONE-OFF CLEANUP FAILED" in r.message for r in caplog.records) >= 2

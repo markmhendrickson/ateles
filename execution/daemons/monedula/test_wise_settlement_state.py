@@ -99,13 +99,12 @@ def calls(monkeypatch) -> list[list[str]]:
 
 
 def status_updates(calls: list[list[str]]) -> list[tuple[str, str]]:
-    """(entity_id, status) for every `entities update … --status <v>` argv."""
-    out = []
-    for c in calls:
-        if "entities" in c and "update" in c and "--status" in c:
-            idx = c.index("update")
-            out.append((c[idx + 1], c[c.index("--status") + 1]))
-    return out
+    """(entity_id, status) for done/archived corrections — the close path."""
+    return [
+        (entity_id, value)
+        for entity_id, field, value in corrections(calls)
+        if field == "status" and value in ("done", "archived")
+    ]
 
 
 def corrections(calls: list[list[str]]) -> list[tuple[str, str, str]]:
@@ -124,11 +123,11 @@ def corrections(calls: list[list[str]]) -> list[tuple[str, str, str]]:
 
 
 def notes(calls: list[list[str]]) -> list[str]:
-    return [c[c.index("--notes") + 1] for c in calls if "--notes" in c]
+    return [value for _e, field, value in corrections(calls) if field == "notes"]
 
 
 def due_dates(calls: list[list[str]]) -> list[str]:
-    return [c[c.index("--due-date") + 1] for c in calls if "--due-date" in c]
+    return [value for _e, field, value in corrections(calls) if field == "due_date"]
 
 
 def _wire_wise(
@@ -660,3 +659,54 @@ def test_manual_required_does_not_roll_a_recurring_due_date(monkeypatch, calls) 
 
     assert due_dates(calls) == [], "a failed payment must keep its original due_date"
     assert status_updates(calls) == [], "no done, no archived"
+
+
+# ── Env-var fallback must not bypass the parked-state guard (#604 review) ───
+
+
+def test_env_fallback_skipped_when_neotoma_has_parked_profiles(monkeypatch) -> None:
+    """An empty active list is not 'no profiles configured'."""
+    import handlers.payment_profile as pp
+
+    monkeypatch.setenv("MONEDULA_PROFILES", "THERAPY")
+    monkeypatch.setenv("THERAPY_LABEL", "Therapy")
+    monkeypatch.setenv("THERAPY_CALENDAR_KEYWORDS", "therapy")
+    monkeypatch.setenv("THERAPY_AMOUNT_EUR", "60")
+
+    calls = {"active": 0, "all": 0}
+
+    def fake_load(statuses=(pp.PROFILE_STATUS_ACTIVE,)):
+        if statuses == (pp.PROFILE_STATUS_ACTIVE,):
+            calls["active"] += 1
+            return []
+        calls["all"] += 1
+        return [
+            pp.PaymentProfile(
+                prefix="THERAPY",
+                label="Therapy",
+                calendar_keywords=["therapy"],
+                payment_type="wise",
+                amount_eur=Decimal("60.00"),
+                entity_id="prof_parked",
+                pending_transfer_id="7",
+            )
+        ]
+
+    monkeypatch.setattr(pp, "load_profiles_from_neotoma", lambda statuses=(pp.PROFILE_STATUS_ACTIVE,): fake_load(statuses))
+
+    assert pp.load_profiles_with_neotoma_fallback() == []
+    assert calls == {"active": 1, "all": 1}
+
+
+def test_env_fallback_still_used_when_neotoma_is_empty(monkeypatch) -> None:
+    import handlers.payment_profile as pp
+
+    monkeypatch.setenv("MONEDULA_PROFILES", "THERAPY")
+    monkeypatch.setenv("THERAPY_LABEL", "Therapy")
+    monkeypatch.setenv("THERAPY_CALENDAR_KEYWORDS", "therapy")
+    monkeypatch.setenv("THERAPY_AMOUNT_EUR", "60")
+    monkeypatch.setattr(pp, "load_profiles_from_neotoma", lambda **k: [])
+
+    profiles = pp.load_profiles_with_neotoma_fallback()
+    assert len(profiles) == 1
+    assert profiles[0].name == "therapy"
