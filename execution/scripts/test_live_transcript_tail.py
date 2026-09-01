@@ -1004,3 +1004,202 @@ def test_no_hallucination_filter_flag_disables_the_marking(tmp_path, monkeypatch
 
     chunk = json.loads(out.read_text().splitlines()[0])
     assert "filtered" not in chunk
+
+
+# --------------------------------------------------------------------------
+# Case 10 — supervisor liveness (assess_tailer_liveness) + follow pause/resume
+# --------------------------------------------------------------------------
+
+
+def test_assess_tailer_liveness_dead_when_pid_gone(tmp_path):
+    jsonl = tmp_path / "livetail.jsonl"
+    jsonl.write_text('{"chunk": 0, "ok": true, "text": "hi"}\n', encoding="utf-8")
+
+    verdict, detail = lt.assess_tailer_liveness(
+        tailer_pid=999_999_999,
+        jsonl_path=jsonl,
+        recording_path=None,
+        interval_s=30,
+        now=1_000_000.0,
+    )
+
+    assert verdict == "dead"
+    assert "gone" in detail.lower()
+    assert "relaunch" in detail.lower()
+
+
+def test_assess_tailer_liveness_stalled_when_recording_grows_jsonl_stale(
+    tmp_path,
+):
+    import os
+
+    jsonl = tmp_path / "livetail.jsonl"
+    recording = tmp_path / "session mic.mp4"
+    jsonl.write_text('{"chunk": 0, "ok": true, "text": "hi"}\n', encoding="utf-8")
+    recording.write_bytes(b"original")
+
+    # JSONL stale for 120s; recording grew since the last probe.
+    os.utime(jsonl, (900_000.0, 900_000.0))
+    os.utime(recording, (999_980.0, 999_980.0))
+    recording.write_bytes(b"original" + b"x" * 500)
+
+    verdict, detail = lt.assess_tailer_liveness(
+        tailer_pid=os.getpid(),
+        jsonl_path=jsonl,
+        recording_path=recording,
+        interval_s=30,
+        now=1_000_000.0,
+        prev_recording_size=len(b"original"),
+        prev_jsonl_mtime=900_000.0,
+    )
+
+    assert verdict == "stalled"
+    assert "recording growing" in detail
+    assert "JSONL silent" in detail
+
+
+def test_assess_tailer_liveness_paused_ok_when_last_event_paused_and_alive(
+    tmp_path,
+):
+    import os
+
+    jsonl = tmp_path / "livetail.jsonl"
+    jsonl.write_text(
+        '{"event": "paused", "t": "2026-09-01T10:00:00+00:00"}\n',
+        encoding="utf-8",
+    )
+
+    verdict, detail = lt.assess_tailer_liveness(
+        tailer_pid=os.getpid(),
+        jsonl_path=jsonl,
+        recording_path=None,
+        interval_s=30,
+    )
+
+    assert verdict == "paused_ok"
+    assert "follow break" in detail.lower()
+    assert "not an alert" in detail.lower()
+
+
+def test_assess_tailer_liveness_dead_during_follow_pause(tmp_path):
+    jsonl = tmp_path / "livetail.jsonl"
+    jsonl.write_text(
+        '{"event": "paused", "t": "2026-09-01T10:00:00+00:00"}\n',
+        encoding="utf-8",
+    )
+
+    verdict, detail = lt.assess_tailer_liveness(
+        tailer_pid=999_999_999,
+        jsonl_path=jsonl,
+        recording_path=None,
+        interval_s=30,
+    )
+
+    assert verdict == "dead"
+    assert "during follow break" in detail.lower()
+    assert "relaunch" in detail.lower()
+
+
+def test_assess_tailer_liveness_stalled_uses_resumed_recording_path(tmp_path):
+    """After follow resume, stall detection must watch the new file, not the old."""
+    import os
+
+    old_rec = tmp_path / "session mic.mp4"
+    new_rec = tmp_path / "session2 mic.mp4"
+    jsonl = tmp_path / "livetail.jsonl"
+    old_rec.write_bytes(b"old")
+    new_rec.write_bytes(b"new")
+    jsonl.write_text(
+        "\n".join([
+            '{"chunk": 0, "ok": true, "text": "hi"}',
+            json.dumps({"event": "paused", "t": "2026-09-01T10:00:00+00:00"}),
+            json.dumps({"event": "resumed", "t": "2026-09-01T10:05:00+00:00", "file": str(new_rec)}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    os.utime(jsonl, (900_000.0, 900_000.0))
+    os.utime(new_rec, (999_980.0, 999_980.0))
+    new_rec.write_bytes(b"new" + b"x" * 500)
+
+    verdict, detail = lt.assess_tailer_liveness(
+        tailer_pid=os.getpid(),
+        jsonl_path=jsonl,
+        recording_path=old_rec,
+        interval_s=30,
+        now=1_000_000.0,
+        prev_recording_size=len(b"new"),
+        prev_jsonl_mtime=900_000.0,
+    )
+
+    assert verdict == "stalled"
+    assert "JSONL silent" in detail
+
+
+def test_follow_pause_resume_keeps_same_track_kind(tmp_path, monkeypatch):
+    """Paused mic recording must resume on a new mic file, not a system track."""
+    import os
+
+    watch_dir = tmp_path
+    mic1 = watch_dir / "session mic.mp4"
+    mic2 = watch_dir / "session2 mic.mp4"
+    system = watch_dir / "session system.mp4"
+    mic1.write_bytes(b"x")
+    out = watch_dir / "out.jsonl"
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    ffmpeg_ok = MagicMock(returncode=0, stderr="", stdout="")
+    probe_values = iter([10.0, 10.01, 35.0, None, None])
+
+    def fake_probe(_recording):
+        try:
+            return next(probe_values)
+        except StopIteration:
+            return None
+
+    resume_calls = {"n": 0}
+
+    def fake_wait_for_resume(watch_dir_arg, kind, known, timeout_s, **kwargs):
+        resume_calls["n"] += 1
+        assert kind == "mic"
+        if resume_calls["n"] == 1:
+            system.write_bytes(b"system-only")
+            mic2.write_bytes(b"new mic recording")
+            return mic2
+        return None
+
+    def fake_sleep(seconds):
+        if seconds >= lt.FOLLOW_POLL_SECONDS:
+            return
+        os.utime(mic1, (0.0, 0.0))
+
+    with (
+        patch.object(lt, "probe_duration", side_effect=fake_probe),
+        patch.object(lt.time, "sleep", side_effect=fake_sleep),
+        patch.object(lt.time, "time", return_value=10_000.0),
+        patch.object(lt, "wait_for_resume", side_effect=fake_wait_for_resume),
+        patch.object(lt.subprocess, "run", return_value=ffmpeg_ok),
+        patch.object(lt, "transcribe_slice", return_value=(True, "hello", "en")),
+        patch.object(lt, "log"),
+    ):
+        rc = lt.main([
+            "--dir", str(watch_dir),
+            "--file", str(mic1),
+            "--out", str(out),
+            "--interval", "1",
+            "--start-at", "0",
+            "--follow",
+            "--follow-timeout-min", "1",
+        ])
+
+    assert rc == 0
+    lines = [json.loads(ln) for ln in out.read_text().splitlines() if ln.strip()]
+    events = [r for r in lines if r.get("event") in ("paused", "resumed")]
+    assert any(r.get("event") == "paused" for r in events)
+    resumed = next(r for r in events if r.get("event") == "resumed")
+    resumed_path = Path(resumed["file"])
+    assert lt.track_kind(resumed_path) == "mic"
+    assert resumed_path == mic2
+    assert not any(
+        r.get("event") == "fatal_transcription_failures" for r in lines
+    )

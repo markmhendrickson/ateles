@@ -33,6 +33,7 @@ import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -365,6 +366,136 @@ def wait_for_resume(
         return candidate
 
     return None
+
+
+LivenessVerdict = Literal["healthy", "dead", "stalled", "paused_ok"]
+
+
+def _pid_alive(pid: int | None) -> bool:
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _last_jsonl_record(jsonl_path: Path) -> dict | None:
+    if not jsonl_path.exists():
+        return None
+    last: dict | None = None
+    for line in jsonl_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            last = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+    return last
+
+
+def effective_recording_path(
+    jsonl_path: Path,
+    recording_path: Path | None,
+) -> Path | None:
+    """Return the active recording file, following ``resumed`` events in JSONL."""
+    if not jsonl_path.exists():
+        return recording_path
+
+    active = recording_path
+    for line in jsonl_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("event") == "resumed" and record.get("file"):
+            active = Path(record["file"])
+    return active
+
+
+def assess_tailer_liveness(
+    *,
+    tailer_pid: int | None,
+    jsonl_path: Path,
+    recording_path: Path | None,
+    interval_s: float,
+    now: float | None = None,
+    prev_recording_size: int | None = None,
+    prev_jsonl_mtime: float | None = None,
+) -> tuple[LivenessVerdict, str]:
+    """Assess whether the live tailer is healthy, paused legitimately, or stuck.
+
+    Called from the ``/stream-transcript`` skill's staleness watch (§4c), not
+    from the tailer's main loop. ``prev_recording_size`` and ``prev_jsonl_mtime``
+    come from the prior probe so growth-vs-staleness can be detected across the
+    ~60s supervisor cadence.
+    """
+    now = time.time() if now is None else now
+    alive = _pid_alive(tailer_pid)
+    last = _last_jsonl_record(jsonl_path)
+    paused = last is not None and last.get("event") == "paused"
+
+    if paused:
+        if alive:
+            return "paused_ok", "tailer alive during follow break — not an alert"
+        return (
+            "dead",
+            "tailer process gone during follow break — relaunch before resume",
+        )
+
+    if tailer_pid is not None and not alive:
+        return "dead", "tailer process gone — relaunch tailer"
+
+    recording_path = effective_recording_path(jsonl_path, recording_path)
+
+    jsonl_mtime: float | None = None
+    if jsonl_path.exists():
+        try:
+            jsonl_mtime = jsonl_path.stat().st_mtime
+        except OSError:
+            jsonl_mtime = None
+
+    stall_threshold = 2 * interval_s + 30
+
+    if (
+        prev_jsonl_mtime is not None
+        and jsonl_mtime is not None
+        and jsonl_mtime > prev_jsonl_mtime
+    ):
+        return "healthy", "JSONL advancing"
+
+    recording_growing = False
+    if recording_path is not None and recording_path.exists():
+        try:
+            st = recording_path.stat()
+            if prev_recording_size is not None:
+                recording_growing = st.st_size > prev_recording_size
+            else:
+                recording_growing = (now - st.st_mtime) <= interval_s
+        except OSError:
+            recording_growing = False
+
+    if (
+        recording_growing
+        and jsonl_mtime is not None
+        and (now - jsonl_mtime) > stall_threshold
+    ):
+        stale_s = now - jsonl_mtime
+        return (
+            "stalled",
+            f"recording growing but JSONL silent for {stale_s:.0f}s — "
+            "tailer may be stuck",
+        )
+
+    if jsonl_mtime is not None and (now - jsonl_mtime) <= stall_threshold:
+        return "healthy", "JSONL recently updated"
+
+    return "healthy", "tailer appears healthy"
 
 
 # Returned in place of an error when a slice transcribes to nothing. Silence is

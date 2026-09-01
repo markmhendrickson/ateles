@@ -158,11 +158,13 @@ is what lets step 4 tail a path you already know, with nothing to parse back.
 # auto-detect the growing recording
 cd "$ATELES_REPO" && nohup execution/venv/bin/python execution/scripts/live_transcript_tail.py \
   --interval 30 --follow --out /tmp/livetail.jsonl > /tmp/livetail.out 2> /tmp/livetail.err &
+echo $! > /tmp/livetail.pid
 
 # or name the recording explicitly, when auto-detect false-negatived (step 1)
 cd "$ATELES_REPO" && nohup execution/venv/bin/python execution/scripts/live_transcript_tail.py \
   --file "$HOME/Documents/data/recordings/<REC>.mp4" \
   --interval 30 --follow --out /tmp/livetail.jsonl > /tmp/livetail.out 2> /tmp/livetail.err &
+echo $! > /tmp/livetail.pid
 ```
 
 `--file` skips detection altogether — the path is used as given, checked only
@@ -306,6 +308,9 @@ quiet meeting look identical: silence. Any `grep` added to this pipeline needs
 
 Record the Monitor's task id — `/stream-transcript stop` needs it.
 
+Also record the **staleness watch** task id from step 4c and the tailer PID
+(from `/tmp/livetail.pid`) — both are needed for stop and for relaunch.
+
 ### 4b. Arm the lifecycle watch (auto-stop)
 
 The tailer exits on its own when the recording stops. Without a second watch,
@@ -358,8 +363,9 @@ sequence without being asked:**
 - `could not probe duration — recording ended?` **without** `--follow`
 
 **`paused` and `resumed` are explicitly NOT terminal.** Neither is
-`5 consecutive failures — stopping`: that is a broken transcription path, not a
-finished meeting — surface the errors and say the recording may still be running.
+`3 consecutive transcription failures — STOPPING`: that is a broken transcription
+path, not a finished meeting — surface the errors and say the recording may
+still be running.
 
 On a terminal state, tell the operator streaming ended because recording stopped. This is
 the auto-stop: the operator stops Audio Hijack and the handoff happens on its
@@ -367,6 +373,80 @@ own, rather than the feed dying silently mid-meeting.
 
 Do not auto-run `analyze-meeting` — stopping is mechanical, but spending a heavy
 multi-phase analysis is the operator's call.
+
+### 4c. Arm the staleness / dead tailer watch
+
+§4b only fires when the tailer **process exits**. It does not catch a tailer that
+is still alive but **stalled** (recording growing, JSONL silent) or one that
+**died during a `--follow` break** (last JSONL line is `paused`, process gone).
+Those are the #619 defect-4 scenarios on the session supervisor path.
+
+Arm a second `run_in_background` loop — separate from §4b, separate from the
+chunk Monitor. This is periodic probing, not stream-driven output, so background
+Bash is the right tool (not Monitor).
+
+Every ~60s, call `assess_tailer_liveness()` — the same import pattern as step 1:
+
+```bash
+cd "$ATELES_REPO" && execution/venv/bin/python -u - <<'PY'
+import json, sys, time
+from pathlib import Path
+sys.path.insert(0, "execution/scripts")
+import live_transcript_tail as lt
+
+state_path = Path("/tmp/livetail.liveness.json")
+jsonl_path = Path("/tmp/livetail.jsonl")
+recording_path = Path("<current recording path>")  # launch path; helper follows resumed events
+tailer_pid = int(Path("/tmp/livetail.pid").read_text().strip())
+interval_s = 30
+
+while True:
+    time.sleep(60)
+    state = {}
+    if state_path.exists():
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    if state.get("recording_path"):
+        recording_path = Path(state["recording_path"])
+
+    verdict, detail = lt.assess_tailer_liveness(
+        tailer_pid=tailer_pid,
+        jsonl_path=jsonl_path,
+        recording_path=recording_path,
+        interval_s=interval_s,
+        prev_recording_size=state.get("recording_size"),
+        prev_jsonl_mtime=state.get("jsonl_mtime"),
+    )
+
+    rec_size = None
+    active_recording = lt.effective_recording_path(jsonl_path, recording_path)
+    if active_recording is not None and active_recording.exists():
+        rec_size = active_recording.stat().st_size
+    jsonl_mtime = jsonl_path.stat().st_mtime if jsonl_path.exists() else None
+    state_path.write_text(json.dumps({
+        "recording_size": rec_size,
+        "jsonl_mtime": jsonl_mtime,
+        "recording_path": str(active_recording) if active_recording else None,
+    }), encoding="utf-8")
+
+    if verdict in ("dead", "stalled"):
+        print(f"=== TAILER {verdict.upper()} — {detail}", flush=True)
+    # paused_ok and healthy are silent — not operator alerts
+PY
+```
+
+**`dead` and `stalled` prints are operator-visible alerts.** Surface them
+immediately in-session; use PushNotification when actionable now. They are **not**
+meeting-over signals — do not run the `stop` sequence unless the operator asks or
+§4b reports a terminal exit.
+
+| Verdict | Meaning | Response |
+|---|---|---|
+| `STALLED` | Recording growing, JSONL silent past `2×interval + 30s` | Surface alert; check `/tmp/livetail.err`; relaunch tailer if stuck |
+| `DEAD` | Tailer process gone while stream expected active | Surface alert; relaunch tailer |
+| `DEAD` (pause variant) | Last JSONL line is `paused` but process gone | Relaunch **before** the operator resumes recording |
+| `paused_ok` / `healthy` | Legitimate break or normal operation | No action |
+
+Use `run_in_background: true`. Record this watch's task id for `/stream-transcript stop`.
 
 ### 5. Confirm
 
@@ -397,9 +477,9 @@ automatic path additionally says why streaming ended.
 pkill -f live_transcript_tail
 ```
 
-Then `TaskStop` the chunk Monitor's task id from start, and the lifecycle watch
-if it has not already fired. A Monitor left armed on a dead file sits until the
-session ends.
+Then `TaskStop` the chunk Monitor's task id from start, the lifecycle watch (§4b)
+if it has not already fired, and the staleness watch (§4c). A Monitor left armed
+on a dead file sits until the session ends.
 
 When triggered automatically the tailer has usually already exited — `pkill`
 finding nothing is expected, not an error.
@@ -479,7 +559,9 @@ is the right place for those provisional rows to be confirmed or corrected.
 | Symptom | Cause | Response |
 |---|---|---|
 | `no active recording found — start recording first, or pass --file` | Nothing *appeared* to grow during the ~3s probe — either nothing is recording, or the probe landed between Audio Hijack's buffered flushes | Check the watch dir for a recently-modified `*mic.mp4` / `*system.mp4`. If one exists, relaunch with `--file <path>`; only if none does, the operator starts the recorder |
-| Chunks stop arriving | Recording ended, or tailer died | Check `/tmp/livetail.err` |
+| Chunks stop arriving | Recording ended, tailer died, or tailer stalled | Check §4c staleness watch output; then `/tmp/livetail.err`. `pgrep -f live_transcript_tail` alive + no chunks → stalled |
+| `=== TAILER STALLED — …` | Recording growing but JSONL silent past threshold | Surface alert; read stderr; relaunch tailer if stuck |
+| `=== TAILER DEAD — …` during `--follow` break | Process gone while JSONL shows `paused` | Relaunch tailer before operator resumes |
 | 3 consecutive failures | Tailer self-stops by design, exits non-zero, writes `event: fatal_transcription_failures` | Read the error lines in the JSONL (silence is excluded from this count). Tune with `--max-consecutive-failures` / `LIVE_TRANSCRIPT_MAX_CONSECUTIVE_FAILURES` |
 | `no usable Python interpreter for transcribe_audio.py — refusing to start` | Neither `execution/venv` nor `.venv` can import the transcriber's dependencies — the usual cause in a git worktree | Create `execution/venv`, or set `LIVE_TRANSCRIPT_PYTHON` to an interpreter that can. The tailer now refuses to start rather than failing every chunk silently |
 | Garbled text on non-speech | Whisper straining on music/noise | Expected; not a defect |
