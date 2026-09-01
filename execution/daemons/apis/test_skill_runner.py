@@ -12,6 +12,7 @@ Run with: pytest execution/daemons/apis/test_skill_runner.py -v
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -2283,6 +2284,10 @@ class TestCrossHarnessRouting:
             "WORK",
             cwd="/repo",
         )
+        # ateles#590 added the network grant, but #601's review scoped it to
+        # delivery-bearing dispatches: the default carries NO network flag.
+        # `/repo` is not a git repo here, so no --add-dir appears;
+        # TestCodexSandboxGitRoots covers that against a real linked worktree.
         assert cmd == [
             "/bin/codex",
             "exec",
@@ -2452,3 +2457,245 @@ class TestCrossHarnessRouting:
 
         assert result.ok
         assert attempts == ["claude"]
+
+
+# ── ateles#590: codex sandbox must reach the gitdir, and a denied delivery ─────
+#    must be reported as a failure rather than as ok:true over nothing.
+
+
+class TestCodexSandboxGitRoots:
+    """`codex exec --sandbox workspace-write` in a LINKED WORKTREE.
+
+    The swarm dispatches every agent into its own worktree (ateles#572, and the
+    repo-isolation guard). A linked worktree keeps its real gitdir in the
+    parent clone, outside the sandbox, so without an explicit grant the child
+    writes correct code and then cannot commit it.
+    """
+
+    def _worktree(self, tmp_path):
+        """A real main clone plus a real linked worktree off it."""
+        main = tmp_path / "main-clone"
+        main.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(main)], check=True)
+        subprocess.run(
+            ["git", "-C", str(main), "config", "user.email", "t@example.com"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(main), "config", "user.name", "T"], check=True
+        )
+        (main / "seed.txt").write_text("seed\n")
+        subprocess.run(["git", "-C", str(main), "add", "seed.txt"], check=True)
+        subprocess.run(
+            ["git", "-C", str(main), "commit", "-q", "-m", "seed"], check=True
+        )
+        wt = tmp_path / "linked-wt"
+        subprocess.run(
+            ["git", "-C", str(main), "worktree", "add", "-q", str(wt), "-b", "wt"],
+            check=True,
+        )
+        return main, wt
+
+    def test_linked_worktree_git_roots_are_granted(self, tmp_path) -> None:
+        """Both the per-worktree gitdir AND the common dir must be granted.
+
+        Granting only one is not enough and this is verified, not assumed:
+        index.lock lives under the per-worktree gitdir while loose objects are
+        written under the common dir, so `git add` fails without the latter and
+        `git commit` fails without the former.
+        """
+        main, wt = self._worktree(tmp_path)
+        roots = skill_runner._git_roots_for_sandbox(str(wt))
+
+        common = (main / ".git").resolve()
+        per_wt = (common / "worktrees" / "linked-wt").resolve()
+        assert str(per_wt) in roots, f"per-worktree gitdir missing from {roots}"
+        assert str(common) in roots, f"common gitdir missing from {roots}"
+
+    def test_codex_command_carries_add_dir_for_each_git_root(self, tmp_path) -> None:
+        """The grants must actually reach the codex argv as --add-dir flags."""
+        main, wt = self._worktree(tmp_path)
+        cmd, _ = skill_runner._provider_command(
+            "codex", "/bin/codex", "system", "work", cwd=str(wt)
+        )
+
+        granted = [cmd[i + 1] for i, tok in enumerate(cmd) if tok == "--add-dir"]
+        common = str((main / ".git").resolve())
+        per_wt = str((main / ".git" / "worktrees" / "linked-wt").resolve())
+        assert common in granted, f"--add-dir missing common gitdir: {cmd}"
+        assert per_wt in granted, f"--add-dir missing worktree gitdir: {cmd}"
+
+    def test_codex_command_enables_network_only_when_asked(self, tmp_path) -> None:
+        """workspace-write denies network by default, so git push / gh cannot
+        resolve github.com. Delivery needs it enabled — but ONLY for a dispatch
+        that delivers.
+
+        #590 asks for this "without granting blanket network access to every
+        dispatch", and the PR body's own alternatives table rejects the
+        widening; granting it unconditionally contradicted both (#601 pm lens).
+        """
+        _, wt = self._worktree(tmp_path)
+        flag = "sandbox_workspace_write.network_access=true"
+
+        off, _ = skill_runner._provider_command(
+            "codex", "/bin/codex", "system", "work", cwd=str(wt)
+        )
+        assert flag not in off, "network must be denied by default"
+
+        on, _ = skill_runner._provider_command(
+            "codex", "/bin/codex", "system", "work", cwd=str(wt), network=True
+        )
+        assert flag in on, "a delivery-bearing dispatch still gets network"
+
+    def test_sandbox_is_not_widened_to_full_access(self, tmp_path) -> None:
+        """The fix must stay inside workspace-write. Reaching for
+        --sandbox danger-full-access would buy the same commit at the cost of
+        all filesystem confinement, everywhere on the operator's machine."""
+        _, wt = self._worktree(tmp_path)
+        cmd, _ = skill_runner._provider_command(
+            "codex", "/bin/codex", "system", "work", cwd=str(wt)
+        )
+        assert "workspace-write" in cmd
+        assert "danger-full-access" not in cmd
+        assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+
+    def test_plain_clone_needs_no_extra_grant(self, tmp_path) -> None:
+        """A plain clone's .git is inside the workdir, already writable. Do not
+        widen the sandbox for a path the sandbox already contains."""
+        main, _ = self._worktree(tmp_path)
+        assert skill_runner._git_roots_for_sandbox(str(main)) == []
+
+    def test_non_repo_cwd_yields_no_roots(self, tmp_path) -> None:
+        """A dispatch into a non-repo is legitimate and needs no git roots."""
+        plain = tmp_path / "not-a-repo"
+        plain.mkdir()
+        assert skill_runner._git_roots_for_sandbox(str(plain)) == []
+
+    def test_no_cwd_yields_no_roots(self) -> None:
+        assert skill_runner._git_roots_for_sandbox(None) == []
+
+
+class TestDeliveryFailureIsReportedAsFailure:
+    """The false `ok: true` (ateles#590).
+
+    A child denied its commit or push exits 0 — it did everything it was
+    permitted to do. Judging the run on the exit code alone reports success
+    over an undelivered change. Same class as ateles#585 (envelope never
+    written) and ateles#566 (401 reported ok).
+    """
+
+    def setup_method(self) -> None:
+        skill_runner._agent_def_cache.clear()
+
+    # The exact strings a real sandboxed codex child emitted, captured from a
+    # live reproduction against a linked worktree.
+    INDEX_LOCK = (
+        "fatal: Unable to create '/Users/x/repos/ateles/.git/worktrees/wt/"
+        "index.lock': Operation not permitted"
+    )
+    OBJECT_STORE = (
+        "error: unable to create temporary file: Operation not permitted\n"
+        "error: unable to index file 'f.txt'\nfatal: adding files failed"
+    )
+    NO_NETWORK = (
+        "fatal: unable to access 'https://github.com/markmhendrickson/ateles/': "
+        "Could not resolve host: github.com"
+    )
+
+    @pytest.mark.parametrize(
+        "blob",
+        [INDEX_LOCK, OBJECT_STORE, NO_NETWORK],
+        ids=["index_lock", "object_store", "no_network"],
+    )
+    def test_denial_signature_is_recognised(self, blob) -> None:
+        assert skill_runner._delivery_failure_reason(blob) is not None
+
+    def test_ordinary_output_is_not_a_denial(self) -> None:
+        """No false positives on a run that simply never tried to commit."""
+        assert (
+            skill_runner._delivery_failure_reason(
+                "Wrote 3 files. 12 passed in 1.2s. Done."
+            )
+            is None
+        )
+
+    def _dispatch_with_child_output(
+        self, stdout: bytes, returncode: int = 0, stderr: bytes = b""
+    ):
+        """run_skill against a fake child that prints `stdout` and exits 0.
+
+        `stderr` is where git actually writes its denial lines, and is the only
+        stream the detector reads — see test_quoted_denial_on_stdout_is_not_a_denial.
+        """
+        instance = MagicMock()
+        instance.load.return_value = _make_def()
+
+        async def fake_exec(*cmd, **kwargs):
+            proc = MagicMock()
+            proc.returncode = returncode
+
+            async def _communicate(input=None):
+                return stdout, stderr
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner._write_harness_event"),
+            patch("skill_runner.AgentLoader", return_value=instance),
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch("skill_runner.write_dispatch_failure_log", return_value=None),
+            patch("skill_runner.notify_dispatch_failure"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="SKILL"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            return asyncio.run(
+                skill_runner.run_skill("gryllus", "work", role="gryllus")
+            )
+
+    def test_rc_zero_with_denied_commit_reports_not_ok(self) -> None:
+        """THE defect: rc=0, real work done, nothing delivered, ok:true."""
+        result = self._dispatch_with_child_output(
+            b"Added the function and the tests; 12 passed.\n",
+            stderr=self.INDEX_LOCK.encode(),
+        )
+        assert result.ok is False, "a dispatch that could not commit reported ok"
+        assert result.returncode == 0
+        assert "commit" in result.error.lower()
+
+    def test_rc_zero_with_denied_push_reports_not_ok(self) -> None:
+        result = self._dispatch_with_child_output(
+            b"Committed locally.\n", stderr=self.NO_NETWORK.encode()
+        )
+        assert result.ok is False
+        assert result.error, "ok:false must always carry a reason"
+
+    def test_quoted_denial_on_stdout_is_not_a_denial(self) -> None:
+        """An agent that READS about a denial has not suffered one.
+
+        The detector searched a joined stdout+stderr blob for the signatures
+        wherever they appeared, so an agent dispatched to read ateles#601, its
+        diff, or an issue quoting the reproduction was reported as a failed
+        delivery — and, because that flips ok to False on an rc=0 run, its whole
+        stdout then reached the capacity/auth classifier, which could cool a
+        provider and replay side-effecting work on the operator's other quota
+        (#601, two lenses compounding).
+
+        git writes these lines to stderr; quoted prose arrives on stdout.
+        """
+        quoted = (
+            b"I read the PR. It reports:\n"
+            + self.INDEX_LOCK.encode()
+            + b"\nand explains the --add-dir fix. Nothing to change.\n"
+        )
+        result = self._dispatch_with_child_output(quoted, stderr=b"")
+
+        assert result.ok is True, "quoting a denial is not being denied"
+        assert result.error == ""
+
+    def test_clean_run_still_reports_ok(self) -> None:
+        """The guard must not turn every successful dispatch into a failure."""
+        result = self._dispatch_with_child_output(b"All done. 12 passed.\n")
+        assert result.ok is True
+        assert result.error == ""
