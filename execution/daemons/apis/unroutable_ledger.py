@@ -209,6 +209,9 @@ class UnroutableLedger:
     # entity_id -> {"n": attempts, "reported": ts}
     _unreadable: dict[str, dict] = field(default_factory=dict)
     _pending_unreadable: set = field(default_factory=set)
+    # field name -> keys this instance deliberately deleted. Consulted by the
+    # merge so a delete is not undone by unioning the prior file back in.
+    _tombstones: dict = field(default_factory=dict)
     _last_unread_emit: float = 0.0
     _loaded: bool = False
 
@@ -287,8 +290,19 @@ class UnroutableLedger:
                     theirs = prior.get(key)
                     if isinstance(theirs, dict):
                         # Ours wins on conflict (it is the newer decision);
-                        # theirs survives for every key we know nothing about.
+                        # theirs survives for every key we know nothing about —
+                        # EXCEPT one we deliberately deleted. A blind union
+                        # cannot express a deletion, so re-adding a cleared key
+                        # would resurrect it forever: `_unreadable` is the only
+                        # field with a delete path (`clear_unreadable`), and
+                        # without the tombstone check that clear never persists,
+                        # leaking entries for the daemon's whole lifetime and
+                        # reloading a stale streak that reports on the first
+                        # blip after a restart — precisely what clearing exists
+                        # to prevent.
                         for k, v in theirs.items():
+                            if k in self._tombstones.get(key, ()):
+                                continue
                             mine.setdefault(k, v)
             payload = json.dumps(
                 {
@@ -414,6 +428,9 @@ class UnroutableLedger:
         if not self._loaded:
             self.load()
         now = time.time() if now is None else now
+        # A new failure after a clear starts a fresh streak: lift the tombstone
+        # so this record is written rather than treated as still-deleted.
+        self._tombstones.get("unreadable", set()).discard(entity_id)
         rec = self._unreadable.setdefault(entity_id, {"n": 0, "reported": 0.0})
         rec["n"] = int(rec.get("n") or 0) + 1
         if rec["n"] < UNREADABLE_ATTEMPTS:
@@ -431,9 +448,14 @@ class UnroutableLedger:
         return True
 
     def clear_unreadable(self, entity_id: str) -> None:
-        """Forget a task that became readable again."""
+        """Forget a task that became readable again.
+
+        Records a tombstone so `save()`'s merge does not resurrect the entry
+        from the copy already on disk — without it the clear never persists.
+        """
         if self._unreadable.pop(entity_id, None) is not None:
             self._pending_unreadable.discard(entity_id)
+            self._tombstones.setdefault("unreadable", set()).add(entity_id)
             self.save()
 
     def drain_unreadable(self, now: float | None = None, force: bool = False) -> str | None:

@@ -321,3 +321,78 @@ def test_unreadable_records_also_survive_the_other_writer(tmp_path):
     disk = json.loads(path.read_text())
     assert "ent_u" in disk["unreadable"], "the role write dropped the unreadable record"
     assert "pavo" in disk["roles"]
+
+
+# ── deletion must be representable (Loxia review, ateles#666) ────────────────
+#
+# Merge-on-write unions the prior file back in, which cannot express a DELETE.
+# `_unreadable` is the only field with a delete path, so without a tombstone the
+# clear never persists: the entry leaks for the daemon's whole life, and on
+# restart the stale streak reloads and reports on the very first later blip —
+# exactly what clearing exists to prevent.
+
+
+def test_clear_unreadable_actually_persists(tmp_path):
+    path = tmp_path / "l.json"
+    led = UnroutableLedger(path=path)
+    for _ in range(3):
+        led.note_unreadable("ent_x", now=1000.0)
+    assert "ent_x" in json.loads(path.read_text())["unreadable"]
+
+    led.clear_unreadable("ent_x")
+    assert "ent_x" not in json.loads(path.read_text())["unreadable"], (
+        "the merge resurrected a deliberately cleared entry"
+    )
+
+
+def test_cleared_entry_stays_gone_after_reload(tmp_path):
+    """The consequence that actually bites: a stale streak reloaded on restart
+    reports on the first later blip instead of starting from zero."""
+    path = tmp_path / "l.json"
+    led = UnroutableLedger(path=path)
+    for _ in range(3):
+        led.note_unreadable("ent_x", now=1000.0)
+    led.clear_unreadable("ent_x")
+
+    restarted = UnroutableLedger(path=path)
+    restarted.load()
+    assert "ent_x" not in restarted._unreadable
+    # A single fresh failure must NOT immediately report (streak restarts at 1).
+    assert restarted.note_unreadable("ent_x", now=2000.0) is False
+
+
+def test_a_new_streak_after_a_clear_is_recorded_again(tmp_path):
+    """The tombstone must not permanently blacklist the key."""
+    path = tmp_path / "l.json"
+    led = UnroutableLedger(path=path)
+    for _ in range(3):
+        led.note_unreadable("ent_x", now=1000.0)
+    led.clear_unreadable("ent_x")
+    for _ in range(2):
+        led.note_unreadable("ent_x", now=2000.0)
+    assert "ent_x" in json.loads(path.read_text())["unreadable"]
+
+
+def test_clearing_one_entry_does_not_disturb_another(tmp_path):
+    path = tmp_path / "l.json"
+    led = UnroutableLedger(path=path)
+    for _ in range(3):
+        led.note_unreadable("ent_keep", now=1000.0)
+        led.note_unreadable("ent_drop", now=1000.0)
+    led.clear_unreadable("ent_drop")
+    disk = json.loads(path.read_text())["unreadable"]
+    assert "ent_keep" in disk and "ent_drop" not in disk
+
+
+def test_clear_does_not_disturb_the_other_writers_fields(tmp_path):
+    """A tombstoned delete must stay scoped to its own field."""
+    path = tmp_path / "l.json"
+    led = UnroutableLedger(path=path)
+    led.note("ent_a", "t", [], None, now=1000.0)
+    led.note_undefined_role("pavo", now=1000.0)
+    for _ in range(3):
+        led.note_unreadable("ent_u", now=1000.0)
+    led.clear_unreadable("ent_u")
+    disk = json.loads(path.read_text())
+    assert "ent_a" in disk["tasks"] and "pavo" in disk["roles"]
+    assert "ent_u" not in disk["unreadable"]

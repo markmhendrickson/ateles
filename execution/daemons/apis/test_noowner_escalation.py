@@ -292,3 +292,66 @@ def test_unhydrated_redeliveries_do_not_repeat_the_created_notice(monkeypatch):
 
     created = [m for m in n.sent if m.startswith("Task created")]
     assert len(created) == 1, f"announced {len(created)} times: {created}"
+
+
+def test_unreadable_announce_is_upgraded_by_the_readable_copy(monkeypatch):
+    """~38% of tasks (14 of 37 on the measured trace) had their first created
+    event fail hydration. Announcing that copy and suppressing every later one
+    would pin the operator to a permanent 'Task created: (untitled)'."""
+    from lib.daemon_runtime.sse_client import NeotomaEvent
+
+    async def _noop_hydrate(ev):
+        return ev
+
+    async def _noop_dispatch(*a, **k):
+        return None
+
+    monkeypatch.setattr(apis, "hydrate_snapshot", _noop_hydrate)
+    monkeypatch.setattr(apis, "dispatch_task", _noop_dispatch)
+    monkeypatch.setattr(apis, "_announced", {})
+    n = _Notifier()
+
+    for _ in range(4):  # unreadable deliveries
+        ev = NeotomaEvent(entity_type="task", entity_id="ent_u", action="created")
+        ev.hydrated = False
+        asyncio.run(apis.handle_event(ev, n))
+
+    ok = NeotomaEvent(
+        entity_type="task", entity_id="ent_u", action="created",
+        snapshot={"title": "The Real Title", "tags": []},
+    )
+    ok.hydrated = True
+    asyncio.run(apis.handle_event(ok, n))
+
+    created = [m for m in n.sent if m.startswith("Task created")]
+    assert len(created) == 2, f"expected provisional + upgrade, got {created}"
+    assert "The Real Title" in created[-1]
+
+
+def test_a_readable_announce_is_final(monkeypatch):
+    """No third notice: once the real title is announced, later copies are quiet."""
+    from lib.daemon_runtime.sse_client import NeotomaEvent
+
+    async def _noop_hydrate(ev):
+        return ev
+
+    async def _noop_dispatch(*a, **k):
+        return None
+
+    monkeypatch.setattr(apis, "hydrate_snapshot", _noop_hydrate)
+    monkeypatch.setattr(apis, "dispatch_task", _noop_dispatch)
+    monkeypatch.setattr(apis, "_announced", {})
+    monkeypatch.setattr(apis, "_created_seen", {})
+    n = _Notifier()
+
+    for _ in range(4):
+        ev = NeotomaEvent(
+            entity_type="task", entity_id="ent_r", action="created",
+            snapshot={"title": "Title", "tags": []},
+        )
+        ev.hydrated = True
+        asyncio.run(apis.handle_event(ev, n))
+        apis._created_seen.clear()   # isolate the announce from the dispatch claim
+
+    created = [m for m in n.sent if m.startswith("Task created")]
+    assert len(created) == 1, f"announced {len(created)} times: {created}"
