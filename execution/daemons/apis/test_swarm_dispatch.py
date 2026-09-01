@@ -6708,6 +6708,145 @@ def test_route_findings_recovers_from_aggregation_comment(monkeypatch):
     assert "three fixed call sites" in captured.get("prompt", "")
 
 
+def test_route_findings_escalates_for_unknown_aggregation_lens(monkeypatch):
+    """Aggregation fallback must not invent a lens when attribution is missing."""
+    dispatched = []
+    escalations = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        dispatched.append(skill)
+        return SkillResult(skill, True, 0, "guidance", "")
+
+    async def fake_claim(self, trigger, kind):
+        escalations.append(kind)
+        assert kind == "unparseable-verdict"
+        return True
+
+    _stub_comment_recovery(monkeypatch, [
+        {
+            "body": swarm_dispatch._VANELLUS_COMMENT_MARKER
+            + "\n**REQUEST_CHANGES**\n"
+            "[BLOCKING] regression-coverage: missing EC-6\n"
+            "the finding has no recognized lens attribution",
+            "created_at": "2026-08-10T09:00:00Z",
+        },
+    ])
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    asyncio.run(
+        d._route_blocking_findings(
+            _trigger(), parent=80, reviews=[("qa", "")],
+            verdict="request_changes",
+        )
+    )
+
+    assert escalations == ["unparseable-verdict"]
+    assert dispatched == []
+    assert any("no blocking findings could be parsed" in m for m in notifier.sent)
+    assert any("unrecognized lens attribution" in m for m in notifier.sent)
+
+
+def test_route_findings_deduplicates_same_lens_panel_and_backfill_comments(
+    monkeypatch,
+):
+    """Panelist and backfill comments with the same finding must not duplicate."""
+    captured = {}
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "cicada":
+            captured["prompt"] = prompt
+            return SkillResult(skill, True, 0, "applied", "")
+        return SkillResult(skill, False, 1, "", "guidance unavailable")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    _stub_comment_recovery(monkeypatch, [
+        {
+            "body": "review:qa\n[BLOCKING] coverage: missing EC-4\n"
+            "same detail from panelist",
+            "created_at": "2026-08-10T09:00:00Z",
+            "id": 1,
+        },
+        {
+            "body": "review:qa\n[BLOCKING] coverage: missing EC-4\n"
+            "same detail from dispatcher backfill\n"
+            "[BLOCKING] coverage: missing EC-4\n"
+            "duplicate detail from dispatcher backfill",
+            "created_at": "2026-08-11T09:00:00Z",
+            "id": 2,
+        },
+    ])
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(
+        d._route_blocking_findings(
+            _trigger(), parent=80, reviews=[("qa", "")],
+            verdict="request_changes",
+        )
+    )
+
+    prompt = captured.get("prompt", "")
+    assert prompt.count("### qa lens") == 1
+    assert prompt.count("missing EC-4") == 1
+
+
+def test_route_findings_prefers_newest_same_lens_review_comment(monkeypatch):
+    """When same-lens durable comments conflict, use the newest one."""
+    captured = {}
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "cicada":
+            captured["prompt"] = prompt
+            return SkillResult(skill, True, 0, "applied", "")
+        return SkillResult(skill, False, 1, "", "guidance unavailable")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    _stub_comment_recovery(monkeypatch, [
+        {
+            "body": "review:qa\n[BLOCKING] coverage: stale EC-5 text\n"
+            "old detail",
+            "createdAt": "2026-08-10T09:00:00Z",
+            "id": 1,
+        },
+        {
+            "body": "review:qa\n[BLOCKING] coverage: newer EC-5 text\n"
+            "new detail",
+            "createdAt": "2026-08-11T09:00:00Z",
+            "id": 2,
+        },
+    ])
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    asyncio.run(
+        d._route_blocking_findings(
+            _trigger(), parent=80, reviews=[("qa", "")],
+            verdict="request_changes",
+        )
+    )
+
+    prompt = captured.get("prompt", "")
+    assert "stale EC-5 text" not in prompt
+    assert "newer EC-5 text" in prompt
+
+
 def test_route_findings_still_escalates_when_comments_have_none(monkeypatch):
     """A genuinely unparseable verdict must still escalate — the recovery
     fallback widens the SOURCE, never the finding regex."""

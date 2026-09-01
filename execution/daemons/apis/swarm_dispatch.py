@@ -3236,7 +3236,7 @@ class SwarmDispatcher:
 
     async def _recover_blocking_findings_from_comments(
         self, t: SwarmTrigger, lenses: list[str]
-    ) -> dict[str, list[ReviewFinding]]:
+    ) -> tuple[dict[str, list[ReviewFinding]], str | None]:
         """Recover per-lens [BLOCKING] findings from the durable PR comments.
 
         The companion to ``_resolve_review_verdict``'s comment fallback
@@ -3250,9 +3250,9 @@ class SwarmDispatcher:
         escalated as "no blocking findings could be parsed" while the findings
         sat in plain sight on the PR.
 
-        Reads the same durable artifacts the panel already writes: comments
-        whose body starts with ``review:<lens>`` (the panelists' own and the
-        dispatcher's ``_post_missing_panel_comments`` backfill share that
+        Reads the same durable artifacts the panel already writes: the newest
+        comment whose body starts with ``review:<lens>`` (the panelists' own and
+        the dispatcher's ``_post_missing_panel_comments`` backfill share that
         prefix), plus the Vanellus aggregation comment as a last resort — it
         embeds the lens reviews inline and is the one artifact guaranteed to
         exist when a verdict was recovered at all.
@@ -3262,10 +3262,32 @@ class SwarmDispatcher:
         genuinely raised no blocking finding still yields nothing here, so a
         real unparseable verdict still escalates.
 
-        Best-effort — NEVER raises. A GitHub hiccup returns ``{}`` so the
-        caller escalates exactly as it did before this fallback existed.
+        Best-effort — NEVER raises. A GitHub hiccup returns ``({}, None)`` so
+        the caller escalates exactly as it did before this fallback existed.
+        When the aggregation comment has blocking findings with no recognized
+        lens attribution, returns an empty map plus operator-facing context.
         """
         by_lens: dict[str, list[ReviewFinding]] = {}
+        seen: set[tuple[str, str, str]] = set()
+
+        def comment_sort_key(comment: dict) -> tuple[str, int]:
+            raw_id = comment.get("id") or 0
+            try:
+                numeric_id = int(raw_id)
+            except (TypeError, ValueError):
+                numeric_id = 0
+            return (
+                str(comment.get("created_at") or comment.get("createdAt") or ""),
+                numeric_id,
+            )
+
+        def append_once(lens: str, finding: ReviewFinding) -> None:
+            key = (lens, finding.category, finding.summary)
+            if key in seen:
+                return
+            seen.add(key)
+            by_lens.setdefault(lens, []).append(finding)
+
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 comments = await self._all_issue_comments(
@@ -3276,34 +3298,49 @@ class SwarmDispatcher:
                 f"[{DAEMON_NAME}] {t.repository}#{t.number}: could not read PR "
                 f"comments to recover blocking findings ({exc}) — escalating"
             )
-            return {}
+            return {}, None
 
         for lens in lenses:
             prefix = f"review:{lens}"
-            for c in comments:
-                body = c.get("body") or ""
-                if not body.lstrip().startswith(prefix):
-                    continue
-                for f in parse_findings(body, lens=lens):
-                    if f.blocking:
-                        by_lens.setdefault(lens, []).append(f)
+            candidates = [
+                c
+                for c in comments
+                if (c.get("body") or "").lstrip().startswith(prefix)
+            ]
+            if not candidates:
+                continue
+            newest = max(candidates, key=comment_sort_key)
+            for f in parse_findings(newest.get("body") or "", lens=lens):
+                if f.blocking:
+                    append_once(lens, f)
         if by_lens:
-            return by_lens
+            return by_lens, None
 
         # Last resort: the aggregation comment embeds the lens reviews inline.
         # Attribute to the lens named in the finding's own category suffix when
-        # present ("regression-coverage (qa)"), else to the aggregator, so the
-        # fix guidance still reaches a real agent.
+        # present ("regression-coverage (qa)"). Unknown or missing attribution
+        # must escalate: routing blind would assign the finding to the wrong
+        # owner and hide the real parse problem from the operator.
         aggregation = latest_aggregation_comment(comments)
         if aggregation is not None:
             for f in parse_findings(aggregation.get("body") or ""):
                 if not f.blocking:
                     continue
                 m = re.search(r"\(([a-z_]+)\)\s*$", f.category)
-                lens = m.group(1) if m and m.group(1) in lenses else "review"
+                if not m or m.group(1) not in lenses:
+                    note = (
+                        "aggregation comment had blocking findings with "
+                        "unrecognized lens attribution"
+                    )
+                    log.warning(
+                        f"[{DAEMON_NAME}] {t.repository}#{t.number}: {note} "
+                        f"(category={f.category!r}) — escalating"
+                    )
+                    return {}, note
+                lens = m.group(1)
                 f.lens = lens
-                by_lens.setdefault(lens, []).append(f)
-        return by_lens
+                append_once(lens, f)
+        return by_lens, None
 
     async def _route_blocking_findings(
         self,
@@ -3337,7 +3374,11 @@ class SwarmDispatcher:
             # PR comment while its captured stdout comes back empty — the same
             # failure the verdict fallback exists for. Before escalating,
             # re-read the durable artifact.
-            by_lens = await self._recover_blocking_findings_from_comments(
+            recovery_note = None
+            (
+                by_lens,
+                recovery_note,
+            ) = await self._recover_blocking_findings_from_comments(
                 trigger, [lens for lens, _ in reviews]
             )
             if by_lens:
@@ -3356,10 +3397,11 @@ class SwarmDispatcher:
             # re-review of the same unparseable verdict must not re-ping the
             # operator.
             if await self._claim_escalation(trigger, "unparseable-verdict"):
+                note = f" ({recovery_note})" if recovery_note else ""
                 self.notifier.send(
                     f"PR {ref}: review verdict `{verdict or 'unparseable'}` is "
-                    "not clear but no blocking findings could be parsed — needs "
-                    "your read. Merge held.",
+                    "not clear but no blocking findings could be parsed"
+                    f"{note} — needs your read. Merge held.",
                     priority=Priority.OPERATOR_DECISION,
                     handler=DAEMON_NAME,
                 )
