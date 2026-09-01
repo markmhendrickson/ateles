@@ -3234,6 +3234,77 @@ class SwarmDispatcher:
             )
             return True
 
+    async def _recover_blocking_findings_from_comments(
+        self, t: SwarmTrigger, lenses: list[str]
+    ) -> dict[str, list[ReviewFinding]]:
+        """Recover per-lens [BLOCKING] findings from the durable PR comments.
+
+        The companion to ``_resolve_review_verdict``'s comment fallback
+        (ateles#292). That fix taught the dispatcher to re-read the verdict
+        from GitHub when Vanellus's stdout omitted it — but the FINDINGS that
+        drive the auto-fix round kept reading stdout alone. So a panel could
+        post a perfectly-formed ``[BLOCKING]`` block to its ``review:<lens>``
+        comment, have its verdict recovered as ``request_changes``, and still
+        route to ``unparseable-verdict`` because ``parse_findings(stdout)``
+        saw nothing. Observed on 9 of 12 PRs overnight 2026-08-31: every one
+        escalated as "no blocking findings could be parsed" while the findings
+        sat in plain sight on the PR.
+
+        Reads the same durable artifacts the panel already writes: comments
+        whose body starts with ``review:<lens>`` (the panelists' own and the
+        dispatcher's ``_post_missing_panel_comments`` backfill share that
+        prefix), plus the Vanellus aggregation comment as a last resort — it
+        embeds the lens reviews inline and is the one artifact guaranteed to
+        exist when a verdict was recovered at all.
+
+        Deliberately NOT a loosening of the finding regex: the same anchored
+        ``_FINDING_HEADER`` runs, only over a more reliable source. A lens that
+        genuinely raised no blocking finding still yields nothing here, so a
+        real unparseable verdict still escalates.
+
+        Best-effort — NEVER raises. A GitHub hiccup returns ``{}`` so the
+        caller escalates exactly as it did before this fallback existed.
+        """
+        by_lens: dict[str, list[ReviewFinding]] = {}
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._all_issue_comments(
+                    t.repository, t.number, client
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: could not read PR "
+                f"comments to recover blocking findings ({exc}) — escalating"
+            )
+            return {}
+
+        for lens in lenses:
+            prefix = f"review:{lens}"
+            for c in comments:
+                body = c.get("body") or ""
+                if not body.lstrip().startswith(prefix):
+                    continue
+                for f in parse_findings(body, lens=lens):
+                    if f.blocking:
+                        by_lens.setdefault(lens, []).append(f)
+        if by_lens:
+            return by_lens
+
+        # Last resort: the aggregation comment embeds the lens reviews inline.
+        # Attribute to the lens named in the finding's own category suffix when
+        # present ("regression-coverage (qa)"), else to the aggregator, so the
+        # fix guidance still reaches a real agent.
+        aggregation = latest_aggregation_comment(comments)
+        if aggregation is not None:
+            for f in parse_findings(aggregation.get("body") or ""):
+                if not f.blocking:
+                    continue
+                m = re.search(r"\(([a-z_]+)\)\s*$", f.category)
+                lens = m.group(1) if m and m.group(1) in lenses else "review"
+                f.lens = lens
+                by_lens.setdefault(lens, []).append(f)
+        return by_lens
+
     async def _route_blocking_findings(
         self,
         trigger: SwarmTrigger,
@@ -3260,11 +3331,30 @@ class SwarmDispatcher:
                     by_lens.setdefault(lens, []).append(f)
 
         if not by_lens:
-            # Verdict was not clear but no parseable [BLOCKING] block exists
-            # (e.g. a BLOCKED "cannot proceed" or a malformed verdict). Don't
-            # guess a fix — escalate so a human reads the review. Only notify
-            # once per PR: a re-review of the same unparseable verdict must not
-            # re-ping the operator.
+            # ateles#292 gave the VERDICT a durable-comment fallback but left
+            # the FINDINGS reading stdout only. A headless panelist routinely
+            # posts a well-formed `[BLOCKING] …` block to its `review:<lens>`
+            # PR comment while its captured stdout comes back empty — the same
+            # failure the verdict fallback exists for. Before escalating,
+            # re-read the durable artifact.
+            by_lens = await self._recover_blocking_findings_from_comments(
+                trigger, [lens for lens, _ in reviews]
+            )
+            if by_lens:
+                log.info(
+                    f"[{DAEMON_NAME}] {ref}: stdout carried no blocking "
+                    f"findings — recovered {sum(len(v) for v in by_lens.values())} "
+                    f"from review:<lens> PR comment(s) "
+                    f"({', '.join(sorted(by_lens))}) (fallback fired)"
+                )
+
+        if not by_lens:
+            # Verdict was not clear and NEITHER stdout nor the durable PR
+            # comments carry a parseable [BLOCKING] block (e.g. a BLOCKED
+            # "cannot proceed" or a malformed verdict). Don't guess a fix —
+            # escalate so a human reads the review. Only notify once per PR: a
+            # re-review of the same unparseable verdict must not re-ping the
+            # operator.
             if await self._claim_escalation(trigger, "unparseable-verdict"):
                 self.notifier.send(
                     f"PR {ref}: review verdict `{verdict or 'unparseable'}` is "
