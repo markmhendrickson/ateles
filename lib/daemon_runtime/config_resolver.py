@@ -59,6 +59,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +90,12 @@ CONFIG_CACHE_DIR = Path(
 CACHE_STALE_WARN_SECONDS = float(
     os.environ.get("ATELES_CONFIG_CACHE_STALE_WARN_S", str(7 * 24 * 3600))
 )
+
+
+class NeotomaFetchStatus(str, Enum):
+    OK = "ok"
+    EMPTY = "empty"  # 2xx, query ok, no matching entity
+    ERROR = "error"  # timeout / HTTP / parse failure
 
 
 class ConfigResolutionError(RuntimeError):
@@ -132,8 +139,9 @@ class ResolvedConfig:
     sources: dict[str, str] = field(default_factory=dict)
     entity_id: str | None = None
     cache_age_seconds: float | None = None
-    degraded: bool = False  # True when Neotoma was unreachable/slow
+    degraded: bool = False  # True when Neotoma fetch failed (transport/HTTP)
     missing_secrets: list[str] = field(default_factory=list)
+    info_suffix: str = ""  # non-degraded provenance hint (e.g. Phase 1 empty entity)
 
     def get(self, key: str, fallback: Any = None) -> Any:
         return self.values.get(key, fallback)
@@ -158,6 +166,8 @@ class ResolvedConfig:
             suffix = f" [DEGRADED: Neotoma unreachable{age}]"
         if self.entity_id:
             suffix += f" [entity={self.entity_id}]"
+        if self.info_suffix:
+            suffix += f" {self.info_suffix}"
         return f"[{self.daemon}] config: {', '.join(parts) or '(none)'}{suffix}"
 
 
@@ -208,11 +218,14 @@ def _unwrap_query_snapshot(ent: dict) -> dict:
     return snap if isinstance(snap, dict) else {}
 
 
-def _fetch_from_neotoma(daemon: str) -> tuple[dict, str | None]:
+def _fetch_from_neotoma(
+    daemon: str,
+) -> tuple[dict, str | None, NeotomaFetchStatus]:
     """Fetch the `daemon_configuration` entity for this daemon.
 
-    Returns (config_values, entity_id). Time-boxed; returns ({}, None) on any
-    failure so the caller can fall through to cache. Never raises.
+    Returns (config_values, entity_id, fetch_status). Time-boxed; returns
+    ({}, None, ERROR|EMPTY) so the caller can fall through to cache/env.
+    Never raises.
     """
     url = f"{NEOTOMA_BASE_URL}/entities/query"
     body = {
@@ -235,7 +248,7 @@ def _fetch_from_neotoma(daemon: str) -> tuple[dict, str | None]:
             f"[{daemon}] could not fetch daemon_configuration from Neotoma "
             f"({type(exc).__name__}: {exc}) — falling back to cache/env"
         )
-        return {}, None
+        return {}, None, NeotomaFetchStatus.ERROR
 
     entities = data.get("entities") or data.get("results") or []
     for ent in entities:
@@ -249,13 +262,13 @@ def _fetch_from_neotoma(daemon: str) -> tuple[dict, str | None]:
         if not isinstance(values, dict):
             log.warning(f"[{daemon}] daemon_configuration.config is not an object")
             values = {}
-        return values, ent.get("entity_id") or ent.get("id")
+        return values, ent.get("entity_id") or ent.get("id"), NeotomaFetchStatus.OK
 
     log.warning(
         f"[{daemon}] no daemon_configuration entity with daemon_name=={daemon!r} "
         f"(searched {len(entities)} candidate(s) via POST /entities/query)"
     )
-    return {}, None
+    return {}, None, NeotomaFetchStatus.EMPTY
 
 
 def resolve(
@@ -273,8 +286,9 @@ def resolve(
 
     remote: dict = {}
     entity_id: str | None = None
+    fetch_status = NeotomaFetchStatus.EMPTY
     if allow_neotoma:
-        remote, entity_id = _fetch_from_neotoma(daemon)
+        remote, entity_id, fetch_status = _fetch_from_neotoma(daemon)
 
     if remote:
         _write_cache(daemon, remote, entity_id)
@@ -283,7 +297,7 @@ def resolve(
     else:
         cached, cache_age = _read_cache(daemon)
         result.cache_age_seconds = cache_age
-        result.degraded = allow_neotoma
+        result.degraded = fetch_status == NeotomaFetchStatus.ERROR
         if cached and cache_age is not None and cache_age > CACHE_STALE_WARN_SECONDS:
             log.warning(
                 f"[{daemon}] using config cache written "
@@ -353,6 +367,11 @@ def resolve(
             f"the value lives in SOPS/1Password; run "
             f"execution/scripts/secrets_materialize.py"
         )
+
+    if fetch_status == NeotomaFetchStatus.EMPTY and any(
+        src == "env" for src in result.sources.values()
+    ):
+        result.info_suffix = "[no daemon_configuration entity yet]"
 
     log.info(result.provenance_line())
     return result

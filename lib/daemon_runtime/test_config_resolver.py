@@ -23,6 +23,7 @@ import lib.daemon_runtime.sse_client as sc
 from lib.daemon_runtime.config_resolver import (
     ConfigResolutionError,
     ConfigSpec,
+    NeotomaFetchStatus,
     resolve,
 )
 from lib.daemon_runtime.sse_client import MissingSubscriptionError, SSEClient
@@ -41,13 +42,27 @@ def _isolate(tmp_path, monkeypatch):
     yield
 
 
-def _no_neotoma(monkeypatch):
-    monkeypatch.setattr(cr, "_fetch_from_neotoma", lambda daemon: ({}, None))
+def _neotoma_error(monkeypatch):
+    monkeypatch.setattr(
+        cr,
+        "_fetch_from_neotoma",
+        lambda daemon: ({}, None, NeotomaFetchStatus.ERROR),
+    )
+
+
+def _neotoma_empty(monkeypatch):
+    monkeypatch.setattr(
+        cr,
+        "_fetch_from_neotoma",
+        lambda daemon: ({}, None, NeotomaFetchStatus.EMPTY),
+    )
 
 
 def _neotoma_returns(monkeypatch, values, entity_id="ent_test"):
     monkeypatch.setattr(
-        cr, "_fetch_from_neotoma", lambda daemon: (values, entity_id)
+        cr,
+        "_fetch_from_neotoma",
+        lambda daemon: (values, entity_id, NeotomaFetchStatus.OK),
     )
 
 
@@ -98,7 +113,7 @@ def test_cache_serves_config_when_neotoma_is_down(monkeypatch):
     _neotoma_returns(monkeypatch, {"sse_subscription_id": "sub-cached"})
     resolve("apis", [ConfigSpec(key="sse_subscription_id")])  # populates cache
 
-    _no_neotoma(monkeypatch)  # Neotoma now down
+    _neotoma_error(monkeypatch)  # Neotoma now down
     got = resolve("apis", [ConfigSpec(key="sse_subscription_id")])
 
     assert got.get("sse_subscription_id") == "sub-cached"
@@ -117,7 +132,7 @@ def test_degraded_run_is_reported_not_silent(monkeypatch, caplog):
     payload["_cached_at"] = time.time() - (30 * 24 * 3600)
     path.write_text(json.dumps(payload))
 
-    _no_neotoma(monkeypatch)
+    _neotoma_error(monkeypatch)
     with caplog.at_level("WARNING"):
         got = resolve("apis", [ConfigSpec(key="sse_subscription_id")])
 
@@ -151,7 +166,7 @@ def test_slow_neotoma_does_not_block_startup(monkeypatch):
 def test_unresolvable_required_config_raises_with_remedy(monkeypatch):
     """The whole point: unresolvable config fails loudly and names the fix,
     rather than resolving to an empty string."""
-    _no_neotoma(monkeypatch)
+    _neotoma_error(monkeypatch)
 
     with pytest.raises(ConfigResolutionError) as exc:
         resolve(
@@ -172,7 +187,7 @@ def test_unresolvable_required_config_raises_with_remedy(monkeypatch):
 
 
 def test_optional_config_falls_back_to_default(monkeypatch):
-    _no_neotoma(monkeypatch)
+    _neotoma_error(monkeypatch)
     got = resolve(
         "apis", [ConfigSpec(key="poll", required=False, default=30)]
     )
@@ -233,10 +248,11 @@ def test_exact_daemon_name_match_required(monkeypatch):
             }
 
     monkeypatch.setattr(cr.httpx, "post", lambda *a, **k: _Resp())
-    values, entity_id = cr._fetch_from_neotoma("apis")
+    values, entity_id, status = cr._fetch_from_neotoma("apis")
 
     assert values == {}
     assert entity_id is None
+    assert status == NeotomaFetchStatus.EMPTY
 
 
 def test_fetch_uses_entities_query_post(monkeypatch):
@@ -293,6 +309,31 @@ def test_explicit_subscription_id_still_works(monkeypatch):
     monkeypatch.setattr(sc, "resolve_subscription_id", lambda name: None)
     client = SSEClient(handler_name="testd", subscription_id="explicit-id")
     assert client._subscription_id == "explicit-id"
+
+
+def test_empty_neotoma_entity_is_not_degraded_when_env_resolves(monkeypatch):
+    """Phase 1: reachable Neotoma with no entity + env override is not degraded."""
+    _neotoma_empty(monkeypatch)
+    monkeypatch.setenv("SUB_ENV", "from-env")
+
+    got = resolve("apis", [ConfigSpec(key="sse_subscription_id", env_var="SUB_ENV")])
+
+    assert got.degraded is False
+    assert got.source_of("sse_subscription_id") == "env"
+    assert "[DEGRADED" not in got.provenance_line()
+
+
+def test_empty_neotoma_uses_cache_without_degraded(monkeypatch):
+    """Empty entity query falls back to cache without marking degraded."""
+    _neotoma_returns(monkeypatch, {"sse_subscription_id": "sub-cached"})
+    resolve("apis", [ConfigSpec(key="sse_subscription_id")])  # seed cache
+
+    _neotoma_empty(monkeypatch)
+    got = resolve("apis", [ConfigSpec(key="sse_subscription_id")])
+
+    assert got.degraded is False
+    assert got.source_of("sse_subscription_id") == "cache"
+    assert "[DEGRADED" not in got.provenance_line()
 
 
 def test_env_var_path_needs_no_neotoma(monkeypatch):
