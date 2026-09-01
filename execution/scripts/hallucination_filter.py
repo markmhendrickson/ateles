@@ -46,6 +46,17 @@ ordinary in dictation and in technical speech, and a filter that eats them is
 worse than the fabrications it removes. Kept here as a note so it is not
 rediscovered and reintroduced: a lone word is NOT evidence of fabrication.
 
+A seventh, ``short_turn_duration``, was measured on 2026-09-01 and REJECTED for
+the same reason. On one capture it looked decisive — both fabrications there ran
+under 1.02s while most real turns ran 3s+. Across the corpus the classes do not
+separate: the shortest REAL turn is "As we go." at 1.03s, two hundredths of a
+second longer than the "Nein." fabrication. A floor low enough to spare real
+speech catches nothing that ``script_mismatch`` has not already caught, and by
+1.5s it is eating whole English questions. Duration is NOT the discriminator,
+and there is no send-path floor to place either: the client streams fixed-size
+PCM payloads gated on RMS, so spans are the server's OUTPUT, not the client's
+input — a turn's duration does not exist until after it has been transcribed.
+
 **Nothing is ever silently dropped.** A caught chunk keeps its text and gains a
 ``filtered`` reason, so a false positive stays recoverable by eye and the
 filter's own accuracy stays measurable against the JSONL. Silently discarding a
@@ -309,13 +320,25 @@ def is_too_short_for_window(text: str, window_seconds: float | None) -> bool:
 
 
 def has_no_letters(text: str) -> bool:
-    """True when the output contains no alphabetic characters at all.
+    """True when the output carries no letters AND no digits.
 
     Observed as pure emoji runs ("🔥🔥🔥🔥🔥", "🔪🔪🔪🔪🔪🔪🔪"). Whisper emits these
     from noise. Independent of window length, because no window length makes a
     row of knife emoji into speech.
+
+    Digits count as speech content. An earlier revision asked only "are there
+    letters", which made every purely numeric utterance a fabrication: "42",
+    "$1,500", "2026", "3.14159". That fired on real speech on 2026-09-01 — the
+    operator's counting test transcribed as "1, 2, 3, 4, 5, 6, 7, 8" and was
+    filtered as an emoji run, the sole false positive in 837 captured turns.
+
+    Numbers are ordinary in dictation, and the streaming path exists for
+    technical and financial speech where they are the whole point. Requiring
+    the absence of BOTH letters and digits keeps all three emoji runs in the
+    corpus and passes every numeric turn.
     """
-    return bool(text.strip()) and not any(ch.isalpha() for ch in text)
+    stripped = text.strip()
+    return bool(stripped) and not any(ch.isalpha() or ch.isdigit() for ch in stripped)
 
 
 # --- 5. Foreign diacritics (Latin-script fabrication) -----------------------

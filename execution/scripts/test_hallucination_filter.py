@@ -337,6 +337,68 @@ def test_a_lone_word_is_never_filtered(text):
 
 @pytest.mark.parametrize(
     "text",
+    ["🔥🔥🔥🔥🔥", "🔪🔪🔪🔪🔪🔪🔪", "😍😍😍😍😍", "...", "!!!"],
+)
+def test_content_free_output_is_filtered(text):
+    """Emoji runs and bare punctuation carry no speech, at any window length."""
+    verdict = screen_transcription(text, expected_language="en", vad_closed=True)
+    assert verdict.filtered
+    assert verdict.reason == "no_speech_content"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "1, 2, 3, 4, 5, 6, 7, 8",   # the operator's counting test, filtered live
+        "42",
+        "2026",
+        "3.14159",
+        "$1,500",
+        "2 + 2 = 4",
+    ],
+)
+def test_a_numeric_utterance_is_never_filtered(text):
+    """Digits are speech content.
+
+    `has_no_letters` asked only "are there alphabetic characters", so every
+    purely numeric utterance read as an emoji run. On 2026-09-01 the operator
+    counted aloud on the streaming path and "1, 2, 3, 4, 5, 6, 7, 8" was
+    filtered as `no_speech_content` — the ONLY false positive in 837 captured
+    turns. Numbers are ordinary in dictation and are the entire point of the
+    technical and financial speech this path exists for.
+    """
+    verdict = screen_transcription(text, expected_language="en", vad_closed=True)
+    assert not verdict.filtered
+
+
+@pytest.mark.parametrize(
+    "text,duration_s",
+    [
+        ("As we go.", 1.03),
+        ("Is this coming through well?", 1.39),
+        ("Should we do a test?", 1.48),
+    ],
+)
+def test_a_short_turn_is_never_filtered_on_duration(text, duration_s):
+    """A rejected signal, pinned so it is not reintroduced.
+
+    A minimum-duration floor looks compelling on one capture: the two
+    fabrications there ran 0.59s and 1.01s. Measured across the corpus it does
+    not separate the classes. The shortest REAL turn is "As we go." at 1.03s —
+    0.02s longer than the "Nein." fabrication. Any floor that catches "Nein."
+    also eats real speech, and by 1.5s it is taking whole English questions.
+
+    The one fabrication a floor would catch below that line is already caught
+    by `script_mismatch`, so the floor buys no new true positives at any
+    threshold where it is safe. Duration is not the discriminator.
+    """
+    assert duration_s < 1.5
+    verdict = screen_transcription(text, expected_language="en", vad_closed=True)
+    assert not verdict.filtered
+
+
+@pytest.mark.parametrize(
+    "text",
     [
         "El niño está aquí.",       # Spanish ñ
         "Ça va très bien.",          # French ç, è
