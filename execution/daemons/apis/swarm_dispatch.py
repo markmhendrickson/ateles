@@ -1932,11 +1932,14 @@ class SwarmDispatcher:
 
         Candidate = open PR, standing CHANGES_REQUESTED, head commit NEWER than
         that review, revision settled for ``APIS_REVISION_STALE_SECONDS``.
-        Re-dispatch runs the panel against the new head via ``_handle_pr``,
-        which is the same idempotent mechanism the sibling sweeps use: a panel
-        that runs posts a verdict, and a PR whose re-review approves or re-blocks
-        against the CURRENT head stops being a candidate either way (approval
-        clears it; a fresh block is newer than the push).
+        Re-dispatch hands the outstanding review body to Cicada via
+        ``run_skill("cicada", ...)`` — deliberately NOT ``_handle_pr``. #511
+        rules the re-panel out: the PR already has a verdict carrying actionable
+        findings, so what is missing is someone acting on them rather than
+        another opinion, and re-paneling would spend a full panel run per stuck
+        PR across a 23-PR backlog. Cicada's push then re-runs the panel through
+        the normal ``pr_synchronize`` path, so the PR leaves this candidate set
+        either way (a fresh review is newer than the push).
 
         Bounded and escalate-once, mirroring ``resume_stalled_reviews``: a PR
         the panel cannot get through will not start working on the twentieth
@@ -2017,7 +2020,31 @@ class SwarmDispatcher:
                         head_ref=(pr.get("head") or {}).get("ref", ""),
                         base_ref=(pr.get("base") or {}).get("ref", ""),
                     )
-                    await self._handle_pr(trigger)
+                    # Re-dispatch CICADA against the outstanding feedback — NOT
+                    # `_handle_pr`. #511 rules the re-panel out explicitly
+                    # ("do not call _handle_pr or re-panel", and re-paneling CR
+                    # PRs is listed as out of scope): the PR already HAS a
+                    # verdict with actionable findings, so what is missing is
+                    # someone acting on them, not another opinion. Re-paneling
+                    # would also spend a full panel run per stuck PR across a
+                    # 23-PR backlog.
+                    result = await run_skill(
+                        "cicada",
+                        self._cicada_fix_prompt(
+                            trigger,
+                            self._parent_issue_number(pr.get("body") or ""),
+                            attempts + 1,
+                            pr.get("_blocking_review_body") or "",
+                        ),
+                        github_token=_token_for_agent_on_repo("cicada", repository),
+                        include_github_contract=True,
+                        notifier=self.notifier,
+                    )
+                    if not result.ok:
+                        raise RuntimeError(
+                            f"cicada re-dispatch did not complete: "
+                            f"{result.error or 'no reason given'}"
+                        )
                     summary["resumed"] += 1
                 except Exception as exc:
                     summary["failed"] += 1
@@ -2650,8 +2677,37 @@ class SwarmDispatcher:
                     continue
                 pr["_blocking_review_at"] = blocking_at.isoformat()
                 pr["_revision_pushed_at"] = pushed_at.isoformat()
+                # Carry the outstanding feedback itself: the re-dispatch hands
+                # it to Cicada as guidance, so a candidate without it would send
+                # the agent to the PR with nothing to act on.
+                pr["_blocking_review_body"] = self._changes_requested_body(reviews)
                 out.append(pr)
         return out
+
+    @staticmethod
+    def _changes_requested_body(reviews: list[dict]) -> str:
+        """Body of the standing CHANGES_REQUESTED review, for the fix prompt.
+
+        Latest-per-reviewer, matching ``_changes_requested_since``: the review
+        that still blocks is the one whose findings the author must answer.
+        """
+        latest: dict[str, dict] = {}
+        for review in reviews:
+            login = ((review.get("user") or {}).get("login")) or ""
+            state = (review.get("state") or "").upper()
+            if not login or state == "COMMENTED":
+                continue
+            prev = latest.get(login)
+            if prev is None or (review.get("submitted_at") or "") >= (
+                prev.get("submitted_at") or ""
+            ):
+                latest[login] = review
+        bodies = [
+            (r.get("body") or "").strip()
+            for r in latest.values()
+            if (r.get("state") or "").upper() == "CHANGES_REQUESTED"
+        ]
+        return "\n\n---\n\n".join(b for b in bodies if b)
 
     @staticmethod
     def _changes_requested_since(reviews: list[dict]) -> datetime | None:

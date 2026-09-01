@@ -44,6 +44,7 @@ Run: pytest execution/daemons/apis/test_merge_carrier.py -v
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -254,23 +255,53 @@ async def test_draft_prs_are_skipped(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_sweep_redispatches_and_reports(monkeypatch):
-    """Effect: `_handle_pr` actually runs against the revised head."""
+async def test_sweep_redispatches_cicada_and_never_repanels(monkeypatch):
+    """Effect: Cicada is dispatched with the outstanding findings, and the
+    panel is NOT re-run.
+
+    #511 rules the re-panel out explicitly ("do not call `_handle_pr` or
+    re-panel"; re-paneling CR PRs is listed as out of scope). The PR already
+    carries a verdict with actionable findings — what is missing is someone
+    acting on them. Asserted as an effect on `run_skill`'s arguments, not on a
+    non-empty candidate list.
+    """
     d = _dispatcher()
-    handled: list[str] = []
+    calls: list[tuple] = []
+    repaneled: list[str] = []
 
     async def fake_candidates(repo, now, stale):  # noqa: ANN001
-        return [dict(_pr(163), _blocking_review_at="x", _revision_pushed_at="y")]
+        return [
+            dict(
+                _pr(163),
+                _blocking_review_at="x",
+                _revision_pushed_at="y",
+                _blocking_review_body="[BLOCKING] the age parse drops the stamp",
+            )
+        ]
+
+    async def fake_run_skill(skill, prompt, **kw):  # noqa: ANN001
+        calls.append((skill, prompt, kw))
+        return SimpleNamespace(ok=True, error="", stdout="", stderr="")
 
     async def fake_handle(trigger):  # noqa: ANN001
-        handled.append(trigger.delivery_id)
+        repaneled.append(trigger.delivery_id)
 
     monkeypatch.setattr(d, "_prs_with_unactioned_revisions", fake_candidates)
     monkeypatch.setattr(d, "_handle_pr", fake_handle)
+    monkeypatch.setattr(sd, "run_skill", fake_run_skill)
 
     summary = await d.resume_unactioned_revisions(["o/r"])
+
     assert summary["resumed"] == 1
-    assert handled and handled[0].startswith("revision-resume-163-")
+    assert repaneled == [], "the panel must not be re-run (#511)"
+    assert calls, "cicada was never dispatched"
+    skill, prompt, kw = calls[0]
+    assert skill == "cicada"
+    assert "163" in prompt, "the fix prompt must name the PR"
+    assert "the age parse drops the stamp" in prompt, (
+        "the outstanding review findings must reach Cicada as guidance"
+    )
+    assert kw.get("include_github_contract") is True, "Cicada has to push"
 
 
 @pytest.mark.asyncio
@@ -282,11 +313,11 @@ async def test_sweep_escalates_once_after_max_retries(monkeypatch):
     async def fake_candidates(repo, now, stale):  # noqa: ANN001
         return [_pr(163)]
 
-    async def boom(trigger):  # noqa: ANN001
-        raise RuntimeError("panel down")
+    async def boom(skill, prompt, **kw):  # noqa: ANN001
+        raise RuntimeError("cicada down")
 
     monkeypatch.setattr(d, "_prs_with_unactioned_revisions", fake_candidates)
-    monkeypatch.setattr(d, "_handle_pr", boom)
+    monkeypatch.setattr(sd, "run_skill", boom)
 
     for _ in range(2):
         await d.resume_unactioned_revisions(["o/r"])
@@ -316,11 +347,12 @@ async def test_new_push_resets_the_retry_budget(monkeypatch):
     async def fake_candidates(repo, now, stale):  # noqa: ANN001
         return [_pr(163, sha=sha["v"])]
 
-    async def fake_handle(trigger):  # noqa: ANN001
-        handled.append(trigger.delivery_id)
+    async def fake_run_skill(skill, prompt, **kw):  # noqa: ANN001
+        handled.append(skill)
+        return SimpleNamespace(ok=True, error="", stdout="", stderr="")
 
     monkeypatch.setattr(d, "_prs_with_unactioned_revisions", fake_candidates)
-    monkeypatch.setattr(d, "_handle_pr", fake_handle)
+    monkeypatch.setattr(sd, "run_skill", fake_run_skill)
 
     await d.resume_unactioned_revisions(["o/r"])
     await d.resume_unactioned_revisions(["o/r"])  # budget exhausted for sha_one
