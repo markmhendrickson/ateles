@@ -20,6 +20,11 @@ import os
 import subprocess
 from pathlib import Path
 
+try:  # package import (production) and bare import (in-dir pytest) both work
+    from .neotoma_timeout import neotoma_timeout
+except ImportError:  # pragma: no cover
+    from neotoma_timeout import neotoma_timeout  # type: ignore
+
 NODE_BIN = os.environ.get("NODE_BIN", "node")
 NEOTOMA_RC_DIR = os.environ.get("NEOTOMA_RC_DIR", str(Path.home() / "neotoma-rc-src"))
 AAUTH_KEYS_DIR = os.environ.get(
@@ -58,9 +63,14 @@ def signed_request(
     url: str,
     body: "dict | None" = None,
     agent_name: str = "",
-    timeout: int = 20,
+    timeout: float | None = None,
 ) -> "tuple[int, dict]":
     """Perform a per-agent AAuth-signed request. Returns (status, parsed_json).
+
+    ``timeout`` defaults to the shared ``neotoma_timeout()`` when not given. It
+    was a hardcoded 20s, which expired against a production instance answering
+    in 20-32s and silently pushed every caller onto its bearer fallback — where
+    the same too-short budget applied again (ateles#669).
 
     Raises RuntimeError on signing/transport failure or when the agent has no
     key — callers should catch and fall back to their existing path.
@@ -84,7 +94,7 @@ def signed_request(
         env=env,
         capture_output=True,
         text=True,
-        timeout=timeout,
+        timeout=neotoma_timeout() if timeout is None else timeout,
     )
     try:
         out = json.loads(proc.stdout or "{}")
