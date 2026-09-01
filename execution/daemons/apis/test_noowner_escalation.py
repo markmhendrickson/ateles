@@ -171,3 +171,98 @@ def test_escalation_dedup_survives_a_restart(tmp_path, monkeypatch):
     n2 = _Notifier()
     _dispatch("ent_a", snapshot, n2)
     assert n2.sent == [], "re-paged the whole backlog after a restart"
+
+
+# ── unreadable tasks must not silently vanish ────────────────────────────────
+#
+# The hydration guard defers instead of escalating. The reconciler sweep that
+# would otherwise re-examine such a task is DEFAULT-OFF and is off in production
+# today, so deferring without tracking would put the task on the floor.
+
+
+def test_one_transient_read_failure_stays_quiet():
+    n = _Notifier()
+    _dispatch("ent_x", {}, n, hydrated=False)
+    assert n.sent == []
+
+
+def test_persistently_unreadable_task_is_eventually_reported():
+    n = _Notifier()
+    for _ in range(8):
+        _dispatch("ent_stuck", {}, n, hydrated=False)
+    combined = "\n".join(n.sent) + (apis._unroutable.drain_unreadable() or "")
+    assert "ent_stuck" in combined, "a permanently unreadable task was never reported"
+    assert "could NOT be read" in combined
+
+
+def test_unreadable_report_is_not_an_unowned_escalation():
+    """It must not claim the task has no owner — that is not known."""
+    n = _Notifier()
+    for _ in range(8):
+        _dispatch("ent_stuck", {}, n, hydrated=False)
+    combined = "\n".join(n.sent) + (apis._unroutable.drain_unreadable() or "")
+    assert "unroutable — no owner" not in combined
+
+
+def test_recovery_clears_the_unreadable_streak():
+    """A task that becomes readable must not inherit its old failure streak."""
+    n = _Notifier()
+    for _ in range(4):
+        _dispatch("ent_flaky", {}, n, hydrated=False)
+    _dispatch("ent_flaky", {"title": "now readable", "tags": []}, n, hydrated=True)
+    apis._created_seen.clear()
+    for _ in range(3):
+        _dispatch("ent_flaky", {}, n, hydrated=False)
+    assert apis._unroutable.drain_unreadable() is None
+
+
+def test_a_failed_first_event_does_not_claim_the_entity():
+    """The idempotency key must only be claimed by an event we actually handled.
+
+    Found by replaying the real trace: 14 of 37 tasks had their FIRST
+    `task.created` fail hydration. Claiming the entity on that failure made every
+    later, readable redelivery a no-op and dropped all 14 tasks silently.
+    """
+    n = _Notifier()
+    # First delivery fails to hydrate…
+    _dispatch("ent_late", {}, n, hydrated=False)
+    assert n.sent == []
+    # …the redelivery reads fine and MUST still be processed.
+    _dispatch("ent_late", {"title": "readable now", "tags": []}, n, hydrated=True)
+    combined = "\n".join(n.sent) + (apis._unroutable.drain(force=True) or "")
+    assert "ent_late" in combined, "task dropped after a failed first event"
+
+
+def test_handle_event_idempotency_only_claims_hydrated_events(monkeypatch):
+    """Through handle_event itself — where the `_seen_created` guard actually lives."""
+    from lib.daemon_runtime.sse_client import NeotomaEvent
+
+    seen: list = []
+
+    async def _fake_dispatch(entity_id, snapshot, trigger, notifier, **kw):
+        seen.append((entity_id, kw.get("snapshot_hydrated")))
+
+    monkeypatch.setattr(apis, "dispatch_task", _fake_dispatch)
+    # hydrate_snapshot would hit the network; the events below carry their own state.
+    async def _noop_hydrate(ev):
+        return ev
+
+    monkeypatch.setattr(apis, "hydrate_snapshot", _noop_hydrate)
+    n = _Notifier()
+
+    failed = NeotomaEvent(entity_type="task", entity_id="ent_z", action="created")
+    failed.hydrated = False
+    asyncio.run(apis.handle_event(failed, n))
+
+    ok = NeotomaEvent(
+        entity_type="task", entity_id="ent_z", action="created",
+        snapshot={"title": "readable", "tags": []},
+    )
+    ok.hydrated = True
+    asyncio.run(apis.handle_event(ok, n))
+
+    assert ("ent_z", True) in seen, "the readable redelivery was skipped"
+
+    # A second READABLE delivery is a true duplicate and must be collapsed.
+    asyncio.run(apis.handle_event(ok, n))
+    assert sum(1 for e, h in seen if e == "ent_z" and h) == 1

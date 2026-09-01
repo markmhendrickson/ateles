@@ -124,6 +124,15 @@ REASSERT_SECONDS = max(
 # remaining entity IDs are still listed, compactly — never omitted.
 MAX_TITLED = 20
 
+# Consecutive failed hydrations before a task is reported as unreadable. Above 1
+# so a single transient 502 — the common case — stays quiet, but low enough to
+# actually fire: on the measured trace, 7 tasks received only TWO created events
+# and both failed, so a threshold of 5 would have reported them never. Every
+# task must end up either routed, escalated, or named as unreadable.
+UNREADABLE_ATTEMPTS = max(
+    1, int(os.environ.get("APIS_UNREADABLE_ATTEMPTS", "2"))
+)
+
 
 def fingerprint(tags, assigned_to) -> str:
     """Stable fingerprint of the ROUTING INPUTS for a task.
@@ -175,7 +184,20 @@ class UnroutableLedger:
     # When the last aggregated report went out. Drives the "first report of a
     # quiet period goes immediately, the burst behind it is coalesced" rule.
     _last_emit: float = 0.0
+    # entity_id -> {"n": attempts, "reported": ts}
+    _unreadable: dict[str, dict] = field(default_factory=dict)
+    _pending_unreadable: set = field(default_factory=set)
+    _last_unread_emit: float = 0.0
     _loaded: bool = False
+
+    def __post_init__(self) -> None:
+        # Coerce a str path to Path. Without this, `UnroutableLedger(path="…")`
+        # fails every save with `'str' object has no attribute 'parent'` — and
+        # because saves are fail-open, it does so QUIETLY: the ledger looks like
+        # it is persisting and keeps nothing, so every restart re-pages the whole
+        # backlog. Exactly the ateles#636 shape this module exists to avoid.
+        if not isinstance(self.path, Path):
+            self.path = Path(self.path).expanduser()
 
     # ── persistence (fail-open) ────────────────────────────────────────────
 
@@ -202,6 +224,11 @@ class UnroutableLedger:
             self._seen = {
                 k: v for k, v in seen.items() if isinstance(v, dict) and "fp" in v
             }
+        unreadable = raw.get("unreadable")
+        if isinstance(unreadable, dict):
+            self._unreadable = {
+                k: v for k, v in unreadable.items() if isinstance(v, dict)
+            }
         roles = raw.get("roles")
         if isinstance(roles, dict):
             self._roles = {
@@ -219,7 +246,12 @@ class UnroutableLedger:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             payload = json.dumps(
-                {"version": 1, "tasks": self._seen, "roles": self._roles},
+                {
+                    "version": 1,
+                    "tasks": self._seen,
+                    "roles": self._roles,
+                    "unreadable": self._unreadable,
+                },
                 sort_keys=True,
             )
             fd, tmp = tempfile.mkstemp(
@@ -318,6 +350,69 @@ class UnroutableLedger:
         self.save()
         log.info("[unroutable] role %r has no agent_definition — escalating once", role)
         return True
+
+    # ── unreadable tasks (hydration failed) ────────────────────────────────
+    #
+    # A task whose snapshot could not be read is NOT known to be unroutable, so
+    # it must not be paged as "no owner". But it must not vanish either: the
+    # reconciler sweep that would re-examine it is default-OFF and is off in
+    # production today. So track attempts and escalate a task that stays
+    # unreadable — a persistent read failure is a real condition (a wedged
+    # Neotoma, a deleted entity) and the operator needs to see it once.
+
+    def note_unreadable(self, entity_id: str, now: float | None = None) -> bool:
+        """Record a failed hydration. True when this task should be reported.
+
+        Reported only after UNREADABLE_ATTEMPTS failures, so a single transient
+        502 stays quiet while a task that is persistently unreadable surfaces.
+        """
+        if not self._loaded:
+            self.load()
+        now = time.time() if now is None else now
+        rec = self._unreadable.setdefault(entity_id, {"n": 0, "reported": 0.0})
+        rec["n"] = int(rec.get("n") or 0) + 1
+        if rec["n"] < UNREADABLE_ATTEMPTS:
+            return False
+        last = float(rec.get("reported") or 0.0)
+        if last and self.reassert_seconds and (now - last) < self.reassert_seconds:
+            return False
+        rec["reported"] = now
+        self._pending_unreadable.add(entity_id)
+        self.save()
+        log.warning(
+            "[unroutable] task %s unreadable after %s attempts — reporting",
+            entity_id, rec["n"],
+        )
+        return True
+
+    def clear_unreadable(self, entity_id: str) -> None:
+        """Forget a task that became readable again."""
+        if self._unreadable.pop(entity_id, None) is not None:
+            self._pending_unreadable.discard(entity_id)
+            self.save()
+
+    def drain_unreadable(self, now: float | None = None, force: bool = False) -> str | None:
+        """Aggregated report for tasks whose snapshot cannot be read.
+
+        Windowed like `drain`: a Neotoma outage makes many tasks unreadable at
+        once, and one report per task would rebuild the very storm this change
+        removes. The periodic flush and shutdown both pass force=True.
+        """
+        if not self._pending_unreadable:
+            return None
+        now = time.time() if now is None else now
+        if not force and (now - self._last_unread_emit) < self.window_seconds:
+            return None
+        self._last_unread_emit = now
+        ids = sorted(self._pending_unreadable)
+        self._pending_unreadable = set()
+        n = len(ids)
+        return (
+            f"{n} task{'s' if n != 1 else ''} could NOT be read from Neotoma "
+            f"after {UNREADABLE_ATTEMPTS}+ attempts — not routed, not escalated "
+            "as unowned (their snapshots are unknown, not empty):\n"
+            + "\n".join("    " + " ".join(ids[i : i + 4]) for i in range(0, n, 4))
+        )
 
     # ── aggregation ────────────────────────────────────────────────────────
 

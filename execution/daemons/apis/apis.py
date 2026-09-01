@@ -417,6 +417,12 @@ async def dispatch_task(
     title = snapshot.get("title", "(untitled)")
     current_status = snapshot.get("status")
 
+    # The snapshot read fine, so any prior unreadable streak for this task is
+    # over; forget it so a later blip starts counting from zero rather than
+    # inheriting an old streak and reporting prematurely.
+    if snapshot_hydrated:
+        _unroutable.clear_unreadable(entity_id)
+
     # Prefer tags already in snapshot (set by neotoma-agent hygiene)
     existing_tags: list[str] = snapshot.get("tags", []) or []
     if isinstance(existing_tags, str):
@@ -450,11 +456,23 @@ async def dispatch_task(
         # `tags=[]` at 16:25:25 right after a 502. Defer instead; the reconciler
         # sweep re-examines tasks left `pending`, so deferring loses nothing.
         if snapshot_hydrated is False:
+            # Deferring must not mean dropping. The reconciler sweep that would
+            # otherwise re-examine a `pending` task is DEFAULT-OFF
+            # (APIS_RECONCILE_ENABLED, and it is off in production today), so
+            # "leave it pending" would put the task on the floor — the silence
+            # failure this whole change exists to avoid. Record it so the count
+            # is reported, and page once if a task never becomes readable.
             log.warning(
                 f"[{DAEMON_NAME}] task {entity_id!r} could not be hydrated "
                 f"(trigger={trigger}) — NOT escalating 'no owner' on an unread "
-                "snapshot; leaving it pending for the reconciler sweep"
+                "snapshot; recording it as unread and retrying"
             )
+            if _unroutable.note_unreadable(entity_id):
+                report = _unroutable.drain_unreadable()
+                if report:
+                    notifier.send(
+                        report, priority=Priority.WARN, handler=DAEMON_NAME
+                    )
             return
 
         # No inferable owner. Previously this was a silent log-and-skip — the task
@@ -825,7 +843,12 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
         # itself is upstream, but re-running the whole create path per copy is
         # not: it re-notified, re-dispatched and re-escalated each time. Collapse
         # duplicates here so the create path runs once per entity per process.
-        if _seen_created(entity_id):
+        # Only a SUCCESSFULLY hydrated event may claim the entity. An event whose
+        # snapshot could not be read was not really handled — claiming it would
+        # make the later, readable redelivery a no-op and drop the task entirely.
+        # Measured on the real trace: 14 of 37 tasks had their FIRST created
+        # event fail hydration, so claiming on failure lost all 14.
+        if event.hydrated and _seen_created(entity_id):
             log.debug(
                 f"[{DAEMON_NAME}] duplicate task.created for {entity_id} — "
                 "already handled this process; skipping"
@@ -1133,6 +1156,11 @@ async def main() -> None:
                 if report:
                     notifier.send(
                         report, priority=Priority.BLOCKER, handler=DAEMON_NAME
+                    )
+                unread = _unroutable.drain_unreadable()
+                if unread:
+                    notifier.send(
+                        unread, priority=Priority.WARN, handler=DAEMON_NAME
                     )
             except Exception as exc:  # noqa: BLE001 — never kill the daemon
                 log.warning(f"[{DAEMON_NAME}] unroutable flush failed: {exc}")

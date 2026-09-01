@@ -213,3 +213,17 @@ def test_undefined_role_dedup_survives_restart(tmp_path):
     path = tmp_path / "ledger.json"
     assert UnroutableLedger(path=path).note_undefined_role("pavo", now=1000.0) is True
     assert UnroutableLedger(path=path).note_undefined_role("pavo", now=1002.0) is False
+
+
+def test_string_path_still_persists(tmp_path):
+    """A str path must not silently disable persistence.
+
+    Found by replaying the real event trace: `path=` given a str made every save
+    fail with 'str' object has no attribute 'parent', fail-open swallowed it, and
+    the ledger kept nothing while appearing to work.
+    """
+    path = tmp_path / "ledger.json"
+    led = UnroutableLedger(path=str(path))
+    assert led.note("ent_a", "t", [], None, now=1000.0) is True
+    assert path.exists(), "a str path silently disabled persistence"
+    assert UnroutableLedger(path=str(path)).note("ent_a", "t", [], None, now=1002.0) is False
