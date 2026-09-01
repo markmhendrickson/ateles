@@ -57,6 +57,17 @@ and there is no send-path floor to place either: the client streams fixed-size
 PCM payloads gated on RMS, so spans are the server's OUTPUT, not the client's
 input — a turn's duration does not exist until after it has been transcribed.
 
+A caution for whoever measures next. The capture corpus is NOT uniformly
+current: rows written before a since-fixed bug can silently argue for or
+against a signal on the strength of data that can no longer occur. Concretely,
+the three zero-duration rows in the 1302 and 1304 captures ("Thank God.",
+"An bhfuil sé sin maith anois?", "orda finish form diurtama?") are artifacts of
+the pre-#631 boundary defect, where both ends of a span fell back to the same
+value — the exact 91.78-91.78 shape that commit fixed. They read as damning
+evidence for a duration floor and are nothing of the kind. Before a duration or
+boundary signal is judged on corpus rows, check which captures predate the fix
+and exclude them.
+
 **Nothing is ever silently dropped.** A caught chunk keeps its text and gains a
 ``filtered`` reason, so a false positive stays recoverable by eye and the
 filter's own accuracy stays measurable against the JSONL. Silently discarding a
