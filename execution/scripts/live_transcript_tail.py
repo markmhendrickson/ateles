@@ -318,6 +318,55 @@ def apply_transcription_result(
     return consecutive_failures + 1
 
 
+#: The only secret transcribe_audio.py needs. The materialized dotenv holds
+#: many unrelated credentials (GitHub PATs, Telegram and Wise tokens, the
+#: Neotoma bearer token and mnemonic); none of them belong in the environment
+#: of a transcription subprocess.
+SUBPROCESS_SECRET_KEYS = ("OPENAI_API_KEY",)
+
+def materialized_env_path() -> Path:
+    """Where SOPS materializes the operator's dotenv.
+
+    Resolved on each call, not at import, so ``Path.home`` stays patchable in
+    tests and a changed HOME is honoured at runtime.
+    """
+    return Path.home() / ".config" / "neotoma" / ".env"
+
+
+def build_subprocess_env(
+    materialized: Path | None = None,
+    base_env: dict | None = None,
+) -> dict:
+    """Build the environment handed to the transcription subprocess.
+
+    Inherits the current environment, then fills in ONLY the keys in
+    ``SUBPROCESS_SECRET_KEYS`` from the SOPS-materialized dotenv. That file
+    also holds unrelated secrets, so we never load it wholesale — mirroring
+    the same restraint the task dashboard's ``neotomaProxy.ts`` documents.
+
+    An already-set key in the real environment wins, so an operator can
+    override without editing the dotenv.
+    """
+    env = {**(os.environ if base_env is None else base_env)}
+    path = materialized_env_path() if materialized is None else materialized
+    if not path.exists():
+        return env
+
+    wanted = set(SUBPROCESS_SECRET_KEYS)
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        if k not in wanted:
+            continue
+        env.setdefault(k, v.strip().strip('"').strip("'"))
+    return env
+
+
 def transcribe_slice(wav_path: Path, env: dict) -> tuple[bool, str]:
     """Transcribe one slice.
 
@@ -383,16 +432,7 @@ def main(argv: list[str]) -> int:
         log(f"transcribe_audio.py not found at {TRANSCRIBE}")
         return 1
 
-    # transcribe_audio.py needs OPENAI_API_KEY; SOPS materializes it here.
-    env = {**os.environ}
-    materialized = Path.home() / ".config" / "neotoma" / ".env"
-    if materialized.exists():
-        for line in materialized.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            env.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    env = build_subprocess_env()
     if not env.get("OPENAI_API_KEY"):
         log("OPENAI_API_KEY not set (checked env and ~/.config/neotoma/.env)")
         return 1
