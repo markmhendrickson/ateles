@@ -51,6 +51,51 @@ A `daemon_configuration` entity per daemon, holding a `config` map and a
 deploy from memory. The pattern is proven; it simply was never applied to daemon
 config or to the operator's own instance.
 
+### Schema (Phase 1 — map-based, one entity per daemon)
+
+This PR deliberately uses a **map-based** entity (one row per daemon, `config`
+object holding all keys) rather than the per-key entity shape sketched in the
+issue's Engineering section (`daemon_label` + `config_key` + `value` per row).
+That finer granularity remains valid for Phase 2 migration (#680); the resolver
+in this PR reads the map shape. Schema definition:
+[`docs/schemas/daemon_configuration.json`](schemas/daemon_configuration.json).
+
+| Field | Required | Purpose |
+|---|---|---|
+| `daemon_name` | yes | Short daemon id (`apis`, `neotoma-agent`) — lookup key for `config_resolver` |
+| `config` | yes | Map of logical keys → CONFIG values (never secrets) |
+| `set_by` | no | Author identity for provenance |
+| `notes` | no | Drift/history notes |
+
+Register on Neotoma (once per instance):
+
+```bash
+neotoma schemas register daemon_configuration \
+  --fields '{"schema_version":{"type":"string","required":true},"daemon_name":{"type":"string","required":true},"config":{"type":"object","required":true},"set_by":{"type":"string","required":false},"notes":{"type":"string","required":false}}' \
+  --schema-version 1.0.0 --activate
+```
+
+Create or update a daemon's config via `store` (example — Apis SSE subscription):
+
+```python
+store(entities=[{
+  "entity_type": "daemon_configuration",
+  "daemon_name": "apis",
+  "schema_version": "1.0.0",
+  "set_by": "operator",
+  "config": {
+    "sse_subscription_id": "<uuid-from-subscribe-tool>"
+  },
+  "notes": "Migrated from installed plist 2026-09-01"
+}], idempotency_key="daemon_configuration:apis:v1")
+```
+
+Implementation: [`lib/daemon_runtime/config_resolver.py`](../lib/daemon_runtime/config_resolver.py)
+(fetches via `POST /entities/query`, exact `daemon_name` match). Loud failure:
+[`MissingSubscriptionError`](../lib/daemon_runtime/sse_client.py) in
+[`sse_client.py`](../lib/daemon_runtime/sse_client.py). Parity check:
+[`execution/scripts/check_daemon_config_parity.py`](../execution/scripts/check_daemon_config_parity.py).
+
 Resolution order in `lib/daemon_runtime/config_resolver.py`:
 
 ```

@@ -132,13 +132,13 @@ def test_slow_neotoma_does_not_block_startup(monkeypatch):
     def _slow(*args, **kwargs):
         raise TimeoutError("read timed out")
 
-    monkeypatch.setattr(cr.httpx, "get", _slow)
+    monkeypatch.setattr(cr.httpx, "post", _slow)
     _neotoma_returns(monkeypatch, {"k": "v"})
     resolve("apis", [ConfigSpec(key="k")])  # seed cache
 
     monkeypatch.undo()
     monkeypatch.setattr(cr, "CONFIG_CACHE_DIR", cr.CONFIG_CACHE_DIR)
-    monkeypatch.setattr(cr.httpx, "get", _slow)
+    monkeypatch.setattr(cr.httpx, "post", _slow)
 
     started = time.monotonic()
     got = resolve("apis", [ConfigSpec(key="k", required=False)])
@@ -223,18 +223,45 @@ def test_exact_daemon_name_match_required(monkeypatch):
                     {
                         "entity_id": "ent_other",
                         "snapshot": {
-                            "daemon_name": "apis-dns-watchdog",
-                            "config": {"sse_subscription_id": "WRONG"},
+                            "snapshot": {
+                                "daemon_name": "apis-dns-watchdog",
+                                "config": {"sse_subscription_id": "WRONG"},
+                            }
                         },
                     }
                 ]
             }
 
-    monkeypatch.setattr(cr.httpx, "get", lambda *a, **k: _Resp())
+    monkeypatch.setattr(cr.httpx, "post", lambda *a, **k: _Resp())
     values, entity_id = cr._fetch_from_neotoma("apis")
 
     assert values == {}
     assert entity_id is None
+
+
+def test_fetch_uses_entities_query_post(monkeypatch):
+    """Neotoma list route is POST /entities/query, not GET /entities."""
+    seen: dict = {}
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"entities": []}
+
+    def _post(url, **kwargs):
+        seen["url"] = url
+        seen["json"] = kwargs.get("json")
+        return _Resp()
+
+    monkeypatch.setattr(cr.httpx, "post", _post)
+    cr._fetch_from_neotoma("apis")
+
+    assert seen["url"].endswith("/entities/query")
+    assert seen["json"]["entity_type"] == "daemon_configuration"
 
 
 # ── the guard must survive the real entrypoint ──────────────────────────────

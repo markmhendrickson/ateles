@@ -64,6 +64,8 @@ from typing import Any
 
 import httpx
 
+from .agent_loader import _auth_headers
+
 log = logging.getLogger("daemon_runtime.config_resolver")
 
 NEOTOMA_BASE_URL = os.environ.get(
@@ -195,26 +197,36 @@ def _write_cache(daemon: str, values: dict, entity_id: str | None) -> None:
         log.warning(f"[{daemon}] could not write config cache: {exc}")
 
 
+def _unwrap_query_snapshot(ent: dict) -> dict:
+    """Unwrap POST /entities/query snapshot to the flat field dict.
+
+    GET /entities does not exist on local Neotoma (404); /entities/query is the
+    canonical list route (same pattern as agent_loader._load_by_name).
+    """
+    outer = ent.get("snapshot") or {}
+    snap = outer.get("snapshot", outer) if isinstance(outer, dict) else {}
+    return snap if isinstance(snap, dict) else {}
+
+
 def _fetch_from_neotoma(daemon: str) -> tuple[dict, str | None]:
     """Fetch the `daemon_configuration` entity for this daemon.
 
     Returns (config_values, entity_id). Time-boxed; returns ({}, None) on any
     failure so the caller can fall through to cache. Never raises.
     """
-    headers = {}
-    if NEOTOMA_BEARER_TOKEN:
-        headers["Authorization"] = f"Bearer {NEOTOMA_BEARER_TOKEN}"
-
-    url = f"{NEOTOMA_BASE_URL}/entities"
-    params = {
+    url = f"{NEOTOMA_BASE_URL}/entities/query"
+    body = {
         "entity_type": "daemon_configuration",
         "search": daemon,
-        "include_snapshots": "true",
-        "limit": "10",
+        "limit": 10,
+        "include_snapshots": True,
     }
     try:
-        resp = httpx.get(
-            url, headers=headers, params=params, timeout=CONFIG_FETCH_TIMEOUT_S
+        resp = httpx.post(
+            url,
+            json=body,
+            headers=_auth_headers(),
+            timeout=CONFIG_FETCH_TIMEOUT_S,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -227,7 +239,7 @@ def _fetch_from_neotoma(daemon: str) -> tuple[dict, str | None]:
 
     entities = data.get("entities") or data.get("results") or []
     for ent in entities:
-        snap = ent.get("snapshot") or ent
+        snap = _unwrap_query_snapshot(ent)
         # `search` is fuzzy; require an exact daemon-name match so a partial hit
         # can never hand one daemon another daemon's configuration. That exact
         # class of mistake pointed a deploy at a client's app.
@@ -241,7 +253,7 @@ def _fetch_from_neotoma(daemon: str) -> tuple[dict, str | None]:
 
     log.warning(
         f"[{daemon}] no daemon_configuration entity with daemon_name=={daemon!r} "
-        f"(searched {len(entities)} candidate(s))"
+        f"(searched {len(entities)} candidate(s) via POST /entities/query)"
     )
     return {}, None
 

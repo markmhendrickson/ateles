@@ -168,6 +168,8 @@ def resolve_subscription_id(handler_name: str) -> str | None:
             )
         return value or None
     except Exception as exc:  # noqa: BLE001 — resolution must not crash import
+        # Degrades to None so _connect_and_stream raises MissingSubscriptionError
+        # with the full remedy; infrastructure faults (network, schema) only.
         log.warning(
             f"[{handler_name}] config resolution for sse_subscription_id "
             f"failed: {exc}"
