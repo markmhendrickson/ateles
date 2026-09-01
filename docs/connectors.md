@@ -1,0 +1,266 @@
+# Connectors — external system state in Neotoma
+
+## The defect this closes
+
+Facts that live only in a live CLI query are facts the swarm cannot act on.
+Every item below cost real time on 2026-08-31, and every one was discoverable
+only by a human thinking to run a command:
+
+| What was wrong | How long it hid | How it surfaced |
+|---|---|---|
+| Production served an application version ~5 minor releases behind what was published | ~1 month | Incidentally, 8h into an unrelated investigation |
+| A committed config file declares less CPU/RAM than the running machine — deploying it would silently shrink production | unknown | A drift script written that day, which has nowhere to display its output |
+| Daemons run from a checkout that lags `main`, so merged fixes never reach them | 3 recurrences | `checkout_drift.py` logs it; nobody reads the log |
+| The instance returned `200` on `/health` all day while unable to serve | 1 day | A `/ready` probe added that day |
+| `sync_issues` has no daemon and no scheduled caller — written, never invoked | since it was written | All 54 open PRs correctly show "not in Neotoma" |
+
+The last row is this codebase's signature failure, and it has a lineage: the
+worker pool built 2026-07-29 and never selected; `agent_auto_invocation.py`,
+fully tested and wired into zero lines of config; the digest queue with zero
+non-test callers. **A connector that ships without a live trigger joins that
+list**, which is why the trigger — not the collector — is the acceptance
+criterion for stage 1.
+
+## The one idea
+
+Fly and GitHub are two instances of a single pattern, and the pattern is worth
+building once:
+
+> An external system is the source of truth. Neotoma holds a **timestamped
+> observation** of it, which can go stale.
+
+That framing generalizes — the Theodore project has wanted connectors and none
+were built, and it is a third implementation of the same contract rather than a
+new thing. If Theodore cannot be implemented against this contract without
+rework, the abstraction is two pipelines sharing a name and should be rejected.
+
+## Why staleness is the whole design
+
+Deployment state is **not** like PRs and issues, where Neotoma is canonical and
+GitHub is overlaid. Here the external API is the truth, and a Neotoma record is
+a cache with no invalidation.
+
+A stale record claiming the current version is `0.22.1` while the machine
+actually serves `0.17.0` is **worse than no record at all**. It is the identical
+failure to a health check returning `200` while nothing works — which is the
+defect this entire effort exists to prevent. Building the fix in the shape of
+the bug would be a poor trade.
+
+Three rules follow, and they are non-negotiable:
+
+1. **Every observation carries `observed_at`.** No exceptions. A value without a
+   timestamp is unusable, because nothing downstream can judge it.
+2. **Consumers render age, never bare values.** "0.17.0, seen 4m ago" is a fact.
+   A bare "0.17.0" is an assertion the data cannot support.
+3. **A stale observation is visibly stale, never silently wrong.** Past the
+   threshold the UI shows the age and the staleness, and a watchdog declines to
+   alarm on it — an alarm computed from an unknown present is noise.
+
+### The threshold, and why this number
+
+Staleness is **per-connector**, declared by the connector itself, because the
+right number is a property of how fast the source changes and how often we poll:
+
+```
+stale_after = max(3 × poll_interval, 15 minutes)
+```
+
+- **3 × poll interval** — one missed run is routine (a laptop sleeps, a fetch
+  times out). Three consecutive misses is a broken connector. Alarming on one
+  miss trains operators to ignore the alarm, which is how the checkout-drift
+  log became unread.
+- **15-minute floor** — stops a fast-polling connector from declaring itself
+  stale during a brief network blip.
+
+For the Fly connector at a 15-minute poll: `stale_after = 45 minutes`.
+
+Three states, deliberately not two:
+
+| State | Meaning | Consumer behavior |
+|---|---|---|
+| `fresh` | `age <= stale_after` | Use the value; alarms may fire |
+| `stale` | `age > stale_after` | Show value **and** age, marked stale; **alarms suppressed** |
+| `unknown` | never observed, or the connector has never succeeded | Show "never observed"; never infer |
+
+`unknown` is separate from `stale` for the same reason `checkout_drift` treats a
+failed fetch as `unknown` rather than drift: *we could not tell* and *we can
+tell, and it is bad* are different facts, and collapsing them produces either
+false alarms or ignored ones.
+
+## The connector contract
+
+A connector is a small object that knows how to observe one external system.
+Everything else — scheduling, status recording, staleness, the UI — is shared.
+
+```python
+@dataclass(frozen=True)
+class ConnectorResult:
+    """One connector run's outcome. Never raised — always returned."""
+    ok: bool
+    records_written: int = 0
+    error: str = ""              # one line, no secrets, no tokens
+    detail: dict | None = None   # small, renderable summary
+
+
+class Connector(Protocol):
+    name: str                    # "fly", "github", "theodore"
+    poll_interval_seconds: int   # declares its own cadence
+
+    @property
+    def stale_after_seconds(self) -> int:
+        return max(3 * self.poll_interval_seconds, 900)
+
+    def observe(self) -> ConnectorResult:
+        """Read the external system and write observations to Neotoma.
+
+        MUST NOT raise. MUST be idempotent — see below.
+        """
+```
+
+`observe()` never raising is load-bearing: the runner drives every connector in
+one loop, and one source's outage must not stop the others.
+
+### Idempotency is a design property, not a hope
+
+The previous GitHub sync produced **520+ duplicate issues and 35 orphaned
+entities**. Root cause: `ops.correct()` passed `{corrections: <map>}` where the
+server expects `{entity_id, entity_type, field, value, idempotency_key}`. Zod
+rejected it *silently*, the code read the non-error as success, and it
+re-corrected in a loop. Its push leg was disabled and never re-enabled.
+
+Three rules, each aimed at one link in that chain:
+
+1. **Every write carries a deterministic `idempotency_key`** derived from stable
+   identity, never from a clock or a counter:
+   `connector-{name}-{external_id}-{content_hash}`. A re-run of an unchanged
+   record is then a no-op at the server rather than a duplicate.
+2. **A write is verified by read-back, never by a success code.** A `body` field
+   on a `task` was accepted with `success: true` and **silently dropped** on this
+   instance today. `success: true` means "the request parsed", not "the data
+   persisted". This is also the exact failure mode above.
+3. **`correct()` for existing fields; `store()` only for new entities.** The
+   correct payload shape is `{entity_id, entity_type, field, value,
+   idempotency_key}` — as used in `lib/daemon_runtime/gating.py`, which is the
+   reference implementation. Writing a `last_write` field with `store()`
+   clobbers concurrent updates (neotoma#2033).
+
+**A bounded write budget per run** backs this up. If a connector tries to write
+more than `ATELES_CONNECTOR_MAX_WRITES` (default 200) in one run it aborts and
+reports the overrun instead of continuing. The runaway wrote 520+ records; a
+budget would have stopped it at 200 with a loud error. Cheap insurance against
+the failure that already happened once.
+
+## Status model — what the app reads
+
+One `connector_status` entity per connector, corrected in place each run:
+
+| Field | Why |
+|---|---|
+| `connector_name` | identity |
+| `last_attempt_at` | when it last ran at all |
+| `last_success_at` | when it last **worked** |
+| `status` | `ok` / `failing` / `never_run` |
+| `last_error` | one line, no secrets |
+| `records_written` | last successful run's count |
+| `poll_interval_seconds`, `stale_after_seconds` | lets any consumer compute staleness without hardcoding |
+
+**`last_attempt_at` and `last_success_at` must be distinct fields.** A connector
+attempting and failing every minute is indistinguishable from a healthy one if
+only attempts are recorded — and that is exactly the class of silent failure
+this whole effort exists to end.
+
+## Observation model — history, not just current state
+
+The Fly release history is the single most informative artifact from the
+investigation, and current-state-only cannot express what it shows:
+
+```
+v16      3h49m ago      deployment-01M1EBTEB…   ← distinct image
+v15      Aug 27 14:46   deployment-01M11TXSC…   ← distinct image
+v14      Aug 9  08:39   deployment-01KZJTRBK…
+v11/v10  Aug 6          deployment-01KZBG32X…   ← same image, two releases
+v3–v8    Aug 2–3        deployment-01KZ1ZMHA…   ← one image, six releases
+```
+
+Only the history reveals that v15 and v16 each built a **fresh image** while the
+reported application version did not move. That contradiction is the crux of the
+open question — is production genuinely a month old, or merely mislabelled? — and
+a single mutable "current deployment" row cannot state it.
+
+So: **one immutable `deployment_observation` entity per release**, never
+overwritten. Fields: `version`, `image_ref`, `deployed_at`, `status`,
+`triggered_by`, `observed_at`, plus the connector that saw it.
+
+Config-only redeploys sharing an image are **normal** here, so "a release exists"
+carries little information about what code is running. The history must make
+image reuse visible — the UI groups consecutive releases sharing an `image_ref`
+— rather than implying each release shipped something.
+
+## Not committed to a public repo
+
+Both `ateles` and `neotoma` are public. A review on ateles PR #655 caught a Fly
+app name as an env-var default on 2026-08-31; that is a standing constraint, not
+a one-off.
+
+No app names, hostnames, machine IDs, or domains in code or config. Instance
+identity resolves at runtime from env or from a `deployment_configuration`
+entity. Connectors that find no binding **skip and report**, never guess.
+
+Observation records store an opaque `instance_ref` that resolves through
+Neotoma, not a literal hostname.
+
+## Staging
+
+Deliberately staged. A deployments view that renders stale data as current would
+be worse than the status quo, so each stage lands complete or not at all.
+
+| Stage | Contents | Acceptance |
+|---|---|---|
+| **1. Contract + status + trigger** | `Connector` protocol, staleness, `connector_status`, the runner, **and its launchd trigger** | A scheduled thing runs and writes real status, verified by read-back |
+| **2. Fly connector** | releases, machine config, health/ready, config drift, checkout freshness | Real observations in Neotoma; history shows image reuse |
+| **3. App view** | `/api/connectors`, `#/connectors`, deployment history | Reads **Neotoma**; renders age; stale is visibly stale |
+| **4. Alarming** | version-behind, config-would-shrink, connector-failing | Alarms fire from durable state, suppressed when stale |
+| **5. GitHub connector** | issues + PRs, replacing client-side polling | **Held** until the Neotoma performance fix lands |
+
+### Alarming needs no new plumbing
+
+Anthus already subscribes over SSE to `daemon_report` and surfaces `error` /
+`critical` to the operator. A connector that emits a `daemon_report` at
+`severity: "error"` is therefore paged for free, and stage 4 is mostly deciding
+*what deserves an alarm* rather than building a delivery path.
+
+The staleness rule binds hardest here: **an alarm computed from a stale
+observation must not fire.** "Production is 5 releases behind" derived from a
+day-old reading is exactly the false-authority failure this design exists to
+prevent. Suppress, and alarm on the connector's own failure instead — a
+connector that stopped working is the more actionable fact.
+
+**Fly is first** because its volume is trivially small (16 releases) versus
+GitHub's 661 issues, and because GitHub's sync would run against a currently
+502-ing instance — which is how the last runaway happened. Building the general
+contract against the small source first is what makes the large one safe.
+
+Stage 1's acceptance criterion is the trigger, not the code. That is the
+difference between this and `sync_issues`.
+
+## Schema registration — deferred deliberately
+
+The `connector_status` and `deployment_observation` entity types are **not yet
+registered**. On 2026-09-01 the hosted instance returned `502`, then failed at
+the TLS layer entirely, and the MCP surface reported "Server unavailable"
+throughout.
+
+Registering a schema is a write, and this design's own rule is that a write is
+verified by read-back rather than by a success code. Against an instance that
+cannot be read back, registration would produce exactly the unverifiable claim
+the rule exists to forbid — and building a sync against a 502-ing instance is
+how the previous runaway happened.
+
+So the types are specified here and registered when the instance is healthy.
+Both are inferred on first store if absent, but explicit registration is
+preferred: it is where `reducer_config` sets per-field merge strategy, and
+`connector_status` wants `last_write` on the mutable fields with `observed_at`
+as tie-breaker.
+
+`deployment_observation` records are **immutable** — one per release, never
+corrected — so they need no reducer policy beyond the default.
