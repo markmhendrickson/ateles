@@ -79,7 +79,7 @@ def test_failed_fetch_leaves_day_unclaimed(monkeypatch, tmp_path) -> None:
     state = tmp_path / ".monedula_last_run"
     monkeypatch.setattr(monedula, "STATE_FILE", state)
     monkeypatch.setattr(monedula, "fetch_yesterday_events", lambda: None)
-    monkeypatch.setattr(handlers, "load_handlers", lambda: [])
+    monkeypatch.setattr(handlers, "load_handlers", lambda strandings=None: [])
 
     monedula.main()
 
@@ -91,7 +91,7 @@ def test_successful_fetch_claims_the_day(monkeypatch, tmp_path) -> None:
     state = tmp_path / ".monedula_last_run"
     monkeypatch.setattr(monedula, "STATE_FILE", state)
     monkeypatch.setattr(monedula, "fetch_yesterday_events", lambda: [])
-    monkeypatch.setattr(handlers, "load_handlers", lambda: [])
+    monkeypatch.setattr(handlers, "load_handlers", lambda strandings=None: [])
     monkeypatch.setattr(monedula, "fetch_due_payment_tasks", lambda *a, **k: [])
 
     monedula.main()
