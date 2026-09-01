@@ -158,6 +158,26 @@ def test_warn_raises_when_enforced(tmp_path: Path, monkeypatch) -> None:
         warn_on_plist_drift(LABEL, repo, live_plist=live)
 
 
+def test_warn_raises_when_enforce_kwarg(tmp_path: Path, monkeypatch) -> None:
+    """``enforce=True`` must work even when the env var is unset (checkout_drift parity)."""
+    monkeypatch.delenv(ENFORCE_ENV, raising=False)
+    repo = _write_plist(tmp_path / "repo.plist", {"ATELES_SWARM_AUTO_BUILD": "1"})
+    live = _write_plist(tmp_path / "live.plist", {"ATELES_SWARM_AUTO_BUILD": "0"})
+
+    with pytest.raises(PlistConfigDriftError):
+        warn_on_plist_drift(LABEL, repo, live_plist=live, enforce=True)
+
+
+def test_clean_config_never_raises_even_when_enforced(tmp_path: Path) -> None:
+    env = {"ATELES_SWARM_AUTO_BUILD": "1"}
+    repo = _write_plist(tmp_path / "repo.plist", env)
+    live = _write_plist(tmp_path / "live.plist", env)
+
+    report = warn_on_plist_drift(LABEL, repo, live_plist=live, enforce=True)
+
+    assert report.state == "clean"
+
+
 def test_enforcement_does_not_fire_on_unknown(tmp_path: Path, monkeypatch) -> None:
     """Even enforcing daemons must boot when there is nothing to compare."""
     monkeypatch.setenv(ENFORCE_ENV, "1")

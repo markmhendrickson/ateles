@@ -40,7 +40,7 @@
          equals the code default. An absent key is indistinguishable from an
          unmade decision: `ATELES_SWARM_AUTO_BUILD` was missing here entirely
          while the running daemon carried it, so the file could not record what
-         the swarm was actually authorised to do. `check_plist_drift.py`
+         the swarm was actually authorised to do. `plist_drift.py`
          compares this file against the live launchd environment at startup. -->
     <key>EnvironmentVariables</key>
     <dict>

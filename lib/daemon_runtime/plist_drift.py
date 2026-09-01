@@ -190,11 +190,13 @@ def warn_on_plist_drift(
     *,
     live_plist: Path | None = None,
     ignored_keys: frozenset[str] = DEFAULT_IGNORED_KEYS,
+    enforce: bool | None = None,
 ) -> PlistDriftReport:
-    """Log config drift at startup. Advisory unless the enforce env var is set.
+    """Log config drift at startup. Advisory unless enforcement is opted into.
 
     Returns the report so a caller can make its own decision; raises
-    ``PlistConfigDriftError`` only under ``ATELES_ENFORCE_PLIST_CONFIG=1``.
+    ``PlistConfigDriftError`` when ``enforce=True`` or when
+    ``ATELES_ENFORCE_PLIST_CONFIG=1``.
     """
     report = check_plist_drift(
         label, repo_plist, live_plist=live_plist, ignored_keys=ignored_keys
@@ -213,6 +215,9 @@ def warn_on_plist_drift(
         repo_plist,
         label,
     )
-    if os.environ.get(ENFORCE_ENV, "0") == "1":
+    should_enforce = (
+        enforce if enforce is not None else os.environ.get(ENFORCE_ENV, "0") == "1"
+    )
+    if should_enforce:
         raise PlistConfigDriftError(report.summary())
     return report
