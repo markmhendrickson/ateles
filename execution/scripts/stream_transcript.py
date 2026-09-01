@@ -145,6 +145,20 @@ GATE_WINDOW_SECONDS = float(
 # at the instant RMS dips would clip word endings and rob the server VAD of the
 # silence it needs to CLOSE a turn — which would reintroduce the mid-sentence
 # truncation this path exists to fix.
+# Server VAD closes a turn on silence, so a single turn is an utterance, not a
+# monologue. Measured on real sessions turns run 0.6-3.5s; 30s is far above any
+# genuine one and was exceeded only by the interleaving bug (18.91s measured,
+# 31.36s in the operator's session).
+# Server VAD may open the next turn slightly before reporting the previous
+# stop. Measured at 0.23s on a real capture with both spans otherwise correct.
+VAD_OVERLAP_TOLERANCE_SECONDS = float(
+    os.environ.get("STREAM_TRANSCRIPT_OVERLAP_TOLERANCE_S", "0.5")
+)
+
+MAX_PLAUSIBLE_TURN_SECONDS = float(
+    os.environ.get("STREAM_TRANSCRIPT_MAX_TURN_S", "30")
+)
+
 GATE_HANGOVER_SECONDS = float(
     os.environ.get("STREAM_TRANSCRIPT_GATE_HANGOVER_S", "2.0")
 )
@@ -526,28 +540,42 @@ class HealthMonitor:
 
 
 class TurnBoundaries:
-    """Tracks VAD speech boundaries so a turn indexes the recording.
+    """Queues VAD speech spans so each turn keeps the boundaries that are ITS OWN.
 
     The Realtime API reports ``input_audio_buffer.speech_started`` /
     ``speech_stopped`` with ``audio_start_ms`` / ``audio_end_ms`` — offsets on
-    the AUDIO clock, i.e. positions in the very byte stream being tee'd to the
-    durable recording. Those are the only honest boundaries for a turn.
+    the AUDIO clock, i.e. positions in the very byte stream tee'd to the durable
+    recording. Those are the only honest boundaries for a turn.
 
-    Deriving them from wall clock instead is what fragmented the operator's
-    session on 2026-09-01: `start_s = now - 5.0` labelled every turn exactly
-    5.0s long, and because turns arrive faster than they are spoken (the socket
-    answers 1-3s after speech ends) consecutive turns overlapped by 2-3s. A
-    sentence then reads as several overlapping slivers, so the operator's
-    meaning arrives in pieces — the very defect the streaming path exists to
-    fix, in a new form.
+    The events INTERLEAVE across turns, and that is the subtlety this class
+    exists for. Captured from a real session:
 
-    Kept as a separate object rather than closure state so the boundary logic is
-    testable without a live socket.
+        52.53  speech_started  audio_start_ms=27540     <- turn 1 opens
+        55.81  speech_stopped  audio_end_ms=30784       <- turn 1 closes
+        55.92  speech_started  audio_start_ms=30548     <- TURN 2 OPENS
+        56.46  completed       "Have we finished..."    <- turn 1's TEXT
+        57.91  speech_stopped  audio_end_ms=32608       <- turn 2 closes
+        58.55  completed       "Ort a fhágfaidh..."     <- turn 2's text
+
+    Transcription is asynchronous, so the next utterance's ``speech_started``
+    routinely arrives BEFORE the previous utterance's ``completed``. Holding the
+    boundaries in a single mutable slot therefore hands turn 1 the boundaries of
+    turn 2, and an earlier revision did exactly that, producing two distinct
+    corruptions from one bug:
+
+      * turn 1 got a start from turn 2 and an end from the fallback, yielding an
+        absurdly long span (18.91s measured; 31.36s in the operator's session).
+        The TEXT was complete and correct, which is what made this dangerous:
+        it reads as a finished thought with no cue that its span is wrong.
+      * turn 2, whose start had been consumed and then cleared, fell back for
+        BOTH ends and emitted a zero-length window (91.78-91.78).
+
+    So spans are queued in arrival order and each ``completed`` takes the OLDEST
+    unclaimed one — the API completes turns in the order it opened them.
     """
 
     def __init__(self) -> None:
-        self.start_s: float | None = None
-        self.end_s: float | None = None
+        self._spans: deque[list[float | None]] = deque()
 
     @staticmethod
     def _seconds(event: dict, key: str) -> float | None:
@@ -558,30 +586,42 @@ class TurnBoundaries:
         """Consume a VAD event. True when it was one (and should not fall through)."""
         etype = event.get("type", "")
         if etype == "input_audio_buffer.speech_started":
-            self.start_s = self._seconds(event, "audio_start_ms")
-            self.end_s = None
+            self._spans.append([self._seconds(event, "audio_start_ms"), None])
             return True
         if etype == "input_audio_buffer.speech_stopped":
-            self.end_s = self._seconds(event, "audio_end_ms")
+            end_s = self._seconds(event, "audio_end_ms")
+            # Close the most recent span still open. A stop with no open span
+            # means the start was missed, so record the end alone rather than
+            # dropping it.
+            for span in reversed(self._spans):
+                if span[1] is None:
+                    span[1] = end_s
+                    return True
+            self._spans.append([None, end_s])
             return True
         return False
 
-    def resolve(self, streamed_s: float) -> tuple[float, float, bool]:
+    def claim(self, streamed_s: float) -> tuple[float, float, bool]:
         """Boundaries for the turn now completing, plus whether VAD closed it.
+
+        Takes the OLDEST unclaimed span: the API completes turns in the order it
+        opened them, so the oldest span belongs to the transcript arriving now.
 
         ``streamed_s`` — seconds of audio actually streamed — is the fallback,
         NOT wall clock: it is a position on the same audio clock, so a missing
         boundary degrades to a coarse offset rather than a fabricated one.
         """
-        start_s = self.start_s if self.start_s is not None else streamed_s
-        end_s = self.end_s if self.end_s is not None else streamed_s
+        span = self._spans.popleft() if self._spans else [None, None]
+        start_s = span[0] if span[0] is not None else streamed_s
+        end_s = span[1] if span[1] is not None else streamed_s
         if end_s < start_s:
             end_s = start_s
-        return start_s, end_s, self.end_s is not None
+        return start_s, end_s, span[1] is not None
 
-    def reset(self) -> None:
-        self.start_s = None
-        self.end_s = None
+    @property
+    def pending(self) -> int:
+        """Spans opened but not yet claimed by a transcript."""
+        return len(self._spans)
 
 
 def timestamp_anomaly(
@@ -601,14 +641,30 @@ def timestamp_anomaly(
     """
     if end_s < start_s:
         return f"turn ends before it starts ({start_s:.2f} > {end_s:.2f})"
+    # Degenerate durations. A zero-length turn cannot come from the audio clock:
+    # VAD spans real speech, so equal start and end means both were stamped from
+    # one fallback value. An implausibly long one means the span belongs to a
+    # different turn, or a boundary was missed. Both were live defects.
+    duration = end_s - start_s
+    if duration <= 0.0:
+        return f"turn has zero duration at {start_s:.2f} — no speech spans zero time"
+    if duration > MAX_PLAUSIBLE_TURN_SECONDS:
+        return (
+            f"turn spans {duration:.2f}s ({start_s:.2f}-{end_s:.2f}), longer than "
+            f"{MAX_PLAUSIBLE_TURN_SECONDS:.0f}s — server VAD closes on silence, so "
+            f"a span this long means the boundary belongs to another turn"
+        )
     if previous_end_s is None:
         return None
-    if start_s == previous_end_s and end_s == previous_end_s:
-        return f"turn has zero width at the previous end ({start_s:.2f})"
-    if start_s < previous_end_s:
+    # Server VAD can open the next turn a fraction before it reports the
+    # previous one's stop — measured at 0.23s on a real session, with both
+    # spans otherwise correct. That is the detector's own latency, not a
+    # stamping fault, so only a substantial overlap is an anomaly.
+    if start_s < previous_end_s - VAD_OVERLAP_TOLERANCE_SECONDS:
         return (
-            f"turn starts at {start_s:.2f}, before the previous turn ended at "
-            f"{previous_end_s:.2f} — boundaries must not overlap"
+            f"turn starts at {start_s:.2f}, {previous_end_s - start_s:.2f}s before "
+            f"the previous turn ended at {previous_end_s:.2f} — boundaries this far "
+            f"out of order mean the spans belong to different turns"
         )
     return None
 
@@ -866,12 +922,14 @@ async def stream_session(
     expected_language: str = DEFAULT_LANGUAGE,
     use_local_vad: bool = True,
     gate_dbfs: float = INPUT_GATE_DBFS,
+    raw_event_log: Path | None = None,
     health_poll: float = 5.0,
 ) -> tuple[int, HealthMonitor]:
     """Capture once, tee to disk and socket, append transcripts to the JSONL."""
     import websockets
 
     monitor = HealthMonitor()
+    trace_started = time.monotonic()
     gate = InputGate(
         threshold_dbfs=gate_dbfs,
         vad=load_speech_detector(enabled=use_local_vad),
@@ -940,6 +998,22 @@ async def stream_session(
                         continue
                     etype = event.get("type", "")
 
+                    if raw_event_log is not None:
+                        with contextlib.suppress(OSError):
+                            with open(raw_event_log, "a", encoding="utf-8") as fh:
+                                fh.write(json.dumps({
+                                    "at": round(time.monotonic() - trace_started, 3),
+                                    "streamed_s": round(
+                                        monitor.bytes_streamed / BYTES_PER_SECOND, 3),
+                                    "type": etype,
+                                    "audio_start_ms": event.get("audio_start_ms"),
+                                    "audio_end_ms": event.get("audio_end_ms"),
+                                    "item_id": event.get("item_id"),
+                                    "content_index": event.get("content_index"),
+                                    "transcript": event.get("transcript"),
+                                    "delta": event.get("delta"),
+                                }, ensure_ascii=False) + "\n")
+
                     if boundaries.observe(event):
                         continue
 
@@ -955,7 +1029,7 @@ async def stream_session(
                             # on, so a missing boundary degrades to a slightly
                             # coarse offset instead of a fabricated one.
                             streamed_s = monitor.bytes_streamed / BYTES_PER_SECOND
-                            start_s, end_s, vad_closed = boundaries.resolve(streamed_s)
+                            start_s, end_s, vad_closed = boundaries.claim(streamed_s)
 
                             anomaly = timestamp_anomaly(start_s, end_s, previous_end_s)
                             if anomaly:
@@ -990,7 +1064,6 @@ async def stream_session(
                             )
                             index += 1
                             monitor.note_transcript()
-                            boundaries.reset()
                     elif etype == "error":
                         message = (event.get("error") or {}).get(
                             "message", "unknown socket error"
@@ -1045,6 +1118,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--dir", type=Path, default=DEFAULT_DIR)
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--raw-event-log",
+        type=Path,
+        default=None,
+        help="append every socket event to this file (diagnostics)",
+    )
     parser.add_argument(
         "--no-local-vad",
         action="store_true",
@@ -1116,6 +1195,7 @@ def main(argv: list[str]) -> int:
                 expected_language=args.language,
                 use_local_vad=not args.no_local_vad,
                 gate_dbfs=args.input_gate_dbfs,
+                raw_event_log=args.raw_event_log,
             )
         )
     except KeyboardInterrupt:

@@ -582,9 +582,7 @@ def _turn(boundaries, start_ms, end_ms, streamed_s):
     boundaries.observe(
         {"type": "input_audio_buffer.speech_stopped", "audio_end_ms": end_ms}
     )
-    resolved = boundaries.resolve(streamed_s)
-    boundaries.reset()
-    return resolved
+    return boundaries.claim(streamed_s)
 
 
 def test_vad_events_drive_the_turn_boundaries():
@@ -638,9 +636,9 @@ def test_replaying_the_operator_session_yields_no_overlap_and_varied_widths():
 def test_a_missing_vad_boundary_falls_back_to_the_audio_clock():
     """Degrade to a coarse offset, never to a fabricated wall-clock window."""
     boundaries = st.TurnBoundaries()
-    start_s, end_s, vad_closed = boundaries.resolve(207.5)
+    start_s, end_s, vad_closed = boundaries.claim(207.5)
     assert (start_s, end_s) == (207.5, 207.5)
-    assert vad_closed is False, "no VAD close means lone-word filtering must not apply"
+    assert vad_closed is False, "no VAD close was reported for this turn"
 
 
 def test_boundaries_never_produce_a_negative_width():
@@ -651,7 +649,7 @@ def test_boundaries_never_produce_a_negative_width():
     boundaries.observe(
         {"type": "input_audio_buffer.speech_stopped", "audio_end_ms": 199000}
     )
-    start_s, end_s, _ = boundaries.resolve(201.0)
+    start_s, end_s, _ = boundaries.claim(201.0)
     assert end_s >= start_s
 
 
@@ -665,7 +663,7 @@ def test_delta_events_are_not_turn_boundaries_and_never_finish_a_turn():
         }
     )
     assert consumed is False, "a delta is not a VAD event"
-    assert boundaries.start_s is None and boundaries.end_s is None
+    assert boundaries.pending == 0, "a delta must not open a span"
 
 
 def test_the_captured_operator_turns_are_all_exactly_five_seconds():
@@ -819,7 +817,7 @@ def test_the_duplicate_window_from_the_live_capture_is_reported():
     assert st.timestamp_anomaly(first_start, first_end, None) is None
     anomaly = st.timestamp_anomaly(second_start, second_end, first_end)
     assert anomaly is not None, "an identical repeated window is an anomaly"
-    assert "overlap" in anomaly
+    assert "out of order" in anomaly
 
 
 def test_ordinary_advancing_turns_raise_nothing():
@@ -832,8 +830,25 @@ def test_a_turn_abutting_the_previous_one_is_fine():
     assert st.timestamp_anomaly(200.0, 202.5, 200.0) is None
 
 
-def test_a_zero_width_turn_at_the_previous_end_is_reported():
-    assert "zero width" in st.timestamp_anomaly(200.0, 200.0, 200.0)
+def test_a_zero_width_turn_is_reported():
+    """The operator's 91.78-91.78 turn. No speech spans zero time."""
+    assert "zero duration" in st.timestamp_anomaly(200.0, 200.0, 200.0)
+    assert "zero duration" in st.timestamp_anomaly(91.78, 91.78, None)
+
+
+def test_an_implausibly_long_turn_is_reported():
+    """The operator's 58.26-89.62 turn: 31.36s is not one VAD-closed utterance."""
+    anomaly = st.timestamp_anomaly(58.26, 89.62, 35.49)
+    assert anomaly is not None and "longer than" in anomaly
+
+
+def test_the_vad_latency_overlap_is_tolerated():
+    """0.23s measured on a real capture, with both spans otherwise correct."""
+    assert st.timestamp_anomaly(30.55, 32.61, 30.78) is None
+
+
+def test_a_substantial_overlap_is_still_reported():
+    assert "out of order" in st.timestamp_anomaly(191.0, 193.0, 196.39)
 
 
 def test_a_turn_ending_before_it_starts_is_reported():
@@ -880,3 +895,102 @@ def test_bare_latin_single_word_fabrications_are_NOT_catchable_on_output(text):
     """
     verdict = st.screen_transcription(text, expected_language="en", vad_closed=True)
     assert not verdict.filtered
+
+
+# ---------------------------------------------------------------------------
+# Interleaved VAD events — the defect behind BOTH live corruptions
+# ---------------------------------------------------------------------------
+#
+# Captured verbatim from the operator's socket via --raw-event-log. The next
+# utterance's speech_started arrives BEFORE the previous utterance's completed,
+# because transcription is asynchronous.
+
+INTERLEAVED_EVENTS = [
+    ("speech_started", 27540, None, None),
+    ("speech_stopped", None, 30784, None),
+    ("speech_started", 30548, None, None),   # turn 2 opens before turn 1 completes
+    ("completed", None, None, "Have we finished all of the performance work we wanted to perform?"),
+    ("speech_stopped", None, 32608, None),
+    ("completed", None, None, "Ort a fhágfaidh mé tama?"),
+]
+
+
+def _replay(events, streamed_s=51.31):
+    boundaries = st.TurnBoundaries()
+    emitted = []
+    for kind, start_ms, end_ms, text in events:
+        if kind == "completed":
+            emitted.append(boundaries.claim(streamed_s) + (text,))
+            continue
+        boundaries.observe(
+            {
+                "type": f"input_audio_buffer.{kind}",
+                "audio_start_ms": start_ms,
+                "audio_end_ms": end_ms,
+            }
+        )
+    return emitted
+
+
+def test_interleaved_events_give_each_turn_its_own_boundaries():
+    """The regression test for the operator's session.
+
+    A single mutable slot handed turn 1 the boundaries of turn 2, producing an
+    18.91s span for 3.24s of speech and a 0.00s span for turn 2. Queueing the
+    spans and claiming the oldest gives each turn what is actually its own.
+    """
+    emitted = _replay(INTERLEAVED_EVENTS)
+    (first_start, first_end, _, first_text), (second_start, second_end, _, _) = emitted
+
+    assert (round(first_start, 2), round(first_end, 2)) == (27.54, 30.78)
+    assert round(first_end - first_start, 2) == 3.24, "not 18.91s"
+    assert "performance work" in first_text, "the TEXT was always complete"
+
+    assert (round(second_start, 2), round(second_end, 2)) == (30.55, 32.61)
+    assert second_end > second_start, "not a zero-length window"
+
+
+def test_no_emitted_turn_is_degenerate_after_the_fix():
+    previous_end = None
+    for start_s, end_s, _, _ in _replay(INTERLEAVED_EVENTS):
+        assert st.timestamp_anomaly(start_s, end_s, previous_end) is None
+        previous_end = end_s
+
+
+def test_turns_are_claimed_oldest_first():
+    """The API completes turns in the order it opened them."""
+    boundaries = st.TurnBoundaries()
+    for start_ms, end_ms in [(1000, 2000), (3000, 4000), (5000, 6000)]:
+        boundaries.observe(
+            {"type": "input_audio_buffer.speech_started", "audio_start_ms": start_ms}
+        )
+        boundaries.observe(
+            {"type": "input_audio_buffer.speech_stopped", "audio_end_ms": end_ms}
+        )
+    assert boundaries.pending == 3
+    assert [boundaries.claim(9.0)[:2] for _ in range(3)] == [
+        (1.0, 2.0), (3.0, 4.0), (5.0, 6.0),
+    ]
+    assert boundaries.pending == 0
+
+
+def test_a_stop_closes_the_most_recent_open_span():
+    boundaries = st.TurnBoundaries()
+    boundaries.observe(
+        {"type": "input_audio_buffer.speech_started", "audio_start_ms": 1000}
+    )
+    boundaries.observe(
+        {"type": "input_audio_buffer.speech_started", "audio_start_ms": 3000}
+    )
+    boundaries.observe(
+        {"type": "input_audio_buffer.speech_stopped", "audio_end_ms": 4000}
+    )
+    # The stop belongs to the span opened at 3.0s, leaving the first still open.
+    assert boundaries.claim(9.0)[:2] == (1.0, 9.0)
+    assert boundaries.claim(9.0)[:2] == (3.0, 4.0)
+
+
+def test_a_completed_with_no_pending_span_falls_back_safely():
+    boundaries = st.TurnBoundaries()
+    start_s, end_s, vad_closed = boundaries.claim(42.0)
+    assert (start_s, end_s) == (42.0, 42.0) and vad_closed is False
