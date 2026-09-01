@@ -72,7 +72,13 @@ ASSIGNED_TO_ROUTES: dict[str, str] = {skill: skill for skill in DOMAIN_ROUTES.va
 # Each entry is (tag, pattern): when the pattern matches the text the tag is
 # suppressed, even though its DOMAIN_PATTERNS entry matched. Guards are
 # deliberately narrow — they encode the specific collision observed, not a veto.
-DOMAIN_ANTIPATTERNS: list[tuple[str, re.Pattern[str]]] = [
+# (tag, negative-context pattern, trigger) — the trigger names the ambiguous
+# word the guard qualifies, so the negative context only counts when it appears
+# NEAR that word rather than anywhere in the task. A guard with no trigger
+# applies to the whole text (its pattern is already self-contained).
+DOMAIN_ANTIPATTERNS: list[
+    tuple[str, re.Pattern[str]] | tuple[str, re.Pattern[str], re.Pattern[str]]
+] = [
     # "audit" is finance analysis only when it is not auditing something else.
     (
         "finance_analysis",
@@ -84,6 +90,10 @@ DOMAIN_ANTIPATTERNS: list[tuple[str, re.Pattern[str]]] = [
             r"accessibility)\b",
             re.I,
         ),
+        # Bound to "audit": that is the only over-broad token in the
+        # finance_analysis pattern. "Reconcile the portfolio" must keep its
+        # route even when the body happens to mention docs or tests.
+        re.compile(r"\baudits?\b", re.I),
     ),
     # "agent" also means a human intermediary (insurance/estate/travel agent).
     (
@@ -103,6 +113,7 @@ DOMAIN_ANTIPATTERNS: list[tuple[str, re.Pattern[str]]] = [
             r"training\s+(data|run|loop|pipeline|job))\b",
             re.I,
         ),
+        re.compile(r"\btraining\b", re.I),
     ),
 ]
 
@@ -410,14 +421,51 @@ def resolve_reviewers(paths: Iterable[str]) -> list[str]:
     return reviewers
 
 
+# A guard qualifies the ambiguous keyword it sits next to — not the whole task.
+# Anything wider is its own silent misroute: an incidental "docs" in a body
+# suppressed a strong title signal, and dropping `finance_analysis` let the
+# broader `finance` pattern claim the task and route it to the PAYMENT
+# EXECUTOR. Measured before this bound existed (ateles#607 qa lens):
+#
+#   ("Reconcile the portfolio statements", "Numbers are in the shared docs
+#    folder.")                                   -> [] (unrouted)
+#   ("Reconcile the Q3 portfolio", "Cross-check against the invoice test
+#    data.")                                     -> ['finance'] -> monedula
+#
+# so the guard window is the ambiguous word plus a few tokens either side.
+_GUARD_WINDOW = 40
+
+
+def _guarded_windows(text: str, trigger: re.Pattern[str]) -> list[str]:
+    """The spans of `text` close enough to a trigger word for a guard to apply."""
+    return [
+        text[max(0, m.start() - _GUARD_WINDOW) : m.end() + _GUARD_WINDOW]
+        for m in trigger.finditer(text)
+    ]
+
+
 def _suppressed_tags(text: str) -> set[str]:
     """Tags whose negative-context guard fires for this text.
 
     See DOMAIN_ANTIPATTERNS: a keyword that is a domain signal in one context and
     ordinary English in another is suppressed rather than allowed to produce a
     confident wrong owner.
+
+    A guard fires only when its negative context sits NEAR the ambiguous word it
+    qualifies. "Audit the README" suppresses `finance_analysis`; "Reconcile the
+    portfolio" with a passing mention of docs elsewhere does not.
     """
-    return {tag for tag, pattern in DOMAIN_ANTIPATTERNS if pattern.search(text)}
+    suppressed: set[str] = set()
+    for entry in DOMAIN_ANTIPATTERNS:
+        tag, pattern = entry[0], entry[1]
+        trigger = entry[2] if len(entry) > 2 else None
+        if trigger is None:
+            if pattern.search(text):
+                suppressed.add(tag)
+            continue
+        if any(pattern.search(w) for w in _guarded_windows(text, trigger)):
+            suppressed.add(tag)
+    return suppressed
 
 
 def infer_tags_from_text(title: str, body: str = "") -> list[str]:

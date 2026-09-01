@@ -255,6 +255,73 @@ def test_tags_do_not_overmatch(text: str, forbidden: str) -> None:
     assert forbidden not in tags, f"{text!r} over-matched {forbidden}: {tags}"
 
 
+# ── The body argument (ateles#607 qa lens) ──────────────────────────────────
+#
+# Both production callers pass a BODY — apis.py `_infer_tags_from_text(title,
+# body)` and a2a_executor.py `infer_tags_from_text(title, body)` — while every
+# corpus above passes a title alone. That gap hid a guard wide enough to fire on
+# an incidental body word:
+#
+#   ("Reconcile the portfolio statements", "Numbers are in the shared docs
+#    folder.")                                  -> [] (route lost entirely)
+#   ("Reconcile the Q3 portfolio", "Cross-check against the invoice test
+#    data.")                                    -> ['finance'] -> MONEDULA
+#
+# The second is the worse half: a reconciliation task reaching the payment
+# EXECUTOR — a brand-new silent misroute created by the fix for silent
+# misroutes. Guards are now bound to the ambiguous word they qualify, and these
+# cases pin that a body cannot steal or destroy a route the title earned.
+
+BODY_MUST_NOT_CHANGE_ROUTE: list[tuple[str, str, str]] = [
+    (
+        "Reconcile the portfolio statements",
+        "Numbers are in the shared docs folder.",
+        "fringilla",
+    ),
+    (
+        "Reconcile the Q3 portfolio",
+        "Cross-check against the invoice test data.",
+        "fringilla",
+    ),
+    (
+        "Quarterly review of fixed costs",
+        "See the onboarding docs and the accessibility notes for context.",
+        "fringilla",
+    ),
+    (
+        "Pay the rent invoice",
+        "The tests for this live in the docs folder.",
+        "monedula",
+    ),
+]
+
+
+@pytest.mark.parametrize("title,body,expected", BODY_MUST_NOT_CHANGE_ROUTE)
+def test_body_context_does_not_steal_the_title_route(
+    title: str, body: str, expected: str
+) -> None:
+    """An incidental word in the body must not suppress the title's domain."""
+    tags = infer_tags_from_text(title, body)
+    assert resolve_skill(tags) == expected, f"{title!r} + {body!r} -> {tags}"
+
+
+@pytest.mark.parametrize("text,expected", EXISTING_ROUTES + PREVIOUSLY_UNOWNED)
+def test_routes_hold_when_the_body_carries_the_text(text: str, expected: str) -> None:
+    """The same corpus through the two-argument production signature.
+
+    Every caller passes a body; a corpus that only ever passes a title cannot
+    catch a defect in how the two are combined.
+    """
+    assert resolve_skill(infer_tags_from_text(text, "")) == expected
+    assert resolve_skill(infer_tags_from_text("", text)) == expected
+
+
+@pytest.mark.parametrize("text,forbidden", MUST_NOT_MATCH)
+def test_over_broad_guards_hold_from_the_body_too(text: str, forbidden: str) -> None:
+    """A guard that only works on titles is not a guard."""
+    assert forbidden not in infer_tags_from_text("", text), text
+
+
 def test_unmatched_task_surfaces_as_unowned() -> None:
     """No route is better than a wrong route.
 
