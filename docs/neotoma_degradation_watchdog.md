@@ -146,9 +146,11 @@ omission.
 - **Scaling — not automated.** It costs money, so it is presented with a number,
   never taken.
 
-**Automated: load shedding**, because the load is the swarm's own doing.
-`lib/neotoma_concurrency.py` caps concurrent readers (default 4). It is
-reversible, costs nothing, and cannot lose data.
+**Load shedding (library, not yet wired):** `lib/neotoma_concurrency.py`
+provides a process-local reader semaphore (default 4 concurrent reads per
+process) for daemons to adopt. It is reversible, costs nothing, and cannot lose
+data — but **no caller uses it yet in this PR**; Nyctea detects and escalates,
+it does not enforce concurrency limits itself.
 
 Honest limitation: that semaphore is **process-local**. It bounds one daemon's
 fan-out, not the ~13 independent agent processes that caused this. A true
@@ -198,3 +200,22 @@ The exit-code contract lets another daemon, a cron line, or the operator answer
 3. **Cap swarm-wide concurrency.** 13 concurrent readers against 2 vCPU is too
    many. The per-process semaphore here is a partial measure.
 4. **Retired `neotoma` app.** Leave both machines stopped; destroy at leisure.
+
+## Relationship to ateles#628
+
+Nyctea and ateles#628 address the **same symptom** (health green while reads
+fail) through **different deliverables**. Merging Nyctea must not close #628.
+
+| | **ateles#628 (Neotoma server contract)** | **Nyctea (this PR, ateles#681)** |
+|---|---|---|
+| Where it runs | Neotoma server | Ateles external daemon |
+| `/health` | Adds bounded DB probe + `database` field | Does not trust `/health` for verdicts |
+| Query/store path | Server-side hard timeout → HTTP 503 | N/A — external probe only |
+| Divergence signal | In-process metric/log when health green + queries fail | SATURATED verdict (read timeout + `/health` 200) |
+| Cross-surface parity | REST + MCP + CLI tests on shared layer | N/A — single external probe |
+| #577 closure | Yes — regression test required | No — works around broken `/health` |
+| Remediation | Fix the contract so all callers benefit | Detect, escalate, and guide operator action |
+
+#628 remains open until the Neotoma server deliverables land (see Neotoma repo
+per arch routing). Nyctea is valuable **now** as external detection while that
+work is in flight.

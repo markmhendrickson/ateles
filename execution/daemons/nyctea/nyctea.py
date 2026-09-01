@@ -41,15 +41,13 @@ position, not an unfinished one.
   * Scaling is NOT automated. It costs the operator money, so it is a decision
     to present with a number, never one to take.
 
-Automated: **load shedding**, because that is the swarm's own mess to clean up.
-The degradation tracked agent concurrency, and the swarm is what generates the
-concurrency. `lib/neotoma_concurrency.py` caps concurrent readers process-wide;
-Nyctea additionally publishes its verdict to a state file that a cooperating
-agent can read to back off. Shedding load is reversible, costs nothing, and
-addresses the actual mechanism.
+Load shedding helper: `lib/neotoma_concurrency.py` provides a process-local
+reader semaphore for daemons to adopt (not wired by Nyctea itself). Nyctea
+additionally publishes its verdict to a state file that a cooperating agent can
+read to back off.
 
-So Nyctea DETECTS and ESCALATES reliably, and sheds the load the swarm itself
-created. A watchdog that does that is worth more than one that restarts unsafely.
+So Nyctea DETECTS and ESCALATES reliably. A watchdog that does that is worth
+more than one that restarts unsafely.
 
 QUIET HOURS — WHY THIS BYPASSES THEM
 ------------------------------------
