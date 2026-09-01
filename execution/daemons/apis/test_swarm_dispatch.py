@@ -6650,3 +6650,158 @@ def test_vanellus_prompt_defaults_to_forbidding_merge():
     # Omitting the parameter must fail closed, not open.
     prompt = swarm_dispatch.SwarmDispatcher._vanellus_prompt(_trigger(), 80, ["pm"])
     assert "DO NOT MERGE" in prompt
+
+
+# ── no-op fix round escalates (PR stranded with no push) ────────────────────
+
+
+def _route_fix_round_with_head(monkeypatch, *, head_before, head_after):
+    """Drive one auto-fix round where the PR head moves from `head_before` to
+    `head_after`, and return the stub notifier + whether Cicada was dispatched.
+    """
+    dispatched = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        dispatched.append(skill)
+        return SkillResult(skill, True, 0, "guidance/fix applied", "")
+
+    async def fake_count(self, trigger):
+        return 0
+
+    async def fake_record(self, trigger, n):
+        return None
+
+    seq = [head_before, head_after]
+
+    async def fake_head(self, trigger):
+        return seq.pop(0) if seq else head_after
+
+    async def fake_claim(self, trigger, kind):
+        return True
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_fix_round_count", fake_count)
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", fake_record)
+    monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", fake_head)
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, _config())
+    reviews = [("ux", "[BLOCKING] naming: the flag is undiscoverable\ndetail")]
+    asyncio.run(
+        d._route_blocking_findings(
+            _trigger(), parent=80, reviews=reviews, verdict="request_changes"
+        )
+    )
+    return notifier, dispatched
+
+
+def test_fix_round_that_pushes_nothing_escalates_instead_of_stranding(monkeypatch):
+    """ateles#570/#596: Cicada exited 0 without pushing, so no pr_synchronize
+    ever fired, the round cap was never re-evaluated, and the PR stopped dead
+    at CHANGES_REQUESTED with nobody owning it. An unchanged head must page the
+    operator rather than 'await a push to re-review' that never arrives."""
+    notifier, dispatched = _route_fix_round_with_head(
+        monkeypatch, head_before="abc1234", head_after="abc1234"
+    )
+    assert "cicada" in dispatched
+    assert any(
+        "without pushing any commit" in m for m in notifier.sent
+    ), notifier.sent
+    assert Priority.OPERATOR_DECISION in notifier.priorities
+
+
+def test_fix_round_that_pushes_a_commit_does_not_escalate(monkeypatch):
+    """The happy path is unchanged: a moved head means the push will re-trigger
+    the handler, so nothing should page the operator."""
+    notifier, dispatched = _route_fix_round_with_head(
+        monkeypatch, head_before="abc1234", head_after="def5678"
+    )
+    assert "cicada" in dispatched
+    assert not any("without pushing any commit" in m for m in notifier.sent)
+
+
+def test_unreadable_head_sha_does_not_invent_a_failure(monkeypatch):
+    """If the head SHA can't be read we must not fabricate a no-op escalation."""
+    notifier, _ = _route_fix_round_with_head(
+        monkeypatch, head_before=None, head_after=None
+    )
+    assert not any("without pushing any commit" in m for m in notifier.sent)
+
+
+# ── self-review 422 downgrade is loud, not silent ───────────────────────────
+
+
+def _emit_review_with_422(monkeypatch, caplog, *, first_status):
+    """Drive _emit_formal_review where the first POST returns `first_status`
+    and any retry succeeds. Returns (notifier, log_text)."""
+    posts = []
+
+    class _Resp:
+        def __init__(self, status, payload=None, text=""):
+            self.status_code = status
+            self._payload = payload or {"id": 999}
+            self.text = text
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, **kwargs):
+            posts.append((kwargs.get("json") or {}).get("event"))
+            if len(posts) == 1:
+                return _Resp(
+                    first_status,
+                    text='["Review Can not request changes on your own pull request"]',
+                )
+            return _Resp(200)
+
+    monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", lambda **kw: _Client())
+
+    async def fake_claim(self, trigger, kind):
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "_claim_escalation", fake_claim)
+
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="tok"))
+    with caplog.at_level(logging.INFO):
+        asyncio.run(
+            d._emit_formal_review(_trigger(), "request_changes", "panel findings")
+        )
+    return notifier, caplog.text, posts
+
+
+def test_self_review_422_escalates_and_logs_the_downgrade(monkeypatch, caplog):
+    """ateles-agent reviewing an ateles-agent PR: GitHub refuses the verdict,
+    it becomes a non-binding COMMENT, and reviewDecision stays empty forever —
+    11 of 15 unreviewed open PRs on 2026-09-01. That must page the operator,
+    and the log must not claim a REQUEST_CHANGES landed."""
+    notifier, log_text, posts = _emit_review_with_422(
+        monkeypatch, caplog, first_status=422
+    )
+    assert posts[0] == "REQUEST_CHANGES" and posts[1] == "COMMENT"
+    assert any("DIFFERENT GitHub identity" in m for m in notifier.sent), notifier.sent
+    assert Priority.OPERATOR_DECISION in notifier.priorities
+    assert "DOWNGRADED" in log_text
+    assert "posted formal GitHub review COMMENT" in log_text
+
+
+def test_accepted_review_does_not_escalate_or_claim_a_downgrade(monkeypatch, caplog):
+    """The happy path stays quiet and reports the event that actually landed."""
+    notifier, log_text, posts = _emit_review_with_422(
+        monkeypatch, caplog, first_status=200
+    )
+    assert posts == ["REQUEST_CHANGES"]
+    assert notifier.sent == []
+    assert "DOWNGRADED" not in log_text

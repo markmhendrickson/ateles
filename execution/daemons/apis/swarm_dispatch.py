@@ -3919,20 +3919,47 @@ class SwarmDispatcher:
 
         try:
             resp = await _post(payload)
+            downgraded = False
             if resp.status_code == 422 and event != _REVIEW_EVENT_COMMENT:
                 # Self-review or otherwise-unacceptable event: degrade to COMMENT
                 # so the verdict is still recorded, and say so plainly.
                 detail = (resp.text or "")[:200]
+                downgraded = True
                 log.warning(
                     f"[{DAEMON_NAME}] formal review {event} rejected on {ref} "
                     f"(422) — retrying as COMMENT: {detail}"
                 )
                 resp = await _post({**payload, "event": _REVIEW_EVENT_COMMENT})
+                # A COMMENT does NOT set reviewDecision, so the PR reads as
+                # "never reviewed" forever and no gate can ever be satisfied.
+                # GitHub refuses REQUEST_CHANGES/APPROVE on your own PR, so when
+                # the authoring token and the reviewing token are the same
+                # identity every verdict silently becomes non-binding. Measured
+                # 2026-09-01: 11 of 15 unreviewed open ateles PRs are
+                # ateles-agent reviewing ateles-agent, and 28 such downgrades
+                # appear in apis.log. Only a distinct reviewer identity fixes
+                # this, so page the operator instead of burying it in a WARNING.
+                if await self._claim_escalation(t, "self-review-422"):
+                    self.notifier.send(
+                        f"PR {ref}: GitHub refused the `{event}` review "
+                        f"({detail[:120]}), so it was recorded as a non-binding "
+                        "COMMENT and the PR still reads as never-reviewed. The "
+                        "review gate cannot be satisfied until the reviewing "
+                        "token is a DIFFERENT GitHub identity from the PR "
+                        "author. Merge held.",
+                        priority=Priority.OPERATOR_DECISION,
+                        handler=DAEMON_NAME,
+                    )
             resp.raise_for_status()
             review_id = resp.json().get("id")
+            # Report what actually landed, not what was attempted — the old log
+            # said "posted formal GitHub review REQUEST_CHANGES" even when the
+            # request had been downgraded to an inert COMMENT.
+            landed = _REVIEW_EVENT_COMMENT if downgraded else event
             log.info(
-                f"[{DAEMON_NAME}] posted formal GitHub review {event} on {ref} "
-                f"(id={review_id}, verdict={verdict})"
+                f"[{DAEMON_NAME}] posted formal GitHub review {landed} on {ref} "
+                f"(id={review_id}, verdict={verdict}"
+                f"{', DOWNGRADED from ' + event + ' — non-binding' if downgraded else ''})"
             )
             return str(review_id) if review_id is not None else None
         except Exception as exc:
@@ -3991,6 +4018,67 @@ class SwarmDispatcher:
                 f"fix-round count read failed ({exc}) — treating as at-cap"
             )
             return self.config.max_fix_rounds
+
+    async def _pr_head_sha(self, trigger: SwarmTrigger) -> str | None:
+        """Current head SHA of the PR, or None if it cannot be read."""
+        url = (
+            f"https://api.github.com/repos/{trigger.repository}/pulls/"
+            f"{trigger.number}"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    url, headers=self._github_headers(trigger.repository)
+                )
+                resp.raise_for_status()
+                return (resp.json().get("head") or {}).get("sha")
+        except Exception as exc:  # noqa: BLE001 — advisory only
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                f"could not read head SHA ({exc})"
+            )
+            return None
+
+    async def _escalate_noop_fix_round(
+        self, trigger: SwarmTrigger, kind: str, n: int, before: str | None
+    ) -> bool:
+        """Escalate when a 'successful' fix round pushed nothing.
+
+        `run_skill(...).ok` only means Cicada's process exited 0 — it does NOT
+        mean a commit landed. When Cicada exits clean without pushing, the
+        handler logs "awaiting its push to re-review" and the PR enters a
+        terminal wait: no push means no `pr_synchronize`, so this handler never
+        re-runs, the round cap is never re-evaluated, and the auto-fix-exhausted
+        escalation never fires. The PR simply stops, still CHANGES_REQUESTED,
+        with nothing owning it.
+
+        Measured 2026-08-31: ateles#570 round 2 dispatched at 17:31Z while its
+        head commit stayed at 17:27Z, and no further trigger ever arrived;
+        ateles#596 did the same. Comparing the head SHA across the call turns
+        that silent stall into a real escalation.
+
+        Returns True if the round was a no-op (caller should stop).
+        """
+        if before is None:
+            return False  # couldn't measure — don't invent a failure
+        after = await self._pr_head_sha(trigger)
+        if after is None or after != before:
+            return False
+        ref = f"{trigger.repository}#{trigger.number}"
+        log.warning(
+            f"[{DAEMON_NAME}] {ref}: {kind} round {n} exited cleanly but pushed "
+            f"no commit (head still {before[:7]}) — escalating instead of "
+            "waiting for a push that will never arrive"
+        )
+        if await self._claim_escalation(trigger, f"{kind}-noop"):
+            self.notifier.send(
+                f"PR {ref}: {kind} round {n} completed without pushing any "
+                "commit, so the review can never re-run. Needs your attention. "
+                "Merge held.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+            )
+        return True
 
     async def _record_fix_round(self, trigger: SwarmTrigger, n: int) -> None:
         """Post the fix-round marker comment (no command tokens; best-effort)."""
@@ -4164,6 +4252,11 @@ class SwarmDispatcher:
 
         consolidated = "\n\n".join(guidance_blocks)
 
+        # Snapshot the head so we can tell whether Cicada actually pushed
+        # (a clean exit with no commit strands the PR — see
+        # _escalate_noop_fix_round).
+        head_before = await self._pr_head_sha(trigger)
+
         # Hand the consolidated guidance to Cicada to implement + push.
         cicada_result = await run_skill(
             "cicada",
@@ -4184,6 +4277,10 @@ class SwarmDispatcher:
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
             )
+            return
+        if await self._escalate_noop_fix_round(
+            trigger, "auto-fix", this_round, head_before
+        ):
             return
         log.info(
             f"[{DAEMON_NAME}] {ref}: dispatched auto-fix round {this_round} "
@@ -4465,6 +4562,7 @@ class SwarmDispatcher:
             return
         this_round = prior_rounds + 1
         await self._record_fix_round(trigger, this_round)
+        head_before = await self._pr_head_sha(trigger)
         cicada_result = await run_skill(
             "cicada",
             self._cicada_ci_fix_prompt(trigger, parent, this_round),
@@ -4482,6 +4580,10 @@ class SwarmDispatcher:
                 priority=Priority.OPERATOR_DECISION,
                 handler=DAEMON_NAME,
             )
+            return
+        if await self._escalate_noop_fix_round(
+            trigger, "CI-fix", this_round, head_before
+        ):
             return
         log.info(
             f"[{DAEMON_NAME}] {ref}: dispatched CI-fix round {this_round} to "

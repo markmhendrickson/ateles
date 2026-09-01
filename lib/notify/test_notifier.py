@@ -213,3 +213,59 @@ def test_from_neotoma_unset_topic_env_falls_back_to_default(monkeypatch):
     n = Notifier.from_neotoma(telegram_topic_env="TELEGRAM_TOPIC_TYTO")
 
     assert n._topic_id == "999"
+
+
+# ── digest queue is persistent and self-draining ────────────────────────────
+#
+# Before this, `_digest_queue` was an in-memory list whose only drain,
+# `flush_digest()`, had zero non-test callers in the tree. Daemons are
+# long-lived, so an OPERATOR_DECISION raised inside the silence window was
+# appended and never delivered. Measured on apis.log 2026-09-01: 45 "queuing
+# for digest" lines, 0 digests ever sent — the mechanism behind "the escalation
+# was written somewhere nobody reads" (ateles#565, #583).
+
+
+def _notifier(tmp_path, rubric, sent):
+    n = Notifier(rubric=rubric)
+    n._digest_path = tmp_path / "digest.json"
+    n._deliver = lambda m, force=False: (sent.append(m), True)[1]
+    return n
+
+
+def test_queued_escalation_survives_restart_and_is_delivered(tmp_path):
+    sent = []
+    n = _notifier(tmp_path, ALWAYS_SILENT, sent)
+    n.send("PR #570: 2 auto-fix rounds did not clear review",
+           Priority.OPERATOR_DECISION, handler="apis")
+    assert sent == []                       # held by the silence window
+    assert len(n._digest_queue) == 1        # but persisted, not lost
+
+    # A fresh process (daemon restart) must still see the queued escalation.
+    n2 = _notifier(tmp_path, NO_SILENCE, sent)
+    assert len(n2._digest_queue) == 1
+
+    # Outside the silence window, the next send drains it.
+    n2.send("a later alert", Priority.OPERATOR_DECISION, handler="apis")
+    assert any("570" in m and "Digest" in m for m in sent), sent
+    assert n2._digest_queue == []
+
+
+def test_failed_digest_delivery_keeps_items_queued(tmp_path):
+    sent = []
+    n = _notifier(tmp_path, ALWAYS_SILENT, sent)
+    n.send("held escalation", Priority.OPERATOR_DECISION, handler="apis")
+    assert len(n._digest_queue) == 1
+
+    n._deliver = lambda m, force=False: False  # transport down
+    assert n.flush_digest() is False
+    # Must NOT be dropped on a failed send.
+    assert len(n._digest_queue) == 1
+
+
+def test_unreadable_queue_file_does_not_crash_send(tmp_path):
+    sent = []
+    n = _notifier(tmp_path, NO_SILENCE, sent)
+    n._digest_path.write_text("{not json")
+    assert n._digest_queue == []
+    n.send("still works", Priority.BLOCKER, handler="apis")
+    assert any("still works" in m for m in sent)
