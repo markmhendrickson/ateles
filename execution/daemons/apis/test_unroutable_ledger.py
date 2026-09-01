@@ -275,3 +275,49 @@ def test_shared_ledger_keeps_both_writers_records(tmp_path, monkeypatch):
     # Neither writer's dedup was lost: both re-notes are suppressed.
     assert reloaded.note("ent_a", "t", [], None, now=1002.0) is False
     assert reloaded.note_undefined_role("pavo", now=1002.0) is False
+
+
+def test_both_writers_survive_a_restart_cycle(tmp_path, monkeypatch):
+    """Restart survival with BOTH writers active — the deployed shape.
+
+    Apis restarted twice on the day this bug shipped and daemons run for months,
+    so the invariant that matters is: after N restarts, with unroutable-task
+    writes and undefined-role writes interleaved, nothing either writer recorded
+    has been lost. A clobbered ledger is indistinguishable from one that
+    legitimately had no entry, so this is asserted by re-noting and requiring
+    suppression rather than by inspecting the file.
+    """
+    import unroutable_ledger as ul
+
+    path = tmp_path / "l.json"
+    monkeypatch.setattr(ul, "_default_ledger_path", lambda: path)
+
+    for cycle in range(3):
+        monkeypatch.setattr(ul, "_SHARED", None)  # process restart
+        led = ul.shared_ledger()
+        led.note(f"ent_{cycle}", "t", [], None, now=1000.0 + cycle)
+        led.note_undefined_role(f"role_{cycle}", now=1000.0 + cycle)
+
+    monkeypatch.setattr(ul, "_SHARED", None)
+    final = ul.shared_ledger()
+    for cycle in range(3):
+        assert final.note(f"ent_{cycle}", "t", [], None, now=2000.0) is False, (
+            f"task from cycle {cycle} was lost across restarts"
+        )
+        assert final.note_undefined_role(f"role_{cycle}", now=2000.0) is False, (
+            f"role from cycle {cycle} was lost across restarts"
+        )
+
+
+def test_unreadable_records_also_survive_the_other_writer(tmp_path):
+    """The third field. A whole-file overwrite drops it as easily as the others."""
+    path = tmp_path / "l.json"
+    a = UnroutableLedger(path=path)
+    b = UnroutableLedger(path=path)
+    b.load()
+    for _ in range(5):
+        a.note_unreadable("ent_u", now=1000.0)
+    b.note_undefined_role("pavo", now=1001.0)
+    disk = json.loads(path.read_text())
+    assert "ent_u" in disk["unreadable"], "the role write dropped the unreadable record"
+    assert "pavo" in disk["roles"]
