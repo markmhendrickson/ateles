@@ -1073,3 +1073,189 @@ def test_webrtcvad_is_declared_optional_in_the_manifest():
     # And NOT among the core install_requires.
     core = manifest.split("dependencies = [", 1)[1].split("]", 1)[0]
     assert "webrtcvad" not in core
+
+
+# ---------------------------------------------------------------------------
+# Below-gate capture — the wrong-microphone failure (ateles#648)
+#
+# The incident: capture ran against the Studio Display Microphone while the
+# operator wore AirPods Max. That device measured -54.7 dB mean / -38.6 dB
+# peak — ABOVE the -65 dBFS silent-input floor, so "silent input" never fired,
+# and entirely BELOW the -50 dBFS gate, so every frame was discarded. Six
+# minutes of nothing, reported healthy throughout.
+# ---------------------------------------------------------------------------
+
+
+def test_gate_starved_reports_unhealthy_when_nothing_passes_the_gate():
+    monitor = st.HealthMonitor(
+        gate_starved_seconds=300, signal_window_seconds=1e9, now=0.0
+    )
+    # Audio keeps arriving and keeps being discarded — the incident exactly.
+    for tick in range(0, 400, 10):
+        monitor.note_audio(_pcm(300), now=float(tick))
+        monitor.note_gate_decision(False, now=float(tick))
+
+    problems = monitor.problems(now=390.0)
+    assert any("gate starved" in p for p in problems), problems
+    assert not monitor.is_healthy(now=390.0), "reported healthy while transcribing nothing"
+
+
+def test_gate_starved_names_the_wrong_device_as_the_likely_cause():
+    """The operator must learn WHAT to do, not merely that something is wrong."""
+    monitor = st.HealthMonitor(
+        gate_starved_seconds=300, signal_window_seconds=1e9, now=0.0
+    )
+    for tick in range(0, 400, 10):
+        monitor.note_audio(_pcm(300), now=float(tick))
+        monitor.note_gate_decision(False, now=float(tick))
+
+    problem = next(p for p in monitor.problems(now=390.0) if "gate starved" in p)
+    assert "WRONG INPUT DEVICE" in problem
+    assert "frames discarded" in problem
+
+
+def test_ordinary_pauses_do_not_trip_the_gate_check():
+    """Not talking for a couple of minutes is normal and must stay healthy."""
+    monitor = st.HealthMonitor(
+        gate_starved_seconds=300, signal_window_seconds=1e9, now=0.0
+    )
+    monitor.note_audio(_pcm(8000), now=0.0)
+    monitor.note_gate_decision(True, now=0.0)
+    for tick in range(10, 130, 10):
+        monitor.note_audio(_pcm(200), now=float(tick))
+        monitor.note_gate_decision(False, now=float(tick))
+
+    assert not any("gate starved" in p for p in monitor.problems(now=120.0))
+
+
+def test_gate_check_resets_when_speech_gets_through_again():
+    monitor = st.HealthMonitor(
+        gate_starved_seconds=300, signal_window_seconds=1e9, now=0.0
+    )
+    for tick in range(0, 400, 10):
+        monitor.note_audio(_pcm(300), now=float(tick))
+        monitor.note_gate_decision(False, now=float(tick))
+    assert any("gate starved" in p for p in monitor.problems(now=390.0))
+
+    # The operator switches to the right microphone and speaks.
+    monitor.note_audio(_pcm(8000), now=395.0)
+    monitor.note_gate_decision(True, now=395.0)
+    assert not any("gate starved" in p for p in monitor.problems(now=400.0))
+
+
+def test_gate_check_stays_quiet_when_the_capture_has_stalled():
+    """A stalled capture is ONE fault and must not be reported as two."""
+    monitor = st.HealthMonitor(
+        stall_seconds=10, gate_starved_seconds=300, signal_window_seconds=1e9, now=0.0
+    )
+    for tick in range(0, 200, 10):
+        monitor.note_audio(_pcm(300), now=float(tick))
+        monitor.note_gate_decision(False, now=float(tick))
+
+    # ffmpeg dies: no audio at all from here on.
+    problems = monitor.problems(now=800.0)
+    assert any("capture stalled" in p for p in problems)
+    assert not any("gate starved" in p for p in problems), problems
+
+
+def test_silent_input_and_gate_starved_are_different_faults():
+    """The dead band between the two thresholds is what hid the incident."""
+    monitor = st.HealthMonitor(
+        gate_starved_seconds=300, signal_window_seconds=120, silent_dbfs=-65, now=0.0
+    )
+    # ~-55 dBFS: above the silent floor, below the gate. Exactly the incident.
+    for tick in range(0, 400, 10):
+        monitor.note_audio(_pcm(60), now=float(tick))
+        monitor.note_gate_decision(False, now=float(tick))
+
+    problems = monitor.problems(now=390.0)
+    assert any("gate starved" in p for p in problems)
+    assert not any("silent input" in p for p in problems), (
+        "this level is above digital silence — the OLD check could not see it"
+    )
+
+
+def test_summary_exposes_gate_counters():
+    monitor = st.HealthMonitor(now=0.0)
+    monitor.note_gate_decision(True, now=1.0)
+    monitor.note_gate_decision(False, now=2.0)
+    summary = monitor.summary(now=3.0)
+    assert summary["frames_passed_gate"] == 1
+    assert summary["frames_gated"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Device resolution (ateles#648)
+# ---------------------------------------------------------------------------
+
+
+def test_explicit_device_skips_probing_entirely(monkeypatch):
+    def explode(**kwargs):
+        raise AssertionError("probed despite an explicit --device")
+
+    monkeypatch.setattr(st.audio_devices, "auto_select_device", explode)
+    assert st.resolve_device(":3") == ":3"
+
+
+def test_explicit_device_may_be_a_loopback_device(monkeypatch):
+    """Naming a device is a different act from a heuristic reaching for one."""
+    monkeypatch.setattr(
+        st.audio_devices, "auto_select_device",
+        lambda **kw: (_ for _ in ()).throw(AssertionError("should not probe")),
+    )
+    assert st.resolve_device(":0") == ":0"
+
+
+def test_absent_device_triggers_auto_selection(monkeypatch):
+    called = {}
+
+    def fake_auto(**kwargs):
+        called.update(kwargs)
+        return st.audio_devices.Selection(":2", [], confident=True)
+
+    monkeypatch.setattr(st.audio_devices, "auto_select_device", fake_auto)
+    assert st.resolve_device(None) == ":2"
+    assert called.get("allow_loopback") is False
+
+
+def test_low_confidence_selection_still_returns_a_device(monkeypatch):
+    monkeypatch.setattr(
+        st.audio_devices, "auto_select_device",
+        lambda **kw: st.audio_devices.Selection(
+            ":3", [], confident=False, warning="NOTHING WOULD BE TRANSCRIBED"
+        ),
+    )
+    assert st.resolve_device(None) == ":3"
+
+
+# ---------------------------------------------------------------------------
+# Device disappearance — the one unambiguous device-change signal
+# ---------------------------------------------------------------------------
+
+
+def test_device_disappeared_detects_a_vanished_index(monkeypatch):
+    monkeypatch.setattr(
+        st.audio_devices, "list_audio_devices",
+        lambda **kw: [st.audio_devices.AudioDevice(0, "BlackHole 2ch"),
+                      st.audio_devices.AudioDevice(1, "System-wide capture")],
+    )
+    assert st.device_disappeared(":3")
+    assert not st.device_disappeared(":1")
+
+
+def test_device_disappearance_is_not_inferred_from_a_failed_enumeration(monkeypatch):
+    """An ffmpeg hiccup must not be reported as a disconnected headset."""
+    monkeypatch.setattr(st.audio_devices, "list_audio_devices", lambda **kw: [])
+    assert not st.device_disappeared(":3")
+
+    def explode(**kwargs):
+        raise OSError("ffmpeg unavailable")
+
+    monkeypatch.setattr(st.audio_devices, "list_audio_devices", explode)
+    assert not st.device_disappeared(":3")
+
+
+def test_non_index_device_specs_are_not_checked(monkeypatch):
+    """Only a `:N` spec can be resolved against the enumeration."""
+    monkeypatch.setattr(st.audio_devices, "list_audio_devices", lambda **kw: [])
+    assert not st.device_disappeared("Some Named Device")
