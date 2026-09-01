@@ -73,6 +73,17 @@ def _iso(dt: datetime) -> str:
 NOW = datetime(2026, 8, 31, 12, 0, 0, tzinfo=timezone.utc)
 
 
+def _freeze_dispatcher_now(monkeypatch) -> None:  # noqa: ANN001
+    class _FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001
+            if tz is None:
+                return NOW.replace(tzinfo=None)
+            return NOW.astimezone(tz)
+
+    monkeypatch.setattr(sd, "datetime", _FrozenDateTime)
+
+
 def _pr(number: int, *, sha: str = "abc1234", draft: bool = False) -> dict:
     return {
         "number": number,
@@ -383,6 +394,7 @@ async def test_sweep_is_fail_open_on_scan_error(monkeypatch):
 @pytest.mark.asyncio
 async def test_approved_clean_pr_is_found_with_age_and_state(monkeypatch):
     """The #452 shape: APPROVED, CLEAN, mergeable, and nothing merging it."""
+    _freeze_dispatcher_now(monkeypatch)
     d = _dispatcher()
     _install_github(
         monkeypatch,
@@ -401,6 +413,7 @@ async def test_approved_clean_pr_is_found_with_age_and_state(monkeypatch):
 @pytest.mark.asyncio
 async def test_stale_approved_clean_pr_escalates_to_blocker(monkeypatch):
     """Mergeable, approved, nobody merging it — the operator is the only fix."""
+    _freeze_dispatcher_now(monkeypatch)
     d = _dispatcher()
     _install_github(
         monkeypatch,
@@ -417,6 +430,7 @@ async def test_stale_approved_clean_pr_escalates_to_blocker(monkeypatch):
 @pytest.mark.asyncio
 async def test_rotted_approved_pr_reports_rebase_not_merge(monkeypatch):
     """A DIRTY approved PR needs a rebase; telling the operator to merge lies."""
+    _freeze_dispatcher_now(monkeypatch)
     d = _dispatcher()
     _install_github(
         monkeypatch,
@@ -434,6 +448,7 @@ async def test_rotted_approved_pr_reports_rebase_not_merge(monkeypatch):
 async def test_freshly_approved_pr_does_not_page(monkeypatch):
     """Below the stale threshold the report stays quiet — noise trains people
     to ignore the channel, which is the failure this sweep exists to fix."""
+    _freeze_dispatcher_now(monkeypatch)
     d = _dispatcher()
     _install_github(
         monkeypatch,
@@ -450,6 +465,7 @@ async def test_freshly_approved_pr_does_not_page(monkeypatch):
 @pytest.mark.asyncio
 async def test_standing_block_outranks_an_approval(monkeypatch):
     """One reviewer's standing CHANGES_REQUESTED means the PR is NOT approved."""
+    _freeze_dispatcher_now(monkeypatch)
     d = _dispatcher()
     _install_github(
         monkeypatch,
@@ -500,6 +516,7 @@ async def test_report_never_merges(monkeypatch):
     Agents do not merge autonomously. If `report_pr_review_queue` ever grows a
     merge call this test fails, which is the point.
     """
+    _freeze_dispatcher_now(monkeypatch)
     d = _dispatcher()
     merged: list[int] = []
 
