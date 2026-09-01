@@ -57,6 +57,7 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
         sys.path.insert(0, _p)
 
 from lib.daemon_runtime import AgentDefinition, AgentLoader  # noqa: E402
+from dispatch_usage import DispatchUsage, parse_dispatch_usage  # noqa: E402
 from harness_router import (  # noqa: E402
     configured_providers,
     cool_down,
@@ -353,12 +354,18 @@ def _write_harness_event(
     input_summary: str = "",
     output_summary: str = "",
     duration_ms: int | None = None,
+    usage: "DispatchUsage | None" = None,
 ) -> None:
     """
     Best-effort write of a harness_event entity to Neotoma.
 
     Uses the same /store endpoint and pattern as lib/activity/_store_activity_log.
     Never raises — a harness_event failure must not crash dispatch.
+
+    ``usage`` carries per-dispatch model/provider/token attribution (see
+    dispatch_usage.py). Its fields are merged in only when actually reported —
+    a harness that reports nothing adds no keys, so an absent field reads as
+    "not reported" rather than as a measured zero.
     """
     base_url = _require_neotoma_base_url()
     token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
@@ -386,6 +393,12 @@ def _write_harness_event(
         entity["output_summary"] = output_summary[:500]
     if duration_ms is not None:
         entity["duration_ms"] = duration_ms
+    if usage is not None:
+        # Additive: only fields the harness actually reported. If the
+        # harness_event schema has not yet declared these, Neotoma accepts the
+        # write and drops the undeclared keys — the pre-existing fields still
+        # land, so this can never regress what was already recorded.
+        entity.update(usage.as_event_fields())
 
     payload = {
         "idempotency_key": idempotency_key,
@@ -652,6 +665,9 @@ class SkillResult:
     error: str = ""  # non-process failure: missing binary / SKILL.md / timeout
     provider: str = ""
     attempted_providers: tuple[str, ...] = ()
+    # Per-dispatch model + token attribution (dispatch_usage.py). None when the
+    # dispatch never reached a harness (missing binary, unreadable SKILL.md).
+    usage: DispatchUsage | None = None
 
 
 # ── Harness adapters + capacity detection ─────────────────────────────────────
@@ -925,6 +941,32 @@ def _provider_command(
             None,
         )
     raise ValueError(f"unsupported harness provider: {provider}")
+
+
+def _requested_model(provider: str, cmd: list[str]) -> str | None:
+    """Return the model this dispatch ASKED for, read off the built command.
+
+    Deliberately derived from the argv actually being executed rather than from
+    a parameter, so it stays correct no matter which layer decides the model —
+    today nothing passes one (every dispatch takes the provider's ambient
+    default), and the per-model fallback work in ateles#667 adds `--model` in
+    the command builder. Reading argv means this keeps reporting the truth
+    across that change instead of silently going stale.
+
+    A requested model is NOT evidence of the model that ran; callers mark it
+    ``model_source="requested"``. Returns None when no model was pinned.
+    """
+    flags = {"--model", "-m"}
+    for i, arg in enumerate(cmd or []):
+        if arg in flags and i + 1 < len(cmd):
+            value = (cmd[i + 1] or "").strip()
+            return value or None
+        # Support the `--model=x` spelling too.
+        for flag in ("--model=",):
+            if arg.startswith(flag):
+                value = arg[len(flag):].strip()
+                return value or None
+    return None
 
 
 def _subscription_only_env(
@@ -1296,6 +1338,17 @@ async def _run_skill_once(
                     success="false",
                     output_summary=f"timeout after {timeout}s",
                     duration_ms=duration_ms,
+                    # A killed child's stdout is discarded, so no token counts
+                    # exist for a timeout — but the provider and the requested
+                    # model still do, and a dispatch that ran to the full
+                    # timeout is the most expensive kind there is. Recording
+                    # provider+model here is what makes "which model keeps
+                    # timing out" answerable at all.
+                    usage=parse_dispatch_usage(
+                        provider,
+                        "",
+                        requested_model=_requested_model(provider, cmd),
+                    ),
                 )
             except Exception as exc:
                 log.debug(f"[apis] timeout harness_event write failed: {exc}")
@@ -1345,6 +1398,18 @@ async def _run_skill_once(
                 f"deliver: {_delivery_denial}"
             )
 
+        # ── Per-dispatch usage attribution ───────────────────────────────────────
+        # Parsed from what the harness already emitted; never estimated. Under
+        # the swarm's text-mode invocations most harnesses report no token
+        # counts, in which case this records provider + model_source and leaves
+        # the token fields absent rather than writing a fabricated zero.
+        _usage = await asyncio.to_thread(
+            parse_dispatch_usage,
+            provider,
+            _stdout_text,
+            requested_model=_requested_model(provider, cmd),
+        )
+
         result = SkillResult(
             skill=skill,
             ok=proc.returncode == 0 and _delivery_denial is None,
@@ -1357,6 +1422,7 @@ async def _run_skill_once(
                 if (_delivery_denial and proc.returncode == 0)
                 else ""
             ),
+            usage=_usage,
         )
 
         # ── Dropped-allowlist-rule notification (ateles#255) ──────────────────────
@@ -1379,7 +1445,7 @@ async def _run_skill_once(
         if result.ok:
             log.info(
                 f"[apis] {skill} dispatch via {provider} ok "
-                f"({len(result.stdout)}B stdout)"
+                f"({len(result.stdout)}B stdout) [{_usage.summary()}]"
             )
             try:
                 await asyncio.to_thread(
@@ -1392,8 +1458,10 @@ async def _run_skill_once(
                     success="true",
                     output_summary=(
                         f"provider={provider} {len(result.stdout)}B stdout rc=0"
+                        f" {_usage.summary()}"
                     ),
                     duration_ms=duration_ms,
+                    usage=_usage,
                 )
             except Exception as exc:
                 log.debug(f"[apis] success harness_event write failed: {exc}")
@@ -1432,10 +1500,15 @@ async def _run_skill_once(
                     success="false",
                     output_summary=(
                         f"provider={provider} rc={proc.returncode} "
+                        f"{_usage.summary()} "
                         f"full_output={path_note} "
                         f"{result.stderr[:200]}"
                     ),
                     duration_ms=duration_ms,
+                    # A failed dispatch still spent tokens. Recording usage only
+                    # on success would systematically under-count exactly the
+                    # dispatches most likely to have burned a retry loop.
+                    usage=_usage,
                 )
             except Exception as exc:
                 log.debug(f"[apis] failure harness_event write failed: {exc}")
