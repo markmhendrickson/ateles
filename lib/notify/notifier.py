@@ -26,6 +26,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .email_gate import email_enabled, record_suppressed
+
 try:
     import apprise
 
@@ -328,6 +330,16 @@ class Notifier:
             return False
         first = (message.strip().splitlines() or ["notification"])[0]
         subject = f"[Ateles] {first[:80]}"
+        # Global kill-switch (ateles#645). Checked here, at the last point before
+        # the wire, so the notification is fully constructed and recorded before
+        # being withheld. Returning False routes the caller to its existing
+        # fallback (Telegram) rather than silently dropping the alert.
+        if not email_enabled():
+            record_suppressed(
+                channel="notifier", subject=subject, body=message,
+                to=self._notify_to,
+            )
+            return False
         cmd = ["gws", "gmail", "+send", "--to", self._notify_to,
                "--subject", subject, "--body", message]
         if self._swarm_email:

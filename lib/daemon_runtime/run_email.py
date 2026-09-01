@@ -38,6 +38,10 @@ import tempfile
 from email.message import EmailMessage
 from email.utils import formatdate
 
+# email_gate is stdlib-only and imports nothing from daemon_runtime, so this
+# cross-package import introduces no cycle.
+from lib.notify.email_gate import email_enabled, record_suppressed
+
 log = logging.getLogger("daemon_runtime.run_email")
 
 # Subject token that carries the task id. This is the PRIMARY inbound matcher:
@@ -140,6 +144,18 @@ def send_run_email(
         return False
 
     subject = run_subject(task_id, title)
+
+    # Global kill-switch (ateles#645). Run-thread mail is the highest-volume
+    # sender in the swarm (one kickoff + one message per stage, per task), so it
+    # is checked before the .eml is even built. The message is recorded so a
+    # withheld run update is still recoverable.
+    if not email_enabled():
+        record_suppressed(
+            channel="run_email", subject=subject, body=body, to=to_addr,
+            meta={"task_id": task_id, "run_key": run_key, "stage": stage},
+        )
+        return False
+
     mid, irt, refs = thread_ids(task_id, run_key, stage)
     eml = build_run_eml(
         from_addr=from_addr, to_addr=to_addr, subject=subject, body=body,
