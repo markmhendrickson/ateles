@@ -8,6 +8,7 @@ again — a correct signal nobody reads.
 from __future__ import annotations
 
 import importlib.util
+import plistlib
 import sys
 from pathlib import Path
 
@@ -28,9 +29,15 @@ _spec.loader.exec_module(daemon)
 class FakeStore:
     def __init__(self, statuses=None):
         self.statuses = statuses or {}
+        self.writes: list[ConnectorStatus] = []
+        self.configured = True
 
     def read_status(self, name):
         return self.statuses.get(name)
+
+    def write_status(self, status):
+        self.writes.append(status)
+        self.statuses[status.connector_name] = status
 
 
 def _reports(monkeypatch) -> list:
@@ -123,9 +130,31 @@ def test_no_connectors_registered_yet_is_a_clean_no_op():
     assert daemon.build_connectors() == []
 
 
-def test_run_once_without_connectors_returns_empty(monkeypatch):
+def test_run_once_without_connectors_writes_heartbeat(monkeypatch):
+    store = FakeStore()
     monkeypatch.setattr(daemon, "build_connectors", lambda: [])
-    assert daemon.run_once() == {}
+    monkeypatch.setattr(daemon, "ConnectorStore", lambda: store)
+
+    results = daemon.run_once()
+
+    assert results["connectors"].ok
+    assert len(store.writes) == 1
+    heartbeat = store.writes[0]
+    assert heartbeat.connector_name == "connectors"
+    assert heartbeat.status == "ok"
+    assert heartbeat.records_written == 0
+
+
+def test_run_once_without_connectors_fails_when_heartbeat_unconfigured(monkeypatch):
+    store = FakeStore()
+    store.configured = False
+    monkeypatch.setattr(daemon, "build_connectors", lambda: [])
+    monkeypatch.setattr(daemon, "ConnectorStore", lambda: store)
+
+    results = daemon.run_once()
+
+    assert not results["connectors"].ok
+    assert store.writes == []
 
 
 def test_env_filter_selects_which_connectors_may_run(monkeypatch):
@@ -138,3 +167,41 @@ def test_env_filter_selects_which_connectors_may_run(monkeypatch):
     # Unset means "all" — not "none", which would silently disable everything.
     monkeypatch.delenv("ATELES_CONNECTORS")
     assert enabled_connector_names() is None
+
+
+# ── install contract ────────────────────────────────────────────────────────
+
+
+def test_plist_committed_alongside_installer():
+    daemon_dir = Path(__file__).resolve().parent
+    assert (daemon_dir / "com.ateles.connectors.plist").is_file()
+
+
+def test_install_script_preflights_missing_plist():
+    src = (Path(__file__).resolve().parent / "install.sh").read_text()
+    assert "PLIST_SRC=" in src
+    assert "missing launchd plist" in src
+    assert "REPO_ROOT=" in src
+    assert 'launchctl bootstrap "$DOMAIN" "$DEST"' in src
+    assert "com.ateles.connectors is not listed" in src
+    assert 'cp "$TMP_PLIST" "$DEST"' in src
+
+
+def test_plist_matches_resident_daemon_contract():
+    plist_path = Path(__file__).resolve().parent / "com.ateles.connectors.plist"
+    plist = plistlib.loads(plist_path.read_bytes())
+
+    assert plist["Label"] == "com.ateles.connectors"
+    assert plist["KeepAlive"] is True
+    assert plist["RunAtLoad"] is True
+    assert "StartInterval" not in plist
+    assert plist["StandardOutPath"].endswith("/Library/Logs/ateles/connectors.log")
+    assert plist["StandardErrorPath"].endswith("/Library/Logs/ateles/connectors.log")
+    args = plist["ProgramArguments"]
+    assert args[0].endswith("/.venv/bin/python3")
+    assert args[1].endswith("/execution/daemons/connectors/connectors_daemon.py")
+    assert "--once" not in args
+    env = plist["EnvironmentVariables"]
+    assert env["NEOTOMA_BASE_URL"] == "https://neotoma.markmhendrickson.com"
+    assert env["CONNECTOR_POLL_SECONDS"] == "900"
+    assert "NEOTOMA_BEARER_TOKEN" not in env

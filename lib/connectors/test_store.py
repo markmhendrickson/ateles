@@ -147,8 +147,22 @@ def test_snapshot_unwrapping_handles_all_three_shapes():
 
 
 def test_new_status_is_created_not_corrected():
+    status_fields = ConnectorStatus(connector_name="fly", status="ok").to_entity_fields()
+
+    def query_response(_body):
+        if any(path == "/store" for path, _ in store.calls):
+            return {
+                "entities": [
+                    {"entity_id": "ent_fly", "snapshot": {"snapshot": status_fields}}
+                ]
+            }
+        return {"entities": []}
+
     store = RecordingStore(
-        responses={"/entities/query": {"entities": []}, "/store": {"entities": []}}
+        responses={
+            "/entities/query": query_response,
+            "/store": {"entities": [{"entity_id": "ent_fly"}]},
+        }
     )
     store.write_status(ConnectorStatus(connector_name="fly", status="ok"))
 
@@ -158,17 +172,26 @@ def test_new_status_is_created_not_corrected():
 
 def test_existing_status_is_corrected_not_recreated():
     """Creating a second entity per run is how duplicates accumulate."""
+    snapshot = {"connector_name": "fly"}
+
+    def query_response(_body):
+        return {
+            "entities": [
+                {
+                    "entity_id": "ent_fly",
+                    "snapshot": {"snapshot": dict(snapshot)},
+                }
+            ]
+        }
+
+    def correct_response(body):
+        snapshot[body["field"]] = body["value"]
+        return {}
+
     store = RecordingStore(
         responses={
-            "/entities/query": {
-                "entities": [
-                    {
-                        "entity_id": "ent_fly",
-                        "snapshot": {"snapshot": {"connector_name": "fly"}},
-                    }
-                ]
-            },
-            "/correct": {},
+            "/entities/query": query_response,
+            "/correct": correct_response,
         }
     )
     store.write_status(

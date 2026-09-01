@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ateles.connectors</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/markmhendrickson/repos/ateles/.venv/bin/python3</string>
+        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/connectors/connectors_daemon.py</string>
+    </array>
+
+    <!-- Resident loop rather than a calendar interval: the daemon owns its own
+         cadence (CONNECTOR_POLL_SECONDS, default 900s) and each connector
+         declares a poll interval from which its staleness threshold derives.
+         A calendar job would put the schedule in two places, and the two would
+         drift apart. -->
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Minimum seconds between relaunches. Guards against a restart storm when
+         the daemon exits repeatedly in a short window — an intermittent Neotoma
+         prod 502 from the Cloudflare tunnel is the observed cause (ateles#193). -->
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/markmhendrickson/repos/ateles</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/connectors.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/markmhendrickson/Library/Logs/ateles/connectors.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/markmhendrickson</string>
+        <key>PATH</key>
+        <string>/Users/markmhendrickson/.local/bin:/Users/markmhendrickson/.nvm/versions/node/v20.20.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>NEOTOMA_BASE_URL</key>
+        <string>https://neotoma.markmhendrickson.com</string>
+        <key>CONNECTOR_POLL_SECONDS</key>
+        <string>900</string>
+    </dict>
+</dict>
+</plist>

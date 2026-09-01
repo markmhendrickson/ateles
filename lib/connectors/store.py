@@ -273,6 +273,7 @@ class ConnectorStore:
                 [{"entity_type": STATUS_ENTITY_TYPE, **fields}],
                 key=idempotency_key(status.connector_name, "status", fields),
             )
+            self._verify_status_written(status)
             return
 
         entity_id = existing.entity_id
@@ -285,11 +286,47 @@ class ConnectorStore:
                     STATUS_ENTITY_TYPE,
                     field_name,
                     value,
-                    key=idempotency_key(
-                        status.connector_name,
-                        f"status-{field_name}",
-                        {"v": value, "at": status.last_attempt_at},
-                    ),
+                    key=self._status_field_key(status.connector_name, field_name, value),
                 )
             except NeotomaUnavailable as exc:
                 log.warning(f"status field {field_name!r} not written: {exc}")
+        self._verify_status_written(status)
+
+    @staticmethod
+    def _status_field_key(connector_name: str, field_name: str, value: Any) -> str:
+        """Stable key for one status field correction.
+
+        The field and value are the operation identity. Adding the run's
+        attempt timestamp to every key would make unchanged fields look new on
+        every run, which is the duplicate-write pattern this module avoids.
+        """
+        return idempotency_key(
+            connector_name,
+            f"status-{field_name}",
+            {"field": field_name, "value": value},
+        )
+
+    def _verify_status_written(self, status: ConnectorStatus) -> None:
+        """Confirm the status row's observable fields survived the write."""
+        expected = status.to_entity_fields()
+        for entity in self.query(STATUS_ENTITY_TYPE, limit=25, search=status.connector_name):
+            fields = self._fields_of(entity)
+            if fields.get("connector_name") != status.connector_name:
+                continue
+            missing = {
+                key: value
+                for key, value in expected.items()
+                if value is not None and fields.get(key) != value
+            }
+            if not missing:
+                return
+            log.warning(
+                "connector_status read-back mismatch for %s: %s",
+                status.connector_name,
+                ", ".join(sorted(missing)),
+            )
+            break
+
+        raise NeotomaUnavailable(
+            f"connector_status read-back verification failed for {status.connector_name}"
+        )

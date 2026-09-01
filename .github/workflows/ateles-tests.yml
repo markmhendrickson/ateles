@@ -16,9 +16,11 @@ on:
       - "execution/daemons/phoenicurus-release/**"
       - "execution/daemons/monedula/**"
       - "execution/daemons/anthus/**"
+      - "execution/daemons/connectors/**"
       - "execution/mcp/**"
       - "lib/daemon_runtime/**"
       - "lib/approval/**"
+      - "lib/connectors/**"
       - "execution/scripts/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -59,6 +61,10 @@ jobs:
       # ship a same-named top-level module today.
       - name: Run anthus daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/anthus/ -q
+      - name: Run connector contract tests
+        run: uv run --extra dev python -m pytest lib/connectors/ -q
+      - name: Run connector daemon tests
+        run: uv run --extra dev python -m pytest execution/daemons/connectors/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
       # ateles#524 (qa lens, PR #527 round 2): execution/scripts/ has its own

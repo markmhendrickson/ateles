@@ -243,6 +243,43 @@ contract against the small source first is what makes the large one safe.
 Stage 1's acceptance criterion is the trigger, not the code. That is the
 difference between this and `sync_issues`.
 
+## Install and verify
+
+Install the launchd resident agent from the repo root:
+
+```bash
+./execution/daemons/connectors/install.sh
+```
+
+Stage 1 has no source connector registered yet. That empty state is valid:
+`build_connectors()` returns `[]`, the daemon still starts, and when Neotoma
+credentials are configured it writes a `connector_status` heartbeat for
+`connectors` with `records_written: 0`. Stage 2 replaces that framework-only
+heartbeat with the Fly connector's real source status and observations.
+
+Verify the trigger, not just the manual command:
+
+```bash
+launchctl list | grep com.ateles.connectors
+tail -f ~/Library/Logs/ateles/connectors.log
+```
+
+The expected first log line is `connector daemon starting — poll every 900s`,
+followed by a clean "no connectors registered" pass and heartbeat status write
+until Stage 2 adds Fly.
+`python3 execution/daemons/connectors/connectors_daemon.py --once` remains the
+manual one-pass check, but it is not a substitute for the scheduled agent.
+
+Installer failures should be actionable:
+
+- Missing `com.ateles.connectors.plist`: exits `1` before `launchctl bootstrap` and
+  prints the exact missing path plus the manual `--once` fallback.
+- `launchctl bootstrap` failure: inspect `~/Library/Logs/ateles/connectors.log` and
+  `launchctl print gui/$UID/com.ateles.connectors`.
+- Neotoma unavailable: the resident loop logs the failure and continues; a
+  manual `--once` returns non-zero when registered connectors fail or the
+  Stage 1 heartbeat cannot be verified by read-back.
+
 ## Schema registration — deferred deliberately
 
 The `connector_status` and `deployment_observation` entity types are **not yet

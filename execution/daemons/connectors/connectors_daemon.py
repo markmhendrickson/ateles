@@ -29,12 +29,13 @@ one connector is isolated by the runner and never stops the others.
 
 Run it once by hand without touching the schedule:
 
-    python3 execution/daemons/riparia-connectors/connectors_daemon.py --once
+    python3 execution/daemons/connectors/connectors_daemon.py --once
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -61,7 +62,7 @@ if _NEOTOMA_ENV_FILE.exists():
         _k, _, _v = _line.partition("=")
         os.environ.setdefault(_k.strip(), _v.strip().strip("\"'"))
 
-from lib.connectors.base import ConnectorResult  # noqa: E402
+from lib.connectors.base import ConnectorResult, ConnectorStatus  # noqa: E402
 from lib.connectors.runner import enabled_connector_names, run_all  # noqa: E402
 from lib.connectors.store import (  # noqa: E402
     NEOTOMA_USER_AGENT,
@@ -132,16 +133,13 @@ def emit_daemon_report(severity: str, message: str, details: dict | None = None)
     if details:
         payload["details"] = json.dumps(details)
 
+    message_key = hashlib.sha256(f"{severity}:{message}".encode()).hexdigest()[:16]
     body = json.dumps(
         {
             "entities": [payload],
-            # Keyed on the day and the message so a connector failing every 15
-            # minutes reports once per day rather than 96 times.
-            "idempotency_key": (
-                f"{DAEMON_NAME}-{severity}-"
-                f"{datetime.now(timezone.utc).date().isoformat()}-"
-                f"{abs(hash(message)) % 10**8}"
-            ),
+            # Keyed on the stable alert identity so daemon restarts do not
+            # defeat deduplication.
+            "idempotency_key": f"{DAEMON_NAME}-{message_key}",
         }
     ).encode()
 
@@ -191,14 +189,37 @@ def alert_on_failures(store: ConnectorStore, results: "dict[str, ConnectorResult
 def run_once() -> "dict[str, ConnectorResult]":
     """One pass over every enabled connector."""
     connectors = build_connectors()
+    store = ConnectorStore()
     if not connectors:
         log.info(
             "no connectors registered — the framework is live but has no sources yet "
             "(stage 2 adds Fly)"
         )
-        return {}
+        if not store.configured:
+            error = "NEOTOMA_BEARER_TOKEN missing — cannot record connector daemon heartbeat"
+            log.error(error)
+            return {DAEMON_NAME: ConnectorResult.failure(error)}
 
-    store = ConnectorStore()
+        attempt_at = datetime.now(timezone.utc).isoformat()
+        status = ConnectorStatus(
+            connector_name=DAEMON_NAME,
+            status="ok",
+            last_attempt_at=attempt_at,
+            last_success_at=attempt_at,
+            records_written=0,
+            poll_interval_seconds=POLL_SECONDS,
+            stale_after_seconds=max(3 * POLL_SECONDS, 900),
+            consecutive_failures=0,
+        )
+        try:
+            store.write_status(status)
+            log.info("wrote connector daemon heartbeat status")
+            return {DAEMON_NAME: ConnectorResult.success(records_written=0)}
+        except Exception as exc:  # noqa: BLE001
+            error = f"failed to persist connector daemon heartbeat: {exc}"
+            log.error(error)
+            return {DAEMON_NAME: ConnectorResult.failure(error)}
+
     if not store.configured:
         # Never silently skip: "no token" and "nothing to report" must not look
         # the same, which is the whole failure class this package addresses.
