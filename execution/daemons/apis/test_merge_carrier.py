@@ -70,7 +70,9 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 
-NOW = datetime(2026, 8, 31, 12, 0, 0, tzinfo=timezone.utc)
+# `report_pr_review_queue` reads the wall clock internally. Keep fixtures tied
+# to the same clock so age-day assertions do not drift as the calendar advances.
+NOW = datetime.now(timezone.utc)
 
 
 def _pr(number: int, *, sha: str = "abc1234", draft: bool = False) -> dict:
