@@ -284,6 +284,35 @@ def test_escalation_entity_matches_the_schema():
     assert entity["source_entity_id"] == "ent_a"
 
 
+def test_escalation_entity_sends_no_undeclared_fields():
+    """The entity carries ONLY fields the registered escalation schema declares.
+
+    The original assertion checked that each declared field was PRESENT, which
+    an undeclared extra passes trivially — `observed_at` shipped that way
+    (ateles#599 arch lens, confirmed live via describe_entity_type). An
+    undeclared field is an unknown_fields defect, not tolerated pass-through,
+    so the check has to be exact rather than one-directional.
+
+    The observation time still reaches the operator: it is stated in the body.
+    """
+    declared = {
+        "entity_type",
+        "title",
+        "body",
+        "severity",
+        "source_agent",
+        "source_entity_id",
+        "source_entity_type",
+        "status",
+        "tags",
+    }
+    entity = build_escalation_entity(_s(), observed_at="2026-08-31T12:00:00Z")
+
+    assert set(entity) == declared, f"undeclared: {sorted(set(entity) - declared)}"
+    assert "observed_at" not in entity
+    assert "2026-08-31T12:00:00Z" in entity["body"], "the timestamp must not be lost"
+
+
 def test_escalate_writes_an_entity_and_notifies(monkeypatch, tmp_path):
     """The effect assertion #553 asked for: an escalation is actually filed."""
     posted: list = []

@@ -228,6 +228,13 @@ def build_escalation_entity(s: Stranding, *, observed_at: str) -> dict:
 
     Fields follow the registered `escalation` schema (v1.0): title, body,
     severity, source_agent, source_entity_id, source_entity_type, status, tags.
+
+    `observed_at` is deliberately NOT sent as a field: the arch lens confirmed
+    against the live schema that it is undeclared on `escalation`, and an
+    undeclared field is an unknown_fields defect rather than tolerated
+    pass-through (ateles#599 review). The observation time is not lost — it is
+    stated in the body prose above, which is the operator-facing surface, and
+    Neotoma stamps its own `observed_at` on ingest.
     """
     return {
         "entity_type": "escalation",
@@ -249,7 +256,6 @@ def build_escalation_entity(s: Stranding, *, observed_at: str) -> dict:
         "source_entity_type": "payment_profile",
         "status": "open",
         "tags": ["monedula", "payments", "stranded_profile", s.reason],
-        "observed_at": observed_at,
     }
 
 
