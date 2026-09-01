@@ -78,6 +78,11 @@ except ImportError:
 DATA_DIR = get_data_dir()
 IMPORTS_DIR = DATA_DIR / "imports"
 
+# Prefix for the optional detected-language line emitted under
+# `--no-store --emit-language`. Distinctive enough that it cannot collide with
+# transcribed speech, and stripped by the caller before the text is used.
+LANGUAGE_MARKER = "__TRANSCRIBE_LANGUAGE__="
+
 # Audio file extensions to process
 AUDIO_EXTENSIONS = {
     ".wav",
@@ -2486,6 +2491,13 @@ def main():
         "Used by realtime chunk transcription.",
     )
     parser.add_argument(
+        "--emit-language",
+        action="store_true",
+        help=f"With --no-store, print '{LANGUAGE_MARKER}<code>' on a final line "
+        "so a caller can read the DETECTED language. Used by the live tailer's "
+        "hallucination filter.",
+    )
+    parser.add_argument(
         "--original-source-file",
         type=str,
         default=None,
@@ -2566,6 +2578,13 @@ def main():
             text = (transcription_result.get("transcription_text") or "").strip()
             if text:
                 print(text)
+            if args.emit_language:
+                # Machine-readable, on its own line, after the transcript. The
+                # live tailer needs the DETECTED language to tell a fabricated
+                # Georgian chunk from real English speech — a distinction the
+                # pre-transcription loudness gate structurally cannot make.
+                lang = (transcription_result.get("language") or "auto").strip()
+                print(f"{LANGUAGE_MARKER}{lang}")
             return
 
         relate_c, relate_fba = _merge_transcription_relate_targets(

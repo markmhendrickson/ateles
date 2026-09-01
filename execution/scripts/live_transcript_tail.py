@@ -34,13 +34,46 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from hallucination_filter import screen_transcription  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 TRANSCRIBE = REPO_ROOT / "execution" / "scripts" / "transcribe_audio.py"
+
+# The marker transcribe_audio.py prints under `--no-store --emit-language`.
+LANGUAGE_MARKER = "__TRANSCRIBE_LANGUAGE__="
+
+# Interpreter candidates, in priority order. REPO_ROOT/execution/venv is the
+# canonical one; a git worktree usually has only `.venv`, which is why resolving
+# against REPO_ROOT alone silently degraded to an interpreter that cannot import
+# `config` and failed EVERY chunk while reporting healthy. See
+# resolve_transcriber_python().
 VENV_PYTHON = REPO_ROOT / "execution" / "venv" / "bin" / "python"
+DOTVENV_PYTHON = REPO_ROOT / ".venv" / "bin" / "python"
 
 # Matches Tyto's conventions so both halves see the same files.
 REMOTE_TRACK_NAMES = ("remote", "system")
 RECORDING_EXTENSIONS = {".aac", ".m4a", ".mp4", ".wav"}
+
+# Track kinds in selection priority. The mic track is the operator; the system
+# track is the computer's OUTPUT. Audio Hijack writes both simultaneously, so an
+# auto-detect that took whichever it found first transcribed the AGENT's own
+# speech back as the operator's — plausible-looking chunks from the wrong
+# source, which is worse than no chunks at all.
+TRACK_PRIORITY = ("mic", "remote", "system")
+
+# The session's expected language. A detected language other than this is the
+# single highest-yield hallucination signal; see hallucination_filter.
+DEFAULT_SESSION_LANGUAGE = os.environ.get("LIVE_TRANSCRIPT_LANGUAGE", "en")
+
+# Three failed chunks in a row means the transcription path is broken, not that
+# the room is quiet. On 2026-09-01 every chunk failed with
+# `ModuleNotFoundError: config` across four restarts while the tailer reported
+# healthy — a run that cannot transcribe anything is not tailing.
+DEFAULT_MAX_CONSECUTIVE_FAILURES = int(
+    os.environ.get("LIVE_TRANSCRIPT_MAX_CONSECUTIVE_FAILURES", "3")
+)
 
 DEFAULT_DIR = Path(
     os.environ.get(
@@ -221,34 +254,79 @@ def matches_track(path: Path, kind: str) -> bool:
     )
 
 
+def track_priority(path: Path) -> int:
+    """Sort key: lower is preferred. Mic beats remote beats system."""
+    kind = track_kind(path)
+    return TRACK_PRIORITY.index(kind) if kind in TRACK_PRIORITY else len(TRACK_PRIORITY)
+
+
+def is_tailable_track(path: Path) -> bool:
+    """Any Audio Hijack track this tailer can follow, mic included."""
+    return (
+        path.is_file()
+        and path.suffix.lower() in RECORDING_EXTENSIONS
+        and track_kind(path) in TRACK_PRIORITY
+    )
+
+
 def find_growing_recording(watch_dir: Path, settle_probe: float = 3.0) -> Path | None:
-    """Return the most recent remote/system track that is actively growing."""
+    """Return the actively-growing track, preferring mic over system/remote.
+
+    Probes ALL candidates across one sleep rather than only the newest, because
+    Audio Hijack writes `<session> mic.mp4` and `<session> system.mp4`
+    simultaneously and their mtimes interleave. Taking whichever happened to be
+    newest is how the 2026-09-01 session ended up tailing the computer's own
+    OUTPUT and feeding the agent's speech back as the operator's.
+    """
     if not watch_dir.exists():
         log(f"watch dir does not exist: {watch_dir}")
         return None
 
-    candidates = [p for p in watch_dir.iterdir() if p.is_file() and is_remote_track(p)]
+    candidates = [p for p in watch_dir.iterdir() if is_tailable_track(p)]
     if not candidates:
         return None
 
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    newest = candidates[0]
+    def size_of(p: Path) -> int | None:
+        try:
+            return p.stat().st_size
+        except OSError:
+            return None
 
-    try:
-        size_before = newest.stat().st_size
-    except OSError:
-        return None
+    before = {p: size_of(p) for p in candidates}
     time.sleep(settle_probe)
-    try:
-        size_after = newest.stat().st_size
-    except OSError:
+
+    growing = []
+    for p in candidates:
+        start, end = before.get(p), size_of(p)
+        if start is not None and end is not None and end > start:
+            growing.append(p)
+
+    if not growing:
+        newest = max(candidates, key=lambda p: p.stat().st_mtime)
+        log(f"no recording is growing (finished?): newest is {newest.name}")
         return None
 
-    if size_after > size_before:
-        return newest
+    # Priority first, mtime only to break ties within a kind.
+    growing.sort(key=lambda p: (track_priority(p), -p.stat().st_mtime))
+    return growing[0]
 
-    log(f"newest recording is not growing (finished?): {newest.name}")
-    return None
+
+def warn_if_not_mic(recording: Path) -> None:
+    """Say loudly when the selected track is the computer's output, not the mic.
+
+    Silence here is what made the wrong-track failure invisible: a system-track
+    tail produces perfectly plausible chunks, they are just the wrong person's.
+    """
+    kind = track_kind(recording)
+    log(f"selected track: {kind or 'unknown'} ({recording.name})")
+    if kind in ("system", "remote"):
+        log("=" * 68)
+        log("WARNING: SYSTEM/REMOTE TRACK SELECTED — this is the computer's")
+        log("OUTPUT, not the microphone. Transcribed speech will be whatever")
+        log("was PLAYED, not what you said.")
+        log(f"  selected: {recording}")
+        log("  pass --file '<session> mic.mp4' to tail the microphone instead.")
+        log("=" * 68)
 
 
 def wait_for_resume(
@@ -300,14 +378,41 @@ def apply_transcription_result(
     ok: bool,
     payload: str,
     consecutive_failures: int,
+    *,
+    detected_language: str | None = None,
+    expected_language: str | None = None,
+    window_seconds: float | None = None,
+    screen: bool = True,
 ) -> int:
     """Update ``record`` from a ``transcribe_slice`` result; return new failure streak.
 
     Silence is a normal meeting state: it neither increments nor resets the
     consecutive-failure kill switch.
+
+    A successful transcription is additionally screened for hallucination
+    signatures. A caught chunk KEEPS ITS TEXT and gains ``filtered`` plus a
+    reason — it is never dropped. Dropping it would make a false positive
+    invisible and unrecoverable, which is precisely the silent-failure class
+    this whole issue is about. A filtered chunk is also not a failure: the
+    transcription path worked, it just produced a fabrication, so the streak
+    resets exactly as a clean success would.
     """
     if ok:
         record["text"] = payload
+        if detected_language:
+            record["language"] = detected_language
+        if not screen:
+            return 0
+        verdict = screen_transcription(
+            payload,
+            expected_language=expected_language,
+            detected_language=detected_language,
+            window_seconds=window_seconds,
+        )
+        if verdict.filtered:
+            record["filtered"] = verdict.reason
+            if verdict.detail:
+                record["filtered_detail"] = verdict.detail
         return 0
     if payload == SILENCE_SENTINEL:
         record["ok"] = True
@@ -367,39 +472,115 @@ def build_subprocess_env(
     return env
 
 
-def transcribe_slice(wav_path: Path, env: dict) -> tuple[bool, str]:
+def preflight_interpreter(python_bin: Path, env: dict) -> str | None:
+    """Return None if ``python_bin`` can import what transcribe_audio.py needs.
+
+    Otherwise returns why it cannot. Existence is not enough: the interpreter
+    that broke the 2026-09-01 session existed and ran, it just could not import
+    `config`. Only an actual import proves the dependency path is intact.
+    """
+    if not python_bin.exists():
+        return "does not exist"
+    probe = (
+        "import sys; sys.path.insert(0, %r); "
+        "import config, openai, dotenv, requests" % str(TRANSCRIBE.parent)
+    )
+    try:
+        proc = subprocess.run(
+            [str(python_bin), "-c", probe],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        return f"could not be run ({exc})"
+    if proc.returncode != 0:
+        tail = (proc.stderr or "").strip().splitlines()
+        return tail[-1] if tail else f"import probe exited {proc.returncode}"
+    return None
+
+
+def resolve_transcriber_python(env: dict) -> tuple[Path | None, list[str]]:
+    """Pick an interpreter that can actually run transcribe_audio.py.
+
+    Returns ``(interpreter, attempts)``. A None interpreter means the caller
+    must REFUSE TO START — the old behaviour of falling back to
+    ``sys.executable`` produced a tailer that ran forever, wrote a chunk every
+    30 seconds, and failed every single one.
+
+    ``LIVE_TRANSCRIPT_PYTHON`` overrides the search, but is preflighted like any
+    other candidate: an explicit override that cannot import the dependencies is
+    the same silent degradation under a different name.
+    """
+    candidates: list[Path] = []
+    override = env.get("LIVE_TRANSCRIPT_PYTHON", "").strip()
+    if override:
+        candidates.append(Path(override))
+    candidates += [VENV_PYTHON, DOTVENV_PYTHON]
+
+    attempts: list[str] = []
+    for candidate in candidates:
+        problem = preflight_interpreter(candidate, env)
+        if problem is None:
+            return candidate, attempts
+        attempts.append(f"{candidate}: {problem}")
+    return None, attempts
+
+
+def transcribe_slice(
+    wav_path: Path,
+    env: dict,
+    python_bin: Path,
+    *,
+    language: str | None = None,
+) -> tuple[bool, str, str | None]:
     """Transcribe one slice.
 
-    Returns (ok, payload). On failure the payload is an error string, EXCEPT for
-    an empty transcript, which returns SILENCE_SENTINEL so the caller can tell a
-    quiet interval apart from a broken transcription path.
+    Returns ``(ok, payload, detected_language)``. On failure the payload is an
+    error string, EXCEPT for an empty transcript, which returns SILENCE_SENTINEL
+    so the caller can tell a quiet interval apart from a broken transcription
+    path.
+
+    ``python_bin`` is resolved once at startup and passed in — never re-derived
+    here, so there is no code path left that can quietly pick a different
+    interpreter mid-run.
     """
-    python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
+    cmd = [
+        str(python_bin), str(TRANSCRIBE), str(wav_path),
+        "--no-store", "--no-diarize", "--emit-language",
+    ]
+    if language:
+        cmd += ["--language", language]
     try:
         result = subprocess.run(
-            [
-                python_bin, str(TRANSCRIBE), str(wav_path),
-                "--no-store", "--no-diarize",
-            ],
-            capture_output=True, text=True, env=env, timeout=300,
+            cmd, capture_output=True, text=True, env=env, timeout=300,
         )
     except subprocess.TimeoutExpired:
-        return False, "transcription timed out after 300s"
+        return False, "transcription timed out after 300s", None
     except OSError as exc:
-        return False, f"failed to run transcribe_audio.py: {exc}"
+        return False, f"failed to run transcribe_audio.py: {exc}", None
 
     if result.returncode != 0:
         tail = (result.stderr or "").strip().splitlines()
-        return False, tail[-1] if tail else f"exit {result.returncode}"
+        return False, (tail[-1] if tail else f"exit {result.returncode}"), None
 
     # transcribe_audio.py prints a "Transcribing audio file: ..." banner ahead of
-    # the transcript; drop it so the JSONL carries only spoken text.
-    lines = [ln for ln in (result.stdout or "").splitlines()
-             if ln.strip() and not ln.startswith("Transcribing audio file:")]
-    text = " ".join(ln.strip() for ln in lines).strip()
+    # the transcript; drop it so the JSONL carries only spoken text. The language
+    # marker rides on its own trailing line.
+    detected: str | None = None
+    lines = []
+    for ln in (result.stdout or "").splitlines():
+        if not ln.strip():
+            continue
+        if ln.startswith(LANGUAGE_MARKER):
+            detected = ln[len(LANGUAGE_MARKER):].strip() or None
+            continue
+        if ln.startswith("Transcribing audio file:"):
+            continue
+        lines.append(ln.strip())
+
+    text = " ".join(lines).strip()
     if not text:
-        return False, SILENCE_SENTINEL
-    return True, text
+        return False, SILENCE_SENTINEL, detected
+    return True, text, detected
 
 
 def main(argv: list[str]) -> int:
@@ -426,6 +607,17 @@ def main(argv: list[str]) -> int:
                     default=DEFAULT_SILENCE_THRESHOLD_DB,
                     help=f"Skip transcription below this sustained RMS in dB "
                          f"(default: {DEFAULT_SILENCE_THRESHOLD_DB:g})")
+    ap.add_argument("--max-consecutive-failures", type=int,
+                    default=DEFAULT_MAX_CONSECUTIVE_FAILURES,
+                    help=f"Stop after this many consecutive failed chunks "
+                         f"(default: {DEFAULT_MAX_CONSECUTIVE_FAILURES})")
+    ap.add_argument("--language", default=DEFAULT_SESSION_LANGUAGE,
+                    help=f"Expected session language, for the hallucination "
+                         f"filter (default: {DEFAULT_SESSION_LANGUAGE!r}); "
+                         f"empty disables the language check")
+    ap.add_argument("--no-hallucination-filter", action="store_true",
+                    help="Record chunks without screening them (the JSONL keeps "
+                         "filtered text either way; this only stops the marking)")
     args = ap.parse_args(argv)
 
     if not TRANSCRIBE.exists():
@@ -435,7 +627,24 @@ def main(argv: list[str]) -> int:
     env = build_subprocess_env()
     if not env.get("OPENAI_API_KEY"):
         log("OPENAI_API_KEY not set (checked env and ~/.config/neotoma/.env)")
+        log("Refusing to start: every chunk would fail. Materialize the secret")
+        log("first (see docs/secrets_management.md), then re-run.")
         return 1
+
+    # Fail closed on the interpreter BEFORE anything is written. The old code
+    # fell back to sys.executable, which exists and runs but cannot import
+    # `config` from a worktree — so the tailer ran for hours writing nothing but
+    # errors, indistinguishable at a glance from a tailer sitting through a
+    # quiet room.
+    python_bin, attempts = resolve_transcriber_python(env)
+    if python_bin is None:
+        log("no usable Python interpreter for transcribe_audio.py — refusing to start.")
+        for attempt in attempts:
+            log(f"  tried {attempt}")
+        log("Create execution/venv, or point LIVE_TRANSCRIPT_PYTHON at an")
+        log("interpreter that can import config/openai/dotenv/requests.")
+        return 1
+    log(f"transcriber interpreter: {python_bin}")
 
     recording = args.file
     if recording is None:
@@ -448,6 +657,10 @@ def main(argv: list[str]) -> int:
         log(f"recording not found: {recording}")
         return 1
 
+    # Applies to --file too: an explicit system track is just as wrong a source
+    # as an auto-detected one, and just as invisible in the output.
+    warn_if_not_mic(recording)
+
     out_path = args.out or recording.with_name(f"{recording.stem}_live.jsonl")
 
     cursor = args.start_at
@@ -457,6 +670,13 @@ def main(argv: list[str]) -> int:
     log(f"tailing: {recording.name}")
     log(f"chunk interval: {args.interval}s   starting at: {cursor:.0f}s")
     log(f"silence gate: skip below {args.silence_threshold_db:g} dB sustained RMS")
+    if args.no_hallucination_filter:
+        log("hallucination filter: OFF")
+    else:
+        log(f"hallucination filter: on (session language "
+            f"{args.language or 'unset'}) — caught chunks are MARKED, not dropped")
+    log(f"failure kill switch: stop after {args.max_consecutive_failures} "
+        f"consecutive failed chunks")
     if args.follow:
         log(f"follow mode: on — pausing (not exiting) on stop, up to "
             f"{args.follow_timeout_min:g} min per break")
@@ -465,6 +685,7 @@ def main(argv: list[str]) -> int:
 
     chunk_index = 0
     consecutive_failures = 0
+    fatal = False
 
     def append(record: dict) -> None:
         with out_path.open("a", encoding="utf-8") as fh:
@@ -564,6 +785,7 @@ def main(argv: list[str]) -> int:
 
             rms_db: float | None = None
             skipped_silent = False
+            detected_language: str | None = None
             try:
                 proc = subprocess.run(
                     [
@@ -586,7 +808,9 @@ def main(argv: list[str]) -> int:
                         skipped_silent = True
                         ok, payload = True, ""
                     else:
-                        ok, payload = transcribe_slice(tmp_path, env)
+                        ok, payload, detected_language = transcribe_slice(
+                            tmp_path, env, python_bin,
+                        )
             except subprocess.TimeoutExpired:
                 ok, payload = False, "ffmpeg slice timed out"
             finally:
@@ -610,8 +834,18 @@ def main(argv: list[str]) -> int:
                 if rms_db is not None:
                     record["rms_db"] = round(rms_db, 1)
                 consecutive_failures = apply_transcription_result(
-                    record, ok, payload, consecutive_failures
+                    record, ok, payload, consecutive_failures,
+                    detected_language=detected_language,
+                    expected_language=args.language or None,
+                    window_seconds=available,
+                    screen=not args.no_hallucination_filter,
                 )
+                if record.get("filtered"):
+                    log(
+                        f"chunk {chunk_index}: filtered as "
+                        f"{record['filtered']} ({record.get('filtered_detail', '')}) "
+                        f"— kept in the JSONL, not surfaced as speech"
+                    )
 
             append(record)
 
@@ -633,15 +867,31 @@ def main(argv: list[str]) -> int:
                 log("final slice written — exiting")
                 break
 
-            if consecutive_failures >= 5:
-                log("5 consecutive failures — stopping (check the JSONL error lines)")
+            if consecutive_failures >= args.max_consecutive_failures:
+                # A run that cannot transcribe anything is not tailing. Say so
+                # in the JSONL as well as on stderr, so a supervising session
+                # sees it without having to read the log.
+                append({
+                    "event": "fatal_transcription_failures",
+                    "ok": False,
+                    "consecutive_failures": consecutive_failures,
+                    "last_error": record.get("error"),
+                    "t": datetime.now(tz=UTC).isoformat(),
+                })
+                log(
+                    f"{consecutive_failures} consecutive transcription failures "
+                    f"— STOPPING. This is a broken transcription path, not a "
+                    f"quiet room."
+                )
+                log(f"last error: {record.get('error')}")
+                fatal = True
                 break
 
     except KeyboardInterrupt:
         log("interrupted — stopping")
 
     log(f"done. {chunk_index} chunk(s) written to {out_path}")
-    return 0
+    return 1 if fatal else 0
 
 
 if __name__ == "__main__":
