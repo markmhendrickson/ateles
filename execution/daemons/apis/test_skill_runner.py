@@ -2699,3 +2699,169 @@ class TestDeliveryFailureIsReportedAsFailure:
         result = self._dispatch_with_child_output(b"All done. 12 passed.\n")
         assert result.ok is True
         assert result.error == ""
+
+
+# ── Per-dispatch usage attribution (model + tokens) ───────────────────────────
+
+
+class TestDispatchUsageRecording:
+    """The harness_event written per dispatch must carry model/provider/token
+    attribution, so a spend can be traced to the role and task that caused it.
+
+    These are integration tests through run_skill: the parsing itself is
+    covered against real captured CLI output in test_dispatch_usage.py.
+    """
+
+    def setup_method(self) -> None:
+        skill_runner._agent_def_cache.clear()
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _dispatch(self, mock_write_harness, MockLoader, stdout: bytes, rc: int = 0):
+        instance = MagicMock()
+        instance.load.return_value = _make_def()
+        MockLoader.return_value = instance
+
+        async def fake_exec(*cmd, **kwargs):
+            proc = MagicMock()
+            proc.returncode = rc
+
+            async def _communicate(input=None):
+                return stdout, b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            return self._run(
+                skill_runner.run_skill(
+                    "gryllus",
+                    "work prompt",
+                    role="gryllus",
+                    task_entity_id="ent_test",
+                )
+            )
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_usage_is_attached_to_the_success_event(
+        self, MockLoader, mock_write_harness
+    ) -> None:
+        json_out = (
+            b'{"usage":{"input_tokens":1200,"output_tokens":340,'
+            b'"cache_read_input_tokens":50},"total_cost_usd":0.04,'
+            b'"modelUsage":{"claude-opus-5":{"outputTokens":340}},"type":"result"}'
+        )
+        result = self._dispatch(mock_write_harness, MockLoader, json_out)
+        assert result.ok
+
+        success = [
+            c
+            for c in mock_write_harness.call_args_list
+            if c.kwargs.get("success") == "true"
+        ]
+        assert success, "expected a success harness_event"
+        usage = success[-1].kwargs.get("usage")
+        assert usage is not None, "success event must carry usage"
+        fields = usage.as_event_fields()
+        assert fields["model"] == "claude-opus-5"
+        assert fields["model_source"] == "reported"
+        assert fields["input_tokens"] == 1200
+        assert fields["output_tokens"] == 340
+        assert fields["provider"] == "claude"
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_usage_is_exposed_on_the_result_for_callers(
+        self, MockLoader, mock_write_harness
+    ) -> None:
+        json_out = (
+            b'{"usage":{"input_tokens":10,"output_tokens":2},'
+            b'"modelUsage":{"claude-opus-5":{"outputTokens":2}},"type":"result"}'
+        )
+        result = self._dispatch(mock_write_harness, MockLoader, json_out)
+        assert result.usage is not None
+        assert result.usage.model == "claude-opus-5"
+        assert result.usage.total_tokens == 12
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_text_mode_dispatch_records_provider_without_fabricating_tokens(
+        self, MockLoader, mock_write_harness
+    ) -> None:
+        """The swarm currently runs text mode. Provider attribution must still
+        be recorded, and token fields must stay absent rather than read zero."""
+        result = self._dispatch(
+            mock_write_harness, MockLoader, b"Opened PR #12 as requested.\n"
+        )
+        assert result.ok
+        usage = [
+            c
+            for c in mock_write_harness.call_args_list
+            if c.kwargs.get("success") == "true"
+        ][-1].kwargs["usage"]
+        fields = usage.as_event_fields()
+        assert fields["provider"] == "claude"
+        assert "input_tokens" not in fields
+        assert "total_tokens" not in fields
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_failed_dispatch_still_records_usage(
+        self, MockLoader, mock_write_harness
+    ) -> None:
+        """A failed dispatch still spent tokens; recording only successes would
+        under-count exactly the runs most likely to have burned a retry loop."""
+        json_out = (
+            b'{"usage":{"input_tokens":900,"output_tokens":5},'
+            b'"modelUsage":{"claude-opus-5":{"outputTokens":5}},"type":"result"}'
+        )
+        result = self._dispatch(mock_write_harness, MockLoader, json_out, rc=1)
+        assert not result.ok
+        failures = [
+            c
+            for c in mock_write_harness.call_args_list
+            if c.kwargs.get("success") == "false"
+        ]
+        assert failures
+        usage = failures[-1].kwargs.get("usage")
+        assert usage is not None
+        assert usage.input_tokens == 900
+
+
+class TestRequestedModelFromArgv:
+    """`_requested_model` reads argv so it stays correct regardless of which
+    layer sets the model (nothing does today; ateles#667 adds `--model`)."""
+
+    def test_reads_double_dash_model(self) -> None:
+        assert (
+            skill_runner._requested_model(
+                "cursor", ["cursor-agent", "--model", "composer-2.5", "--print"]
+            )
+            == "composer-2.5"
+        )
+
+    def test_reads_short_flag(self) -> None:
+        assert (
+            skill_runner._requested_model("codex", ["codex", "exec", "-m", "gpt-5.3"])
+            == "gpt-5.3"
+        )
+
+    def test_reads_equals_spelling(self) -> None:
+        assert (
+            skill_runner._requested_model("cursor", ["cursor-agent", "--model=composer-2.5"])
+            == "composer-2.5"
+        )
+
+    def test_returns_none_when_unpinned(self) -> None:
+        """Today's actual behaviour: no model flag, so the provider default runs."""
+        assert skill_runner._requested_model("claude", ["claude", "--print"]) is None
+
+    def test_handles_trailing_flag_without_value(self) -> None:
+        assert skill_runner._requested_model("cursor", ["cursor-agent", "--model"]) is None
