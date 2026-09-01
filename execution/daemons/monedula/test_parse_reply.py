@@ -11,7 +11,7 @@ Run with: pytest execution/daemons/monedula/test_parse_reply.py -v
 
 from __future__ import annotations
 
-from monedula import _parse_reply
+from monedula import _is_bare_affirmative, _parse_reply
 
 # Handler names as Monedula passes them in (order-independent; parser returns a set).
 NAMES = ["yoga", "therapy"]
@@ -97,3 +97,25 @@ def test_unrecognised_reply_skips_all() -> None:
 def test_case_and_whitespace_insensitive() -> None:
     assert _parse_reply("  ATTENDED ALL  ", NAMES) == {"yoga", "therapy"}
     assert _parse_reply("Attended Yoga", NAMES) == {"yoga"}
+
+
+# ── Bare-affirmative detection (drives the "attendance-gated" nudge) ───────────
+
+
+def test_bare_affirmative_detects_yes_forms() -> None:
+    for reply in ("yes", "yes all", "y", "y all", "  YES ALL  "):
+        assert _is_bare_affirmative(reply) is True, reply
+
+
+def test_bare_affirmative_false_for_attendance_and_skips() -> None:
+    for reply in (
+        "attended all",
+        "attended yoga",
+        "yes yoga",
+        "no",
+        "skipped",
+        "maybe later",
+        "",
+        None,
+    ):
+        assert _is_bare_affirmative(reply) is False, reply
