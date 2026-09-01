@@ -297,11 +297,16 @@ def resolve(
     else:
         cached, cache_age = _read_cache(daemon)
         result.cache_age_seconds = cache_age
-        result.degraded = fetch_status == NeotomaFetchStatus.ERROR
+        result.degraded = allow_neotoma and fetch_status == NeotomaFetchStatus.ERROR
         if cached and cache_age is not None and cache_age > CACHE_STALE_WARN_SECONDS:
+            neotoma_reason = (
+                "Neotoma unreachable"
+                if fetch_status == NeotomaFetchStatus.ERROR
+                else "no daemon_configuration entity in Neotoma"
+            )
             log.warning(
                 f"[{daemon}] using config cache written "
-                f"{cache_age / 86400:.1f} days ago — Neotoma unreachable and this "
+                f"{cache_age / 86400:.1f} days ago — {neotoma_reason} and this "
                 f"config may be stale"
             )
 
