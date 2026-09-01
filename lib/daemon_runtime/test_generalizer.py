@@ -7,6 +7,10 @@ These cover the pure logic only — no Neotoma I/O. Run with:
 
 from __future__ import annotations
 
+import asyncio
+
+import generalizer as gz
+import pytest
 from drift import DriftCluster, DriftSignal, cluster_signals, parse_drift_signals
 from generalizer import (
     DEFAULT_POLICY_CAP_PER_AGENT,
@@ -122,3 +126,81 @@ def test_count_live_auto_policies_ignores_human_and_retired():
         {"status": "active", "body": human},  # human-authored -> not counted
     ]
     assert count_live_auto_policies(policies) == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Neotoma REST endpoint regression coverage (ateles#606, PR #610 qa lens).
+#
+# generalizer.py's three reads — fetch_threshold, fetch_agent_policies and
+# fetch_recent_signals — all POSTed to /retrieve_entities, an MCP TOOL name
+# rather than a REST route. It 404s live, and `_post` swallows a >=400 into
+# `None`, so each read degraded to its empty default while the daemon logged
+# nothing worse than a WARNING: the drift threshold silently fell back to the
+# constant, and clustering saw zero policies and zero signals forever.
+#
+# The sibling agent_loader fix in this PR is pinned by
+# test_load_active_policies_posts_to_entities_query; these three were not, so a
+# revert here would regress silently. They assert the URL actually requested,
+# for the same reason: the failure mode is a green suite over a dead endpoint.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _FakeAsyncClient:
+    """Records the URL of every POST and replays a canned payload."""
+
+    def __init__(self, seen, payload):
+        self._seen = seen
+        self._payload = payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, json=None):
+        self._seen.append(url)
+
+        class _R:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return self._payload
+
+        return _R()
+
+
+def _capture(monkeypatch, payload):
+    seen: list[str] = []
+    monkeypatch.setattr(
+        gz.httpx, "AsyncClient", lambda **kw: _FakeAsyncClient(seen, payload)
+    )
+    return seen
+
+
+@pytest.mark.parametrize(
+    "call, payload",
+    [
+        (lambda: gz.fetch_threshold("pavo@ateles-swarm", "tok"), {"entities": []}),
+        (lambda: gz.fetch_agent_policies("pavo@ateles-swarm", "tok"), {"entities": []}),
+        (lambda: gz.fetch_recent_signals("pavo@ateles-swarm", "tok"), {"entities": []}),
+    ],
+    ids=["fetch_threshold", "fetch_agent_policies", "fetch_recent_signals"],
+)
+def test_generalizer_reads_post_to_entities_query(monkeypatch, call, payload):
+    """Every generalizer read must hit /entities/query, never /retrieve_entities.
+
+    FAILS on the pre-fix revision: the URL ends in "/retrieve_entities", which
+    404s live and is swallowed into the empty default by `_post`.
+    """
+    seen = _capture(monkeypatch, payload)
+    asyncio.run(call())
+
+    assert seen, "no request was issued"
+    for url in seen:
+        assert url.endswith("/entities/query"), url
+        assert "retrieve_entities" not in url, (
+            "retrieve_entities is an MCP tool name, not a REST path — it 404s "
+            "live and _post degrades the 404 into an empty result"
+        )

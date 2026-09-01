@@ -82,8 +82,10 @@ def main() -> int:
             return 0
 
         agent_sub = args.agent if "@" in args.agent else f"{args.agent}@ateles-swarm"
+        # POST /entities/query is the REST list route; /retrieve_entities is
+        # the MCP tool name and 404s on the hosted instance.
         resp = client.post(
-            f"{NEOTOMA_BASE_URL}/retrieve_entities",
+            f"{NEOTOMA_BASE_URL}/entities/query",
             json={"entity_type": "agent_policy", "limit": 500, "include_snapshots": True},
         )
         resp.raise_for_status()
