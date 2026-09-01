@@ -92,6 +92,42 @@ DEFAULT_FOLLOW_TIMEOUT_MIN = float(
 # session, so keep it short.
 FOLLOW_POLL_SECONDS = 4.0
 
+# --- Capture gate -----------------------------------------------------------
+# Transcription is a deliberately STARTED activity with a bounded end, not a
+# daemon that attaches to whatever audio happens to exist.
+#
+# The defect this closes: auto-detect attached to ANY growing recording in the
+# watch directory. A recording the operator started for an unrelated reason was
+# therefore tailed in full — its audio transcribed, sent to a third-party API,
+# written to disk, and surfaced into an agent session. Nothing in that path had
+# any notion of "this speech is not for the agent."
+#
+# An always-on microphone in a shared space captures other people. Consent to
+# record is not consent to stream to a model, and the operator being present is
+# not the same as the operator addressing the agent. So the gate is at CAPTURE:
+# it is the only point before the API call and the on-disk write, which are
+# where the harm actually lands. A filter further downstream arrives after the
+# content has already left the machine.
+#
+# Three bounds, all enforced here:
+#   1. Explicit target      — the operator names the recording (--file), or
+#                             passes --attach-growing to opt into detection.
+#   2. Bounded duration     — the session ends by itself (--max-session-min).
+#   3. Bounded re-attach    — --follow resumes a break, it does not roam
+#                             indefinitely across later recordings.
+#
+# Rationale for the default in (2): the incident ran ~2.5 hours unattended. A
+# stream that outlives the operator's attention is capturing a room, not a
+# meeting.
+DEFAULT_MAX_SESSION_MIN = float(
+    os.environ.get("LIVE_TRANSCRIPT_MAX_SESSION_MIN", "90")
+)
+
+#: Env escape hatch for the explicit-target requirement, for automation that
+#: has already established its own consent basis. Deliberately NOT consulted
+#: when the operator passes nothing at all on an interactive run.
+ATTACH_GROWING_ENV = "LIVE_TRANSCRIPT_ATTACH_GROWING"
+
 
 def log(msg: str) -> None:
     print(f"[live-tail] {msg}", file=sys.stderr, flush=True)
@@ -251,6 +287,59 @@ def find_growing_recording(watch_dir: Path, settle_probe: float = 3.0) -> Path |
     return None
 
 
+#: Shown whenever the tailer is asked to start with no explicit target. It has
+#: to explain the refusal, not merely report it — an operator who reads only
+#: "no target" will reach for the flag that restores the old behaviour without
+#: understanding what the flag now means.
+NO_TARGET_MESSAGE = (
+    "refusing to auto-attach: no capture target given.\n"
+    "  Live transcription is an explicitly started activity, not a watcher on "
+    "the recordings directory.\n"
+    "  A recording may exist for reasons that have nothing to do with this "
+    "session, and may capture people\n"
+    "  who have not agreed to be streamed to a transcription API.\n"
+    "\n"
+    "  Name the recording:      --file <path>\n"
+    "  Or opt into detection:   --attach-growing   (attaches to the "
+    "newest growing track)\n"
+    "\n"
+    "  Only pass --attach-growing when you know what is being recorded and "
+    "who can be heard."
+)
+
+
+def resolve_capture_target(
+    explicit: Path | None,
+    watch_dir: Path,
+    *,
+    attach_growing: bool = False,
+) -> tuple[Path | None, str | None]:
+    """Resolve which recording to tail, or refuse.
+
+    Returns ``(path, None)`` on success and ``(None, reason)`` on refusal.
+
+    An explicit ``--file`` is an act of selection: the operator has named this
+    recording, so it is used as given. Detection is the opposite — it takes
+    whatever the microphone happens to be producing — and so must be opted into
+    rather than being what happens when no one said anything.
+    """
+    if explicit is not None:
+        if not explicit.exists():
+            return None, f"recording not found: {explicit}"
+        return explicit, None
+
+    if not (attach_growing or os.environ.get(ATTACH_GROWING_ENV) == "1"):
+        return None, NO_TARGET_MESSAGE
+
+    log(f"looking for a growing recording in {watch_dir} …")
+    found = find_growing_recording(watch_dir)
+    if found is None:
+        return None, (
+            "no active recording found — start recording first, or pass --file"
+        )
+    return found, None
+
+
 def wait_for_resume(
     watch_dir: Path,
     kind: str,
@@ -405,7 +494,20 @@ def transcribe_slice(wav_path: Path, env: dict) -> tuple[bool, str]:
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--file", type=Path, default=None,
-                    help="Recording to tail (default: auto-detect growing file)")
+                    help="Recording to tail. Required unless --attach-growing "
+                         "is given: the tailer does not attach to an "
+                         "unnamed recording.")
+    ap.add_argument("--attach-growing", action="store_true",
+                    default=os.environ.get(ATTACH_GROWING_ENV) == "1",
+                    help="Opt in to attaching to the newest growing recording "
+                         f"instead of naming one (env {ATTACH_GROWING_ENV}=1). "
+                         "Only use when you know who can be heard.")
+    ap.add_argument("--max-session-min", type=float,
+                    default=DEFAULT_MAX_SESSION_MIN,
+                    help=f"Stop after this many minutes of wall clock "
+                         f"(default: {DEFAULT_MAX_SESSION_MIN:g}; 0 disables). "
+                         f"A stream that outlives the operator's attention is "
+                         f"capturing a room, not a meeting.")
     ap.add_argument("--dir", type=Path, default=DEFAULT_DIR,
                     help=f"Directory to watch (default: {DEFAULT_DIR})")
     ap.add_argument("--interval", type=int, default=DEFAULT_INTERVAL,
@@ -437,15 +539,11 @@ def main(argv: list[str]) -> int:
         log("OPENAI_API_KEY not set (checked env and ~/.config/neotoma/.env)")
         return 1
 
-    recording = args.file
+    recording, err = resolve_capture_target(
+        args.file, args.dir, attach_growing=args.attach_growing
+    )
     if recording is None:
-        log(f"looking for a growing recording in {args.dir} …")
-        recording = find_growing_recording(args.dir)
-        if recording is None:
-            log("no active recording found — start recording first, or pass --file")
-            return 1
-    if not recording.exists():
-        log(f"recording not found: {recording}")
+        log(err or "no capture target")
         return 1
 
     out_path = args.out or recording.with_name(f"{recording.stem}_live.jsonl")
@@ -460,6 +558,16 @@ def main(argv: list[str]) -> int:
     if args.follow:
         log(f"follow mode: on — pausing (not exiting) on stop, up to "
             f"{args.follow_timeout_min:g} min per break")
+    # A capture session has an end. Computed once, at start, so that a --follow
+    # break cannot extend it: the deadline bounds the whole activity, not each
+    # individual recording it happens to attach to.
+    session_deadline: float | None = None
+    if args.max_session_min > 0:
+        session_deadline = time.time() + args.max_session_min * 60.0
+        log(f"session cap: stopping after {args.max_session_min:g} min")
+    else:
+        log("session cap: DISABLED — this stream will not stop on its own")
+
     log(f"JSONL: {out_path}")
     print(str(out_path), flush=True)  # stdout: the path, for scripting
 
@@ -487,9 +595,19 @@ def main(argv: list[str]) -> int:
             known = set()
         known.add(recording)
 
-        resumed = wait_for_resume(
-            watch_dir, kind, known, args.follow_timeout_min * 60.0
-        )
+        # The resume wait is clamped to whatever is left of the session, so
+        # --follow resumes a break within a session rather than roaming onward
+        # into later, unrelated recordings. Without this clamp the tailer would
+        # re-attach to a fresh recording started hours later for another
+        # purpose — the auto-attach defect, arriving by a second route.
+        wait_s = args.follow_timeout_min * 60.0
+        if session_deadline is not None:
+            wait_s = min(wait_s, max(0.0, session_deadline - time.time()))
+            if wait_s <= 0:
+                end_on_cap()
+                return None
+
+        resumed = wait_for_resume(watch_dir, kind, known, wait_s)
         if resumed is None:
             log(f"no resume within {args.follow_timeout_min:g} min — exiting")
             return None
@@ -502,9 +620,31 @@ def main(argv: list[str]) -> int:
         })
         return resumed
 
+    def session_expired() -> bool:
+        """True once the capture session's wall-clock cap has passed."""
+        return session_deadline is not None and time.time() >= session_deadline
+
+    def end_on_cap() -> None:
+        """Record the cap in the JSONL so the session sees WHY the feed ended."""
+        log(
+            f"session cap of {args.max_session_min:g} min reached — stopping. "
+            f"Restart the stream if the meeting is still going."
+        )
+        append({
+            "event": "session_cap_reached",
+            "t": datetime.now(tz=UTC).isoformat(),
+            "max_session_min": args.max_session_min,
+        })
+
     try:
         while True:
             time.sleep(args.interval)
+
+            # Checked before slicing, so the cap ends the session without one
+            # more chunk being transcribed and sent past it.
+            if session_expired():
+                end_on_cap()
+                break
 
             duration = probe_duration(recording)
             if duration is None:
