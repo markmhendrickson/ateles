@@ -123,3 +123,65 @@ def test_non_dict_snapshot_falls_back_to_empty(monkeypatch):
     ev = NeotomaEvent(entity_type="task", entity_id="ent_x", action="created")
     asyncio.run(hydrate_snapshot(ev))
     assert ev.snapshot == {}
+
+
+# ── hydrated flag: a FAILED read must not read as an empty entity ────────────
+#
+# The no-owner loop's routing half. hydrate_snapshot used to leave snapshot={}
+# on any fetch error, which callers could not tell apart from a task that
+# genuinely has no tags — so a transient 502 made a fully-tagged task look
+# unroutable. ent_c192afd8760fd9f3fbd3c08c (title + description + five tags)
+# was escalated three times; its real tags were logged at 16:22:05 and `tags=[]`
+# at 16:25:25, right after a 502 on this exact GET.
+
+
+def test_successful_hydration_marks_hydrated(monkeypatch):
+    _install_fake_client(monkeypatch, payload={"snapshot": {"title": "T", "tags": ["ops"]}})
+    ev = NeotomaEvent(entity_type="task", entity_id="ent_x", action="created")
+    asyncio.run(hydrate_snapshot(ev))
+    assert ev.hydrated is True
+
+
+def test_failed_hydration_leaves_hydrated_false(monkeypatch):
+    _install_fake_client(monkeypatch, raises=RuntimeError("502 Bad Gateway"))
+    ev = NeotomaEvent(entity_type="task", entity_id="ent_x", action="created")
+    asyncio.run(hydrate_snapshot(ev))
+    assert ev.snapshot == {}
+    assert ev.hydrated is False, "a failed read must not look like an empty entity"
+
+
+def test_genuinely_empty_entity_is_hydrated_true(monkeypatch):
+    """The distinction that matters: read OK but the entity really has no fields."""
+    _install_fake_client(monkeypatch, payload={"snapshot": {}})
+    ev = NeotomaEvent(entity_type="task", entity_id="ent_x", action="created")
+    asyncio.run(hydrate_snapshot(ev))
+    assert ev.snapshot == {}
+    assert ev.hydrated is True
+
+
+def test_embedded_snapshot_counts_as_hydrated():
+    ev = NeotomaEvent.from_raw(
+        {"entity_type": "task", "entity_id": "ent_x", "action": "created",
+         "snapshot": {"title": "T"}}
+    )
+    assert ev.hydrated is True
+
+
+def test_event_without_snapshot_starts_unhydrated():
+    ev = NeotomaEvent.from_raw(
+        {"entity_type": "task", "entity_id": "ent_x", "action": "created"}
+    )
+    assert ev.hydrated is False
+
+
+def test_prehydrated_event_short_circuits_as_hydrated(monkeypatch):
+    def factory(**kwargs):
+        raise AssertionError("should not fetch when the snapshot is present")
+
+    monkeypatch.setattr(sc.httpx, "AsyncClient", factory)
+    ev = NeotomaEvent(
+        entity_type="task", entity_id="ent_x", action="created",
+        snapshot={"title": "already here"},
+    )
+    asyncio.run(hydrate_snapshot(ev))
+    assert ev.hydrated is True

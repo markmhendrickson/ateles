@@ -70,6 +70,18 @@ NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
 
 log = logging.getLogger("apis.skill_runner")
 
+# Lazily-built shared ledger for undefined-role dedup. Lazy because skill_runner
+# is imported by tooling that must not touch the state file on import.
+_ROLE_LEDGER = None
+
+
+def _role_ledger(factory):
+    """Return the process-wide ledger used to dedup undefined-role reports."""
+    global _ROLE_LEDGER
+    if _ROLE_LEDGER is None:
+        _ROLE_LEDGER = factory()
+    return _ROLE_LEDGER
+
 CLAUDE_BIN = os.environ.get("APIS_CLAUDE_BIN") or shutil.which("claude")
 _CODEX_APP_BIN = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
 CODEX_BIN = (
@@ -1043,11 +1055,28 @@ async def _run_skill_once(
             "Dispatching with SKILL.md only."
         )
         log.warning(f"[apis] {warn_msg}")
-        if notifier is not None:
+        # A role with no agent_definition is ONE fact about that ROLE, not one
+        # per task that happens to route to it. Notifying per task paged the
+        # operator N times for a single missing definition; dedup on the role so
+        # it escalates once (and again after the ledger's re-assert window, so a
+        # role that stays undefined does not go quiet forever).
+        _should_notify = True
+        try:
+            from unroutable_ledger import UnroutableLedger
+
+            _should_notify = _role_ledger(UnroutableLedger).note_undefined_role(str(_role))
+        except Exception as exc:  # noqa: BLE001 — dedup must never block the warning
+            log.debug(f"[apis] undefined-role dedup unavailable: {exc}")
+        if notifier is not None and _should_notify:
             try:
                 from lib.notify import Priority
 
-                notifier.send(warn_msg, priority=Priority.WARN, handler="apis")
+                notifier.send(
+                    f"Role {_role!r} has no agent_definition — every task routed "
+                    "to it runs DEGRADED (SKILL.md only). Reported once per role.",
+                    priority=Priority.WARN,
+                    handler="apis",
+                )
             except Exception as exc:
                 log.debug(f"[apis] notifier.send failed: {exc}")
 
