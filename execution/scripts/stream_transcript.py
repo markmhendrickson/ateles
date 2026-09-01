@@ -23,9 +23,16 @@ nothing noticing, and separately ran with every chunk erroring while reporting
 healthy). See `HealthMonitor`: a dead socket, a stalled capture, and a silent
 mic each announce themselves, and are distinguished from one another.
 
+The input device is MEASURED, never assumed (ateles#648). This script used to
+default to a hardcoded `--device :3`; when the operator wore AirPods Max the
+capture ran against the display microphone, every frame fell below the input
+gate, and nothing was transcribed for six minutes while the process reported
+itself healthy. Device indices reorder whenever a headset connects, so a fixed
+index is wrong the moment the hardware changes. See `audio_devices.py`.
+
 Usage:
-    python execution/scripts/stream_transcript.py                  # auto-detect device
-    python execution/scripts/stream_transcript.py --device :3
+    python execution/scripts/stream_transcript.py                  # probe and pick
+    python execution/scripts/stream_transcript.py --device :3      # explicit override
     python execution/scripts/stream_transcript.py --fallback-only  # force chunking
 """
 
@@ -49,6 +56,7 @@ from pathlib import Path
 # The filter is a sibling module, shared verbatim with the chunking tailer.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import audio_devices
 from hallucination_filter import screen_transcription
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -95,6 +103,27 @@ SIGNAL_WINDOW_SECONDS = float(os.environ.get("STREAM_TRANSCRIPT_SIGNAL_WINDOW_S"
 # above it. This is the check that catches "the file is growing but there is
 # nothing in it" — growth alone is NOT health.
 SILENT_INPUT_DBFS = float(os.environ.get("STREAM_TRANSCRIPT_SILENT_DBFS", "-65"))
+
+# How long every single frame may be discarded by the input gate before that
+# counts as a fault (ateles#648).
+#
+# This closes the gap that let the incident stay invisible for six minutes. The
+# capture ran against the wrong microphone, which measured -54.7 dB mean and
+# -38.6 dB peak. That is ABOVE the -65 dBFS silent-input floor, so "silent
+# input" never fired — yet it is entirely BELOW the -50 dBFS gate, so every
+# frame was discarded and nothing was ever transcribed. The process reported
+# healthy throughout.
+#
+# Below-gate audio is therefore a THIRD failure, distinct from both siblings:
+#
+#   no audio at all         -> capture stalled
+#   audio at digital silence-> silent input
+#   audio present, all of it below the gate -> THIS
+#
+# The window is generous because the honest version of this state is an
+# ordinary pause. What it must not tolerate is a whole session of them: nobody
+# pauses for five minutes and then expects a transcript of it.
+GATE_STARVED_SECONDS = float(os.environ.get("STREAM_TRANSCRIPT_GATE_STARVED_S", "300"))
 
 # Above this dBFS the capture is carrying speech, so a transcript IS expected.
 # The operator's verified speech measures -21 to -37 dBFS; room tone with nobody
@@ -373,9 +402,15 @@ class HealthMonitor:
     * is audio still arriving from the capture?      (stall)
     * is the socket still answering?                 (dead socket)
     * does the arriving audio contain any signal?    (silent mic)
+    * is any of that audio actually getting through? (gate starved)
 
     "Quiet room, correctly no transcript" and "socket died" produce identical
     output — no transcript — so only an explicit liveness check separates them.
+
+    The fourth question was added after ateles#648, where the first three all
+    answered "fine" while the pipeline transcribed nothing for six minutes: the
+    capture was healthy, the audio was above digital silence, and the socket
+    was open — but every frame sat below the input gate and was discarded.
     """
 
     def __init__(
@@ -386,6 +421,7 @@ class HealthMonitor:
         signal_window_seconds: float = SIGNAL_WINDOW_SECONDS,
         silent_dbfs: float = SILENT_INPUT_DBFS,
         speech_dbfs: float = SPEECH_PRESENT_DBFS,
+        gate_starved_seconds: float = GATE_STARVED_SECONDS,
         now: float | None = None,
     ) -> None:
         self.stall_seconds = stall_seconds
@@ -393,14 +429,18 @@ class HealthMonitor:
         self.signal_window_seconds = signal_window_seconds
         self.silent_dbfs = silent_dbfs
         self.speech_dbfs = speech_dbfs
+        self.gate_starved_seconds = gate_starved_seconds
         start = time.monotonic() if now is None else now
         self.last_audio_at = start
         self.last_socket_at = start
         self.last_speech_at = start
+        self.last_gate_pass_at = start
         self.started_at = start
         self.bytes_streamed = 0
         self.transcripts = 0
         self.errors = 0
+        self.frames_gated = 0
+        self.frames_passed = 0
         # (timestamp, dbfs) for the rolling silent-input window.
         self._levels: deque[tuple[float, float]] = deque()
         self._announced: set[str] = set()
@@ -422,6 +462,22 @@ class HealthMonitor:
             if level >= self.speech_dbfs:
                 self.last_speech_at = now
         self._trim(now)
+
+    def note_gate_decision(self, sent: bool, now: float | None = None) -> None:
+        """Record whether the input gate let a frame through.
+
+        The gate's own counters are cumulative, so they cannot answer "has
+        anything got through RECENTLY" — which is the question that matters.
+        A session that captured speech for an hour and then had the operator
+        switch headsets shows a healthy lifetime ratio while currently
+        transcribing nothing.
+        """
+        now = time.monotonic() if now is None else now
+        if sent:
+            self.frames_passed += 1
+            self.last_gate_pass_at = now
+        else:
+            self.frames_gated += 1
 
     def note_socket_event(self, now: float | None = None) -> None:
         self.last_socket_at = time.monotonic() if now is None else now
@@ -494,6 +550,33 @@ class HealthMonitor:
                     f"— audio is being recorded but carries no signal (muted or wrong device)"
                 )
 
+        # Audio is arriving, is above digital silence, and NONE of it is
+        # clearing the input gate (ateles#648). This is the wrong-microphone
+        # signature: a device whose level sits in the dead band between the
+        # silent-input floor and the gate threshold produces a capture that
+        # looks alive from every other angle and transcribes nothing.
+        #
+        # Gated on audio_gap so this never fires for a capture that has simply
+        # stopped — that is the stall check's job, and reporting both would
+        # describe one fault as two.
+        gate_gap = now - self.last_gate_pass_at
+        if (
+            self.frames_gated > 0
+            and audio_gap <= self.stall_seconds
+            and gate_gap > self.gate_starved_seconds
+        ):
+            peak = self.peak_dbfs(now)
+            level = f"{peak:.1f} dBFS" if peak is not None else "unknown"
+            found.append(
+                f"gate starved: audio has been arriving for {gate_gap:.0f}s "
+                f"(threshold {self.gate_starved_seconds:.0f}s) with NOTHING passing the "
+                f"input gate — {self.frames_gated} frames discarded, {self.frames_passed} "
+                f"sent. Recent peak {level}. The capture is running but every frame is "
+                f"below the gate, so nothing is being transcribed — this is usually the "
+                f"WRONG INPUT DEVICE (check that the mic you are speaking into is the one "
+                f"being captured)"
+            )
+
         return found
 
     def is_healthy(self, now: float | None = None) -> bool:
@@ -523,6 +606,9 @@ class HealthMonitor:
             "seconds_streamed": round(self.bytes_streamed / BYTES_PER_SECOND, 1),
             "transcripts": self.transcripts,
             "errors": self.errors,
+            "frames_passed_gate": self.frames_passed,
+            "frames_gated": self.frames_gated,
+            "seconds_since_gate_pass": round(now - self.last_gate_pass_at, 1),
             "peak_dbfs": (
                 round(self.peak_dbfs(now), 1) if self.peak_dbfs(now) is not None else None
             ),
@@ -994,7 +1080,12 @@ async def stream_session(
                     # know what the capture is really carrying, which the gate
                     # must not be able to hide from it.
                     monitor.note_audio(payload)
-                    if not gate.should_send(payload, time.monotonic()):
+                    sent = gate.should_send(payload, time.monotonic())
+                    # The monitor also sees the gate's VERDICT, so "every frame
+                    # is being discarded" is observable rather than invisible
+                    # (ateles#648).
+                    monitor.note_gate_decision(sent)
+                    if not sent:
                         continue
                     await ws.send(
                         json.dumps(
@@ -1095,6 +1186,7 @@ async def stream_session(
 
             async def watch_health() -> None:
                 nonlocal index
+                announced_missing = False
                 while True:
                     await asyncio.sleep(health_poll)
                     fresh = monitor.new_problems()
@@ -1102,6 +1194,28 @@ async def stream_session(
                         for problem in fresh:
                             log(f"UNHEALTHY: {problem}")
                         append(health_record(index, fresh, monitor.summary()))
+                        index += 1
+
+                    # Has the device we are capturing from VANISHED? This is
+                    # the one device-change signal that is unambiguous, and it
+                    # is checked by ENUMERATION rather than by inferring from
+                    # silence: an operator not talking for two minutes is
+                    # normal and must never trigger a device hunt.
+                    #
+                    # Enumeration is cheap (no device is opened) so it can run
+                    # on the health cadence without disturbing the capture,
+                    # unlike a re-probe, which would.
+                    if not announced_missing and device_disappeared(device):
+                        announced_missing = True
+                        note = (
+                            f"input device {device} has disappeared from the audio "
+                            "device list — the headset was probably disconnected. The "
+                            "capture is still running against a device that no longer "
+                            "exists, so NOTHING further will be transcribed. Restart "
+                            "the stream to select the new device."
+                        )
+                        log(f"UNHEALTHY: {note}")
+                        append(error_record(index, note))
                         index += 1
 
             tasks = [
@@ -1132,9 +1246,80 @@ async def stream_session(
     return 0, monitor
 
 
+def device_disappeared(device: str) -> bool:
+    """Whether `device` is no longer present in the audio device list.
+
+    Only a `:N` index spec can be checked this way. Enumeration is a read of
+    the device list and never opens an input, so it is safe to call while a
+    capture is running — which a re-probe would not be.
+
+    Returns False whenever enumeration itself fails: an ffmpeg hiccup must not
+    be reported to the operator as a disconnected headset.
+    """
+    if not device.startswith(":") or not device[1:].isdigit():
+        return False
+    try:
+        present = audio_devices.list_audio_devices()
+    except Exception:  # noqa: BLE001 — a failed check is not a verdict
+        return False
+    if not present:
+        return False
+    return int(device[1:]) not in {d.index for d in present}
+
+
+def resolve_device(requested: str | None, *, allow_loopback: bool = False) -> str:
+    """Decide which input to capture, and SAY which one and why.
+
+    An explicit `--device` is honoured exactly as given and skips probing
+    entirely — including for loopback devices. The operator naming a device is
+    a different act from a heuristic reaching for one, and only the second
+    needs guarding.
+
+    Auto-selection announces its evidence either way. When it is not confident
+    it says so at startup, in the first seconds, rather than leaving the
+    operator to work it out six minutes later from an empty transcript
+    (ateles#648).
+    """
+    if requested:
+        log(f"input device {requested} (explicit — no probing)")
+        return requested
+
+    log("no --device given; probing audio inputs for signal…")
+    selection = audio_devices.auto_select_device(allow_loopback=allow_loopback)
+    for line in audio_devices.format_probe_table(selection.results).splitlines():
+        log(line)
+
+    if selection.confident:
+        log(f"selected input device {selection.spec} (carrying signal)")
+    else:
+        # Loud, specific, and at startup. The operator must be able to tell in
+        # the first ten seconds that nothing is being heard.
+        for line in selection.warning.splitlines():
+            log(f"WARNING: {line}")
+    return selection.spec
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device", default=os.environ.get("STREAM_TRANSCRIPT_DEVICE", ":3"))
+    parser.add_argument(
+        "--device",
+        default=os.environ.get("STREAM_TRANSCRIPT_DEVICE"),
+        help=(
+            "avfoundation input to capture (e.g. ':2'). Omit to probe the available "
+            "inputs and pick the one carrying signal. An explicit device skips probing "
+            "entirely and is honoured as given, including loopback devices."
+        ),
+    )
+    parser.add_argument(
+        "--allow-loopback-device",
+        action="store_true",
+        help=(
+            "permit AUTO-selection of system-audio capture devices (BlackHole, "
+            "System-wide capture, ZoomAudioDevice). Off by default: these record what "
+            "the machine is playing, including the far end of calls the operator is "
+            "not part of"
+        ),
+    )
     parser.add_argument("--dir", type=Path, default=DEFAULT_DIR)
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--model", default=DEFAULT_MODEL)
@@ -1188,6 +1373,19 @@ def main(argv: list[str]) -> int:
             return 2
         return run_fallback(out_path, "ffmpeg not found on PATH")
 
+    try:
+        device = resolve_device(
+            args.device, allow_loopback=args.allow_loopback_device
+        )
+    except audio_devices.NoUsableInputDevice as exc:
+        # No device can be captured at all. Falling back to chunking would not
+        # help — the chunking path reads a file the recorder is not writing —
+        # so this fails loudly instead of degrading into the same silence.
+        log("CANNOT CAPTURE AUDIO — no usable input device.")
+        for line in str(exc).splitlines():
+            log(f"  {line}")
+        return 2
+
     api_key = load_openai_key()
     if not api_key:
         if args.no_fallback:
@@ -1207,7 +1405,7 @@ def main(argv: list[str]) -> int:
     try:
         rc, monitor = asyncio.run(
             stream_session(
-                args.device,
+                device,
                 recording,
                 out_path,
                 model=args.model,
