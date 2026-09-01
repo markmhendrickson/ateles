@@ -112,6 +112,69 @@ async def hydrate_snapshot(event: NeotomaEvent) -> NeotomaEvent:
 EventHandler = Callable[[NeotomaEvent], Awaitable[None]]
 
 
+class MissingSubscriptionError(RuntimeError):
+    """Raised when a daemon's SSE subscription id resolves from nowhere.
+
+    Replaces the previous behaviour — a single WARNING and a silent return —
+    which made "subscribed and idle" indistinguishable from "consuming nothing".
+    Apis sat in the second state for 88 days (67,450 skipped events, ~100
+    stranded tasks) while looking healthy.
+    """
+
+
+def resolve_subscription_id(handler_name: str) -> str | None:
+    """Resolve this daemon's SSE subscription id.
+
+    Order: env var (operator override) → Neotoma `daemon_configuration` →
+    local last-known-good cache. Returns None when all three miss, which the
+    caller turns into a hard, named failure.
+
+    Neotoma is time-boxed and cache-backed inside config_resolver, so a slow or
+    down Neotoma costs a few seconds and falls back to cache — it never prevents
+    a daemon from starting on config it already knows.
+    """
+    # Historical env keys, both consulted so nothing that works today breaks.
+    env_key = f"NEOTOMA_SSE_SUBSCRIPTION_ID_{handler_name.upper()}"
+    direct = os.environ.get(env_key) or os.environ.get(
+        "NEOTOMA_SSE_SUBSCRIPTION_ID"
+    )
+    if direct and not (direct.startswith("__") and direct.endswith("__")):
+        return direct
+
+    try:
+        from .config_resolver import ConfigSpec, resolve
+
+        resolved = resolve(
+            handler_name,
+            [
+                ConfigSpec(
+                    key="sse_subscription_id",
+                    env_var=env_key,
+                    required=False,  # we raise our own, richer error below
+                    secret_name="NEOTOMA_BEARER_TOKEN",
+                    remedy=(
+                        "create the subscription via the Neotoma `subscribe` tool "
+                        "with delivery_method=sse, then record its id on the "
+                        "daemon_configuration entity"
+                    ),
+                )
+            ],
+        )
+        value = resolved.get("sse_subscription_id")
+        if value:
+            log.info(
+                f"[{handler_name}] SSE subscription id resolved from "
+                f"{resolved.source_of('sse_subscription_id')}"
+            )
+        return value or None
+    except Exception as exc:  # noqa: BLE001 — resolution must not crash import
+        log.warning(
+            f"[{handler_name}] config resolution for sse_subscription_id "
+            f"failed: {exc}"
+        )
+        return None
+
+
 class SSEClient:
     """
     Async SSE client for the Neotoma entity event stream.
@@ -138,12 +201,8 @@ class SSEClient:
         self._token = bearer_token or NEOTOMA_BEARER_TOKEN
         self._base_url = base_url or NEOTOMA_BASE_URL
         self._running = False
-        # Allow per-daemon env-var override: NEOTOMA_SSE_SUBSCRIPTION_ID_ANTHUS etc.
-        env_key = f"NEOTOMA_SSE_SUBSCRIPTION_ID_{handler_name.upper()}"
-        self._subscription_id = (
-            subscription_id
-            or os.environ.get(env_key)
-            or os.environ.get("NEOTOMA_SSE_SUBSCRIPTION_ID")
+        self._subscription_id = subscription_id or resolve_subscription_id(
+            handler_name
         )
 
     async def stream(
@@ -164,6 +223,13 @@ class SSEClient:
                 delay = SSE_RECONNECT_DELAY_BASE  # reset on clean disconnect
             except asyncio.CancelledError:
                 break
+            except MissingSubscriptionError:
+                # Must propagate. Retrying cannot help — no amount of backoff
+                # invents a subscription id — and catching it here would convert
+                # the loud failure this class exists to raise back into a
+                # warning in a quiet retry loop, which is the original defect.
+                self._running = False
+                raise
             except Exception as exc:
                 log.warning(
                     f"[{self.handler_name}] SSE stream error: {exc} — "
@@ -188,14 +254,25 @@ class SSEClient:
             )
 
         if not self._subscription_id:
-            log.warning(
-                f"[{self.handler_name}] NEOTOMA_SSE_SUBSCRIPTION_ID not set — "
-                "SSE subscription skipped (create a subscription via Neotoma MCP "
-                "subscribe tool with delivery_method=sse and set "
-                f"NEOTOMA_SSE_SUBSCRIPTION_ID_{self.handler_name.upper()})"
+            # LOUD FAILURE, deliberately. This previously logged one warning and
+            # returned, leaving the daemon running and consuming nothing — the
+            # exact shape of the 88-day Apis outage. A daemon whose entire job
+            # is reacting to events, and which cannot subscribe, is not degraded
+            # but healthy-looking; it is broken and must say so.
+            env_key = f"NEOTOMA_SSE_SUBSCRIPTION_ID_{self.handler_name.upper()}"
+            raise MissingSubscriptionError(
+                f"[{self.handler_name}] SSE SUBSCRIPTION ID UNRESOLVED — this "
+                f"daemon consumes events and cannot subscribe, so it would "
+                f"process NOTHING while appearing healthy. Refusing to run.\n"
+                f"  Tried: env {env_key}, env NEOTOMA_SSE_SUBSCRIPTION_ID, "
+                f"Neotoma daemon_configuration(daemon_name="
+                f"{self.handler_name!r}).config.sse_subscription_id, local cache.\n"
+                f"  Fix: create a subscription (Neotoma `subscribe` tool, "
+                f"delivery_method=sse), then record its id as "
+                f"`sse_subscription_id` on the daemon_configuration entity for "
+                f"{self.handler_name!r} (preferred — versioned and queryable), "
+                f"or set {env_key} as a stopgap."
             )
-            self._running = False
-            return
 
         url = f"{self._base_url}/events/stream"
         params: dict[str, str] = {"subscription_id": self._subscription_id}
