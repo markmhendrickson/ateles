@@ -17,6 +17,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 
 # This daemon module imports siblings by bare name and `lib.*` absolutely; put
 # both the daemon dir and the repo root on the path so the test runs from
@@ -355,3 +356,94 @@ def test_run_is_a_noop_when_disabled(monkeypatch):
         rec, "sweep", lambda *a: (_ for _ in ()).throw(AssertionError("swept while off"))
     )
     asyncio.run(rec.run(dispatch_fn))  # returns without sweeping
+
+
+# ── The parse layer: _unwrap_snapshot / _query_tasks (ateles#598 qa lens) ────
+#
+# These sit UPSTREAM of all three double-dispatch layers and had no tests: 13
+# of the 15 cases above monkeypatch `_query_tasks` away, and `_unwrap_snapshot`
+# never appeared in this file. A wrong unwrap defeats layer 1 at parse time —
+# `status` reads absent -> "" is in _SWEEPABLE -> a done task becomes eligible.
+#
+# The rows below are the real `/entities/query` shape: `EntitySnapshot` declares
+# `computed_at` and `last_observation_at` as SIBLINGS of `snapshot`, not inside
+# it, so the pm lens's finding was that the unwrap discarded exactly the stamps
+# the age calculation needs — every real stranded task skipped `within_grace`
+# forever, with no expiry, because nothing would ever give the row an age.
+
+
+def _row(snapshot: dict, **row_level) -> dict:
+    """A row shaped like the real /entities/query EntitySnapshot response."""
+    return {"entity_id": "ent_task", "entity_type": "task", "snapshot": snapshot, **row_level}
+
+
+def test_unwrap_carries_row_level_stamps_into_the_snapshot():
+    """The two stamps the age calculation needs survive the unwrap.
+
+    FAILS before the fix: the row-level stamps were dropped, `_age_seconds`
+    returned None, and should_dispatch mapped that to WITHIN_GRACE on every
+    pass.
+    """
+    row = _row({"status": "pending"}, last_observation_at="2026-01-01T00:00:00Z")
+    snap = tr._unwrap_snapshot(row)
+
+    assert snap["status"] == "pending"
+    assert snap["last_observation_at"] == "2026-01-01T00:00:00Z"
+    assert tr._age_seconds(snap, now=time.time()) is not None
+
+
+def test_a_stranded_task_is_dispatchable_rather_than_ageless():
+    """The end-to-end effect #586 exists to produce, through the real parse.
+
+    A pending task last touched well beyond the grace window must come out of
+    the parse with an age, and should_dispatch must not skip it as
+    `within_grace`.
+    """
+    old = tr._iso_ago(tr.GRACE_SECONDS + 3600)
+    snap = tr._unwrap_snapshot(_row({"status": "pending"}, last_observation_at=old))
+    age = tr._age_seconds(snap, now=time.time())
+
+    assert age is not None and age > tr.GRACE_SECONDS
+    skip = tr.TaskReconciler().should_dispatch("ent_task", "pending", age)
+    assert skip is not tr.SkipReason.WITHIN_GRACE, "a real stranded task is not ageless"
+    assert skip is None, f"nothing should skip this task, got {skip}"
+
+
+def test_a_snapshot_stamp_is_not_shadowed_by_a_row_level_one():
+    """`updated_at` inside the snapshot stays authoritative.
+
+    It moves when the SSE path writes ROUTED, so it means "untouched by
+    dispatch"; the row-level stamps move on ANY observation write and are only
+    the fallback. Carrying them must not change that precedence.
+    """
+    fresh = tr._iso_ago(5)
+    stale = tr._iso_ago(tr.GRACE_SECONDS + 9999)
+    snap = tr._unwrap_snapshot(
+        _row({"status": "pending", "updated_at": fresh}, last_observation_at=stale)
+    )
+
+    assert snap["updated_at"] == fresh
+    age = tr._age_seconds(snap, now=time.time())
+    assert age is not None and age < tr.GRACE_SECONDS, "the fresh stamp must win"
+
+
+def test_done_task_is_not_swept_through_the_real_parse_path():
+    """Layer 1 must hold at PARSE time, not only in should_dispatch.
+
+    If the unwrap loses `status`, it reads absent -> "" is in _SWEEPABLE -> a
+    completed task is re-dispatched. This asserts through the parse rather than
+    handing should_dispatch a hand-built dict.
+    """
+    snap = tr._unwrap_snapshot(_row({"status": "done"}, last_observation_at=tr._iso_ago(99999)))
+
+    assert snap["status"] == "done"
+    skip = tr.TaskReconciler().should_dispatch(
+        "ent_task", snap.get("status", ""), tr._age_seconds(snap, now=time.time())
+    )
+    assert skip is tr.SkipReason.NOT_PENDING
+
+
+def test_unwrap_tolerates_the_doubly_nested_and_bare_shapes():
+    """The nesting tolerance the docstring promises, pinned."""
+    assert tr._unwrap_snapshot(_row({"snapshot": {"status": "pending"}}))["status"] == "pending"
+    assert tr._unwrap_snapshot({"status": "pending"})["status"] == "pending"

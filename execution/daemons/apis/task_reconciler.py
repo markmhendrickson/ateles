@@ -352,14 +352,39 @@ def _query_tasks(limit: int) -> list[tuple[str, dict]]:
     return out
 
 
+# Stamps that live at the ROW level of an EntitySnapshot, as siblings of
+# `snapshot` rather than inside it (openapi.yaml: `computed_at` and
+# `last_observation_at` are declared alongside `snapshot` on EntitySnapshot).
+# Dropping them is not cosmetic: `_age_seconds` looks for exactly these keys,
+# so a row whose own snapshot carries no stamp read as ageless, which
+# should_dispatch maps to WITHIN_GRACE — skipped on every pass, forever. The
+# fail-safe had no expiry because nothing would ever give that row an age, and
+# on the measured backlog that was 463 of 474 pending tasks (ateles#598 pm
+# lens, confirmed at contract level by the steward).
+_ROW_LEVEL_STAMPS = ("last_observation_at", "computed_at")
+
+
 def _unwrap_snapshot(row: dict) -> dict:
-    """Tolerate the several snapshot nesting shapes Neotoma returns."""
+    """Tolerate the several snapshot nesting shapes Neotoma returns.
+
+    Row-level stamps are carried down into the returned dict so the age
+    calculation can see them, WITHOUT letting them shadow a stamp the snapshot
+    already carries: `updated_at` inside the snapshot is the semantically
+    correct signal (it moves when the SSE path writes ROUTED), and the
+    row-level stamps are the weaker fallback because they move on any
+    observation write, not just a dispatch. `_age_seconds` already encodes that
+    precedence; this only ensures the fallbacks are present to be considered.
+    """
     snap = row.get("snapshot")
     if isinstance(snap, dict):
         inner = snap.get("snapshot")
-        if isinstance(inner, dict):
-            return inner
-        return snap
+        base = inner if isinstance(inner, dict) else snap
+        carried = {
+            k: row[k]
+            for k in _ROW_LEVEL_STAMPS
+            if k in row and k not in base and row[k] is not None
+        }
+        return {**base, **carried} if carried else base
     return row
 
 
