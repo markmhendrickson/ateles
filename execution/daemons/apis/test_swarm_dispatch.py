@@ -6805,3 +6805,130 @@ def test_accepted_review_does_not_escalate_or_claim_a_downgrade(monkeypatch, cap
     assert posts == ["REQUEST_CHANGES"]
     assert notifier.sent == []
     assert "DOWNGRADED" not in log_text
+
+
+# ── parent-issue link resolution (ateles#434 / #613 / #300) ─────────────────
+#
+# The old pattern was `(?:closes|fixes|resolves)\s+#(\d+)`. Measured 2026-09-02:
+# 50 of 112 open PRs across both repos had no parent detectable by it, and 22 of
+# those named an existing issue in a form GitHub itself honours. These tests pin
+# the widened grammar AND the boundaries — a wrong parent is worse than none,
+# because gate inheritance would read an unrelated issue's gates.
+
+
+class TestParentIssueNumber:
+    """`_parent_issue_number` resolves parentage, not GitHub's auto-close set."""
+
+    @staticmethod
+    def _resolve(body: str, repository: str = "markmhendrickson/ateles"):
+        return SwarmDispatcher._parent_issue_number(body, repository)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # The three spellings the old regex already handled.
+            "Closes #123",
+            "Fixes #123",
+            "Resolves #123",
+            # The spellings GitHub honours and the old regex silently dropped.
+            "Close #123",
+            "Closed #123",
+            "Fix #123",
+            "Fixed #123",
+            "Resolve #123",
+            "Resolved #123",
+            # Non-closing parentage: a partial-implementation PR must be able to
+            # name its parent WITHOUT falsely claiming it closes it (ateles#300).
+            "Part of #123",
+            "Refs #123",
+            "Ref #123",
+            "References #123",
+            "Parent #123",
+            "Related to #123",
+            # Punctuation and case the wild actually contains.
+            "closes: #123",
+            "CLOSES #123",
+            "Part of: #123",
+            # Embedded in prose rather than on its own line.
+            "This is a follow-up. Part of #123, with tests.",
+        ],
+    )
+    def test_recognised_parent_forms(self, body):
+        assert self._resolve(body) == 123
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # A bare reference is NOT parentage. It is far too easy to write
+            # incidentally, and attaching a parent the author never asserted
+            # would inherit the wrong issue's gates.
+            "See #123 for background",
+            "Unlike #123, this takes the other approach",
+            "#123",
+            # No reference at all.
+            "A PR body with no issue reference whatsoever.",
+            "",
+            # A keyword with no number, and a number with no keyword.
+            "This closes the loop on the design.",
+            "Bumps the timeout to 123 seconds.",
+        ],
+    )
+    def test_non_parent_forms(self, body):
+        assert self._resolve(body) is None
+
+    def test_none_body_is_safe(self):
+        assert SwarmDispatcher._parent_issue_number(None) is None
+
+    def test_first_parent_link_wins(self):
+        # A body naming several parents resolves the first — deterministic, and
+        # matches how the single-parent gate inheritance model reads it.
+        assert self._resolve("Closes #10\nPart of #20") == 10
+
+    def test_bare_refs_do_not_shadow_a_real_parent(self):
+        # The regression behind the measurement: bodies that mention issues in
+        # prose AND declare a parent must resolve the declared one.
+        body = "Follows #99 and supersedes #98.\n\nPart of #123"
+        assert self._resolve(body) == 123
+
+    # ── cross-repo qualification ────────────────────────────────────────────
+
+    def test_same_repo_qualified_reference_resolves(self):
+        assert self._resolve("Closes markmhendrickson/ateles#123") == 123
+
+    def test_foreign_repo_reference_is_not_a_local_parent(self):
+        # Every caller feeds this number to a SAME-REPO lookup (the Neotoma
+        # issue entity, the GitHub comment API). Returning neotoma's #123 while
+        # dispatching on ateles would read an unrelated issue's gate_status.
+        assert self._resolve("Closes markmhendrickson/neotoma#123") is None
+
+    def test_foreign_qualified_skipped_in_favour_of_local(self):
+        body = "Closes markmhendrickson/neotoma#999\nPart of #123"
+        assert self._resolve(body) == 123
+
+    def test_qualified_reference_skipped_when_repository_unknown(self):
+        # Default (no repository): assume an unqualified #N is local, skip a
+        # qualified one. A missed parent posts a bypass notice; a wrong parent
+        # inherits foreign gates. Fail toward the recoverable error.
+        assert SwarmDispatcher._parent_issue_number("Closes owner/repo#123") is None
+        assert SwarmDispatcher._parent_issue_number("Closes #123") == 123
+
+    # ── the closure/parentage split ─────────────────────────────────────────
+
+    def test_closure_verb_set_excludes_parentage_forms(self):
+        # `_CLOSURE_VERB` answers "will GitHub auto-close this?" and must NOT
+        # widen along with parentage — that is ateles#300's bug in the other
+        # direction, where a partial PR falsely closes its parent on merge.
+        assert swarm_dispatch._CLOSURE_VERB.search("Closes #123")
+        assert swarm_dispatch._CLOSURE_VERB.search("Fixed #123")
+        assert not swarm_dispatch._CLOSURE_VERB.search("Part of #123")
+        assert not swarm_dispatch._CLOSURE_VERB.search("Refs #123")
+        assert not swarm_dispatch._CLOSURE_VERB.search("Related to #123")
+
+    def test_parent_link_is_a_superset_of_closure(self):
+        for body in ("Closes #1", "Fixed #1", "Part of #1", "Refs #1"):
+            assert swarm_dispatch._PARENT_LINK.search(body), body
+
+    def test_legacy_alias_still_points_at_parentage(self):
+        # `_PARENT_ISSUE` is imported/read elsewhere; it must keep naming the
+        # superset its call sites always actually wanted.
+        assert swarm_dispatch._PARENT_ISSUE is swarm_dispatch._PARENT_LINK

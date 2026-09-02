@@ -102,7 +102,46 @@ log = logging.getLogger("apis.swarm_dispatch")
 
 DAEMON_NAME = "apis"
 
-_PARENT_ISSUE = re.compile(r"\b(?:closes|fixes|resolves)\s+#(\d+)", re.I)
+# Parent-issue resolution (ateles#434, ateles#613, ateles#300).
+#
+# Two DISTINCT questions, deliberately not the same regex:
+#
+#   _CLOSURE_VERB  — "will GitHub auto-close the parent when this merges?"
+#                    Exactly GitHub's own closing-keyword set, no more.
+#   _PARENT_LINK   — "which issue is this PR's parent, for GATE INHERITANCE?"
+#                    A superset: every closure verb PLUS non-closing parentage
+#                    forms (`Part of`, `Refs`, `Parent`, `Related to`).
+#
+# Conflating them is ateles#300's finding in both directions: a partial-
+# implementation PR must either falsely auto-close its parent or lose its
+# parent entirely. Gate inheritance only ever needs to know the parent, so it
+# reads the superset and nothing is forced to claim a closure it does not mean.
+#
+# The old pattern was `(?:closes|fixes|resolves)\s+#(\d+)`, which missed the
+# `close/closed/fix/fixed/resolve/resolved` spellings GitHub itself honours
+# and could not express a cross-repo parent. Measured 2026-09-02: 50 of 112
+# open PRs across both repos had no parent detectable by it, while 22 of those
+# named an existing issue by bare `#N`.
+#
+# Bare `#N` is STILL not a parent link. It is far too easy to write incidentally
+# ("see #123 for background", "unlike #456"), and promoting it would attach
+# parents that the author never asserted — a wrong parent is worse than none,
+# because gate inheritance would then read the wrong issue's gates.
+_CLOSING_KEYWORDS = r"clos(?:e|es|ed)|fix(?:es|ed)?|resolv(?:e|es|ed)"
+_PARENTAGE_KEYWORDS = r"part\s+of|refs?|references?|parent|related\s+to"
+
+# Optional `owner/repo` qualifier so a cross-repo parent is expressible.
+_ISSUE_REF = r"(?:(?P<repo>[\w.-]+/[\w.-]+))?#(?P<number>\d+)"
+
+_CLOSURE_VERB = re.compile(rf"\b(?:{_CLOSING_KEYWORDS})\s*:?\s+{_ISSUE_REF}", re.I)
+_PARENT_LINK = re.compile(
+    rf"\b(?:{_CLOSING_KEYWORDS}|{_PARENTAGE_KEYWORDS})\s*:?\s+{_ISSUE_REF}", re.I
+)
+
+# Back-compat alias: `_PARENT_ISSUE` was the single conflated pattern. It now
+# names the parentage superset, which is what every one of its call sites
+# actually wanted.
+_PARENT_ISSUE = _PARENT_LINK
 _GATE_VERDICT = re.compile(r"GATE_INHERITANCE:\s*(clear|blocked)", re.I)
 
 # ateles#232 QA finding: `reopened` (github_gateway.py maps it to kind
@@ -2224,7 +2263,9 @@ class SwarmDispatcher:
                         "cicada",
                         self._cicada_fix_prompt(
                             trigger,
-                            self._parent_issue_number(pr.get("body") or ""),
+                            self._parent_issue_number(
+                                pr.get("body") or "", repository
+                            ),
                             attempts + 1,
                             pr.get("_blocking_review_body") or "",
                         ),
@@ -3528,7 +3569,7 @@ class SwarmDispatcher:
 
     async def _handle_pr(self, trigger: SwarmTrigger) -> None:
         ref = f"{trigger.repository}#{trigger.number}"
-        parent = self._parent_issue_number(trigger.body)
+        parent = self._parent_issue_number(trigger.body, trigger.repository)
 
         # 0. Pipeline-bypass guard (ateles): a product-code PR with NO parent
         #    issue skipped the gated issue → pm/arch → Cicada path. Lanius still
@@ -5073,7 +5114,7 @@ class SwarmDispatcher:
 
         # Build a PR-shaped trigger the readiness/route helpers expect.
         pr_trigger = self._pr_trigger_from_api(trigger.repository, pr)
-        parent = self._parent_issue_number(pr_trigger.body)
+        parent = self._parent_issue_number(pr_trigger.body, trigger.repository)
 
         # Terminal CI conclusion → failing? Route back (bounded), regardless of
         # review state: a broken build must be fixed to merge.
@@ -6146,7 +6187,10 @@ class SwarmDispatcher:
         # comment_on_pr means trigger.number IS the PR number; the parent issue
         # number is in the PR body.  Extract it.
         if trigger.comment_on_pr:
-            issue_number = self._parent_issue_number(trigger.body) or trigger.number
+            issue_number = (
+                self._parent_issue_number(trigger.body, trigger.repository)
+                or trigger.number
+            )
 
         store = IssueGateStore(
             self.config.neotoma_base_url, self.config.neotoma_token
@@ -6966,9 +7010,29 @@ class SwarmDispatcher:
     # ── GitHub helpers ───────────────────────────────────────────────────────
 
     @staticmethod
-    def _parent_issue_number(pr_body: str) -> int | None:
-        m = _PARENT_ISSUE.search(pr_body or "")
-        return int(m.group(1)) if m else None
+    def _parent_issue_number(pr_body: str, repository: str = "") -> int | None:
+        """Resolve the PR's parent issue number from its body.
+
+        Accepts GitHub's full closing-keyword set and the non-closing parentage
+        forms (`Part of`, `Refs`, `Parent`, `Related to`) — gate inheritance
+        needs to know the parent, not whether GitHub will auto-close it
+        (ateles#300).
+
+        A cross-repo reference (`owner/repo#N`) resolves ONLY when it names
+        `repository`. Every caller feeds this number to a same-repo lookup —
+        the Neotoma issue entity, the GitHub comment API — so returning a
+        foreign repo's number would silently read the wrong issue's gates.
+        When `repository` is unknown (the default), an unqualified `#N` is
+        assumed local and a qualified one is skipped, which is the safe
+        direction: a missed parent posts a bypass notice, a wrong parent
+        inherits gates from an unrelated issue.
+        """
+        for m in _PARENT_LINK.finditer(pr_body or ""):
+            qualifier = m.group("repo")
+            if qualifier and qualifier.lower() != (repository or "").lower():
+                continue
+            return int(m.group("number"))
+        return None
 
     def _github_headers(self, repo: str = "") -> dict[str, str]:
         """Return GitHub API request headers with the per-repo token (#95).
