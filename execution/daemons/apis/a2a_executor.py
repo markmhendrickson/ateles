@@ -201,6 +201,22 @@ def create_neotoma_task(
                 "tags": tags,
                 "source": "a2a",
                 "visibility": A2A_DEFAULT_TASK_VISIBILITY,
+                # ateles#682: an externally-delegated request is the one case
+                # where the swarm genuinely knows nothing about the work's
+                # blast radius — the caller supplied prose, not a warrant. Say
+                # so explicitly rather than letting the task fall through to
+                # the policy's LOW default: declare confidence 0.0 with the
+                # reason, so the gate checkpoints and the operator sees WHY.
+                # No action_type is asserted; content inference still runs, and
+                # a caller who describes a payment or a PR gets classified as
+                # such. Absent a signal the confidence axis holds it.
+                "confidence": 0.0,
+                "confidence_drivers": (
+                    "Externally delegated via A2A. The request originates "
+                    "outside the swarm and its scope is unverified — no "
+                    "retrieval, no spec, no operator review. Confidence is "
+                    "zero by construction, not by measurement."
+                ),
             }
         ],
         "idempotency_key": idempotency_key,

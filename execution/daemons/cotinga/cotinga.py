@@ -560,6 +560,16 @@ def create_neotoma_task(title: str, description: str, due_date: str, priority: s
             "priority": priority,
             "status": "open",
             "domain": "preparation",
+            # ateles#682: meeting prep is research and note-assembly — it reads
+            # context and produces a brief. Nothing leaves the machine, so the
+            # honest classification is LOW, declared rather than inferred.
+            "action_type": "compute_only_analysis",
+            "confidence": 0.7,
+            "confidence_drivers": (
+                "Prep task derived from a confirmed calendar event with known "
+                "attendees. Output is a research brief; no external writes, "
+                "no communication sent."
+            ),
         }],
         "idempotency_key": f"cotinga-task-{title[:40].replace(' ', '-')}-{due_date}",
     }).encode()
