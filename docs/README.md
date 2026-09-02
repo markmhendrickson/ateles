@@ -20,6 +20,16 @@ stale, misplaced, or operator-personal files, see the [documentation plan](docum
 
 ---
 
+## P0 · Foundation
+
+*What the swarm's work conforms to.*
+
+- [**Conformance**](foundation/conformance.md) — how issue-based work binds to the design foundation: the
+  always-read kernel, the path-keyed reading list the arch gate and review lenses load at review time, and
+  the design-basis statement every issue and PR carries. The remaining foundation documents (principles,
+  work model, gates and workflows, failure posture, vocabulary, authority model) land in
+  [`docs/foundation/`](foundation/) as they are written; each is read by the gates the day it lands.
+
 ## P0 · Decide & orient
 
 *What is this, and is it for me?*
