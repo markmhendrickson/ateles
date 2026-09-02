@@ -439,7 +439,7 @@ async def _fetch_comments(snap: dict) -> list:
     import json as _json
     import subprocess as _sp
 
-    # ateles#682: this omitted `issue_number` (8.7% of prod rows) and
+    # ateles#741: this omitted `issue_number` (8.7% of prod rows) and
     # `github_issue_number` (1.8%). A miss returns [] here, which the
     # orchestrator reads as "nothing satisfied yet" — so participation
     # state silently stalls rather than erroring.

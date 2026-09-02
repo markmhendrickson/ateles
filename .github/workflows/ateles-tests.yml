@@ -72,7 +72,7 @@ jobs:
         run: uv run --extra dev python -m pytest execution/daemons/anthus/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
-      # ateles#682: lib/ has root-level test files (test_issue_labels.py,
+      # ateles#741: lib/ has root-level test files (test_issue_labels.py,
       # test_neotoma_forensics.py, test_issue_number.py) that NO lane collected
       # — the step above is scoped to lib/approval/ only. So the shared helpers
       # every daemon imports had tests that never ran in CI.

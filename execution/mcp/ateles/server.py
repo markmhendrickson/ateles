@@ -646,6 +646,19 @@ ISSUE_NUMBER_FIELDS: tuple[str, ...] = (
 )
 
 
+def _extract_issue_number(snap: dict) -> int | None:
+    """Return the first parseable issue number using ISSUE_NUMBER_FIELDS order."""
+    for key in ISSUE_NUMBER_FIELDS:
+        value = snap.get(key)
+        if value is None:
+            continue
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _issue_snapshot_matches(snap: dict, repo: str, number: int) -> bool:
     """True when *snap* is the issue entity for ``repo#number``.
 
@@ -661,21 +674,13 @@ def _issue_snapshot_matches(snap: dict, repo: str, number: int) -> bool:
     server at startup. ``lib/issue_number.py`` and this function are kept in
     sync by ``test_server.py``, which asserts the two field lists are equal.
 
-    ateles#682: ``github_issue_number`` (82 rows in prod) was missing here.
+    ateles#390/#722: ``github_issue_number`` (82 rows in prod) was missing here.
     """
     snap_repo = snap.get("repo") or snap.get("repository") or ""
     if str(snap_repo) != str(repo):
         return False
-    for key in ISSUE_NUMBER_FIELDS:
-        value = snap.get(key)
-        if value is None:
-            continue
-        try:
-            if int(str(value).strip()) == int(number):
-                return True
-        except (TypeError, ValueError):
-            continue
-    return False
+    found = _extract_issue_number(snap)
+    return found is not None and found == int(number)
 
 
 def _parse_owner_history(raw: Any) -> list[dict]:
@@ -799,9 +804,7 @@ def _get_gate_status(issue_ref: str, history_limit: int = 5) -> dict:
 
     blocking = _blocking_gates(gate_status)
     repo_name = str(snap.get("repo") or snap.get("repository") or "")
-    number_val = next(
-        (snap.get(f) for f in ISSUE_NUMBER_FIELDS if snap.get(f) is not None), None
-    )
+    number_val = _extract_issue_number(snap)
 
     pipeline = _pipeline_state_for(repo_name, number_val)
 

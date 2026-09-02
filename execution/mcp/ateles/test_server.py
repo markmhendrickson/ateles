@@ -860,7 +860,7 @@ class TestSwarmObservability(unittest.TestCase):
 
     def test_issue_match_tolerates_field_spellings(self):
         """Prod entities disagree on field names; matching one spelling misses the rest."""
-        for number_field in ("issue_number", "github_number", "number"):
+        for number_field in ("github_number", "issue_number", "github_issue_number", "number"):
             for repo_field in ("repo", "repository"):
                 snap = {repo_field: "o/r", number_field: 2169}
                 self.assertTrue(srv._issue_snapshot_matches(snap, "o/r", 2169))
@@ -992,7 +992,7 @@ class TestSwarmObservability(unittest.TestCase):
         out = srv._get_gate_status("garbage")
         self.assertIn("error", out)
 
-    # ── ateles#682: issue-number field spellings ────────────────────────────
+    # ── ateles#390/#722: issue-number field spellings ───────────────────────
 
     def test_issue_number_fields_match_the_shared_definition(self):
         """This server's field list MUST equal lib/issue_number.py's.
@@ -1041,6 +1041,12 @@ class TestSwarmObservability(unittest.TestCase):
         self.assertFalse(
             srv._issue_snapshot_matches({"github_number": 682, "repo": "x/y"}, "o/r", 682)
         )
+
+    def test_matcher_uses_the_first_parseable_issue_number(self):
+        """A later alias must not override the leading issue identity."""
+        snap = {"github_number": 2237, "issue_number": 521, "repo": "o/r"}
+        self.assertFalse(srv._issue_snapshot_matches(snap, "o/r", 521))
+        self.assertTrue(srv._issue_snapshot_matches(snap, "o/r", 2237))
 
 
 if __name__ == "__main__":
