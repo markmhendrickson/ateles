@@ -37,6 +37,33 @@ All hooks are **fail-open** (stdlib-only Python; any error or missing `NEOTOMA_B
 
 **Rollout posture:** defaults to **WARN** (logs the violation, exits 0). Set `ATELES_SESSION_INTEGRITY_ENFORCE=1` to switch the Stop hook to **BLOCK** (exit 2 + `{"decision":"block"}`), preventing a clean stop until the session binds a plan and stores its turns. Per-session state lives in `.claude/.session_state/` (gitignored).
 
+## Session conduct — how the operator wants to be worked with
+
+These are standing operator instructions, stated repeatedly across sessions. They live here because **CLAUDE.md is re-injected from disk after every compaction**, so unlike an instruction given in conversation, they do not age out of a long session.
+
+- **Dispatch, don't work inline.** Create a Neotoma `task` entity and let an agent claim it; use a subagent only where no swarm path exists. This binds to *all* work — research, analysis, design, payments, investigation — not only code. Work you recommend is work you file, in the same turn you recommend it, without waiting to be asked; dispatch proactively and in parallel. Reserve the session for judgement and conversation. Durable work never goes into a harness task chip (`spawn_task`) — a chip is not an entity, so it is unclaimable and invisible to the swarm.
+- **Summarize what the operator said at the top of each reply,** cleaned up. Most operator input arrives as live voice transcription, which garbles names and can fabricate whole sentences; echoing what was heard is how the operator catches it. Do this even when the turn seems routine.
+- **Give status updates unprompted** — what moved, what is blocked, and one recommended next step *per workstream*, so the operator can confirm whether to stop that workstream for now.
+- **Name the related task entities whenever discussing work,** and link each by id into the Ateles task dashboard so the operator can open it. Work discussed without a task id cannot be tracked or found again.
+- **Proceed on your recommendation instead of stopping to ask.** Ask only at a genuine fork you cannot resolve from the request, the data, or Neotoma. If you asked something and it went unanswered, re-surface it each turn until it is answered rather than dropping it.
+- **Fix the swarm rather than routing around it.** Repair a broken daemon, gate, or dispatch path rather than doing its job by hand, and do so without asking. When the defect belongs to a dependency, file an issue against that repo with a test rather than writing an instruction that works around it.
+- **Contextualize before executing.** Dispatched work must first check existing tasks, issues, PRs, and the codebase, so the swarm neither duplicates work nor re-decides settled questions.
+
+### Standing instructions must survive compaction
+
+An instruction that has to be repeated is not persisted. Compaction replaces the conversation with a summary, so anything stated only in chat is lost unless it happens to make that summary — which is why the two rules above about dispatching and summarizing had to be restated four times and twice respectively in one 2026-09-02 session.
+
+Two mechanisms re-inject after a compaction boundary, and only these two:
+
+| Mechanism | Fires | Use for |
+|---|---|---|
+| CLAUDE.md (this file) | Re-injected from disk on every compaction | Standing constraints, repo-wide |
+| `SessionStart` hook, matcher `compact` | After auto- and manual `/compact` | Short restatement of interaction rules |
+
+`PreCompact` cannot do this — its stdout goes to the debug log, never into context. `UserPromptSubmit` does inject, but fires every turn and so pays the cost on turns that never needed it.
+
+`.claude/hooks/reinject_working_method.py` carries the short restatement. Note the failure it fixes: `session_start.py` was registered against `startup|resume|clear`, which **excludes `compact`** — so the hook meant to keep context alive was silent at precisely the moment context was lost. When adding a SessionStart hook, include `compact` in the matcher, or state why it is deliberately excluded.
+
 ## Repo-isolation hook (mechanical enforcement)
 
 - **`sibling_repo_worktree_guard.py`** (PreToolUse: `Edit|Write|NotebookEdit|Bash`) — a distinct concern from the session-integrity hooks above: it protects **other repos**, not this session's audit trail. When operating from the Ateles repo, it **hard-blocks** any mutation of a *sibling* repo's **shared main clone** (e.g. `~/repos/neotoma`): file edits, and git-mutating Bash (commit, checkout/switch, reset, merge, rebase, cherry-pick, push, …). It allows the Ateles repo itself, any dedicated **linked worktree**, read-only git, and `git worktree add` (the remedy). On a hit it directs you to `git worktree add ~/repos/<repo>-wt-<slug> origin/main` first. Detection: `git rev-parse --git-dir` == `--git-common-dir` ⇒ main clone; also honors `git -C <path>` / `--git-dir=<path>`. Fail-open (stdlib-only; any error → exit 0). Override a deliberate case with `ATELES_ALLOW_SHARED_REPO_WRITES=1`. Motivated by a 2026-07-21 incident where a stray write + commit landed on another session's branch in the shared checkout.
