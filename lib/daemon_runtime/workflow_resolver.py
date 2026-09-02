@@ -77,7 +77,7 @@ extra steps.
 
 Reading entities live means a bad value in an entity becomes a live routing
 fault rather than dormant decoration — three of the eight definitions still name
-``gryllus``, an agent renamed to Cicada on 2026-06-12 (filed separately as
+``gryllus`` (gryllus -> cicada, renamed 2026-06-12; filed separately as
 ent_875dee7675b0516f66a72220). Two guards apply, and neither is this module
 silently repairing data:
 
