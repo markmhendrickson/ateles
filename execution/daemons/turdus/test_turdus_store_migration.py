@@ -122,8 +122,9 @@ def test_store_email_entity_payload_shape(monkeypatch):
     entity = body["entities"][0]
     assert entity["entity_type"] == "email_message"
     assert entity["canonical_name"] == "email_message:gmail:msg-1"
-    assert entity["snapshot"]["sender"] == _MESSAGE["sender"]
-    assert entity["snapshot"]["subject"] == _MESSAGE["subject"]
+    # Flat, not nested: /store drops an unrecognized "snapshot" key wholesale.
+    assert entity["sender"] == _MESSAGE["sender"]
+    assert entity["subject"] == _MESSAGE["subject"]
 
 
 # ── _create_task_for_email ───────────────────────────────────────────────────
@@ -163,6 +164,74 @@ def test_create_task_for_email_payload_shape(monkeypatch):
     entity = body["entities"][0]
     assert entity["entity_type"] == "task"
     assert entity["canonical_name"] == "task:turdus:email:msg-1"
+
+    # /store reads entity fields FLAT. A nested "snapshot" key is not a
+    # recognized field, so everything under it is dropped silently and the
+    # task lands carrying only its canonical_name — which never dispatches,
+    # because Apis routes on status/title/tags that are no longer there.
+    assert "snapshot" not in entity, (
+        "fields must be flat on the entity; a nested 'snapshot' is dropped by /store"
+    )
+    assert entity["title"]
+    assert entity["description"]
+    assert entity["status"] == "open"
+    # ateles#682: blast radius must key on what the task does, not on the
+    # agent that would handle it.
+    assert entity["action_type"] == "compute_only_analysis"
+    assert entity["confidence"] == 0.8
+    # _MESSAGE is invoice-shaped, so this exercises the monedula branch.
+    assert entity["assigned_to"] == "monedula"
+    assert entity["priority"] == "urgent"
+    assert entity["domain"] == "finance"
+
+
+def test_create_task_for_plain_actionable_email_is_flat(monkeypatch):
+    """The non-invoice branch also lands its fields flat."""
+    turdus = _load_turdus(monkeypatch)
+    capture: dict = {}
+    _install_fake_client(
+        monkeypatch,
+        payload={"entities": [{"entity_id": "ent_task_1"}]},
+        capture=capture,
+    )
+
+    plain = dict(_MESSAGE)
+    plain["subject"] = "Can we meet on Thursday?"
+    plain["sender"] = "Colleague <colleague@example.com>"
+    plain["snippet"] = "Let me know what time works."
+    assert not turdus._is_invoice(plain["sender"], plain["subject"], plain["snippet"])
+
+    asyncio.run(turdus._create_task_for_email(plain, "ent_email_1"))
+
+    entity = next(
+        c for c in capture["calls"] if c["url"].endswith("/store")
+    )["json"]["entities"][0]
+    assert "snapshot" not in entity
+    assert entity["status"] == "open"
+    assert entity["title"].startswith("Email triage:")
+    assert entity["action_type"] == "compute_only_analysis"
+    assert "assigned_to" not in entity
+
+
+def test_store_email_entity_payload_is_flat(monkeypatch):
+    """email_message fields must be flat too — 497 shells were stored nested."""
+    turdus = _load_turdus(monkeypatch)
+    capture: dict = {}
+    _install_fake_client(
+        monkeypatch,
+        payload={"entities": [{"entity_id": "ent_email_1"}]},
+        capture=capture,
+    )
+
+    asyncio.run(turdus._store_email_entity(_MESSAGE))
+
+    entity = next(
+        c for c in capture["calls"] if c["url"].endswith("/store")
+    )["json"]["entities"][0]
+    assert "snapshot" not in entity
+    assert entity["entity_type"] == "email_message"
+    assert entity["message_id"] == "msg-1"
+    assert entity["source"] == "gmail"
 
 
 def test_create_task_for_email_links_task_to_email_entity(monkeypatch):

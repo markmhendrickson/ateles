@@ -505,20 +505,22 @@ async def _store_email_entity(message: dict) -> str | None:
     payload = {
         "entities": [
             {
+                # /store reads entity fields FLAT off this object. A nested
+                # "snapshot" key is not a recognized field, so every field under
+                # it is silently dropped and the entity lands carrying only its
+                # canonical_name. (The deprecated /observations endpoint this was
+                # migrated from in #190 did take a nested snapshot — the nesting
+                # was carried over unchanged and nothing failed loudly.)
                 "entity_type": "email_message",
                 "canonical_name": f"email_message:gmail:{msg_id}",
-                "snapshot": {
-                    "message_id": message.get("id", ""),
-                    "sender": message.get("sender", ""),
-                    "subject": message.get("subject", ""),
-                    "snippet": message.get("snippet", ""),
-                    "date": message.get("date_iso", ""),
-                    "labels": message.get("labels", []),
-                    "classification": message.get(
-                        "classification", "informational"
-                    ),
-                    "source": "gmail",
-                },
+                "message_id": message.get("id", ""),
+                "sender": message.get("sender", ""),
+                "subject": message.get("subject", ""),
+                "snippet": message.get("snippet", ""),
+                "date": message.get("date_iso", ""),
+                "labels": message.get("labels", []),
+                "classification": message.get("classification", "informational"),
+                "source": "gmail",
             }
         ],
         "idempotency_key": f"turdus-email-{msg_id}",
@@ -579,6 +581,11 @@ async def _create_task_for_email(message: dict, email_entity_id: str | None) -> 
             "priority": "urgent",
             "status": "open",
             "domain": "finance",
+            # ateles#682: state what the task DOES so the gate infers blast
+            # radius from the action, not from which agent would handle it.
+            # Triage only reads and summarizes; payment stays operator-gated.
+            "action_type": "compute_only_analysis",
+            "confidence": 0.8,
         }
         log_label = "INVOICE→monedula"
     else:
@@ -593,6 +600,9 @@ async def _create_task_for_email(message: dict, email_entity_id: str | None) -> 
             ),
             "audience": "agent",
             "status": "open",
+            # ateles#682: as above — triaging an email is read-and-summarize.
+            "action_type": "compute_only_analysis",
+            "confidence": 0.8,
         }
         log_label = "actionable"
 
@@ -607,9 +617,12 @@ async def _create_task_for_email(message: dict, email_entity_id: str | None) -> 
     payload = {
         "entities": [
             {
+                # Flat, not nested under "snapshot" — see the note on the
+                # email_message store above. Nesting drops title/description/
+                # status, and a task with no status never reaches dispatch.
                 "entity_type": "task",
                 "canonical_name": f"task:turdus:email:{msg_id}",
-                "snapshot": snapshot,
+                **snapshot,
             }
         ],
         "idempotency_key": f"turdus-task-{msg_id}",
