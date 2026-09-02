@@ -118,12 +118,15 @@ The shared clones (`~/repos/ateles`, `~/repos/neotoma`) are for sessions and are
 - **Google Calendar**: always use `gws` CLI with `Europe/Madrid` timezone.
 - **Gmail**: always use `gws gmail ...` commands, not the Gmail MCP server.
 - **Strip PII before filing issues** — scrub usernames, worktree names, platform names; use `visibility: private` for session-derived issues.
+- **Never bypass the pre-commit hook with `--no-verify`.** When a commit must land with tests skipped, use the hook's own escape hatch: `SKIP_TESTS=1 SKIP_TESTS_REASON="<why>"`. `--no-verify` silently skips every check, so a self-inflicted failure arrives later looking environmental. The named reason keeps the skip attributable.
 
 ---
 
-## Verification discipline — standing engineering rules
+## Verification discipline — standing engineering rules (session-only)
 
-Each rule below was derived from **three or more independent failures on a single day (2026-09-02)**. They are stated here because CLAUDE.md is re-injected from disk after compaction, so they bind every session in this repo rather than aging out of one.
+**Session-only — these rules do not bind dispatched agents.** `CLAUDE.md` is loaded by interactive sessions in this checkout; Cicada/Pavo/etc. at spawn never see it. Dispatch-facing verify / refusal / dispatch-and-report duties remain on `ateles.prompt_markdown` (and code / point-of-use homes) per ateles#593 D1–D3. This section is authorized by ateles#731 as compaction-surviving session guidance, not as a #593 deliverable.
+
+Each rule below was derived from **three or more independent failures on a single day (2026-09-02)**. They are stated here because CLAUDE.md is re-injected from disk after compaction, so they bind every *interactive session* in this repo rather than aging out of one.
 
 Where a rule can be enforced mechanically it says so. **A rule with no enforcement is one you must apply by hand** — that is the honest posture, not a defect to paper over.
 
