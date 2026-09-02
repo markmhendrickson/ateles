@@ -9,6 +9,7 @@ socket died" by looking at an empty transcript, so the code has to tell them.
 import asyncio
 import json
 import math
+import os
 import random
 import re
 import struct
@@ -2089,3 +2090,44 @@ def test_an_explicit_monolingual_override_is_still_honoured(
     assert resolved.primary == "es"
     assert resolved.plausible == ("es",)
     assert resolved.source == "explicit override"
+
+
+def test_a_cache_carrying_junk_codes_is_normalized_not_trusted(
+    monkeypatch, tmp_path
+):
+    """The cache is a file on disk, so it is not a trusted input.
+
+    A hand edit or an older cache shape could otherwise put a non-ISO code into
+    `plausible`, where it matches no orthography table — silently narrowing the
+    allowed set while still reporting a healthy cached read.
+    """
+    import json as _json
+    import time as _time
+
+    cache = tmp_path / "spoken_languages.json"
+    cache.write_text(
+        _json.dumps(
+            {
+                "languages": ["English", "es", "not-a-language", "Catalan"],
+                "written_at": _time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sl, "CACHE_PATH", cache)
+    monkeypatch.setattr(sl, "_fetch_locale_profile", lambda timeout: None)
+
+    resolved = sl.resolve_session_languages("en")
+
+    assert resolved.source == "cache"
+    assert set(resolved.plausible) == {"en", "es", "ca"}, (
+        "names fold to codes and junk is dropped"
+    )
+
+
+def test_the_cache_is_keyed_by_profile_so_two_profiles_do_not_seed_each_other():
+    """Screening one operator's speech against another's languages would be
+    exactly the false-positive class this module exists to prevent."""
+    assert sl.LOCALE_PROFILE_KEY in str(sl.CACHE_PATH) or os.environ.get(
+        "STREAM_TRANSCRIPT_LANGUAGE_CACHE"
+    ), "the default cache path must carry the profile key"

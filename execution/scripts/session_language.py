@@ -76,10 +76,19 @@ LOCALE_PROFILE_KEY = os.environ.get("ATELES_LOCALE_PROFILE_KEY", "default")
 # Last good read of the operator's spoken set, so an outage degrades to what
 # was true yesterday rather than to a guess. Not a cache of the PIN — that
 # falls back to the explicitly configured language, which needs no cache.
+#
+# Keyed by LOCALE_PROFILE_KEY: two profile keys on one host must not seed each
+# other's degraded set, which would silently screen one operator's speech
+# against another's languages.
 CACHE_PATH = Path(
     os.environ.get(
         "STREAM_TRANSCRIPT_LANGUAGE_CACHE",
-        str(Path.home() / ".cache" / "ateles" / "spoken_languages.json"),
+        str(
+            Path.home()
+            / ".cache"
+            / "ateles"
+            / f"spoken_languages.{LOCALE_PROFILE_KEY}.json"
+        ),
     )
 )
 CACHE_TTL_SECONDS = int(
@@ -186,7 +195,24 @@ def _read_cached_plausible() -> tuple[tuple[str, ...], str] | None:
     """The last good spoken set and how old it is, or None if unusable."""
     try:
         raw = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
-        codes = tuple(c for c in raw["languages"] if isinstance(c, str))
+        # Re-normalize rather than trusting the file: it is on disk, so a hand
+        # edit or a cache written by an older shape could otherwise carry a
+        # non-ISO code straight into `plausible`, where it silently matches no
+        # orthography table and narrows the allowed set without saying so.
+        #
+        # `normalize_language` is deliberately permissive — it passes an
+        # unrecognized code through so the filter can still compare labels — so
+        # a second check against the codes this API can actually pin is what
+        # rejects junk here.
+        codes = tuple(
+            code
+            for code in (
+                normalize_language(c)
+                for c in raw["languages"]
+                if isinstance(c, str)
+            )
+            if code and code in REALTIME_SUPPORTED_LANGUAGES
+        )
         if not codes:
             return None
         age = time.time() - float(raw.get("written_at", 0))
