@@ -230,11 +230,45 @@ def parse_steps(next_steps: str) -> list[dict]:
 WHO_CLASS = {"SWARM": "sw", "SUBAGENT": "sa", "OPERATOR": "op"}
 
 # The plan writes long analytical steps. The page is a scan surface, so each row
-# shows the leading sentence and links the reader onward to the plan itself.
+# shows the leading sentence and links the reader onward to the plan itself. Any
+# drop of trailing sentences OR a length cut must be visibly incomplete — a
+# truncated cell with no ellipsis reads as the full step, which is the silent
+# omission this renderer exists to avoid.
+#
+# A bare split on `[.!?]\s+` treats "e.g. the" or "Mr. Smith" as a sentence
+# boundary and truncates a short step down to a two-character fragment — a
+# sharper silent-omission bug than the one this function exists to fix. The
+# lookbehind excludes the common abbreviations plan prose actually uses; this
+# is a short, practical list, not a full NLP sentence splitter. It must sit
+# immediately after `[.!?]`, before the `\s+` that consumes the following
+# whitespace — a lookbehind placed after `\s+` sees "Mr. " (with the space)
+# rather than "Mr.", so it never matches.
+_ABBREV = r"(?<!\bMr\.)(?<!\bMs\.)(?<!\bDr\.)(?<!e\.g\.)(?<!i\.e\.)(?<!\betc\.)(?<!\bvs\.)"
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])" + _ABBREV + r"\s+")
+
+
 def _summarize(text: str, limit: int = 240) -> str:
-    first = re.split(r"(?<=[.!?])\s+", text.strip())[0] if text.strip() else ""
+    text = text.strip()
+    if not text:
+        return ""
+    parts = SENTENCE_SPLIT_RE.split(text)
+    first = parts[0]
+    truncated = len(parts) > 1 or len(first) > limit
     if len(first) > limit:
-        first = first[: limit - 1].rstrip() + "…"
+        first = first[: limit - 1].rstrip()
+    if truncated and "…" not in first[-3:]:
+        # Strip exactly one trailing '.' — the sentence terminator we just cut
+        # on — before appending the ellipsis. NOT rstrip(".") or a "\.+$"
+        # collapse: either would also eat a decimal point, over-strip a
+        # multi-period abbreviation like "e.g." that survived the split, or
+        # collapse a source "..."/"…." the author already wrote. If the tail
+        # already reads as incomplete (ends in one of those), leave it as-is.
+        if first.endswith("...") or first.endswith("…."):
+            pass
+        elif first.endswith("."):
+            first = first[:-1] + "…"
+        else:
+            first = first + "…"
     return first
 
 
@@ -242,7 +276,48 @@ def _esc(text: str) -> str:
     return html.escape(text, quote=False)
 
 
-def _strand_table(strand: dict) -> str:
+SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _slug(text: str, seen: set) -> str:
+    """Slugify heading text into a stable id; de-dupe collisions with -2, -3, …
+
+    `seen` is a caller-owned set of every id already issued on the page (keyed
+    by the id string itself, not the base text), threaded across every
+    heading. Two headings with the same text (e.g. two strands both titled
+    "REVIEW") get distinct anchors — and so does a heading whose literal text
+    already looks like a generated suffix (a strand titled "Goals 2" sitting
+    next to a second "Goals" heading), since the candidate is checked against
+    every id already taken, not just re-derived from a per-base counter that
+    the literal text could coincidentally match.
+    """
+    base = SLUG_RE.sub("-", text.lower()).strip("-") or "section"
+    candidate = base
+    n = 2
+    while candidate in seen:
+        candidate = f"{base}-{n}"
+        n += 1
+    seen.add(candidate)
+    return candidate
+
+
+def _heading(level: int, text: str, seen: set) -> str:
+    """A deep-linkable heading: stable id + hover `.hanchor` permalink.
+
+    Required by the draft-rendered-page skill (`RENDERED_PAGE_NO_HEADING_ANCHORS`
+    on conformance_policy ent_edd087ca6482f7d93162f9a2) so a reader can point
+    someone at "Strand B" by URL. CSS ships via PAGE_CSS / custom_css.
+    """
+    hid = _slug(text, seen)
+    esc = _esc(text)
+    return f'<h{level} id="{hid}">{esc} <a class="hanchor" href="#{hid}">#</a></h{level}>'
+
+
+def _plan_link(plan_id: str, label: str) -> str:
+    return f'<a href="/entities/{_esc(plan_id)}">{label}</a>'
+
+
+def _strand_table(strand: dict, plan_id: str, seen: set) -> str:
     steps = strand["steps"]
     # Reproduce, from the data, the judgement a human made by hand: a strand in
     # which nothing is blocked gets no "Blocked by" column, rather than a column
@@ -256,10 +331,15 @@ def _strand_table(strand: dict) -> str:
     for s in steps:
         cls = WHO_CLASS.get(s["who"], "sw")
         tr = ' class="opr"' if s["who"] == "OPERATOR" else ""
+        summary = _summarize(s["text"])
+        step_cell = _esc(summary)
+        if summary != s["text"].strip():
+            # Truncated: point the reader onward to the full step text.
+            step_cell += f' {_plan_link(plan_id, "full step")}'
         row = (
             f"<tr{tr}><td>{s['number']}</td>"
             f'<td><span class="tag {cls}">{_esc(s["who"])}</span></td>'
-            f"<td>{_esc(_summarize(s['text']))}</td>"
+            f"<td>{step_cell}</td>"
         )
         if has_blockers:
             blocked = s["blocked_by"]
@@ -270,8 +350,9 @@ def _strand_table(strand: dict) -> str:
                 row += '<td class="free">&mdash;</td>'
         rows.append(row + "</tr>")
 
+    heading = _heading(2, f'Strand {strand["letter"]} — {strand["title"]}', seen)
     return (
-        f'<h2>Strand {strand["letter"]} &mdash; {_esc(strand["title"])}</h2>\n'
+        f"{heading}\n"
         + (f'<p class="lead">{_esc(_summarize(strand["preamble"], 400))}</p>\n' if strand["preamble"] else "")
         + "<table>\n<thead>"
         + head
@@ -284,9 +365,11 @@ def _strand_table(strand: dict) -> str:
 def build_html(plan: dict) -> str:
     """Generate the page body from the plan snapshot. Pure — no I/O."""
     title = plan.get("title") or "Plan"
+    plan_id = plan.get("_entity_id", DEFAULT_PLAN_ID)
     strands = parse_steps(plan.get("next_steps") or "")
     decisions = plan.get("decisions") or {}
     goals = plan.get("goals") or []
+    seen_ids: set = set()
 
     step_count = sum(len(s["steps"]) for s in strands)
     operator_steps = [
@@ -294,11 +377,11 @@ def build_html(plan: dict) -> str:
     ]
 
     parts = [
-        f"<h1>{_esc(title)}</h1>",
-        f'<p class="sub">plan <code>{_esc(plan.get("_entity_id", DEFAULT_PLAN_ID))}</code> '
+        _heading(1, title, seen_ids),
+        f'<p class="sub">Scan surface of {_plan_link(plan_id, f"plan <code>{_esc(plan_id)}</code>")} '
         f"&middot; {step_count} steps, {len(strands)} strands "
         f"&middot; {len(decisions)} decisions recorded "
-        f"&middot; generated from the plan entity</p>",
+        f"&middot; summarized here, full step text on the plan entity</p>",
     ]
 
     overview = plan.get("overview")
@@ -306,37 +389,47 @@ def build_html(plan: dict) -> str:
         parts.append(f'<div class="callout">\n<p>{_esc(overview)}</p>\n</div>')
 
     if goals:
-        parts.append('<h2 class="first">Goals</h2>\n<ul>')
+        parts.append(_heading(2, "Goals", seen_ids) + "\n<ul>")
         parts.extend(f"<li>{_esc(str(g))}</li>" for g in goals)
         parts.append("</ul>")
 
     for strand in strands:
-        parts.append(_strand_table(strand))
+        parts.append(_strand_table(strand, plan_id, seen_ids))
 
     if operator_steps:
-        listed = ", ".join(
-            f"<strong>{s['number']}</strong>" for s in operator_steps
-        )
+        listed = ", ".join(str(s["number"]) for s in operator_steps)
         parts.append(
-            "<h2>Operator-only steps</h2>\n"
-            f"<p>{listed} &mdash; these need a decision, not execution. "
+            _heading(2, "Operator-only steps", seen_ids) + "\n"
+            f"<p>Steps {listed} need a decision, not execution. "
             "Every other step is executable by the swarm or a subagent.</p>"
         )
 
     if decisions:
         parts.append(
-            "<h2>Decisions on record</h2>\n"
+            _heading(2, "Decisions on record", seen_ids) + "\n"
             '<p class="lead">Settled. Do not re-raise these.</p>\n<ul>'
         )
         for key in sorted(decisions):
             label = key.replace("_", " ")
             parts.append(
-                f"<li><strong>{_esc(label)}</strong> &mdash; "
+                f'<li><span class="dlabel">{_esc(label)}</span> &mdash; '
                 f"{_esc(_summarize(str(decisions[key]), 300))}</li>"
             )
         parts.append("</ul>")
 
     return "\n\n".join(parts) + "\n"
+
+
+# Hover-revealed heading permalinks (draft-rendered-page skill, "Deep-linkable
+# headings"). Host defaults do not define `.hanchor`; without this CSS the
+# anchors render but are visually unusable, which fails the same rule.
+PAGE_CSS = """
+h1,h2,h3,h4,h5,h6{ scroll-margin-top:1.5rem; }
+a.hanchor{ margin-left:.4em; font-weight:400; font-size:.85em; text-decoration:none; opacity:0; transition:opacity .12s ease; color:var(--muted); }
+h1:hover>a.hanchor,h2:hover>a.hanchor,h3:hover>a.hanchor,h4:hover>a.hanchor,h5:hover>a.hanchor,h6:hover>a.hanchor{ opacity:.5; }
+a.hanchor:hover{ opacity:1; }
+.dlabel{ font-weight:600; }
+""".strip()
 
 
 # ------------------------------------------------------- verify by read-back
@@ -376,24 +469,56 @@ def _generate(base_url: str, token: str, plan_id: str) -> tuple[str, str]:
     return _with_marker(build_html(plan))
 
 
-def render(base_url: str, token: str, plan_id: str, page_id: str) -> int:
-    body, digest = _generate(base_url, token, plan_id)
+def _correct_field(base_url: str, token: str, page_id: str, field: str, value: str, digest: str) -> None:
+    """POST one /correct call for a single rendered_page field.
 
+    Kept separate per field (rather than one call try/excepted as a unit) so a
+    failure names which field it was — html_body and custom_css are corrected
+    independently, and a failure on the second must not be reported the same
+    way as a failure on the first, since the first may have already landed.
+    """
     _request(
         f"{base_url}/correct",
         token,
         {
             "entity_id": page_id,
             "entity_type": "rendered_page",
-            "field": "html_body",
-            "value": body,
-            "idempotency_key": f"render-plan-page-html_body-{digest}",
+            "field": field,
+            "value": value,
+            "idempotency_key": f"render-plan-page-{field}-{digest}",
         },
     )
-    print(f"corrected html_body ({len(body)} chars)")
+    print(f"corrected {field} ({len(value)} chars)")
 
-    # The write "succeeded". That proves nothing — verify through the viewer's
-    # own path before reporting success.
+
+def render(base_url: str, token: str, plan_id: str, page_id: str) -> int:
+    body, digest = _generate(base_url, token, plan_id)
+
+    try:
+        _correct_field(base_url, token, page_id, "html_body", body, digest)
+    except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+        print(f"html_body correction FAILED (nothing landed): {exc}", file=sys.stderr)
+        return 1
+
+    # The .hanchor affordance in html_body is unusable without this CSS — push
+    # it every run so a manual custom_css edit can never drift from the markup
+    # the generator emits.
+    css_digest = _fingerprint(PAGE_CSS)
+    try:
+        _correct_field(base_url, token, page_id, "custom_css", PAGE_CSS, css_digest)
+    except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+        print(
+            f"custom_css correction FAILED: {exc}\n"
+            f"  html_body already landed (verify separately with --check);"
+            f" only the CSS half is stale — re-run to retry.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Both writes "succeeded". That proves nothing — verify through the
+    # viewer's own path before reporting success. html_body carries its own
+    # content-hash marker; custom_css has no such marker in the served /html
+    # body, so it is verified by re-fetching the entity snapshot instead.
     served = _fetch_served_html(base_url, token, page_id)
     got = _served_hash(served)
     if got != digest:
@@ -406,7 +531,18 @@ def render(base_url: str, token: str, plan_id: str, page_id: str) -> int:
         )
         return 1
 
-    print(f"verified: live page serves {digest} ({len(served)} bytes)")
+    page_snapshot = _fetch_snapshot(base_url, token, page_id)
+    if page_snapshot.get("custom_css") != PAGE_CSS:
+        print(
+            "VERIFY FAILED: custom_css correction reported success but the "
+            "entity snapshot does not carry the CSS just written.\n"
+            "  The .hanchor anchors will render with no styling until this "
+            "is corrected — do not trust the write.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"verified: live page serves {digest} ({len(served)} bytes), custom_css confirmed")
     return 0
 
 
