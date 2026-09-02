@@ -239,9 +239,10 @@ def test_a2a_and_sse_routing_paths_agree():
     routing.resolve_skill directly — there is no per-surface routing logic to
     diverge. This test proves that structurally: it imports apis.py's bound
     names (`_infer_tags_from_text`, `_resolve_skill`) alongside the A2A path's
-    equivalents and asserts identical output for the same input text, so a
-    future edit that reintroduces a second routing implementation on either
-    surface fails loudly here instead of silently drifting.
+    equivalents and asserts identical output for the same input text and
+    assigned owner, so a future edit that reintroduces a second routing
+    implementation on either surface fails loudly here instead of silently
+    drifting.
     """
     import apis as apis_module  # noqa: E402 - imported lazily to avoid apis.py's
 
@@ -261,6 +262,24 @@ def test_a2a_and_sse_routing_paths_agree():
         sse_skill = apis_module._resolve_skill(sse_tags)
         a2a_skill = ax.resolve_skill(a2a_tags)
         assert sse_skill == a2a_skill, (title, sse_skill, a2a_skill)
+
+    assigned_cases = [
+        (["engineering"], "operator", routing.HUMAN_OWNED),
+        (["finance"], "pavo", None),
+        (["finance"], None, "monedula"),
+    ]
+    for tags, assigned_to, expected in assigned_cases:
+        sse_skill = apis_module._resolve_skill(tags, assigned_to=assigned_to)
+        a2a_skill = ax.resolve_skill(tags, assigned_to=assigned_to)
+        assert sse_skill == a2a_skill == expected, (
+            tags,
+            assigned_to,
+            sse_skill,
+            a2a_skill,
+        )
+        if assigned_to == "pavo":
+            assert sse_skill != "monedula"
+            assert a2a_skill != "monedula"
     print("✓ A2A and SSE paths produce identical routing output (≥3 inputs)")
 
 
