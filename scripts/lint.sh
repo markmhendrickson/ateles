@@ -95,11 +95,13 @@ if [ -n "$NEOTOMA_BASE_URL" ]; then
 
     # Generated agent-doc mirrors must be fresh (docs/agents/*.md,
     # .claude/skills/*/SKILL.md are rendered FROM Neotoma agent_definition
-    # entities — never hand-edited). Informational only for now: pre-existing
-    # drift unrelated to any one PR currently fails this check repo-wide (see
-    # .github/workflows/agent-config-validation.yml for the tracking note).
-    echo "  - Checking agent-doc mirrors are in sync with Neotoma (informational)..."
-    python execution/scripts/render_agent_docs.py --check || true
+    # entities — never hand-edited). Enforcing as of ateles#682: the
+    # repo-wide drift that made this informational has been cleared, and the
+    # same check now blocks in .github/workflows/agent-config-validation.yml.
+    # Fix by correcting the entity in Neotoma, then running
+    # `python3 execution/scripts/render_agent_docs.py` and committing.
+    echo "  - Checking agent-doc mirrors are in sync with Neotoma..."
+    python execution/scripts/render_agent_docs.py --check --skip-without-token || ERRORS=$((ERRORS + 1))
 else
     echo "  - Skipping tool_allowlist + agent-doc-mirror checks (NEOTOMA_BASE_URL unset)"
 fi

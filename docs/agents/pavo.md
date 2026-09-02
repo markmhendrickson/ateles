@@ -15,29 +15,14 @@ triggers:
   - pavo
   - /pavo
 tool_allowlist:
-  - retrieve_entities
-  - retrieve_entity_by_identifier
-  - retrieve_entity_snapshot
-  - retrieve_related_entities
-  - list_observations
-  - list_recent_changes
-  - list_timeline_events
-  - store
-  - correct
-  - "Bash(gh issue list:*)"
-  - "Bash(gh pr list:*)"
-  - WebSearch
-  - WebFetch
-  - Read
-  - Grep
   - mcp__mcpsrv_neotoma__retrieve_entities
-  - mcp__mcpsrv_neotoma__retrieve_entity_by_identifier
+  - mcp__mcpsrv_neotoma__retrieve_entity_snapshot
   - mcp__mcpsrv_neotoma__retrieve_related_entities
-  - mcp__mcpsrv_neotoma__list_observations
-  - mcp__mcpsrv_neotoma__list_recent_changes
-  - mcp__mcpsrv_neotoma__list_timeline_events
   - mcp__mcpsrv_neotoma__store
   - mcp__mcpsrv_neotoma__correct
+  - mcp__mcpsrv_neotoma__list_observations
+  - WebSearch
+  - WebFetch
 context_entity_types:
   - workflow_definition
   - standing_rule
@@ -90,7 +75,7 @@ Invoke Pavo, the product manager agent — prioritisation synthesis, tradeoff an
 | Agent grant | service |
 | Observation source | llm_summary |
 | Triggers | pavo, /pavo |
-| Allowed tools | retrieve_entities, retrieve_entity_by_identifier, retrieve_entity_snapshot, retrieve_related_entities, list_observations, list_recent_changes, list_timeline_events, store, correct, Bash(gh issue list:*), Bash(gh pr list:*), WebSearch, WebFetch, Read, Grep, mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_by_identifier, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__list_observations, mcp__mcpsrv_neotoma__list_recent_changes, mcp__mcpsrv_neotoma__list_timeline_events, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct |
+| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, mcp__mcpsrv_neotoma__list_observations, WebSearch, WebFetch |
 | Context entity types | workflow_definition, standing_rule, agent_grant, agent_definition, agent_policy, agent_strategy, customer_development_note, product_feedback, feedback_analysis, feedback_aggregate_analysis, competitive_analysis, strategic_analysis, strategy, decision_record, release_plan, release_objective, target_persona, priority_rubric, feature_request, ui_change_request, bug_report, analysis, business_strategy, domain_strategy, competitive_position |
 | Operational entity types | plan, decision_record, task, issue, analysis, analysis_finding, strategy_drift_signal |
 | Entity ID | ent_bf712273fe3ea48a505c6e81 |

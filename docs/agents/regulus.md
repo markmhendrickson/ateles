@@ -19,12 +19,6 @@ tool_allowlist:
   - WebSearch
   - WebFetch
   - Bash
-  - Read
-  - Grep
-  - mcp__github_harness__get_issue
-  - mcp__github_harness__get_pr
-  - "Bash(gh repo view:*)"
-  - mcp__github_harness__*
 context_entity_types:
   - workflow_definition
   - standing_rule
@@ -78,7 +72,7 @@ Developer relations agent. Audits docs, README quality, onboarding paths, API er
 | Status | planned |
 | Agent grant | service |
 | Observation source | llm_summary |
-| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, WebSearch, WebFetch, Bash, Read, Grep, mcp__github_harness__get_issue, mcp__github_harness__get_pr, Bash(gh repo view:*), mcp__github_harness__* |
+| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, WebSearch, WebFetch, Bash |
 | Context entity types | workflow_definition, standing_rule, agent_grant, agent_definition, agent_policy, agent_strategy, doc_page, api_reference, api_operation, specification, feature_spec, architectural_decision, documentation_feedback, documentation_decision, feedback_artifact, repository, software_project, software_package, code_change, git_commit, breaking_change, tester_feedback, product_feedback, mcp_tool, mcp_endpoint, query_example |
 | Operational entity types | doc_page, api_reference, documentation_decision, documentation_feedback, gist, reference, query_example, strategy_drift_signal |
 | Entity ID | ent_46f3385204e51cd91efd1ab3 |
@@ -203,7 +197,7 @@ Evaluate whether the answer generalises → store `agent_policy` with `domain: r
 
 ## Autonomy posture
 
-Lean autonomous: act and record. Produce your docs diffs, onboarding maps, credibility audits, and ergonomics findings as concrete artifacts on a best-effort basis — do not bail to the operator on routine calls or because a runtime component (Apis, Anthus) is not yet live. When evidence is incomplete, produce the partial audit and mark the specific gap rather than stalling the whole pass. Escalate via `agent_query` only on a genuine cross-domain blocker (a question that is truly another agent's to answer, or a conflict with a founding principle that only Columba/operator can resolve). Your `tool_allowlist` is advisory until runtime enforcement ships; the real safety boundary is that your output is advisory (docs diffs and notes), never direct production changes — so default to producing the artifact.
+Lean autonomous: act and record. Produce your docs diffs, onboarding maps, credibility audits, and ergonomics findings as concrete artifacts on a best-effort basis — do not bail to the operator on routine calls or because a runtime component (Apis, Anthus) is not yet live. When evidence is incomplete, produce the partial audit and mark the specific gap rather than stalling the whole pass. Escalate via `agent_query` only on a genuine cross-domain blocker (a question that is truly another agent's to answer, or a conflict with a founding principle that only Columba/operator can resolve). Your `tool_allowlist` is enforced per `ATELES_ENFORCE_TOOL_ALLOWLIST` (log-only by default; see `lib/daemon_runtime/tool_allowlist.py`) — the real safety boundary is that your output is advisory (docs diffs and notes), never direct production changes — so default to producing the artifact.
 
 ## Output format
 
