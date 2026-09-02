@@ -352,12 +352,20 @@ class IssueGateStore:
         """True when *snap* is the issue entity for ``repo#issue_number``.
 
         Tolerates the duplicated fields seen in prod: ``repo``/``repository``
-        and ``issue_number``/``github_number``.
+        and ``issue_number``/``github_number``/``number``.
+
+        ateles#390: ``number`` was missing from this list, and it is the field
+        the triage path actually writes. Measured against prod on 2026-09-02,
+        ``ent_e882a86eb583b828ac00f98b`` (ateles#390's own entity) stores
+        ``number: 390`` with no ``issue_number`` and no ``github_number``, so
+        both the server-side filter and this client-side matcher missed it and
+        the store reported "no Neotoma issue entity" for an entity that plainly
+        exists — the exact error in the issue's symptom log.
         """
         snap_repo = snap.get("repo") or snap.get("repository") or ""
         if str(snap_repo) != str(repo):
             return False
-        for key in ("issue_number", "github_number"):
+        for key in ("issue_number", "github_number", "number"):
             value = snap.get(key)
             if value is not None and str(value) == str(issue_number):
                 return True
@@ -380,23 +388,36 @@ class IssueGateStore:
         attributed to a missing entity rather than to a truncated read.
         Filtering server-side returns exactly the one row and removes the
         window entirely.
+
+        ateles#390: the filter keyed on ``github_number`` ALONE, but issue
+        entities are written with ``number``. Measured against prod on
+        2026-09-02, a ``github_number`` filter for ateles#390 returned 0 rows
+        while the same query on ``number`` returned exactly
+        ``ent_e882a86eb583b828ac00f98b``. Every gate lookup therefore fell
+        through to the bounded scan and — because ``_matches`` did not know
+        ``number`` either — reported "no Neotoma issue entity". Both number
+        fields are now tried, so the fast path works for either shape.
         """
         state = IssueGateState(repo=repo, issue_number=issue_number)
-        data = await self._post(
-            "entities/query",
-            {
-                "entity_type": self.ENTITY_TYPE,
-                "limit": 10,
-                "include_snapshots": True,
-                "snapshot_filters": {
-                    "github_number": {"op": "eq", "value": issue_number},
-                    "repo": {"op": "eq", "value": repo},
+        entities: list[dict] = []
+        for number_field in ("number", "github_number", "issue_number"):
+            data = await self._post(
+                "entities/query",
+                {
+                    "entity_type": self.ENTITY_TYPE,
+                    "limit": 10,
+                    "include_snapshots": True,
+                    "snapshot_filters": {
+                        number_field: {"op": "eq", "value": issue_number},
+                        "repo": {"op": "eq", "value": repo},
+                    },
                 },
-            },
-        )
-        if data is None:
-            return state
-        entities = data.get("entities", [])
+            )
+            if data is None:
+                return state
+            entities = data.get("entities", [])
+            if entities:
+                break
         if not entities:
             # Fall back to an unfiltered scan for entities whose snapshot does
             # not carry the composite fields (e.g. legacy rows keyed by
@@ -573,3 +594,193 @@ class IssueGateStore:
                 ", ".join(outcome.waived),
             )
         return outcome
+
+    async def waive_many(
+        self,
+        repo: str,
+        issue_numbers: list[int],
+        pre_impl_gates: tuple[str, ...],
+    ) -> "AggregateWaiveOutcome":
+        """Waive *pre_impl_gates* on every issue in *issue_numbers* (ateles#390).
+
+        Pure fan-out over :meth:`waive`, which already write-verifies each
+        entity — so this adds no new mutation shape and inherits that method's
+        idempotency (``gates_needing_waive`` targets only unsigned gates, so a
+        replay on an already-waived issue is a verified no-op, not a re-write).
+
+        Every number is resolved against the SINGLE *repo* argument.  Parent
+        links are extracted as bare ``#N`` from the PR body and a bare number is
+        only meaningful within its own repo; Neotoma issue entities are keyed by
+        ``(repo, issue_number)``, never by number alone.  A cross-repo parent is
+        filtered out at resolution time, before it reaches here.
+
+        One failing parent does NOT short-circuit the loop: a partially
+        resolvable set still lands what it can, and the aggregate reports both
+        halves so the operator sees which issue is still blocking.  Never raises
+        — the caller owns reporting.
+        """
+        aggregate = AggregateWaiveOutcome()
+        for number in issue_numbers:
+            try:
+                outcome = await self.waive(repo, number, pre_impl_gates)
+            except Exception as exc:  # noqa: BLE001 — never crash the pipeline
+                log.error(
+                    "[apis.gate_waive] waive raised on %s#%s: %s — recording "
+                    "as a failure and continuing with the remaining parents",
+                    repo,
+                    number,
+                    exc,
+                )
+                outcome = WaiveOutcome(
+                    entity_found=True,
+                    targeted=list(pre_impl_gates),
+                    failed=list(pre_impl_gates),
+                )
+            aggregate.per_issue.append((number, outcome))
+        return aggregate
+
+
+# ── Multi-parent waive (ateles#390) ──────────────────────────────────────────
+#
+# ``/confirm-gates-clear`` posted on a PR used to resolve its target as
+# ``_parent_issue_number(body) or trigger.number``.  The ``or`` fallback is the
+# bug: a PR carries no ``gate_status`` (gates live on the ISSUE entity), so when
+# the PR body has no parent link the waive was applied to the PR number and
+# could only ever miss.  Worse, once ateles#416 added entity backfill, that miss
+# stopped being a loud "no entity" error and started BACKFILLING an issue entity
+# for the PR number, then waiving gates on that phantom — a command reporting
+# success while the real parent's gates stayed pending.
+#
+# Two corrections, both here:
+#   * resolution never falls back to the PR number (swarm_dispatch side), and
+#     an unresolvable parent is its own loud failure mode (`unresolved`);
+#   * a PR may close MORE THAN ONE issue, so the waive fans out over every
+#     parent instead of only the first match.
+
+
+@dataclass
+class AggregateWaiveOutcome:
+    """Result of waiving across every resolved parent issue of a trigger.
+
+    ``per_issue`` preserves resolution order so the operator comment can name
+    which issue landed and which did not.  ``unresolved`` is the distinct
+    failure the old code could not express: the command was issued on a PR whose
+    body names no parent issue at all, so there is nothing to waive — which is
+    NOT the same as "the parent's Neotoma entity is missing" and must not be
+    reported with that message.
+    """
+
+    per_issue: list[tuple[int, WaiveOutcome]] = field(default_factory=list)
+    unresolved: bool = False
+
+    @property
+    def waived_issues(self) -> list[int]:
+        return [n for n, o in self.per_issue if o.waived]
+
+    @property
+    def failed_issues(self) -> list[int]:
+        return [n for n, o in self.per_issue if not o.ok]
+
+    @property
+    def issue_numbers(self) -> list[int]:
+        return [n for n, _ in self.per_issue]
+
+    @property
+    def ok(self) -> bool:
+        """True only when a target was resolved AND every target cleared.
+
+        An empty ``per_issue`` is never ``ok``: "waived nothing, successfully"
+        is exactly the false-success the whole module exists to prevent.
+        """
+        return (
+            not self.unresolved
+            and bool(self.per_issue)
+            and all(o.ok for _, o in self.per_issue)
+        )
+
+
+def format_waive_comment_multi(
+    marker: str,
+    header: str,
+    aggregate: AggregateWaiveOutcome,
+) -> str:
+    """Render the operator-visible comment for a possibly-multi-parent waive.
+
+    Delegates per-parent rendering to :func:`format_waive_comment` so the
+    no-command-token self-trigger defence (neotoma#1686) is inherited rather
+    than re-implemented, and prefixes each block with the issue number it
+    describes — a bare pass/fail naming no issue is not actionable when a PR
+    has two parents and only one of them landed.
+    """
+    if aggregate.unresolved:
+        return "\n".join(
+            [
+                marker,
+                header,
+                "",
+                "⚠️ **Gate waive could not be applied** — this pull request's "
+                "body names no parent issue, so there is no issue entity whose "
+                "gates could be waived. Gate state lives on the ISSUE, never on "
+                "the PR.",
+                "",
+                "Link the PR to its parent by adding a line such as "
+                "`Closes #123` (or `Part of #123` for a partial "
+                "implementation) to the PR description, then re-issue the "
+                "command. Nothing was written.",
+            ]
+        )
+
+    if not aggregate.per_issue:
+        # Defensive: a resolved-but-empty target list is a programming error,
+        # not an operator error. Report it as a failure, never as success.
+        return "\n".join(
+            [
+                marker,
+                header,
+                "",
+                "❌ **Gate waive resolved no target issue** — nothing was "
+                "written. This is a dispatcher bug; the pipeline stays blocked.",
+            ]
+        )
+
+    if len(aggregate.per_issue) == 1:
+        number, outcome = aggregate.per_issue[0]
+        body = format_waive_comment(
+            marker=marker,
+            header=header,
+            waived=outcome.waived,
+            already_clear=outcome.already_clear,
+            failed=outcome.failed,
+            entity_found=outcome.entity_found,
+        )
+        # Name the issue the waive actually targeted. The operator issues the
+        # command on the PR; without this line they cannot tell which entity
+        # was written, which is how a waive against the wrong number went
+        # unnoticed for a month (ateles#390).
+        lines = body.split("\n")
+        lines.insert(2, f"\nTarget issue: **#{number}**")
+        return "\n".join(lines)
+
+    lines = [
+        marker,
+        header,
+        "",
+        f"This pull request has **{len(aggregate.per_issue)} parent issues**. "
+        "Gate waive was applied to each independently:",
+    ]
+    for number, outcome in aggregate.per_issue:
+        lines.append("")
+        lines.append(f"### #{number}")
+        block = format_waive_comment(
+            marker="",
+            header="",
+            waived=outcome.waived,
+            already_clear=outcome.already_clear,
+            failed=outcome.failed,
+            entity_found=outcome.entity_found,
+        )
+        # Drop the empty marker/header lines the single-issue formatter emits.
+        lines.extend(
+            line for line in block.split("\n")[3:] if line or lines[-1]
+        )
+    return "\n".join(lines)

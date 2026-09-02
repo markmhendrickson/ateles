@@ -2096,6 +2096,12 @@ class _FakeGateStore:
     the real store does, so the sweep semantics (waive all unsigned, leave the
     cleared alone) are exercised end to end. ``verify_returns`` lets a test
     simulate a write that does NOT persist — the verification-failure path.
+
+    ateles#390: state is keyed PER ISSUE NUMBER (``per_issue``), because the
+    old single-global-``gate_status`` fake could not express "this PR has two
+    parents and only one of them flipped" — the exact multi-parent effect the
+    fix has to guarantee. *initial* seeds the default for any number a test does
+    not name explicitly, so every existing single-parent test is unaffected.
     """
 
     def __init__(
@@ -2104,12 +2110,39 @@ class _FakeGateStore:
         *,
         entity_found: bool = True,
         verify_returns: dict | None = None,
+        per_issue: dict[int, dict] | None = None,
+        missing_issues: tuple[int, ...] = (),
     ):
-        self.gate_status = dict(initial or {})
+        self._default = dict(initial or {})
         self.entity_found = entity_found
         self.verify_returns = verify_returns
         self.owner_history: list[dict] = []
         self.waive_calls: list[tuple] = []
+        # Per-issue gate state. Tests naming multiple parents pass `per_issue`;
+        # single-parent tests get `initial` lazily for whatever number is used.
+        self.per_issue: dict[int, dict] = {
+            n: dict(g) for n, g in (per_issue or {}).items()
+        }
+        # Issue numbers whose entity does not exist, for the backfill path.
+        self.missing_issues = set(missing_issues)
+
+    def gates_for(self, issue_number: int) -> dict:
+        """Gate state as this fake currently holds it for *issue_number*."""
+        return self.per_issue.setdefault(issue_number, dict(self._default))
+
+    @property
+    def gate_status(self) -> dict:
+        """Back-compat view for single-parent tests.
+
+        Returns the state of the single issue touched so far, so assertions
+        written against the old global attribute keep meaning what they meant.
+        """
+        if len(self.per_issue) == 1:
+            return next(iter(self.per_issue.values()))
+        return self._default
+
+    def _exists(self, issue_number: int) -> bool:
+        return self.entity_found and issue_number not in self.missing_issues
 
     async def load(self, repo, issue_number):
         """Mirror IssueGateStore.load — the backfill path (ateles#416) reads
@@ -2124,7 +2157,7 @@ class _FakeGateStore:
                 # coincide; see test_entity_backfill.py for the split case.
                 self.triaged = found
 
-        return _State(self.entity_found)
+        return _State(self._exists(issue_number))
 
     async def waive(self, repo, issue_number, pre_impl_gates):
         from gate_waive import (
@@ -2136,30 +2169,40 @@ class _FakeGateStore:
 
         self.waive_calls.append((repo, issue_number, tuple(pre_impl_gates)))
         outcome = WaiveOutcome()
-        if not self.entity_found:
+        if not self._exists(issue_number):
             return outcome
         outcome.entity_found = True
-        targeted = gates_needing_waive(self.gate_status, tuple(pre_impl_gates))
+        gates = self.gates_for(issue_number)
+        targeted = gates_needing_waive(gates, tuple(pre_impl_gates))
         outcome.targeted = list(targeted)
         outcome.already_clear = [g for g in pre_impl_gates if g not in targeted]
         if not targeted:
             outcome.verified = True
             return outcome
         for gate in targeted:
-            self.gate_status[gate] = "waived"
+            gates[gate] = "waived"
         self.owner_history.extend(waive_history_entries(targeted, "2026-07-27T00:00:00Z"))
         # Verification re-read: either the real mutated state, or an injected
         # state simulating a write that did not persist.
         observed = (
-            self.verify_returns
-            if self.verify_returns is not None
-            else self.gate_status
+            self.verify_returns if self.verify_returns is not None else gates
         )
         still_open = verify_waived(observed, targeted)
         outcome.failed = still_open
         outcome.waived = [g for g in targeted if g not in still_open]
         outcome.verified = not still_open
         return outcome
+
+    async def waive_many(self, repo, issue_numbers, pre_impl_gates):
+        """Mirror IssueGateStore.waive_many — pure fan-out over ``waive``."""
+        from gate_waive import AggregateWaiveOutcome
+
+        aggregate = AggregateWaiveOutcome()
+        for number in issue_numbers:
+            aggregate.per_issue.append(
+                (number, await self.waive(repo, number, pre_impl_gates))
+            )
+        return aggregate
 
 
 def _install_fake_gate_store(monkeypatch, store):
@@ -2175,16 +2218,13 @@ def _capture_waive_comments(monkeypatch):
     bodies: list[str] = []
 
     async def fake_post(self, trigger, outcome):
-        from gate_waive import format_waive_comment
+        from gate_waive import format_waive_comment_multi
 
         bodies.append(
-            format_waive_comment(
+            format_waive_comment_multi(
                 marker="<!-- swarm-gate-waive-result -->",
                 header="hdr",
-                waived=outcome.waived,
-                already_clear=outcome.already_clear,
-                failed=outcome.failed,
-                entity_found=outcome.entity_found,
+                aggregate=outcome,
             )
         )
 
@@ -6932,3 +6972,297 @@ class TestParentIssueNumber:
         # `_PARENT_ISSUE` is imported/read elsewhere; it must keep naming the
         # superset its call sites always actually wanted.
         assert swarm_dispatch._PARENT_ISSUE is swarm_dispatch._PARENT_LINK
+
+
+# ── ateles#390: /confirm-gates-clear must resolve the PARENT issue ───────────
+#
+# The command is the operator's only manual gate-unblock hatch. It used to
+# resolve its target as `_parent_issue_number(body) or trigger.number`, so on a
+# PR with no parent link it waived against the PR NUMBER — which carries no
+# gate_status. Combined with the ateles#416 backfill it would CREATE an issue
+# entity for the PR number and then report a successful waive on that phantom,
+# while the real parent's gates stayed pending. These tests pin both halves:
+# the PR number is never a waive target, and an unresolvable parent fails loudly.
+
+
+def _waive_dispatcher(monkeypatch, store):
+    """Dispatcher wired to *store* with the GitHub comment captured."""
+    _install_fake_gate_store(monkeypatch, store)
+    bodies = _capture_waive_comments(monkeypatch)
+    notifier = _StubNotifier()
+    return SwarmDispatcher(notifier, _config()), notifier, bodies
+
+
+def test_waive_on_pr_targets_parent_issue_not_the_pr_number(monkeypatch):
+    """THE ateles#390 REGRESSION. Waive must hit the parent, never the PR.
+
+    Revert the fix (restore `... or trigger.number`) and this still passes on
+    its first assertion — the parent IS resolvable here — so the load-bearing
+    assertion is the SECOND one: the PR number must never appear as a waive
+    target. See the sibling test below for the no-parent case, which is the one
+    the old `or` fallback got wrong.
+    """
+    store = _FakeGateStore(per_issue={50: {g: "pending" for g in PRE_IMPL_GATES}})
+    dispatcher, _, bodies = _waive_dispatcher(monkeypatch, store)
+
+    aggregate = asyncio.run(
+        dispatcher._waive_gates(
+            _comment_trigger(comment_on_pr=True, number=99, body="Closes #50.")
+        )
+    )
+
+    # EFFECT, not acceptance: the parent's gates actually flipped.
+    assert store.gates_for(50) == {g: "waived" for g in PRE_IMPL_GATES}
+    # The PR number was never a waive target.
+    assert 99 not in [n for _repo, n, _gates in store.waive_calls]
+    assert [n for _repo, n, _gates in store.waive_calls] == [50]
+    assert aggregate.ok
+    assert aggregate.waived_issues == [50]
+    # The operator can see WHICH issue was written.
+    assert "#50" in bodies[0]
+
+
+def test_waive_on_pr_without_parent_link_fails_loudly_and_writes_nothing(
+    monkeypatch,
+):
+    """No parent link => loud failure, NOT a silent waive against the PR number.
+
+    This is the exact regression: with the old `or trigger.number` fallback the
+    dispatcher waived (and, post-ateles#416, BACKFILLED) an entity for PR #99
+    and reported success. Reverting the fix makes this test fail on
+    `store.waive_calls == []`.
+    """
+    store = _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    dispatcher, notifier, bodies = _waive_dispatcher(monkeypatch, store)
+
+    backfilled: list[int] = []
+
+    async def fake_ensure(self, repository, issue_number):
+        backfilled.append(issue_number)
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "ensure_issue_entity", fake_ensure)
+
+    aggregate = asyncio.run(
+        dispatcher._waive_gates(
+            _comment_trigger(
+                comment_on_pr=True,
+                number=99,
+                body="A PR body that links no parent issue at all.",
+            )
+        )
+    )
+
+    # NOTHING was written, and nothing was backfilled for the PR number.
+    assert store.waive_calls == []
+    assert backfilled == []
+    # And it is reported as a failure, not as a successful no-op.
+    assert not aggregate.ok
+    assert aggregate.unresolved
+    assert notifier.sent, "an unresolvable parent must notify the operator"
+    message = " ".join(str(s) for s in notifier.sent)
+    assert "no parent issue" in message
+    # The distinct reason, NOT the generic "no Neotoma issue entity" string.
+    assert "no Neotoma issue entity" not in message
+    assert "names no parent issue" in bodies[0]
+    # The comment names the remedy, not just the failure.
+    assert "Closes #123" in bodies[0]
+
+
+def test_waive_on_pr_waives_every_parent_issue(monkeypatch):
+    """A PR closing two issues must have BOTH parents' gates flipped.
+
+    neotoma#2078 is the live case: parents #2072 and #2073, both `arch: pending`.
+    Waiving only the first leaves the PR blocked while the command claims
+    success.
+    """
+    store = _FakeGateStore(
+        per_issue={
+            2072: {g: "pending" for g in PRE_IMPL_GATES},
+            2073: {g: "pending" for g in PRE_IMPL_GATES},
+        }
+    )
+    dispatcher, _, bodies = _waive_dispatcher(monkeypatch, store)
+
+    aggregate = asyncio.run(
+        dispatcher._waive_gates(
+            _comment_trigger(
+                comment_on_pr=True,
+                number=2078,
+                body="Closes #2072\nCloses #2073",
+            )
+        )
+    )
+
+    assert store.gates_for(2072) == {g: "waived" for g in PRE_IMPL_GATES}
+    assert store.gates_for(2073) == {g: "waived" for g in PRE_IMPL_GATES}
+    assert aggregate.waived_issues == [2072, 2073]
+    assert aggregate.ok
+    assert "#2072" in bodies[0] and "#2073" in bodies[0]
+
+
+def test_waive_partial_resolution_reports_both_and_keeps_what_landed(
+    monkeypatch,
+):
+    """One unresolvable parent must not roll back the parent that did land."""
+    store = _FakeGateStore(
+        per_issue={
+            50: {g: "pending" for g in PRE_IMPL_GATES},
+            51: {g: "pending" for g in PRE_IMPL_GATES},
+        },
+        missing_issues=(51,),
+    )
+    dispatcher, notifier, bodies = _waive_dispatcher(monkeypatch, store)
+
+    async def fake_ensure(self, repository, issue_number):
+        return False  # backfill cannot produce the entity
+
+    monkeypatch.setattr(SwarmDispatcher, "ensure_issue_entity", fake_ensure)
+
+    aggregate = asyncio.run(
+        dispatcher._waive_gates(
+            _comment_trigger(
+                comment_on_pr=True, number=99, body="Closes #50\nCloses #51"
+            )
+        )
+    )
+
+    # #50 landed and is NOT rolled back by #51's failure.
+    assert store.gates_for(50) == {g: "waived" for g in PRE_IMPL_GATES}
+    assert aggregate.waived_issues == [50]
+    assert aggregate.failed_issues == [51]
+    assert not aggregate.ok
+    # Both outcomes are named by number in the operator comment.
+    assert "#50" in bodies[-1] and "#51" in bodies[-1]
+    assert any("#51" in str(s) for s in notifier.sent)
+
+
+def test_waive_on_issue_comment_targets_the_issue_itself(monkeypatch):
+    """The issue-direct path still works and does no parent resolution."""
+    store = _FakeGateStore(per_issue={80: {g: "pending" for g in PRE_IMPL_GATES}})
+    dispatcher, _, bodies = _waive_dispatcher(monkeypatch, store)
+
+    aggregate = asyncio.run(
+        dispatcher._waive_gates(
+            # comment_on_pr=False and a body that names ANOTHER issue: the
+            # trigger number wins, the body reference is not followed.
+            _comment_trigger(comment_on_pr=False, number=80, body="Closes #50.")
+        )
+    )
+
+    assert [n for _repo, n, _gates in store.waive_calls] == [80]
+    assert store.gates_for(80) == {g: "waived" for g in PRE_IMPL_GATES}
+    assert aggregate.waived_issues == [80]
+    assert "#80" in bodies[0]
+
+
+def test_waive_is_idempotent_on_replay(monkeypatch):
+    """A second /confirm-gates-clear must be a safe no-op, not a re-write.
+
+    The dispatcher re-triggers the PR pipeline after a waive, so an operator
+    retry (or a dedup-marker race) replays this path. Already-waived gates must
+    stay waived and must not bounce back to pending.
+    """
+    store = _FakeGateStore(per_issue={50: {g: "pending" for g in PRE_IMPL_GATES}})
+    dispatcher, _, _ = _waive_dispatcher(monkeypatch, store)
+    trigger = _comment_trigger(comment_on_pr=True, number=99, body="Closes #50.")
+
+    first = asyncio.run(dispatcher._waive_gates(trigger))
+    second = asyncio.run(dispatcher._waive_gates(trigger))
+
+    assert store.gates_for(50) == {g: "waived" for g in PRE_IMPL_GATES}
+    assert first.ok and second.ok
+    # The replay targeted nothing (everything already clear) — no re-write.
+    assert second.per_issue[0][1].waived == []
+    assert second.per_issue[0][1].already_clear == list(PRE_IMPL_GATES)
+
+
+def test_waive_backfills_a_missing_parent_entity_then_retries(monkeypatch):
+    """ateles#416's backfill still applies — but to the PARENT, not the PR."""
+    store = _FakeGateStore(
+        per_issue={50: {g: "pending" for g in PRE_IMPL_GATES}},
+        missing_issues=(50,),
+    )
+    dispatcher, _, _ = _waive_dispatcher(monkeypatch, store)
+
+    async def fake_ensure(self, repository, issue_number):
+        store.missing_issues.discard(issue_number)  # triage created it
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "ensure_issue_entity", fake_ensure)
+
+    aggregate = asyncio.run(
+        dispatcher._waive_gates(
+            _comment_trigger(comment_on_pr=True, number=99, body="Closes #50.")
+        )
+    )
+
+    assert store.gates_for(50) == {g: "waived" for g in PRE_IMPL_GATES}
+    assert aggregate.ok
+    assert 99 not in [n for _repo, n, _gates in store.waive_calls]
+
+
+def test_parent_issue_numbers_returns_every_parent_in_order():
+    """The plural helper: all matches, deduped, cross-repo filtered."""
+    numbers = SwarmDispatcher._parent_issue_numbers(
+        "Closes #12\nPart of #7\nRefs #12\nFixes other/repo#99\n"
+        "Background reading in #400.",
+        "owner/repo",
+    )
+    # #12 deduped, #7 kept, foreign repo dropped, bare #400 is not a parent.
+    assert numbers == [12, 7]
+
+
+def test_parent_issue_numbers_empty_when_no_linkage():
+    assert SwarmDispatcher._parent_issue_numbers("No linkage here.", "owner/repo") == []
+    assert SwarmDispatcher._parent_issue_numbers("", "owner/repo") == []
+
+
+def test_parent_issue_number_singular_unchanged_for_routing():
+    """The singular helper keeps first-match semantics for its routing callers."""
+    body = "Closes #12\nCloses #13"
+    assert SwarmDispatcher._parent_issue_number(body, "owner/repo") == 12
+
+
+def test_confirm_gates_clear_end_to_end_on_pr_waives_parent(monkeypatch):
+    """Cross-surface: the full comment handler, not just _waive_gates.
+
+    Per QA policy cross_surface_contract_parity_tested_all_surfaces — the
+    command's real entry point is _handle_issue_comment, and 'fixed' is asserted
+    by the reported EFFECT (the parent's gates flip), not by acceptance.
+    """
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    async def fake_changed_files(self, t):
+        return []
+
+    async def fake_preregistered(self, repo, number):
+        return {}
+
+    monkeypatch.setattr(SwarmDispatcher, "_changed_files", fake_changed_files)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_preregistered_expectations", fake_preregistered
+    )
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", _noop)
+    monkeypatch.setattr(SwarmDispatcher, "_post_missing_panel_comments", _noop)
+    monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", _noop)
+    monkeypatch.setattr(SwarmDispatcher, "_store_merge_checkpoint", _noop)
+
+    store = _FakeGateStore(per_issue={50: {g: "pending" for g in PRE_IMPL_GATES}})
+    dispatcher, _, _ = _waive_dispatcher(monkeypatch, store)
+
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _comment_trigger(comment_on_pr=True, number=99, body="Closes #50.")
+        )
+    )
+
+    assert store.gates_for(50) == {g: "waived" for g in PRE_IMPL_GATES}
+    assert 99 not in [n for _repo, n, _gates in store.waive_calls]
