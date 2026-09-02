@@ -1482,3 +1482,458 @@ def test_require_local_vad_aborts_before_capture_starts(tmp_path, monkeypatch):
     assert rc == 2
     records = [json.loads(line) for line in out.read_text().splitlines()]
     assert any(r.get("fatal") for r in records), "the abort must be loud"
+
+
+# ---------------------------------------------------------------------------
+# Socket recovery (ateles#682)
+#
+# The failure being reproduced here is NOT a clean disconnect. It is a socket
+# that stays open, accepts every frame it is offered, and never answers — which
+# is what the operator hit three times in fifteen minutes, losing up to 16s of
+# continuous speech each time. A test that only closed the socket would pass
+# against the live bug, because the live bug's socket never closes.
+# ---------------------------------------------------------------------------
+
+
+class _FakeCaptureStdout:
+    """ffmpeg's stdout: speech-level PCM forever, until told to stop."""
+
+    def __init__(self, frames: int) -> None:
+        self.remaining = frames
+        self.reads = 0
+
+    async def read(self, _size: int) -> bytes:
+        self.reads += 1
+        if self.remaining <= 0:
+            return b""  # capture ended — the intentional stop
+        self.remaining -= 1
+        await asyncio.sleep(0)
+        return _pcm(3000)  # -20.8 dBFS: unambiguously speech
+
+
+class _FakeProc:
+    def __init__(self, frames: int) -> None:
+        self.stdout = _FakeCaptureStdout(frames)
+        self.stderr = None
+        self.returncode = 0
+        self.terminated = 0
+
+    def terminate(self) -> None:
+        self.terminated += 1
+
+    async def wait(self) -> int:
+        return 0
+
+
+class _SilentSocket:
+    """A socket that ACCEPTS audio and NEVER answers. The actual bug.
+
+    `__aiter__` blocks forever rather than returning, because a socket that
+    returns is a socket that closed — a different, already-handled failure.
+    """
+
+    def __init__(self, log: list, *, answer: bool = False) -> None:
+        self.log = log
+        self.answer = answer
+        self.sent = 0
+
+    async def __aenter__(self):
+        self.log.append("connect")
+        return self
+
+    async def __aexit__(self, *exc):
+        self.log.append("close")
+        return False
+
+    async def send(self, _payload) -> None:
+        self.sent += 1
+
+    async def __aiter__(self):
+        if self.answer:
+            yield json.dumps({"type": "session.updated"})
+        # Never yields again: audio goes in, nothing comes back.
+        while True:
+            await asyncio.sleep(3600)
+
+
+def _silent_socket_session(tmp_path, monkeypatch, **kwargs):
+    """Drive a real `stream_session` against a socket that never answers.
+
+    The stall threshold is shrunk to milliseconds so the test proves the
+    behaviour rather than waiting out the production 45s, and the capture is
+    made effectively endless so the run ends by RECOVERY OUTCOME rather than by
+    ffmpeg running out of frames — which would silently turn every one of these
+    into a test of the intentional-stop path instead.
+    """
+    events: list = []
+    sockets: list = []
+
+    class _FastStallMonitor(st.HealthMonitor):
+        def __init__(self, **kw):
+            kw["socket_silent_seconds"] = 0.05
+            super().__init__(**kw)
+
+    monkeypatch.setattr(st, "HealthMonitor", _FastStallMonitor)
+
+    def _connect():
+        ws = _SilentSocket(events)
+        sockets.append(ws)
+        return ws
+
+    proc = _FakeProc(frames=kwargs.pop("frames", 10**9))
+    monkeypatch.setattr(
+        st.asyncio, "create_subprocess_exec",
+        lambda *a, **k: _make_future(proc),
+    )
+    monkeypatch.setattr(st, "load_speech_detector", lambda enabled=True: None)
+
+    slept: list = []
+
+    async def _sleep(delay):
+        slept.append(delay)
+        await asyncio.sleep(0)
+
+    out = tmp_path / "t_live.jsonl"
+    params = dict(
+        api_key="unused",
+        languages=sl.SessionLanguages("en", ("en",), "test"),
+        connect_factory=_connect,
+        sleep=_sleep,
+        # Tight so the test does not spend 45 real seconds proving the point.
+        health_poll=0.001,
+    )
+    params.update(kwargs)
+    monkeypatch.setattr(st, "SOCKET_SILENT_SECONDS", 0.05)
+
+    async def _run():
+        # Bounded deliberately. Reverting the recovery does not make these
+        # tests fail with an assertion — it makes the run never finish, which
+        # is the operator's actual symptom (the process sat there feeding a
+        # dead socket until he restarted it by hand). Without this timeout a
+        # reverted fix hangs the suite instead of failing it, and a hang is not
+        # a test result anyone reads.
+        return await asyncio.wait_for(
+            st.stream_session(":3", tmp_path / "t.m4a", out, **params),
+            timeout=10.0,
+        )
+
+    return _run, out, sockets, slept
+
+
+def _make_future(value):
+    loop = asyncio.get_event_loop()
+    fut = loop.create_future()
+    fut.set_result(value)
+    return fut
+
+
+def test_an_unanswered_socket_is_torn_down_and_rebuilt(tmp_path, monkeypatch):
+    """THE regression test: audio offered, nothing returned, must reconnect.
+
+    Reverting the recovery (`reconnect=False`, which is the pre-fix behaviour
+    of logging UNHEALTHY and carrying on) makes this fail — asserted directly
+    in `test_without_recovery_a_stalled_socket_is_never_rebuilt` below.
+    """
+    run, out, sockets, slept = _silent_socket_session(
+        tmp_path, monkeypatch, max_reconnects=3
+    )
+
+    with pytest.raises(RuntimeError, match="could not be recovered"):
+        asyncio.run(run())
+
+    # The point of the whole change: more than one socket was built.
+    assert len(sockets) > 1, (
+        "a socket that accepts audio and never answers must be REBUILT, not "
+        "merely reported — this is the ateles#682 defect"
+    )
+    assert len(sockets) == 4, "3 reconnects after the original socket"
+    # Each dead socket was actually closed, not leaked.
+    assert sum(1 for e in sockets[0].log if e == "close") >= 1
+
+
+def test_without_recovery_a_stalled_socket_is_never_rebuilt(tmp_path, monkeypatch):
+    """The fix, reverted: detection still fires, the socket is never rebuilt.
+
+    `reconnect=False` reproduces the pre-ateles#682 behaviour exactly — the
+    stall is DETECTED and announced, and then the run carries on feeding audio
+    into a socket that will never answer. That run does not terminate on its
+    own, which is precisely why the operator had to restart the process by
+    hand, so the assertion is a timeout rather than a return value.
+
+    This is the test that proves the reconnect is what does the work: with
+    recovery on, the same fixture terminates (see the tests above); with it
+    off, it runs forever against one socket.
+    """
+    run, out, sockets, _ = _silent_socket_session(
+        tmp_path, monkeypatch, reconnect=False
+    )
+
+    # The harness bounds the run; without recovery it never completes.
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(run())
+
+    assert len(sockets) == 1, (
+        "without recovery the dead socket is kept and never rebuilt — the "
+        "pre-fix behaviour, and the reason speech was lost"
+    )
+    records = [json.loads(line) for line in out.read_text().splitlines()]
+    assert any("socket silent" in r.get("error", "") for r in records), (
+        "detection still fires without recovery — detection was never the "
+        "missing half"
+    )
+    assert not any("reconnect" in r for r in records), (
+        "and nothing is done about it"
+    )
+
+
+def test_the_reconnect_is_announced_in_the_jsonl(tmp_path, monkeypatch):
+    """A silent reconnect is nearly as bad as a silent stall."""
+    run, out, sockets, _ = _silent_socket_session(
+        tmp_path, monkeypatch, max_reconnects=2
+    )
+    with pytest.raises(RuntimeError):
+        asyncio.run(run())
+
+    records = [json.loads(line) for line in out.read_text().splitlines()]
+    reconnects = [r for r in records if "reconnect" in r]
+    assert reconnects, "the operator must SEE that a gap happened"
+    recovered = [r for r in reconnects if r["reconnect"]["recovered"]]
+    assert recovered, "a successful reconnect is reported, not just the attempt"
+    # The lost audio is quantified, because the operator has to repeat it.
+    assert any(
+        r["reconnect"]["dropped_seconds"] is not None for r in recovered
+    )
+    assert any("repeat" in r["error"] for r in recovered), (
+        "the operator is told to repeat himself, not left to infer it"
+    )
+    # And the give-up is fatal and loud.
+    assert any(r.get("fatal") for r in records)
+
+
+def test_reconnect_backs_off_exponentially_with_a_ceiling():
+    """A reconnect loop against a down API must not hammer it."""
+    delays = [st.reconnect_backoff_delay(n) for n in range(1, 12)]
+    assert delays[0] < delays[1] < delays[2], "must back off"
+    assert all(d <= st.RECONNECT_BACKOFF_MAX_SECONDS for d in delays), (
+        "unbounded backoff means a recovered API waits out an old penalty"
+    )
+    assert delays[-1] == st.RECONNECT_BACKOFF_MAX_SECONDS, "reaches the ceiling"
+
+
+def test_reconnect_attempts_are_bounded(tmp_path, monkeypatch):
+    """Give up loudly rather than retry forever."""
+    run, out, sockets, slept = _silent_socket_session(
+        tmp_path, monkeypatch, max_reconnects=2
+    )
+    with pytest.raises(RuntimeError, match="2 consecutive attempts"):
+        asyncio.run(run())
+    assert len(sockets) == 3, "original + exactly 2 attempts, then stop"
+    assert slept, "attempts are spaced, not spun"
+
+
+def test_an_intentional_stop_never_reconnects(tmp_path, monkeypatch):
+    """A user who stops talking or stops the recorder is NOT a stall.
+
+    Reconnecting on an intentional stop would be a regression: the capture is
+    over, and a fresh socket would have nothing to feed it.
+    """
+    events: list = []
+    sockets: list = []
+
+    def _connect():
+        ws = _SilentSocket(events, answer=True)
+        sockets.append(ws)
+        return ws
+
+    # Capture ends immediately: EOF on the first read.
+    proc = _FakeProc(frames=0)
+    monkeypatch.setattr(
+        st.asyncio, "create_subprocess_exec", lambda *a, **k: _make_future(proc)
+    )
+    monkeypatch.setattr(st, "load_speech_detector", lambda enabled=True: None)
+
+    out = tmp_path / "t_live.jsonl"
+    rc, monitor = asyncio.run(
+        st.stream_session(
+            ":3", tmp_path / "t.m4a", out,
+            api_key="unused",
+            languages=sl.SessionLanguages("en", ("en",), "test"),
+            connect_factory=_connect,
+            health_poll=0.001,
+        )
+    )
+    assert rc == 0, "an intentional stop is a clean exit"
+    assert len(sockets) == 1, "the recorder stopping must not trigger a reconnect"
+    assert monitor.reconnects == 0
+
+
+def test_a_quiet_room_does_not_trigger_a_reconnect():
+    """Silence is not a stall — the distinction the detector already made.
+
+    Reconnecting on a quiet room would rebuild the socket every 45s of an
+    ordinary pause, which is the #631 false-alarm failure with teeth.
+    """
+    quiet = st.HealthMonitor(socket_silent_seconds=45, signal_window_seconds=1e9, now=0.0)
+    t = 0.0
+    while t < 300.0:
+        quiet.note_audio(_pcm(60), now=t)  # room tone, below speech threshold
+        t += 1.0
+    assert not quiet.socket_stalled(now=t), (
+        "nobody talking is not a dead socket, however long the socket is quiet"
+    )
+
+
+def test_speech_going_unanswered_is_a_stall():
+    """The positive case, from the same predicate the message is built from."""
+    dead = st.HealthMonitor(socket_silent_seconds=45, signal_window_seconds=1e9, now=0.0)
+    t = 0.0
+    while t < 120.0:
+        dead.note_audio(_pcm(3000), now=t)  # speech level
+        t += 1.0
+    assert dead.socket_stalled(now=t)
+    assert dead.unanswered_speech_seconds(now=t) > 0
+
+
+def test_reconnecting_clears_the_stall_so_it_does_not_immediately_refire():
+    """Without resetting the clocks the new socket inherits the old one's guilt."""
+    monitor = st.HealthMonitor(socket_silent_seconds=45, signal_window_seconds=1e9, now=0.0)
+    t = 0.0
+    while t < 120.0:
+        monitor.note_audio(_pcm(3000), now=t)
+        t += 1.0
+    assert monitor.socket_stalled(now=t)
+
+    monitor.note_reconnected(now=t)
+    assert not monitor.socket_stalled(now=t), (
+        "a freshly built socket must not be torn down by the previous stall"
+    )
+    assert monitor.reconnects == 1
+
+
+def test_the_capture_is_not_restarted_by_a_reconnect(tmp_path, monkeypatch):
+    """One recording across reconnects — a new .m4a per stall would fragment it.
+
+    Tyto and analyze-meeting consume the recording afterwards; splitting it to
+    fix the stream would trade one defect for another.
+    """
+    starts = []
+    events: list = []
+    sockets: list = []
+
+    def _connect():
+        ws = _SilentSocket(events)
+        sockets.append(ws)
+        return ws
+
+    proc = _FakeProc(frames=10_000)
+
+    def _spawn(*a, **k):
+        starts.append(a)
+        return _make_future(proc)
+
+    monkeypatch.setattr(st.asyncio, "create_subprocess_exec", _spawn)
+    monkeypatch.setattr(st, "load_speech_detector", lambda enabled=True: None)
+
+    async def _sleep(_d):
+        await asyncio.sleep(0)
+
+    class _FastStallMonitor(st.HealthMonitor):
+        def __init__(self, **kw):
+            kw["socket_silent_seconds"] = 0.05
+            super().__init__(**kw)
+
+    monkeypatch.setattr(st, "HealthMonitor", _FastStallMonitor)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(
+            st.stream_session(
+                ":3", tmp_path / "t.m4a", tmp_path / "t_live.jsonl",
+                api_key="unused",
+                languages=sl.SessionLanguages("en", ("en",), "test"),
+                connect_factory=_connect,
+                sleep=_sleep,
+                health_poll=0.001,
+                max_reconnects=3,
+            )
+        )
+
+    assert len(sockets) > 1, "sockets were rebuilt"
+    assert len(starts) == 1, (
+        "ffmpeg must start EXACTLY once — one recording, whatever the socket does"
+    )
+
+
+def test_the_session_cap_close_is_covered_by_the_same_path(tmp_path, monkeypatch):
+    """The 60-minute cap arrives as a clean server-side close, mid-capture.
+
+    Same mechanism, no separate handling: a socket that ends while the capture
+    is still running is reconnectable regardless of HOW it ended.
+    """
+    sockets: list = []
+
+    class _CappedSocket:
+        """Answers once, then closes cleanly — the `1001 going away` shape."""
+
+        def __init__(self) -> None:
+            self.log: list = []
+
+        async def __aenter__(self):
+            sockets.append(self)
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def send(self, _payload) -> None:
+            pass
+
+        async def __aiter__(self):
+            yield json.dumps({"type": "session.updated"})
+            await asyncio.sleep(0)
+            return  # server closed the stream: iteration simply ends
+
+    proc = _FakeProc(frames=10_000)
+    monkeypatch.setattr(
+        st.asyncio, "create_subprocess_exec", lambda *a, **k: _make_future(proc)
+    )
+    monkeypatch.setattr(st, "load_speech_detector", lambda enabled=True: None)
+
+    async def _sleep(_d):
+        await asyncio.sleep(0)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(
+            st.stream_session(
+                ":3", tmp_path / "t.m4a", tmp_path / "t_live.jsonl",
+                api_key="unused",
+                languages=sl.SessionLanguages("en", ("en",), "test"),
+                connect_factory=lambda: _CappedSocket(),
+                sleep=_sleep,
+                health_poll=5.0,
+                max_reconnects=2,
+            )
+        )
+    assert len(sockets) == 3, (
+        "a clean server-side close mid-capture reconnects on the same path as "
+        "a stall — the 60-minute cap needs no separate mechanism"
+    )
+
+
+def test_reconnect_can_be_disabled_from_the_cli():
+    args = st.build_parser().parse_args(["--no-reconnect"])
+    assert args.no_reconnect is True
+    assert st.build_parser().parse_args([]).no_reconnect is False
+
+
+def test_max_reconnects_is_settable_from_the_cli():
+    assert st.build_parser().parse_args(["--max-reconnects", "3"]).max_reconnects == 3
+
+
+def test_health_summary_reports_reconnects(tmp_path):
+    """A session that stayed up by reconnecting is not one that never faltered."""
+    monitor = st.HealthMonitor(now=0.0)
+    summary = monitor.summary(now=1.0)
+    assert summary["reconnects"] == 0
+    assert summary["dropped_speech_seconds"] == 0.0
+    monitor.note_reconnected(now=2.0)
+    assert monitor.summary(now=3.0)["reconnects"] == 1
