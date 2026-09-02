@@ -346,7 +346,79 @@ be worse than the status quo, so each stage lands complete or not at all.
 | **2. Fly connector** | releases, machine config, health/ready, config drift, checkout freshness | Real observations in Neotoma; history shows image reuse |
 | **3. App view** | `/api/connectors`, `#/connectors`, deployment history | Reads **Neotoma**; renders age; stale is visibly stale |
 | **4. Alarming** | version-behind, config-would-shrink, connector-failing | Alarms fire from durable state, suppressed when stale |
-| **5. GitHub connector** | issues + PRs, replacing client-side polling | **Held** until the Neotoma performance fix lands |
+| **5. GitHub connector** | issues + PRs **with their parent edges**, replacing client-side polling and superseding `sync_issues` | **Held** until the Neotoma performance fix lands |
+
+### GitHub sync is folded into this contract — design of record
+
+Operator decision (2026-09-02): *"For the GitHub to Neotoma sync question, it
+seems like it is best to fold it into that connector work."*
+
+So there is **no separate GitHub→Neotoma sync mechanism**. `sync_issues` and any
+successor are stage 5 of this contract, not a parallel path.
+
+The reason is the divergence problem, and it is not theoretical here: a config
+audit found four live instances of the copied-mechanism shape in this codebase,
+including a gate set duplicated four times with two copies already wrong — one
+of them a **re-introduction of a bug that had been fixed in the dispatcher and
+never fixed in the label path**. A second sync beside this one would be the
+fifth instance, and the connector contract exists precisely so that staleness,
+idempotency, budgets, and status are defined once.
+
+#### The sync must carry the RELATIONSHIP, not just the row
+
+A `pull_request` entity with no edge to the work that motivated it reproduces
+today's blindness *inside* Neotoma rather than fixing it. The evidence:
+
+- Lanius blocked PR #687 with exactly this: *"PR body scanned for `Closes #N` /
+  `Fixes #N` — none found. Thematic Neotoma search — no linked parent issue."*
+  Confirmed firsthand — that PR's body genuinely carries no closing keyword.
+- Its task entity (`ent_f6b3103a0042eeeb95f7b606`) exists and is current, but
+  nothing connects it to the PR, so the gate cannot find it.
+- **24 of 56 open PRs had no detectable parent**, and every agent-opened PR that
+  day carried a `pipeline-bypass-notice` for this reason.
+
+The writer side is already filed as `ent_eb763ee6d04ec1c0e4a5dbb9` — *"Store the
+`pull_request PART_OF issue` edge at PR-open instead of re-deriving it by
+regex"*. **Coordinate with it rather than solving this twice.** The division:
+
+| | Owner |
+|---|---|
+| **Writing** the edge at PR-open, from dispatch context | `ent_eb763ee6d04ec1c0e4a5dbb9` |
+| **Reading/preserving** it during sync, and not inventing a second scheme | stage 5 (this contract) |
+
+That task's resolution order is the one to honor: **(a) the dispatch context
+that opened the PR, (b) the body closing-keyword, (c) the branch name** — with
+regex as fallback only for human-authored PRs. Its central observation is worth
+restating, because it is what makes the fix cheap: *the swarm already knows the
+parent when it opens a PR, discards that knowledge, then re-infers it from
+prose.*
+
+So the sync's job is to **preserve an edge that exists**, and to fall back to
+the widened regex only when one does not. It must not invent a third derivation
+scheme — that would be the divergence problem again, one layer down.
+
+#### Every upstream timestamp is an idempotency hazard
+
+A synced `pull_request` carries GitHub's `updated_at`, which is **exactly the
+shape of field that poisoned `sync_issues_from_github.ts`** — see the trap
+section above. The rule generalizes beyond our own `observed_at`:
+
+> Any timestamp that changes without the record's substance changing must be
+> stripped before hashing, or kept out of the payload entirely.
+
+`observation_payload()` strips our clock. **Stage 5 must extend
+`_VOLATILE_FIELDS`** to cover the upstream timestamps it carries, or key on the
+source's `updated_at` the way the existing sync now does — deliberately, and
+with a test proving an unchanged upstream record re-syncs as a byte-stable
+no-op. Getting this wrong does not fail loudly; it freezes the records
+permanently.
+
+#### Sequencing is unchanged
+
+Fly first, still. Fly is 16 releases; GitHub is 661 issues plus 56 PRs against a
+datastore that was unreachable as recently as yesterday. The contract gets
+proven against trivial volume before it is pointed at the large, slow source —
+which is the ordering the previous runaway did not have.
 
 ### Alarming needs no new plumbing
 

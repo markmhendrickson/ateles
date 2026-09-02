@@ -223,6 +223,9 @@ mcp-examples = [
     { name = "requests" },
     { name = "websockets" },
 ]
+vad = [
+    { name = "webrtcvad" },
+]
 watch = [
     { name = "watchdog" },
 ]
@@ -253,9 +256,10 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
     { name = "uvicorn", marker = "extra == 'a2a'", specifier = ">=0.30.0" },
     { name = "watchdog", marker = "extra == 'watch'", specifier = ">=3.0.0" },
+    { name = "webrtcvad", marker = "extra == 'vad'", specifier = ">=2.0.10" },
     { name = "websockets", marker = "extra == 'mcp-examples'", specifier = ">=12.0" },
 ]
-provides-extras = ["a2a", "apis-gateway", "watch", "mcp-examples", "dev"]
+provides-extras = ["a2a", "apis-gateway", "watch", "vad", "mcp-examples", "dev"]
 
 [[package]]
 name = "attrs"
@@ -1726,6 +1730,12 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/db/d9/c495884c6e548fce18a8f40568ff120bc3a4b7b99813081c8ac0c936fa64/watchdog-6.0.0-py3-none-win_amd64.whl", hash = "sha256:cbafb470cf848d93b5d013e2ecb245d4aa1c8fd0504e863ccefa32445359d680", size = 79070, upload-time = "2024-11-01T14:07:10.686Z" },
     { url = "https://files.pythonhosted.org/packages/33/e8/e40370e6d74ddba47f002a32919d91310d6074130fe4e17dabcafc15cbf1/watchdog-6.0.0-py3-none-win_ia64.whl", hash = "sha256:a1914259fa9e1454315171103c6a30961236f508b9b623eae470268bbcc6a22f", size = 79067, upload-time = "2024-11-01T14:07:11.845Z" },
 ]
+
+[[package]]
+name = "webrtcvad"
+version = "2.0.10"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/89/34/e2de2d97f3288512b9ea56f92e7452f8207eb5a0096500badf9dfd48f5e6/webrtcvad-2.0.10.tar.gz", hash = "sha256:f1bed2fb25b63fb7b1a55d64090c993c9c9167b28485ae0bcdd81cf6ede96aea", size = 66156, upload-time = "2017-01-07T23:05:18.732Z" }
 
 [[package]]
 name = "websockets"

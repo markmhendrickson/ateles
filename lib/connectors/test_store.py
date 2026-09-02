@@ -276,3 +276,49 @@ def test_unchanged_source_is_byte_stable_across_runs():
     run1 = content_hash(observation_payload({**record, "observed_at": "2026-09-01T08:00:00Z"}))
     run2 = content_hash(observation_payload({**record, "observed_at": "2026-09-02T09:15:00Z"}))
     assert run1 == run2
+
+
+# ── stage 5: upstream timestamps are the same trap from the other side ──────
+#
+# A synced pull_request carries GitHub's updated_at. That is exactly the field
+# shape that froze every issue in sync_issues_from_github.ts. Our own clock is
+# stripped by default; upstream clocks must be declared per connector.
+
+
+def test_upstream_timestamp_can_be_declared_volatile():
+    """A PR re-synced with only a touched updated_at must hash identically."""
+    pr = {"number": 687, "title": "fix(transcription): ...", "state": "open"}
+    a = idempotency_key("github", "pr-687", {**pr, "updated_at": "2026-09-01T10:00:00Z"},
+                        volatile={"updated_at"})
+    b = idempotency_key("github", "pr-687", {**pr, "updated_at": "2026-09-02T04:30:00Z"},
+                        volatile={"updated_at"})
+    assert a == b
+
+
+def test_declaring_volatile_does_not_mask_a_real_change():
+    """Stripping a timestamp must not make substantive edits invisible."""
+    a = idempotency_key("github", "pr-687", {"title": "before", "updated_at": "2026-09-01T10:00:00Z"},
+                        volatile={"updated_at"})
+    b = idempotency_key("github", "pr-687", {"title": "after", "updated_at": "2026-09-01T10:00:00Z"},
+                        volatile={"updated_at"})
+    assert a != b
+
+
+def test_our_own_clock_is_stripped_without_being_declared():
+    """observed_at is always volatile — a connector should not have to remember."""
+    base = {"version": "0.17.0"}
+    a = idempotency_key("fly", "v16", {**base, "observed_at": "2026-09-01T00:00:00Z"})
+    b = idempotency_key("fly", "v16", {**base, "observed_at": "2026-09-02T00:00:00Z"})
+    assert a == b
+
+
+def test_undeclared_upstream_timestamp_still_changes_the_key():
+    """The hazard is real: forget to declare it and every re-sync looks different.
+
+    Pinned deliberately. This is the failure that froze sync_issues_from_github,
+    and the test exists so the requirement is visible rather than assumed.
+    """
+    pr = {"number": 687, "title": "same"}
+    a = idempotency_key("github", "pr-687", {**pr, "updated_at": "2026-09-01T10:00:00Z"})
+    b = idempotency_key("github", "pr-687", {**pr, "updated_at": "2026-09-02T04:30:00Z"})
+    assert a != b  # NOT a bug — it is why `volatile` must be passed

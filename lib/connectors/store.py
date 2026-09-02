@@ -65,12 +65,18 @@ def content_hash(payload: "dict[str, Any]") -> str:
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
-#: Fields excluded from the content hash because they change every run without
-#: the SOURCE having changed. See ``observation_payload`` for why this matters.
+#: Fields excluded from the content hash because they change without the
+#: SOURCE's substance changing. See ``observation_payload`` for why this matters.
+#:
+#: These are OUR clock. A connector carrying UPSTREAM timestamps — a synced
+#: pull_request's ``updated_at``, say — must extend this via the ``volatile``
+#: argument, or it walks into the same trap from the other direction.
 _VOLATILE_FIELDS = frozenset({"observed_at", "observed_by", "connector_name"})
 
 
-def observation_payload(fields: "dict[str, Any]") -> "dict[str, Any]":
+def observation_payload(
+    fields: "dict[str, Any]", *, volatile: "frozenset[str] | set[str] | None" = None
+) -> "dict[str, Any]":
     """The part of a record that reflects the SOURCE, with our clock stripped.
 
     ## The trap this avoids
@@ -90,10 +96,17 @@ def observation_payload(fields: "dict[str, Any]") -> "dict[str, Any]":
     ``observed_at`` is precisely that shape of field, so connectors must key on
     the source's own identity and content, never on when we happened to look.
     """
-    return {k: v for k, v in fields.items() if k not in _VOLATILE_FIELDS}
+    excluded = _VOLATILE_FIELDS | set(volatile or ())
+    return {k: v for k, v in fields.items() if k not in excluded}
 
 
-def idempotency_key(connector: str, external_id: str, payload: "dict[str, Any]") -> str:
+def idempotency_key(
+    connector: str,
+    external_id: str,
+    payload: "dict[str, Any]",
+    *,
+    volatile: "frozenset[str] | set[str] | None" = None,
+) -> str:
     """``connector-{name}-{external_id}-{content_hash}`` — never a clock.
 
     A timestamp here would make every run's key unique, which is precisely how
@@ -103,7 +116,7 @@ def idempotency_key(connector: str, external_id: str, payload: "dict[str, Any]")
     produces a byte-stable payload under a stable key and the intended
     idempotent no-op actually holds. See ``observation_payload``.
     """
-    payload = observation_payload(payload)
+    payload = observation_payload(payload, volatile=volatile)
     safe_id = str(external_id).replace(" ", "-")[:80]
     return f"connector-{connector}-{safe_id}-{content_hash(payload)}"
 
