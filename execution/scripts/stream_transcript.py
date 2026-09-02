@@ -50,6 +50,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from hallucination_filter import screen_transcription
+from session_language import SessionLanguages, resolve_session_languages
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 FALLBACK_TAILER = REPO_ROOT / "execution" / "scripts" / "live_transcript_tail.py"
@@ -394,13 +395,27 @@ def _resample_pcm16(payload: bytes, src_rate: int, dst_rate: int) -> bytes:
 
 
 def load_speech_detector(enabled: bool = True) -> SpeechDetector | None:
-    """The local VAD when available, else None (gate degrades to RMS alone)."""
+    """The local VAD when available, else None (gate degrades to RMS alone).
+
+    The failure is reported WITH ITS CAUSE, because the causes need different
+    fixes and used to be indistinguishable. `webrtcvad` 2.0.10 imports
+    `pkg_resources` (deleted from modern setuptools) purely to set
+    `__version__`, so on Python 3.12+ it raises ImportError from a package pip
+    installed successfully — reporting that as "not installed" sends the
+    operator to re-run an install that already worked. Hence
+    `webrtcvad-wheels` in the manifest, and the cause in the message.
+
+    Catching only ImportError was itself too narrow: a built extension can
+    fail to load for reasons that are not ImportError (a bad architecture
+    raises OSError), and those would have propagated and taken the whole live
+    transcript down over an OPTIONAL layer.
+    """
     if not enabled:
         return None
     try:
         return SpeechDetector()
-    except ImportError:
-        log(DEGRADED_VAD_MESSAGE)
+    except Exception as exc:  # noqa: BLE001 — an optional layer must not be fatal
+        log(f"{DEGRADED_VAD_MESSAGE} [cause: {type(exc).__name__}: {exc}]")
         return None
 
 
@@ -762,16 +777,17 @@ DEGRADED_VAD_MESSAGE = (
 )
 
 
-def degraded_vad_record(index: int) -> dict:
+def degraded_vad_record(index: int, *, fatal: bool = False) -> dict:
     """The missing-VAD notice, on the channel the operator actually watches.
 
     ``load_speech_detector`` already logs this to stderr, but stderr is a
     write-only channel (ateles#583): the operator reads the JSONL through the
     session Monitor. A degraded gate changes the transcript the operator is
-    about to trust, so it belongs where they are looking — non-fatal, because
-    the RMS gate still works and the stream continues.
+    about to trust, so it belongs where they are looking — non-fatal by
+    default, because the RMS gate still works and the stream continues.
+    `fatal` is set only when the operator asked for --require-local-vad.
     """
-    return error_record(index, DEGRADED_VAD_MESSAGE)
+    return error_record(index, DEGRADED_VAD_MESSAGE, fatal=fatal)
 
 
 def health_record(index: int, problems: list[str], summary: dict) -> dict:
@@ -825,8 +841,41 @@ def session_update_message(
     model: str = DEFAULT_MODEL,
     silence_duration_ms: int | None = None,
     prefix_padding_ms: int | None = None,
+    language: str | None = None,
 ) -> dict:
     """The Realtime session config.
+
+    `language` used not to be sent AT ALL: without it the API replies
+    `"language": null`, i.e. full auto-detect.
+
+    MEASURED, and the result is NOT the one this was expected to deliver.
+    Pinning does not stop the decoder emitting another language. Replayed
+    against the live socket, `gpt-4o-transcribe` with `language: "en"`
+    accepted and echoed the pin and still returned
+    `こんにちは、今日はいい天気ですね。` for Japanese speech, byte-identical to
+    the unpinned run. It is a hint that improves accuracy and latency within a
+    language, not a constraint on the output alphabet. So this field is NOT the
+    fix for fabrication, and must not be reported as one — the input gate is.
+
+    It is sent anyway because auto-detect is strictly worse: it is a documented
+    accuracy and latency win on the language actually being spoken, and it makes
+    the session's expected language explicit in the request rather than implied.
+
+    Deliberately NOT accompanied by a steering `prompt`. A prompt DOES change
+    the output — "transcribe only English" turned that same Japanese line into
+    "Hello, today is a nice day." — which is worse, not better: it launders a
+    fabrication the output filter would have caught on its non-Latin script
+    into fluent English that no downstream check can see.
+
+    Only the SINGULAR `language` can be sent here, and it takes exactly one
+    ISO-639-1 code. The plural `languages` (which would let a trilingual
+    operator pin all three) is rejected by `gpt-4o-transcribe` with
+    `invalid_parameter`, and the model that does accept it, `gpt-live-transcribe`,
+    rejects `turn_detection` — so using it would cost the server VAD this path
+    depends on for honest turn boundaries and speech-based billing. Both
+    verified against the live API. The remaining languages are therefore
+    enforced on the OUTPUT side, by the hallucination filter's
+    `plausible_languages`, rather than at the decoder.
 
     `server_vad` is load-bearing for BOTH correctness and cost: it closes turns
     on silence (fixing the 42% mid-sentence truncation) and it keeps billing on
@@ -843,6 +892,9 @@ def session_update_message(
     The `OpenAI-Beta: realtime=v1` era shape now fails closed with
     `beta_api_shape_disabled`; this is the current one (ateles#625).
     """
+    transcription: dict = {"model": model}
+    if language:
+        transcription["language"] = language
     return {
         "type": "session.update",
         "session": {
@@ -850,7 +902,7 @@ def session_update_message(
             "audio": {
                 "input": {
                     "format": {"type": "audio/pcm", "rate": SAMPLE_RATE},
-                    "transcription": {"model": model},
+                    "transcription": transcription,
                     "turn_detection": {
                         "type": "server_vad",
                         "silence_duration_ms": (
@@ -998,7 +1050,9 @@ async def stream_session(
     model: str = DEFAULT_MODEL,
     api_key: str,
     expected_language: str = DEFAULT_LANGUAGE,
+    languages: "SessionLanguages | None" = None,
     use_local_vad: bool = True,
+    require_local_vad: bool = False,
     gate_dbfs: float = INPUT_GATE_DBFS,
     vad_silence_ms: int = VAD_SILENCE_DURATION_MS,
     vad_prefix_padding_ms: int = VAD_PREFIX_PADDING_MS,
@@ -1010,6 +1064,17 @@ async def stream_session(
 
     monitor = HealthMonitor()
     trace_started = time.monotonic()
+    if languages is None:
+        languages = resolve_session_languages(expected_language)
+    # The pin the decoder runs under, and the wider set the output filter
+    # tolerates, are different things and both belong in the log: pinning 'en'
+    # while accepting Spanish and Catalan on output is a deliberate asymmetry,
+    # not an inconsistency.
+    log(
+        f"language: pinned {languages.primary!r} on the model "
+        f"(source: {languages.source}); output filter accepts "
+        f"{'/'.join(languages.plausible)}"
+    )
     gate = InputGate(
         threshold_dbfs=gate_dbfs,
         vad=load_speech_detector(enabled=use_local_vad),
@@ -1031,10 +1096,27 @@ async def stream_session(
         with open(out_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+    for warning in languages.warnings:
+        # A degraded language pin changes how fabrication-prone the transcript
+        # is, so it belongs on the channel the operator reads (ateles#583),
+        # not only in stderr.
+        append(error_record(index, f"language resolution degraded: {warning}"))
+        index += 1
+
     if use_local_vad and gate.vad is None:
         # Degraded, not broken: say so where the operator is reading.
-        append(degraded_vad_record(index))
+        append(degraded_vad_record(index, fatal=require_local_vad))
         index += 1
+        if require_local_vad:
+            # Opt-in, and deliberately NOT the default. The RMS gate still
+            # works without this layer, and failing closed on an optional
+            # package would lose the operator's words — a worse outcome than
+            # the fabrications it guards against. The flag exists so an
+            # operator who has decided otherwise can say so.
+            # Before ffmpeg starts, deliberately: aborting here leaves no
+            # half-written recording to finalize.
+            log("local VAD required but unavailable — aborting (--require-local-vad)")
+            return 2, monitor
 
     proc = await asyncio.create_subprocess_exec(
         *build_capture_command(device, recording_path),
@@ -1055,11 +1137,15 @@ async def stream_session(
                         model,
                         silence_duration_ms=vad_silence_ms,
                         prefix_padding_ms=vad_prefix_padding_ms,
+                        language=languages.primary,
                     )
                 )
             )
             monitor.note_socket_event()
-            log(f"socket open (model={model}, server_vad on)")
+            log(
+                f"socket open (model={model}, server_vad on, "
+                f"language={languages.primary})"
+            )
 
             async def pump_audio() -> None:
                 nonlocal index
@@ -1144,9 +1230,10 @@ async def stream_session(
 
                             verdict = screen_transcription(
                                 text,
-                                expected_language=expected_language,
+                                expected_language=languages.primary,
                                 window_seconds=max(0.0, end_s - start_s),
                                 vad_closed=vad_closed,
+                                plausible_languages=languages.plausible,
                             )
                             if verdict.filtered:
                                 log(
@@ -1233,6 +1320,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable the local VAD pre-filter (RMS input gating still applies)",
     )
     parser.add_argument(
+        "--require-local-vad",
+        action="store_true",
+        help=(
+            "abort instead of degrading when the local VAD cannot load. Off by "
+            "default: the RMS gate still works without it, and failing closed "
+            "would lose speech rather than fabricate it"
+        ),
+    )
+    parser.add_argument(
         "--input-gate-dbfs",
         type=float,
         default=INPUT_GATE_DBFS,
@@ -1263,7 +1359,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--language",
         default=DEFAULT_LANGUAGE,
-        help="language the session is expected to be in (drives the hallucination filter)",
+        help=(
+            "fallback language, used ONLY when locale_profile cannot be read "
+            f"(default: {DEFAULT_LANGUAGE})"
+        ),
+    )
+    parser.add_argument(
+        "--languages",
+        default=os.environ.get("STREAM_TRANSCRIPT_LANGUAGES"),
+        help=(
+            "comma-separated ISO-639-1 codes overriding the operator's "
+            "locale_profile, primary first (e.g. 'es,en,ca'). The FIRST is "
+            "pinned on the model — the Realtime API accepts only one there on "
+            "the server-VAD path — and the rest are accepted by the output "
+            "hallucination filter"
+        ),
     )
     parser.add_argument(
         "--fallback-only",
@@ -1319,7 +1429,11 @@ def main(argv: list[str]) -> int:
                 model=args.model,
                 api_key=api_key,
                 expected_language=args.language,
+                languages=resolve_session_languages(
+                    args.language, override=args.languages
+                ),
                 use_local_vad=not args.no_local_vad,
+                require_local_vad=args.require_local_vad,
                 gate_dbfs=args.input_gate_dbfs,
                 vad_silence_ms=args.vad_silence_ms,
                 vad_prefix_padding_ms=args.vad_prefix_padding_ms,

@@ -6,8 +6,10 @@ loudly (ateles#619): the operator cannot tell "nobody is talking" from "the
 socket died" by looking at an empty transcript, so the code has to tell them.
 """
 
+import asyncio
 import json
 import math
+import random
 import re
 import struct
 import sys
@@ -18,6 +20,7 @@ import pytest
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPTS_DIR))
 
+import session_language as sl  # noqa: E402
 import stream_transcript as st  # noqa: E402
 
 
@@ -1138,3 +1141,341 @@ def test_webrtcvad_is_declared_optional_in_the_manifest():
     # And NOT among the core install_requires.
     core = manifest.split("dependencies = [", 1)[1].split("]", 1)[0]
     assert "webrtcvad" not in core
+
+
+# ---------------------------------------------------------------------------
+# The language pin (ateles ent_c7c2ea62e380df71ac38f1cd)
+#
+# The session used to send `transcription: {"model": model}` and nothing else.
+# The API's own echo confirms what that meant — it replies `"language": null`,
+# i.e. full auto-detect — and the operator's sessions duly produced confident
+# text in ten languages while nobody was speaking.
+# ---------------------------------------------------------------------------
+
+
+def _transcription(msg: dict) -> dict:
+    return msg["session"]["audio"]["input"]["transcription"]
+
+
+def test_session_pins_the_language_on_the_model():
+    """The regression that matters: a session config with no language field.
+
+    Fails against the pre-fix code, where `language` was never sent under any
+    argument.
+    """
+    tr = _transcription(st.session_update_message(language="en"))
+    assert tr.get("language") == "en", (
+        "no language field means the model auto-detects, which is where the "
+        "ten-language fabrication came from"
+    )
+
+
+def test_session_omits_language_only_when_none_is_resolved():
+    """Absent rather than null: the API distinguishes them, and an explicit
+    null is auto-detect stated out loud."""
+    tr = _transcription(st.session_update_message(language=None))
+    assert "language" not in tr
+
+
+def test_session_never_sends_the_plural_languages_field():
+    """Verified against the live API: `gpt-4o-transcribe` rejects `languages`
+    with invalid_parameter, and `gpt-live-transcribe`, which accepts it,
+    rejects `turn_detection` — so sending it would cost this path its server
+    VAD. Pinned so a future edit does not reintroduce it untested.
+    """
+    tr = _transcription(st.session_update_message(language="en"))
+    assert "languages" not in tr
+
+
+def test_language_pin_survives_vad_tuning_overrides():
+    """The two configs are independent; setting one must not drop the other."""
+    tr = _transcription(
+        st.session_update_message(
+            language="es", silence_duration_ms=1500, prefix_padding_ms=450
+        )
+    )
+    assert tr["language"] == "es"
+
+
+# ---------------------------------------------------------------------------
+# Language resolution from the operator's locale_profile
+# ---------------------------------------------------------------------------
+
+
+def test_languages_resolve_from_the_locale_profile_snapshot():
+    """The entity stores English NAMES; the API needs ISO-639-1 codes."""
+    codes = sl.languages_from_profile(
+        {
+            "profile_key": "default",
+            "language": "English",
+            "secondary_languages": ["Spanish", "Catalan"],
+        }
+    )
+    assert codes == ["en", "es", "ca"], "primary first, then the rest"
+
+
+def test_language_resolution_degrades_to_a_pin_never_to_auto_detect(monkeypatch):
+    """Neotoma being unreachable must not silently restore auto-detect.
+
+    Losing the pin is the whole defect, so the degraded path still pins
+    something — and says so, loudly enough for the operator to see.
+    """
+    monkeypatch.setattr(
+        sl, "_fetch_locale_profile", lambda timeout: (_ for _ in ()).throw(OSError("down"))
+    )
+    resolved = sl.resolve_session_languages("en")
+    assert resolved.primary == "en"
+    assert resolved.source == "fallback"
+    assert resolved.warnings, "a degraded pin must announce itself"
+
+
+def test_missing_locale_profile_still_pins(monkeypatch):
+    monkeypatch.setattr(sl, "_fetch_locale_profile", lambda timeout: None)
+    resolved = sl.resolve_session_languages("es")
+    assert resolved.primary == "es"
+    assert resolved.warnings
+
+
+def test_override_wins_and_keeps_the_rest_for_the_output_filter(monkeypatch):
+    """The Realtime API pins ONE language. The others are not discarded — they
+    go to the output filter, so a trilingual operator code-switching is not
+    flagged as fabrication."""
+    monkeypatch.setattr(sl, "_fetch_locale_profile", lambda timeout: None)
+    resolved = sl.resolve_session_languages("en", override="ca,es,en")
+    assert resolved.primary == "ca"
+    assert resolved.plausible == ("ca", "es", "en")
+
+
+def test_a_language_the_api_cannot_pin_falls_back_rather_than_unpinning():
+    """An unsupported code must not become "send no language" — that is
+    auto-detect again. The API's supported set is its own, read from its error
+    response, so a preference outside it degrades to a pin plus a warning."""
+    resolved = sl._build(["mi_nonexistent"], "test", [])
+    assert resolved.primary in sl.REALTIME_SUPPORTED_LANGUAGES
+    assert resolved.warnings
+
+
+# ---------------------------------------------------------------------------
+# Silence must produce NO transcript (ateles ent_706afed58092b0b855e5098b)
+#
+# The test the pre-fix code would have passed is "speech transcribes
+# correctly". That one is green against the live bug. This one feeds the gate
+# what the operator's room actually sounds like when nobody is talking, and
+# asserts nothing reaches the model at all.
+# ---------------------------------------------------------------------------
+
+
+def _room_tone(seconds: float, dbfs: float, seed: int = 7) -> bytes:
+    """Pseudo-random noise at a target level — room tone, not digital silence.
+
+    Digital silence is the easy case and not the one that fabricates. The
+    measured room tone in the corpus sits near -55 dBFS; the fabricated
+    Georgian chunk arrived at -31.6.
+    """
+    rng = random.Random(seed)
+    amplitude = 32768.0 * (10.0 ** (dbfs / 20.0)) * math.sqrt(2.0)
+    n = int(st.SAMPLE_RATE * seconds)
+    vals = [
+        max(-32768, min(32767, int(rng.uniform(-amplitude, amplitude))))
+        for _ in range(n)
+    ]
+    return struct.pack(f"<{n}h", *vals)
+
+
+def _feed(gate: st.InputGate, payload: bytes, *, start: float = 0.0) -> int:
+    """Push audio through the gate in real frame sizes; count frames sent."""
+    sent = 0
+    now = start
+    step = st.STREAM_CHUNK_BYTES
+    for offset in range(0, len(payload) - step + 1, step):
+        if gate.should_send(payload[offset:offset + step], now):
+            sent += 1
+        now += step / st.BYTES_PER_SECOND
+    return sent
+
+
+def test_digital_silence_sends_nothing_to_the_model():
+    """Note for whoever reads a revert: this one, and the room-tone test below,
+    still PASS with the local VAD absent. The RMS gate carries silence on its
+    own — which is the repo's own measured finding (ateles#631: webrtcvad
+    changed zero suppression outcomes across 56 labelled chunks). They are
+    kept because they pin the behaviour that actually protects the operator,
+    not because they exercise the VAD. The VAD's own liveness is asserted
+    separately, below.
+    """
+    gate = st.InputGate(vad=st.load_speech_detector())
+    assert _feed(gate, b"\x00\x00" * (st.SAMPLE_RATE * 5)) == 0
+
+
+def test_room_tone_with_nobody_speaking_sends_nothing_to_the_model():
+    """The real failure case: a live room, mic open, nobody talking.
+
+    This is what was streaming continuously into the decoder and coming back
+    as Japanese, Amharic and Portuguese.
+    """
+    gate = st.InputGate(vad=st.load_speech_detector())
+    sent = _feed(gate, _room_tone(5.0, dbfs=-55.0))
+    assert sent == 0, (
+        f"{sent} frames of room tone reached the model; an autoregressive "
+        "decoder has no 'emit nothing' option, so it will invent text"
+    )
+
+
+def test_a_keyboard_click_admits_only_its_hangover_not_the_whole_room():
+    """A transient is BOUNDED, not eliminated — and the bound is the point.
+
+    Written first as "a click admits nothing" and that assertion failed, so it
+    is recorded here as measured rather than as hoped. A 10ms click inside a
+    100ms frame lifts that whole frame to about -18 dBFS, and a 1.5s window
+    holds only ~15 frames, so one loud frame reaches the p95. The gate then
+    holds open for its hangover and closes again.
+
+    That is frame-level averaging, not a regression: the same property lets a
+    quiet word-ending through, which is why the hangover exists. What must
+    never happen is the click admitting the MINUTES of room tone around it, so
+    the assertion is the bound.
+    """
+    gate = st.InputGate(vad=st.load_speech_detector())
+    audio = bytearray(_room_tone(20.0, dbfs=-55.0))
+    click = _pcm(12000, samples=int(st.SAMPLE_RATE * 0.01))
+    at = st.BYTES_PER_SECOND * 2
+    audio[at:at + len(click)] = click
+
+    sent = _feed(gate, bytes(audio))
+    ceiling = int(
+        (st.GATE_HANGOVER_SECONDS + st.GATE_WINDOW_SECONDS)
+        * st.BYTES_PER_SECOND
+        / st.STREAM_CHUNK_BYTES
+    )
+    assert 0 < sent <= ceiling, (
+        f"{sent} frames admitted by one click; the hangover bounds this at "
+        f"{ceiling}, and anything more means a transient opens the room"
+    )
+    assert gate.frames_suppressed > gate.frames_sent * 5, (
+        "the overwhelming majority of a quiet room must still be suppressed"
+    )
+
+
+def test_the_gate_still_passes_real_speech():
+    """The counterweight. A gate that suppresses everything would pass every
+    silence test and be useless — it must still carry the operator's words."""
+    gate = st.InputGate(vad=st.load_speech_detector())
+    n = int(st.SAMPLE_RATE * 3.0)
+    speech = struct.pack(
+        f"<{n}h",
+        *[
+            int(6000 * math.sin(2 * math.pi * 140 * i / st.SAMPLE_RATE)
+                * (1 + 0.6 * math.sin(2 * math.pi * 3 * i / st.SAMPLE_RATE)))
+            for i in range(n)
+        ],
+    )
+    assert _feed(gate, speech) > 0, "the operator's speech must reach the model"
+
+
+# ---------------------------------------------------------------------------
+# The VAD layer must be genuinely live, and loud when it is not
+# ---------------------------------------------------------------------------
+
+
+def test_webrtcvad_is_importable_and_the_detector_actually_loads():
+    """Asserts the OBJECT, not the absence of a warning.
+
+    `webrtcvad` 2.0.10 imports pkg_resources, which modern setuptools no
+    longer ships, so it raises ImportError from a package pip installed
+    successfully — a dead layer that looks installed. The manifest pins
+    `webrtcvad-wheels` for exactly that reason.
+    """
+    detector = st.load_speech_detector()
+    assert detector is not None, (
+        "local VAD did not load — check webrtcvad-wheels, not webrtcvad"
+    )
+    assert isinstance(detector, st.SpeechDetector)
+    assert st.InputGate(vad=detector).summary()["vad"] is not None
+
+
+def test_the_detector_discriminates_rather_than_merely_constructing():
+    """A detector that answers True to everything would satisfy every
+    is-it-loaded assertion while filtering nothing."""
+    detector = st.load_speech_detector()
+    assert detector is not None
+    assert detector.is_speech(b"\x00\x00" * (st.SAMPLE_RATE // 10)) is False
+
+
+def test_the_manifest_pins_the_fork_that_imports_on_modern_python():
+    manifest = (_SCRIPTS_DIR.parents[1] / "pyproject.toml").read_text()
+    assert "webrtcvad-wheels" in manifest
+    assert not re.search(r'"webrtcvad>=', manifest), (
+        "plain webrtcvad is unimportable on Python 3.12+ (pkg_resources)"
+    )
+
+
+def test_a_missing_vad_reports_its_cause_not_just_its_absence(monkeypatch, capsys):
+    """"Not installed" and "installed but unimportable" need different fixes,
+    and used to produce the identical message."""
+    def _boom(self, aggressiveness=2):
+        raise ImportError("No module named 'pkg_resources'")
+
+    monkeypatch.setattr(st.SpeechDetector, "__init__", _boom)
+    assert st.load_speech_detector() is None
+    err = capsys.readouterr().err
+    assert "pkg_resources" in err, "the cause must survive to the operator"
+
+
+def test_a_non_import_vad_failure_degrades_instead_of_killing_the_stream(monkeypatch):
+    """A built extension can fail for reasons that are not ImportError. The
+    old handler caught ImportError alone, so an OSError would have taken the
+    whole live transcript down over an OPTIONAL layer."""
+    def _boom(self, aggressiveness=2):
+        raise OSError("incompatible architecture")
+
+    monkeypatch.setattr(st.SpeechDetector, "__init__", _boom)
+    assert st.load_speech_detector() is None
+
+
+def test_degradation_is_fatal_only_when_the_operator_asked():
+    assert st.degraded_vad_record(0)["fatal"] is False
+    assert st.degraded_vad_record(0, fatal=True)["fatal"] is True
+
+
+def test_no_steering_prompt_is_sent_with_the_language_pin():
+    """A steering prompt LAUNDERS fabrications, and this pins that finding.
+
+    Measured against the live socket, all three on the same Japanese audio:
+
+      language=en             -> 'こんにちは、今日はいい天気ですね。'
+      language=en + a prompt  -> 'Hello, today is a nice day.'
+
+    The prompt is the only one of the two that changes the output — and it
+    changes it the wrong way. The output filter catches fabrication by its
+    non-Latin script; a prompt that renders the same fabrication as fluent
+    English removes the signal the filter depends on and leaves plausible text
+    in the transcript instead. Left out deliberately, not overlooked.
+    """
+    tr = _transcription(st.session_update_message(language="en"))
+    assert "prompt" not in tr
+
+
+def test_require_local_vad_aborts_before_capture_starts(tmp_path, monkeypatch):
+    """The strict path must abort BEFORE ffmpeg runs.
+
+    Its first draft called `proc.terminate()` on a process that did not exist
+    yet — caught by lint, not by a test, so here is the test. Aborting before
+    capture also means there is no half-written recording to finalize.
+    """
+    monkeypatch.setattr(st, "load_speech_detector", lambda enabled=True: None)
+
+    def _never(*args, **kwargs):
+        raise AssertionError("capture must not start when the VAD is required")
+
+    monkeypatch.setattr(st.asyncio, "create_subprocess_exec", _never)
+    out = tmp_path / "t_live.jsonl"
+    rc, _ = asyncio.run(
+        st.stream_session(
+            ":3", tmp_path / "t.m4a", out,
+            api_key="unused", require_local_vad=True,
+            languages=sl.SessionLanguages("en", ("en",), "test"),
+        )
+    )
+    assert rc == 2
+    records = [json.loads(line) for line in out.read_text().splitlines()]
+    assert any(r.get("fatal") for r in records), "the abort must be loud"
