@@ -355,3 +355,117 @@ def test_a_readable_announce_is_final(monkeypatch):
 
     created = [m for m in n.sent if m.startswith("Task created")]
     assert len(created) == 1, f"announced {len(created)} times: {created}"
+
+
+# ── unmapped tags must not suppress inference (ateles#702, defect b) ──────────
+#
+# `dispatch_task` used to call _infer_tags_from_text ONLY when the snapshot's
+# tags were empty, so tags that were PRESENT but unmapped suppressed inference
+# entirely and sent a well-formed task straight to BLOCKED. Driven through the
+# real entrypoint: the bug lives in dispatch_task's control flow, not in the
+# routing table, so a unit test of resolve_skill would pass while this failed.
+
+
+def test_unmapped_tags_do_not_block_a_routable_task(monkeypatch):
+    """The plan's own step-1 task: five bookkeeping tags, none of them a route.
+
+    action_type=fix, confidence=0.9, a real title — and it blocked, because
+    ['apis','swarm','gates','observability','ateles-682'] is not empty. Having
+    tags was strictly worse than having none.
+    """
+    monkeypatch.setattr(apis, "_activity", _FakeActivity())
+    n = _Notifier()
+    snapshot = {
+        "title": "Make swarm dispatch gates observable",
+        "tags": ["apis", "swarm", "gates", "observability", "ateles-682"],
+        "action_type": "fix",
+        "confidence": 0.9,
+    }
+    with pytest.raises(_Stop):
+        _dispatch("ent_step1", snapshot, n)
+    assert not any("unroutable" in m for m in n.sent), n.sent
+
+
+def test_a_routable_stored_tag_still_wins_over_inference(monkeypatch):
+    """Inference AUGMENTS; it must not displace an explicit routable tag.
+
+    A task tagged `health` whose text is full of payment words must still reach
+    gorilla — otherwise the fix would trade one misroute for another.
+    """
+    routed: list[str] = []
+
+    class _Capture:
+        def started(self, msg, *a, **k):
+            routed.append(msg)
+            raise _Stop()
+
+    monkeypatch.setattr(apis, "_activity", _Capture())
+    snapshot = {"title": "Pay the invoice for the gym", "tags": ["health"]}
+    with pytest.raises(_Stop):
+        _dispatch("ent_mix", snapshot, _Notifier())
+    assert "gorilla" in routed[0], routed
+
+
+def test_genuinely_unroutable_tags_still_escalate():
+    """The fix must not become a blanket rescue — no route is still a page."""
+    n = _Notifier()
+    _dispatch(
+        "ent_nope",
+        {"title": "Water the plants on the terrace", "tags": ["misc", "someday"]},
+        n,
+    )
+    assert len(n.sent) == 1
+    assert "unroutable" in n.sent[0]
+
+
+# ── human-owned tasks park, never spawn (ateles#702, defect a) ────────────────
+
+
+def test_operator_assigned_task_is_not_spawned(monkeypatch):
+    """The blast-radius case, through the dispatcher.
+
+    An `operator`-assigned task whose text keyword-matches an agent used to be
+    marked ROUTED and spawned. It must now park in AWAITING_INPUT — and must not
+    travel the unroutable BLOCKER path either, because it is not a defect.
+    """
+    statuses: list = []
+    monkeypatch.setattr(
+        apis, "set_task_status",
+        lambda eid, status, **k: statuses.append((status, k.get("reason"))) or True,
+    )
+    spawned: list = []
+    monkeypatch.setattr(
+        apis, "_activity",
+        type("A", (), {"started": lambda self, *a, **k: spawned.append(a)})(),
+    )
+    n = _Notifier()
+    _dispatch(
+        "ent_human",
+        {"title": "operator-only: merge the PR and fix the auth path",
+         "tags": ["engineering"], "assigned_to": "operator"},
+        n,
+    )
+    assert spawned == [], f"an agent was spawned onto human-owned work: {spawned}"
+    assert statuses and statuses[0][0] == apis.TaskStatus.AWAITING_INPUT, statuses
+    assert "human-owned" in (statuses[0][1] or "")
+    assert not any("unroutable" in m for m in n.sent), n.sent
+
+
+def test_unknown_assignee_escalates_instead_of_being_reassigned(monkeypatch):
+    """A named owner nobody can spawn blocks visibly rather than being replaced."""
+    spawned: list = []
+    monkeypatch.setattr(
+        apis, "_activity",
+        type("A", (), {"started": lambda self, *a, **k: spawned.append(a)})(),
+    )
+    n = _Notifier()
+    # `pavo` is a real roster agent that owns no domain. Before the fix the
+    # finance tag sent this to monedula, the payment executor.
+    _dispatch(
+        "ent_pavo",
+        {"title": "Reconcile the payment spreadsheet", "tags": ["finance"],
+         "assigned_to": "pavo"},
+        n,
+    )
+    assert spawned == [], f"reassigned to another agent: {spawned}"
+    assert len(n.sent) == 1 and "unroutable" in n.sent[0], n.sent
