@@ -579,6 +579,20 @@ async def _create_task_for_email(message: dict, email_entity_id: str | None) -> 
             "priority": "urgent",
             "status": "open",
             "domain": "finance",
+            # ateles#682: declare what this task DOES and how sure we are, so
+            # the execution gate classifies it on the work rather than on the
+            # assignee. This one really does move money — HIGH by declaration,
+            # and it SHOULD checkpoint. Confidence is deliberately low: Turdus
+            # detected an invoice by keyword heuristic and has verified neither
+            # the amount nor the payee, which is precisely the uncertainty the
+            # gate exists to surface.
+            "action_type": "payment",
+            "confidence": 0.3,
+            "confidence_drivers": (
+                "Invoice detected by sender/subject keyword heuristic only. "
+                "Amount, payee, and legitimacy unverified. Monedula must "
+                "retrieve the payment_profile and confirm before acting."
+            ),
         }
         log_label = "INVOICE→monedula"
     else:
@@ -593,6 +607,19 @@ async def _create_task_for_email(message: dict, email_entity_id: str | None) -> 
             ),
             "audience": "agent",
             "status": "open",
+            # ateles#682: Turdus's standing contract is that it STAGES Gmail
+            # drafts and never sends — the send remains a human action. So the
+            # honest action_type is "draft" (LOW blast), not
+            # "send_external_comms". Confidence stays moderate: the email is
+            # real and the triage is routine, but whether a reply is actually
+            # warranted is a judgment the handling agent still makes.
+            "action_type": "draft",
+            "confidence": 0.6,
+            "confidence_drivers": (
+                "Email retrieved and classified actionable by Turdus's hourly "
+                "sweep. Output is an unsent Gmail draft; delivery stays a "
+                "human action. Whether a reply is warranted is unverified."
+            ),
         }
         log_label = "actionable"
 

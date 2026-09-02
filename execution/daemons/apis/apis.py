@@ -210,31 +210,73 @@ DAEMON_NAME = "apis"
 
 SUBSCRIBE_ENTITY_TYPES = ["task", "checkpoint_brief"]
 
-# Coarse action_type per resolved skill — feeds the execution gate's blast-radius
-# classification. Conservative: anything that opens PRs, releases, pays, or posts
-# publicly is high blast. An explicit task.action_type field overrides this.
-# Values MUST match the execution_policy's high/low_blast_action_types vocabulary
-# (default policy ent_dfce6edecefe3eb7fc9e0337) or the gate mis-classifies blast
-# radius. PR open and merge both map to the policy's "open_or_merge_pr"; "release"
-# is treated as high blast via blast_radius_default + the policy's publish set.
+# Coarse action_type per resolved skill — the LAST resort for the execution
+# gate's blast-radius classification, consulted only when the task neither
+# declares an action_type nor describes one in its own text.
+#
+# ateles#682: this map used to be the FIRST thing consulted after the (never
+# populated) explicit field, which made blast radius a property of the
+# ASSIGNEE rather than of the work. Cicada is the generalist and owns six of
+# nine routing domains, so every engineering-flavoured task — including tasks
+# whose only output is a written report — inherited "open_or_merge_pr" and
+# scored HIGH. Measured 2026-09-01/02: 27 consecutive PLAN checkpoints, 23 of
+# them open_or_merge_pr via Cicada.
+#
+# Resolution order is now: explicit task.action_type → inferred from the task's
+# own text (lib/daemon_runtime/action_type.py) → this map → policy default.
+# The map survives because it is still a reasonable prior for the specialists
+# whose ENTIRE remit is one action class (Monedula only moves money, Struthio
+# only publishes). It is no longer allowed to speak for the generalists.
+#
+# Values MUST match the execution_policy's high/low_blast_action_types
+# vocabulary (default policy ent_dfce6edecefe3eb7fc9e0337) or the gate
+# mis-classifies blast radius.
 _AGENT_ACTION_TYPE: dict[str, str] = {
-    "cicada": "open_or_merge_pr",
-    "vanellus": "open_or_merge_pr",
-    "struthio": "publish",
+    # Single-remit specialists: the agent's identity really does determine the
+    # action class, so the prior is sound.
     "monedula": "payment",
-    "fringilla": "compute_only_analysis",
+    "struthio": "publish",
     "corvus": "send_external_comms",
+    "fringilla": "compute_only_analysis",
+    # Generalists deliberately ABSENT (ateles#682). Cicada and Vanellus each
+    # span read-only analysis through PR merges; naming one action for them
+    # mislabels the majority of their work. With no entry here an
+    # unclassifiable task falls through to the policy's blast_radius_default
+    # and still cannot auto-execute below the confidence threshold, so removing
+    # them loosens nothing — it stops asserting something untrue.
 }
 
 
-def _infer_action_type(skill: str | None, snapshot: dict) -> str | None:
-    """Best-effort action_type for the gate. Explicit task field wins."""
-    explicit = (snapshot.get("action_type") or "").strip().lower()
+def _infer_action_type(skill: str | None, snapshot: dict) -> tuple[str | None, bool]:
+    """
+    Resolve the action_type the gate should classify blast radius from.
+
+    Returns ``(action_type, was_inferred)``. ``was_inferred`` is False only when
+    the task itself declared the value — that distinction decides whether a
+    resulting block is an operator judgment or a mechanical guess
+    (see lib/daemon_runtime/block_kind.classify_gate_block).
+
+    Order:
+      1. ``task.action_type``, declared by whatever created the task. An
+         unrecognized spelling is discarded rather than passed through, so a
+         typo cannot land on the policy default and earn auto-execution.
+      2. Inference from the task's own title + body — what the work DOES.
+      3. The per-agent prior, now only for single-remit specialists.
+    """
+    explicit = normalize_action_type(snapshot.get("action_type"))
     if explicit:
-        return explicit
+        return explicit, False
+
+    inferred = infer_action_type_from_text(
+        snapshot.get("title") or "",
+        snapshot.get("body") or snapshot.get("description") or "",
+    )
+    if inferred:
+        return inferred, True
+
     if skill:
-        return _AGENT_ACTION_TYPE.get(skill.lower())
-    return None
+        return _AGENT_ACTION_TYPE.get(skill.lower()), True
+    return None, True
 
 
 def _read_confidence(snapshot: dict) -> float:
@@ -242,6 +284,12 @@ def _read_confidence(snapshot: dict) -> float:
     Read the agent-supplied confidence (0..1) from the task snapshot. Absent an
     explicit score, return 0.0 so the gate fails CLOSED (checkpoint) for any
     non-low-blast action — the operator is asked rather than the swarm guessing.
+
+    ateles#682 note: this axis was a constant 0.0 in production because no task
+    creation path wrote the field, which collapsed the two-axis gate to one
+    axis. The fix is at the WRITE end (creation paths now declare a confidence
+    they can honestly assert); this reader is unchanged and still fails closed,
+    because a task that genuinely cannot state a confidence should still stop.
     """
     raw = snapshot.get("confidence", snapshot.get("confidence_score"))
     try:
@@ -297,6 +345,15 @@ from routing import (  # noqa: E402
     infer_tags_from_text as _infer_tags_from_text,
     resolve_role as _resolve_role,
     resolve_skill as _resolve_skill,
+)
+
+from lib.daemon_runtime.action_type import (  # noqa: E402
+    infer_action_type as infer_action_type_from_text,
+    normalize_action_type,
+)
+from lib.daemon_runtime.block_kind import (  # noqa: E402
+    classify_gate_block,
+    record_block_classification,
 )
 
 import github_gateway  # noqa: E402
@@ -583,7 +640,7 @@ async def dispatch_task(
     # Skipped when re-dispatching an operator-approved checkpoint.
     if not gate_override:
         policy = resolve_policy_for_agent(skill)
-        action_type = _infer_action_type(skill, snapshot)
+        action_type, action_type_was_inferred = _infer_action_type(skill, snapshot)
         confidence = _read_confidence(snapshot)
         decision = evaluate_gate(
             confidence=confidence,
@@ -593,7 +650,8 @@ async def dispatch_task(
         )
         log.info(
             f"[{DAEMON_NAME}] gate: task={entity_id} → {skill} "
-            f"action={action_type} blast={decision.blast_radius.value} "
+            f"action={action_type}{'(inferred)' if action_type_was_inferred else '(declared)'} "
+            f"blast={decision.blast_radius.value} "
             f"conf={confidence:.2f}/{decision.threshold:.2f} "
             f"→ {decision.action.value} ({decision.reason})"
         )
@@ -613,10 +671,31 @@ async def dispatch_task(
                     else None
                 ),
             )
+            # ateles#682 / operator question: type the block so a future
+            # re-evaluation sweep is safe by construction rather than by regex
+            # over free text. A HIGH blast radius derived from a DECLARED
+            # action_type is an operator judgment and is never swept; a block
+            # resting on an inferred action type, or on the confidence axis
+            # alone, is a mechanical default and may be re-evaluated once the
+            # creating agent supplies the fields. Best-effort — on failure the
+            # block stays untyped, which `may_sweep` treats as operator-only.
+            block_kind, clear_condition = classify_gate_block(
+                blast_radius=decision.blast_radius.value,
+                confidence=confidence,
+                threshold=decision.threshold,
+                action_type_was_inferred=action_type_was_inferred,
+            )
+            record_block_classification(
+                entity_id,
+                block_kind=block_kind,
+                clear_condition=clear_condition,
+                handler=DAEMON_NAME,
+            )
             notifier.send(
                 f"PLAN checkpoint: {title[:70]}\n"
                 f"  agent={skill} blast={decision.blast_radius.value} "
                 f"conf={confidence:.2f} — {decision.reason}\n"
+                f"  block={block_kind.value} clears_on={clear_condition.value}\n"
                 f"  task={entity_id} brief={brief_id or '(unpersisted)'}",
                 priority=Priority.BLOCKER,
                 handler=DAEMON_NAME,

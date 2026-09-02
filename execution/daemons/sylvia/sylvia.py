@@ -592,6 +592,17 @@ def import_calendar_tasks(
             "audience": audience,
             "status": "pending",
             "notes": "imported from Google Calendar by Sylvia",
+            # ateles#682: a calendar import is a mirror, not an instruction.
+            # What Sylvia itself did is a Neotoma-internal write; what the
+            # resulting task will require is unknown from a calendar title
+            # alone. Declare the low confidence rather than leaving the axis
+            # silently zero, so the gate's reason names the real uncertainty.
+            "confidence": 0.4,
+            "confidence_drivers": (
+                "Mirrored from a Google Calendar event title with no body or "
+                "agenda. The work the event implies is inferred from the "
+                "title alone and has not been specified or reviewed."
+            ),
         }
         if assigned_to:
             payload["assigned_to"] = assigned_to

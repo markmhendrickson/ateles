@@ -51,7 +51,10 @@ mcp__mcpsrv_neotoma__store(
     "status": "pending",  // or "in_progress" if actively being worked
     "priority": "<see priority mapping below>",
     "phase": "<plan phase number as string>",
-    "tags": ["ateles", "phase-N", "<daemon-name-if-relevant>"]
+    "tags": ["ateles", "phase-N", "<daemon-name-if-relevant>"],
+    "action_type": "<see action_type vocabulary below>",
+    "confidence": <0.0–1.0, see below>,
+    "confidence_drivers": "<one or two sentences: what you retrieved, what is still unverified>"
   }],
   relationships=[{
     "relationship_type": "PART_OF",
@@ -60,6 +63,40 @@ mcp__mcpsrv_neotoma__store(
   }]
 )
 ```
+
+**`action_type` — what the task DOES** (feeds the execution gate's blast-radius
+classification; ateles#682). Pick the most consequential action the task will
+actually take, not the mildest one it starts with. A task that analyses
+something and then opens a PR is `open_or_merge_pr`.
+
+| Low blast (may auto-execute at high confidence) | High blast (always checkpoints) |
+|---|---|
+| `local_edit` — edits confined to a working tree | `git_push` — pushes to a remote |
+| `draft` — stages a draft that a human sends | `open_or_merge_pr` — opens or merges a PR |
+| `neotoma_read` — retrieval only | `payment` — moves money |
+| `neotoma_internal_entity_update` — bookkeeping writes | `send_external_comms` — sends to someone outside the swarm |
+| `compute_only_analysis` — produces a report, writes nothing | `delete_entity_or_data` — destroys data |
+| | `external_api_write` — writes to a third-party API |
+| | `publish` — makes something public |
+
+Omitting `action_type` is safe but lossy: the gate falls back to inferring it
+from your title and description, and failing that to a per-agent default. Say
+what you mean and the classification stops being a guess.
+
+**`confidence` — how sure you are, 0.0–1.0.** This is a self-score about *this
+task's specification*, not about your general competence. Score honestly; the
+gate's whole value is that a low score stops work that should stop.
+
+- **0.85+** (the default auto-execute threshold): you retrieved the relevant
+  entities, every required input is present, and the acceptance criteria are
+  unambiguous.
+- **0.5–0.85**: the work is understood but something material is unverified —
+  a value you inferred, a file you have not read, a decision not yet made.
+- **below 0.5**: you are proposing work, not specifying it.
+
+Never inflate a score to get past the gate. If you cannot honestly assert
+0.85, the correct outcome is a checkpoint, and `confidence_drivers` is where
+you tell the operator exactly what would raise it.
 
 **Priority mapping:**
 - Phase 2 blocker items → `"blocker"`
