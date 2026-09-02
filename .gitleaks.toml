@@ -160,6 +160,12 @@ regexes = [
   # digits, so this is a value-shape false positive, not fixable by renaming.
   # Anchored to the exact 16-digit literal used as the test fixture value.
   '''\b1202469970914439\b''',
+  # generic-api-key false positive: OpenAI Realtime transcription model
+  # product ids (DEFAULT_MODEL / docs in stream_transcript.py). Hyphenated
+  # alphanumeric with enough entropy to trip the default rule; not secrets.
+  # Flagged on ateles#707 / PR tip commit against test_stream_transcript.py.
+  '''\bgpt-4o-transcribe\b''',
+  '''\bgpt-live-transcribe\b''',
 ]
 paths = [
   "execution/scripts/ga_last_7_days_report.py",

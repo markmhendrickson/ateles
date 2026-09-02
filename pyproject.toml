@@ -44,7 +44,15 @@ watch = ["watchdog>=3.0.0"]
 # aggressiveness level. Kept installable, and wired, so the finding stays
 # reproducible — but nothing should depend on it until a detector that
 # actually discriminates replaces it. See ateles#631.
-vad = ["webrtcvad>=2.0.10"]
+#
+# `webrtcvad-wheels`, not `webrtcvad`: the original 2.0.10 is unimportable on
+# Python 3.12+. Its module does `import pkg_resources` purely to populate
+# __version__, and setuptools no longer ships pkg_resources, so the import
+# fails on a machine where pip reported a successful install. That is how this
+# layer stayed dead after being "installed" — the failure is an ImportError,
+# indistinguishable to `load_speech_detector` from never having installed it.
+# The fork is the same C extension with that line removed.
+vad = ["webrtcvad-wheels>=2.0.14"]
 # Reference MCP servers under docs/mcp/* — union of their runtime deps so
 # `pip install ateles[mcp-examples]` can run them. Each server still keeps its
 # own requirements.txt for standalone use; removing those once this extra is
@@ -73,6 +81,13 @@ dev = [
     # (ateles#524, PR #527 round 2 — execution/scripts/ had no CI lane at all).
     "openai>=1.0.0",
     "python-dotenv>=1.0.0",
+    # execution/scripts/stream_transcript.py: CI runs `uv run --extra dev`, so
+    # VAD-liveness tests (ateles#631 / PR #707) need the wheels fork here, not
+    # only under the optional `vad` extra. Same pin as `vad` above.
+    "webrtcvad-wheels>=2.0.14",
+    # stream_session imports websockets before connecting; needed to collect /
+    # exercise the --require-local-vad abort path under the scripts lane.
+    "websockets>=12.0",
 ]
 
 [project.scripts]
