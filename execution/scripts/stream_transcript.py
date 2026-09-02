@@ -111,6 +111,35 @@ SILENT_INPUT_DBFS = float(os.environ.get("STREAM_TRANSCRIPT_SILENT_DBFS", "-65")
 # without admitting ordinary room noise.
 SPEECH_PRESENT_DBFS = float(os.environ.get("STREAM_TRANSCRIPT_SPEECH_DBFS", "-50"))
 
+# ...and it must be SUSTAINED for this long before it counts as speech.
+#
+# This is the clause that was missing, and its absence is what made the
+# "speech has been arriving for Ns" readings untrue. A single 0.1s frame over
+# -50 dBFS was enough to stamp `last_speech_at`, so one keyboard click, one
+# chair creak or one breath reset the speech clock — and the clock is what the
+# stall detector, the "is this a dead socket or a quiet room" verdict, and the
+# operator-facing dropped-audio figure are all built on.
+#
+# Measured on a real hour-long session in which the operator was mostly silent:
+# 26 isolated loud frames scattered across a 125s stretch containing no speech
+# at all were enough to report 101.9s of "speech arriving unanswered". Across
+# the last eight recordings, a single-frame test claims the speech clock is
+# fresh for 67-88% of the session; requiring 2.0s of sustained level drops that
+# to 5-15%, which is the right order for sessions that are mostly listening.
+#
+# 2.0s is chosen to sit above the longest impulsive noise in these captures
+# (the loudest 120s window's longest sustained run is 3.5s and IS speech, while
+# noise bursts are sub-second) and below any real utterance — the shortest
+# transcribed turn observed is 1.4s, and this gate only needs to notice that
+# talking STARTED, not to capture its first syllable.
+#
+# It deliberately does NOT gate what is SENT to the decoder — `InputGate` owns
+# that, and making this stricter would lose words. It gates only what the
+# health monitor is willing to CALL speech.
+SPEECH_SUSTAIN_SECONDS = float(
+    os.environ.get("STREAM_TRANSCRIPT_SPEECH_SUSTAIN_S", "2.0")
+)
+
 # --- Socket recovery --------------------------------------------------------
 # Detection without recovery still drops the operator's words (ateles#682).
 #
@@ -487,6 +516,7 @@ class HealthMonitor:
         signal_window_seconds: float = SIGNAL_WINDOW_SECONDS,
         silent_dbfs: float = SILENT_INPUT_DBFS,
         speech_dbfs: float = SPEECH_PRESENT_DBFS,
+        speech_sustain_seconds: float = SPEECH_SUSTAIN_SECONDS,
         now: float | None = None,
     ) -> None:
         self.stall_seconds = stall_seconds
@@ -494,6 +524,11 @@ class HealthMonitor:
         self.signal_window_seconds = signal_window_seconds
         self.silent_dbfs = silent_dbfs
         self.speech_dbfs = speech_dbfs
+        self.speech_sustain_seconds = speech_sustain_seconds
+        # Start of the current unbroken run of speech-level frames, or None
+        # between runs. A run must last `speech_sustain_seconds` before it is
+        # allowed to move `last_speech_at`.
+        self._speech_run_started_at: float | None = None
         start = time.monotonic() if now is None else now
         self.last_audio_at = start
         self.last_socket_at = start
@@ -527,8 +562,21 @@ class HealthMonitor:
             # Track the last moment the capture carried speech-level audio, so
             # the socket-silence timer can run against speech rather than
             # against wall clock (ateles#631 review).
+            #
+            # SUSTAINED, not instantaneous. One loud frame is a click, a breath
+            # or a chair; only a run of them is somebody talking. Advancing the
+            # clock on a single frame is what let a silent room report a
+            # hundred seconds of "speech arriving unanswered", which in turn
+            # sent the operator a request to repeat words he had never said.
             if level >= self.speech_dbfs:
-                self.last_speech_at = now
+                if self._speech_run_started_at is None:
+                    self._speech_run_started_at = now
+                elif now - self._speech_run_started_at >= self.speech_sustain_seconds:
+                    self.last_speech_at = now
+            else:
+                # Any frame below threshold breaks the run. Speech is
+                # continuous at this timescale; noise is not.
+                self._speech_run_started_at = None
         self._trim(now)
 
     def note_socket_event(self, now: float | None = None) -> None:
@@ -606,6 +654,8 @@ class HealthMonitor:
         # and leaving it in the past would make the NEW socket look guilty of
         # the old one's silence.
         self.last_speech_at = now
+        # A half-finished speech run belongs to the dead socket's timeline.
+        self._speech_run_started_at = None
         self.reconnects += 1
 
     def problems(self, now: float | None = None) -> list[str]:
@@ -637,11 +687,14 @@ class HealthMonitor:
         unanswered_speech = now - self.last_speech_at
         if self.socket_stalled(now):
             found.append(
-                f"socket silent: speech has been arriving for "
-                f"{unanswered_speech:.0f}s with no event from the transcription "
-                f"socket in {socket_gap:.0f}s (threshold "
-                f"{self.socket_silent_seconds:.0f}s) — audio is being offered and "
-                f"is going unanswered, so this is the socket, not a quiet room"
+                f"socket silent: audio above the speech threshold has been "
+                f"arriving for {unanswered_speech:.0f}s with no event from the "
+                f"transcription socket in {socket_gap:.0f}s (threshold "
+                f"{self.socket_silent_seconds:.0f}s) — sustained speech-level "
+                f"audio is being offered and is going unanswered. This is "
+                f"measured from the capture's RMS level, not from anything the "
+                f"decoder returned, so it indicates a dead socket rather than "
+                f"confirming what was said"
             )
 
         # Only meaningful once a full window has actually elapsed.
@@ -928,34 +981,47 @@ def reconnect_record(
 
     A SILENT reconnect is nearly as bad as a silent stall: the operator needs to
     know a gap happened and roughly where, because audio spoken into a dead
-    socket is not recoverable and he has to repeat it. `dropped_seconds` is the
-    span of speech-bearing audio that was offered to a socket which never
-    answered — an estimate of what he has to say again, not a guess at content.
+    socket is not recoverable and he has to repeat it.
+
+    `dropped_seconds` is the span of audio that read above the speech threshold
+    and was offered to a socket which never answered. It is an UPPER BOUND on
+    what was lost, not a measurement of speech: it is derived from the capture's
+    RMS level, so anything loud enough counts, and a window containing no
+    speech at all can still carry a non-zero figure. The wording says "may
+    have" for that reason — an earlier revision asserted the loss outright and
+    a quiet stretch misread as speech had the operator repeating sentences he
+    had never said.
     """
     if recovered:
         message = f"transcription socket reconnected (attempt {attempt}) after {reason}"
         if dropped_seconds:
             message += (
-                f" — approximately {dropped_seconds:.0f}s of speech was offered to the "
-                f"dead socket and was NOT transcribed; please repeat anything said in "
-                f"that window"
+                f" — up to {dropped_seconds:.0f}s of audio above the speech "
+                f"threshold was offered to the dead socket and was NOT "
+                f"transcribed; if you were speaking in that window, it did not "
+                f"land"
             )
     else:
         message = (
             f"transcription socket reconnect attempt {attempt} after {reason}"
         )
+    rounded = round(dropped_seconds, 1) if dropped_seconds is not None else None
     return {
         "chunk": index,
         "t": datetime.now(tz=UTC).isoformat(),
         "ok": False,
         "error": message,
+        # Mirrored at the TOP level as well as inside `reconnect`. The nested
+        # copy is the structured record; this one is what a consumer reading
+        # `r.get("dropped_seconds")` finds. Without it the figure rendered as
+        # `?` in the Monitor — the one number that makes a gap visible was not
+        # reachable where readers looked for it.
+        "dropped_seconds": rounded,
         "reconnect": {
             "attempt": attempt,
             "reason": reason,
             "recovered": recovered,
-            "dropped_seconds": (
-                round(dropped_seconds, 1) if dropped_seconds is not None else None
-            ),
+            "dropped_seconds": rounded,
         },
         "fatal": fatal,
         "source": "stream",
