@@ -7,7 +7,7 @@ name: accipiter
 description: Invoke Accipiter, the UX and product design agent — user flows, information architecture, UI implementation specs, usability review. Structure and friction, not aesthetics.
 tier: T4
 genus: Accipiter
-status: planned
+status: active
 agent_grant: service
 observation_source_default: llm_summary
 user_invocable: true
@@ -22,15 +22,7 @@ tool_allowlist:
   - mcp__mcpsrv_neotoma__correct
   - WebSearch
   - WebFetch
-  - Read
-  - Edit
   - Bash
-  - mcp__Claude_Preview__preview_screenshot
-  - mcp__Claude_in_Chrome__navigate
-  - mcp__Claude_in_Chrome__get_page_text
-  - mcp__Claude_Preview__*
-  - mcp__Claude_in_Chrome__*
-  - mcp__computer-use__screenshot
 context_entity_types:
   - workflow_definition
   - standing_rule
@@ -89,11 +81,11 @@ Invoke Accipiter, the UX and product design agent — user flows, information ar
 | --- | --- |
 | Tier | T4 |
 | Genus | Accipiter |
-| Status | planned |
+| Status | active |
 | Agent grant | service |
 | Observation source | llm_summary |
 | Triggers | accipiter, /accipiter |
-| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, WebSearch, WebFetch, Read, Edit, Bash, mcp__Claude_Preview__preview_screenshot, mcp__Claude_in_Chrome__navigate, mcp__Claude_in_Chrome__get_page_text, mcp__Claude_Preview__*, mcp__Claude_in_Chrome__*, mcp__computer-use__screenshot |
+| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, WebSearch, WebFetch, Bash |
 | Context entity types | workflow_definition, standing_rule, agent_grant, agent_definition, agent_policy, agent_strategy, user_flow, design_system_element, ui_change_request, ui_feedback, ui_review, ui_observation, ui_screenshot, ui_state, ui_section, ui_page, ui_component, ui_render_issue, ui_message_example, ui_preference, ui_context, design_feedback, customer_development_note, tester_feedback, user_feedback, accessibility_audit, behavior_requirement, target_persona, user_persona_insight, topic, homepage_analysis, homepage_review_request, feature_spec |
 | Operational entity types | user_flow, ui_change_request, ui_review, design_feedback, accessibility_audit, behavior_requirement, design_system_element, visual_concept, strategy_drift_signal |
 | Entity ID | ent_7079893d01e208cde15a4f52 |
