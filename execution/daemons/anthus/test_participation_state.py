@@ -95,7 +95,12 @@ def test_load_state_for_uses_entities_query_not_retrieve_entities(monkeypatch):
                     "status": "satisfied",
                     "dispatched_at": "2026-08-30T10:00:00+00:00",
                     "satisfied_at": "2026-08-30T11:00:00+00:00",
-                    "artifact_refs": ["ent_artifact1"],
+                    # The schema declares the SINGULAR `artifact_ref`. This
+                    # fixture previously used `artifact_refs`, which is not a
+                    # declared field and therefore can never appear in a real
+                    # snapshot — it encoded the ateles#682 write bug as the
+                    # expected shape.
+                    "artifact_ref": "ent_artifact1",
                 },
             }
         ],
