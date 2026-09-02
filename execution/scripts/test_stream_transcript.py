@@ -1138,3 +1138,122 @@ def test_webrtcvad_is_declared_optional_in_the_manifest():
     # And NOT among the core install_requires.
     core = manifest.split("dependencies = [", 1)[1].split("]", 1)[0]
     assert "webrtcvad" not in core
+
+
+# ---------------------------------------------------------------------------
+# Named-device binding: capture stops rather than substituting a microphone
+# ---------------------------------------------------------------------------
+
+
+def test_suspended_capture_is_not_reported_as_a_stall():
+    """A stall means the recorder died and something is wrong. Suspension
+    means the operator took his headset off and the system is behaving as
+    designed. Reporting the second as the first trains him to ignore the
+    alert that matters."""
+    monitor = st.HealthMonitor(now=0.0)
+    monitor.note_capture_suspended()
+    problems = monitor.problems(now=600.0)
+
+    assert len(problems) == 1, "one true statement, not a pile of alarms"
+    assert "capture suspended" in problems[0]
+    assert not any("capture stalled" in p for p in problems)
+    assert not any("silent input" in p for p in problems)
+
+
+def test_suspended_capture_says_no_other_microphone_is_used():
+    """The operator must be able to tell 'stopped on purpose' from 'broken'."""
+    monitor = st.HealthMonitor(now=0.0)
+    monitor.note_capture_suspended()
+    assert "no other microphone" in monitor.problems(now=600.0)[0]
+
+
+def test_suspended_capture_is_unhealthy_so_it_surfaces():
+    """Suspension is correct behaviour but it is NOT healthy: nothing is being
+    transcribed, and a pipeline that looks healthy while capturing nothing is
+    the exact failure this path keeps rediscovering."""
+    monitor = st.HealthMonitor(now=0.0)
+    monitor.note_capture_suspended()
+    assert not monitor.is_healthy(now=600.0)
+
+
+def test_resuming_clears_suspension_and_the_stall_clock():
+    """The gap spent waiting for the device must not then be billed as a
+    stall the moment capture resumes."""
+    monitor = st.HealthMonitor(now=0.0)
+    monitor.note_capture_suspended()
+    monitor.note_capture_active(now=600.0)
+    assert monitor.problems(now=601.0) == []
+    assert monitor.is_healthy(now=601.0)
+
+
+def test_a_real_stall_still_reports_after_a_resume():
+    """Resuming must not disarm the stall detector permanently."""
+    monitor = st.HealthMonitor(now=0.0)
+    monitor.note_capture_suspended()
+    monitor.note_capture_active(now=100.0)
+    problems = monitor.problems(now=100.0 + st.CAPTURE_STALL_SECONDS + 5)
+    assert any("capture stalled" in p for p in problems)
+
+
+def test_device_lost_record_names_the_device_and_the_consequence():
+    record = st.device_lost_record(7, "Someone's Headphones")
+    assert record["ok"] is False
+    assert record["fatal"] is False, "the stream resumes; this is not a crash"
+    assert "Someone's Headphones" in record["error"]
+    assert "STOPPED" in record["error"]
+    # It must say both that nothing is recorded AND that it will come back.
+    assert "resumes automatically" in record["error"]
+    assert "no other microphone" in record["error"]
+
+
+def test_device_resumed_record_is_a_success_notice():
+    record = st.device_resumed_record(8, "Someone's Headphones", ":2")
+    assert record["ok"] is True
+    assert "RESUMED" in record["notice"]
+    assert ":2" in record["notice"]
+    assert "same file" in record["notice"]
+
+
+def test_stop_and_resume_are_announced_on_the_jsonl_not_only_stderr():
+    """stderr is a write-only channel (ateles#583); the operator reads the
+    JSONL through the session Monitor. A silent stop is the failure."""
+    for record in (
+        st.device_lost_record(0, "X"),
+        st.device_resumed_record(1, "X", ":2"),
+    ):
+        assert record["source"] == "stream"
+        assert "t" in record and "chunk" in record
+        json.dumps(record)  # must serialize onto the JSONL
+
+
+def test_capture_command_takes_the_resolved_index():
+    """build_capture_command still speaks avfoundation's ':N', so name
+    resolution happens above it and the ffmpeg contract is unchanged."""
+    cmd = st.build_capture_command(":2", Path("/tmp/x.m4a"))
+    assert "-f" in cmd and "avfoundation" in cmd
+    assert cmd[cmd.index("-i") + 1] == ":2"
+
+
+def test_device_flag_defaults_to_no_override():
+    """With no flag the permitted set comes from configuration, NOT from a
+    hardcoded index. The old default was ':3' — a literal that addressed a
+    different physical microphone as soon as hardware changed."""
+    args = st.build_parser().parse_args([])
+    assert args.device is None
+
+
+def test_device_flag_accepts_a_name():
+    args = st.build_parser().parse_args(["--device", "Someone's Headphones"])
+    assert args.device == "Someone's Headphones"
+
+
+def test_resuming_does_not_fire_a_false_socket_silent_alarm():
+    """Regression: no audio is sent while suspended, so the API correctly
+    sends nothing back. On resume the socket LOOKS silent for the whole
+    suspension — but it was unasked, not unhealthy. Without resetting the
+    socket clock every reconnection alarms on the wrong component."""
+    monitor = st.HealthMonitor(now=0.0)
+    monitor.note_capture_suspended()
+    # Long enough to blow past the socket-silence threshold many times over.
+    monitor.note_capture_active(now=600.0)
+    assert not any("socket silent" in p for p in monitor.problems(now=601.0))
