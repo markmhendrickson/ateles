@@ -1,0 +1,42 @@
+[
+  {
+    "ID": "rel-v10",
+    "Version": 10,
+    "ImageRef": "deployment-01KZBG32X",
+    "Status": "successful",
+    "CreatedAt": "2026-08-06T10:00:00Z",
+    "User": {"email": "operator@example.com", "name": "Operator"}
+  },
+  {
+    "ID": "rel-v11",
+    "Version": 11,
+    "ImageRef": "deployment-01KZBG32X",
+    "Status": "successful",
+    "CreatedAt": "2026-08-06T12:00:00Z",
+    "User": {"email": "operator@example.com", "name": "Operator"}
+  },
+  {
+    "ID": "rel-v14",
+    "Version": 14,
+    "ImageRef": "deployment-01KZJTRBK",
+    "Status": "successful",
+    "CreatedAt": "2026-08-09T08:39:00Z",
+    "User": {"email": "operator@example.com", "name": "Operator"}
+  },
+  {
+    "ID": "rel-v15",
+    "Version": 15,
+    "ImageRef": "deployment-01M11TXSC",
+    "Status": "successful",
+    "CreatedAt": "2026-08-27T14:46:00Z",
+    "User": {"email": "operator@example.com", "name": "Operator"}
+  },
+  {
+    "ID": "rel-v16",
+    "Version": 16,
+    "ImageRef": "deployment-01M1EBTEB",
+    "Status": "successful",
+    "CreatedAt": "2026-09-01T04:00:00Z",
+    "User": {"email": "operator@example.com", "name": "Operator"}
+  }
+]
