@@ -32,24 +32,65 @@ Degrading safely
 Neotoma being unreachable must NOT take live transcription down, and must not
 silently resurrect auto-detect either. `resolve_session_languages` always
 returns a usable result and reports, in `source`, where it came from — the
-caller announces that on the operator-visible channel. The fallback is the
+caller announces that on the operator-visible channel. The fallback pin is the
 explicit `STREAM_TRANSCRIPT_LANGUAGE` / `--language` value, never "auto".
+
+The PIN and the PLAUSIBLE SET degrade differently, and conflating them was a
+real defect. The pin is one code and falling back to the configured language is
+right. The plausible set is not: collapsing it to that same single language
+makes every non-ASCII letter foreign, so on an outage the operator's genuine
+Spanish and Catalan — "El niño está aquí.", "Això és el català." — get marked
+`foreign_diacritic`. Both obvious degradations are wrong:
+
+* Fall OPEN (every language plausible) and the orthography signal silently
+  stops catching anything — the filter reports healthy while admitting the
+  fabrications it exists to reject.
+* Fall CLOSED (the pin only) and real speech is recorded as fabrication — the
+  false positives this filter has never once produced.
+
+So the plausible set degrades to neither: it is the last successfully-read set,
+cached on disk, and only if no cache has ever been written does it use a
+conservative seed of the operator's known spoken languages. That errs toward
+admitting real speech, because a missed fabrication is recoverable by eye while
+a filtered real turn is a corrupted record. Every degraded path warns and is
+visible in `source`, so a stale set is diagnosable rather than looking fresh.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 
-from hallucination_filter import normalize_language
+from hallucination_filter import DEFAULT_PLAUSIBLE_LANGUAGES, normalize_language
 
 NEOTOMA_BASE_URL = os.environ.get(
     "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
 )
 LOCALE_PROFILE_KEY = os.environ.get("ATELES_LOCALE_PROFILE_KEY", "default")
+
+# Last good read of the operator's spoken set, so an outage degrades to what
+# was true yesterday rather than to a guess. Not a cache of the PIN — that
+# falls back to the explicitly configured language, which needs no cache.
+CACHE_PATH = Path(
+    os.environ.get(
+        "STREAM_TRANSCRIPT_LANGUAGE_CACHE",
+        str(Path.home() / ".cache" / "ateles" / "spoken_languages.json"),
+    )
+)
+CACHE_TTL_SECONDS = int(
+    os.environ.get("STREAM_TRANSCRIPT_LANGUAGE_CACHE_TTL", str(24 * 3600))
+)
+
+# Used only when Neotoma is unreachable AND no cache has ever been written.
+# Deliberately the operator's known spoken set rather than a bare ("en",):
+# see the module docstring on why falling closed is the worse failure. Shared
+# with the filter's own default so the two cannot drift apart.
+SEED_PLAUSIBLE_LANGUAGES: tuple[str, ...] = DEFAULT_PLAUSIBLE_LANGUAGES
 
 # The hosted instance sits behind Cloudflare, which 1010-blocks urllib's
 # default User-Agent. Naming ourselves is what makes the read work at all.
@@ -141,6 +182,32 @@ def _bearer_token() -> str | None:
     return None
 
 
+def _read_cached_plausible() -> tuple[tuple[str, ...], str] | None:
+    """The last good spoken set and how old it is, or None if unusable."""
+    try:
+        raw = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+        codes = tuple(c for c in raw["languages"] if isinstance(c, str))
+        if not codes:
+            return None
+        age = time.time() - float(raw.get("written_at", 0))
+        stale = ", STALE" if age > CACHE_TTL_SECONDS else ""
+        return codes, f"cached {age / 3600:.1f}h ago{stale}"
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _write_cached_plausible(codes: tuple[str, ...]) -> None:
+    """Record a good read. A read-only cache dir must not break transcription."""
+    try:
+        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CACHE_PATH.write_text(
+            json.dumps({"languages": list(codes), "written_at": time.time()}),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 def languages_from_profile(snapshot: dict) -> list[str]:
     """ISO-639-1 codes from a locale_profile snapshot, primary first.
 
@@ -199,7 +266,7 @@ def resolve_session_languages(
                 "no locale_profile entity found — falling back to the "
                 "configured language"
             )
-        return _build([normalize_language(fallback_language) or "en"], "fallback", warnings)
+        return _degraded(fallback_language, warnings)
 
     codes = languages_from_profile(snapshot)
     if not codes:
@@ -207,9 +274,51 @@ def resolve_session_languages(
             "locale_profile carries no usable language field — falling back "
             "to the configured language"
         )
-        return _build([normalize_language(fallback_language) or "en"], "fallback", warnings)
+        return _degraded(fallback_language, warnings)
 
+    _write_cached_plausible(tuple(codes))
     return _build(codes, f"locale_profile:{LOCALE_PROFILE_KEY}", warnings)
+
+
+def _degraded(fallback_language: str, warnings: list[str]) -> SessionLanguages:
+    """The unreachable-Neotoma result: a pin, plus a plausible set that is NOT
+    just that pin.
+
+    Collapsing `plausible` to the single fallback code is what marks the
+    operator's own Spanish and Catalan as `foreign_diacritic` during an outage.
+    The pin still degrades to the configured language — one code is all the API
+    takes — while the set the output filter screens against degrades to the
+    last good read, else the seed.
+    """
+    pin = normalize_language(fallback_language) or "en"
+
+    cached = _read_cached_plausible()
+    if cached is not None:
+        codes, detail = cached
+        warnings.append(
+            f"spoken languages are a cached read, not live ({detail}): "
+            f"{'/'.join(codes)}"
+        )
+        source = "cache"
+    else:
+        codes = SEED_PLAUSIBLE_LANGUAGES
+        warnings.append(
+            "no cached spoken languages either — the output filter is running "
+            f"on the built-in seed {'/'.join(codes)}, not on operator "
+            "configuration"
+        )
+        source = "seed"
+
+    # The pin must be inside the set it is screened against, or a monolingual
+    # override plus a cached multilingual set would disagree about the pin.
+    plausible = (pin,) + tuple(c for c in codes if c != pin)
+    resolved = _build([pin], source, warnings)
+    return SessionLanguages(
+        primary=resolved.primary,
+        plausible=plausible,
+        source=source,
+        warnings=resolved.warnings,
+    )
 
 
 def _build(codes: list[str], source: str, warnings: list[str]) -> SessionLanguages:

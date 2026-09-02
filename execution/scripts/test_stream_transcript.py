@@ -1217,22 +1217,29 @@ def test_languages_resolve_from_the_locale_profile_snapshot():
     assert codes == ["en", "es", "ca"], "primary first, then the rest"
 
 
-def test_language_resolution_degrades_to_a_pin_never_to_auto_detect(monkeypatch):
+def test_language_resolution_degrades_to_a_pin_never_to_auto_detect(
+    monkeypatch, tmp_path
+):
     """Neotoma being unreachable must not silently restore auto-detect.
 
     Losing the pin is the whole defect, so the degraded path still pins
-    something — and says so, loudly enough for the operator to see.
+    something — and says so, loudly enough for the operator to see. `source`
+    names WHICH degraded path was taken ("cache" or "seed"), because a caller
+    that cannot tell a week-old cache from a built-in default cannot tell a
+    healthy filter from a silently stale one.
     """
+    monkeypatch.setattr(sl, "CACHE_PATH", tmp_path / "spoken_languages.json")
     monkeypatch.setattr(
         sl, "_fetch_locale_profile", lambda timeout: (_ for _ in ()).throw(OSError("down"))
     )
     resolved = sl.resolve_session_languages("en")
     assert resolved.primary == "en"
-    assert resolved.source == "fallback"
+    assert resolved.source in {"cache", "seed"}
     assert resolved.warnings, "a degraded pin must announce itself"
 
 
-def test_missing_locale_profile_still_pins(monkeypatch):
+def test_missing_locale_profile_still_pins(monkeypatch, tmp_path):
+    monkeypatch.setattr(sl, "CACHE_PATH", tmp_path / "spoken_languages.json")
     monkeypatch.setattr(sl, "_fetch_locale_profile", lambda timeout: None)
     resolved = sl.resolve_session_languages("es")
     assert resolved.primary == "es"
@@ -1937,3 +1944,148 @@ def test_health_summary_reports_reconnects(tmp_path):
     assert summary["dropped_speech_seconds"] == 0.0
     monitor.note_reconnected(now=2.0)
     assert monitor.summary(now=3.0)["reconnects"] == 1
+
+
+# ---------------------------------------------------------------------------
+# The plausible set degrades differently from the pin (ateles#687)
+# ---------------------------------------------------------------------------
+
+
+def _isolate_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(sl, "CACHE_PATH", tmp_path / "spoken_languages.json")
+
+
+def test_degraded_plausible_set_does_not_collapse_to_the_pin(
+    monkeypatch, tmp_path
+):
+    """The defect this closes: an outage must not filter the operator's own
+    Spanish and Catalan.
+
+    The PIN is one code and rightly falls back to the configured language. The
+    PLAUSIBLE set is a different thing — collapsing it to that same single code
+    makes every non-ASCII letter foreign, so real code-switching comes back
+    `foreign_diacritic` precisely when Neotoma is down and nobody is watching.
+    """
+    _isolate_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(sl, "_fetch_locale_profile", lambda timeout: None)
+
+    resolved = sl.resolve_session_languages("en")
+
+    assert resolved.primary == "en", "the pin still degrades to the configured language"
+    assert resolved.plausible != ("en",), (
+        "collapsing the set to the pin is what filtered real speech"
+    )
+    assert set(resolved.plausible) >= {"en", "es", "ca"}
+    assert resolved.source == "seed"
+    assert resolved.warnings, "a seeded set must announce it is not operator config"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["El niño está aquí.", "Això és el català.", "¿Qué opinas de la sesión?"],
+)
+def test_real_speech_survives_a_neotoma_outage(monkeypatch, tmp_path, text):
+    """End to end through the filter on the degraded path."""
+    from hallucination_filter import screen_transcription
+
+    _isolate_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(sl, "_fetch_locale_profile", lambda timeout: None)
+    resolved = sl.resolve_session_languages("en")
+
+    verdict = screen_transcription(
+        text,
+        expected_language=resolved.primary,
+        vad_closed=True,
+        plausible_languages=resolved.plausible,
+    )
+    assert not verdict.filtered, f"{text!r} is the operator, not a fabrication"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Möchtest du ein Feuer?", "Und das hängt an der Korrex auf.", "Taparvo sessões."],
+)
+def test_fabrications_outside_the_spoken_set_are_still_caught_when_degraded(
+    monkeypatch, tmp_path, text
+):
+    """Admitting real speech on the degraded path must not fall open.
+
+    These three are the only verdicts that change across the capture corpus
+    when the set narrows from the languages the operator can READ to the ones
+    he SPEAKS, and all three are genuine fabrications.
+    """
+    from hallucination_filter import screen_transcription
+
+    _isolate_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(sl, "_fetch_locale_profile", lambda timeout: None)
+    resolved = sl.resolve_session_languages("en")
+
+    verdict = screen_transcription(
+        text,
+        expected_language=resolved.primary,
+        vad_closed=True,
+        plausible_languages=resolved.plausible,
+    )
+    assert verdict.filtered, f"{text!r} is a fabrication"
+    assert verdict.reason == "foreign_diacritic"
+
+
+def test_a_good_read_is_cached_and_survives_the_next_outage(
+    monkeypatch, tmp_path
+):
+    """The cache is what makes the degraded set yesterday's truth rather than
+    a built-in guess."""
+    _isolate_cache(monkeypatch, tmp_path)
+    profile = {
+        "profile_key": "default",
+        "language": "English",
+        "secondary_languages": ["Spanish", "Catalan"],
+    }
+    monkeypatch.setattr(sl, "_fetch_locale_profile", lambda timeout: profile)
+    live = sl.resolve_session_languages("en")
+    assert live.source == "locale_profile:default"
+    assert live.plausible == ("en", "es", "ca")
+
+    monkeypatch.setattr(
+        sl,
+        "_fetch_locale_profile",
+        lambda timeout: (_ for _ in ()).throw(OSError("down")),
+    )
+    degraded = sl.resolve_session_languages("en")
+    assert degraded.source == "cache", "a written cache beats the seed"
+    assert set(degraded.plausible) == {"en", "es", "ca"}
+    assert any("cached" in w for w in degraded.warnings), (
+        "a stale set must be diagnosable, not look fresh"
+    )
+
+
+def test_an_unwritable_cache_never_breaks_transcription(monkeypatch, tmp_path):
+    """Transcription runs on a laptop; a read-only cache dir is not fatal."""
+    target = tmp_path / "nope"
+    target.write_text("not a directory")
+    monkeypatch.setattr(sl, "CACHE_PATH", target / "spoken_languages.json")
+    monkeypatch.setattr(
+        sl,
+        "_fetch_locale_profile",
+        lambda timeout: {
+            "profile_key": "default",
+            "language": "English",
+            "secondary_languages": ["Spanish"],
+        },
+    )
+    resolved = sl.resolve_session_languages("en")
+    assert resolved.plausible == ("en", "es")
+    assert resolved.source == "locale_profile:default"
+
+
+def test_an_explicit_monolingual_override_is_still_honoured(
+    monkeypatch, tmp_path
+):
+    """The seed must not widen a caller who deliberately asked for one
+    language."""
+    _isolate_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(sl, "_fetch_locale_profile", lambda timeout: None)
+    resolved = sl.resolve_session_languages("en", override="es")
+    assert resolved.primary == "es"
+    assert resolved.plausible == ("es",)
+    assert resolved.source == "explicit override"

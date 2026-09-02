@@ -400,11 +400,12 @@ def test_a_short_turn_is_never_filtered_on_duration(text, duration_s):
 @pytest.mark.parametrize(
     "text",
     [
-        "El niño está aquí.",       # Spanish ñ
-        "Ça va très bien.",          # French ç, è
-        "Això és el català.",        # Catalan à, ï
-        "Über die Straße.",          # German ü, ß
-        "Não é verdade.",            # Portuguese ã
+        "El niño está aquí.",                        # ñ, á
+        "¿Qué opinas de la sesión?",                 # é, ó
+        "Una ambigüedad tuya, y después ayudarte.",  # ü, é
+        "De dónde salió esto, más o menos.",         # ó, á
+        "Això és el català, si us plau.",            # Catalan à, ï
+        "La sessió d'aquest matí és a les vuit.",    # Catalan ó, í
     ],
 )
 def test_code_switching_into_the_operators_own_languages_survives(text):
@@ -412,9 +413,42 @@ def test_code_switching_into_the_operators_own_languages_survives(text):
 
     The allowed set is the UNION over plausible session languages precisely so a
     Spanish "ñ" inside an English session is the operator, not Whisper.
+
+    These cases are drawn from characters that actually appear in the operator's
+    verified Spanish and Catalan across the capture corpus (á in 134 rows, í
+    149, ó 117, é 111, ú 76, ñ 27). French and German lines were removed from
+    this list deliberately: the operator READS those languages but does not
+    speak them, so "Über die Straße." and "Não é verdade." are fabrication
+    evidence, not code-switching — see the case below.
     """
     verdict = screen_transcription(text, expected_language="en", vad_closed=True)
     assert not verdict.filtered, f"{text!r} is real code-switching"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Möchtest du ein Feuer?",            # German ö
+        "Und das hängt an der Korrex auf.",  # German ä
+        "Taparvo sessões.",                  # Portuguese õ
+    ],
+)
+def test_latin_script_fabrications_outside_the_spoken_languages_are_caught(text):
+    """The class the narrowed plausible-language set exists to catch.
+
+    All three arrived during silence in English sessions and all three passed
+    while German, French, Portuguese and Italian were treated as plausible —
+    the languages the operator can READ rather than the ones he SPEAKS. They
+    are the only three verdicts that change across the full capture corpus when
+    the set narrows to (en, es, ca): 3 true positives, 0 false positives.
+
+    Catalan is IN the set. It was briefly dropped on the reasoning that the
+    corpus contained no Catalan speech, which confuses absence from a sample
+    with absence from the operator's speech.
+    """
+    verdict = screen_transcription(text, expected_language="en", vad_closed=True)
+    assert verdict.filtered, f"{text!r} is a fabrication"
+    assert verdict.reason == "foreign_diacritic"
 
 
 def test_plain_english_can_never_trigger_the_diacritic_signal():
