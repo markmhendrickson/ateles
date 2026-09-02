@@ -20,6 +20,8 @@ on:
       - "lib/daemon_runtime/**"
       - "lib/approval/**"
       - "execution/scripts/**"
+      - "apps/task-dashboard/**"
+      - "apps/task-dashboard/package-lock.json"
       - "pyproject.toml"
       - "uv.lock"
       - "scripts/linters/check_agent_roster.py"
@@ -94,3 +96,24 @@ jobs:
         run: .mcp-venv/bin/python execution/mcp/ateles/test_server.py
       - name: Run ateles MCP server smoke tests
         run: .mcp-venv/bin/python execution/mcp/ateles/test_server_smoke.py
+
+  # ateles#723 (qa lens, PR #723 round 1): task-dashboard vitest suite
+  # (taskLinks.test.ts, taskSearch.test.ts) was committed but collected by no
+  # lane — same defect class as #584/#596 (anthus) and #524/#527. Sibling job,
+  # not a step inside pytest, so a red vitest is attributable.
+  task-dashboard-vitest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/task-dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/task-dashboard/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Run task-dashboard vitest
+        run: npm test
