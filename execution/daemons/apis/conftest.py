@@ -30,3 +30,47 @@ def _isolate_dispatch_failure_logs(monkeypatch, tmp_path):
     monkeypatch.setattr(
         skill_runner, "DISPATCH_FAILURE_LOG_DIR", tmp_path / "dispatch-failures"
     )
+
+
+@pytest.fixture(autouse=True)
+def _default_feature_workflow(monkeypatch):
+    """Serve the `ateles|feature` workflow_definition to every dispatch test.
+
+    Gate sequences now come from `workflow_definition` entities rather than a
+    hardcoded tuple, and an unresolvable workflow fails CLOSED — so without this
+    every legacy waive / gates_green test would fail on a refusal rather than on
+    the behaviour it is actually asserting. This fixture supplies the workflow
+    those tests were written against (`ateles|feature`: pm, then ux+arch), for
+    ANY repo, so their intent is preserved unchanged.
+
+    It is deliberately a plain default, not a bypass: a test that cares which
+    workflow is in force overrides `httpx.post` itself (see
+    `test_workflow_definition_drives_dispatch.py`), and the resolver cache is
+    cleared around every test so one test's stored entity can never decide
+    another's outcome.
+    """
+    from lib.daemon_runtime import workflow_resolver as _wr
+
+    _gates = [
+        {"phase": 1, "gate_name": "pm", "owner_agent": "pavo", "required": True},
+        {"phase": 2, "gate_name": "ux", "owner_agent": "accipiter", "required": True},
+        {"phase": 2, "gate_name": "arch", "owner_agent": "waxwing", "required": True},
+        {"phase": 3, "gate_name": "impl", "owner_agent": "cicada", "required": True},
+        {"phase": 4, "gate_name": "pr_review", "owner_agent": "vanellus",
+         "required": True},
+    ]
+
+    def _fetch(project: str):
+        return [
+            _wr.ResolvedWorkflow(
+                entity_id="ent_test_feature",
+                project=project,
+                workflow_type="feature",
+                gates=_wr.validate_gates(_gates, entity_id="ent_test_feature"),
+            )
+        ]
+
+    monkeypatch.setattr(_wr, "_fetch_definitions", _fetch)
+    _wr.clear_cache()
+    yield
+    _wr.clear_cache()

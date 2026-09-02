@@ -96,6 +96,10 @@ from skill_runner import (
 
 from lib.daemon_runtime.checkpoint_posture import PostureOutcome, evaluate_with_posture
 from lib.daemon_runtime.gating import load_policy
+from lib.daemon_runtime.workflow_resolver import (
+    WorkflowUnresolvedError,
+    resolve_pre_impl_gates,
+)
 from lib.notify import Notifier, Priority
 
 log = logging.getLogger("apis.swarm_dispatch")
@@ -260,13 +264,41 @@ def parse_approve_token(text: str) -> tuple[str, int] | None:
 # Pre-impl gates that must be signed off before the PR review panel runs.
 # These are the gates Lanius checks for GATE_INHERITANCE.
 #
-# ateles#285: `ux` was MISSING from this tuple even though the Lanius skill,
+# NO LONGER A CONSTANT. The sequence is resolved per issue from the governing
+# `workflow_definition` entity via `resolve_pre_impl_gates` — see
+# `lib/daemon_runtime/workflow_resolver.py`.
+#
+# The hardcoded tuple here was ("pm", "ux", "arch"), which is right for
+# `ateles|feature` and WRONG for `ateles|bug` and `ateles|security` — both of
+# which declare `pm` as their only pre-impl gate. Waiving against the fixed
+# triple therefore touched `ux`/`arch` gates that those workflows do not define,
+# and blocking against it held bugs behind gates no workflow ever asked for.
+#
+# The history that produced the tuple is why it is now derived rather than
+# listed. ateles#285: `ux` was MISSING from it even though the Lanius skill,
 # the workflow phase table (Phase 2 = Accipiter `ux` + Waxwing `arch`), and
 # _lanius_pr_prompt ("If pm/ux/arch are all satisfied there …") all treat it as
 # a pre-impl gate. That omission is the mechanical cause of the 2026-07-23
 # PARTIAL waive on ateles#241: the sweep waived `arch`, left `ux` pending, and
 # PR gate inheritance kept blocking on a gate the operator believed cleared.
-PRE_IMPL_GATES = ("pm", "ux", "arch")
+# Four copies of this sequence existed and two had already drifted; the resolver
+# derives "pre-impl" from each definition's own phase numbers so a gate added in
+# Neotoma is honoured without a code change.
+
+
+async def _pre_impl_gates_for(trigger: SwarmTrigger) -> tuple[str, ...]:
+    """Pre-impl gate names for *trigger*'s issue, read from the record.
+
+    Raises `WorkflowUnresolvedError` when no workflow_definition governs the
+    issue. Callers decline the decision rather than substituting a default:
+    a fallback sequence would be exactly the second source of truth this
+    replaced, and would apply precisely when the record is not answering
+    (same posture as the Neotoma halt in
+    `lib/daemon_runtime/neotoma_reachability.py`).
+    """
+    return await asyncio.to_thread(
+        resolve_pre_impl_gates, trigger.repository, list(trigger.labels or [])
+    )
 
 # Operator GitHub login — only this login may waive gates via the comment
 # command.  Defaults to the repo owner; override with APIS_OPERATOR_LOGIN.
@@ -3213,7 +3245,8 @@ class SwarmDispatcher:
         #    (and ultimately stops at the operator's merge approval). When OFF,
         #    STOP and notify that the spec is ready awaiting `build` approval.
         gates_green = await self._gates_green(
-            lanius, trigger.repository, trigger.number
+            lanius, trigger.repository, trigger.number,
+            labels=list(trigger.labels or []),
         )
         if self.config.auto_build and gates_green:
             pr_url = await self._open_implementation_pr(trigger, state)
@@ -3256,7 +3289,11 @@ class SwarmDispatcher:
             )
 
     async def _gates_green(
-        self, lanius: SkillResult, repository: str, issue_number: int
+        self,
+        lanius: SkillResult,
+        repository: str,
+        issue_number: int,
+        labels: list[str] | None = None,
     ) -> bool:
         """Whether every pre-impl gate is cleared in the SYSTEM OF RECORD.
 
@@ -3278,6 +3315,12 @@ class SwarmDispatcher:
         fails — but silence no longer passes. Fails CLOSED when the entity
         cannot be read: declining to build costs a delay, building on unsigned
         gates costs a PR nobody authorised.
+
+        WHICH gates count as pre-impl now comes from the governing
+        `workflow_definition` rather than a hardcoded tuple, so a bug issue is
+        judged against `ateles|bug`'s single `pm` gate instead of a feature
+        workflow's `pm, ux, arch`. An unresolvable workflow fails CLOSED for the
+        same reason an unreadable entity does.
         """
         if not lanius.ok:
             return False
@@ -3285,6 +3328,18 @@ class SwarmDispatcher:
             return False
 
         ref = f"{repository}#{issue_number}"
+        try:
+            pre_impl_gates = await asyncio.to_thread(
+                resolve_pre_impl_gates, repository, list(labels or [])
+            )
+        except WorkflowUnresolvedError as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: no workflow_definition governs this "
+                f"issue ({exc.reason}) — treating gates as NOT green (fail "
+                "closed)"
+            )
+            return False
+
         try:
             store = IssueGateStore(
                 self.config.neotoma_base_url, self.config.neotoma_token
@@ -3306,7 +3361,7 @@ class SwarmDispatcher:
 
         unsigned = [
             gate
-            for gate in PRE_IMPL_GATES
+            for gate in pre_impl_gates
             if (state.gate_status.get(gate) or "pending").strip().lower()
             not in CLEARED_GATE_STATES
         ]
@@ -6172,12 +6227,21 @@ class SwarmDispatcher:
         turn (same lesson as ateles#263 — do not rely on an LLM to persist a
         mechanical mutation).  The dispatcher now:
 
-          1. reads the issue entity,
-          2. sweeps ALL of :data:`PRE_IMPL_GATES` (a total function — the
-             partial-apply mode is structurally impossible),
-          3. writes ``gate_status`` + ``owner_history``,
-          4. RE-READS and asserts every targeted gate is now cleared,
-          5. reports the outcome to the operator on GitHub either way.
+          1. resolves the pre-impl gate set from the governing
+             ``workflow_definition`` (previously a hardcoded tuple),
+          2. reads the issue entity,
+          3. sweeps ALL of the resolved gates (a total function over that set —
+             the partial-apply mode is structurally impossible),
+          4. writes ``gate_status`` + ``owner_history``,
+          5. RE-READS and asserts every targeted gate is now cleared,
+          6. reports the outcome to the operator on GitHub either way.
+
+        Step 1 is why the sweep is now correct per workflow: the fixed triple
+        waived ``ux``/``arch`` on bug and security issues, whose workflows
+        declare neither. When no workflow governs the issue the waive is
+        REFUSED and reported, rather than falling back to a default set —
+        waiving gates the record did not ask for is the same class of unbacked
+        state change the Neotoma halt (#714) exists to prevent.
 
         Returns the :class:`WaiveOutcome` so the caller can decide whether to
         re-trigger the PR pipeline.  Never raises.
@@ -6192,12 +6256,35 @@ class SwarmDispatcher:
                 or trigger.number
             )
 
+        # Resolve WHICH gates this issue's workflow declares pre-impl, before
+        # touching any state. A refusal here has written nothing, so the issue
+        # is left exactly as it was (the same positioning argument #714 makes
+        # for placing the halt before the first status write).
+        try:
+            pre_impl_gates = await _pre_impl_gates_for(trigger)
+        except WorkflowUnresolvedError as exc:
+            log.error(
+                f"[{DAEMON_NAME}] gate waive on {ref}: no workflow_definition "
+                f"governs this issue ({exc.reason}) — REFUSING to waive rather "
+                "than assuming a default gate set. Nothing was written."
+            )
+            self.notifier.send(
+                f"Gate waive on {ref} REFUSED: no `workflow_definition` "
+                f"governs it ({exc.reason}).\n"
+                "  Nothing was written — the issue is unchanged.\n"
+                "  Add or activate a workflow_definition for this project, "
+                "then re-issue the waive.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+            )
+            return WaiveOutcome(entity_found=False, targeted=[], failed=[])
+
         store = IssueGateStore(
             self.config.neotoma_base_url, self.config.neotoma_token
         )
         try:
             outcome = await store.waive(
-                trigger.repository, issue_number, PRE_IMPL_GATES
+                trigger.repository, issue_number, pre_impl_gates
             )
         except Exception as exc:  # noqa: BLE001 — never crash the pipeline
             log.error(
@@ -6205,8 +6292,8 @@ class SwarmDispatcher:
                 "reporting failure to the operator"
             )
             outcome = WaiveOutcome(
-                entity_found=True, targeted=list(PRE_IMPL_GATES),
-                failed=list(PRE_IMPL_GATES),
+                entity_found=True, targeted=list(pre_impl_gates),
+                failed=list(pre_impl_gates),
             )
 
         # ALWAYS surface the result on GitHub — success, no-op, and failure.
@@ -6231,7 +6318,7 @@ class SwarmDispatcher:
                     "retrying the waive"
                 )
                 outcome = await store.waive(
-                    trigger.repository, issue_number, PRE_IMPL_GATES
+                    trigger.repository, issue_number, pre_impl_gates
                 )
                 try:
                     await self._post_gate_waive_comment(trigger, outcome)

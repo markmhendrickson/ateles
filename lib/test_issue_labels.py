@@ -16,6 +16,9 @@ from issue_labels import (
     reconcile_labels,
 )
 
+# Pre-impl gates of the `ateles|feature` workflow (ent_1d20d557828ecd080b654367).
+FEATURE_PRE_IMPL = ("pm", "ux", "arch")
+
 # ── labels_for_gate_status: cleared gates -> cumulative trail ────────────────
 
 
@@ -62,7 +65,10 @@ def test_non_string_state_is_ignored_not_crashed():
     """A malformed state must not crash the projection, must not earn a
     `-signed` label, and must FAIL SAFE: an unparseable pre-impl gate counts as
     'not cleared' (blocked), never as silently clear."""
-    out = labels_for_gate_status({"pm": None, "arch": 3, "qa": "signed_off"})  # type: ignore[dict-item]
+    out = labels_for_gate_status(
+        {"pm": None, "arch": 3, "qa": "signed_off"},  # type: ignore[dict-item]
+        pre_impl_gates=FEATURE_PRE_IMPL,
+    )
     assert GateLabel.QA.value in out
     assert GateLabel.PM.value not in out
     assert GateLabel.ARCH.value not in out
@@ -71,18 +77,31 @@ def test_non_string_state_is_ignored_not_crashed():
 
 
 # ── blocked/gates: derived from PRE-IMPL gates only ─────────────────────────
+#
+# `pre_impl_gates` is now passed in explicitly. It used to be read from the
+# module-level `PRE_IMPL_GATE_NAMES`, which was `("pm", "arch")` while its own
+# comment claimed it mirrored `("pm", "ux", "arch")` — so `blocked/gates` read
+# CLEAR on a feature issue whose `ux` gate was still pending. Production now
+# resolves the set per issue from the governing `workflow_definition`; these
+# tests supply the `ateles|feature` set the same way a caller would.
 
 
 def test_pending_pre_impl_gate_sets_blocked_flag():
-    assert BLOCKED_GATES_LABEL in labels_for_gate_status({"pm": "pending"})
+    assert BLOCKED_GATES_LABEL in labels_for_gate_status(
+        {"pm": "pending"}, pre_impl_gates=FEATURE_PRE_IMPL
+    )
 
 
 def test_blocked_state_also_sets_blocked_flag():
-    assert BLOCKED_GATES_LABEL in labels_for_gate_status({"arch": "blocked"})
+    assert BLOCKED_GATES_LABEL in labels_for_gate_status(
+        {"arch": "blocked"}, pre_impl_gates=FEATURE_PRE_IMPL
+    )
 
 
 def test_all_pre_impl_gates_cleared_drops_blocked_flag():
-    out = labels_for_gate_status({"pm": "signed_off", "arch": "waived"})
+    out = labels_for_gate_status(
+        {"pm": "signed_off", "arch": "waived"}, pre_impl_gates=FEATURE_PRE_IMPL
+    )
     assert BLOCKED_GATES_LABEL not in out
 
 
@@ -90,13 +109,18 @@ def test_pending_NON_pre_impl_gate_does_not_block():
     """qa/legal pending must not flag the issue as gate-blocked — only the
     pre-impl gates (pm, arch) gate implementation."""
     out = labels_for_gate_status(
-        {"pm": "signed_off", "arch": "signed_off", "qa": "pending"}
+        {"pm": "signed_off", "arch": "signed_off", "ux": "signed_off",
+         "qa": "pending"},
+        pre_impl_gates=FEATURE_PRE_IMPL,
     )
     assert BLOCKED_GATES_LABEL not in out
 
 
 def test_not_required_pre_impl_gate_does_not_block():
-    out = labels_for_gate_status({"pm": "not_required", "arch": "signed_off"})
+    out = labels_for_gate_status(
+        {"pm": "not_required", "arch": "signed_off", "ux": "signed_off"},
+        pre_impl_gates=FEATURE_PRE_IMPL,
+    )
     assert BLOCKED_GATES_LABEL not in out
 
 
@@ -223,3 +247,47 @@ def test_realistic_mid_pipeline_issue_projects_expected_set():
         GateLabel.ARCH.value,
         PhaseLabel.IMPL.value,
     }, out
+
+
+def test_unsupplied_pre_impl_gates_makes_no_blocking_claim():
+    """With no gate set supplied, emit NO `blocked/gates` label.
+
+    The old module-level default was `("pm", "arch")` — a confident, wrong
+    answer that cleared `blocked/gates` on feature issues with `ux` pending.
+    Emitting nothing instead means an unsupplied sequence makes no claim about
+    blocking rather than a wrong one: under-labelling is visible and
+    recoverable, while clearing a live block is what shipped code past an
+    unsigned gate.
+    """
+    out = labels_for_gate_status({"pm": "pending", "ux": "pending"})
+    assert BLOCKED_GATES_LABEL not in out
+    # The cumulative `-signed` trail is unaffected — only the blocked flag
+    # depends on knowing which gates are pre-impl.
+    assert labels_for_gate_status({"pm": "signed_off"}) == {GateLabel.PM.value}
+
+
+def test_ux_pending_blocks_a_feature_issue():
+    """The exact divergence that was live: pm signed, ux pending.
+
+    Under `PRE_IMPL_GATE_NAMES = ("pm", "arch")` this returned no
+    `blocked/gates` label — the issue read as clear while `ux` was still
+    holding it. With the feature workflow's real gate set it blocks.
+    """
+    out = labels_for_gate_status(
+        {"pm": "signed_off", "ux": "pending", "arch": "signed_off"},
+        pre_impl_gates=FEATURE_PRE_IMPL,
+    )
+    assert BLOCKED_GATES_LABEL in out
+
+
+def test_bug_workflow_gate_set_does_not_block_on_ux():
+    """`ateles|bug` declares only `pm`; a pending `ux` is not its gate.
+
+    Paired with the test above: the same gate_status yields opposite verdicts
+    purely because the workflow supplies a different pre-impl set — which is
+    the property a single hardcoded tuple could not express.
+    """
+    out = labels_for_gate_status(
+        {"pm": "signed_off", "ux": "pending"}, pre_impl_gates=("pm",)
+    )
+    assert BLOCKED_GATES_LABEL not in out
