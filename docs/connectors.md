@@ -478,24 +478,24 @@ Installer failures should be actionable:
   manual `--once` returns non-zero when registered connectors fail or the
   Stage 1 heartbeat cannot be verified by read-back.
 
-## Schema registration — deferred deliberately
+## Schema registration — done, verified by read-back
 
-The `connector_status` and `deployment_observation` entity types are **not yet
-registered**. On 2026-09-01 the hosted instance returned `502`, then failed at
-the TLS layer entirely, and the MCP surface reported "Server unavailable"
-throughout.
+Both types are registered on the hosted instance (2026-09-02, once it recovered
+from the outage that blocked this initially) and **verified by read-back** —
+`describe_entity_type` returns all declared fields with their descriptions, not
+merely a `success: true`.
 
-Registering a schema is a write, and this design's own rule is that a write is
-verified by read-back rather than by a success code. Against an instance that
-cannot be read back, registration would produce exactly the unverifiable claim
-the rule exists to forbid — and building a sync against a 502-ing instance is
-how the previous runaway happened.
+- **`connector_status`** — 11 fields, `connector_name` required and canonical.
+  `reducer_config` sets `last_write` with an `observed_at` tie-breaker on every
+  mutable field, so concurrent writers cannot clobber one another.
+- **`deployment_observation`** — 9 fields, `instance_ref` required. **Immutable**
+  (one record per release, never corrected), so it needs no merge policy beyond
+  the default.
 
-So the types are specified here and registered when the instance is healthy.
-Both are inferred on first store if absent, but explicit registration is
-preferred: it is where `reducer_config` sets per-field merge strategy, and
-`connector_status` wants `last_write` on the mutable fields with `observed_at`
-as tie-breaker.
+Two registration notes for whoever adds the next type:
 
-`deployment_observation` records are **immutable** — one per release, never
-corrected — so they need no reducer policy beyond the default.
+- The REST route is **`POST /register_schema`**, not `/schemas/register` — the
+  latter 404s. This is the same MCP-tool-name-is-not-a-route trap that
+  `scripts/linters/check_neotoma_rest_paths.py` exists to catch.
+- The server's pluralization check **false-positives on `connector_status`**,
+  suggesting `connector_statu`. "Status" is not a plural. Pass `force: true`.
