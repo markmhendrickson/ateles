@@ -102,8 +102,9 @@ def build_connectors() -> list:
     allowed = enabled_connector_names()
 
     # ── stage 2 ──
-    # from lib.connectors.fly import FlyConnector
-    # connectors.append(FlyConnector())
+    from lib.connectors.fly import FlyConnector
+
+    connectors.append(FlyConnector())
 
     if allowed is not None:
         connectors = [c for c in connectors if getattr(c, "name", "") in allowed]

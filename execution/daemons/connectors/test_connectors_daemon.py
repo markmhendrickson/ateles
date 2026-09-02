@@ -125,8 +125,14 @@ def test_alert_is_about_connector_health_not_observed_values(monkeypatch):
 # ── registration ────────────────────────────────────────────────────────────
 
 
-def test_no_connectors_registered_yet_is_a_clean_no_op():
-    """Stage 1 ships the framework live but with no sources; that must not error."""
+def test_fly_connector_registered_by_default():
+    """Stage 2 registers Fly; ATELES_CONNECTORS can still filter it out."""
+    names = [getattr(c, "name", "") for c in daemon.build_connectors()]
+    assert "fly" in names
+
+
+def test_build_connectors_respects_env_filter(monkeypatch):
+    monkeypatch.setenv("ATELES_CONNECTORS", "github")
     assert daemon.build_connectors() == []
 
 
@@ -143,6 +149,27 @@ def test_run_once_without_connectors_writes_heartbeat(monkeypatch):
     assert heartbeat.connector_name == "connectors"
     assert heartbeat.status == "ok"
     assert heartbeat.records_written == 0
+
+
+def test_run_once_with_fly_enabled_runs_connector(monkeypatch):
+    """When Fly is registered, run_once drives it instead of the framework heartbeat."""
+    from lib.connectors.fly import FlyConnector
+
+    store = FakeStore()
+    monkeypatch.setattr(daemon, "build_connectors", lambda: [FlyConnector()])
+    monkeypatch.setattr(daemon, "ConnectorStore", lambda: store)
+    monkeypatch.setattr(
+        FlyConnector,
+        "observe",
+        lambda self: __import__(
+            "lib.connectors.base", fromlist=["ConnectorResult"]
+        ).ConnectorResult.success(records_written=0),
+    )
+
+    results = daemon.run_once()
+
+    assert "fly" in results
+    assert results["fly"].ok
 
 
 def test_run_once_without_connectors_fails_when_heartbeat_unconfigured(monkeypatch):
