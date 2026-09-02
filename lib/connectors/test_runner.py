@@ -64,6 +64,40 @@ def test_success_records_ok_status_and_both_timestamps():
     assert written.stale_after_seconds == 2700  # 3 x 900
 
 
+def test_skipped_result_does_not_advance_success_or_failures():
+    """Unbound skip is idle, not a verify success and not a failure streak."""
+    prior = ConnectorStatus(
+        connector_name="stub",
+        status="ok",
+        last_success_at="2026-08-29T09:00:00+00:00",
+        consecutive_failures=2,
+        records_written=7,
+    )
+    store = FakeStore({"stub": prior})
+    result = run_connector(
+        StubConnector(
+            result=ConnectorResult.skipped("set FLY_APP or DEPLOYMENT_CONFIGURATION_ID")
+        ),
+        store,
+    )
+    assert result.ok and result.detail["skipped"] is True
+    written = store.writes[-1]
+    assert written.consecutive_failures == 2
+    assert written.last_success_at == "2026-08-29T09:00:00+00:00"
+    assert written.status == "ok"
+    assert written.last_attempt_at is not None
+    assert written.last_attempt_at != written.last_success_at
+
+
+def test_skipped_never_run_stays_never_run():
+    store = FakeStore()
+    run_connector(StubConnector(result=ConnectorResult.skipped("unbound")), store)
+    written = store.writes[-1]
+    assert written.status == "never_run"
+    assert written.last_success_at is None
+    assert written.consecutive_failures == 0
+
+
 # ── failure handling ────────────────────────────────────────────────────────
 
 

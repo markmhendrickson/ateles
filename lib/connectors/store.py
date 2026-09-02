@@ -186,6 +186,69 @@ class ConnectorStore:
         except json.JSONDecodeError as exc:
             raise NeotomaUnavailable(f"non-JSON response from {path}") from exc
 
+    # ── schema / health ────────────────────────────────────────────────────
+
+    def health(self) -> dict[str, Any]:
+        """``GET /health`` — preflight before any schema write."""
+        data = self._request("/health")
+        if not isinstance(data, dict):
+            raise NeotomaUnavailable("non-object health response")
+        return data
+
+    def read_schema(self, entity_type: str) -> dict[str, Any] | None:
+        """``GET /schemas/{entity_type}`` — read-back source of truth.
+
+        Returns the schema object (or nested ``schema``) when present, else
+        None when the type is absent (404 / empty).
+        """
+        path = f"/schemas/{entity_type}"
+        try:
+            data = self._request(path)
+        except NeotomaUnavailable as exc:
+            msg = str(exc)
+            if "HTTP 404" in msg:
+                return None
+            raise
+        if not data:
+            return None
+        schema = data.get("schema") if isinstance(data.get("schema"), dict) else data
+        if not isinstance(schema, dict):
+            return None
+        # Absent types sometimes return ``{success:false}`` without fields.
+        if schema.get("success") is False and "schema_definition" not in schema:
+            return None
+        if "entity_type" not in schema and "schema_definition" not in schema:
+            if "fields" not in schema:
+                return None
+        return schema
+
+    def register_schema(
+        self,
+        entity_type: str,
+        schema_definition: dict[str, Any],
+        reducer_config: dict[str, Any],
+        *,
+        schema_version: str = "1.0",
+        activate: bool = True,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """``POST /register_schema``. Caller must still read-back to verify.
+
+        ``force=True`` is required for intentional singular nouns the server's
+        pluralization lint mis-classifies (e.g. ``connector_status``).
+        """
+        body: dict[str, Any] = {
+            "entity_type": entity_type,
+            "schema_definition": schema_definition,
+            "reducer_config": reducer_config,
+            "schema_version": schema_version,
+            "activate": activate,
+            "user_specific": False,
+        }
+        if force:
+            body["force"] = True
+        return self._request("/register_schema", body)
+
     # ── entity writes ──────────────────────────────────────────────────────
 
     def store_entities(

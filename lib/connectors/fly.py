@@ -16,6 +16,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ from .fly_config_drift import (
     compare_all_machines,
     parse_vm_want_from_path,
 )
+from .schema_registration import schemas_match_expected
 from .store import ConnectorStore, NeotomaUnavailable, idempotency_key
 
 log = logging.getLogger("connectors.fly")
@@ -39,6 +41,16 @@ _SKIP_BINDING_MSG = (
     "set FLY_APP env or create a deployment_configuration entity "
     "(DEPLOYMENT_CONFIGURATION_ID)"
 )
+_SCHEMA_GATE_MSG = (
+    "connector schemas not verified — run "
+    "python3 execution/daemons/connectors/register_schemas.py"
+)
+
+
+class StoreOutcome(str, Enum):
+    STORED = "stored"
+    DUPLICATE = "duplicate"
+    REFUSED = "refused"
 
 
 @dataclass(frozen=True)
@@ -200,12 +212,16 @@ def release_observation_fields(
     image_changed_from_previous: bool,
 ) -> dict[str, Any]:
     user = release.get("User") or release.get("user") or {}
-    triggered_by = (
+    raw_actor = (
         user.get("email")
         or user.get("name")
         or user.get("Email")
         or user.get("Name")
         or ""
+    )
+    # Never persist a raw email — hash to an opaque actor ref (arch privacy).
+    triggered_by = (
+        _opaque_ref("actor", str(raw_actor)) if str(raw_actor).strip() else ""
     )
     image_ref = str(release.get("ImageRef") or release.get("imageRef") or "")
     version = str(release.get("Version") or release.get("version") or "")
@@ -250,10 +266,18 @@ class FlyConnector:
     def _observe_impl(self) -> ConnectorResult:
         binding = resolve_fly_binding(self._store)
         if isinstance(binding, SkipBinding):
-            return ConnectorResult.failure(binding.reason)
+            return ConnectorResult.skipped(binding.reason)
 
         if not self._store.configured:
             return ConnectorResult.failure("no NEOTOMA_BEARER_TOKEN configured")
+
+        schemas_ok, schema_problems = schemas_match_expected(self._store)
+        if not schemas_ok:
+            detail = "; ".join(schema_problems[:3]) if schema_problems else ""
+            return ConnectorResult.failure(
+                f"{_SCHEMA_GATE_MSG}" + (f" ({detail})" if detail else ""),
+                schema_problems=schema_problems,
+            )
 
         observed_at = _now_iso()
         partial_failures: list[str] = []
@@ -295,6 +319,8 @@ class FlyConnector:
         ordered = _releases_chronological(releases_raw)
         prev_image: str | None = None
         new_releases = 0
+        refused_releases = 0
+        duplicate_releases = 0
         for release in ordered:
             image_ref = str(release.get("ImageRef") or release.get("imageRef") or "")
             fields = release_observation_fields(
@@ -313,9 +339,18 @@ class FlyConnector:
                 str(fields["release_id"]),
                 fields,
             )
-            if self._store_release(fields, key=key):
+            outcome = self._store_release(fields, key=key)
+            if outcome is StoreOutcome.STORED:
                 records_written += 1
                 new_releases += 1
+            elif outcome is StoreOutcome.DUPLICATE:
+                duplicate_releases += 1
+            else:
+                refused_releases += 1
+                rid = fields.get("release_id")
+                partial_failures.append(
+                    f"releases: store refused for release_id={rid}"
+                )
 
         self._write_fly_status_fields(
             binding,
@@ -328,8 +363,17 @@ class FlyConnector:
         detail["partial_failures"] = partial_failures
         detail["new_releases"] = new_releases
         detail["release_count"] = len(releases_raw)
-        if new_releases == 0 and releases_raw:
+        detail["refused_releases"] = refused_releases
+        # idempotent_note only for verified duplicates — never for refusals.
+        if new_releases == 0 and duplicate_releases > 0 and refused_releases == 0:
             detail["idempotent_note"] = "0 new releases"
+
+        if refused_releases > 0 and new_releases == 0:
+            return ConnectorResult.failure(
+                "; ".join(partial_failures[:3])
+                or "release store/query refused",
+                **detail,
+            )
 
         ok = bool(releases_raw) or bool(machines) or drift is not None
         if not ok and partial_failures:
@@ -339,27 +383,33 @@ class FlyConnector:
             )
         if partial_failures and (releases_raw or machines):
             detail["partial_failures"] = partial_failures
+            if refused_releases > 0:
+                return ConnectorResult.failure(
+                    "; ".join(partial_failures[:3]),
+                    **detail,
+                )
         return ConnectorResult.success(records_written=records_written, **detail)
 
-    def _store_release(self, fields: dict[str, Any], *, key: str) -> bool:
+    def _store_release(self, fields: dict[str, Any], *, key: str) -> StoreOutcome:
         """Store one release observation and verify read-back."""
         already = self._release_already_stored(fields)
         if already is True:
-            return False
+            return StoreOutcome.DUPLICATE
         if already is None:
-            # Query failed — do not invent a duplicate under a new key.
+            # Query failed — do not invent a duplicate under a new key, and do
+            # not present this as an idempotent no-op.
             log.warning(
                 "skipping release store; cannot verify prior existence for %s",
                 fields.get("release_id"),
             )
-            return False
+            return StoreOutcome.REFUSED
         try:
             ids = self._store.store_entities([fields], key=key)
         except NeotomaUnavailable as exc:
             log.warning("release store failed: %s", exc)
-            return False
+            return StoreOutcome.REFUSED
         if not ids:
-            return False
+            return StoreOutcome.REFUSED
         release_id = str(fields.get("release_id") or "")
         if release_id and self._store.verify_stored(
             DEPLOYMENT_OBSERVATION_TYPE,
@@ -367,12 +417,12 @@ class FlyConnector:
             release_id,
             search=release_id,
         ):
-            return True
+            return StoreOutcome.STORED
         log.warning(
             "release read-back verification failed for release_id=%s",
             fields.get("release_id"),
         )
-        return False
+        return StoreOutcome.REFUSED
 
     def _release_already_stored(self, fields: dict[str, Any]) -> bool | None:
         """True if present, False if absent, None if Neotoma could not be queried."""

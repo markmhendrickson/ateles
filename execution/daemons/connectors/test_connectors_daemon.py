@@ -91,6 +91,24 @@ def test_successful_connectors_never_alert(monkeypatch):
     assert sent == []
 
 
+def test_skipped_connectors_never_alert_even_after_many_passes(monkeypatch):
+    """Unbound skip is ok=True — soft idle must not page after N passes."""
+    sent = _reports(monkeypatch)
+    store = FakeStore(
+        {
+            "fly": ConnectorStatus(
+                connector_name="fly",
+                consecutive_failures=0,
+                status="never_run",
+            )
+        }
+    )
+    skipped = ConnectorResult.skipped("set FLY_APP or DEPLOYMENT_CONFIGURATION_ID")
+    for _ in range(5):
+        daemon.alert_on_failures(store, {"fly": skipped})
+    assert sent == []
+
+
 def test_alert_names_the_last_success_as_never_when_there_was_none(monkeypatch):
     """'Never worked' and 'worked last Tuesday' are different operator situations."""
     sent = _reports(monkeypatch)

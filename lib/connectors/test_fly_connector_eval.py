@@ -2,9 +2,10 @@
 
 Eval id: ateles-fly-connector-observe
 
-Write verification uses inferred entity types until neotoma#671 registers
-``connector_status`` and ``deployment_observation`` schemas (inferred-schema
-fallback documented here per QA gate).
+Schemas for ``connector_status`` / ``deployment_observation`` are registered
+via ``register_schemas.py`` (read-back gated). Unit tests stub
+``schemas_match_expected`` so observe paths exercise store/runner behaviour
+without requiring a live registry.
 """
 
 from __future__ import annotations
@@ -39,6 +40,14 @@ def stub_neotoma():
         yield server
 
 
+@pytest.fixture(autouse=True)
+def _schemas_ready(monkeypatch):
+    monkeypatch.setattr(
+        "lib.connectors.fly.schemas_match_expected",
+        lambda store: (True, []),
+    )
+
+
 def test_eval_id_is_stable():
     assert EVAL_ID == "ateles-fly-connector-observe"
 
@@ -48,9 +57,82 @@ def test_no_binding_skips_with_both_remediation_paths(monkeypatch, stub_neotoma)
     monkeypatch.delenv("DEPLOYMENT_CONFIGURATION_ID", raising=False)
     store = FlyStubStore(stub_neotoma)
     result = FlyConnector(store=store).observe()
-    assert not result.ok
-    assert "FLY_APP" in result.error
+    assert result.ok
+    assert result.detail.get("skipped") is True
+    assert "FLY_APP" in result.detail["skip_reason"]
+    assert "DEPLOYMENT_CONFIGURATION_ID" in result.detail["skip_reason"]
     assert stub_neotoma.entities_of_type("deployment_observation") == []
+
+
+def test_existence_query_refusal_is_not_idempotent_success(
+    monkeypatch, stub_neotoma, tmp_path
+):
+    monkeypatch.setenv("FLY_APP", "example-app")
+    config = tmp_path / "fly.toml"
+    config.write_text("[[vm]]\nmemory = '2gb'\ncpus = 2\n", encoding="utf-8")
+    monkeypatch.setenv("FLY_CONFIG_PATH", str(config))
+    releases = json.loads(FIXTURE.read_text())
+
+    def fake_flyctl(args, *, app, timeout=60):
+        if args == ["releases"]:
+            return releases
+        return [
+            {
+                "config": {
+                    "guest": {"memory_mb": 8192, "cpus": 2, "cpu_kind": "performance"},
+                    "checks": {},
+                }
+            }
+        ]
+
+    monkeypatch.setattr("lib.connectors.fly.run_flyctl_json", fake_flyctl)
+    store = FlyStubStore(stub_neotoma)
+    connector = FlyConnector(store=store)
+    monkeypatch.setattr(connector, "_release_already_stored", lambda fields: None)
+    result = connector.observe()
+    assert not result.ok
+    assert "idempotent_note" not in result.detail
+    assert result.detail.get("refused_releases", 0) > 0
+    assert stub_neotoma.entities_of_type("deployment_observation") == []
+
+
+def test_triggered_by_is_opaque_not_email(monkeypatch, stub_neotoma, tmp_path):
+    monkeypatch.setenv("FLY_APP", "example-app")
+    config = tmp_path / "fly.toml"
+    config.write_text("[[vm]]\nmemory = '2gb'\ncpus = 2\n", encoding="utf-8")
+    monkeypatch.setenv("FLY_CONFIG_PATH", str(config))
+    releases = [
+        {
+            "ID": "rel_privacy",
+            "Version": 99,
+            "ImageRef": "deployment-privacy",
+            "Status": "complete",
+            "CreatedAt": "2026-09-01T00:00:00Z",
+            "User": {"email": "deployer@example.com", "name": "Deployer"},
+        }
+    ]
+
+    def fake_flyctl(args, *, app, timeout=60):
+        if args == ["releases"]:
+            return releases
+        return [
+            {
+                "config": {
+                    "guest": {"memory_mb": 2048, "cpus": 2, "cpu_kind": "shared"},
+                    "checks": {},
+                }
+            }
+        ]
+
+    monkeypatch.setattr("lib.connectors.fly.run_flyctl_json", fake_flyctl)
+    store = FlyStubStore(stub_neotoma)
+    FlyConnector(store=store).observe()
+    obs = stub_neotoma.entities_of_type("deployment_observation")
+    assert len(obs) == 1
+    triggered = obs[0]["fields"]["triggered_by"]
+    assert triggered.startswith("actor:")
+    assert "@" not in triggered
+    assert "example.com" not in triggered
 
 
 def test_binding_from_fly_app_env(monkeypatch):
