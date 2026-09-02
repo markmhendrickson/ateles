@@ -50,6 +50,7 @@
  * Every helper below therefore reaches Neotoma only via `/entities/query`.
  */
 import type { Plugin } from "vite";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -1741,10 +1742,37 @@ function scanFreshness(scanCommit: string): {
   }
 }
 
-export function neotomaProxy(): Plugin {
-  return {
-    name: "neotoma-task-proxy",
-    configureServer(server) {
+/**
+ * A Connect-style middleware host. Both consumers satisfy this: Vite's
+ * `server.middlewares` in dev, and the `connect` app the production server
+ * builds in `server/serve.ts`.
+ *
+ * WHY THIS INTERFACE EXISTS RATHER THAN TWO ROUTE TABLES: the dashboard is
+ * deployed as well as run locally, and a second copy of these routes would be
+ * a copy that drifts. The dev server and the deployed server must answer
+ * IDENTICALLY or local iteration stops predicting production — which is the
+ * whole reason the local loop is kept. One definition, two hosts.
+ */
+export interface MiddlewareHost {
+  use(
+    path: string,
+    handler: (
+      req: IncomingMessage,
+      res: ServerResponse,
+      next: (err?: unknown) => void,
+    ) => void,
+  ): unknown;
+}
+
+/**
+ * Register every `/api/*` route on `server`.
+ *
+ * Called by the Vite plugin below (dev) and by `server/serve.ts` (production).
+ * Everything here is READ-ONLY against Neotoma — see the header comment. That
+ * property is what makes deploying this safe at all: the bearer token stays in
+ * the Node process, and no route it backs can write.
+ */
+export function registerApiRoutes(server: MiddlewareHost) {
       /**
        * GET /api/tasks — one page of tasks, optionally narrowed server-side.
        *
@@ -1760,7 +1788,7 @@ export function neotomaProxy(): Plugin {
        * narrowing is strictly opt-in and the two new keys (`total_saturated`,
        * `filters_applied`) are additive.
        */
-      server.middlewares.use("/api/tasks", async (req, res) => {
+      server.use("/api/tasks", async (req, res) => {
         const params = new URL(req.url ?? "/", "http://localhost").searchParams;
         const limit = Math.min(Number(params.get("limit")) || 200, 1000);
 
@@ -1837,13 +1865,13 @@ export function neotomaProxy(): Plugin {
        * `{ total: null }` on any failure — `countAllTasks` never invents a
        * zero, and the client prints "not measured" rather than a number.
        */
-      server.middlewares.use("/api/task-total", async (_req, res) => {
+      server.use("/api/task-total", async (_req, res) => {
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "no-store");
         res.end(JSON.stringify({ total: await countAllTasks() }));
       });
 
-      server.middlewares.use("/api/sessions", async (req, res) => {
+      server.use("/api/sessions", async (req, res) => {
         const limit = Math.min(
           Number(new URL(req.url ?? "/", "http://localhost").searchParams.get("limit")) || 400,
           1000,
@@ -1871,7 +1899,7 @@ export function neotomaProxy(): Plugin {
        * fallback's evidence. When `conversation` comes back non-null the client
        * shows a Neotoma-sourced session and drops the filesystem caveat.
        */
-      server.middlewares.use("/api/conversation", async (_req, res) => {
+      server.use("/api/conversation", async (_req, res) => {
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "no-store");
         try {
@@ -1902,7 +1930,7 @@ export function neotomaProxy(): Plugin {
        * the upstream path — it is interpolated into a URL, so anything else is
        * rejected here rather than forwarded.
        */
-      server.middlewares.use("/api/entity", async (req, res) => {
+      server.use("/api/entity", async (req, res) => {
         const id = new URL(req.url ?? "/", "http://localhost").searchParams.get("id") ?? "";
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "no-store");
@@ -1934,7 +1962,7 @@ export function neotomaProxy(): Plugin {
        * Verified against the live API: `/entities/<id>/observations` returns
        * `{observations, total, limit, offset}`. Read-only, like every route here.
        */
-      server.middlewares.use("/api/observations", async (req, res) => {
+      server.use("/api/observations", async (req, res) => {
         const id = new URL(req.url ?? "/", "http://localhost").searchParams.get("id") ?? "";
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "no-store");
@@ -1954,7 +1982,7 @@ export function neotomaProxy(): Plugin {
         }
       });
 
-      server.middlewares.use("/api/workflows", async (req, res) => {
+      server.use("/api/workflows", async (req, res) => {
         const limit = Math.min(
           Number(new URL(req.url ?? "/", "http://localhost").searchParams.get("limit")) || 100,
           1000,
@@ -1983,7 +2011,7 @@ export function neotomaProxy(): Plugin {
        * `FACET_STATUSES`, so this cannot be pointed at an arbitrary filter.
        * Count-only queries, no snapshots.
        */
-      server.middlewares.use("/api/facets", async (_req, res) => {
+      server.use("/api/facets", async (_req, res) => {
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "no-store");
         try {
@@ -2001,7 +2029,7 @@ export function neotomaProxy(): Plugin {
        * denominator the rail was missing, so the badge can say when the queue
        * it is showing is not the whole queue. Takes no parameters.
        */
-      server.middlewares.use("/api/questions", async (_req, res) => {
+      server.use("/api/questions", async (_req, res) => {
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "no-store");
         try {
@@ -2012,7 +2040,7 @@ export function neotomaProxy(): Plugin {
         }
       });
 
-      server.middlewares.use("/api/lifecycle", async (_req, res) => {
+      server.use("/api/lifecycle", async (_req, res) => {
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "no-store");
         try {
@@ -2031,7 +2059,7 @@ export function neotomaProxy(): Plugin {
        * allowlist; it is length-capped and required non-empty so a stray call
        * cannot turn into an unfiltered scan of 20,922 tasks.
        */
-      server.middlewares.use("/api/assigned", async (req, res) => {
+      server.use("/api/assigned", async (req, res) => {
         const params = new URL(req.url ?? "/", "http://localhost").searchParams;
         const to = (params.get("to") ?? "").trim();
         const limit = Math.min(Number(params.get("limit")) || 100, 200);
@@ -2060,7 +2088,7 @@ export function neotomaProxy(): Plugin {
        * client-supplied, so this route cannot be pointed at an arbitrary
        * upstream path or turned into an unbounded scan.
        */
-      server.middlewares.use("/api/schemas", async (_req, res) => {
+      server.use("/api/schemas", async (_req, res) => {
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "no-store");
         try {
@@ -2079,7 +2107,7 @@ export function neotomaProxy(): Plugin {
        * server re-reading that file, so the answer is about the exact module
        * the browser loaded. Touches git only through read-only plumbing.
        */
-      server.middlewares.use("/api/scan-freshness", (req, res) => {
+      server.use("/api/scan-freshness", (req, res) => {
         const commit =
           new URL(req.url ?? "/", "http://localhost").searchParams.get("commit") ?? "";
         res.setHeader("Content-Type", "application/json");
@@ -2087,7 +2115,7 @@ export function neotomaProxy(): Plugin {
         res.end(JSON.stringify(scanFreshness(commit)));
       });
 
-      server.middlewares.use("/api/agents", async (req, res) => {
+      server.use("/api/agents", async (req, res) => {
         const limit = Math.min(
           Number(new URL(req.url ?? "/", "http://localhost").searchParams.get("limit")) || 200,
           1000,
@@ -2128,7 +2156,7 @@ export function neotomaProxy(): Plugin {
        * The reader-pool starvation upstream is also why the timeout here is
        * generous: a slow answer is the normal case, not a fault.
        */
-      server.middlewares.use("/api/search", async (req, res) => {
+      server.use("/api/search", async (req, res) => {
         const params = new URL(req.url ?? "/", "http://localhost").searchParams;
         const entityType = (params.get("type") ?? "").trim();
         const q = (params.get("q") ?? "").trim();
@@ -2230,7 +2258,7 @@ export function neotomaProxy(): Plugin {
        *
        * Read-only, like every route here.
        */
-      server.middlewares.use("/api/task-search", async (req, res) => {
+      server.use("/api/task-search", async (req, res) => {
         const params = new URL(req.url ?? "/", "http://localhost").searchParams;
         const q = (params.get("q") ?? "").trim();
         // Capped at 500: the client filters this page down, so a bigger page
@@ -2274,6 +2302,20 @@ export function neotomaProxy(): Plugin {
           res.end(JSON.stringify({ error: message, timedOut }));
         }
       });
+}
+
+/**
+ * The Vite dev-server plugin — unchanged in behaviour.
+ *
+ * `npm run dev` keeps working exactly as before, HMR included: this registers
+ * the same routes, on Vite's own middleware stack, from the same definition
+ * the deployed server uses.
+ */
+export function neotomaProxy(): Plugin {
+  return {
+    name: "neotoma-task-proxy",
+    configureServer(server) {
+      registerApiRoutes(server.middlewares);
     },
   };
 }

@@ -90,3 +90,60 @@ Things worth knowing, each verified against prod rather than assumed:
 - Many tasks have no `title`, only a `description` — and their `canonical_name`
   is a punctuation-stripped copy of that entire description, sometimes thousands
   of characters. The UI derives a headline from the first sentence instead.
+
+## Running it: local dev, and the deployed instance
+
+Two modes, and they do not conflict.
+
+### Local dev (unchanged)
+
+```
+npm run dev --prefix apps/task-dashboard
+```
+
+Vite on port 5273 with HMR, no sign-in, reading Neotoma through the same
+`/api/*` routes the deployed server exposes. This is still the loop for
+iterating on the app.
+
+### The deployed instance
+
+The dashboard also runs on Fly, so its links resolve for the operator on any
+device and survive his laptop being closed. Task links used to be
+`http://localhost:5273/#/entities/...`, which died with the local process and
+never resolved for anyone else in the first place.
+
+`server/serve.ts` serves the built SPA plus those same routes, from the *same*
+definition (`registerApiRoutes` in `server/neotomaProxy.ts`) — one route table,
+two hosts, so dev and production cannot drift.
+
+**Deploys are automatic**: a merge to `main` touching `apps/task-dashboard/**`
+triggers `.github/workflows/deploy-task-dashboard.yml`, which waits for CI to be
+green on that exact commit, deploys with `-c fly.dashboard.toml`, and then
+verifies the deploy actually happened. The app name, hostname and region come
+from repository secrets; the canonical binding lives in the
+`deployment_configuration` entity in Neotoma, never in this public repo.
+
+### Sign-in
+
+Deployed, the dashboard is behind Google sign-in against an email allowlist —
+the same mechanism Neotoma itself uses. Without it, a Fly URL would publish the
+entire task graph to anyone who learned the address.
+
+It **fails closed**: if `DASHBOARD_GOOGLE_CLIENT_ID`,
+`DASHBOARD_GOOGLE_CLIENT_SECRET`, `DASHBOARD_APPROVED_EMAILS` or
+`DASHBOARD_SESSION_KEY` is missing, the server refuses to serve anything rather
+than serving it unprotected. `/healthz` is the only unauthenticated route (Fly's
+health checker has no Google account) and exposes no graph data.
+
+### What the post-deploy check proves
+
+`flyctl deploy` exiting 0 is not evidence that anything shipped — Neotoma
+shipped a month-old image twice while reporting success. So the workflow checks
+the *running* instance:
+
+- `/healthz` reports a `git_sha`, and it must equal the commit just deployed —
+  this is what catches a silently stale build.
+- `auth_configured` must be `true`, so a misconfigured deploy fails loudly.
+- An anonymous `GET /` must not return the app, and an anonymous
+  `GET /api/tasks` must not return data. Shipping the gate and the gate working
+  are different claims, and only the second one matters.
