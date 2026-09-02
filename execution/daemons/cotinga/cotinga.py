@@ -59,6 +59,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from lib.daemon_runtime import AgentLoader  # noqa: E402
+from lib.daemon_runtime.tool_allowlist import build_claude_argv  # noqa: E402
 from lib.daemon_runtime.logging_setup import configure_daemon_logging
 
 try:
@@ -766,7 +768,7 @@ Work through all steps, then stop.
         safe_title = re.sub(r"[^A-Za-z0-9_-]", "_", event_title[:20])
         log_path = LOG_DIR / f"cotinga_deepprep_{event_date}_{safe_title}.log"
         subprocess.Popen(
-            [claude, "--print", "--dangerously-skip-permissions", prompt],
+            _agent_argv(claude, prompt),
             env=os.environ,
             stdout=open(log_path, "w"),
             stderr=subprocess.STDOUT,
@@ -921,6 +923,40 @@ def _main() -> None:
     log.info("Cotinga Phase 1 complete. Deep-prep agents running in background.")
 
 
+_TOOL_ALLOWLIST_ROLE = "cotinga"
+
+
+# ── Tool allowlist (ateles: shared enforcement) ───────────────────────────────
+# This daemon builds its own `claude --print` argv and, before this, never
+# consulted the agent's `tool_allowlist` at all — one of eight such bypasses
+# around the single enforcement site in skill_runner.
+#
+# It also passes --dangerously-skip-permissions, which DEFEATS an allowlist:
+# the CLI's permission flow returns "allow" at the bypass branch before it ever
+# reads the allow rules. So enforcement here cannot bind while bypass is on,
+# and the shared planner reports the dispatch as unconfined rather than
+# appending a flag that would be silently stepped over. The grant is left in
+# place deliberately — it is load-bearing for a headless launchd dispatch with
+# no TTY to answer permission prompts — but it is no longer invisible.
+def _agent_argv(claude_bin: str, prompt: str) -> list[str]:
+    """Build this daemon's dispatch argv, applying the agent's tool_allowlist."""
+    try:
+        tools = AgentLoader(_TOOL_ALLOWLIST_ROLE).load().tools
+    except Exception as exc:  # noqa: BLE001 — never block a dispatch on this
+        log.warning(
+            f"[{_TOOL_ALLOWLIST_ROLE}] could not load tool_allowlist: {exc}"
+        )
+        tools = ["*"]
+    return build_claude_argv(
+        [claude_bin, "--print"],
+        tools,
+        log=log,
+        role=_TOOL_ALLOWLIST_ROLE,
+        skip_permissions=True,
+        prompt=prompt,
+    )
+
+
 if __name__ == "__main__":
     _notify("cotinga started", priority="info")
     try:
@@ -934,3 +970,4 @@ if __name__ == "__main__":
         except Exception:
             pass
         sys.exit(1)
+

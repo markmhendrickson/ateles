@@ -57,6 +57,13 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
         sys.path.insert(0, _p)
 
 from lib.daemon_runtime import AgentDefinition, AgentLoader  # noqa: E402
+from lib.daemon_runtime.tool_allowlist import (  # noqa: E402
+    EnforcementMode,
+    apply_to_claude_argv,
+    enforcement_mode,
+    log_tool_plan,
+    plan_enforcement,
+)
 from dispatch_usage import DispatchUsage, parse_dispatch_usage  # noqa: E402
 from harness_router import (  # noqa: E402
     configured_providers,
@@ -1207,30 +1214,50 @@ async def _run_skill_once(
             )
             _mcp_tmp_path = None
 
-    tools = agent_def.tools  # property: list[str]; ['*'] means all
-    if provider == "claude" and tools != ["*"]:
-        # --allowed-tools is confirmed present in `claude --print --help`
-        # (alias: --allowedTools). Accepts comma- or space-separated tool names.
-        # MCP server tools use the "mcp__<servername>__*" wildcard form, where the
-        # server name matches the mcpServers key (here: "mcpsrv_neotoma" — the
-        # universal convention across all 31 agent SKILLs and 24 agent_definitions).
-        # This allows all tools from that MCP server without enumerating them individually.
-        allowed_list = list(tools)
-        if "mcp__mcpsrv_neotoma__*" not in allowed_list:
-            allowed_list.append("mcp__mcpsrv_neotoma__*")
-        allowed = ",".join(allowed_list)
-        cmd += ["--allowed-tools", allowed]
-        log.info(
-            f"[apis] Spawning via {provider}: "
-            f"<{_role}:agent_def+{skill}.SKILL.md> "
-            f"--allowed-tools {allowed} timeout={timeout}s"
+    # ── Tool allowlist (shared with every other spawner) ──────────────────────
+    # Previously this was the ONLY place tool_allowlist was enforced, and it
+    # enforced it only for the claude provider. Both halves leaked: a codex or
+    # cursor fallthrough ran the same agent unconfined, and eight daemons that
+    # build their own argv never consulted the definition at all. The decision
+    # now comes from lib/daemon_runtime/tool_allowlist.py so every caller
+    # reaches the same verdict — including the verdict "this cannot be
+    # confined", which is reported rather than passed over in silence.
+    plan = plan_enforcement(
+        agent_def.tools,
+        provider=provider,
+        skip_permissions=False,  # this adapter never passes --dangerously-skip-permissions
+    )
+    cmd = apply_to_claude_argv(cmd, plan)
+    log_tool_plan(log, role=_role, provider=provider, plan=plan)
+
+    # Provider parity (or an honest refusal). codex and cursor accept no
+    # per-dispatch tool restriction — codex has a filesystem/network SANDBOX,
+    # which constrains where a tool may write but not WHICH tools exist, and
+    # cursor's flags only widen approval. Since the provider order is
+    # claude,codex,cursor with fallthrough on capacity/auth failure, leaving
+    # this silent means the same agent with the same allowlist is confined or
+    # unconfined depending on quota headroom at dispatch time.
+    #
+    # Under ENFORCE we refuse the dispatch rather than run it unconfined. The
+    # refusal is a normal SkillResult failure, so run_skill's loop treats it
+    # like any other non-retryable outcome and the caller sees a named reason
+    # instead of a silently-widened agent. Under the log-only default this
+    # only logs, so turning enforcement on is what changes behaviour.
+    if plan.status == "unsupported" and enforcement_mode() is EnforcementMode.ENFORCE:
+        msg = (
+            f"refusing to dispatch {_role!r} on {provider!r}: {plan.reason}. "
+            "Enforcement is on and this provider cannot honour the agent's "
+            "tool_allowlist, so running here would silently widen its privilege."
         )
-    else:
-        log.info(
-            f"[apis] Spawning via {provider}: "
-            f"<{_role}:{'agent_def+' if not degraded else 'degraded-'}{skill}.SKILL.md> "
-            f"timeout={timeout}s"
+        log.error(f"[apis] {msg}")
+        return SkillResult(
+            skill, False, None, "", "", error=msg, provider=provider
         )
+    log.info(
+        f"[apis] Spawning via {provider}: "
+        f"<{_role}:{'agent_def+' if not degraded else 'degraded-'}{skill}.SKILL.md> "
+        f"tools={plan.status} timeout={timeout}s"
+    )
 
     # ── Stage 2: harness_event at dispatch start ───────────────────────────────
     try:

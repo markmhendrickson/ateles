@@ -97,6 +97,7 @@ from lib.daemon_runtime import (  # noqa: E402
     AgentLoader,
     enforce_status_or_exit,
 )
+from lib.daemon_runtime.tool_allowlist import build_claude_argv  # noqa: E402
 from lib.notify import Notifier, Priority  # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -353,8 +354,25 @@ If no calendar event matches within the ±90-minute window, note
         f"(source: {source_ref[:60]}...)"
     )
 
+    # Tyto loads its agent_definition at startup but never applied `.tools`
+    # to this dispatch. The shared planner decides now — and reports that the
+    # unconditional --dangerously-skip-permissions below defeats any allowlist
+    # (the CLI allows at the bypass branch before reading allow rules), so the
+    # dispatch is logged as unconfined rather than dressed up as confined.
+    # The prompt travels on stdin here, so no positional argument is appended.
+    try:
+        _tools = AgentLoader(DAEMON_NAME).load().tools
+    except Exception as exc:  # noqa: BLE001 — never block a dispatch on this
+        log.warning(f"[{DAEMON_NAME}] could not load tool_allowlist: {exc}")
+        _tools = ["*"]
     result = subprocess.run(
-        [claude_bin, "--print", "--dangerously-skip-permissions"],
+        build_claude_argv(
+            [claude_bin, "--print"],
+            _tools,
+            log=log,
+            role=DAEMON_NAME,
+            skip_permissions=True,
+        ),
         input=prompt,
         capture_output=True,
         text=True,

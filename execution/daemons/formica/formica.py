@@ -63,6 +63,7 @@ from lib.daemon_runtime import (  # noqa: E402
     SSEClient,
     hydrate_snapshot,
 )
+from lib.daemon_runtime.tool_allowlist import build_claude_argv  # noqa: E402
 from lib.notify import Notifier, Priority  # noqa: E402
 from lib.activity import ActivityLogger  # noqa: E402
 
@@ -197,7 +198,26 @@ async def _spawn_claude_skill(
         f"Work entity: {entity_id}."
     )
 
-    cmd = [CLAUDE_BIN, "--print", "--append-system-prompt", skill_md]
+    # Apply the DISPATCHED agent's tool_allowlist — not this daemon's. The
+    # spawned child acts as `skill`, so that is the identity whose grants
+    # bind. This path never consulted the allowlist before; it is one of the
+    # eight bypasses around skill_runner's single enforcement site.
+    #
+    # Unlike most of those bypasses, this one passes no
+    # --dangerously-skip-permissions, so an allowlist here can actually bind
+    # once enforcement is switched on.
+    try:
+        _tools = AgentLoader(skill).load().tools
+    except Exception as exc:  # noqa: BLE001 — never block a dispatch on this
+        log.warning(f"[{DAEMON_NAME}] could not load tool_allowlist for {skill}: {exc}")
+        _tools = ["*"]
+    cmd = build_claude_argv(
+        [CLAUDE_BIN, "--print", "--append-system-prompt", skill_md],
+        _tools,
+        log=log,
+        role=skill,
+        skip_permissions=False,
+    )
     log.info(
         f"[{DAEMON_NAME}] Spawning: claude --print --append-system-prompt <{skill}.SKILL.md> "
         f"timeout={DISPATCH_TIMEOUT_SECONDS}s entity={entity_id}"

@@ -61,6 +61,12 @@ jobs:
         run: uv run --extra dev python -m pytest execution/daemons/anthus/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
+      # lib/daemon_runtime/ ships test_*.py for the agent loader, gating,
+      # checkout drift, and tool_allowlist enforcement, but no lane collected
+      # them — the same CI gap ateles#682 flagged. Enforcement of a privilege
+      # boundary must not be green only on a developer's laptop.
+      - name: Run shared daemon_runtime lib tests
+        run: uv run --extra dev python -m pytest lib/daemon_runtime/ -q
       # ateles#524 (qa lens, PR #527 round 2): execution/scripts/ has its own
       # test_*.py files (SOPS token fallback, Loxia review, agent-doc render,
       # transcription) but no lane ran them — this closes that gap.

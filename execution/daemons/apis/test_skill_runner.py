@@ -12,6 +12,7 @@ Run with: pytest execution/daemons/apis/test_skill_runner.py -v
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -302,6 +303,150 @@ class TestRunSkill:
             "Expected at least one harness_event with output_summary='degraded_generic_subagent'"
         )
 
+    def _capture_dispatch_cmd(self, *, tool_allowlist: str, env: dict) -> list:
+        """Run one dispatch under `env` and return the argv it built."""
+        agent_def = _make_def(
+            prompt_markdown="Restricted agent.", tool_allowlist=tool_allowlist
+        )
+        instance = MagicMock()
+        instance.load.return_value = agent_def
+
+        captured: list = []
+
+        async def fake_exec(*cmd, **kwargs):
+            captured.extend(cmd)
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.AgentLoader", return_value=instance),
+            patch("skill_runner._write_harness_event"),
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch.dict(os.environ, env),
+        ):
+            self._run(
+                skill_runner.run_skill(
+                    "gryllus", "work prompt", role="gryllus", task_entity_id="ent_abc"
+                )
+            )
+        return captured
+
+    def test_allowlist_is_log_only_by_default(self) -> None:
+        """A restricted agent runs UNCONFINED unless enforcement is switched on.
+
+        This is deliberate: enabling enforcement globally would brick seven
+        agents whose tool_allowlist is entirely capability-slot aliases (apis
+        and turdus among them). Log-only makes the blast radius measurable
+        before it is load-bearing — the same reasoning that keeps
+        checkout_drift advisory.
+        """
+        cmd = self._capture_dispatch_cmd(
+            tool_allowlist="Bash,Read,Write",
+            env={"ATELES_ENFORCE_TOOL_ALLOWLIST": ""},
+        )
+        assert "--allowed-tools" not in cmd
+
+    def test_allowlist_binds_when_enforcement_enabled(self) -> None:
+        cmd = self._capture_dispatch_cmd(
+            tool_allowlist="Bash,Read,Write",
+            env={"ATELES_ENFORCE_TOOL_ALLOWLIST": "1"},
+        )
+        assert "--allowed-tools" in cmd
+
+    def test_all_alias_allowlist_never_reaches_argv_even_when_enforcing(self) -> None:
+        """apus declares ["git","subprocess"] — neither is a real tool name.
+
+        Passing those to --allowed-tools would confine the agent to nothing.
+        Enforcement must decline rather than ship a dispatch that cannot act.
+        """
+        cmd = self._capture_dispatch_cmd(
+            tool_allowlist="git,subprocess",
+            env={"ATELES_ENFORCE_TOOL_ALLOWLIST": "1"},
+        )
+        assert "--allowed-tools" not in cmd
+
+    def _dispatch_on(self, *, provider: str, tool_allowlist: str, env: dict):
+        agent_def = _make_def(
+            prompt_markdown="Restricted agent.", tool_allowlist=tool_allowlist
+        )
+        instance = MagicMock()
+        instance.load.return_value = agent_def
+
+        async def fake_exec(*cmd, **kwargs):
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.AgentLoader", return_value=instance),
+            patch("skill_runner._write_harness_event"),
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch("skill_runner.CODEX_BIN", "/usr/bin/codex"),
+            patch("skill_runner.CURSOR_BIN", "/usr/bin/cursor-agent"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch.dict(os.environ, env),
+        ):
+            return self._run(
+                skill_runner._run_skill_once(
+                    "gryllus", "work prompt", provider=provider, role="gryllus"
+                )
+            )
+
+    @pytest.mark.parametrize("provider", ["codex", "cursor"])
+    def test_enforcing_refuses_unconfining_provider(self, provider) -> None:
+        """A restrictive allowlist must not fall through to a provider that
+        cannot honour it.
+
+        Provider order is claude,codex,cursor with fallthrough on capacity or
+        auth failure. Without this refusal the same agent with the same
+        allowlist is confined or unconfined depending on quota headroom at
+        dispatch time.
+        """
+        result = self._dispatch_on(
+            provider=provider,
+            tool_allowlist="Bash,Read",
+            env={"ATELES_ENFORCE_TOOL_ALLOWLIST": "1"},
+        )
+        assert result.ok is False
+        assert "tool_allowlist" in result.error
+        assert provider in result.error
+
+    @pytest.mark.parametrize("provider", ["codex", "cursor"])
+    def test_log_only_does_not_refuse_unconfining_provider(self, provider) -> None:
+        """The default posture must not change dispatch behaviour."""
+        result = self._dispatch_on(
+            provider=provider,
+            tool_allowlist="Bash,Read",
+            env={"ATELES_ENFORCE_TOOL_ALLOWLIST": ""},
+        )
+        assert result.ok is True
+
+    @pytest.mark.parametrize("provider", ["codex", "cursor"])
+    def test_wildcard_agent_still_runs_on_unconfining_provider(self, provider) -> None:
+        """An agent that declares '*' loses nothing on codex/cursor."""
+        result = self._dispatch_on(
+            provider=provider,
+            tool_allowlist="*",
+            env={"ATELES_ENFORCE_TOOL_ALLOWLIST": "1"},
+        )
+        assert result.ok is True
+
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
     def test_tool_allowlist_applied_when_restricted(
@@ -334,6 +479,11 @@ class TestRunSkill:
             patch.object(Path, "exists", return_value=True),
             patch.object(Path, "read_text", return_value="skill md"),
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            # Enforcement is log-only by DEFAULT (lib/daemon_runtime/
+            # tool_allowlist.py), so an allowlist only reaches argv when
+            # switched on. The default is pinned by
+            # test_allowlist_is_log_only_by_default below.
+            patch.dict(os.environ, {"ATELES_ENFORCE_TOOL_ALLOWLIST": "1"}),
         ):
             result = self._run(
                 skill_runner.run_skill(
@@ -1027,6 +1177,7 @@ class TestNeotomaMcpConfigInjection:
 
         monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "tok")
+        monkeypatch.setenv("ATELES_ENFORCE_TOOL_ALLOWLIST", "1")
 
         captured_cmd: list = []
 
