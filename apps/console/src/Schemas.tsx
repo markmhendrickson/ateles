@@ -133,7 +133,7 @@ type Freshness = {
   reason?: string;
 };
 
-const REGEN_CMD = "python3 apps/task-dashboard/scripts/generate_code_usage.py";
+const REGEN_CMD = "python3 apps/console/scripts/generate_code_usage.py";
 
 function ScanFreshness() {
   const [open, setOpen] = useState(false);

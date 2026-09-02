@@ -76,7 +76,7 @@ const DEFAULT_BASE_URL = "https://neotoma.markmhendrickson.com";
 /**
  * The repo whose HEAD the code scan is compared against.
  *
- * `process.cwd()` is the dev server's directory (`apps/task-dashboard`), and
+ * `process.cwd()` is the dev server's directory (`apps/console`), and
  * `git -C` resolves upward from there — which lands on the WORKTREE this server
  * was started in, not the shared main clone. That is the correct target: the
  * scan generator walks up from its own path to the same root, so both sides
@@ -451,7 +451,7 @@ function liveSession(): LiveSession | null {
   try {
     // Claude Code keys transcripts by the directory the SESSION opened, which
     // is the worktree root — while this dev server's cwd is the app subdir
-    // (apps/task-dashboard). Walk up from cwd and take the first ancestor that
+    // (apps/console). Walk up from cwd and take the first ancestor that
     // has a transcript dir, so both layouts resolve.
     const projects = join(homedir(), ".claude", "projects");
     let dir = process.cwd();

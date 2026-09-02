@@ -342,7 +342,7 @@ def build_subprocess_env(
     Inherits the current environment, then fills in ONLY the keys in
     ``SUBPROCESS_SECRET_KEYS`` from the SOPS-materialized dotenv. That file
     also holds unrelated secrets, so we never load it wholesale — mirroring
-    the same restraint the task dashboard's ``neotomaProxy.ts`` documents.
+    the same restraint the console's ``neotomaProxy.ts`` documents.
 
     An already-set key in the real environment wins, so an operator can
     override without editing the dotenv.
