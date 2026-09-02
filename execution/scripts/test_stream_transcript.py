@@ -1196,10 +1196,10 @@ def test_a_real_stall_still_reports_after_a_resume():
 
 
 def test_device_lost_record_names_the_device_and_the_consequence():
-    record = st.device_lost_record(7, "Mark's AirPods Max")
+    record = st.device_lost_record(7, "Someone's Headphones")
     assert record["ok"] is False
     assert record["fatal"] is False, "the stream resumes; this is not a crash"
-    assert "Mark's AirPods Max" in record["error"]
+    assert "Someone's Headphones" in record["error"]
     assert "STOPPED" in record["error"]
     # It must say both that nothing is recorded AND that it will come back.
     assert "resumes automatically" in record["error"]
@@ -1207,7 +1207,7 @@ def test_device_lost_record_names_the_device_and_the_consequence():
 
 
 def test_device_resumed_record_is_a_success_notice():
-    record = st.device_resumed_record(8, "Mark's AirPods Max", ":2")
+    record = st.device_resumed_record(8, "Someone's Headphones", ":2")
     assert record["ok"] is True
     assert "RESUMED" in record["notice"]
     assert ":2" in record["notice"]
@@ -1243,8 +1243,8 @@ def test_device_flag_defaults_to_no_override():
 
 
 def test_device_flag_accepts_a_name():
-    args = st.build_parser().parse_args(["--device", "Mark's AirPods Max"])
-    assert args.device == "Mark's AirPods Max"
+    args = st.build_parser().parse_args(["--device", "Someone's Headphones"])
+    assert args.device == "Someone's Headphones"
 
 
 def test_resuming_does_not_fire_a_false_socket_silent_alarm():

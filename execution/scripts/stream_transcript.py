@@ -30,7 +30,7 @@ recorded, and a room microphone is not (ateles#646).
 
 Usage:
     python execution/scripts/stream_transcript.py                  # configured device
-    python execution/scripts/stream_transcript.py --device "Mark's AirPods Max"
+    python execution/scripts/stream_transcript.py --device "My Headset"
     python execution/scripts/stream_transcript.py --fallback-only  # force chunking
 """
 

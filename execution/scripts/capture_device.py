@@ -7,7 +7,7 @@ avfoundation indices are positions in an enumeration, not identities. They
 renumber whenever hardware connects or disconnects. Measured on the operator's
 machine within a single session:
 
-    with the headset connected      [2] Mark's AirPods Max
+    with the headset connected      [2] <operator headset>
                                     [3] Studio Display Microphone
     after the headset dropped       [2] Studio Display Microphone
 
@@ -44,8 +44,8 @@ Fallback when Neotoma is unreachable
 Transcription runs on a laptop that may have no Neotoma reachability, so a hard
 dependency would take capture down on an outage. Follows the degradation
 pattern established by ``spoken_languages`` (#687): live read, else the
-last-good on-disk cache, else a conservative seed — with the source visible in
-the returned value so a stale binding is diagnosable rather than looking fresh.
+last-good on-disk cache — with the source visible in the returned value so a
+stale binding is diagnosable rather than looking fresh.
 
 There is no seed DEVICE NAME, deliberately. A built-in device name would be
 either operator-specific config smuggled into a public repo, or a guess that
@@ -103,9 +103,9 @@ _DEVICE_LINE = re.compile(r"^\[AVFoundation indev @ [^\]]+\] \[(\d+)\] (.+)$")
 def normalize_device_name(name: str) -> str:
     """Fold a device name to a comparable form.
 
-    macOS reports ``Mark’s AirPods Max`` with a TYPOGRAPHIC apostrophe
-    (U+2019), while anything a human types into a config field carries the
-    ASCII one. They are different strings and compare unequal, so a binding
+    macOS reports names like ``Someone’s Headphones`` with a TYPOGRAPHIC
+    apostrophe (U+2019), while anything a human types into a config field
+    carries the ASCII one. They are different strings and compare unequal, so a binding
     that looks obviously correct would never match. Verified against the live
     enumeration on the operator's machine, where this exact mismatch applies.
 

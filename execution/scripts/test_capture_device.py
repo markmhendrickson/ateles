@@ -37,7 +37,7 @@ LISTING = """\
 [AVFoundation indev @ 0x1] AVFoundation audio devices:
 [AVFoundation indev @ 0x1] [0] BlackHole 2ch
 [AVFoundation indev @ 0x1] [1] System-wide capture
-[AVFoundation indev @ 0x1] [2] Mark’s AirPods Max
+[AVFoundation indev @ 0x1] [2] Someone’s Headphones
 [AVFoundation indev @ 0x1] [3] Studio Display Microphone
 [AVFoundation indev @ 0x1] [4] ZoomAudioDevice
 """
@@ -52,7 +52,7 @@ LISTING_NO_HEADSET = """\
 [AVFoundation indev @ 0x1] [3] ZoomAudioDevice
 """
 
-AIRPODS = "Mark’s AirPods Max"
+AIRPODS = "Someone’s Headphones"
 
 
 def devices_from(listing: str) -> list[AudioDevice]:
@@ -124,16 +124,16 @@ def test_enumeration_failure_is_empty_not_raise(monkeypatch):
 def test_typographic_apostrophe_matches_ascii():
     """macOS reports U+2019; a human types U+0027. Unequal as strings, so
     without folding a correct-looking binding would silently never match."""
-    assert normalize_device_name(AIRPODS) == normalize_device_name("Mark's AirPods Max")
+    assert normalize_device_name(AIRPODS) == normalize_device_name("Someone's Headphones")
 
 
 @pytest.mark.parametrize(
     "variant",
     [
-        "mark's airpods max",
-        "MARK'S AIRPODS MAX",
-        "Mark's  AirPods  Max",
-        " Mark's AirPods Max ",
+        "someone's headphones",
+        "SOMEONE'S HEADPHONES",
+        "Someone's  Headphones",
+        " Someone's Headphones ",
     ],
 )
 def test_case_and_whitespace_variants_match(variant):
@@ -300,7 +300,7 @@ def test_unwritable_cache_does_not_break_capture(monkeypatch, tmp_path):
 def test_describe_names_the_device_and_the_source():
     binding = DeviceBinding((AIRPODS,), "neotoma")
     line = describe(binding, binding.resolve(devices_from(LISTING)))
-    assert "AirPods" in line and ":2" in line and "neotoma" in line
+    assert "Headphones" in line and ":2" in line and "neotoma" in line
 
 
 def test_describe_absent_says_capture_is_stopped():
