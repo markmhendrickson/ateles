@@ -152,6 +152,14 @@ regexes = [
   # (exact literal shape, 2-digit year+month, single trailing letter) so it can
   # only ever match this display-slug pattern, never a real credential.
   '''^advisory-2026-\d{2}-[a-z]$''',
+  # asana-client-id false positive: default gitleaks rule flags any bare
+  # 16-digit numeric string by shape. `asana_source_gid` is an Asana task
+  # object ID (import provenance marker, not a credential) stored on
+  # imported task entities and exercised in taskSearch tests/fixtures —
+  # confirmed by testing that renaming the surrounding field still flags the
+  # digits, so this is a value-shape false positive, not fixable by renaming.
+  # Anchored to the exact 16-digit literal used as the test fixture value.
+  '''\b1202469970914439\b''',
 ]
 paths = [
   "execution/scripts/ga_last_7_days_report.py",
