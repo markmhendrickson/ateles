@@ -127,6 +127,45 @@ def test_silence_threshold_stays_within_the_gate_hangover():
     assert st.VAD_SILENCE_DURATION_MS < st.GATE_HANGOVER_SECONDS * 1000
 
 
+def _transcription(msg: dict) -> dict:
+    return msg["session"]["audio"]["input"]["transcription"]
+
+
+def test_session_pins_the_transcription_language():
+    """Unpinned, the model decodes silence into whatever language it likes, and
+    a Latin-script guess is invisible to both script and diacritic checks.
+
+    This is prevention, not filtering: measured on identical non-speech audio,
+    24 turns per arm, unpinned produced 15 foreign-language fabrications and
+    pinned produced 2, with the Latin-script foreign class eliminated.
+    """
+    transcription = _transcription(st.session_update_message())
+    assert transcription["language"] == st.DEFAULT_LANGUAGE, (
+        "an unpinned session invents turns in arbitrary languages"
+    )
+    assert transcription["model"] == st.DEFAULT_MODEL
+
+
+def test_language_pin_can_be_disabled_for_a_multilingual_session():
+    """`None` restores auto-detection; the key must be absent, not null."""
+    transcription = _transcription(st.session_update_message(language=None))
+    assert "language" not in transcription
+    assert transcription["model"] == st.DEFAULT_MODEL
+
+
+def test_language_flag_reaches_the_session_message():
+    """A flag that parses but never reaches the socket is not configurable.
+
+    `--language` already drove the hallucination filter; it must now also pin
+    the session, or the two halves disagree about what language is expected.
+    """
+    args = st.build_parser().parse_args(["--language", "es"])
+    assert args.language == "es"
+    assert _transcription(st.session_update_message(language=args.language))[
+        "language"
+    ] == "es"
+
+
 def test_session_vad_tuning_is_overridable():
     """The operator tunes this without a code change."""
     msg = st.session_update_message(

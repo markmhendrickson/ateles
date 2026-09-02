@@ -400,21 +400,64 @@ def test_a_short_turn_is_never_filtered_on_duration(text, duration_s):
 @pytest.mark.parametrize(
     "text",
     [
-        "El niño está aquí.",       # Spanish ñ
-        "Ça va très bien.",          # French ç, è
-        "Això és el català.",        # Catalan à, ï
-        "Über die Straße.",          # German ü, ß
-        "Não é verdade.",            # Portuguese ã
+        "El niño está aquí.",                       # ñ, á
+        "¿Qué opinas de la sesión?",                # ¿, é, ó
+        "Una ambigüedad tuya, y después ayudarte.", # ü, é
+        "De dónde salió esto, más o menos.",        # ó, á
     ],
 )
 def test_code_switching_into_the_operators_own_languages_survives(text):
     """Real bilingual speech must never read as fabrication.
 
     The allowed set is the UNION over plausible session languages precisely so a
-    Spanish "ñ" inside an English session is the operator, not Whisper.
+    Spanish "ñ" inside an English session is the operator, not Whisper. These
+    cases are drawn from characters that actually appear in the operator's
+    verified Spanish across the capture corpus (á in 134 rows, í in 149, ó in
+    117, é in 111, ú in 76, ñ in 27, ü in 1).
     """
     verdict = screen_transcription(text, expected_language="en", vad_closed=True)
     assert not verdict.filtered, f"{text!r} is real code-switching"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Möchtest du ein Feuer?",            # German ö
+        "Und das hängt an der Korrex auf.",  # German ä
+        "Taparvo sessões.",                  # Portuguese õ
+    ],
+)
+def test_latin_script_fabrications_outside_the_spoken_languages_are_caught(text):
+    """The class the narrowed plausible-language set exists to catch.
+
+    All three arrived during silence in English sessions and all three passed
+    while German, French, Portuguese and Italian were treated as plausible.
+    They are the ONLY three verdicts that change across the full 1137-row
+    corpus when the set narrows to the languages the operator actually speaks,
+    and all three are genuine fabrications — 3 true positives, 0 false
+    positives.
+    """
+    verdict = screen_transcription(text, expected_language="en", vad_closed=True)
+    assert verdict.filtered, f"{text!r} is a fabrication"
+    assert verdict.reason == "foreign_diacritic"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Nein.", "Buonasera.", "de todas partes.", "Seamos claros."],
+)
+def test_diacriticless_latin_fabrications_remain_undetectable(text):
+    """Documents the residue honestly rather than pretending it is covered.
+
+    These carry no foreign script and no foreign diacritic, and the streaming
+    API reports no per-turn language, so there is no local evidence to act on.
+    The session-level language pin in ``stream_transcript`` is what reduces
+    them; this filter cannot, and a check tuned until it did would be guessing
+    at the operator's own vocabulary. Asserting the CURRENT behaviour keeps the
+    gap visible instead of silently closing it with a heuristic.
+    """
+    verdict = screen_transcription(text, expected_language="en", vad_closed=True)
+    assert not verdict.filtered
 
 
 def test_plain_english_can_never_trigger_the_diacritic_signal():

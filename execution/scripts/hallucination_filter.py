@@ -17,7 +17,13 @@ can address (true silence), and this catches what arrives past it.
 Four signals, ordered by observed catch rate on two days of real chunks:
 
 1. ``language_mismatch`` — Whisper reports a detected language. The session's
-   language is known. Observed fabrications came back as Georgian, Khmer,
+   language is known. NOTE: on the STREAMING path this signal has no producer.
+   Probed against the live Realtime API on 2026-09-02, the
+   ``conversation.item.input_audio_transcription.completed`` event carries
+   exactly ``content_index``, ``event_id``, ``item_id``, ``transcript``,
+   ``type`` and ``usage`` — there is no per-turn language field to pass in.
+   ``detected_language`` therefore stays None there and 1a never fires; the
+   batch path can still supply it. Do not re-probe this hoping for a field. Observed fabrications came back as Georgian, Khmer,
    Chinese, Ukrainian, and Thai in recordings whose speech is English. Highest
    catch rate, and it is the only signal that catches a *fluent-looking*
    fabrication. Backed by a script check so it still fires when the detected
@@ -67,6 +73,21 @@ value — the exact 91.78-91.78 shape that commit fixed. They read as damning
 evidence for a duration floor and are nothing of the kind. Before a duration or
 boundary signal is judged on corpus rows, check which captures predate the fix
 and exclude them.
+
+The strongest lever found for the Latin-script class is NOT in this module.
+Because the completed event reports no language, a fluent Latin-script
+fabrication with no diacritic ("Nein.", "Buonasera.", "de todas partes.")
+presents no local evidence of any kind: it is well-formed text of an ordinary
+length in an ordinary script. No post-hoc check can separate it from real
+speech. The fix is to stop it being generated — ``stream_transcript`` now pins
+``transcription.language`` on the session, which on identical non-speech audio
+cut foreign-language fabrications from 15/24 turns to 2/24 and removed the
+Latin-script foreign class entirely.
+
+One case remains genuinely undetectable and is stated rather than papered over:
+"Seamos claros." is Spanish, a language the operator actually speaks. It has no
+foreign diacritic, no foreign script, and a language pin admitting Spanish
+cannot exclude it. There is no local signal for this residue.
 
 **Nothing is ever silently dropped.** A caught chunk keeps its text and gains a
 ``filtered`` reason, so a false positive stays recoverable by eye and the
@@ -382,7 +403,25 @@ _LATIN_DIACRITICS_BY_LANGUAGE = {
 
 # Sessions are assumed to admit the operator's own languages even when the
 # expected language is narrower, so code-switching never reads as fabrication.
-DEFAULT_PLAUSIBLE_LANGUAGES = ("en", "es", "ca", "fr", "de", "pt", "it")
+#
+# This is the set of languages the operator actually SPEAKS, not the set they
+# could read. It was ("en", "es", "ca", "fr", "de", "pt", "it"), which admitted
+# every diacritic in German, French, Portuguese and Italian and so let a whole
+# class of fabrication through: "Möchtest du ein Feuer?", "Und das hängt an der
+# Korrex auf." and "Taparvo sessões." all arrived during silence in English
+# sessions and all passed. Measured over the full 1137-row capture corpus, the
+# narrowing to ("en", "es") changes exactly 3 verdicts — those 3 rows — and all
+# 3 are genuine fabrications: 3 true positives, 0 false positives.
+#
+# It is safe precisely because the operator's real Spanish is dense in the
+# characters that stay allowed: á appears in 134 rows, í in 149, ó in 117, é in
+# 111, ú in 76, ñ in 27, ü in 1 (all genuine speech). Every character the
+# narrowing newly rejects appears exactly ONCE in the whole corpus, and every
+# one of those single occurrences is a fabricated turn.
+#
+# Widen this only for an operator who genuinely speaks the added language;
+# adding a language to read is what created the gap.
+DEFAULT_PLAUSIBLE_LANGUAGES = ("en", "es")
 
 
 def _allowed_diacritics(languages: tuple[str, ...]) -> set[str]:

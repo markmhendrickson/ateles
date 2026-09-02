@@ -825,6 +825,7 @@ def session_update_message(
     model: str = DEFAULT_MODEL,
     silence_duration_ms: int | None = None,
     prefix_padding_ms: int | None = None,
+    language: str | None = DEFAULT_LANGUAGE,
 ) -> dict:
     """The Realtime session config.
 
@@ -840,6 +841,22 @@ def session_update_message(
     explicit, so the configuration the session runs under is visible in the
     request rather than inherited from a default that can change underneath us.
 
+    `language` is load-bearing for a failure the post-hoc filter structurally
+    cannot reach. Left unset, the model decodes silence into whatever language
+    it likes, and a Latin-script guess ("Nein.", "Buonasera.") is invisible to
+    `script_mismatch` and carries no diacritic for `foreign_diacritic` to see.
+    Pinning the language does not filter those turns — it stops them being
+    generated. Measured on identical non-speech audio, 24 turns per arm:
+    unpinned produced 15 foreign-language fabrications, pinned produced 2, and
+    the Latin-script foreign class (Czech, Dutch, Indonesian) disappeared
+    entirely. The field is accepted by the session and echoed back in
+    `session.updated` as `transcription.language`.
+
+    Pass `language=None` to restore auto-detection for a genuinely
+    multilingual session; the operator's own English/Spanish code-switching is
+    unaffected, because a pinned language biases decoding rather than
+    hard-restricting output.
+
     The `OpenAI-Beta: realtime=v1` era shape now fails closed with
     `beta_api_shape_disabled`; this is the current one (ateles#625).
     """
@@ -850,7 +867,11 @@ def session_update_message(
             "audio": {
                 "input": {
                     "format": {"type": "audio/pcm", "rate": SAMPLE_RATE},
-                    "transcription": {"model": model},
+                    "transcription": (
+                        {"model": model, "language": language}
+                        if language
+                        else {"model": model}
+                    ),
                     "turn_detection": {
                         "type": "server_vad",
                         "silence_duration_ms": (
@@ -1055,6 +1076,7 @@ async def stream_session(
                         model,
                         silence_duration_ms=vad_silence_ms,
                         prefix_padding_ms=vad_prefix_padding_ms,
+                        language=expected_language,
                     )
                 )
             )
