@@ -858,6 +858,120 @@ function fetchWorkflows(limit: number): Promise<unknown> {
   });
 }
 
+/** Read one snapshot field as a trimmed string, or null. */
+function snapStr(snap: Record<string, unknown>, key: string): string | null {
+  const v = snap[key];
+  return typeof v === "string" && v.trim() ? v.trim() : null;
+}
+
+/** Unwrap the double-nesting some rows arrive with, as the client parsers do. */
+function innerSnapshot(entity: Record<string, unknown> | null): Record<string, unknown> {
+  const outer = (entity?.snapshot ?? {}) as Record<string, unknown>;
+  return ((outer.snapshot as Record<string, unknown> | undefined) ?? outer) ?? {};
+}
+
+/**
+ * FOLLOW A TASK'S STORED LINK TO A WORKFLOW — and report how far it got.
+ *
+ * The full rationale is on the `/api/task-workflow` route below. In short: the
+ * only durable task -> workflow bridge is the task's own `source_url`, and this
+ * walks it without ever inferring past a missing link.
+ *
+ * Returns the same discriminated union the client's `WorkflowLink` declares, so
+ * each dead end is a NAMED outcome carrying its reason rather than a generic
+ * empty result. "No issue was ever referenced" and "the referenced issue was
+ * never stored" are different findings with different fixes, and the operator
+ * should be able to tell them apart from the page.
+ */
+async function resolveTaskWorkflow(taskId: string): Promise<unknown> {
+  const task = (await neotomaGet(`/entities/${taskId}`)) as Record<string, unknown> | null;
+  const snap = innerSnapshot(task);
+
+  // The stored reference. `source_url` is the field issue-derived tasks carry;
+  // `permalink_url` is checked too because imported tasks use that name.
+  const raw = snapStr(snap, "source_url") ?? snapStr(snap, "permalink_url");
+  const m = raw ? /github\.com\/([^/\s]+\/[^/\s]+)\/(issues|pull)\/(\d+)/.exec(raw) : null;
+  if (!m) return { kind: "none" };
+
+  const ref = {
+    repo: m[1],
+    number: Number(m[3]),
+    url: raw as string,
+    isPullRequest: m[2] === "pull",
+  };
+
+  // Find the issue entity by number, then confirm the repo matches. Matching on
+  // number alone would cross-link neotoma#410 to ateles#410 — two different
+  // pieces of work that happen to share an integer.
+  const found = (await neotomaPost("/entities/query", {
+    entity_type: "issue",
+    limit: 10,
+    include_snapshots: true,
+    snapshot_filters: { issue_number: { op: "eq", value: ref.number } },
+  })) as { entities?: Record<string, unknown>[] };
+
+  const hit = (found.entities ?? []).find((e) => {
+    const s = innerSnapshot(e);
+    return (snapStr(s, "repo") ?? snapStr(s, "repository")) === ref.repo;
+  });
+
+  // The common case as measured: the task names an issue that was never stored
+  // as an entity. Reported as `dangling` rather than as "no workflow", because
+  // the link EXISTS and it is the target that is missing — a backfill fixes
+  // this, whereas `kind: "none"` needs the link written in the first place.
+  if (!hit) return { kind: "dangling", ref };
+
+  const issueId = String(hit.entity_id ?? "");
+  const isnap = innerSnapshot(hit);
+  const gateMap = isnap.gate_status;
+
+  // SOURCE ONE: the issue's own gate_status map.
+  const gates =
+    gateMap && typeof gateMap === "object" && !Array.isArray(gateMap)
+      ? Object.entries(gateMap as Record<string, unknown>).map(([gateName, status]) => ({
+          gateName,
+          status: typeof status === "string" ? status : String(status),
+        }))
+      : [];
+
+  // SOURCE TWO: participation_record rows for this work entity. Fetched
+  // separately and NEVER merged into `gates` — the two writers disagree
+  // systematically, and the client renders the disagreement.
+  let participation: { gateName: string; status: string }[] = [];
+  try {
+    const prs = (await neotomaPost("/entities/query", {
+      entity_type: "participation_record",
+      limit: 50,
+      include_snapshots: true,
+      snapshot_filters: { work_entity_id: { op: "eq", value: issueId } },
+    })) as { entities?: Record<string, unknown>[] };
+    participation = (prs.entities ?? []).flatMap((e) => {
+      const s = innerSnapshot(e);
+      const gateName = snapStr(s, "gate_name");
+      const status = snapStr(s, "status");
+      return gateName && status ? [{ gateName, status }] : [];
+    });
+  } catch {
+    // A participation lookup that fails must not blank the gate_status we
+    // already read. Left empty; the client shows what it has.
+    participation = [];
+  }
+
+  if (!gates.length && !participation.length) {
+    return { kind: "issue_without_gates", ref, issueId };
+  }
+
+  return {
+    kind: "resolved",
+    ref,
+    issueId,
+    workflowType: snapStr(isnap, "workflow_type"),
+    currentOwner: snapStr(isnap, "current_owner"),
+    gates,
+    participation,
+  };
+}
+
 /**
  * HOW MANY TASKS SIT IN EACH LIFECYCLE STATE.
  *
@@ -1864,6 +1978,61 @@ export function neotomaProxy(): Plugin {
 
         try {
           res.end(JSON.stringify(await neotomaGet(`/entities/${id}/observations?limit=60`)));
+        } catch (err) {
+          res.statusCode = 502;
+          res.end(JSON.stringify({ error: (err as Error).message }));
+        }
+      });
+
+      /**
+       * GET /api/task-workflow?id=… — WHICH WORKFLOW, IF ANY, RELATES TO A TASK.
+       *
+       * THE FACTS THIS ROUTE HAS TO REPORT HONESTLY, all measured against prod
+       * on 2026-09-02 (see `WORKFLOW_LINKAGE_FACTS` in src/taskPosition.ts):
+       *
+       *   - `participation_record`, the per-gate instance type, points at ZERO
+       *     tasks. Its 135 distinct work entities are 132 issues + 3 PRs. So
+       *     there is no direct task -> gate record to read, for any task.
+       *   - No task in a 40-task sample carried any relationship edge to an
+       *     issue either.
+       *   - The ONE real bridge is the task's own stored `source_url`. That is
+       *     stored data the task asserts about itself, not an inference, which
+       *     is why reading it is legitimate where a routing heuristic would not
+       *     be.
+       *
+       * So this route follows the stored link and reports exactly how far it
+       * got. It NEVER infers a workflow from tags, assignee, or title text: a
+       * confident answer nothing durably backs is worse than a stated gap,
+       * and the gap is itself the thing worth showing — the operator can see
+       * how many tasks have no workflow, which is what the gates work exists
+       * to fix.
+       *
+       * BOTH GATE-STATE SOURCES ARE RETURNED, deliberately unmerged. The issue's
+       * `gate_status` map and the `participation_record` rows are written by two
+       * engines that do not read each other (135 `dispatched` vs 1 `satisfied`
+       * graph-wide). Picking one would present a settled answer where the graph
+       * holds two, so the client shows both and flags disagreement.
+       *
+       * DATA COMES FROM NEOTOMA ONLY. This deliberately does NOT shell out to
+       * `gh` — /api/pull-requests is and stays "the ONE route whose facts come
+       * from GitHub rather than Neotoma", and a second such route is not being
+       * added here.
+       *
+       * Read-only, like every route in this file.
+       */
+      server.middlewares.use("/api/task-workflow", async (req, res) => {
+        const id = new URL(req.url ?? "/", "http://localhost").searchParams.get("id") ?? "";
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Cache-Control", "no-store");
+
+        if (!/^ent_[0-9a-f]+$/.test(id)) {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: "Malformed entity id." }));
+          return;
+        }
+
+        try {
+          res.end(JSON.stringify({ link: await resolveTaskWorkflow(id) }));
         } catch (err) {
           res.statusCode = 502;
           res.end(JSON.stringify({ error: (err as Error).message }));
