@@ -50,6 +50,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from hallucination_filter import screen_transcription
+from spoken_languages import spoken_languages
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 FALLBACK_TAILER = REPO_ROOT / "execution" / "scripts" / "live_transcript_tail.py"
@@ -825,7 +826,7 @@ def session_update_message(
     model: str = DEFAULT_MODEL,
     silence_duration_ms: int | None = None,
     prefix_padding_ms: int | None = None,
-    language: str | None = DEFAULT_LANGUAGE,
+    language: str | None = None,
 ) -> dict:
     """The Realtime session config.
 
@@ -841,21 +842,26 @@ def session_update_message(
     explicit, so the configuration the session runs under is visible in the
     request rather than inherited from a default that can change underneath us.
 
-    `language` is load-bearing for a failure the post-hoc filter structurally
-    cannot reach. Left unset, the model decodes silence into whatever language
-    it likes, and a Latin-script guess ("Nein.", "Buonasera.") is invisible to
-    `script_mismatch` and carries no diacritic for `foreign_diacritic` to see.
-    Pinning the language does not filter those turns — it stops them being
-    generated. Measured on identical non-speech audio, 24 turns per arm:
-    unpinned produced 15 foreign-language fabrications, pinned produced 2, and
-    the Latin-script foreign class (Czech, Dutch, Indonesian) disappeared
-    entirely. The field is accepted by the session and echoed back in
-    `session.updated` as `transcription.language`.
+    `language` is DELIBERATELY UNSET BY DEFAULT, and that is a measured
+    decision rather than an oversight.
 
-    Pass `language=None` to restore auto-detection for a genuinely
-    multilingual session; the operator's own English/Spanish code-switching is
-    unaffected, because a pinned language biases decoding rather than
-    hard-restricting output.
+    Pinning it does suppress fabrication: on identical non-speech audio, 24
+    turns per arm, unpinned produced 15 foreign-language fabrications and
+    pinned `en` produced 2, with the Latin-script foreign class eliminated. It
+    prevents rather than filters, which would be strictly better — if the
+    session were monolingual.
+
+    It is not. The API forces a SINGLE language: `["en","es","ca"]`,
+    `"en,es,ca"` and `"auto"` are all rejected (`invalid_value`), and only one
+    ISO code is accepted. The operator speaks English, Spanish and Catalan, and
+    15.8% of real transcribed turns in the capture corpus are clearly Spanish.
+    Pinning `en` would therefore degrade a sixth of genuine speech to suppress
+    fabricated turns that the orthography check already catches when they carry
+    any foreign letter. That is a worse regression than the defect.
+
+    So the pin stays available for a caller that genuinely has a monolingual
+    session, and is off by default. Do not "fix" this by pinning the primary
+    language — the multilingual case is the operator's normal case.
 
     The `OpenAI-Beta: realtime=v1` era shape now fails closed with
     `beta_api_shape_disabled`; this is the current one (ateles#625).
@@ -1076,7 +1082,6 @@ async def stream_session(
                         model,
                         silence_duration_ms=vad_silence_ms,
                         prefix_padding_ms=vad_prefix_padding_ms,
-                        language=expected_language,
                     )
                 )
             )
@@ -1106,6 +1111,21 @@ async def stream_session(
                             }
                         )
                     )
+
+            # Resolved once per session rather than per turn: the orthography
+            # check runs on every completed turn, and a network read there
+            # would put Neotoma on the transcription hot path. A session that
+            # outlives a locale change picks it up on the next start.
+            language_set = spoken_languages()
+            log(
+                f"spoken languages: {'/'.join(language_set.languages)} "
+                f"(source: {language_set.source})"
+            )
+            if not language_set.is_fresh:
+                log(
+                    "WARNING: spoken languages are NOT a live read of "
+                    f"locale_profile — {language_set.detail}"
+                )
 
             async def pump_events() -> None:
                 nonlocal index
@@ -1169,6 +1189,7 @@ async def stream_session(
                                 expected_language=expected_language,
                                 window_seconds=max(0.0, end_s - start_s),
                                 vad_closed=vad_closed,
+                                plausible_languages=language_set.languages,
                             )
                             if verdict.filtered:
                                 log(

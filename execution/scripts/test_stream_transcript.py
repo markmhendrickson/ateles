@@ -131,39 +131,29 @@ def _transcription(msg: dict) -> dict:
     return msg["session"]["audio"]["input"]["transcription"]
 
 
-def test_session_pins_the_transcription_language():
-    """Unpinned, the model decodes silence into whatever language it likes, and
-    a Latin-script guess is invisible to both script and diacritic checks.
+def test_session_does_not_pin_a_language_by_default():
+    """Pinning suppresses fabrication but the API forces ONE language.
 
-    This is prevention, not filtering: measured on identical non-speech audio,
-    24 turns per arm, unpinned produced 15 foreign-language fabrications and
-    pinned produced 2, with the Latin-script foreign class eliminated.
+    Measured: pinning cuts fabrications from 15/24 to 2/24 on non-speech audio,
+    so it is tempting. But `["en","es","ca"]`, `"en,es,ca"` and `"auto"` are all
+    rejected by the API — only a single ISO code is accepted — and the operator
+    speaks three languages, with 15.8% of real corpus turns clearly Spanish.
+    Pinning `en` would degrade a sixth of genuine speech to suppress turns the
+    orthography check already catches. Default-off is the measured choice, not
+    an oversight; do not "fix" this by pinning the primary language.
     """
     transcription = _transcription(st.session_update_message())
-    assert transcription["language"] == st.DEFAULT_LANGUAGE, (
-        "an unpinned session invents turns in arbitrary languages"
+    assert "language" not in transcription, (
+        "pinning one language degrades the operator's other two"
     )
     assert transcription["model"] == st.DEFAULT_MODEL
 
 
-def test_language_pin_can_be_disabled_for_a_multilingual_session():
-    """`None` restores auto-detection; the key must be absent, not null."""
-    transcription = _transcription(st.session_update_message(language=None))
-    assert "language" not in transcription
+def test_language_pin_is_available_for_a_genuinely_monolingual_session():
+    """The capability stays reachable for a caller that really is monolingual."""
+    transcription = _transcription(st.session_update_message(language="es"))
+    assert transcription["language"] == "es"
     assert transcription["model"] == st.DEFAULT_MODEL
-
-
-def test_language_flag_reaches_the_session_message():
-    """A flag that parses but never reaches the socket is not configurable.
-
-    `--language` already drove the hallucination filter; it must now also pin
-    the session, or the two halves disagree about what language is expected.
-    """
-    args = st.build_parser().parse_args(["--language", "es"])
-    assert args.language == "es"
-    assert _transcription(st.session_update_message(language=args.language))[
-        "language"
-    ] == "es"
 
 
 def test_session_vad_tuning_is_overridable():

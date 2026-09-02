@@ -401,27 +401,38 @@ _LATIN_DIACRITICS_BY_LANGUAGE = {
     "nl": "ëïéèü",
 }
 
-# Sessions are assumed to admit the operator's own languages even when the
-# expected language is narrower, so code-switching never reads as fabrication.
+# The languages the operator actually SPEAKS. This is operator configuration,
+# so the real source is the ``locale_profile`` entity in Neotoma, resolved at
+# runtime by ``spoken_languages.spoken_languages()``. The tuple here is only
+# the fallback used when that is unreachable — see ``spoken_languages`` for why
+# the degraded path is neither open nor closed.
 #
-# This is the set of languages the operator actually SPEAKS, not the set they
-# could read. It was ("en", "es", "ca", "fr", "de", "pt", "it"), which admitted
-# every diacritic in German, French, Portuguese and Italian and so let a whole
-# class of fabrication through: "Möchtest du ein Feuer?", "Und das hängt an der
-# Korrex auf." and "Taparvo sessões." all arrived during silence in English
-# sessions and all passed. Measured over the full 1137-row capture corpus, the
-# narrowing to ("en", "es") changes exactly 3 verdicts — those 3 rows — and all
-# 3 are genuine fabrications: 3 true positives, 0 false positives.
+# It was ("en", "es", "ca", "fr", "de", "pt", "it") — languages the operator can
+# READ — which admitted every German, French, Portuguese and Italian diacritic
+# and let a class of fabrication through: "Möchtest du ein Feuer?", "Und das
+# hängt an der Korrex auf." and "Taparvo sessões." all arrived during silence in
+# English sessions and all passed.
 #
-# It is safe precisely because the operator's real Spanish is dense in the
-# characters that stay allowed: á appears in 134 rows, í in 149, ó in 117, é in
-# 111, ú in 76, ñ in 27, ü in 1 (all genuine speech). Every character the
-# narrowing newly rejects appears exactly ONCE in the whole corpus, and every
-# one of those single occurrences is a fabricated turn.
+# The correction is narrower but NOT ("en", "es"). Catalan was briefly dropped
+# on the evidence that the capture corpus contained no Catalan speech. That
+# inference was wrong in a way worth naming: absence from a sample is not
+# absence from the operator's speech. The operator speaks Catalan; the corpus
+# simply had not recorded any. A check confident about what it could not see is
+# the same failure this filter exists to catch.
 #
-# Widen this only for an operator who genuinely speaks the added language;
-# adding a language to read is what created the gap.
-DEFAULT_PLAUSIBLE_LANGUAGES = ("en", "es")
+# Measured over the full 1145-row corpus, narrowing to ("en", "es", "ca")
+# changes exactly 3 verdicts and all 3 are genuine fabrications: 3 true
+# positives, 0 false positives. Restoring Catalan costs nothing against the
+# corpus — the German and Portuguese catches are unaffected.
+#
+# Safe because the operator's real Spanish is dense in the characters that stay
+# allowed (á 134 rows, í 149, ó 117, é 111, ú 76, ñ 27), while every character
+# this rejects appears exactly ONCE and each is a fabricated turn.
+FALLBACK_PLAUSIBLE_LANGUAGES = ("en", "es", "ca")
+
+# Back-compat alias: callers that pass no explicit set get the fallback, and
+# the runtime-resolved set is threaded in by the streaming path.
+DEFAULT_PLAUSIBLE_LANGUAGES = FALLBACK_PLAUSIBLE_LANGUAGES
 
 
 def _allowed_diacritics(languages: tuple[str, ...]) -> set[str]:

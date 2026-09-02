@@ -404,6 +404,8 @@ def test_a_short_turn_is_never_filtered_on_duration(text, duration_s):
         "¿Qué opinas de la sesión?",                # ¿, é, ó
         "Una ambigüedad tuya, y después ayudarte.", # ü, é
         "De dónde salió esto, más o menos.",        # ó, á
+        "Això és el català, si us plau.",           # Catalan à, ï
+        "La sessió d'aquest matí és a les vuit.",   # Catalan ó, è
     ],
 )
 def test_code_switching_into_the_operators_own_languages_survives(text):
@@ -433,9 +435,11 @@ def test_latin_script_fabrications_outside_the_spoken_languages_are_caught(text)
     All three arrived during silence in English sessions and all three passed
     while German, French, Portuguese and Italian were treated as plausible.
     They are the ONLY three verdicts that change across the full 1137-row
-    corpus when the set narrows to the languages the operator actually speaks,
-    and all three are genuine fabrications — 3 true positives, 0 false
-    positives.
+    corpus when the set narrows to the languages the operator actually speaks
+    (en/es/ca), and all three are genuine fabrications — 3 true positives, 0
+    false positives. Catalan is IN the set: it was briefly dropped on the
+    reasoning that the corpus contained none, which confused absence from a
+    sample with absence from the operator's speech.
     """
     verdict = screen_transcription(text, expected_language="en", vad_closed=True)
     assert verdict.filtered, f"{text!r} is a fabrication"
