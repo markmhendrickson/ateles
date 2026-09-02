@@ -70,8 +70,10 @@ GitHub trigger layer (ateles#80 — see github_gateway.py / swarm_dispatch.py):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
+import socket
 import sys
 import time
 from pathlib import Path
@@ -191,6 +193,12 @@ from lib.daemon_runtime.task_lifecycle import (  # noqa: E402
     TaskStatus,
     set_task_status,
 )
+from lib.daemon_runtime.task_claim import (  # noqa: E402
+    CLAIM_HARNESS,
+    HEARTBEAT_SECONDS,
+    ClaimStore,
+    new_runner_id,
+)
 from lib.notify import Notifier, Priority  # noqa: E402
 from lib.activity import ActivityLogger  # noqa: E402
 
@@ -274,6 +282,100 @@ RUN_EMAIL = os.environ.get("APIS_RUN_EMAIL", "0") == "1"
 # under-specified (no clear goal/constraints/tooling), park it in awaiting_input
 # and email the operator the specific gaps instead of executing. Default off.
 READINESS_GATE = os.environ.get("APIS_READINESS_GATE", "0") == "1"
+
+# ── Claim + lease ───────────────────────────────────────────────────────────
+# The pull-model primitive: an agent CLAIMS a task rather than a router
+# assigning it. One mechanism serializes concurrent claimants AND expires when
+# a runner dies. Default ON; set APIS_CLAIM_ENABLED=0 to fall back to the old
+# unclaimed path while rolling out.
+CLAIM_ENABLED = os.environ.get("APIS_CLAIM_ENABLED", "1") == "1"
+
+
+def _claim_context() -> dict:
+    """Identity half of the claim: WHICH host and checkout holds it.
+
+    Task observations record what happened; they do not record where. This is
+    required for the cloud move and is not inferable from "it's my machine".
+    """
+    ctx: dict = {"origin_device": socket.gethostname(), "cwd": os.getcwd()}
+    try:
+        root = Path(__file__).resolve().parents[3]
+        ctx["repo"] = root.name
+        ctx["worktree_path"] = str(root)
+        head = (root / ".git" / "HEAD")
+        if head.exists():
+            ctx["branch"] = head.read_text().strip().rsplit("/", 1)[-1]
+    except Exception:  # noqa: BLE001 — context is best-effort, never fatal
+        pass
+    return ctx
+
+
+def _build_claim_store():
+    """ClaimStore backed by Neotoma HTTP, or None when unavailable.
+
+    Returns None (rather than raising) when there is no token: with
+    CLAIM_ENABLED on and no store, dispatch_task fails closed and does not run
+    unclaimed work.
+    """
+    base = os.environ.get("NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com")
+    token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
+    if not token:
+        log.warning(f"[{DAEMON_NAME}] no bearer token — claim store unavailable")
+        return None
+
+    import httpx
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    def _store_fn(entities, idempotency_key=None):
+        resp = httpx.post(
+            f"{base}/store",
+            headers=headers,
+            json={"entities": entities, "idempotency_key": idempotency_key},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def _read_fn(key):
+        # Look the claim row up by its canonical (harness, native_session_id).
+        resp = httpx.post(
+            f"{base}/entities/query",
+            headers=headers,
+            json={
+                "entity_type": "agent_session",
+                "snapshot_filters": {
+                    "harness": CLAIM_HARNESS,
+                    "native_session_id": key,
+                },
+                "limit": 1,
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        rows = resp.json().get("entities") or resp.json().get("results") or []
+        return rows[0] if rows else None
+
+    return ClaimStore(_store_fn, _read_fn)
+
+
+_claims = _build_claim_store() if CLAIM_ENABLED else None
+
+
+async def _heartbeat_loop(claims, claim) -> None:
+    """Refresh the lease until cancelled.
+
+    Cancellation (clean exit) and process death (SIGKILL) both stop this loop.
+    The difference is that a clean exit also releases the claim explicitly,
+    while a kill leaves the lease to lapse — which is the whole point.
+    """
+    while True:
+        await asyncio.sleep(HEARTBEAT_SECONDS)
+        try:
+            claims.heartbeat(claim)
+        except Exception as exc:  # noqa: BLE001 — never kill the dispatch
+            log.warning(f"[{DAEMON_NAME}] heartbeat failed for {claim.task_id}: {exc}")
+
 
 # Dispatch timeout per agent invocation (seconds).
 DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
@@ -656,6 +758,34 @@ async def dispatch_task(
         job.finished(f"task {entity_id} → {skill} routed (dry-run, gate: {_gate_label})")
         return
 
+    # ── Claim + lease ────────────────────────────────────────────────────────
+    # Take an atomic claim BEFORE marking EXECUTING. Two jobs, one primitive:
+    # it serializes concurrent claimants (mutual exclusion) and it expires on
+    # its own when this process dies (crash recovery).
+    #
+    # FAIL-CLOSED (ent_670cacab2f46fd9547ced7ed, approved; ateles#714): if the
+    # claim cannot be taken or verified, do NOT start work. Running unclaimed
+    # recreates the untracked population this exists to eliminate, and would let
+    # two agents execute the same task.
+    _runner_id = new_runner_id()
+    _claim = None
+    if CLAIM_ENABLED and _claims is not None:
+        _claim = _claims.acquire(entity_id, _runner_id, context=_claim_context())
+        if not _claim.held:
+            if _claim.lost_race:
+                log.info(
+                    f"[{DAEMON_NAME}] task {entity_id} already claimed by "
+                    f"{_claim.holder} — leaving it to them"
+                )
+                job.finished(f"task {entity_id} claimed elsewhere ({_claim.holder})")
+            else:
+                log.warning(
+                    f"[{DAEMON_NAME}] could not claim task {entity_id} "
+                    f"({_claim.reason}) — not starting work (fail-closed)"
+                )
+                job.escalated(f"task {entity_id} unclaimable: {_claim.reason}")
+            return
+
     # Lifecycle: about to spawn the T4 agent.
     set_task_status(
         entity_id, TaskStatus.EXECUTING, handler=DAEMON_NAME,
@@ -705,6 +835,14 @@ async def dispatch_task(
                f"Dispatched {skill} for task {entity_id} (trigger={trigger}): {title}",
                stage="kickoff")
 
+    _hb_task = None
+    if _claim is not None and _claim.held and _claims is not None:
+        # Heartbeat while the agent runs, so a long but healthy run never lets
+        # its own lease lapse. The task stops the moment this coroutine's
+        # `finally` runs; if the PROCESS is killed it stops too — which is
+        # precisely how the lease decays and the task frees itself.
+        _hb_task = asyncio.create_task(_heartbeat_loop(_claims, _claim))
+
     try:
         result = await _spawn_harness_skill(
             skill, entity_id, snapshot, trigger, notifier, role=role,
@@ -722,6 +860,21 @@ async def dispatch_task(
         )
         job.failed(f"task {entity_id} → {skill} dispatch failed: {type(exc).__name__}")
         raise
+    finally:
+        # Stop the heartbeat and hand the claim back. This closes the window
+        # FAST on any Python-level exit (return, exception, timeout).
+        #
+        # It is deliberately NOT what makes the design correct: a SIGKILL or
+        # power loss runs no `finally` at all. In that case the heartbeat simply
+        # stops, `last_activity_at` goes stale, and the lease lapses on its own
+        # — correctness requires no cooperation from the dying process. This
+        # block is an optimisation on top of that guarantee.
+        if _hb_task is not None:
+            _hb_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await _hb_task
+        if _claim is not None and _claim.held and _claims is not None:
+            _claims.release(_claim)
 
     if result.ok:
         _run_stage("assistant", f"{skill} completed (trigger={trigger}).",

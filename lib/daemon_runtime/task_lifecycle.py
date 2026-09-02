@@ -104,6 +104,10 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
     TaskStatus.ROUTED.value: frozenset(
         {
             TaskStatus.EXECUTING.value,
+            # Claim released: the runner never picked it up (or died holding
+            # it), so the task goes back on the claimable queue. Under the pull
+            # model this is a normal recovery, not an anomaly.
+            TaskStatus.PENDING.value,
             TaskStatus.AWAITING_APPROVAL.value,
             TaskStatus.AWAITING_INPUT.value,
             TaskStatus.BLOCKED.value,
@@ -113,6 +117,10 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
     TaskStatus.EXECUTING.value: frozenset(
         {
             TaskStatus.VERIFIED.value,
+            # Lease lapsed → released back to the queue by the watchdog. The
+            # runner was SIGKILLed and wrote nothing; this is the compensating
+            # transition that un-pins a task stranded at EXECUTING.
+            TaskStatus.PENDING.value,
             TaskStatus.DONE.value,
             TaskStatus.FAILED.value,
             TaskStatus.BLOCKED.value,
