@@ -344,14 +344,16 @@ def _build_claim_store():
 
     def _read_fn(key):
         # Look the claim row up by its canonical (harness, native_session_id).
+        # Filter shape matches gate_waive / prod-accepted `{op,value}` form —
+        # bare strings are rejected by the entities/query contract.
         resp = httpx.post(
             f"{base}/entities/query",
             headers=headers,
             json={
                 "entity_type": "agent_session",
                 "snapshot_filters": {
-                    "harness": CLAIM_HARNESS,
-                    "native_session_id": key,
+                    "harness": {"op": "eq", "value": CLAIM_HARNESS},
+                    "native_session_id": {"op": "eq", "value": key},
                 },
                 "limit": 1,
             },

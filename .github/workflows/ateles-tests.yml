@@ -71,6 +71,12 @@ jobs:
         run: uv run --extra dev python -m pytest execution/daemons/anthus/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
+      # ateles#733 (qa lens, PR #733 round 2): lib/daemon_runtime/** is on the
+      # path trigger but was never collected — only lib/approval/ ran. Without
+      # this step, claim mutual-exclusion + raw_fragments holder regressions
+      # stay local-green and CI-invisible.
+      - name: Run daemon_runtime lib tests
+        run: uv run --extra dev python -m pytest lib/daemon_runtime/ -q
       # ateles#524 (qa lens, PR #527 round 2): execution/scripts/ has its own
       # test_*.py files (SOPS token fallback, Loxia review, agent-doc render,
       # transcription) but no lane ran them — this closes that gap.
