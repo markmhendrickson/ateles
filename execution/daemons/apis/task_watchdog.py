@@ -143,7 +143,33 @@ class TaskWatchdog:
         dispatch_task closure) used to re-dispatch a retryable task.
         """
         now = time.time()
-        counts = {"scanned": 0, "retried": 0, "escalated": 0, "skipped_backoff": 0}
+        counts = {
+            "scanned": 0, "retried": 0, "escalated": 0,
+            "skipped_backoff": 0, "skipped_halted": 0,
+        }
+
+        # ── Neotoma halt (task ent_670cacab2f46fd9547ced7ed) ─────────────────
+        # The watchdog KEEPS SWEEPING during a halt — it is an observer, and
+        # halting the thing that drains the backlog would make recovery
+        # impossible. What it must not do is act: a re-dispatch would be work
+        # with no record, and the ESCALATE branch writes BLOCKED + blocked_reason
+        # to Neotoma, so during an outage it would either fail silently or, worse,
+        # burn a task's whole attempt budget against an outage that is not the
+        # task's fault. So: sweep, count, log, act on nothing.
+        #
+        # This is also the drain path. Tasks left untouched by a halted dispatch
+        # keep their pre-existing status and age, so once the record returns this
+        # same sweep sees them stalled and re-dispatches them through the existing
+        # backoff — no new deferral semantics, just the ones already here.
+        gate = _reachability_gate()
+        if gate is not None and gate.halted:
+            log.warning(
+                "[watchdog] Neotoma unreachable — sweeping but not acting; "
+                "deferred tasks drain once the record returns"
+            )
+            counts["skipped_halted"] = 1
+            return counts
+
         try:
             tasks = _query_tasks(QUERY_LIMIT)
         except Exception as exc:  # noqa: BLE001 — never let a query error kill the loop
@@ -210,6 +236,22 @@ class TaskWatchdog:
 
 
 # ── module-level I/O helpers ────────────────────────────────────────────────
+
+
+def _reachability_gate():
+    """The process-wide Neotoma halt gate, or None if unavailable.
+
+    Fail-open on import: the watchdog is an observer and must keep running even
+    if the gate module is missing. Returning None means "no halt known", which
+    degrades to the pre-halt behaviour rather than to a stuck sweeper.
+    """
+    try:
+        from lib.daemon_runtime.neotoma_reachability import shared_gate
+
+        return shared_gate()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("[watchdog] reachability gate unavailable: %s", exc)
+        return None
 
 
 def _notify(notifier, entity_id: str, snapshot: dict, attempts: int) -> None:

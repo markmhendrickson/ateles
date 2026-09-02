@@ -191,6 +191,10 @@ from lib.daemon_runtime.task_lifecycle import (  # noqa: E402
     TaskStatus,
     set_task_status,
 )
+from lib.daemon_runtime.neotoma_reachability import (  # noqa: E402
+    HaltedError,
+    shared_gate,
+)
 from lib.notify import Notifier, Priority  # noqa: E402
 from lib.activity import ActivityLogger  # noqa: E402
 
@@ -359,6 +363,18 @@ def _seen_created(entity_id: str) -> bool:
             _created_seen.pop(eid, None)
     _created_seen[entity_id] = time.time()
     return False
+
+
+def _unsee_created(entity_id: str) -> None:
+    """Release a `task.created` claim so a later redelivery still dispatches.
+
+    Used when dispatch is REFUSED rather than handled — the Neotoma halt. The
+    claim above exists to stop 6.2x duplicate delivery re-running the create
+    path; it must not double as a record that the task was dealt with. A halted
+    dispatch handled nothing, so leaving the claim in place would let the halt
+    silently consume the task's only remaining delivery.
+    """
+    _created_seen.pop(entity_id, None)
 from task_watchdog import TaskWatchdog  # noqa: E402
 
 
@@ -446,6 +462,35 @@ async def dispatch_task(
     """
     title = snapshot.get("title", "(untitled)")
     current_status = snapshot.get("status")
+
+    # ── Neotoma hard-dependency halt (task ent_670cacab2f46fd9547ced7ed) ──────
+    # FIRST, before any status write, any gate decision, any spawn. Neotoma is
+    # the swarm's level of truth: if it cannot be read, the swarm does not do
+    # work. Dispatching anyway produces work with no record — on 2026-09-01/02
+    # agents completed real work whose task entities never landed, recovered
+    # only because the operator relayed it into GitHub by hand.
+    #
+    # Position matters as much as presence. Placed here, a halted dispatch has
+    # written nothing, so the task is left in EXACTLY its pre-existing state and
+    # the watchdog's existing deferral picks it up when the record returns. Any
+    # later and the refusal would itself be an unrecordable state change.
+    #
+    # No try/except around this call: swallowing it would defeat the halt. The
+    # announcement is edge-triggered inside the gate, so a halt blocking N tasks
+    # pages once, not N times (#645 — lib/notify has no rate limiting of its own).
+    _gate = shared_gate()
+    try:
+        _gate.raise_if_halted()
+    except HaltedError as halt:
+        _gate.announce(notifier)
+        log.error(
+            f"[{DAEMON_NAME}] HALTED — refusing to dispatch task {entity_id!r} "
+            f"(trigger={trigger}): {halt.reason}. Task left untouched in "
+            f"status={current_status!r} for the watchdog to requeue."
+        )
+        raise
+    # Reachable again after a halt: announce the recovery on the same edge.
+    _gate.announce(notifier)
 
     # The snapshot read fine, so any prior unreadable streak for this task is
     # over; forget it so a later blip starts counting from zero rather than
@@ -726,13 +771,50 @@ async def dispatch_task(
     if result.ok:
         _run_stage("assistant", f"{skill} completed (trigger={trigger}).",
                    stage="done")
-        set_task_status(
+        # ── Mid-task outage: never claim completion you could not record ──────
+        # (task ent_670cacab2f46fd9547ced7ed, part 2.) The agent was already
+        # running when the record went away. The work itself is NOT abandoned —
+        # the reasoning finished and the write is attempted — but a sign-off
+        # whose write failed is precisely the unaccountable work this change
+        # exists to prevent. `set_task_status` is fail-open by design and
+        # returns False when the correction did not land; every caller before
+        # this one discarded that boolean, so a failed DONE reported success and
+        # the task was left EXECUTING with nobody told.
+        #
+        # On write failure: do NOT retry harder (that is how slow becomes
+        # unreachable), do NOT write a substitute status (that write would fail
+        # for the same reason and could half-land). Leave the task in its
+        # pre-existing EXECUTING state, which is exactly what the watchdog's
+        # stall sweep already reclaims — it re-dispatches ROUTED/EXECUTING tasks
+        # past the stall window with backoff, so the task is requeued rather
+        # than lost. Silence beats a false verdict.
+        recorded = set_task_status(
             entity_id, TaskStatus.DONE, handler=DAEMON_NAME,
             from_status=TaskStatus.EXECUTING.value,
             result=f"{skill} completed (trigger={trigger})",
             key_suffix=trigger,
         )
-        job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
+        if recorded:
+            job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
+        else:
+            log.error(
+                f"[{DAEMON_NAME}] task {entity_id!r} finished {skill} but the DONE "
+                "write did NOT land — refusing to report success. Left in "
+                "status=executing for the watchdog to requeue."
+            )
+            job.failed(
+                f"task {entity_id} → {skill} completed but could not be recorded"
+            )
+            notifier.send(
+                f"{skill} completed on {entity_id} but the completion could NOT be "
+                "recorded in Neotoma.\n"
+                "  The task is deliberately left `executing` rather than reported "
+                "done — it will be requeued by the watchdog.\n"
+                "  Re-running it may repeat work already performed; check before "
+                "forcing it forward.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
     else:
         reason = result.error or f"rc={result.returncode}"
         _run_stage("assistant", f"{skill} failed (trigger={trigger}): {reason}",
@@ -909,10 +991,21 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
                 priority=Priority.INFO,
                 handler=DAEMON_NAME,
             )
-        await dispatch_task(
-            entity_id, snapshot, trigger="created", notifier=notifier,
-            snapshot_hydrated=event.hydrated,
-        )
+        try:
+            await dispatch_task(
+                entity_id, snapshot, trigger="created", notifier=notifier,
+                snapshot_hydrated=event.hydrated,
+            )
+        except HaltedError:
+            # The swarm is halted: this task was NOT handled. Release the
+            # duplicate-delivery claim so a redelivery (or the watchdog sweep
+            # once the record returns) can still pick it up, and leave the task
+            # in its existing status — dispatch_task wrote nothing. Swallowed
+            # here and only here, at the SSE loop boundary, so one halted task
+            # does not tear down the subscription; the operator already got the
+            # single edge-triggered page from the gate.
+            _unsee_created(entity_id)
+            return
 
     elif action == "updated":
         # Tasks dispatch on creation (and on due_today when AUTO_EXECUTE is set);
@@ -938,10 +1031,15 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
             log.info(
                 f"[{DAEMON_NAME}] AUTO_EXECUTE=1 — dispatching due task {entity_id}"
             )
-            await dispatch_task(
-                entity_id, snapshot, trigger="due_today", notifier=notifier,
-                snapshot_hydrated=event.hydrated,
-            )
+            try:
+                await dispatch_task(
+                    entity_id, snapshot, trigger="due_today", notifier=notifier,
+                    snapshot_hydrated=event.hydrated,
+                )
+            except HaltedError:
+                # Halted: nothing dispatched, nothing written. The due date does
+                # not move, so the next due_today (or the watchdog) retries.
+                return
         else:
             log.info(
                 f"[{DAEMON_NAME}] AUTO_EXECUTE off — operator notification sent for {entity_id}"
