@@ -58,6 +58,10 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 
 from lib.daemon_runtime import AgentDefinition, AgentLoader  # noqa: E402
 from dispatch_usage import DispatchUsage, parse_dispatch_usage  # noqa: E402
+from foundation import (  # noqa: E402
+    SWARM_FOUNDATION_CONTRACT,  # noqa: F401 — re-exported beside the sibling contracts
+    foundation_contract,
+)
 from harness_router import (  # noqa: E402
     configured_providers,
     cool_down,
@@ -386,12 +390,20 @@ def build_system_prompt(
     and a second flag would just relocate the forgetting.  It is injected in
     degraded mode too, for the same reason the GitHub contract is — checking for
     existing work is useful regardless of which definition loaded.
+
+    The design-basis contract (foundation.foundation_contract: the
+    SWARM_FOUNDATION_CONTRACT rule plus the kernel documents actually on this
+    checkout) follows on the same flag, for the same reason.  It is EMPTY — and
+    so absent — on a checkout with no docs/foundation/conformance.md, so the
+    prompt only ever names a reading list the agent can open; the day a kernel
+    document lands, the injected text changes to name it.
     """
-    contracts = (
-        f"{SWARM_GITHUB_CONTRACT}\n\n---\n\n{SWARM_PRIOR_ART_CONTRACT}"
-        if include_github_contract
-        else ""
-    )
+    contracts = ""
+    if include_github_contract:
+        contracts = f"{SWARM_GITHUB_CONTRACT}\n\n---\n\n{SWARM_PRIOR_ART_CONTRACT}"
+        foundation = foundation_contract()
+        if foundation:
+            contracts = f"{contracts}\n\n---\n\n{foundation}"
     definition_prompt = (agent_def.prompt_markdown or "").strip()
     if definition_prompt:
         if include_github_contract:
