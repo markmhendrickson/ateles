@@ -103,6 +103,36 @@ def parse_dotenv(text: str) -> dict[str, str]:
     return out
 
 
+def merge_preserve_unmanaged(existing: dict[str, str], managed_keys: set[str],
+                              resolved: dict[str, str]) -> dict[str, str]:
+    """Merge a freshly-resolved key set into an existing snapshot, Design B contract.
+
+    A `.sops.enc` snapshot can be dual-written: `secrets_publish.py` owns the
+    keys in the manifest's `refs` (1Password-backed), while
+    `secrets_extract_host.py` merge-writes host-only keys into the SAME file
+    (see docs/secrets_management.md, "Host-only keys" / Design B). A publish
+    that blindly replace-encrypts from `resolved` alone drops any key the host
+    extractor wrote, because that key is absent from `resolved` (it does not
+    live in 1Password) and not in `managed_keys` either.
+
+    Contract: a key survives untouched unless it is in `managed_keys`. Keys
+    outside `managed_keys` -- host-only keys, or any key this run didn't
+    resolve -- pass through from `existing` unchanged. Keys in
+    `managed_keys` always take the freshly `resolved` value.
+
+    Callers MUST pass `managed_keys == set(resolved.keys())` (i.e. only keys
+    this run actually resolved a fresh value for) -- never a broader set like
+    "every key this run was asked to look up." A key the caller intended to
+    manage but didn't resolve this run (skipped, or the read failed) must
+    stay in `managed_keys`'s complement, or it is silently deleted here
+    instead of left untouched -- the exact host-only-key-loss bug this
+    function exists to prevent, just triggered from the other side.
+    """
+    merged = {k: v for k, v in existing.items() if k not in managed_keys}
+    merged.update(resolved)
+    return merged
+
+
 def merge_into_env_file(env_file: Path, updates: dict[str, str]) -> list[str]:
     """Merge `updates` into a dotenv file, preserving unmanaged keys.
 
