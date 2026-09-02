@@ -281,10 +281,11 @@ class ClaimStore:
             "kind": "claim",
             "status": "running",
             "title": f"claim {task_id}",
-            # `holder` and `task_id` are not declared on agent_session (31
-            # fields, verified via describe_entity_type); Neotoma stores
-            # undeclared keys as raw_fragments and returns them on read, which
-            # is how the holder survives the round-trip.
+            # `holder` and `task_id` are declared on agent_session as of schema
+            # 0.2.0 (added 2026-09-02 for exactly this purpose), so they land in
+            # the entity snapshot. On 0.1.0 they were undeclared and arrived in
+            # a sibling raw_fragments block instead; `_read_claim` merges both,
+            # so the claim stays correct across either schema version.
             "holder": runner_id,
             "task_id": task_id,
             "last_activity_at": _iso(now),
@@ -426,6 +427,21 @@ class ClaimStore:
         return row
 
     def _read_claim(self, key: str) -> dict | None:
+        """Read a claim row, merging raw_fragments over the snapshot.
+
+        `holder` and `task_id` were undeclared on agent_session until schema
+        0.2.0. Neotoma keeps undeclared fields OUT of `snapshot` and returns
+        them in a sibling `raw_fragments` block instead (verified against prod:
+        a store of holder="" came back as snapshot={…} plus
+        raw_fragments={"holder": ""}).
+
+        Reading only `snapshot` therefore made `holder` invisible, every
+        read-back verification fail, and — because the claim is fail-closed —
+        NO agent ever start work. The schema now declares both fields, but this
+        merge is kept deliberately: it makes the claim correct against both
+        schema versions, so a rollback or an instance still on 0.1.0 degrades to
+        working rather than to a total dispatch halt.
+        """
         raw = self._read(key)
         if not raw:
             return None
@@ -435,8 +451,15 @@ class ClaimStore:
             out = dict(inner if isinstance(inner, dict) else snap)
         else:
             out = dict(raw)
-        if isinstance(raw, dict) and raw.get("entity_id"):
-            out.setdefault("entity_id", raw["entity_id"])
+        if isinstance(raw, dict):
+            # Undeclared fields live here; they take precedence because a
+            # declared-field snapshot may simply not carry them at all.
+            fragments = raw.get("raw_fragments")
+            if isinstance(fragments, dict):
+                for k, v in fragments.items():
+                    out.setdefault(k, v)
+            if raw.get("entity_id"):
+                out.setdefault("entity_id", raw["entity_id"])
         return out
 
 

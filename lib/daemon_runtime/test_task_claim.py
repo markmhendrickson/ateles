@@ -36,12 +36,6 @@ class FakeNeotoma:
     success, and the second write's fields overwrite the first's.
     """
 
-    def __init__(self):
-        self.rows: dict[str, dict] = {}
-        self.writes = 0
-        self.fail_next_store = False
-        self.fail_next_read = False
-
     def store(self, entities, idempotency_key=None):
         if self.fail_next_store:
             self.fail_next_store = False
@@ -59,12 +53,40 @@ class FakeNeotoma:
             out.append({"entity_id": row["entity_id"], "action": action})
         return {"entities": out}
 
+    # Fields agent_session declares (schema 0.2.0). Anything else is returned in
+    # a sibling raw_fragments block, NOT in snapshot -- verified against prod.
+    DECLARED = {
+        "harness", "native_session_id", "kind", "title", "summary", "status",
+        "created_at", "last_activity_at", "cwd", "repo", "repo_remote_url",
+        "branch", "git_head_sha", "worktree_path", "origin_device",
+        "trigger_kind", "trigger_ref", "holder", "task_id",
+    }
+
+    def __init__(self, declared=None):
+        self.rows: dict[str, dict] = {}
+        self.writes = 0
+        self.fail_next_store = False
+        self.fail_next_read = False
+        # Overridable so a test can simulate the OLD 0.1.0 schema, where
+        # `holder` was undeclared and hid in raw_fragments.
+        self.declared = self.DECLARED if declared is None else set(declared)
+
     def read(self, key):
         if self.fail_next_read:
             self.fail_next_read = False
             raise RuntimeError("neotoma unreachable")
         row = self.rows.get(key)
-        return {"entity_id": row["entity_id"], "snapshot": dict(row)} if row else None
+        if not row:
+            return None
+        snapshot, fragments = {}, {}
+        for k, v in row.items():
+            if k == "entity_id":
+                continue
+            (snapshot if k in self.declared else fragments)[k] = v
+        out = {"entity_id": row["entity_id"], "snapshot": snapshot}
+        if fragments:
+            out["raw_fragments"] = fragments
+        return out
 
 
 class Clock:
@@ -439,3 +461,50 @@ def test_release_transitions_are_declared_legal():
     # Terminal states are never reopened by a release.
     for terminal in ("done", "declined", "superseded"):
         assert not can_transition(terminal, "pending")
+
+
+# ── 6. schema-shape regression ───────────────────────────────────────────────
+
+
+def test_claim_works_when_holder_arrives_in_raw_fragments():
+    """REGRESSION: `holder` was undeclared on agent_session before schema 0.2.0.
+
+    Neotoma keeps undeclared fields OUT of `snapshot` and returns them in a
+    sibling `raw_fragments` block (verified against prod). Reading only
+    `snapshot` made `holder` invisible, so EVERY read-back verification failed
+    and -- because the claim is fail-closed -- no agent would ever have started
+    work. `_read_claim` merges both blocks, so the claim is correct on either
+    schema version.
+    """
+    legacy = FakeNeotoma(declared=FakeNeotoma.DECLARED - {"holder", "task_id"})
+    clock = Clock()
+    store = ClaimStore(legacy.store, legacy.read, lease_seconds=900, now_fn=clock)
+    task = "ent_task_legacy_schema"
+
+    # Confirm the fake really does hide holder from the snapshot.
+    store.acquire(task, "runner-A")
+    raw = legacy.read(claim_key(task))
+    assert "holder" not in raw["snapshot"], "precondition: holder is undeclared"
+    assert raw["raw_fragments"]["holder"] == "runner-A"
+
+    # The claim must still work end to end.
+    assert store.inspect(task)["holder"] == "runner-A"
+    assert not store.acquire(task, "runner-B").held, "mutual exclusion must hold"
+
+    clock.advance(901)
+    assert store.acquire(task, "runner-C").held, "lease must still lapse"
+
+
+def test_claim_works_when_holder_is_declared_in_the_snapshot():
+    """The schema-0.2.0 shape: holder lands directly in the snapshot."""
+    modern = FakeNeotoma()
+    clock = Clock()
+    store = ClaimStore(modern.store, modern.read, lease_seconds=900, now_fn=clock)
+    task = "ent_task_modern_schema"
+
+    store.acquire(task, "runner-A")
+    raw = modern.read(claim_key(task))
+    assert raw["snapshot"]["holder"] == "runner-A"
+    assert "raw_fragments" not in raw
+
+    assert not store.acquire(task, "runner-B").held
