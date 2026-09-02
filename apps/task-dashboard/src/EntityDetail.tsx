@@ -44,9 +44,18 @@ import {
   type ObservationsPayload,
   DISPATCHABLE_ROLES,
   dispatchability,
+  provenanceCoverage,
   toHistory,
   writtenOnce,
 } from "./taskState";
+import {
+  type WorkflowLink,
+  type WorkflowLinkPayload,
+  WORKFLOW_LINKAGE_FACTS,
+  gateDisagreements,
+  placeOnLifecycle,
+} from "./taskPosition";
+import { PATH_ORDER, VALIDATION_NOTE } from "./lifecycleData";
 import { AssignedTo } from "./AssignedTo";
 import { useRoster } from "./useRoster";
 import { absoluteTime, entityUrl, toBucket } from "./tasks";
@@ -402,14 +411,14 @@ function TaskStatePanel({ snap, id }: { snap: Record<string, unknown>; id: strin
         now is not something Neotoma can answer.
       </p>
 
-      {/* HISTORY — the append-only observation log. */}
+      {/* HISTORY — the append-only observation log, WITH the values. */}
       <div className="mt-[6px] border-t pt-[5px]">
         <div className="mb-[2px] flex items-baseline gap-[8px]">
           <span className="text-[10px] uppercase tracking-[.06em] text-muted-foreground">
             History
           </span>
           <span className="text-[11px] text-muted-foreground">
-            every field change, newest first — Neotoma is append-only
+            every field change and what it changed to, newest first — Neotoma is append-only
           </span>
         </div>
 
@@ -431,22 +440,41 @@ function TaskStatePanel({ snap, id }: { snap: Record<string, unknown>; id: strin
                 filed.
               </p>
             )}
+            <ProvenanceNote history={history} />
             <table className="w-full border-collapse text-[11.5px]">
               <tbody>
                 {history.map((h, i) => (
-                  <tr key={i} className="border-b border-border/50 last:border-b-0">
-                    <td className="w-[128px] py-[2px] pr-2 align-baseline tabular-nums text-muted-foreground">
+                  <tr key={i} className="border-b border-border/50 align-baseline last:border-b-0">
+                    <td className="w-[122px] py-[3px] pr-2 align-baseline tabular-nums text-muted-foreground">
                       {h.at ? absoluteTime(h.at) : "unknown"}
                     </td>
-                    <td className="py-[2px] pr-2 align-baseline">
-                      {h.fields.length ? (
-                        <span className="font-mono text-[11px]">{h.fields.join(", ")}</span>
+                    <td className="py-[3px] pr-2 align-baseline">
+                      {h.changes.length ? (
+                        <div className="flex flex-col gap-[2px]">
+                          {h.changes.map((c) => (
+                            <div key={c.name} className="leading-[1.4]">
+                              <span className="font-mono text-[11px] text-muted-foreground">
+                                {c.name}
+                              </span>
+                              <span className="text-muted-foreground"> = </span>
+                              {/* `title` on the value gives the untruncated
+                                  string on hover, so a long description is
+                                  summarised without being lost. */}
+                              <span
+                                className="font-mono text-[11px]"
+                                title={c.truncated ? c.full : undefined}
+                              >
+                                {c.preview}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
                       ) : (
                         <span className="text-muted-foreground">no fields</span>
                       )}
                     </td>
-                    <td className="w-[64px] py-[2px] text-right align-baseline text-[10px] uppercase tracking-[.04em] text-muted-foreground">
-                      {h.sourced ? "imported" : ""}
+                    <td className="w-[152px] py-[3px] text-right align-baseline">
+                      <WriterCell entry={h} />
                     </td>
                   </tr>
                 ))}
@@ -456,6 +484,435 @@ function TaskStatePanel({ snap, id }: { snap: Record<string, unknown>; id: strin
         )}
       </div>
     </section>
+  );
+}
+
+/**
+ * WHO WROTE THIS CHANGE — and how much the answer is worth.
+ *
+ * Three cases, deliberately styled differently because they carry different
+ * amounts of evidence:
+ *
+ *   real provenance   — the server recorded a client name and tier. Shown plain.
+ *   convention only   — `provenance` was null, but the idempotency key names a
+ *                       component by convention. Shown MUTED and marked "by
+ *                       convention", because anything can write any key. It is
+ *                       a useful hint, not an attribution, and rendering it as
+ *                       though it were attribution is the failure to avoid.
+ *   nothing           — neither. Said plainly rather than left blank.
+ */
+function WriterCell({ entry }: { entry: HistoryEntry }) {
+  const { clientName, attributionTier, conventionName } = entry.writer;
+
+  if (clientName) {
+    return (
+      <span className="text-[10px] leading-[1.35]">
+        <span className="font-mono">{clientName}</span>
+        {attributionTier && (
+          <span className="block text-muted-foreground">{attributionTier.replace(/_/g, " ")}</span>
+        )}
+      </span>
+    );
+  }
+
+  if (conventionName) {
+    return (
+      <span
+        className="text-[10px] leading-[1.35] text-muted-foreground"
+        title={entry.idempotencyKey ?? undefined}
+      >
+        <span className="font-mono">{conventionName}?</span>
+        <span className="block">by convention, unverified</span>
+      </span>
+    );
+  }
+
+  return (
+    <span className="text-[10px] text-muted-foreground">
+      {entry.sourced ? "imported" : "unattributed"}
+    </span>
+  );
+}
+
+/**
+ * ONE LINE ON HOW MUCH OF THIS HISTORY IS ACTUALLY ATTRIBUTABLE.
+ *
+ * Stated once at the top rather than repeated per row. The measured reality on
+ * a task the daemons have touched: the creation observation carries provenance
+ * and every subsequent daemon write carries `provenance: null`. That gap is
+ * shown because it is the identity problem made visible on the page instead of
+ * something found by audit — and when the identity work lands, this line
+ * improves on its own.
+ */
+function ProvenanceNote({ history }: { history: HistoryEntry[] }) {
+  const { attributed, total } = provenanceCoverage(history);
+  if (total === 0 || attributed === total) return null;
+
+  return (
+    <p className="m-0 mb-[3px] text-[11px] leading-[1.4] text-muted-foreground">
+      <span className="text-warn">
+        {attributed} of {total}
+      </span>{" "}
+      {total - attributed === 1 ? "change carries" : "changes carry"} recorded provenance
+      {attributed === 0
+        ? " — none of these writes is attributable to a verified client."
+        : "; the rest were written with none."}{" "}
+      Where a writer is guessed below it comes from the{" "}
+      <code className="text-[10.5px]">idempotency_key</code> naming convention, which is a hint
+      rather than an authenticated identity.
+    </p>
+  );
+}
+
+/**
+ * WHERE THIS TASK SITS ON THE LIFECYCLE.
+ *
+ * The forward path is rendered as a sequence with the current position marked,
+ * because "where along the lifecycle" is a question about ORDER and a list of
+ * badges does not answer it.
+ *
+ * Holds (`awaiting_approval`, `blocked`, …) are NOT rendered as further along
+ * the path — they sit beside it. A hold is a mode a task enters FROM a path
+ * position and returns to, so showing it as step six would answer "does done
+ * come before or after awaiting_approval?", which has no answer.
+ *
+ * OFF-VOCABULARY STATUSES ARE THE MAJORITY, not an edge case: 17,251 of 21,285
+ * tasks (81%) carry a status the state machine never declared. Those render as
+ * the raw value, explicitly outside the lifecycle, with no position guessed.
+ */
+function LifecyclePanel({ snap }: { snap: Record<string, unknown> }) {
+  const position = placeOnLifecycle(snap.status);
+
+  return (
+    <section className="my-[10px] rounded-[7px] border bg-card px-[10px] py-[7px]">
+      <div className="mb-[5px] flex items-baseline gap-[8px]">
+        <h3 className="m-0 text-[10px] font-[650] uppercase tracking-[.06em] text-muted-foreground">
+          Lifecycle
+        </h3>
+        <span className="text-[11px] text-muted-foreground">
+          vocabulary from <code className="text-[10.5px]">task_lifecycle.py</code>; this task's
+          position from its stored <code className="text-[10.5px]">status</code>
+        </span>
+      </div>
+
+      {position.kind === "no_status" && (
+        <p className="m-0 text-[12px] leading-[1.45] text-warn">
+          <strong>No status stored</strong>{" "}
+          <span className="text-muted-foreground">
+            — this task has no position on the lifecycle at all, and nothing will pick it up on the
+            strength of its status.
+          </span>
+        </p>
+      )}
+
+      {position.kind === "off_vocabulary" && (
+        <>
+          <p className="m-0 text-[12px] leading-[1.45] text-warn">
+            <strong>
+              Status <code className="text-[11px]">{position.raw}</code> is outside the lifecycle
+            </strong>{" "}
+            <span className="text-muted-foreground">
+              — it is not one of the eleven states <code className="text-[10.5px]">TaskStatus</code>{" "}
+              declares, so this task has no position on the path below and none is guessed for it.
+            </span>
+          </p>
+          {/* The ungoverned consequence, surfaced rather than left in a
+              docstring: an unknown origin state is exactly the case the
+              transition check waves through. */}
+          <p className="m-0 mt-[3px] text-[11px] leading-[1.4] text-muted-foreground">
+            It is also <strong className="text-bad">ungoverned</strong>: {VALIDATION_NOTE.behaviour}{" "}
+            So this task can move to any status at all, unchecked.
+          </p>
+          <p className="m-0 mt-[3px] text-[11px] leading-[1.4] text-muted-foreground">
+            Not unusual — {WORKFLOW_LINKAGE_FACTS.measuredOn}, 17,251 of 21,285 tasks (81%) carried
+            a status outside the eleven, mostly from imports. Reconciling the vocabulary is tracked
+            separately.
+          </p>
+        </>
+      )}
+
+      {position.kind === "on_lifecycle" && (
+        <>
+          {/* THE PATH. Rendered in order, current position marked. */}
+          <div className="flex flex-wrap items-center gap-[3px]">
+            {PATH_ORDER.map((key, i) => {
+              const here = position.stage.key === key;
+              const passed = position.pathIndex !== null && i < position.pathIndex;
+              return (
+                <span key={key} className="flex items-center gap-[3px]">
+                  {i > 0 && <span className="text-[10px] text-muted-foreground">→</span>}
+                  <span
+                    className={
+                      here
+                        ? "rounded-[4px] bg-[hsl(var(--live)/0.16)] px-[6px] py-[2px] font-mono text-[11px] font-[650] text-live"
+                        : passed
+                          ? "px-[3px] font-mono text-[11px] text-muted-foreground line-through"
+                          : "px-[3px] font-mono text-[11px] text-muted-foreground"
+                    }
+                  >
+                    {key}
+                  </span>
+                </span>
+              );
+            })}
+          </div>
+
+          {/* A hold or exit is BESIDE the path, so it is stated separately
+              rather than drawn as another step in the sequence above. */}
+          {position.pathIndex === null && (
+            <p className="m-0 mt-[4px] text-[12px] leading-[1.45]">
+              <span className="rounded-[4px] bg-[hsl(var(--warn)/0.16)] px-[6px] py-[2px] font-mono text-[11px] font-[650] text-warn">
+                {position.stage.key}
+              </span>{" "}
+              <span className="text-muted-foreground">
+                — {position.stage.kind === "hold" ? "a hold beside the path" : "a terminal ending"},
+                not a step further along it.
+                {position.stage.enteredFrom.length > 0 && (
+                  <> Entered from {position.stage.enteredFrom.join(", ")}.</>
+                )}
+              </span>
+            </p>
+          )}
+
+          <p className="m-0 mt-[4px] text-[12px] leading-[1.45]">
+            <span className="text-muted-foreground">{position.stage.meaning}</span>
+          </p>
+
+          <p className="m-0 mt-[3px] text-[11px] leading-[1.4] text-muted-foreground">
+            {position.next.length ? (
+              <>
+                From here it may move to{" "}
+                {position.next.map((n, i) => (
+                  <span key={n}>
+                    {i > 0 && ", "}
+                    <code className="text-[10.5px]">{n}</code>
+                  </span>
+                ))}
+                . Moved out by: {position.stage.exit}
+              </>
+            ) : (
+              <>
+                Terminal — nothing moves a task out of{" "}
+                <code className="text-[10.5px]">{position.stage.key}</code> automatically.
+              </>
+            )}
+          </p>
+        </>
+      )}
+    </section>
+  );
+}
+
+/** Fetch which workflow, if any, relates to this task. */
+function useWorkflowLink(id: string): { link: WorkflowLink | null; failed: boolean } {
+  const [link, setLink] = useState<WorkflowLink | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setLink(null);
+    setFailed(false);
+    (async () => {
+      try {
+        const res = await fetch(`/api/task-workflow?id=${encodeURIComponent(id)}`);
+        const body: WorkflowLinkPayload = await res.json();
+        if (!alive) return;
+        if (!res.ok || body.error) throw new Error(body.error ?? `HTTP ${res.status}`);
+        setLink(body.link ?? { kind: "none" });
+      } catch {
+        if (alive) setFailed(true);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [id]);
+
+  return { link, failed };
+}
+
+/**
+ * WHICH WORKFLOW RELATES TO THIS TASK — and, usually, the honest answer that
+ * none does.
+ *
+ * THE RULE: no relationship is ever inferred to make this panel look complete.
+ * A workflow guessed from tags or routing would render a confident answer that
+ * nothing durably backs. Each dead end below is therefore a NAMED outcome
+ * carrying its own reason, because "no issue was ever referenced" and "the
+ * referenced issue was never stored" need different fixes.
+ *
+ * Showing the gap is the point. Measured 2026-09-02: `participation_record`,
+ * the per-gate instance type, points at ZERO tasks (its 135 work entities are
+ * 132 issues and 3 PRs), and no task in a 40-task sample carried any edge to an
+ * issue. So an operator seeing "no workflow linked" on task after task is
+ * seeing the actual state of the graph, which is what the gates work exists to
+ * change.
+ */
+function WorkflowPanel({ id }: { id: string }) {
+  const { link, failed } = useWorkflowLink(id);
+
+  return (
+    <section className="my-[10px] rounded-[7px] border bg-card px-[10px] py-[7px]">
+      <div className="mb-[4px] flex items-baseline gap-[8px]">
+        <h3 className="m-0 text-[10px] font-[650] uppercase tracking-[.06em] text-muted-foreground">
+          Workflow
+        </h3>
+        <span className="text-[11px] text-muted-foreground">
+          followed from stored links only — never inferred
+        </span>
+      </div>
+
+      {failed ? (
+        <p className="m-0 text-[11.5px] text-muted-foreground">
+          Workflow linkage could not be read. The task's own fields are unaffected.
+        </p>
+      ) : link === null ? (
+        <p className="m-0 text-[11.5px] text-muted-foreground">Resolving workflow…</p>
+      ) : link.kind === "none" ? (
+        <>
+          <p className="m-0 text-[12px] leading-[1.45] text-warn">
+            <strong>No workflow linked</strong>{" "}
+            <span className="text-muted-foreground">
+              — this task carries no reference to an issue or pull request, and nothing else
+              connects a task to a workflow.
+            </span>
+          </p>
+          <p className="m-0 mt-[3px] text-[11px] leading-[1.4] text-muted-foreground">
+            This is the normal case rather than a fault in this task. As of{" "}
+            {WORKFLOW_LINKAGE_FACTS.measuredOn}, all{" "}
+            {WORKFLOW_LINKAGE_FACTS.distinctWorkEntities} work entities tracked by{" "}
+            <code className="text-[10.5px]">participation_record</code> were issues and pull
+            requests — <strong>{WORKFLOW_LINKAGE_FACTS.workEntitiesThatAreTasks} were tasks</strong>
+            .
+          </p>
+        </>
+      ) : link.kind === "dangling" ? (
+        <>
+          <p className="m-0 text-[12px] leading-[1.45] text-warn">
+            <strong>
+              Linked to {link.ref.repo}#{link.ref.number}, which has no entity
+            </strong>{" "}
+            <span className="text-muted-foreground">
+              — the task stores this reference, but no {link.ref.isPullRequest ? "PR" : "issue"}{" "}
+              entity exists for it, so its gates cannot be read.
+            </span>
+          </p>
+          <p className="m-0 mt-[3px] text-[11px] leading-[1.4]">
+            <a
+              className="underline decoration-dotted underline-offset-2"
+              href={link.ref.url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {link.ref.url}
+            </a>
+          </p>
+          <p className="m-0 mt-[3px] text-[11px] leading-[1.4] text-muted-foreground">
+            The link is real and stored; the target was never captured. Backfilling the issue
+            entity would make this resolve without changing the task.
+          </p>
+        </>
+      ) : link.kind === "issue_without_gates" ? (
+        <p className="m-0 text-[12px] leading-[1.45]">
+          <span className="text-muted-foreground">
+            Linked to{" "}
+            <a
+              className="underline decoration-dotted underline-offset-2"
+              href={link.ref.url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {link.ref.repo}#{link.ref.number}
+            </a>
+            , which exists but declares no gates — so there is no workflow position to show.
+          </span>
+        </p>
+      ) : (
+        <ResolvedWorkflow link={link} />
+      )}
+    </section>
+  );
+}
+
+/**
+ * A task whose workflow DID resolve.
+ *
+ * BOTH GATE-STATE SOURCES ARE SHOWN, and never merged. The issue's own
+ * `gate_status` map and the `participation_record` rows are written by two
+ * engines that do not read each other — graph-wide, participation reads
+ * `dispatched` on 135 of 136 rows and `satisfied` on exactly one. Picking a
+ * winner would present a settled answer where the graph holds two, so any gate
+ * they disagree about is called out explicitly.
+ */
+function ResolvedWorkflow({ link }: { link: Extract<WorkflowLink, { kind: "resolved" }> }) {
+  const disagreements = gateDisagreements(link);
+  const participationByGate = new Map(link.participation.map((g) => [g.gateName, g.status]));
+  const names = [
+    ...new Set([...link.gates.map((g) => g.gateName), ...link.participation.map((g) => g.gateName)]),
+  ];
+
+  return (
+    <>
+      <p className="m-0 text-[12px] leading-[1.45]">
+        <a
+          className="underline decoration-dotted underline-offset-2"
+          href={link.ref.url}
+          target="_blank"
+          rel="noreferrer"
+        >
+          {link.ref.repo}#{link.ref.number}
+        </a>
+        {link.workflowType && (
+          <span className="text-muted-foreground">
+            {" "}
+            · <code className="text-[11px]">{link.workflowType}</code>
+          </span>
+        )}
+        {link.currentOwner && (
+          <span className="text-muted-foreground"> · owner {link.currentOwner}</span>
+        )}
+      </p>
+
+      <table className="mt-[4px] w-full border-collapse text-[11.5px]">
+        <thead>
+          <tr className="text-[10px] uppercase tracking-[.05em] text-muted-foreground">
+            <th className="py-[2px] pr-2 text-left font-[600]">Gate</th>
+            <th className="py-[2px] pr-2 text-left font-[600]">issue.gate_status</th>
+            <th className="py-[2px] text-left font-[600]">participation_record</th>
+          </tr>
+        </thead>
+        <tbody>
+          {names.map((name) => {
+            const fromIssue = link.gates.find((g) => g.gateName === name)?.status ?? null;
+            const fromPart = participationByGate.get(name) ?? null;
+            const conflict = disagreements.includes(name);
+            return (
+              <tr key={name} className="border-b border-border/50 last:border-b-0">
+                <td className="py-[2px] pr-2 align-baseline font-mono text-[11px]">{name}</td>
+                <td
+                  className={`py-[2px] pr-2 align-baseline font-mono text-[11px] ${conflict ? "text-bad" : ""}`}
+                >
+                  {fromIssue ?? <span className="text-muted-foreground">—</span>}
+                </td>
+                <td
+                  className={`py-[2px] align-baseline font-mono text-[11px] ${conflict ? "text-bad" : ""}`}
+                >
+                  {fromPart ?? <span className="text-muted-foreground">—</span>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+
+      {disagreements.length > 0 && (
+        <p className="m-0 mt-[3px] text-[11px] leading-[1.4] text-bad">
+          Two engines write gate state and neither reads the other's, so{" "}
+          {disagreements.length === 1 ? "this gate is" : "these gates are"} recorded differently by
+          each: {disagreements.join(", ")}. Both are shown rather than one being chosen.
+        </p>
+      )}
+    </>
   );
 }
 
@@ -480,6 +937,11 @@ function TaskView({ snap, id }: { snap: Record<string, unknown>; id: string }) {
           actually happened to it" is the question the operator opens a task
           with, and the description does not answer it. */}
       <TaskStatePanel snap={snap} id={id} />
+      {/* WHERE it is, then WHAT WORKFLOW it belongs to — the operator's two
+          questions, in the order he asked them, and both above the stored prose
+          because neither is answerable from the description. */}
+      <LifecyclePanel snap={snap} />
+      <WorkflowPanel id={id} />
       {context && <Prose label="Context" text={context} />}
       {description && <Prose label="Description" text={description} />}
       {recommendation && (
