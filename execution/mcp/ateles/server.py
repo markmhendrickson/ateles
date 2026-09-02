@@ -291,6 +291,15 @@ def _get_swarm_roster() -> dict:
     }
 
 
+# Action types no agent may execute, whatever the policy sets say. Kept in
+# sync with `lib.daemon_runtime.gating.NEVER_AUTO_EXECUTE_ACTION_TYPES`, which
+# is the canonical definition and the enforcing one; duplicated here rather
+# than imported so this MCP server keeps its zero-dependency-on-daemon-runtime
+# posture. `test_route_task_blast_radius.py` asserts the two stay identical,
+# so adding a member in one place and not the other fails CI (ateles#715).
+NEVER_AUTO_EXECUTE_ACTION_TYPES = frozenset({"operator_only"})
+
+
 def _route_task(task_description: str, action_type: str | None = None) -> dict:
     roster = _get_swarm_roster()
     if "error" in roster:
@@ -432,6 +441,10 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
             "confidence_threshold": psnap.get("confidence_threshold"),
             "blast_radius_default": psnap.get("blast_radius_default"),
             "high_blast_action_types": psnap.get("high_blast_action_types"),
+            # Needed by _action_blast_radius: an action type must be checked
+            # against BOTH sets, since "in neither" is now a distinct (and
+            # never-auto-executable) verdict rather than a silent "low".
+            "low_blast_action_types": psnap.get("low_blast_action_types"),
         }
 
     result: dict[str, Any] = {
@@ -451,17 +464,43 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
     if action_type:
         result["action_type"] = action_type
         if policy:
-            high_blast = policy.get("high_blast_action_types", [])
-            if isinstance(high_blast, str):
-                try:
-                    high_blast = json.loads(high_blast)
-                except (json.JSONDecodeError, TypeError):
-                    high_blast = []
-            result["action_blast_radius"] = (
-                "high" if action_type.lower() in [h.lower() for h in (high_blast or [])]
-                else "low"
-            )
+            result["action_blast_radius"] = _action_blast_radius(action_type, policy)
     return result
+
+
+def _action_blast_radius(action_type: str, policy: dict) -> str:
+    """Classify an action type's blast radius for the routing advisory.
+
+    Mirrors `lib.daemon_runtime.gating.ExecutionPolicy.blast_radius_for`, which
+    is the enforcing path; this one is advisory (it tells a caller what the gate
+    will decide). The two must agree, or the advice misleads.
+
+    Ordering, per ateles#715:
+
+    * `operator_only` → "never", ahead of both policy sets. Never auto-executable
+      at any confidence or recurrence count.
+    * explicitly low → "low"; explicitly high → "high".
+    * declared but in neither set → "never", not "low". The previous
+      `else "low"` was the same fail-open as the enforcing path: an action type
+      nobody had classified was advertised as safe.
+    """
+    at = action_type.strip().lower()
+    if at in NEVER_AUTO_EXECUTE_ACTION_TYPES:
+        return "never"
+
+    def _as_list(v) -> list[str]:
+        if isinstance(v, str):
+            try:
+                v = json.loads(v)
+            except (json.JSONDecodeError, TypeError):
+                return []
+        return [str(x).strip().lower() for x in v] if isinstance(v, list) else []
+
+    if at in _as_list(policy.get("low_blast_action_types")):
+        return "low"
+    if at in _as_list(policy.get("high_blast_action_types")):
+        return "high"
+    return "never"
 
 
 def _list_checkpoints() -> dict:

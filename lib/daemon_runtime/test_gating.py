@@ -6,6 +6,7 @@ import pytest
 
 from lib.daemon_runtime.gating import (
     DEFAULT_CLOSED_BOUNDARIES,
+    NEVER_AUTO_EXECUTE_ACTION_TYPES,
     BlastRadius,
     CheckpointPosture,
     ExecutionPolicy,
@@ -45,16 +46,53 @@ def test_low_conf_high_blast_proposes_alternatives():
     assert d.action == GateAction.CHECKPOINT_WITH_ALTERNATIVES
 
 
-def test_unknown_action_uses_policy_default_blast():
+def test_unrecognized_action_type_never_auto_executes(caplog):
+    """An action type in NEITHER blast set must not resolve to LOW.
+
+    This test previously asserted the opposite — that an unrecognized action
+    type under a LOW default auto-executes. That was the ateles#715 fail-open
+    written down as expected behaviour: the next unclassified action type
+    inherits "safe" from a default that was never a judgment about it.
+    """
     low = ExecutionPolicy(entity_id="p", blast_radius_default=BlastRadius.LOW, loaded=True)
-    d = evaluate_gate(confidence=0.9, action_type="totally_unknown", policy=low)
-    assert d.action == GateAction.AUTO_EXECUTE
+    with caplog.at_level("WARNING"):
+        d = evaluate_gate(confidence=0.9, action_type="totally_unknown", policy=low)
+    assert d.action == GateAction.CHECKPOINT
+    assert d.blast_radius == BlastRadius.NEVER
+    assert not d.may_auto_execute
 
     high = ExecutionPolicy(
         entity_id="p", blast_radius_default=BlastRadius.HIGH, loaded=True
     )
     d = evaluate_gate(confidence=0.9, action_type="totally_unknown", policy=high)
     assert d.action == GateAction.CHECKPOINT
+
+
+def test_unrecognized_action_type_warns_by_name(caplog):
+    """The fallthrough must be loud, naming the value, so a missing
+    classification is visible rather than silently permissive."""
+    pol = ExecutionPolicy(entity_id="ent_policy", loaded=True)
+    with caplog.at_level("WARNING"):
+        pol.blast_radius_for("open_pull_request")
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings, "unrecognized action_type must log a warning"
+    joined = " ".join(r.getMessage() for r in warnings)
+    assert "open_pull_request" in joined
+    assert "ent_policy" in joined
+
+
+def test_absent_action_type_still_uses_policy_default():
+    """"Nothing declared" is distinct from "declared and unclassified".
+
+    A task with no action_type at all keeps the policy default — that is the
+    case the default exists for, and tightening it would checkpoint every
+    unannotated task. Only a DECLARED-but-unclassified value fails closed.
+    """
+    low = ExecutionPolicy(entity_id="p", blast_radius_default=BlastRadius.LOW, loaded=True)
+    assert low.blast_radius_for(None) == BlastRadius.LOW
+    assert low.blast_radius_for("") == BlastRadius.LOW
+    d = evaluate_gate(confidence=0.9, action_type=None, policy=low)
+    assert d.action == GateAction.AUTO_EXECUTE
 
 
 def test_recurrence_graduation_auto_executes_below_threshold():
@@ -126,7 +164,10 @@ def test_blast_radius_for_classification():
     )
     assert pol.blast_radius_for("payment") == BlastRadius.HIGH
     assert pol.blast_radius_for("draft") == BlastRadius.LOW
-    assert pol.blast_radius_for("unknown") == BlastRadius.LOW
+    # Declared but classified by neither set → NEVER, not the LOW default
+    # (ateles#715).
+    assert pol.blast_radius_for("unknown") == BlastRadius.NEVER
+    # Nothing declared at all → the policy default, unchanged.
     assert pol.blast_radius_for(None) == BlastRadius.LOW
 
 
@@ -264,3 +305,199 @@ def test_load_policy_degrades_to_fallback_on_invalid_posture(monkeypatch):
     assert pol.entity_id == "ent_bad_policy"
     # Still resolves postures safely via the DEFAULT_CLOSED_BOUNDARIES fallback.
     assert pol.posture_for("pre_merge") == CheckpointPosture.CLOSED
+
+
+# ── operator_only: never auto-executable (ateles#715) ────────────────────────
+#
+# The regression these cover: `operator_only` was in neither
+# low_blast_action_types nor high_blast_action_types, so blast_radius_for()
+# fell through to blast_radius_default = LOW and the gate auto-executed on
+# high confidence. The observed line was:
+#
+#   gate: task=<id> → cicada action=operator_only blast=low conf=0.95/0.85
+#     → auto_execute (high confidence, low blast radius)
+#
+# The operator's decision was NEVER-auto-executable rather than merely
+# high-blast, because high-blast still graduates via
+# auto_execute_after_n_successful_recurrences — and `operator_only` does not
+# mean "risky", it means an agent structurally cannot do the work. No number of
+# prior successes changes whether the swarm holds a credential it was designed
+# not to hold. Hence `test_operator_only_never_graduates_via_recurrence` below,
+# which is the half that a merely-high-blast fix would silently fail.
+
+
+def test_operator_only_resolves_to_never_blast_radius():
+    assert _default().blast_radius_for("operator_only") == BlastRadius.NEVER
+
+
+@pytest.mark.parametrize("confidence", [0.0, 0.5, 0.85, 0.95, 0.99, 1.0])
+def test_operator_only_never_auto_executes_at_any_confidence(confidence):
+    """The observed bug scaled with confidence: the surer the authoring agent
+    was that a task needed a human, the more certainly it dispatched."""
+    d = evaluate_gate(
+        confidence=confidence, action_type="operator_only", policy=_default()
+    )
+    assert d.action != GateAction.AUTO_EXECUTE
+    assert not d.may_auto_execute
+    assert d.blast_radius == BlastRadius.NEVER
+
+
+def test_operator_only_reproduces_the_observed_case():
+    """Exactly the logged case: action=operator_only, conf=0.95, threshold 0.85."""
+    d = evaluate_gate(
+        confidence=0.95, action_type="operator_only", policy=_default()
+    )
+    assert d.action == GateAction.CHECKPOINT
+    assert not d.may_auto_execute
+    assert d.blast_radius == BlastRadius.NEVER
+    assert "never auto-executable" in d.reason
+
+
+@pytest.mark.parametrize("recurrences", [0, 3, 5, 100, 10_000])
+def test_operator_only_never_graduates_via_recurrence(recurrences):
+    """THE operator decision: recurrence graduation must not reach it.
+
+    A HIGH-blast action is merely gated; a proven recurring series clears it
+    after N clean cycles. `operator_only` must bypass that path entirely, so
+    this asserts it at counts far past the graduation threshold.
+    """
+    pol = ExecutionPolicy(
+        entity_id="p",
+        confidence_threshold=0.85,
+        auto_execute_after_n_successful_recurrences=3,
+        loaded=True,
+    )
+    d = evaluate_gate(
+        confidence=0.99,
+        action_type="operator_only",
+        policy=pol,
+        successful_recurrences=recurrences,
+    )
+    assert d.action == GateAction.CHECKPOINT
+    assert not d.may_auto_execute
+    assert d.blast_radius == BlastRadius.NEVER
+
+
+def test_operator_only_graduation_contrast_with_low_blast():
+    """Control: the same recurrence count DOES graduate a low-blast action.
+
+    Without this contrast, the test above could pass because graduation is
+    broken generally rather than because operator_only is excluded from it.
+    """
+    pol = ExecutionPolicy(
+        entity_id="p",
+        confidence_threshold=0.85,
+        auto_execute_after_n_successful_recurrences=3,
+        low_blast_action_types=frozenset({"local_edit"}),
+        loaded=True,
+    )
+    graduated = evaluate_gate(
+        confidence=0.10, action_type="local_edit", policy=pol, successful_recurrences=5
+    )
+    assert graduated.action == GateAction.AUTO_EXECUTE
+
+    held = evaluate_gate(
+        confidence=0.10,
+        action_type="operator_only",
+        policy=pol,
+        successful_recurrences=5,
+    )
+    assert held.action == GateAction.CHECKPOINT
+
+
+def test_policy_cannot_demote_operator_only_to_low_blast():
+    """A policy listing operator_only as low blast must not win.
+
+    Membership in the low set is a tuning knob; "an agent structurally cannot
+    do this" is not. If a policy could demote it, the whole guarantee reduces
+    to whoever last edited the policy entity.
+    """
+    permissive = ExecutionPolicy(
+        entity_id="p",
+        low_blast_action_types=frozenset({"operator_only", "local_edit"}),
+        blast_radius_default=BlastRadius.LOW,
+        loaded=True,
+    )
+    assert permissive.blast_radius_for("operator_only") == BlastRadius.NEVER
+    d = evaluate_gate(
+        confidence=1.0, action_type="operator_only", policy=permissive,
+        successful_recurrences=999,
+    )
+    assert d.action == GateAction.CHECKPOINT
+    assert not d.may_auto_execute
+
+
+def test_operator_only_case_and_whitespace_insensitive():
+    for spelling in ("OPERATOR_ONLY", " operator_only ", "Operator_Only"):
+        assert _default().blast_radius_for(spelling) == BlastRadius.NEVER
+
+
+def test_operator_only_in_fallback_high_blast_as_defense_in_depth():
+    """Belt-and-braces: if the NEVER tier were ever lost in a refactor, the
+    fallback set must degrade operator_only to HIGH, not back to LOW."""
+    from lib.daemon_runtime.gating import _FALLBACK_HIGH_BLAST
+
+    assert "operator_only" in _FALLBACK_HIGH_BLAST
+    assert "operator_only" in NEVER_AUTO_EXECUTE_ACTION_TYPES
+
+
+def test_may_auto_execute_rejects_a_never_tier_decision():
+    """Hand-constructed AUTO_EXECUTE at NEVER radius is still not dispatchable."""
+    from lib.daemon_runtime.gating import GateDecision
+
+    forged = GateDecision(
+        action=GateAction.AUTO_EXECUTE,
+        blast_radius=BlastRadius.NEVER,
+        confidence=1.0,
+        threshold=0.85,
+        policy_id="p",
+        reason="forged",
+    )
+    assert not forged.may_auto_execute
+
+
+def test_parse_policy_accepts_never_as_blast_radius_default():
+    pol = _parse_policy("p", {"snapshot": {"blast_radius_default": "never"}})
+    assert pol.blast_radius_default == BlastRadius.NEVER
+    d = evaluate_gate(confidence=1.0, action_type=None, policy=pol)
+    assert d.action == GateAction.CHECKPOINT
+
+
+def test_any_action_type_vocabulary_must_contain_the_never_set():
+    """Forward guard against ateles#689's `normalize_action_type` discard rule.
+
+    PR #689 introduces `lib/daemon_runtime/action_type.py` with its own
+    `KNOWN_ACTION_TYPES` vocabulary and a `normalize_action_type()` that
+    DISCARDS any value outside it, returning None. That rule is right for a
+    typo ("open_pull_request"), but `operator_only` is not a typo — it is
+    absent from both of #689's vocabularies, so a declared `operator_only`
+    would be dropped as if never declared, fall through to text inference, and
+    land back on `blast_radius_default` = LOW. The gate would never see the
+    value this module refuses to auto-execute.
+
+    This test is skipped until that module exists, and fails the moment it
+    lands without `operator_only` in its vocabulary — so the two changes
+    cannot merge in the wrong order silently.
+    """
+    action_type = pytest.importorskip(
+        "lib.daemon_runtime.action_type",
+        reason="ateles#689 not merged yet — nothing to guard",
+    )
+
+    known = getattr(action_type, "KNOWN_ACTION_TYPES", None)
+    assert known is not None, "action_type module must expose KNOWN_ACTION_TYPES"
+    missing = NEVER_AUTO_EXECUTE_ACTION_TYPES - set(known)
+    assert not missing, (
+        f"{sorted(missing)} missing from KNOWN_ACTION_TYPES. "
+        "normalize_action_type() discards anything outside that set, so these "
+        "would be dropped as if undeclared and fall back to blast_radius_default "
+        "(LOW) — reopening ateles#715 through a different door."
+    )
+
+    normalize = getattr(action_type, "normalize_action_type", None)
+    if normalize is not None:
+        for value in NEVER_AUTO_EXECUTE_ACTION_TYPES:
+            assert normalize(value) == value, (
+                f"normalize_action_type({value!r}) must preserve the value, not "
+                "discard it — the gate cannot refuse what it never receives."
+            )

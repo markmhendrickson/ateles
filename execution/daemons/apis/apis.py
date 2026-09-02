@@ -228,7 +228,19 @@ _AGENT_ACTION_TYPE: dict[str, str] = {
 
 
 def _infer_action_type(skill: str | None, snapshot: dict) -> str | None:
-    """Best-effort action_type for the gate. Explicit task field wins."""
+    """Best-effort action_type for the gate. Explicit task field wins.
+
+    A declared value is passed through verbatim — including one the policy
+    classifies in neither blast set. That is deliberate (ateles#715): the gate
+    now treats an unrecognized declared action type as never-auto-executable
+    and logs it by name, so passing it through is what makes the missing
+    classification visible. Swallowing it here would restore the per-agent
+    fallback and hide the gap.
+
+    In particular `operator_only` must reach the gate intact. It is the one
+    value whose entire purpose is to stop dispatch, and it is not in any
+    policy's action-type sets.
+    """
     explicit = (snapshot.get("action_type") or "").strip().lower()
     if explicit:
         return explicit
