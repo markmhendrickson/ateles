@@ -62,10 +62,14 @@ def reminder_text(title: str, task_id: str) -> str:
         "Code UI construct — it is NOT a Neotoma entity. Per the CLAUDE.md plan/task "
         "contract, create the paired durable record now: (1) store a Neotoma `task` "
         "entity capturing this work (title/description, status, priority, "
-        "repository_name if repo-touching); (2) create_relationship PART_OF from that "
-        "task to the bound plan; (3) reference the chip's task_id in the task so the "
-        "two are linked. Do this in the same turn so the work survives whether or not "
-        "the chip is ever clicked. If a Neotoma task for this already exists, skip."
+        "repository_name if repo-touching, action_type, confidence); (2) create_relationship "
+        "PART_OF from that task to the bound plan; (3) reference the chip's task_id in the "
+        "task so the two are linked. Do this in the same turn so the work survives whether "
+        "or not the chip is ever clicked. If a Neotoma task for this already exists, skip.\n"
+        "Set action_type and confidence at filing time (see "
+        "execution/daemons/apis/action_types.md): read-only/spec work → "
+        "action_type=compute_only_analysis with confidence ≥ 0.85; PR/git/payment/publish "
+        "work → the matching high-blast type (e.g. open_or_merge_pr)."
     )
 
 
