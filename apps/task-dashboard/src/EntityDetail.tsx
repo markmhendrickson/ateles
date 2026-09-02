@@ -773,8 +773,8 @@ function WorkflowPanel({ id }: { id: string }) {
           <p className="m-0 text-[12px] leading-[1.45] text-warn">
             <strong>No workflow linked</strong>{" "}
             <span className="text-muted-foreground">
-              — this task carries no reference to an issue or pull request, and nothing else
-              connects a task to a workflow.
+              — this task carries no reference to a GitHub issue, and nothing else connects a
+              task to a workflow on this surface.
             </span>
           </p>
           <p className="m-0 mt-[3px] text-[11px] leading-[1.4] text-muted-foreground">
@@ -783,18 +783,41 @@ function WorkflowPanel({ id }: { id: string }) {
             {WORKFLOW_LINKAGE_FACTS.distinctWorkEntities} work entities tracked by{" "}
             <code className="text-[10.5px]">participation_record</code> were issues and pull
             requests — <strong>{WORKFLOW_LINKAGE_FACTS.workEntitiesThatAreTasks} were tasks</strong>
-            .
+            . This panel only follows issue workflows (`issue.gate_status`).
+          </p>
+        </>
+      ) : link.kind === "unsupported_ref" ? (
+        <>
+          <p className="m-0 text-[12px] leading-[1.45] text-warn">
+            <strong>
+              References {link.ref.repo}#{link.ref.number} (pull request)
+            </strong>{" "}
+            <span className="text-muted-foreground">
+              — this surface only resolves issue workflows. Gates live on{" "}
+              <code className="text-[10.5px]">issue.gate_status</code>; pull-request entities
+              do not carry that map, so a PR URL is not followed here.
+            </span>
+          </p>
+          <p className="m-0 mt-[3px] text-[11px] leading-[1.4]">
+            <a
+              className="underline decoration-dotted underline-offset-2"
+              href={link.ref.url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {link.ref.url}
+            </a>
           </p>
         </>
       ) : link.kind === "dangling" ? (
         <>
           <p className="m-0 text-[12px] leading-[1.45] text-warn">
             <strong>
-              Linked to {link.ref.repo}#{link.ref.number}, which has no entity
+              Linked to {link.ref.repo}#{link.ref.number}, which has no issue entity
             </strong>{" "}
             <span className="text-muted-foreground">
-              — the task stores this reference, but no {link.ref.isPullRequest ? "PR" : "issue"}{" "}
-              entity exists for it, so its gates cannot be read.
+              — the task stores this issue reference, but no issue entity exists for it, so
+              its gates cannot be read.
             </span>
           </p>
           <p className="m-0 mt-[3px] text-[11px] leading-[1.4]">

@@ -195,6 +195,13 @@ export interface GateState {
 export type WorkflowLink =
   /** No `source_url`, no issue reference — nothing links this task to a workflow. */
   | { kind: "none" }
+  /**
+   * The task names a pull-request URL. This surface only resolves ISSUE
+   * workflows (`issue.gate_status`); `pull_request` has no `gate_status`, so
+   * `/pull/` is refused rather than looked up as an issue or claimed as a
+   * missing PR entity (Option 3 / ADR ent_951b1dedd6304a41f5a9866e).
+   */
+  | { kind: "unsupported_ref"; ref: IssueRef; reason: "pull_request_not_supported" }
   /** The task names an issue, but no issue entity exists for it. */
   | { kind: "dangling"; ref: IssueRef }
   /** The issue entity exists but declares no gates. */
