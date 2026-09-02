@@ -16,6 +16,9 @@ on:
       - "execution/daemons/phoenicurus-release/**"
       - "execution/daemons/monedula/**"
       - "execution/daemons/anthus/**"
+      - "execution/daemons/formica/**"
+      - "execution/daemons/neotoma-agent/**"
+      - "execution/daemons/cotinga/**"
       - "execution/mcp/**"
       - "lib/daemon_runtime/**"
       - "lib/approval/**"
@@ -59,6 +62,19 @@ jobs:
       # ship a same-named top-level module today.
       - name: Run anthus daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/anthus/ -q
+      # ateles#696 (pm lens, review round 1): formica, neotoma-agent, and
+      # cotinga are three of the direct-spawner call sites this PR wires the
+      # shared tool_allowlist enforcement into, but — like anthus above before
+      # #584 — none of them had a CI lane, so their new call-site effect tests
+      # (test_tool_allowlist_dispatch.py) would only ever run on a developer's
+      # laptop. One step per daemon for the same attributability reason as the
+      # apis/anthus steps above.
+      - name: Run formica daemon tests
+        run: uv run --extra dev python -m pytest execution/daemons/formica/ -q
+      - name: Run neotoma-agent daemon tests
+        run: uv run --extra dev python -m pytest execution/daemons/neotoma-agent/ -q
+      - name: Run cotinga daemon tests
+        run: uv run --extra dev python -m pytest execution/daemons/cotinga/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
       # lib/daemon_runtime/ ships test_*.py for the agent loader, gating,

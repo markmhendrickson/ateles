@@ -211,3 +211,94 @@ def test_spawn_agent_number_fallback_order(monkeypatch):
         {"repo": "markmhendrickson/swarm-smoke", "title": "T", "number": 42},
     )
     assert "#42" in prompt
+
+
+# ── tool_allowlist call-site effect (ateles#696 review round 1, pavo lens) ────
+#
+# Anthus loads the agent_definition to pin agent_definition_ref for
+# provenance but, before this PR, never read `.tools` at all — every gate
+# dispatch ran with whatever the ambient CLI allowed. These tests pin the
+# actual argv _spawn_agent produces, not just that plan_enforcement() returns
+# the right ToolPlan in isolation (that is covered by
+# lib/daemon_runtime/test_tool_allowlist.py already).
+
+
+class _FakeToolLoader:
+    """AgentLoader stand-in whose .load().tools is a restricted allowlist —
+    distinct from _FakeLoader above, which never sets .tools at all."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def load(self):
+        class _D:
+            entity_id = "ent_def"
+            last_observation_id = "obs"
+            tools = ["Bash", "Read", "Write"]
+
+        return _D()
+
+    def render_policy_prompt(self):
+        return ""
+
+
+def _capture_spawn_argv(monkeypatch, *, owner_agent: str, enforce: bool) -> list[str]:
+    """Drive _spawn_agent far enough to capture the full argv passed to
+    create_subprocess_exec, with a real (restricted) tool_allowlist."""
+    import shutil
+    from pathlib import Path
+
+    monkeypatch.setattr(shutil, "which", lambda _bin: "/usr/bin/true")
+    monkeypatch.setattr(anthus, "AgentLoader", _FakeToolLoader)
+    if enforce:
+        monkeypatch.setenv("ATELES_ENFORCE_TOOL_ALLOWLIST", "1")
+    else:
+        monkeypatch.delenv("ATELES_ENFORCE_TOOL_ALLOWLIST", raising=False)
+
+    captured: dict = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["cmd"] = list(args)
+        return _FakeProc()
+
+    monkeypatch.setattr(anthus.asyncio, "create_subprocess_exec", fake_exec)
+
+    skill = Path(anthus._REPO_ROOT) / ".claude" / "skills" / owner_agent / "SKILL.md"
+    if not skill.exists():
+        import pytest
+
+        pytest.skip(f"{owner_agent} SKILL.md not present in this checkout")
+    import os
+
+    os.environ["ATELES_REPO_ROOT"] = str(anthus._REPO_ROOT)
+
+    asyncio.run(
+        anthus._spawn_agent(
+            owner_agent=owner_agent,
+            work_entity_id="ent_issue31",
+            gate_name="pm",
+            snapshot={"repo": "markmhendrickson/swarm-smoke", "title": "T", "github_number": 31},
+        )
+    )
+    return captured.get("cmd", [])
+
+
+def test_spawn_agent_binds_allowlist_for_no_bypass_agent_under_enforce(monkeypatch):
+    """pavo never gets --dangerously-skip-permissions (not in
+    _AGENTS_NEEDING_SKIP_PERMISSIONS), so under ENFORCE its restricted
+    allowlist must actually reach argv as --allowed-tools."""
+    cmd = _capture_spawn_argv(monkeypatch, owner_agent="pavo", enforce=True)
+    assert "--allowed-tools" in cmd, f"expected --allowed-tools in argv, got: {cmd}"
+    assert "--dangerously-skip-permissions" not in cmd
+
+
+def test_spawn_agent_defeated_for_bypass_agent_even_under_enforce(monkeypatch):
+    """cicada IS in _AGENTS_NEEDING_SKIP_PERMISSIONS, so
+    --dangerously-skip-permissions defeats the allowlist at the CLI's
+    permission-flow stage 4 — --allowed-tools must NOT appear even under
+    ENFORCE, and the skip-permissions flag must still be present."""
+    cmd = _capture_spawn_argv(monkeypatch, owner_agent="cicada", enforce=True)
+    assert "--allowed-tools" not in cmd, (
+        f"expected no --allowed-tools under bypass (defeated), got: {cmd}"
+    )
+    assert "--dangerously-skip-permissions" in cmd
