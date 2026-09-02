@@ -74,6 +74,7 @@ import {
   type TaskEntity,
   parseTask,
   relativeTime,
+  toBucket,
 } from "./tasks";
 import { AssignedTo } from "./AssignedTo";
 import {
@@ -85,6 +86,14 @@ import {
   isTruncated,
   missingRows,
 } from "./taskCount";
+import {
+  MIN_QUERY_LENGTH,
+  OPEN_TASK_STATUSES,
+  SEARCH_LIMIT,
+  type SearchResult,
+  applyFilters,
+  runSearch,
+} from "./taskSearch";
 import { useRoster } from "./useRoster";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -387,6 +396,61 @@ export function TaskList({
   const roster = useRoster();
 
   /**
+   * SEARCH STATE.
+   *
+   * `draft` is what the box holds; `query` is what was actually SUBMITTED.
+   * They are separate because search runs ON SUBMIT, never per keystroke: one
+   * query is a 5–30s upstream read against a reader pool that is the
+   * documented bottleneck (ateles#576, neotoma#2217), so a query per character
+   * would queue dozens of them and take the app down with it. Enter or the
+   * button runs it; typing alone does not.
+   */
+  const [draft, setDraft] = useState("");
+  const [query, setQuery] = useState("");
+  const [search, setSearch] = useState<SearchResult | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  /** Import residue is SHOWN by default — see `isImported` in taskSearch.ts. */
+  const [hideImported, setHideImported] = useState(false);
+
+  const searchActive = query.length >= MIN_QUERY_LENGTH;
+
+  useEffect(() => {
+    if (!searchActive) {
+      setSearch(null);
+      setSearchError(null);
+      setSearching(false);
+      return;
+    }
+    const controller = new AbortController();
+    let alive = true;
+    setSearching(true);
+    // Drop the previous query's rows immediately: showing them under a new
+    // query's heading would attribute one search's results to another's count.
+    setSearch(null);
+    setSearchError(null);
+
+    void (async () => {
+      try {
+        const result = await runSearch(query, controller.signal);
+        if (alive) setSearch(result);
+      } catch (err) {
+        if ((err as Error).name === "AbortError") return;
+        // No rows and no count: a failed search must not render as "nothing
+        // matched" against a 21,285-task backlog.
+        if (alive) setSearchError((err as Error).message);
+      } finally {
+        if (alive) setSearching(false);
+      }
+    })();
+
+    return () => {
+      alive = false;
+      controller.abort();
+    };
+  }, [query]);
+
+  /**
    * "Recent — any status" with no owner filter is precisely `App`'s poll, so it
    * is served from the `work` prop: instant, and one fewer identical query
    * against a loaded instance.
@@ -477,11 +541,78 @@ export function TaskList({
     return c;
   }, [loaded]);
 
+  /**
+   * SEARCH ROWS, COMPOSED WITH THE PAGE'S FILTERS.
+   *
+   * The filters are applied HERE rather than upstream because upstream drops
+   * them when `search` is present — it accepts `status: pending` beside a
+   * search, ignores it, and returns `completed` and `in_progress` rows anyway
+   * (finding 5 in `taskSearch.ts`). Applying them client-side is what makes
+   * "undispatched, high priority, matching X" answerable at all.
+   *
+   * This is NOT the client-side filtering the search box was forbidden to do.
+   * The TEXT match ran across all 21,285 tasks upstream; only the narrowing of
+   * that result set happens here, and the disclosure below states both figures
+   * so the filtered count is never mistaken for the backlog count.
+   */
+  const searchRows = useMemo(() => {
+    if (!search) return [];
+    return applyFilters(
+      search.rows,
+      { status, assignedTo, priority, staleDays, chip: filter, hideImported },
+      OPEN_TASK_STATUSES,
+    );
+  }, [search, status, assignedTo, priority, staleDays, filter, hideImported]);
+
+  /** How many of the fetched search rows are Asana import residue. */
+  const searchImported = useMemo(
+    () => (search ? search.rows.filter((r) => r.imported).length : 0),
+    [search],
+  );
+
   const visible = useMemo(() => {
     if (filter === "all") return loaded;
     if (filter === "undispatched") return loaded.filter((t) => t.undispatched);
     return loaded.filter((t) => t.bucket === filter);
   }, [loaded, filter]);
+
+  /**
+   * THE ROWS THE TABLE ACTUALLY DRAWS.
+   *
+   * A search REPLACES the page's rows rather than re-cutting them, because the
+   * two sets answer different questions: `visible` is a page of the backlog
+   * narrowed by the query controls, while a search result is drawn from all
+   * 21,285 tasks. Intersecting them would silently restrict the search to the
+   * 200 rows already loaded — the exact defect this feature exists to avoid.
+   *
+   * Only the fields the table renders are needed, so both sources are mapped to
+   * one minimal shape. `bucket` is derived for search rows via the same
+   * `toBucket` the page uses, so a status badge means the same thing either way.
+   */
+  const rendered = useMemo(() => {
+    const source = searchActive
+      ? searchRows.map((r) => ({
+          id: r.id,
+          title: r.title,
+          status: r.status,
+          bucket: toBucket(r.status),
+          priority: r.priority,
+          assignedTo: r.assignedTo,
+          updatedAt: r.updatedAt,
+          undispatched: r.undispatched,
+        }))
+      : visible.map((t) => ({
+          id: t.id,
+          title: t.title,
+          status: t.status,
+          bucket: t.bucket,
+          priority: t.priority,
+          assignedTo: t.assignedTo,
+          updatedAt: t.updatedAt,
+          undispatched: t.undispatched,
+        }));
+    return source;
+  }, [searchActive, searchRows, visible]);
 
   const chips: Filter[] = ["all", "undispatched", ...BUCKETS];
 
@@ -533,15 +664,27 @@ export function TaskList({
                * carries its own provenance: an exact count, a `≥` lower bound,
                * or the words "not measured".
                */}
-              <span className="tabular-nums">{visible.length.toLocaleString()}</span>
+              <span className="tabular-nums">{rendered.length.toLocaleString()}</span>
               {" shown · "}
-              <span className="tabular-nums">{received.toLocaleString()}</span>
-              {" loaded of "}
-              <span className={cn("tabular-nums", !isExact(matching) && "text-warn")}>
-                {countText(matching)}
-              </span>{" "}
-              {scopeLabel}
-              {" · "}
+              {/*
+               * DURING A SEARCH the rows come from the search query, not from
+               * this page's query, so the page's "loaded of N open" fraction
+               * would be describing a list that is not on screen. The search
+               * banner below carries the figures that DO describe these rows.
+               */}
+              {searchActive ? (
+                <>matching this search · </>
+              ) : (
+                <>
+                  <span className="tabular-nums">{received.toLocaleString()}</span>
+                  {" loaded of "}
+                  <span className={cn("tabular-nums", !isExact(matching) && "text-warn")}>
+                    {countText(matching)}
+                  </span>{" "}
+                  {scopeLabel}
+                  {" · "}
+                </>
+              )}
               <span className="tabular-nums">
                 {totalPending ? "measuring…" : countText(grandTotal)}
               </span>
@@ -701,6 +844,178 @@ export function TaskList({
         )}
       </div>
 
+      {/*
+       * THE SEARCH BOX.
+       *
+       * Runs the text match UPSTREAM, across all 21,285 tasks. It deliberately
+       * does NOT filter the loaded page: this list holds 200 rows of a 5,566-task
+       * open set, so a client-side box would search 3.6% of the backlog while
+       * looking like it searched everything, and its empty result would read as
+       * "no such task". That is the defect #691 removed from the facet chips.
+       *
+       * A form, so Enter submits — search runs on submit, never per keystroke,
+       * because each query is a multi-second upstream read.
+       */}
+      <form
+        className="mt-[6px] flex flex-wrap items-center gap-[6px]"
+        onSubmit={(e) => {
+          e.preventDefault();
+          setQuery(draft.trim());
+        }}
+      >
+        <span className="text-[10px] uppercase tracking-[.06em] text-muted-foreground">
+          Search
+        </span>
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          type="search"
+          placeholder="Text across every task — title, description, notes…"
+          aria-label="Search all tasks, server-side"
+          className="h-[26px] min-w-[260px] flex-1 rounded-[6px] border bg-background px-[8px] text-[12.5px] outline-none"
+        />
+        <Button type="submit" variant="outline" size="sm" disabled={searching}>
+          {searching ? "Searching…" : "Search"}
+        </Button>
+        {(query || draft) && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setDraft("");
+              setQuery("");
+            }}
+          >
+            Clear
+          </Button>
+        )}
+        {searchActive && searchImported > 0 && (
+          <label className="flex items-center gap-[4px] text-[11.5px] text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={hideImported}
+              onChange={(e) => setHideImported(e.target.checked)}
+            />
+            Hide {searchImported.toLocaleString()} imported
+          </label>
+        )}
+      </form>
+
+      {/* A query too short to send, explained rather than silently ignored. */}
+      {draft.trim().length > 0 && draft.trim().length < MIN_QUERY_LENGTH && (
+        <p className="my-[6px] text-[11.5px] text-muted-foreground">
+          Enter at least {MIN_QUERY_LENGTH} characters — a single character matches as a
+          substring across {countText(grandTotal)} tasks and answers nothing.
+        </p>
+      )}
+
+      {searchError && (
+        <div className="my-[10px] rounded-lg border border-[hsl(var(--bad)/0.35)] bg-[hsl(var(--bad)/0.12)] px-3 py-[8px] text-[12.5px]">
+          <strong>The search did not answer.</strong> {searchError} — no rows and no count are
+          shown. This is NOT "nothing matched": with {countText(grandTotal)} tasks in the
+          backlog, an unanswered query and an empty result mean opposite things.
+        </div>
+      )}
+
+      {/*
+       * WHAT THE SEARCH ACTUALLY FOUND — the two figures that must both appear.
+       *
+       * `total` is backlog-wide and real (a search-only total does not saturate).
+       * `matched` is what survived the page's filters, applied here because
+       * upstream drops them. Printing only one of them would either understate
+       * the backlog or label a filtered list with an unfiltered count.
+       */}
+      {searchActive && search && !searching && (
+        <div className="my-[10px] rounded-lg border bg-muted/40 px-3 py-[8px] text-[12.5px]">
+          <div>
+            <strong>
+              <span className="tabular-nums">{countText(search.total)}</span>
+            </strong>{" "}
+            {isExact(search.total) && search.total.value === 1 ? "task matches" : "tasks match"}{" "}
+            “{query}” across the whole backlog
+            {searchRows.length !== search.rows.length && (
+              <>
+                {" · "}
+                <span className="tabular-nums">{searchRows.length.toLocaleString()}</span> shown
+                after the filters above
+              </>
+            )}
+            {" · read "}
+            {relativeTime(search.readAt)}
+          </div>
+
+          {/*
+           * The result set is a SAMPLE whenever the fetch filled its page. The
+           * filters then ran over the newest N rows, not over every match, so
+           * the filtered figure is a lower bound and says so.
+           */}
+          {search.capped && (
+            <div className="mt-[4px] text-muted-foreground">
+              Only the {SEARCH_LIMIT.toLocaleString()} most relevant rows were fetched, so the
+              filtered count above is a lower bound — narrow the query or the filters to see
+              the rest.
+            </div>
+          )}
+
+          {/*
+           * ACCENT FOLDING IS NOT DONE UPSTREAM (measured — see taskSearch.ts).
+           * When a variant spelling was sent, say so; when none was available,
+           * say THAT, because the query may then be missing rows written the
+           * other way and the operator cannot tell from the result.
+           */}
+          {search.variants.length > 1 ? (
+            <div className="mt-[4px] text-muted-foreground">
+              Upstream does not fold accents, so this searched{" "}
+              {search.variants.map((v) => `“${v}”`).join(" and ")} and merged the results.
+            </div>
+          ) : (
+            /\p{Diacritic}/u.test(query.normalize("NFD")) === false && (
+              <div className="mt-[4px] text-muted-foreground">
+                Upstream matches the spelling exactly and does not fold accents: rows written
+                with accented characters will not appear here.
+              </div>
+            )
+          )}
+
+          {search.failedVariants.length > 0 && (
+            <div className="mt-[4px] text-warn">
+              The spelling{search.failedVariants.length === 1 ? "" : "s"}{" "}
+              {search.failedVariants.map((v) => `“${v}”`).join(", ")} could not be read, so
+              matching rows are missing from this list and the count is incomplete.
+            </div>
+          )}
+
+          {/*
+           * Import residue is disclosed, never hidden by default. A third of
+           * the backlog is an Asana import and it dominates most searches.
+           */}
+          {searchImported > 0 && (
+            <div className="mt-[4px] text-muted-foreground">
+              <span className="tabular-nums">{searchImported.toLocaleString()}</span> of the{" "}
+              <span className="tabular-nums">{search.rows.length.toLocaleString()}</span> fetched
+              rows are Asana import residue rather than swarm work
+              {hideImported ? " and are hidden" : ""}.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/*
+       * THE ONE QUERY UPSTREAM ANSWERS WITH A MEANINGLESS ZERO.
+       * Searching type `task` for the term "task" returns 0 — reproducible on
+       * `plan`, `issue` and `project` too. Rendering that as "no matches" would
+       * be a confident wrong answer about the data.
+       */}
+      {searchActive && search?.typeNameCollision && (
+        <div className="my-[10px] rounded-lg border border-warn bg-[hsl(var(--warn)/0.12)] px-3 py-[8px] text-[12.5px]">
+          <strong>This query cannot be answered upstream.</strong> Searching tasks for the word
+          “{query}” returns zero rows because the term is the entity type's own name — a known
+          upstream defect, not a fact about the backlog. Add another word, or search for a
+          distinctive part of the title instead.
+        </div>
+      )}
+
       {error && (
         <div className="my-[10px] rounded-lg border border-[hsl(var(--bad)/0.35)] bg-[hsl(var(--bad)/0.12)] px-3 py-[8px] text-[12.5px]">
           <strong>This filter could not be read.</strong> {error} — no rows and no count are
@@ -716,7 +1031,7 @@ export function TaskList({
        * When the total is a lower bound the shortfall is described as "at
        * least" rather than subtracted into a confident figure.
        */}
-      {!pending && truncated && (
+      {!pending && !searchActive && truncated && (
         <div className="my-[10px] flex flex-wrap items-baseline gap-x-2 rounded-lg border border-warn bg-[hsl(var(--warn)/0.12)] px-3 py-[8px] text-[12.5px]">
           <strong>This list is partial.</strong>
           <span>
@@ -745,7 +1060,7 @@ export function TaskList({
 
       {/* Questions are counted rather than silently subtracted, so the drop
           from "loaded" to "shown" never looks like arithmetic going wrong. */}
-      {!pending && questionsHere > 0 && (
+      {!pending && !searchActive && questionsHere > 0 && (
         <p className="my-[6px] text-[11.5px] text-muted-foreground">
           {questionsHere} of the loaded rows{" "}
           {questionsHere === 1 ? "is an open question" : "are open questions"} and{" "}
@@ -799,9 +1114,17 @@ export function TaskList({
              * backlog, the rows are this page of it. Saying so here is what
              * keeps the two from being read as one number.
              */}
+            {/*
+             * The chip counts are ALWAYS backlog-wide, which is right, but
+             * during a search the rows beside them are a search result — so the
+             * note has to say that clicking narrows the SEARCH, not the page,
+             * or the two numbers read as one scope again.
+             */}
             <span className="text-[11px] text-muted-foreground">
               {facets
-                ? "across all open tasks — clicking narrows the loaded page only"
+                ? searchActive
+                  ? "across all open tasks — clicking narrows the search results only"
+                  : "across all open tasks — clicking narrows the loaded page only"
                 : "counting all open tasks…"}
             </span>
           </nav>
@@ -832,7 +1155,7 @@ export function TaskList({
                * since a chevron or a link colour per row would put back the
                * chrome the density pass just removed.
                */}
-              {visible.map((t) => (
+              {rendered.map((t) => (
                 <tr
                   key={t.id}
                   role="button"
@@ -897,13 +1220,30 @@ export function TaskList({
               ))}
             </tbody>
           </table>
-          {!visible.length && !error && (
+          {!rendered.length && !error && !searching && (
             <p className="py-6 text-center text-muted-foreground">
-              {/* An empty QUERY result and an empty CHIP cut are different
-                  facts, and the fix for each is a different control. */}
-              {loaded.length
-                ? "No loaded tasks match this chip."
-                : `No tasks match this query${isExact(matching) && matching.value === 0 ? "" : " in the rows returned"}.`}
+              {/* An empty QUERY result, an empty CHIP cut and an empty SEARCH
+                  are different facts, and the fix for each is a different
+                  control. A search that matched upstream but kept nothing after
+                  the filters says so, rather than reading as "no such task". */}
+              {searchActive ? (
+                searchError ? (
+                  ""
+                ) : search && search.rows.length > 0 ? (
+                  <>
+                    {search.rows.length.toLocaleString()} tasks matched “{query}”, but none of
+                    them pass the filters above — widen the query controls to see them.
+                  </>
+                ) : search?.typeNameCollision ? (
+                  ""
+                ) : (
+                  <>No task in the backlog matches “{query}”.</>
+                )
+              ) : loaded.length ? (
+                "No loaded tasks match this chip."
+              ) : (
+                `No tasks match this query${isExact(matching) && matching.value === 0 ? "" : " in the rows returned"}.`
+              )}
             </p>
           )}
         </>

@@ -62,6 +62,13 @@ import { dirname, join } from "node:path";
  * nothing and touches no DOM, so it is safe to pull into the dev server.
  */
 import { FILTERED_TOTAL_CEILING } from "../src/taskCount";
+/**
+ * The open-status vocabulary, shared with the browser for the same reason the
+ * ceiling above is: search applies this rule client-side (upstream drops
+ * `snapshot_filters` sent alongside `search`), so two copies would drift and a
+ * spelling missing from either side would silently hide open work.
+ */
+import { OPEN_TASK_STATUSES } from "../src/taskSearch";
 
 const DEFAULT_BASE_URL = "https://neotoma.markmhendrickson.com";
 
@@ -231,42 +238,6 @@ async function fetchSchema(entityType: string): Promise<SchemaFetch> {
 }
 
 /**
- * THE NON-TERMINAL STATUS VOCABULARY — what "open work" means to a query.
- *
- * Expressed as a POSITIVE list because it has to be: `snapshot_filters` accepts
- * only `eq | in | gt | lt | gte | lte | contains | contains_word`, and BOTH
- * `ne` and `nin` are rejected 400. "Everything except done" is therefore not
- * expressible upstream, and the open set must be enumerated instead.
- *
- * The list is the union of the dispatcher's state machine
- * (`lib/daemon_runtime/task_lifecycle.py`) and the legacy spellings production
- * actually holds, because `status` is typed as a bare string with no enum and
- * both vocabularies are live. Measured 2026-08-31, one count per value:
- * pending 3547, open 1088, in_progress 394, todo 252, awaiting_input 90,
- * blocked 74, executing 3, active 1, awaiting_release_confirmation 1,
- * awaiting_approval 1, routed 0 — summing to 5451, which is EXACTLY the total
- * the combined `in` query reports. That agreement is the check that this list
- * is complete: a missing spelling would show up as an unexplained shortfall
- * against the 20,989-task denominator.
- *
- * A value here that no task carries costs nothing. A value MISSING from here
- * silently hides open work, so err toward including a spelling.
- */
-const OPEN_TASK_STATUSES = [
-  "pending",
-  "open",
-  "todo",
-  "in_progress",
-  "active",
-  "routed",
-  "executing",
-  "blocked",
-  "awaiting_input",
-  "awaiting_approval",
-  "awaiting_release_confirmation",
-] as const;
-
-/**
  * Turn a "stalled for N days" request into the ISO cutoff the query needs.
  *
  * Computed SERVER-SIDE from a day count rather than accepting a date from the
@@ -366,6 +337,63 @@ async function fetchTasks(limit: number, filters: TaskFilters): Promise<unknown>
     ...body,
     total_saturated: filtered && body.total === FILTERED_TOTAL_CEILING,
     filters_applied: filtered ? snapshotFilters : null,
+  };
+}
+
+/**
+ * SEARCH THE WHOLE TASK BACKLOG for one spelling of a query.
+ *
+ * The Tasks page shows 200 of 21,285 tasks, so search HAS to run upstream: a
+ * box that filtered the loaded page would cover 3.6% of the backlog while
+ * appearing to cover all of it, and an empty result would read as "no such
+ * task". Same defect class as the pre-#691 facet chips.
+ *
+ * NO `snapshot_filters` ARE SENT, AND THAT IS DELIBERATE. Measured against the
+ * live instance on 2026-09-02, upstream ACCEPTS a filter alongside `search`,
+ * IGNORES it, and answers with the unfiltered set:
+ *
+ *   status=pending alone              -> total 3,597
+ *   search="release" alone            -> total   334
+ *   search="release" + status=pending -> total   334, and of 40 rows returned
+ *                                        only 9 were actually `pending`
+ *
+ * Sending the filter anyway would print a count for a strictly wider question
+ * than the page claims to be answering. So this route asks by text only, is
+ * explicit about it via `filters_applied: null`, and the client applies the
+ * page's filters to the returned rows and shows both figures. It is the same
+ * class of upstream defect as `sort_by` being accepted and ignored on a search
+ * (see `/api/search`), and is handled the same way: do not send it.
+ *
+ * Because no filters are sent, `total` takes Neotoma's real-aggregate path
+ * rather than the saturating fetch-and-length one — search "a" reports 21,369,
+ * above the 10,000 clamp — so the figure is a count, not a lower bound. The
+ * `total_saturated` key is still emitted (always false here) so the client's
+ * `countFrom` contract holds unchanged.
+ */
+async function fetchTaskSearch(query: string, limit: number): Promise<unknown> {
+  const body = (await neotomaPost(
+    "/entities/query",
+    {
+      entity_type: "task",
+      search: query,
+      limit,
+      include_snapshots: true,
+      // NO `sort_by`: upstream returns HTTP 400 when it accompanies `search`
+      // (the same constraint `/api/search` documents). Relevance order is the
+      // server's; the client sorts for display.
+    },
+    // `task` is the slowest type measured (27.6s for a broad search), so this
+    // gets the same generous budget `/api/search` uses. A slow answer is the
+    // normal case against a starved reader pool (ateles#576, neotoma#2217).
+    75_000,
+  )) as Record<string, unknown>;
+
+  return {
+    ...body,
+    // Always false while no filters are sent; kept so the client reads totals
+    // through one contract and a future filtered variant cannot slip past it.
+    total_saturated: false,
+    filters_applied: null,
   };
 }
 
@@ -2052,7 +2080,7 @@ export function neotomaProxy(): Plugin {
          *
          * Only `eq` is offered. `snapshot_filters` also accepts `in`, `gt`,
          * `lt`, `gte`, `lte`, `contains` and `contains_word`, but `ne`/`nin`
-         * are rejected 400 upstream — see OPEN_TASK_STATUSES above.
+         * are rejected 400 upstream — see `OPEN_TASK_STATUSES` in `src/taskSearch.ts`.
          */
         const snapshotFilters: Record<string, { op: "eq"; value: string }> = {};
         for (const [key, value] of params) {
@@ -2114,6 +2142,64 @@ export function neotomaProxy(): Plugin {
         }
       });
 
+      /**
+       * GET /api/task-search?q=<text>&limit=<n> — the Tasks page's search box.
+       *
+       * Separate from `/api/search` on purpose, though both end at
+       * `/entities/query`. That route serves the GLOBAL search: many types, 12
+       * rows each, and it forwards `field:value` terms as `snapshot_filters`.
+       * This one is single-type, fetches a deep page so the client can apply
+       * the Tasks page's own filters over it, and sends NO filters at all
+       * because upstream drops them when `search` is present (see
+       * `fetchTaskSearch`). Folding the two together would mean one of those
+       * two contracts silently applying to the other's callers.
+       *
+       * Read-only, like every route here.
+       */
+      server.middlewares.use("/api/task-search", async (req, res) => {
+        const params = new URL(req.url ?? "/", "http://localhost").searchParams;
+        const q = (params.get("q") ?? "").trim();
+        // Capped at 500: the client filters this page down, so a bigger page
+        // means a truer filtered view, but every row is snapshot-bearing and
+        // this query already runs for tens of seconds.
+        const limit = Math.min(Number(params.get("limit")) || 200, 500);
+
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Cache-Control", "no-store");
+
+        /**
+         * A one-character query is a substring match over 21,285 entities: it
+         * returns thousands of rows and answers nothing. Refused rather than
+         * run, so a stray keystroke cannot cost a 75s query. The bound matches
+         * `MIN_QUERY_LENGTH` on the client, which stops it being sent at all.
+         */
+        if (q.length < 2) {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: "Search needs at least two characters." }));
+          return;
+        }
+        // Length-capped like every other value this file forwards. The query is
+        // a JSON body value, not a path segment, so there is nothing to escape;
+        // the cap keeps the route from becoming an unbounded upstream scan.
+        if (q.length > 200) {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: "Search query is too long." }));
+          return;
+        }
+
+        try {
+          res.end(JSON.stringify(await fetchTaskSearch(q, limit)));
+        } catch (err) {
+          // A timeout is NOT an empty result. The client renders "the search
+          // did not answer" rather than "nothing matched" — with 5,566 open
+          // tasks, the difference is the whole point of the feature.
+          const message = (err as Error).message;
+          const timedOut =
+            (err as Error).name === "TimeoutError" || /timeout|aborted/i.test(message);
+          res.statusCode = 502;
+          res.end(JSON.stringify({ error: message, timedOut }));
+        }
+      });
     },
   };
 }
