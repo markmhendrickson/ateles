@@ -508,3 +508,197 @@ def test_claim_works_when_holder_is_declared_in_the_snapshot():
     assert "raw_fragments" not in raw
 
     assert not store.acquire(task, "runner-B").held
+
+
+# ── 7. ACTIVATION: the watchdog actually reaps by lease in production ────────
+#
+# The tests in section 5 drive `classify()` directly and construct the watchdog
+# WITH a claim store. That proves the logic, and proves nothing about whether
+# production ever reaches it: before this change `apis.py` built the watchdog as
+# `TaskWatchdog()` with `_claims` defaulting to None, so the lease path was dead
+# code in the running daemon. These tests assert the WIRING.
+
+
+def _apis_source() -> str:
+    """The daemon's source text, read from disk (not imported).
+
+    apis.py cannot be imported in a unit test — it opens SSE subscriptions and
+    requires a live Neotoma at module scope. The construction site is therefore
+    asserted against the source, which is exactly the artifact that was wrong.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    return (root / "execution" / "daemons" / "apis" / "apis.py").read_text()
+
+
+def test_apis_constructs_the_watchdog_with_a_claim_store():
+    """REGRESSION: `TaskWatchdog()` with no store leaves the lease path dead.
+
+    This is the single assertion that distinguishes "the mechanism exists" from
+    "the mechanism runs". Reverting the activation makes this fail.
+    """
+    import re
+
+    src = _apis_source()
+    ctor = re.search(r"watchdog\s*=\s*TaskWatchdog\((.*?)\)", src, re.S)
+    assert ctor, "apis.py must construct a TaskWatchdog"
+    args = ctor.group(1)
+    assert "_claims" in args, (
+        "TaskWatchdog must be constructed WITH the claim store; a bare "
+        "TaskWatchdog() silently falls back to the age proxy and the RELEASE "
+        "path never executes in production"
+    )
+
+
+def test_apis_injects_the_same_claim_store_the_dispatcher_uses():
+    """The reaper must read the rows the claimer writes.
+
+    A separately-built store could point at a different instance and reap live
+    work, so the module-level `_claims` is the only correct argument.
+    """
+    import re
+
+    src = _apis_source()
+    ctor = re.search(r"watchdog\s*=\s*TaskWatchdog\((.*?)\)", src, re.S)
+    assert re.search(r"_claims\s*=\s*_claims", ctor.group(1)), (
+        "watchdog must receive the module-level _claims used by dispatch_task"
+    )
+    # And that store is the one the dispatch path claims through.
+    assert "_claims.acquire(" in src
+
+
+def test_watchdog_default_still_has_no_claim_store():
+    """The default stays None so a caller must opt in explicitly.
+
+    Activation is a property of the DAEMON's construction, not a changed
+    default — this keeps the primitive usable (and testable) unwired.
+    """
+    from execution.daemons.apis.task_watchdog import TaskWatchdog
+
+    assert TaskWatchdog()._claims is None
+    sentinel = object()
+    assert TaskWatchdog(_claims=sentinel)._claims is sentinel
+
+
+# ── 8. ACTIVATION: behaviour of the wired watchdog against real claim rows ───
+
+
+def _wired_watchdog(store, stall_seconds=3600):
+    from execution.daemons.apis.task_watchdog import TaskWatchdog
+
+    return TaskWatchdog(stall_seconds=stall_seconds, _claims=store)
+
+
+def test_killed_runner_task_is_released_once_its_lease_lapses(env):
+    """THE failure this exists to fix, end to end through the wired watchdog.
+
+    A runner claims a task and is SIGKILLed: it writes NOTHING further. The
+    task's own row is meanwhile touched by an unrelated write, so the age proxy
+    reports it as fresh forever. Only the lease notices the runner is gone.
+    """
+    from execution.daemons.apis.task_watchdog import WatchdogAction
+
+    _, clock, store = env
+    task = "ent_task_killed_runner"
+    assert store.acquire(task, "runner-doomed").held
+
+    wd = _wired_watchdog(store)
+
+    # Still inside the lease → left alone, even though we ask about it.
+    assert wd.classify(task, "executing", age_seconds=1,
+                       claim=wd._claim_for(task)) == WatchdogAction.NONE
+
+    clock.advance(901)  # the runner is dead; only time passes
+
+    # age_seconds=1 models an unrelated write resetting updated_at. The age
+    # proxy would say NONE here; the lease says RELEASE.
+    assert wd.classify(task, "executing", age_seconds=1,
+                       claim=wd._claim_for(task)) == WatchdogAction.RELEASE
+
+
+def test_live_lease_is_not_released_however_stale_the_task_row_is(env):
+    """The dangerous direction: never yank a task from a healthy runner."""
+    from execution.daemons.apis.task_watchdog import WatchdogAction
+
+    _, clock, store = env
+    task = "ent_task_healthy"
+    claim = store.acquire(task, "runner-alive")
+    assert claim.held
+
+    wd = _wired_watchdog(store)
+    clock.advance(600)                # inside the 900s lease
+    assert store.heartbeat(claim)     # the runner is doing its job
+    clock.advance(600)
+
+    assert wd.classify(task, "executing", age_seconds=99_999,
+                       claim=wd._claim_for(task)) == WatchdogAction.NONE
+
+
+def test_never_claimed_task_is_not_released_by_the_first_sweep(env):
+    """THE 21k-backlog question, asserted rather than assumed.
+
+    Every existing task predates the primitive and has NO claim row. `inspect()`
+    returns None for those, so `classify()` falls back to the age proxy and the
+    first sweep behaves exactly as it does today. "Never claimed" must never be
+    read as "lease expired", or one sweep would release the whole backlog.
+    """
+    from execution.daemons.apis.task_watchdog import WatchdogAction
+
+    _, _, store = env
+    wd = _wired_watchdog(store)
+
+    # No claim row exists for this task at all.
+    assert wd._claim_for("ent_task_from_the_backlog") is None
+
+    # Fresh by the age proxy → untouched, NOT released.
+    assert wd.classify("ent_task_from_the_backlog", "executing", age_seconds=1,
+                       claim=wd._claim_for("ent_task_from_the_backlog")) == WatchdogAction.NONE
+    # Genuinely stale → the pre-existing RETRY, not a RELEASE.
+    assert wd.classify("ent_task_from_the_backlog", "executing", age_seconds=99_999,
+                       claim=wd._claim_for("ent_task_from_the_backlog")) == WatchdogAction.RETRY
+
+
+def test_an_already_released_claim_is_not_released_again(env):
+    """REGRESSION: a cleared holder is not a lapsed lease.
+
+    `release_expired()` writes holder="", so the row still reads live=False.
+    Treating that as a lapsed lease re-releases an unheld task every sweep,
+    burning one attempt per pass until a task NOBODY holds is escalated to the
+    operator. With no holder there is no lease to have lapsed → age proxy.
+    """
+    from execution.daemons.apis.task_watchdog import WatchdogAction
+
+    _, clock, store = env
+    task = "ent_task_double_release"
+    store.acquire(task, "runner-dead")
+    clock.advance(901)
+
+    wd = _wired_watchdog(store)
+    assert wd.classify(task, "executing", age_seconds=1,
+                       claim=wd._claim_for(task)) == WatchdogAction.RELEASE
+    assert store.release_expired(task) is True
+
+    # The claim row still exists, with an empty holder and live=False.
+    row = wd._claim_for(task)
+    assert row is not None and not row.get("live") and not row.get("holder")
+
+    # Second sweep: no holder → no lease lapsed → age proxy, not another RELEASE.
+    assert wd.classify(task, "executing", age_seconds=1,
+                       claim=row) == WatchdogAction.NONE
+
+
+def test_claim_read_failure_never_releases_a_task(env):
+    """Fail-soft in the safe direction: an unreadable claim must not reap."""
+    from execution.daemons.apis.task_watchdog import WatchdogAction
+
+    fake, clock, store = env
+    task = "ent_task_read_error"
+    store.acquire(task, "runner-alive")
+
+    wd = _wired_watchdog(store)
+    fake.fail_next_read = True
+    assert wd._claim_for(task) is None       # swallowed, not raised
+
+    # Falls back to the age proxy rather than releasing a possibly-live runner.
+    assert wd.classify(task, "executing", age_seconds=1, claim=None) == WatchdogAction.NONE

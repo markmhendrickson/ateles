@@ -1174,7 +1174,23 @@ async def main() -> None:
     # 6. Stall watchdog (task #2): out-of-band sweeper that retries FAILED tasks
     #    with backoff, resumes tasks left mid-flight by a restart, and escalates
     #    once attempts are exhausted — without blocking the SSE loop.
-    watchdog = TaskWatchdog()
+    # The ClaimStore is what ACTIVATES lease-based reaping. Without it the
+    # watchdog falls back to `_age_seconds`, which reads updated_at — a proxy
+    # ANY unrelated Neotoma write resets, so a task whose runner was SIGKILLed
+    # can look alive indefinitely and never gets released.
+    #
+    # Injecting the SAME `_claims` the dispatch path holds is deliberate: the
+    # reaper must read the very rows the claimer writes. A second store built
+    # here could read a different instance and silently reap live work.
+    #
+    # Not gated behind a new env flag. `APIS_CLAIM_ENABLED` already gates the
+    # store's existence, and a second flag defaulting off is how a mechanism
+    # ends up merged-but-inert. When claims are on, the reaper reads them.
+    watchdog = TaskWatchdog(_claims=_claims)
+    log.info(
+        f"[{DAEMON_NAME}] watchdog liveness signal: "
+        f"{'lease (claim store)' if _claims is not None else 'age proxy (no claim store)'}"
+    )
 
     async def watchdog_dispatch(task_id: str, snapshot: dict, trigger: str) -> None:
         await dispatch_task(task_id, snapshot, trigger, notifier=notifier)
