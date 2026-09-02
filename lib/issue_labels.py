@@ -94,10 +94,29 @@ class GateLabel(str, Enum):
 # Cheaper and more filterable than a blocked label per gate.
 BLOCKED_GATES_LABEL = "blocked/gates"
 
-# Gates that must clear before implementation may start. Mirrors
-# swarm_dispatch.PRE_IMPL_GATES; duplicated here so this module stays
-# importable without pulling in the daemon.
-PRE_IMPL_GATE_NAMES: tuple[str, ...] = ("pm", "arch")
+# Gates that must clear before implementation may start.
+#
+# THIS IS NOT A GATE SEQUENCE. It is the last-resort set used only when the
+# caller does not supply one, and it exists solely so this pure projection
+# function stays callable without I/O.
+#
+# It used to be `("pm", "arch")` while the comment above it claimed it mirrored
+# `swarm_dispatch.PRE_IMPL_GATES` — which was `("pm", "ux", "arch")`. Because
+# `BLOCKED_GATES_LABEL` derives from this tuple, `blocked/gates` read CLEAR on a
+# feature issue whose `ux` gate was still pending. Two copies of one sequence,
+# silently disagreeing.
+#
+# Callers that know the issue now pass `pre_impl_gates` explicitly, resolved
+# from the governing `workflow_definition` entity via
+# `lib.daemon_runtime.workflow_resolver.resolve_pre_impl_gates`. The value below
+# is deliberately EMPTY: with no gates named, no `blocked/gates` label is
+# emitted, so an unsupplied sequence produces *no claim* about blocking rather
+# than a confident wrong one. Under-labelling is visible and recoverable;
+# clearing a block that is still live is what shipped code past an unsigned gate.
+_UNSUPPLIED_PRE_IMPL_GATES: tuple[str, ...] = ()
+
+# Back-compat alias. Prefer passing `pre_impl_gates` to `labels_for_gate_status`.
+PRE_IMPL_GATE_NAMES: tuple[str, ...] = _UNSUPPLIED_PRE_IMPL_GATES
 
 # Gate states that mean "this gate is no longer holding the issue up".
 _CLEARED_STATES = frozenset({"signed_off", "waived"})
@@ -146,6 +165,7 @@ MANAGED_LABEL_PREFIXES: tuple[str, ...] = ("phase/", "gate/", "blocked/")
 def labels_for_gate_status(
     gate_status: dict[str, str] | None,
     current_owner: str | None = None,
+    pre_impl_gates: tuple[str, ...] | list[str] | None = None,
 ) -> set[str]:
     """Project a swarm issue's gate state onto the GitHub labels it should carry.
 
@@ -159,6 +179,14 @@ def labels_for_gate_status(
 
     `current_owner` may name a gate (`"arch"`) or the agent that owns it
     (`"waxwing"`); both resolve to the same `phase/` label.
+
+    `pre_impl_gates` is the gate set that must clear before implementation, for
+    THIS issue — resolve it from the governing `workflow_definition` with
+    `lib.daemon_runtime.workflow_resolver.resolve_pre_impl_gates` rather than
+    assuming one. It differs per workflow: `ateles|feature` declares
+    `pm, ux, arch`; `ateles|bug` and `ateles|security` declare only `pm`.
+    Omitting it emits no `blocked/gates` label at all (see
+    `_UNSUPPLIED_PRE_IMPL_GATES`) — no claim beats a wrong one.
 
     Returns only the labels this module manages; callers union it with the
     issue's unmanaged labels.
@@ -175,7 +203,12 @@ def labels_for_gate_status(
                 desired.add(label.value)
 
     # Blocked flag: any PRE-IMPL gate not yet cleared and not not_required.
-    for gate in PRE_IMPL_GATE_NAMES:
+    blocking_gates = (
+        tuple(pre_impl_gates)
+        if pre_impl_gates is not None
+        else _UNSUPPLIED_PRE_IMPL_GATES
+    )
+    for gate in blocking_gates:
         state = str(status.get(gate, "")).strip().lower()
         if state and state not in _CLEARED_STATES and state != "not_required":
             desired.add(BLOCKED_GATES_LABEL)

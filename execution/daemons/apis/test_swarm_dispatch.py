@@ -21,11 +21,18 @@ from lib.daemon_runtime.gating import CheckpointPosture, ExecutionPolicy
 from lib.notify import Priority
 from review_panel import Lens
 from skill_runner import SkillResult
+# Pre-impl gates of the `ateles|feature` workflow (ent_1d20d557828ecd080b654367).
+# A TEST FIXTURE, not a production constant — the dispatcher resolves this per
+# issue from the governing workflow_definition entity, and `gates_needing_waive`
+# takes the set as a parameter. Keeping a local literal here lets these waive
+# tests keep asserting the ateles#241 behaviour without re-pinning a hardcoded
+# sequence in production code.
+FEATURE_PRE_IMPL_GATES = ("pm", "ux", "arch")
+
 from swarm_dispatch import (
     AGENT_GITHUB_LOGIN,
     EXPECTATION_MARKER,
     GITHUB_FACING_AGENTS,
-    PRE_IMPL_GATES,
     _APPROVE_CMD,
     _CONFIRM_GATES_CLEAR_CMD,
     _HOLD_CMD,
@@ -2207,7 +2214,7 @@ def test_confirm_gates_clear_performs_dispatcher_side_write(monkeypatch):
         return SkillResult(skill, True, 0, "", "")
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
-    store = _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    store = _FakeGateStore({g: "pending" for g in FEATURE_PRE_IMPL_GATES})
     _install_fake_gate_store(monkeypatch, store)
     comments = _capture_waive_comments(monkeypatch)
 
@@ -2223,7 +2230,7 @@ def test_confirm_gates_clear_performs_dispatcher_side_write(monkeypatch):
     )
     assert store.waive_calls, "the dispatcher must call the gate store"
     # Every pre-impl gate must be waived.
-    for gate in PRE_IMPL_GATES:
+    for gate in FEATURE_PRE_IMPL_GATES:
         assert store.gate_status[gate] == "waived", (
             f"gate {gate!r} must be waived by the dispatcher-side sweep"
         )
@@ -2320,7 +2327,7 @@ def test_confirm_gates_clear_on_pr_comment_retriggers_pr_pipeline(monkeypatch):
     monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_persist)
     monkeypatch.setattr(SwarmDispatcher, "_store_merge_checkpoint", fake_merge_checkpoint)
     store = _install_fake_gate_store(
-        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+        monkeypatch, _FakeGateStore({g: "pending" for g in FEATURE_PRE_IMPL_GATES})
     )
     _capture_waive_comments(monkeypatch)
 
@@ -2351,7 +2358,7 @@ def test_confirm_gates_clear_is_case_insensitive_for_operator_login(monkeypatch)
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     store = _install_fake_gate_store(
-        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+        monkeypatch, _FakeGateStore({g: "pending" for g in FEATURE_PRE_IMPL_GATES})
     )
     _capture_waive_comments(monkeypatch)
     dispatcher = SwarmDispatcher(_StubNotifier(), _config())
@@ -2406,7 +2413,7 @@ def test_lanius_pr_prompt_blocked_comment_names_gates():
     """Blocked comment must name which pre-impl gates are unsigned."""
     prompt = SwarmDispatcher._lanius_pr_prompt(_trigger(), parent=80)
     # The prompt must mention the specific gates so Lanius lists them.
-    for gate in PRE_IMPL_GATES:
+    for gate in FEATURE_PRE_IMPL_GATES:
         assert gate in prompt, f"Lanius PR prompt must mention gate '{gate}'"
 
 
@@ -2429,17 +2436,25 @@ def test_lanius_pr_prompt_blocked_comment_specifies_operator_only():
     assert _OPERATOR_LOGIN in prompt
 
 
-def test_pre_impl_gates_constant_includes_expected_gates():
-    """PRE_IMPL_GATES must include pm, ux and arch (the three pre-impl gates).
+def test_no_hardcoded_pre_impl_gate_sequence_remains():
+    """swarm_dispatch must not export a fixed pre-impl gate sequence.
 
-    ateles#285: `ux` was missing, which is why the 2026-07-23 waive on
-    ateles#241 cleared `arch` and left `ux` pending. The Lanius skill's Phase 2
-    (Accipiter `ux` + Bombycilla `arch`) and _lanius_pr_prompt both treat `ux`
-    as a pre-impl gate, so the constant must agree.
+    REPLACES `test_pre_impl_gates_constant_includes_expected_gates`, which
+    asserted the module-level tuple contained pm/ux/arch. That assertion was
+    correct for `ateles|feature` and WRONG for `ateles|bug` and
+    `ateles|security`, which declare `pm` alone — so it pinned a sequence that
+    over-waived on two of the four ateles workflows, in the same way a test
+    asserting `owning_agent == "gryllus"` pinned a rename bug as expected.
+
+    The sequence now comes from the governing `workflow_definition`; that the
+    dispatcher actually obeys it is asserted in
+    `test_workflow_definition_drives_dispatch.py`. What is left to check here is
+    that the constant did not quietly come back.
     """
-    assert "pm" in PRE_IMPL_GATES
-    assert "ux" in PRE_IMPL_GATES
-    assert "arch" in PRE_IMPL_GATES
+    assert not hasattr(swarm_dispatch, "PRE_IMPL_GATES"), (
+        "a module-level PRE_IMPL_GATES is a second source of truth; resolve the "
+        "sequence from the workflow_definition entity instead"
+    )
 
 
 def test_operator_login_defaults_to_repo_owner():
@@ -2462,7 +2477,7 @@ def test_waive_sweeps_all_unsigned_gates_not_just_one():
 
     That run waived `arch` and left `ux` pending, so the issue LOOKED cleared
     while PR gate inheritance kept blocking. `gates_needing_waive` is a total
-    function over PRE_IMPL_GATES, so a partial sweep is structurally impossible.
+    function over FEATURE_PRE_IMPL_GATES, so a partial sweep is structurally impossible.
     """
     from gate_waive import apply_waives, gates_needing_waive
 
@@ -2477,7 +2492,7 @@ def test_waive_sweeps_all_unsigned_gates_not_just_one():
         "legal": "not_required",
     }
 
-    targeted = gates_needing_waive(gate_status, PRE_IMPL_GATES)
+    targeted = gates_needing_waive(gate_status, FEATURE_PRE_IMPL_GATES)
     assert set(targeted) == {"ux", "arch"}, (
         f"both unsigned pre-impl gates must be targeted, got {targeted}"
     )
@@ -2495,7 +2510,7 @@ def test_waive_sweep_covers_gates_absent_from_gate_status():
     """A gate MISSING from gate_status is unsigned, not cleared."""
     from gate_waive import gates_needing_waive
 
-    targeted = gates_needing_waive({"pm": "signed_off"}, PRE_IMPL_GATES)
+    targeted = gates_needing_waive({"pm": "signed_off"}, FEATURE_PRE_IMPL_GATES)
     assert set(targeted) == {"ux", "arch"}, (
         f"absent gates must be treated as unsigned, got {targeted}"
     )
@@ -2510,7 +2525,7 @@ def test_already_cleared_gates_are_left_alone():
         "ux": "waived",
         "arch": "not_required",
     }
-    assert gates_needing_waive(gate_status, PRE_IMPL_GATES) == [], (
+    assert gates_needing_waive(gate_status, FEATURE_PRE_IMPL_GATES) == [], (
         "no gate should be targeted when all pre-impl gates are already cleared"
     )
 
@@ -2759,7 +2774,9 @@ def test_additive_spec_pr_opened_is_info_priority(monkeypatch):
     monkeypatch.setattr(swarm_dispatch, "select_expectation_agents",
                         lambda *a, **kw: [])
     # ateles#460: _gates_green is async and takes (lanius, repository, number).
-    async def _always_green(self, lanius, repository, issue_number):
+    # It now also takes `labels`, which it uses to resolve the pre-impl gate set
+    # from the governing workflow_definition.
+    async def _always_green(self, lanius, repository, issue_number, labels=None):
         return True
 
     monkeypatch.setattr(SwarmDispatcher, "_gates_green", _always_green)
@@ -2855,7 +2872,7 @@ def test_gate_waive_spawns_no_agent(monkeypatch):
         return SkillResult(skill, True, 0, "", "")
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", spy_run_skill)
-    store = _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+    store = _FakeGateStore({g: "pending" for g in FEATURE_PRE_IMPL_GATES})
     _install_fake_gate_store(monkeypatch, store)
     _capture_waive_comments(monkeypatch)
 
@@ -3022,7 +3039,7 @@ def test_confirm_gates_clear_still_works_after_swarm_run_added(monkeypatch):
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     store = _install_fake_gate_store(
-        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+        monkeypatch, _FakeGateStore({g: "pending" for g in FEATURE_PRE_IMPL_GATES})
     )
     _capture_waive_comments(monkeypatch)
     notifier = _StubNotifier()
@@ -3051,7 +3068,7 @@ def test_both_commands_prefers_confirm_gates_clear(monkeypatch):
     monkeypatch.setattr(SwarmDispatcher, "_handle_issue_opened", fake_handle_issue_opened)
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     store = _install_fake_gate_store(
-        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+        monkeypatch, _FakeGateStore({g: "pending" for g in FEATURE_PRE_IMPL_GATES})
     )
     _capture_waive_comments(monkeypatch)
 
@@ -3316,7 +3333,7 @@ def test_operator_confirm_gates_clear_still_dispatches_after_bot_guard(monkeypat
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     store = _install_fake_gate_store(
-        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+        monkeypatch, _FakeGateStore({g: "pending" for g in FEATURE_PRE_IMPL_GATES})
     )
     _capture_waive_comments(monkeypatch)
     dispatcher = SwarmDispatcher(_StubNotifier(), _config())
@@ -4176,7 +4193,7 @@ def test_confirm_gates_clear_still_dispatches_after_h1_commands_added(monkeypatc
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     store = _install_fake_gate_store(
-        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+        monkeypatch, _FakeGateStore({g: "pending" for g in FEATURE_PRE_IMPL_GATES})
     )
     _capture_waive_comments(monkeypatch)
     asyncio.run(
@@ -4228,7 +4245,7 @@ def test_confirm_gates_clear_wins_over_approve_when_both_present(monkeypatch):
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
     store = _install_fake_gate_store(
-        monkeypatch, _FakeGateStore({g: "pending" for g in PRE_IMPL_GATES})
+        monkeypatch, _FakeGateStore({g: "pending" for g in FEATURE_PRE_IMPL_GATES})
     )
     _capture_waive_comments(monkeypatch)
 

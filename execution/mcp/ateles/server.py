@@ -56,6 +56,42 @@ from mcp.types import (
     Tool,
 )
 
+# This module lives at execution/mcp/ateles/server.py, so the repo root is four
+# parents up. Added so the gate order can be resolved from `workflow_definition`
+# entities through the same resolver the dispatcher uses — a fourth private copy
+# of the sequence here is what this change removes.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+# Loaded by FILE PATH, not as `lib.daemon_runtime.workflow_resolver`.
+#
+# Importing the package would run `lib/daemon_runtime/__init__.py`, whose env
+# bootstrap reads ~/.config/neotoma/.env and REPOPULATES an empty
+# NEOTOMA_BEARER_TOKEN. That bootstrap is correct for daemons under launchd,
+# which have no environment; it is wrong here, because this server is started
+# by an MCP client that decides its own credentials — and a caller that
+# deliberately blanks the token would silently get the operator's real one back.
+# `test_server_smoke.test_tool_call_degrades_gracefully_without_token` catches
+# exactly that: it starts the server with an empty token and expects a graceful
+# error, and it began returning live roster data the moment this import was
+# added as a package import.
+#
+# The resolver module itself imports nothing from its package, so loading it
+# directly is equivalent minus the bootstrap.
+import importlib.util as _importlib_util  # noqa: E402
+
+_resolver_spec = _importlib_util.spec_from_file_location(
+    "_ateles_workflow_resolver",
+    _REPO_ROOT / "lib" / "daemon_runtime" / "workflow_resolver.py",
+)
+_resolver = _importlib_util.module_from_spec(_resolver_spec)
+# Registered before exec: @dataclass resolves annotations via
+# sys.modules[cls.__module__], which is None for an unregistered module.
+sys.modules[_resolver_spec.name] = _resolver
+_resolver_spec.loader.exec_module(_resolver)
+resolve_gates = _resolver.resolve_gates
+
 log = logging.getLogger("ateles")
 
 NEOTOMA_BASE_URL = os.environ.get(
@@ -565,9 +601,21 @@ def _resolve_checkpoint(checkpoint_id: str, action: str) -> dict:
 # mutating counterpart is ever added it belongs behind the operator-approval
 # path resolve_checkpoint already uses, not as a free-form gate setter.
 
-# Gate order used for reporting. Mirrors the pre-impl → impl → review ordering
-# the dispatcher enforces; an absent gate is unsigned, not cleared.
-_GATE_ORDER = ("pm", "ux", "arch", "impl", "pr_review")
+# Gate order used for reporting.
+#
+# The real order comes from the governing `workflow_definition` entity, resolved
+# per issue by `lib.daemon_runtime.workflow_resolver.resolve_gates` — this was
+# the third of four divergent hardcoded copies of one sequence.
+#
+# What remains here is a REPORTING-ONLY fallback for when no workflow resolves.
+# It is safe in a way the dispatcher's fallback would not have been, and the
+# asymmetry is deliberate: this module never writes gate state (see the
+# self-certification note above), so the worst case is a report that names a
+# gate the workflow does not define — visible, and corrected by the same read
+# that produced it. The dispatcher instead REFUSES, because there a wrong
+# sequence waives or blocks real gates. Every response carries `gate_order_source`
+# so a reader can tell a resolved order from this fallback.
+_GATE_ORDER_FALLBACK = ("pm", "ux", "arch", "impl", "pr_review")
 
 # States that count as "this gate is not waiting on anyone".
 _CLEARED_GATE_STATES = {"signed_off", "not_required", "waived"}
@@ -648,18 +696,52 @@ def _dedupe_history(entries: list[dict]) -> list[dict]:
     return out
 
 
-def _blocking_gates(gate_status: dict) -> list[str]:
+def _issue_labels(snap: dict) -> list[str]:
+    """Labels off an issue snapshot, tolerating the stored shapes.
+
+    Prod stores `labels` as a list of strings, a list of ``{"name": ...}``
+    dicts, or a comma-separated string. Workflow selection keys off these, so
+    reading only one spelling would silently select the default workflow.
+    """
+    raw = snap.get("labels")
+    if isinstance(raw, str):
+        try:
+            decoded = json.loads(raw)
+        except (ValueError, TypeError):
+            return [s.strip() for s in raw.split(",") if s.strip()]
+        raw = decoded
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        if isinstance(item, dict):
+            name = str(item.get("name", "")).strip()
+        else:
+            name = str(item).strip()
+        if name:
+            out.append(name)
+    return out
+
+
+def _blocking_gates(
+    gate_status: dict, gate_order: tuple[str, ...] | list[str] | None = None
+) -> list[str]:
     """Gates that are not cleared, in gate order.
 
-    A total function over _GATE_ORDER: a gate missing from *gate_status* is
+    A total function over *gate_order*: a gate missing from *gate_status* is
     unsigned, not cleared. (The 2026-07-23 waive regression came from iterating
     the stored map instead of the full gate list.) Unknown extra gates are
     appended so a newly-added gate is never invisible here.
+
+    *gate_order* should come from the issue's `workflow_definition` via
+    `resolve_gates`; omitting it falls back to `_GATE_ORDER_FALLBACK` for
+    reporting only.
     """
-    out = [g for g in _GATE_ORDER if str(gate_status.get(g, "")).strip().lower() not in _CLEARED_GATE_STATES]
+    order = tuple(gate_order) if gate_order else _GATE_ORDER_FALLBACK
+    out = [g for g in order if str(gate_status.get(g, "")).strip().lower() not in _CLEARED_GATE_STATES]
     out += [
         g for g in sorted(gate_status)
-        if g not in _GATE_ORDER
+        if g not in order
         and str(gate_status.get(g, "")).strip().lower() not in _CLEARED_GATE_STATES
     ]
     return out
@@ -731,9 +813,20 @@ def _get_gate_status(issue_ref: str, history_limit: int = 5) -> dict:
     # has it now and why".
     recent = history[-history_limit:] if history_limit > 0 else history
 
-    blocking = _blocking_gates(gate_status)
     repo_name = str(snap.get("repo") or snap.get("repository") or "")
     number_val = snap.get("github_number") or snap.get("issue_number") or snap.get("number")
+
+    # Report against the gate order the issue's own workflow_definition
+    # declares, not a fixed list. `gate_order_source` tells the reader which
+    # they got, so a fallback is never mistaken for the record's answer.
+    gate_order: tuple[str, ...] | None = None
+    gate_order_source = "workflow_definition"
+    try:
+        gate_order = resolve_gates(repo_name, _issue_labels(snap))
+    except Exception as exc:  # noqa: BLE001 — reporting must not fail closed
+        gate_order_source = f"fallback ({type(exc).__name__})"
+
+    blocking = _blocking_gates(gate_status, gate_order)
 
     pipeline = _pipeline_state_for(repo_name, number_val)
 
@@ -747,6 +840,8 @@ def _get_gate_status(issue_ref: str, history_limit: int = 5) -> dict:
         "gate_status": gate_status,
         "blocking_gates": blocking,
         "all_gates_cleared": not blocking,
+        "gate_order": list(gate_order) if gate_order else list(_GATE_ORDER_FALLBACK),
+        "gate_order_source": gate_order_source,
         "owner_history_recent": recent,
         "owner_history_total": len(history),
         "pipeline": pipeline,
