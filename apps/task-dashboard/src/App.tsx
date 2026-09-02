@@ -23,6 +23,7 @@ import { type Task, type TaskEntity, parseTask } from "./tasks";
 import { Questions } from "./Questions";
 import { QuestionDetail } from "./QuestionDetail";
 import { questionRefs } from "./questionRefs";
+import { type QuestionCoverage, questionCoverage } from "./questionCount";
 import { TaskList } from "./TaskList";
 import { AgentDirectory } from "./AgentDirectory";
 import { Sessions } from "./Sessions";
@@ -88,6 +89,18 @@ export function App() {
   /** Ids seen in a previous poll — anything new gets highlighted briefly. */
   const seen = useRef<Set<string> | null>(null);
   const [fresh, setFresh] = useState<Set<string>>(new Set());
+  /**
+   * How many open questions EXIST, against how many the task page loaded.
+   *
+   * The rail filters this page's newest-200 tasks. That is fine while every
+   * question is recent, and silently wrong the moment one is not — and the
+   * question most likely to age out is the one longest unanswered, which is
+   * exactly the one a queue must not lose. `/api/questions` supplies the
+   * denominator so the rail can say when it is showing a subset.
+   */
+  const [questionCoverageState, setQuestionCoverage] = useState<QuestionCoverage>({
+    kind: "unknown",
+  });
 
   const load = useCallback(async () => {
     try {
@@ -122,6 +135,35 @@ export function App() {
     const id = setInterval(() => void load(), REFRESH_MS);
     return () => clearInterval(id);
   }, [load]);
+
+  /**
+   * The question denominator, on the same clock as the task poll.
+   *
+   * Deliberately a SEPARATE request rather than a field on `/api/tasks`: it is
+   * a count over every question regardless of age, which is precisely what the
+   * 200-row task page cannot answer about itself. A failure here leaves the
+   * coverage `unknown`, and the rail then states the figure it can defend
+   * rather than inventing one.
+   */
+  useEffect(() => {
+    let alive = true;
+    const loadCounts = async () => {
+      try {
+        const res = await fetch("/api/questions");
+        const body = await res.json();
+        if (!res.ok || body.error) throw new Error(body.error ?? `HTTP ${res.status}`);
+        if (alive) setQuestionCoverage({ kind: "measured", total: body.total, done: body.done });
+      } catch {
+        if (alive) setQuestionCoverage({ kind: "unknown" });
+      }
+    };
+    void loadCounts();
+    const id = setInterval(() => void loadCounts(), REFRESH_MS);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
 
   /**
    * Questions are `task` entities too, so they arrive on the same poll. Split
@@ -376,6 +418,7 @@ export function App() {
               the shared 10s poll, so a newly-raised question appears unprompted. */}
           <Questions
             questions={questions}
+            coverage={questionCoverage(questionCoverageState, questions)}
             firstLoadDone={firstLoadDone}
             onOpen={openQuestion}
             openId={route.questionId}
