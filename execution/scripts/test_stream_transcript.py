@@ -1571,6 +1571,11 @@ def _silent_socket_session(tmp_path, monkeypatch, **kwargs):
     class _FastStallMonitor(st.HealthMonitor):
         def __init__(self, **kw):
             kw["socket_silent_seconds"] = 0.05
+            # Same reason the stall threshold is shrunk: these tests
+            # drive simulated clocks far faster than wall time, so the
+            # production 2s sustain window would never be satisfied and
+            # the speech clock would never advance.
+            kw["speech_sustain_seconds"] = 0.0
             super().__init__(**kw)
 
     monkeypatch.setattr(st, "HealthMonitor", _FastStallMonitor)
@@ -1699,12 +1704,17 @@ def test_the_reconnect_is_announced_in_the_jsonl(tmp_path, monkeypatch):
     assert reconnects, "the operator must SEE that a gap happened"
     recovered = [r for r in reconnects if r["reconnect"]["recovered"]]
     assert recovered, "a successful reconnect is reported, not just the attempt"
-    # The lost audio is quantified, because the operator has to repeat it.
+    # The gap is quantified, so the operator can judge what it cost him.
     assert any(
         r["reconnect"]["dropped_seconds"] is not None for r in recovered
     )
-    assert any("repeat" in r["error"] for r in recovered), (
-        "the operator is told to repeat himself, not left to infer it"
+    # Reachable at the top level too — that is where consumers read it.
+    assert any(r.get("dropped_seconds") is not None for r in recovered)
+    # Stated as a BOUND on audio, not as a claim about speech. The figure is
+    # RMS-derived, and asserting it as speech is what had the operator
+    # repeating sentences he had never said.
+    assert any("up to" in r["error"] for r in recovered), (
+        "the operator is told how big the gap was, as an upper bound"
     )
     # And the give-up is fatal and loud.
     assert any(r.get("fatal") for r in records)
@@ -1840,6 +1850,11 @@ def test_the_capture_is_not_restarted_by_a_reconnect(tmp_path, monkeypatch):
     class _FastStallMonitor(st.HealthMonitor):
         def __init__(self, **kw):
             kw["socket_silent_seconds"] = 0.05
+            # Same reason the stall threshold is shrunk: these tests
+            # drive simulated clocks far faster than wall time, so the
+            # production 2s sustain window would never be satisfied and
+            # the speech clock would never advance.
+            kw["speech_sustain_seconds"] = 0.0
             super().__init__(**kw)
 
     monkeypatch.setattr(st, "HealthMonitor", _FastStallMonitor)
@@ -1937,3 +1952,151 @@ def test_health_summary_reports_reconnects(tmp_path):
     assert summary["dropped_speech_seconds"] == 0.0
     monitor.note_reconnected(now=2.0)
     assert monitor.summary(now=3.0)["reconnects"] == 1
+
+
+# ---------------------------------------------------------------------------
+# The speech clock must mean SPEECH (ateles#682 follow-up)
+#
+# `last_speech_at` is what separates "dead socket" from "quiet room", and it is
+# also the operator-facing "how much do I have to repeat" figure. An earlier
+# revision advanced it on a SINGLE 0.1s frame above -50 dBFS, so one click or
+# one breath reset it. On a real session that turned 125s of silence into a
+# report of 101.9s of unanswered speech, and the operator was asked to repeat
+# words he had never said.
+# ---------------------------------------------------------------------------
+
+
+def _isolated_bursts(monitor, *, seconds: float, every: float, start: float = 0.0):
+    """Feed room tone with one loud 0.1s frame every `every` seconds."""
+    t = start
+    end = start + seconds
+    while t < end:
+        loud = int((t - start) / every) != int((t - start - 0.1) / every)
+        monitor.note_audio(_pcm(3000 if loud else 60), now=t)
+        t += 0.1
+    return t
+
+
+def test_isolated_loud_frames_are_not_speech():
+    """The defect, stated directly: scattered clicks are not somebody talking.
+
+    Reverting the sustain requirement (advancing `last_speech_at` on any single
+    frame >= speech_dbfs) makes this fail — `last_speech_at` tracks the last
+    burst and the monitor reports continuous speech through pure silence.
+    """
+    monitor = st.HealthMonitor(
+        signal_window_seconds=1e9, speech_sustain_seconds=2.0, now=0.0
+    )
+    end = _isolated_bursts(monitor, seconds=120.0, every=5.0)
+    # One loud frame every 5s for two minutes: never 2s of sustained level.
+    assert monitor.last_speech_at == 0.0, (
+        "isolated frames must not advance the speech clock"
+    )
+    assert not monitor.socket_stalled(now=end), (
+        "a room with occasional noise and no talking is not a stalled socket, "
+        "however long the socket stays quiet"
+    )
+
+
+def test_sustained_level_is_speech():
+    """The positive case — the fix must not deafen the detector."""
+    monitor = st.HealthMonitor(
+        signal_window_seconds=1e9, speech_sustain_seconds=2.0, now=0.0
+    )
+    t = 0.0
+    while t < 5.0:
+        monitor.note_audio(_pcm(3000), now=t)
+        t += 0.1
+    assert monitor.last_speech_at > 0.0, (
+        "five unbroken seconds of speech-level audio is speech"
+    )
+
+
+def test_speech_must_be_sustained_for_the_full_window():
+    """Just under the sustain threshold is still not speech."""
+    monitor = st.HealthMonitor(
+        signal_window_seconds=1e9, speech_sustain_seconds=2.0, now=0.0
+    )
+    t = 0.0
+    while t < 1.5:  # 1.5s of level, then it stops
+        monitor.note_audio(_pcm(3000), now=t)
+        t += 0.1
+    assert monitor.last_speech_at == 0.0
+    # A gap resets the run, so a second short burst does not accumulate.
+    monitor.note_audio(_pcm(60), now=t)
+    t += 0.1
+    while t < 3.2:
+        monitor.note_audio(_pcm(3000), now=t)
+        t += 0.1
+    assert monitor.last_speech_at == 0.0, (
+        "two sub-threshold bursts either side of a gap are not one long run"
+    )
+
+
+def test_a_silent_room_with_noise_does_not_report_phantom_unanswered_speech():
+    """The operator-facing number, which is what did the damage.
+
+    The stall message and the reconnect record both quote
+    `unanswered_speech_seconds`. When the room is quiet that figure must show
+    the socket has heard nothing to answer, not invent a stretch of speech.
+    """
+    monitor = st.HealthMonitor(
+        signal_window_seconds=1e9, speech_sustain_seconds=2.0, now=0.0
+    )
+    end = _isolated_bursts(monitor, seconds=125.0, every=5.0)
+    # Nothing was ever said, so nothing is owed a repeat.
+    assert monitor.last_speech_at == 0.0
+    assert not monitor.socket_stalled(now=end)
+
+
+def test_a_reconnect_clears_a_half_finished_speech_run():
+    """A partial run belongs to the dead socket's timeline."""
+    monitor = st.HealthMonitor(
+        signal_window_seconds=1e9, speech_sustain_seconds=2.0, now=0.0
+    )
+    t = 0.0
+    while t < 1.0:  # a run in progress, not yet long enough to count
+        monitor.note_audio(_pcm(3000), now=t)
+        t += 0.1
+    reconnected_at = t
+    monitor.note_reconnected(now=t)
+    assert monitor.last_speech_at == pytest.approx(reconnected_at)
+    # Continuing to speak must restart the run against the NEW socket, so a
+    # further 1.5s (under the 2s threshold) still does not advance the clock.
+    while t < reconnected_at + 1.5:
+        monitor.note_audio(_pcm(3000), now=t)
+        t += 0.1
+    assert monitor.last_speech_at == pytest.approx(reconnected_at), (
+        "note_reconnected stamps the speech clock; the partial run must not "
+        "carry over and advance it again"
+    )
+
+
+def test_the_reconnect_record_exposes_dropped_seconds_at_the_top_level():
+    """The "how much did this cost me" number, where readers actually look.
+
+    It rendered as `?` in a consumer reading `dropped_seconds`, because the
+    only copy lived nested under `reconnect`.
+    """
+    record = st.reconnect_record(
+        3, attempt=1, reason="a stalled socket", dropped_seconds=17.4, recovered=True
+    )
+    assert record["dropped_seconds"] == 17.4
+    assert record["reconnect"]["dropped_seconds"] == 17.4
+    # And it stays absent-but-present when there is nothing to report.
+    empty = st.reconnect_record(3, attempt=1, reason="x")
+    assert empty["dropped_seconds"] is None
+
+
+def test_the_dropped_figure_is_described_as_a_bound_not_as_speech():
+    """The figure is RMS-derived, so the wording must not assert speech.
+
+    Asserting it outright is what had the operator repeating sentences he had
+    never said, after a quiet stretch was misreported as unanswered speech.
+    """
+    record = st.reconnect_record(
+        1, attempt=1, reason="a stalled socket", dropped_seconds=12.0, recovered=True
+    )
+    assert "up to" in record["error"]
+    assert "if you were speaking" in record["error"]
+    assert "please repeat anything said" not in record["error"]
