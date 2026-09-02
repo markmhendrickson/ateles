@@ -7,7 +7,7 @@ name: neotoma-agent
 description: Neotoma-repo automation daemon. Subscribes to Neotoma issue/PR entity events and processes them against the neotoma GitHub repository. Phase 1 skeleton — full automation in Phase 3.
 tier: T3
 genus: Castor
-status: planned
+status: active
 aauth_sub: neotoma-agent@ateles-swarm
 agent_grant: service
 observation_source_default: workflow_state
@@ -26,7 +26,7 @@ Neotoma-repo automation daemon. Subscribes to Neotoma issue/PR entity events and
 | --- | --- |
 | Tier | T3 |
 | Genus | Castor |
-| Status | planned |
+| Status | active |
 | AAuth sub | neotoma-agent@ateles-swarm |
 | Agent grant | service |
 | Observation source | workflow_state |

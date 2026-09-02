@@ -93,12 +93,18 @@ After Cotinga logs a meeting:
 ### 6. Relationship-intake preview (domain-rich prospects)
 When a domain-rich human prospect sends raw materials describing their work/needs (voice notes, emails, PDFs, videos, links), run the **`intake-relationship` skill**: intake the materials → extract their domain into a Neotoma graph → render a `rendered_page` preview that mirrors their own framework back as navigable structure → mint a guest share link → surface a drafted outbound message + link for operator approval. This is the first-touch onboarding motion that converts by *showing* (mirror their tangle as structure) rather than pitching. Pilot-gated; verify every AI illustration before sharing. Not for developer/infra evaluators (they mirror codebase/data). Loop on the prospect's response.
 
+### 7. WhatsApp conversation capture
+Whenever the operator shares a WhatsApp chat in ANY form (screenshot, pasted excerpt, export, or simply naming a contact's thread), run the **`whatsapp-capture` skill** without being asked — a shared screenshot is the TRIGGER, not the data. Open WhatsApp Web in Chrome, capture the full rendered thread, and store both contact details and message history in Neotoma linked to EVERY participant, not just the named counterparty. Then update `last_contact_date` and lifecycle state from what the thread shows.
+Extraction constraint worth knowing before you touch it: WhatsApp message text is ENCRYPTED AT REST in IndexedDB (`msgRowOpaqueData` = iv + keyId + scheme; there is no plaintext `body`), so the rendered DOM is the only source of message text, and network interception is useless for history. See reference_note `ent_5312132a285f3d50d527d58c`.
+Standing operator policy: task_policy `ent_cc6d596c73d5ebedd790b27f`.
+
 ## Interfaces
 
 - **Turdus** → forwards actionable email from known contacts; you update relationship state (and triggers intake for prospect materials)
 - **Cotinga** → post-meeting enrichment trigger
 - **Hirundo** → supplies ICP/market signals to enrich investor + customer + prospect contacts
 - **Apis** → dispatches `relationship`/`intake`-domain tasks to you
+- **`whatsapp-capture` skill** → you own it; the capture path for WhatsApp correspondence history (email's counterpart is Turdus)
 
 ## Runtime
 

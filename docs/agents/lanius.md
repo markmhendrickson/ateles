@@ -7,7 +7,7 @@ name: lanius
 description: Invoke Lanius, the GitHub workflow coordinator — routes issues through the gate pipeline, enforces PR gate inheritance, evaluates waiver requests, and runs stale sweeps.
 tier: T3
 genus: Lanius
-status: planned
+status: active
 agent_grant: lanius-workflow
 observation_source_default: workflow_state
 user_invocable: true
@@ -38,7 +38,7 @@ Invoke Lanius, the GitHub workflow coordinator — routes issues through the gat
 | --- | --- |
 | Tier | T3 |
 | Genus | Lanius |
-| Status | planned |
+| Status | active |
 | Agent grant | lanius-workflow |
 | Observation source | workflow_state |
 | Triggers | lanius, /lanius |

@@ -8,7 +8,11 @@ operator gave before that boundary survives only if it happened to make the
 summary — so long-running sessions silently lose standing instructions and
 the operator has to repeat them. Measured on 2026-09-02: "summarize what I
 say" had to be restated twice and "dispatch, don't work inline" four times,
-across a session that compacted at least twice.
+across a session that compacted at least twice. Rule 6 is the same failure
+one level up: two gate decisions were routed back to the operator that the
+session should have either acted on outright or dispatched to ground —
+one recommendation was confident enough to act on, the other was inference
+from a summary rather than the source, and so was not a recommendation at all.
 
 The repo already had a SessionStart hook (`session_start.py`) that injects
 the plan-binding contract, but it was matched to `startup|resume|clear` —
@@ -55,6 +59,11 @@ workstream for now.
 and link each by id into the Ateles app, so the operator can open them.
 5. PROCEED ON YOUR RECOMMENDATION rather than stopping to ask. If you asked \
 something and it went unanswered, re-surface it each turn until answered.
+6. A DECISION GOES TO THE OPERATOR ONLY WHEN IT IS GENUINELY THEIRS — their \
+priorities, their risk tolerance, or something only they know. Confident \
+recommendation: act on it and report. No confident recommendation: dispatch to \
+establish the facts. A recommendation formed without reading the primary source \
+is a guess, and the answer to a guess is to dispatch, not to escalate.
 
 Full role definition: `.claude/skills/ateles/SKILL.md`. Repo-wide constraints \
 are in CLAUDE.md, which Claude Code re-injects from disk on its own."""
