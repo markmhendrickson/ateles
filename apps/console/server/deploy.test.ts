@@ -22,10 +22,10 @@ const APP_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 const REPO_ROOT = join(APP_DIR, "..", "..");
 
 const workflow = readFileSync(
-  join(REPO_ROOT, ".github", "workflows", "deploy-task-dashboard.yml"),
+  join(REPO_ROOT, ".github", "workflows", "deploy-console.yml"),
   "utf8",
 );
-const flyConfig = readFileSync(join(APP_DIR, "fly.dashboard.toml"), "utf8");
+const flyConfig = readFileSync(join(APP_DIR, "fly.console.toml"), "utf8");
 const serveSrc = readFileSync(join(APP_DIR, "server", "serve.ts"), "utf8");
 
 /** Strip full-line comments so prose about bad values is never asserted on. */
@@ -36,10 +36,10 @@ const stripComments = (s: string) =>
     .join("\n");
 
 describe("deploy workflow", () => {
-  it("deploys from the dashboard's own Fly config, not the default fly.toml", () => {
+  it("deploys from the console's own Fly config, not the default fly.toml", () => {
     // The bug this pins: `flyctl deploy` with no -c falls back to fly.toml and
     // reapplies ITS [[vm]] block over the running machine.
-    expect(workflow).toMatch(/flyctl deploy -c fly\.dashboard\.toml/);
+    expect(workflow).toMatch(/flyctl deploy -c fly\.console\.toml/);
   });
 
   it("passes the app and region explicitly, since the config names neither", () => {
@@ -48,13 +48,13 @@ describe("deploy workflow", () => {
   });
 
   it("injects the deployed commit so the running build can be identified", () => {
-    expect(workflow).toMatch(/--build-arg DASHBOARD_GIT_SHA="\$SHA"/);
+    expect(workflow).toMatch(/--build-arg CONSOLE_GIT_SHA="\$SHA"/);
   });
 
   it("names no app or hostname — this repo is public", () => {
     // Values come from secrets; the canonical binding lives in Neotoma.
-    expect(workflow).toMatch(/secrets\.DASHBOARD_APP/);
-    expect(workflow).toMatch(/secrets\.DASHBOARD_HOST/);
+    expect(workflow).toMatch(/secrets\.CONSOLE_APP/);
+    expect(workflow).toMatch(/secrets\.CONSOLE_HOST/);
     expect(stripComments(workflow)).not.toMatch(/\.fly\.dev/);
   });
 

@@ -1,6 +1,6 @@
-name: Deploy task dashboard
+name: Deploy console
 
-# Deploys merged `main` to the operator's task-dashboard instance.
+# Deploys merged `main` to the operator's Ateles console instance.
 #
 # WHY THIS EXISTS: the dashboard ran only on the operator's laptop, on
 # localhost:5273. When it went down, every task link produced that day died
@@ -20,20 +20,20 @@ name: Deploy task dashboard
 # and the same insistence that a deploy exiting 0 is NOT evidence of a deploy.
 #
 # Required repository secrets:
-#   DASHBOARD_APP        Fly app name
-#   DASHBOARD_HOST       hostname to verify (no scheme)
+#   CONSOLE_APP        Fly app name
+#   CONSOLE_HOST       hostname to verify (no scheme)
 #   FLY_API_TOKEN        Fly deploy token for the app's org
-#                        (override with DASHBOARD_FLY_TOKEN if it moves org)
+#                        (override with CONSOLE_FLY_TOKEN if it moves org)
 #
-# The job SKIPS cleanly when DASHBOARD_APP is unset, so forks are unaffected.
+# The job SKIPS cleanly when CONSOLE_APP is unset, so forks are unaffected.
 
 on:
   push:
     branches: [main]
     # Only redeploy when something the served build actually contains changed.
     paths:
-      - "apps/task-dashboard/**"
-      - ".github/workflows/deploy-task-dashboard.yml"
+      - "apps/console/**"
+      - ".github/workflows/deploy-console.yml"
   workflow_dispatch:
     inputs:
       skip_ci_gate:
@@ -50,7 +50,7 @@ permissions:
 # machine stopped or half-updated. Two merges in quick succession should deploy
 # in order, the second superseding the first.
 concurrency:
-  group: deploy-task-dashboard
+  group: deploy-console
   cancel-in-progress: false
 
 jobs:
@@ -58,16 +58,16 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: apps/task-dashboard
+        working-directory: apps/console
     steps:
       - name: Check instance is configured
         id: gate
         working-directory: .
         env:
-          APP: ${{ secrets.DASHBOARD_APP }}
+          APP: ${{ secrets.CONSOLE_APP }}
         run: |
           if [ -z "$APP" ]; then
-            echo "DASHBOARD_APP not set — no dashboard instance configured; skipping."
+            echo "CONSOLE_APP not set — no dashboard instance configured; skipping."
             echo "configured=false" >> "$GITHUB_OUTPUT"
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
@@ -104,7 +104,7 @@ jobs:
                 [ -z "${NAME:-}" ] && continue
                 # Skip this workflow's own check-run, or it waits on itself.
                 case "$NAME" in
-                  deploy|"Deploy task dashboard"*) continue ;;
+                  deploy|"Deploy console"*) continue ;;
                 esac
                 if [ "$STATUS" != "completed" ]; then
                   PENDING=$((PENDING + 1)); continue
@@ -136,7 +136,7 @@ jobs:
         if: steps.gate.outputs.configured == 'true'
         uses: superfly/flyctl-actions/setup-flyctl@master
 
-      # `-c fly.dashboard.toml` is LOAD-BEARING. `flyctl deploy` defaults to
+      # `-c fly.console.toml` is LOAD-BEARING. `flyctl deploy` defaults to
       # fly.toml and REAPPLIES the selected config's [[vm]] block over the
       # running machine — it does not merge, and prints no warning when it
       # shrinks one (neotoma#2289). --app and --primary-region are passed
@@ -144,14 +144,14 @@ jobs:
       - name: Deploy to Fly
         if: steps.gate.outputs.configured == 'true'
         env:
-          FLY_API_TOKEN: ${{ secrets.DASHBOARD_FLY_TOKEN || secrets.FLY_API_TOKEN }}
-          APP: ${{ secrets.DASHBOARD_APP }}
-          REGION: ${{ vars.DASHBOARD_REGION || 'ams' }}
+          FLY_API_TOKEN: ${{ secrets.CONSOLE_FLY_TOKEN || secrets.FLY_API_TOKEN }}
+          APP: ${{ secrets.CONSOLE_APP }}
+          REGION: ${{ vars.CONSOLE_REGION || 'ams' }}
           SHA: ${{ github.sha }}
         run: |
-          flyctl deploy -c fly.dashboard.toml \
+          flyctl deploy -c fly.console.toml \
             --app "$APP" --primary-region "$REGION" --remote-only \
-            --build-arg DASHBOARD_GIT_SHA="$SHA"
+            --build-arg CONSOLE_GIT_SHA="$SHA"
 
       # ── POST-DEPLOY VERIFICATION ─────────────────────────────────────────
       # `flyctl deploy` exiting 0 is NOT evidence the new build is serving.
@@ -162,7 +162,7 @@ jobs:
         if: steps.gate.outputs.configured == 'true'
         env:
           EXPECTED_SHA: ${{ github.sha }}
-          HOST: ${{ secrets.DASHBOARD_HOST }}
+          HOST: ${{ secrets.CONSOLE_HOST }}
         run: |
           set -euo pipefail
 

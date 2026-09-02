@@ -61,7 +61,7 @@ const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 /** The out-and-back hop to Google. Short: it is a redirect, not a session. */
 const STATE_TTL_MS = 10 * 60 * 1000;
 
-export const SESSION_COOKIE = "ateles_dash_session";
+export const SESSION_COOKIE = "ateles_console_session";
 
 let cachedJwks: ReturnType<typeof createRemoteJWKSet> | null = null;
 function getJwks() {
@@ -81,7 +81,7 @@ function env(name: string): string {
  */
 function approvedEmails(): Set<string> {
   const out = new Set<string>();
-  for (const raw of env("DASHBOARD_APPROVED_EMAILS").split(",")) {
+  for (const raw of env("CONSOLE_APPROVED_EMAILS").split(",")) {
     const e = raw.trim().toLowerCase();
     if (e) out.add(e);
   }
@@ -95,10 +95,10 @@ function approvedEmails(): Set<string> {
  */
 export function authConfigured(): { ok: boolean; missing: string[] } {
   const missing: string[] = [];
-  if (!env("DASHBOARD_GOOGLE_CLIENT_ID")) missing.push("DASHBOARD_GOOGLE_CLIENT_ID");
-  if (!env("DASHBOARD_GOOGLE_CLIENT_SECRET")) missing.push("DASHBOARD_GOOGLE_CLIENT_SECRET");
-  if (approvedEmails().size === 0) missing.push("DASHBOARD_APPROVED_EMAILS");
-  if (!env("DASHBOARD_SESSION_KEY")) missing.push("DASHBOARD_SESSION_KEY");
+  if (!env("CONSOLE_GOOGLE_CLIENT_ID")) missing.push("CONSOLE_GOOGLE_CLIENT_ID");
+  if (!env("CONSOLE_GOOGLE_CLIENT_SECRET")) missing.push("CONSOLE_GOOGLE_CLIENT_SECRET");
+  if (approvedEmails().size === 0) missing.push("CONSOLE_APPROVED_EMAILS");
+  if (!env("CONSOLE_SESSION_KEY")) missing.push("CONSOLE_SESSION_KEY");
   return { ok: missing.length === 0, missing };
 }
 
@@ -109,7 +109,7 @@ export function authConfigured(): { ok: boolean; missing: string[] } {
 // app is redeployed on every merge to main.
 
 function sign(value: string): string {
-  return createHmac("sha256", env("DASHBOARD_SESSION_KEY")).update(value).digest("base64url");
+  return createHmac("sha256", env("CONSOLE_SESSION_KEY")).update(value).digest("base64url");
 }
 
 export function issueSession(email: string): string {
@@ -185,7 +185,7 @@ export function consumeState(nonce: string): { next: string } | null {
 
 export function buildAuthorizeUrl(redirectUri: string, state: string): string {
   const url = new URL(GOOGLE_AUTHORIZE_URL);
-  url.searchParams.set("client_id", env("DASHBOARD_GOOGLE_CLIENT_ID"));
+  url.searchParams.set("client_id", env("CONSOLE_GOOGLE_CLIENT_ID"));
   url.searchParams.set("redirect_uri", redirectUri);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("scope", "openid email");
@@ -206,7 +206,7 @@ export async function verifyGoogleCode(
   code: string,
   redirectUri: string,
 ): Promise<string> {
-  const clientId = env("DASHBOARD_GOOGLE_CLIENT_ID");
+  const clientId = env("CONSOLE_GOOGLE_CLIENT_ID");
 
   const res = await fetch(GOOGLE_TOKEN_URL, {
     method: "POST",
@@ -214,7 +214,7 @@ export async function verifyGoogleCode(
     body: new URLSearchParams({
       code,
       client_id: clientId,
-      client_secret: env("DASHBOARD_GOOGLE_CLIENT_SECRET"),
+      client_secret: env("CONSOLE_GOOGLE_CLIENT_SECRET"),
       redirect_uri: redirectUri,
       grant_type: "authorization_code",
     }).toString(),

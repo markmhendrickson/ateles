@@ -35,22 +35,23 @@ export interface CodeUsage {
 }
 
 export const SCAN_META = {
-  "generatedAt": "2026-08-31T14:13:12+00:00",
-  "commit": "47d786e",
-  "filesScanned": 312,
+  "generatedAt": "2026-09-02T13:39:47+00:00",
+  "commit": "f9389a7",
+  "filesScanned": 357,
   "repoRoot": "ateles"
 } as const;
 
 export const CODE_USAGE: Record<string, CodeUsage> = {
   "agent_definition": {
     "readers": [
-      "apps/task-dashboard/server/neotomaProxy.ts:164",
+      "apps/console/server-dist/serve.js:301",
+      "apps/console/server/neotomaProxy.ts:412",
       "execution/mcp/ateles/server.py:407",
       "execution/scripts/render_agent_docs.py:117",
-      "lib/daemon_runtime/agent_loader.py:196"
+      "lib/daemon_runtime/agent_loader.py:325"
     ],
     "writers": [],
-    "readerCount": 4,
+    "readerCount": 5,
     "writerCount": 0,
     "testOnlyReaders": false
   },
@@ -66,9 +67,9 @@ export const CODE_USAGE: Record<string, CodeUsage> = {
   },
   "agent_policy": {
     "readers": [
-      "lib/daemon_runtime/agent_loader.py:281",
+      "lib/daemon_runtime/agent_loader.py:433",
       "lib/daemon_runtime/generalizer.py:274",
-      "scripts/revert_auto_policy.py:87"
+      "scripts/revert_auto_policy.py:89"
     ],
     "writers": [
       "lib/daemon_runtime/generalizer.py:434",
@@ -105,13 +106,14 @@ export const CODE_USAGE: Record<string, CodeUsage> = {
   },
   "conversation": {
     "readers": [
-      "apps/task-dashboard/server/neotomaProxy.ts:266",
+      "apps/console/server-dist/serve.js:340",
+      "apps/console/server/neotomaProxy.ts:514",
       "execution/daemons/riparia/riparia.py:220"
     ],
     "writers": [
       "execution/mcp/mcp_tool_grant_proxy/session_integrity.py:49"
     ],
-    "readerCount": 2,
+    "readerCount": 3,
     "writerCount": 1,
     "testOnlyReaders": false
   },
@@ -140,9 +142,11 @@ export const CODE_USAGE: Record<string, CodeUsage> = {
   },
   "email_message": {
     "readers": [],
-    "writers": [],
+    "writers": [
+      "execution/daemons/turdus/turdus.py:514"
+    ],
     "readerCount": 0,
-    "writerCount": 0,
+    "writerCount": 1,
     "testOnlyReaders": false
   },
   "escalation": {
@@ -169,7 +173,7 @@ export const CODE_USAGE: Record<string, CodeUsage> = {
   "harness_event": {
     "readers": [],
     "writers": [
-      "execution/daemons/apis/swarm_dispatch.py:6057"
+      "execution/daemons/apis/swarm_dispatch.py:7181"
     ],
     "readerCount": 0,
     "writerCount": 1,
@@ -177,22 +181,24 @@ export const CODE_USAGE: Record<string, CodeUsage> = {
   },
   "issue": {
     "readers": [
-      "execution/daemons/apis/swarm_dispatch.py:5687",
-      "execution/daemons/apis/swarm_dispatch.py:5833",
+      "execution/daemons/apis/swarm_dispatch.py:6782",
+      "execution/daemons/apis/swarm_dispatch.py:6928",
       "execution/mcp/ateles/server.py:694",
       "execution/mcp/ateles/server.py:700"
     ],
     "writers": [
-      "execution/daemons/apis/swarm_dispatch.py:5833"
+      "execution/daemons/apis/swarm_dispatch.py:6928"
     ],
     "readerCount": 4,
     "writerCount": 1,
     "testOnlyReaders": false
   },
   "locale_profile": {
-    "readers": [],
+    "readers": [
+      "execution/scripts/session_language.py:92"
+    ],
     "writers": [],
-    "readerCount": 0,
+    "readerCount": 1,
     "writerCount": 0,
     "testOnlyReaders": false
   },
@@ -205,7 +211,7 @@ export const CODE_USAGE: Record<string, CodeUsage> = {
   },
   "payment_profile": {
     "readers": [
-      "execution/daemons/monedula/handlers/payment_profile.py:141"
+      "execution/daemons/monedula/handlers/payment_profile.py:172"
     ],
     "writers": [],
     "readerCount": 1,
@@ -232,7 +238,7 @@ export const CODE_USAGE: Record<string, CodeUsage> = {
   },
   "project": {
     "readers": [
-      "execution/daemons/anthus/orchestrator.py:400"
+      "execution/daemons/anthus/orchestrator.py:442"
     ],
     "writers": [],
     "readerCount": 1,
@@ -255,10 +261,11 @@ export const CODE_USAGE: Record<string, CodeUsage> = {
   },
   "session_digest": {
     "readers": [
-      "apps/task-dashboard/server/neotomaProxy.ts:672"
+      "apps/console/server-dist/serve.js:624",
+      "apps/console/server/neotomaProxy.ts:1184"
     ],
     "writers": [],
-    "readerCount": 1,
+    "readerCount": 2,
     "writerCount": 0,
     "testOnlyReaders": false
   },
@@ -280,16 +287,19 @@ export const CODE_USAGE: Record<string, CodeUsage> = {
   },
   "task": {
     "readers": [
-      "apps/task-dashboard/server/neotomaProxy.ts:145",
-      "apps/task-dashboard/server/neotomaProxy.ts:661",
-      "execution/daemons/apis/task_watchdog.py:240",
-      "execution/scripts/verify_aauth_signer.py:52"
+      "apps/console/server-dist/serve.js:261",
+      "apps/console/server-dist/serve.js:278",
+      "apps/console/server-dist/serve.js:505",
+      "apps/console/server-dist/serve.js:519",
+      "apps/console/server-dist/serve.js:548",
+      "apps/console/server-dist/serve.js:578"
     ],
     "writers": [
+      "execution/daemons/turdus/turdus.py:623",
       "execution/mcp/ateles/server.py:538"
     ],
-    "readerCount": 4,
-    "writerCount": 1,
+    "readerCount": 17,
+    "writerCount": 2,
     "testOnlyReaders": false
   },
   "task_policy": {
@@ -308,14 +318,15 @@ export const CODE_USAGE: Record<string, CodeUsage> = {
   },
   "workflow_definition": {
     "readers": [
-      "apps/task-dashboard/server/neotomaProxy.ts:634",
-      "execution/daemons/anthus/orchestrator.py:321",
-      "execution/daemons/apis/swarm_dispatch.py:4217"
+      "apps/console/server-dist/serve.js:482",
+      "apps/console/server/neotomaProxy.ts:882",
+      "execution/daemons/anthus/orchestrator.py:363",
+      "execution/daemons/apis/swarm_dispatch.py:5283"
     ],
     "writers": [
-      "execution/daemons/apis/swarm_dispatch.py:4217"
+      "execution/daemons/apis/swarm_dispatch.py:5283"
     ],
-    "readerCount": 3,
+    "readerCount": 4,
     "writerCount": 1,
     "testOnlyReaders": false
   }
