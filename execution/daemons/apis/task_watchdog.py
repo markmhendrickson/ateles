@@ -151,11 +151,25 @@ class TaskWatchdog:
                 # genuinely holding this, no matter how stale the task row is.
                 if claim.get("live"):
                     return WatchdogAction.NONE
-                # Lease lapsed (or never held) → release it back to the queue.
-                return (
-                    WatchdogAction.RELEASE if attempts < MAX_ATTEMPTS
-                    else WatchdogAction.ESCALATE
-                )
+                # A LAPSED lease means a runner took this task and then stopped
+                # writing — the SIGKILL case. Release it back to the queue.
+                #
+                # An ALREADY-RELEASED claim (holder cleared by release_expired,
+                # which writes holder="") is NOT that. Both have live=False, so
+                # treating them alike re-releases an unheld task on every sweep,
+                # burning one attempt each pass until a task nobody holds gets
+                # ESCALATEd to the operator. `set_task_status(PENDING)` normally
+                # moves it out of this branch, but that write is fail-open — so
+                # the guard belongs here, not in the caller's success path.
+                #
+                # With no holder recorded there is no lease to have lapsed, so
+                # fall through to the age proxy: the same signal used for a task
+                # that was never claimed at all.
+                if claim.get("holder"):
+                    return (
+                        WatchdogAction.RELEASE if attempts < MAX_ATTEMPTS
+                        else WatchdogAction.ESCALATE
+                    )
             if age_seconds is not None and age_seconds >= self.stall_seconds:
                 return WatchdogAction.RETRY if attempts < MAX_ATTEMPTS else WatchdogAction.ESCALATE
             return WatchdogAction.NONE
