@@ -56,7 +56,9 @@ will need to record. It gates nothing else. Watchdogs keep sweeping, forensics
 keeps capturing, health checks keep probing, and the notifier keeps delivering.
 A hard dependency that stops the thing diagnosing the dependency makes recovery
 impossible; a diagnostic capture asserts nothing about the record, so it does
-not require the record.
+not require the record. While halted, `TaskWatchdog.sweep` re-probes
+(`probe(force=True)`) so recovery and drain do not depend on dispatch/SSE
+traffic.
 
 The halt announces itself off-Neotoma
 -------------------------------------
@@ -169,8 +171,24 @@ def _real_read(timeout: float) -> ProbeResult:
             timeout=timeout,
         )
         elapsed = time.monotonic() - started
-        resp.raise_for_status()
-        # A 200 whose body is not a readable envelope means the read path
+        # An arriving response — even a 5xx — proves the server is alive.
+        # raise_for_status() would map that to UNREACHABLE and halt under
+        # intermittent 502 pressure; classify by status before treating errors.
+        if resp.status_code >= 500:
+            return ProbeResult(
+                Reachability.SLOW,
+                elapsed,
+                f"HTTP {resp.status_code} — server answered (degraded)",
+            )
+        if resp.status_code >= 400:
+            # Auth/config/client fault: same spirit as a missing bearer —
+            # do not halt the swarm and blame the server.
+            return ProbeResult(
+                Reachability.OK,
+                elapsed,
+                f"HTTP {resp.status_code} — config/client fault, not halting",
+            )
+        # A 2xx whose body is not a readable envelope means the read path
         # answered with something other than the record. Treat it as an outage:
         # the point of a real read is that it proves reads work.
         try:
@@ -310,19 +328,45 @@ class ReachabilityGate:
             from lib.notify import Priority
 
             if halted:
+                # Structure fixed for Accipiter UX DoD; [COPY:…] slots are for
+                # Paradisaea final wording — do not invent polished prose here.
                 notifier.send(
-                    "SWARM HALTED — Neotoma unreachable.\n"
+                    "[COPY: SWARM HALTED — Neotoma unreachable / hard-stop title]\n"
                     f"  {failures} consecutive failed reads ({detail}).\n"
-                    "  Dispatch is refusing new work so nothing is done without a "
-                    "record. Watchdogs, forensics and alerting stay live.",
+                    "  [COPY: what stopped]: dispatch refuses new work; "
+                    "completions that cannot be recorded are not claimed DONE.\n"
+                    "  [COPY: what still runs]: watchdogs, forensics, alerting.\n"
+                    "\n"
+                    "  Next:\n"
+                    f"  1. [COPY: inspect failed read path] — "
+                    f"POST {NEOTOMA_BASE_URL}/entities/query (never /health).\n"
+                    "  2. [COPY: inspect Apis daemon logs on the live checkout] — "
+                    "e.g. ~/ateles-rc-src / Apis process logs for "
+                    "`[reachability]` / `HALTED — refusing to dispatch`.\n"
+                    "  3. [COPY: inspect forensic capture dir] — "
+                    "$NEOTOMA_FORENSICS_DIR or "
+                    "~/.local/state/ateles/neotoma-forensics "
+                    "(lib/neotoma_forensics.py).\n"
+                    "  4. [COPY: distinguish outage vs config] — empty "
+                    "NEOTOMA_BEARER_TOKEN does not halt; token/auth/config "
+                    f"faults show differently from transport/timeout in ({detail}).\n"
+                    "  5. [COPY: what deferred tasks do] — left in prior status; "
+                    "drain after a successful re-probe clears the halt "
+                    "(TaskWatchdog.sweep calls probe(force=True) while halted).\n"
+                    "  6. [COPY: recovery condition] — one successful real read "
+                    "clears the halt; resume pages on that edge.\n"
+                    "  7. [COPY: override — last resort only] — "
+                    "ATELES_DISABLE_NEOTOMA_HALT=1|true|yes forces proceed while "
+                    "unreachable; work done then may not be recorded. Default off.",
                     priority=Priority.CRITICAL,
                     handler="neotoma-reachability",
                 )
             else:
                 notifier.send(
-                    "Swarm resumed — Neotoma reachable again.\n"
+                    "[COPY: Swarm resumed — Neotoma reachable again.]\n"
                     f"  {detail}\n"
-                    "  Deferred tasks drain through the watchdog.",
+                    "  [COPY: deferred work drains after the gate clears / "
+                    "via watchdog sweep].",
                     priority=Priority.BLOCKER,
                     handler="neotoma-reachability",
                 )

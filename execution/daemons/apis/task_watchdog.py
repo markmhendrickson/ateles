@@ -161,14 +161,23 @@ class TaskWatchdog:
         # keep their pre-existing status and age, so once the record returns this
         # same sweep sees them stalled and re-dispatches them through the existing
         # backoff — no new deferral semantics, just the ones already here.
+        #
+        # While halted, force a re-probe so recovery is owned by every declared
+        # consumer of the shared gate — not only dispatch/SSE. Halt clear lives
+        # inside ReachabilityGate.probe(); reading sticky .halted without probing
+        # leaves the drain stuck when no dispatch traffic arrives after recovery.
         gate = _reachability_gate()
-        if gate is not None and gate.halted:
-            log.warning(
-                "[watchdog] Neotoma unreachable — sweeping but not acting; "
-                "deferred tasks drain once the record returns"
-            )
-            counts["skipped_halted"] = 1
-            return counts
+        if gate is not None:
+            if gate.halted:
+                gate.probe(force=True)
+                gate.announce(notifier)  # LEAVING edge must fire here too
+            if gate.halted:
+                log.warning(
+                    "[watchdog] Neotoma unreachable — sweeping but not acting; "
+                    "deferred tasks drain once the record returns"
+                )
+                counts["skipped_halted"] = 1
+                return counts
 
         try:
             tasks = _query_tasks(QUERY_LIMIT)

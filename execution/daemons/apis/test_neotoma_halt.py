@@ -146,6 +146,58 @@ def test_missing_token_is_a_config_fault_not_an_outage(monkeypatch):
     assert result.reachable
 
 
+def test_http_502_response_is_slow_not_unreachable(monkeypatch):
+    """An arriving 502 proves the server is alive — must be SLOW, not UNREACHABLE."""
+    class _Resp:
+        status_code = 502
+
+        def raise_for_status(self):
+            raise AssertionError("5xx must not go through raise_for_status")
+
+        def json(self):
+            raise AssertionError("502 body must not be required for SLOW")
+
+    monkeypatch.setattr(nr, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(nr.httpx, "post", lambda *a, **k: _Resp())
+
+    result = nr._real_read(5.0)
+    assert result.verdict is nr.Reachability.SLOW
+    assert result.reachable
+
+    g = nr.ReachabilityGate(
+        probe_fn=nr._real_read, probe_interval_seconds=0, failures_before_halt=1,
+    )
+    for _ in range(5):
+        g.raise_if_halted()  # must not raise
+    assert not g.halted
+
+
+def test_http_503_response_is_slow_not_unreachable(monkeypatch):
+    """Any arriving 5xx is degraded-alive, not a one-off 502 special case."""
+    class _Resp:
+        status_code = 503
+
+        def raise_for_status(self):
+            raise AssertionError("5xx must not go through raise_for_status")
+
+        def json(self):
+            raise AssertionError("503 body must not be required for SLOW")
+
+    monkeypatch.setattr(nr, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(nr.httpx, "post", lambda *a, **k: _Resp())
+
+    result = nr._real_read(5.0)
+    assert result.verdict is nr.Reachability.SLOW
+    assert result.reachable
+
+    g = nr.ReachabilityGate(
+        probe_fn=nr._real_read, probe_interval_seconds=0, failures_before_halt=1,
+    )
+    for _ in range(5):
+        g.raise_if_halted()
+    assert not g.halted
+
+
 # ── 3. dispatch halts — through the real entrypoint ──────────────────────────
 
 
@@ -268,15 +320,24 @@ def test_watchdog_keeps_sweeping_but_acts_on_nothing_while_halted(monkeypatch):
 
     assert counts["skipped_halted"] == 1, "the sweep must report that it held off"
     assert dispatched["n"] == 0, "no re-dispatch while the record is unreachable"
+    assert queried["n"] == 0, "still-halted re-probe must not query tasks"
 
 
-def test_watchdog_resumes_acting_once_the_record_returns(monkeypatch):
-    """The drain path: the same existing stall sweep reclaims the tasks a halted
-    dispatch left untouched — no new deferral semantics."""
+def test_watchdog_clears_halt_and_drains_via_sweep(monkeypatch):
+    """Drain contract: sticky halt → record returns → same sweep clears halt
+    and re-dispatches. Recovery must not require dispatch/SSE traffic."""
     import task_watchdog as tw
 
-    healthy = nr.ReachabilityGate(probe_fn=_up, probe_interval_seconds=0)
-    monkeypatch.setattr(tw, "_reachability_gate", lambda: healthy)
+    gate = nr.ReachabilityGate(
+        probe_fn=_down, probe_interval_seconds=0, failures_before_halt=1,
+    )
+    gate.probe(force=True)
+    assert gate.halted
+
+    # Record returns: next probe from sweep must clear halt and allow action.
+    gate.probe_fn = _up
+    monkeypatch.setattr(tw, "_reachability_gate", lambda: gate)
+
     stalled = {"status": "executing", "updated_at": "2020-01-01T00:00:00Z", "title": "t"}
     monkeypatch.setattr(tw, "_query_tasks", lambda limit: [("ent_stalled", stalled)])
     monkeypatch.setattr(tw, "set_task_status", lambda *a, **k: True)
@@ -285,10 +346,20 @@ def test_watchdog_resumes_acting_once_the_record_returns(monkeypatch):
     async def _dispatch(task_id, snapshot, trigger):
         dispatched.append(task_id)
 
-    counts = asyncio.run(tw.TaskWatchdog().sweep(FakeNotifier(), _dispatch))
+    notifier = FakeNotifier()
+    # Seed the ENTERING edge so sweep's clear can fire LEAVING.
+    gate.announce(notifier)
+    assert len(notifier.sent) == 1
+    assert "HALTED" in notifier.sent[0][0]
 
+    counts = asyncio.run(tw.TaskWatchdog().sweep(notifier, _dispatch))
+
+    assert not gate.halted
     assert dispatched == ["ent_stalled"]
     assert counts["retried"] == 1
+    assert counts.get("skipped_halted", 0) == 0
+    assert len(notifier.sent) == 2
+    assert "resumed" in notifier.sent[1][0].lower()
 
 
 # ── 5. the halt announces itself, once per edge ──────────────────────────────

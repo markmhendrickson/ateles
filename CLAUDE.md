@@ -70,6 +70,33 @@ The shared clones (`~/repos/ateles`, `~/repos/neotoma`) are for sessions and are
 
 **Two consequences worth remembering when debugging a daemon:** verify against the checkout the daemon actually runs from, not the worktree you are editing in; and a merged fix does nothing until that checkout is updated.
 
+### Neotoma hard-dependency halt (Apis)
+
+`lib/daemon_runtime/neotoma_reachability.py` makes Neotoma a hard dependency for **dispatch**: when the record cannot be read, Apis refuses new work so nothing is done without a record. Observers (watchdog sweeps, forensics, health checks, alerting) stay live. The probe is a real read (`POST /entities/query`, `limit: 1`) — never `/health` (green while a wedged DB hangs every read).
+
+**Halt means:** no dispatch, no gate decisions that would spawn work, no claimed DONE that cannot be recorded. **Held tasks** keep their prior status and age (not a new deferral product). **Recovery:** one successful real read clears the halt; Telegram announce fires only on ENTERING and LEAVING. While halted, `TaskWatchdog.sweep` calls `probe(force=True)` so drain does not depend on dispatch/SSE traffic.
+
+| Env var (exact) | Default | Safe to change when | Effect |
+|---|---|---|---|
+| `NEOTOMA_BASE_URL` | `https://neotoma.markmhendrickson.com` | pointing Apis at a known instance | Probe target host |
+| `NEOTOMA_BEARER_TOKEN` | empty | always required for a real probe | Empty → reachability unverified, **does not halt** (config fault ≠ outage) |
+| `NEOTOMA_PROBE_TIMEOUT_SECONDS` | `30` | only if slow-but-alive periods are misclassified as unreachable | Per-probe timeout |
+| `NEOTOMA_PROBE_SLOW_SECONDS` | `10` | tuning “degraded but alive” reporting | SLOW threshold; SLOW (including arriving 5xx) does **not** halt |
+| `NEOTOMA_PROBE_INTERVAL_SECONDS` | `30` | only if probe pressure / cache freshness needs retuning | Min spacing between real probes (cache = backoff) |
+| `NEOTOMA_PROBE_FAILURES_BEFORE_HALT` | `3` | only with operator intent — lower = hair-trigger halt | Consecutive UNREACHABLE before halt |
+| `ATELES_DISABLE_NEOTOMA_HALT` | unset/off | **drill / probe-bug recovery only** | `1`/`true`/`yes` → proceed while unreachable; work may be unrecorded |
+
+```bash
+# Deliberate drill: confirm halt pages, then override ONLY for recovery debugging.
+# 1) Induce or wait for halt (failed real reads ≥ NEOTOMA_PROBE_FAILURES_BEFORE_HALT).
+# 2) Confirm Telegram enter-halt page lists Next actions + forensic dir.
+# 3) Inspect: ~/.local/state/ateles/neotoma-forensics  and Apis logs for [reachability]
+# 4) If Neotoma is actually up: do nothing — one good probe clears halt.
+# 5) Escape hatch (accepts unrecorded work risk):
+ATELES_DISABLE_NEOTOMA_HALT=1  # restart/reload Apis env so the process sees it
+# 6) Unset and restore normal halt as soon as the drill ends.
+```
+
 ---
 
 ## Gmail send-gate hook (mechanical enforcement)
