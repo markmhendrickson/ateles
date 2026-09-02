@@ -2574,13 +2574,16 @@ class SwarmDispatcher:
                 f"{result.error or f'rc={result.returncode}'}"
             )
 
-        # Post the verdict as a review:<lens> comment so Vanellus can aggregate
-        # it. Without this the lens has run and the aggregation still cannot see
-        # it — the same "produced a result nothing consumes" failure this sweep
-        # exists to fix.
-        await self._post_missing_panel_comments(
-            trigger, [(lens.lens, result.stdout)], {lens.lens: lens.agent}
-        )
+        # Persist THEN post, exactly as the primary panel loop pairs them.
+        # Omitting the persist (arch lens, #447) left a re-dispatched verdict
+        # visible on GitHub but absent from Neotoma — so the recovered review
+        # existed for the aggregation and not for the durable record, which is a
+        # quieter version of the same "produced a result nothing consumes"
+        # failure this sweep exists to fix.
+        captured = [(lens.lens, result.stdout)]
+        agents_by_lens = {lens.lens: lens.agent}
+        await self._persist_panel_reviews(trigger, captured, agents_by_lens)
+        await self._post_missing_panel_comments(trigger, captured, agents_by_lens)
 
     async def resume_missing_lens_reviews(self, repositories: list[str]) -> dict:
         """Re-dispatch a lens that never answered on an otherwise-clear panel.
