@@ -293,6 +293,67 @@ aggregator (Vanellus) parse these; treat them as structured data with a human-re
 summary, not a narrative.\
 """
 
+# ── Prior-art contract (check existing context before building) ───────────────
+# Injected into every dispatched agent's system prompt by build_system_prompt,
+# alongside SWARM_GITHUB_CONTRACT.  Lives in ONE place, exactly like that
+# contract — the point is that no brief author has to remember to ask for it.
+#
+# Motivated by two wasted runs on 2026-09-01: an agent was dispatched to build
+# provider load balancing that already existed in harness_router.py
+# (provider_candidates), and another was sent after neotoma#2279 — an issue
+# filed against a clone 139 commits behind main, describing problems already
+# fixed — and spent its entire run refuting its own brief.  On the same day the
+# check paid off twice where a brief happened to request it: workflow_definition
+# and participation_record already existed (so no new entity types were needed),
+# and the non-blocking DB worker pool had shipped in July and merely was not
+# selected (so the fix was one config line rather than building a pool).
+#
+# Scoped deliberately to three checks with observed payoff rather than a general
+# "be careful" instruction, because a check that fires noise on every dispatch
+# gets ignored — which is the same failure as having no check at all.
+
+SWARM_PRIOR_ART_CONTRACT = """\
+## Prior-art contract — check before you build
+
+This codebase's dominant failure mode is **correct code that nothing invokes**.
+Several mechanisms here are fully written and tested but wired into nothing, so
+work that looks unbuilt is often built-but-unreferenced. Assume the thing you
+were asked to build may already exist until you have checked.
+
+Before you write code or open a PR, run these three checks. They are fast, and
+each one has caught a wasted run in this swarm.
+
+1. **Existing issues and PRs** — is this already filed, in flight, or fixed?
+   `gh issue list --search '<terms>' --state all` and
+   `gh pr list --search '<terms>' --state all` in the repo you were pointed at.
+   An issue can also be *stale*: check whether the clone or branch it describes
+   is behind main before you trust its problem statement.
+
+2. **The codebase** — does this mechanism already exist, perhaps unwired?
+   Grep for the capability, not just the name you were given: the existing
+   implementation almost certainly uses different vocabulary than your brief.
+   Search for the function it would perform and the config it would read. If you
+   find it, check whether anything *calls* it — an unwired implementation needs
+   connecting, not rebuilding.
+
+3. **Existing tasks and plans** — is another agent already on this? Many agents
+   run concurrently with overlapping scopes. Check open Neotoma `task` entities
+   and the relevant `plan` before starting.
+
+**Report what you found, at the top of your output, before your work.** One or
+two lines: what you searched, and whether anything already covers this. If the
+checks turned up prior art, say what it is and how it changed your approach.
+If they turned up nothing, say that — a stated negative result is what makes
+this contract auditable.
+
+**When the brief's premise is wrong, say so and stop.** If the thing already
+exists, or the issue describes a problem already fixed, that finding IS the
+deliverable. Report it and do not build the duplicate. Correcting a brief is a
+successful outcome, not a failed one — do not treat "I was told to build it" as
+a reason to build something the repository already has.\
+"""
+
+
 # ── System-prompt assembly ─────────────────────────────────────────────────────
 
 
@@ -318,14 +379,26 @@ def build_system_prompt(
     degraded mode (no definition_prompt) because it is useful guidance regardless.
     When include_github_contract=False (the default), behaviour is byte-identical
     to the pre-contract implementation — the SSE/non-GitHub task path is unchanged.
+
+    SWARM_PRIOR_ART_CONTRACT is injected on the SAME condition, immediately after
+    the GitHub contract.  It is deliberately not given its own flag: the whole
+    point is that no brief author has to remember to ask for a prior-art check,
+    and a second flag would just relocate the forgetting.  It is injected in
+    degraded mode too, for the same reason the GitHub contract is — checking for
+    existing work is useful regardless of which definition loaded.
     """
+    contracts = (
+        f"{SWARM_GITHUB_CONTRACT}\n\n---\n\n{SWARM_PRIOR_ART_CONTRACT}"
+        if include_github_contract
+        else ""
+    )
     definition_prompt = (agent_def.prompt_markdown or "").strip()
     if definition_prompt:
         if include_github_contract:
             return (
                 f"{definition_prompt}\n\n"
                 "---\n\n"
-                f"{SWARM_GITHUB_CONTRACT}\n\n"
+                f"{contracts}\n\n"
                 "---\n\n"
                 f"{skill_md}",
                 False,
@@ -336,7 +409,7 @@ def build_system_prompt(
         )
     # Degraded: no definition_prompt.
     if include_github_contract:
-        return f"{SWARM_GITHUB_CONTRACT}\n\n---\n\n{skill_md}", True
+        return f"{contracts}\n\n---\n\n{skill_md}", True
     return skill_md, True
 
 
