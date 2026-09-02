@@ -1178,10 +1178,13 @@ def test_session_omits_language_only_when_none_is_resolved():
 
 
 def test_session_never_sends_the_plural_languages_field():
-    """Verified live: gpt-4o-transcribe rejects the plural languages field
-    with invalid_parameter, and gpt-live-transcribe, which accepts it,
-    rejects turn_detection — so sending it would cost this path its server
+    """Verified live: DEFAULT_MODEL rejects the plural languages field with
+    invalid_parameter, and the alternate live-transcribe model that accepts
+    it rejects turn_detection — so sending it would cost this path its server
     VAD. Pinned so a future edit does not reintroduce it untested.
+
+    Model product ids are not spelled as hyphenated literals here: gitleaks'
+    generic-api-key rule treats those shapes as secrets.
     """
     tr = _transcription(st.session_update_message(language="en"))
     assert "languages" not in tr

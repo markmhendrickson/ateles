@@ -1060,8 +1060,6 @@ async def stream_session(
     health_poll: float = 5.0,
 ) -> tuple[int, HealthMonitor]:
     """Capture once, tee to disk and socket, append transcripts to the JSONL."""
-    import websockets
-
     monitor = HealthMonitor()
     trace_started = time.monotonic()
     if languages is None:
@@ -1114,9 +1112,12 @@ async def stream_session(
             # the fabrications it guards against. The flag exists so an
             # operator who has decided otherwise can say so.
             # Before ffmpeg starts, deliberately: aborting here leaves no
-            # half-written recording to finalize.
+            # half-written recording to finalize. websockets is imported only
+            # after this return so the abort path does not depend on it.
             log("local VAD required but unavailable — aborting (--require-local-vad)")
             return 2, monitor
+
+    import websockets
 
     proc = await asyncio.create_subprocess_exec(
         *build_capture_command(device, recording_path),
