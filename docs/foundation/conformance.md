@@ -1,5 +1,11 @@
 # Conformance: how work binds to the foundation
 
+**Vision phase:** P1 (governed execution for one principal). **Kind:** consolidation, not design: this
+document describes the binding ateles#744 built. **Derived from:** plan `ent_533d4ec2f7bfb60f66fb3fce`
+decisions `binding_is_the_reviewer_reading_a_kernel_not_a_loading_order` and
+`ateles_binding_extends_three_existing_mechanisms`, synthesis `ent_b0ce322f768e4fc676b73139` (PR-29, C7),
+prior art `ent_08460968e6f49dac21510f4a` (OPA: decision decoupled from enforcement).
+
 ## Purpose
 
 State how issue-based swarm work is checked against the design documents in
@@ -57,20 +63,20 @@ first.
 | Changed path | Read |
 |---|---|
 | `lib/daemon_runtime/task_claim`, `lib/daemon_runtime/task_lifecycle`, `execution/daemons/apis/apis\.py`, `execution/daemons/apis/task_watchdog`, `execution/daemons/apis/routing` | `docs/foundation/work_model.md` |
-| `execution/daemons/apis/swarm_dispatch`, `execution/daemons/apis/review_panel`, `execution/daemons/apis/issue_spec`, `lib/daemon_runtime/workflow_resolver`, `lib/issue_labels`, `lib/daemon_runtime/checkpoint` | `docs/foundation/gates_and_workflows.md` |
+| `execution/daemons/apis/swarm_dispatch`, `execution/daemons/apis/review_panel`, `execution/daemons/apis/issue_spec`, `lib/daemon_runtime/workflow_resolver`, `lib/issue_labels`, `lib/daemon_runtime/checkpoint`, `lib/daemon_runtime/gating`, `execution/daemons/anthus/`, `execution/mcp/ateles/` | `docs/foundation/gates_and_workflows.md` |
 | `execution/daemons/apis/skill_runner`, `execution/daemons/apis/harness_router` | `docs/foundation/work_model.md`, `docs/foundation/gates_and_workflows.md` |
 
 ### Failure posture
 
 | Changed path | Read |
 |---|---|
-| `lib/daemon_runtime/neotoma_reachability`, `lib/daemon_runtime/checkout_drift`, `lib/neotoma`, `lib/daemon_runtime/readiness` | `docs/foundation/failure_posture.md` |
+| `lib/daemon_runtime/neotoma_reachability`, `lib/daemon_runtime/checkout_drift`, `lib/neotoma`, `lib/daemon_runtime/readiness`, `lib/neotoma_forensics` | `docs/foundation/failure_posture.md` |
 
 ### Authority
 
 | Changed path | Read |
 |---|---|
-| `lib/daemon_runtime/agent_loader`, `grant_checker`, `lib/approval`, `lib/daemon_runtime/checkpoint_posture`, `execution/mcp/ateles/` | `docs/foundation/authority_model.md` |
+| `lib/daemon_runtime/agent_loader`, `grant_checker`, `aauth_signer`, `lib/approval`, `lib/notify`, `lib/daemon_runtime/checkpoint_posture`, `execution/mcp/ateles/`, `execution/mcp/mcp_tool_grant_proxy`, `execution/daemons/apis/a2a_` | `docs/foundation/authority_model.md` |
 
 ### Vocabulary and agent instructions
 
@@ -117,6 +123,22 @@ approval: conforms, align (the ask is right, the framing names no basis),
 close (conforms to nothing), supersede (already a step in a sibling plan), or
 premature (work for a later vision phase, marked with that phase and kept
 open).
+
+## Direction of truth per artifact class
+
+Rules and decisions have four homes, chosen for four audiences (synthesis C7). Each class has one
+authoritative side; the others are mirrors or restatements that are wrong until corrected.
+
+| Artifact class | Authoritative side | Mirror or restatement |
+|---|---|---|
+| A design invariant, the work model, the gate model, the failure posture, the authority model | this directory, repo-authored, PR-reviewed | plan `decisions` maps hold the event log of when each was decided; `CLAUDE.md`'s session-only section restates six of the principles for interactive sessions and says it does not bind dispatched agents |
+| An agent's behavioural rule | `agent_policy` entities in Neotoma | `.claude/skills/<name>/SKILL.md` and `docs/agents/*.md`, rendered by `render_agent_docs.py` |
+| The system's composition, roster, and roadmap | plan `ent_99ace4dd6673aa36ed08b1fe` fields | `docs/architecture.md`, `docs/taxonomy.md`, `docs/phases.md`, rendered by `render_plan_docs.py` |
+| A session's standing instruction | `CLAUDE.md` (re-injected after compaction) | none |
+
+A rule that belongs to two classes is written once in its authoritative home and cited from the other, never
+copied: a comment or a second document claiming to mirror the first is not a mechanism that keeps them
+matching (`principles.md`, invariant 9).
 
 ## Amending a foundation document
 

@@ -533,7 +533,8 @@ state layer and the GitHub harness.
 (`[<agent>] <artifact_kind>: <body>` or `BLOCKED — <reason>`). The coordinator parses this to mark workflow
 gates satisfied. Agents optionally append a second line, `[<agent>] strategy_drift_signal: <observation>`,
 when their work surfaces evidence contradicting their current `agent_strategy`. See
-[docs/swarm_orchestration.md](docs/swarm_orchestration.md) for the full contract.
+[docs/archive/swarm_orchestration.md](docs/archive/swarm_orchestration.md) for the full header contract
+(archived; the gate model itself is [docs/foundation/gates_and_workflows.md](docs/foundation/gates_and_workflows.md)).
 
 ## Common questions
 
@@ -563,7 +564,7 @@ in validation, and many T4 agents are still `planned`. See
 **What if I want to add a new agent?**
 File an `agent_definition` entity in Neotoma. Mint an AAuth keypair. File an `agent_grant` with the
 capabilities it needs. Apus mirrors the SKILL.md to disk. The coordinator picks it up on the next workflow
-that references its trigger. The whole loop is in [docs/swarm_orchestration.md](docs/swarm_orchestration.md).
+that references its trigger. The gate model is in [docs/foundation/gates_and_workflows.md](docs/foundation/gates_and_workflows.md).
 
 ## Related posts
 
@@ -581,9 +582,9 @@ Full documentation lives in `docs/` — index at [docs/README.md](docs/README.md
 [Taxonomy](docs/taxonomy.md) · [Phases](docs/phases.md) ·
 [Neotoma vs. alternatives](docs/neotoma_vs_alternatives.md)
 
-**Operating:** [Swarm orchestration](docs/swarm_orchestration.md) ·
-[Agent execution runbook](docs/agent_execution_runbook.md) ·
-[Task execution loop](docs/task_execution_loop.md) · [Setup](docs/setup.md) ·
+**Operating:** [Foundation](docs/foundation/) · [Gates and workflows](docs/foundation/gates_and_workflows.md) ·
+[Work model](docs/foundation/work_model.md) · [Agent execution runbook](docs/agent_execution_runbook.md) ·
+[Setup](docs/setup.md) ·
 [Smoke-test plan](docs/swarm_smoke_test_plan.md)
 
 **Reference:** [Data types](docs/data_types.md) · [AAuth](docs/aauth.md) ·

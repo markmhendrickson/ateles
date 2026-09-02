@@ -22,13 +22,27 @@ stale, misplaced, or operator-personal files, see the [documentation plan](docum
 
 ## P0 · Foundation
 
-*What the swarm's work conforms to.*
+*What the swarm's work conforms to.* Seven P1 (consolidation) documents in [`docs/foundation/`](foundation/),
+each carrying its vision phase and the synthesis and prior-art entities it derives from. The arch gate and
+the review lenses read the kernel (the first three) on every review and the rest by changed path.
 
-- [**Conformance**](foundation/conformance.md) — how issue-based work binds to the design foundation: the
-  always-read kernel, the path-keyed reading list the arch gate and review lenses load at review time, and
-  the design-basis statement every issue and PR carries. The remaining foundation documents (principles,
-  work model, gates and workflows, failure posture, vocabulary, authority model) land in
-  [`docs/foundation/`](foundation/) as they are written; each is read by the gates the day it lands.
+- [**Principles**](foundation/principles.md) — the ten invariants, each with what fires when it is violated,
+  and "nothing" where nothing does.
+- [**Work model**](foundation/work_model.md) — pull over push; the claim and the lease as one primitive;
+  liveness derived at read time; no dispatch log; `created / claimed / running / released`.
+- [**Gates and workflows**](foundation/gates_and_workflows.md) — `workflow_definition` declares,
+  `participation_record` instantiates, `gate_status` projects; one gate-set constant; the PR-independent
+  execution gate with three blast tiers; what is true today about merge authority.
+- [**Failure posture**](foundation/failure_posture.md) — Neotoma as a hard dependency: halt work, never stop
+  observing, announce off-Neotoma, read back every write, refuse resume-by-replay.
+- [**Vocabulary**](foundation/vocabulary.md) — canonical terms with forbidden synonyms, P1 through P4 on one
+  list with phase markers.
+- [**Conformance**](foundation/conformance.md) — how issue-based work binds to the foundation: the
+  always-read kernel, the path-keyed reading list, the design-basis statement, and the direction of truth
+  per artifact class.
+- [**Authority model**](foundation/authority_model.md) — the tuple `principal + domain + scope + action +
+  conditions + time` as implemented (`time` unimplemented), the five fail-open paths, the single-principal
+  inventory (138 sites), and a verdict per extension point on the README's extension-not-rewrite claim.
 
 ## P0 · Decide & orient
 
@@ -64,12 +78,13 @@ stale, misplaced, or operator-personal files, see the [documentation plan](docum
 
 *Run it daily; add agents and workflows.*
 
-- [**Swarm orchestration**](swarm_orchestration.md) — `workflow_definition`, gate semantics, and the
-  artifact-header dispatch contract.
+- [**Gates and workflows**](foundation/gates_and_workflows.md) — `workflow_definition`, gate semantics, and
+  the execution gate (the former `swarm_orchestration.md` and `swarm_hitl_checkpoints_design.md` are
+  [archived](archive/) with pointers).
 - [**Agent execution runbook**](agent_execution_runbook.md) ·
-  [**Task execution loop**](task_execution_loop.md) ·
-  [**Agent execution architecture**](agent_execution_architecture.md) — how a dispatch runs end-to-end.
-- [**HITL checkpoints**](swarm_hitl_checkpoints_design.md) — confidence × blast-radius gating and approval.
+  [**Agent execution architecture**](agent_execution_architecture.md) — how a dispatch runs end-to-end; the
+  work model itself is [`foundation/work_model.md`](foundation/work_model.md) (the former
+  `task_execution_loop.md` described the retired push model and is [archived](archive/)).
 - [**PR review routing**](pr_review_routing.md) · [**Swarm trigger layer**](swarm-trigger-layer.md) ·
   [**GitHub interaction design**](swarm_github_interaction_design.md) — issue/PR triage and webhook flow.
 - [**A2A gateway**](a2a.md) — the inbound agent-to-agent task receiver.
