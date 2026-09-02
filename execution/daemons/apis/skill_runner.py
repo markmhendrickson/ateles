@@ -1092,12 +1092,27 @@ async def _run_skill_once(
         # role that stays undefined does not go quiet forever).
         _should_notify = True
         try:
-            from unroutable_ledger import shared_ledger
+            from unroutable_ledger import LedgerUnavailable, shared_ledger
 
-            # The SHARED instance — never a second UnroutableLedger() on the same
-            # file. Two instances each save their own stale view and drop each
-            # other's records (Loxia review, ateles#656).
+            # The SHARED instance — see `shared_ledger()` for why it stays a
+            # singleton now that the ledger lives in Neotoma.
             _should_notify = shared_ledger().note_undefined_role(str(_role))
+        except LedgerUnavailable as exc:
+            # The ledger could not be READ, so whether this role was already
+            # reported is unknown. Notifying anyway is the wrong guess: an
+            # unreachable Neotoma affects every role at once, so this path would
+            # page once per undefined role per cycle — a flood built out of the
+            # dedup failing, which is the exact defect the ledger prevents.
+            # Hold instead. The role is still undefined and still reported next
+            # cycle; the DEGRADED dispatch is logged either way, so nothing goes
+            # unobserved.
+            _should_notify = False
+            log.warning(
+                f"[apis] unroutable ledger unreadable ({exc}) — holding the "
+                f"undefined-role notification for {_role!r} rather than risking "
+                "a duplicate page; the role stays DEGRADED and is re-checked "
+                "next cycle"
+            )
         except Exception as exc:  # noqa: BLE001 — dedup must never block the warning
             log.debug(f"[apis] undefined-role dedup unavailable: {exc}")
         if notifier is not None and _should_notify:
