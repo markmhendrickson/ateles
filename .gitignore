@@ -81,6 +81,9 @@ execution/daemons/mic-recorder/
 # launchd plists contain operator-absolute home paths (e.g. /Users/<name>/...).
 # All daemon plists are local-only; never commit them.
 execution/daemons/*/*.plist
+# Connector Stage 1 acceptance is the launchd trigger itself. This plist is
+# committed without secrets, and install.sh rewrites operator paths at install.
+!execution/daemons/connectors/com.ateles.connectors.plist
 
 # Daemon runtime state
 execution/daemons/**/.monedula_last_run
