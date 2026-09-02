@@ -57,9 +57,11 @@ import httpx
 
 from gate_waive import (
     CLEARED_GATE_STATES,
+    AggregateWaiveOutcome,
     IssueGateStore,
     WaiveOutcome,
     format_waive_comment,
+    format_waive_comment_multi,
 )
 from github_gateway import SwarmTrigger
 from issue_spec import (
@@ -6157,7 +6159,7 @@ class SwarmDispatcher:
             )
             return None
 
-    async def _waive_gates(self, trigger: SwarmTrigger) -> WaiveOutcome:
+    async def _waive_gates(self, trigger: SwarmTrigger) -> AggregateWaiveOutcome:
         """Waive all unsigned pre-impl gates DISPATCHER-SIDE, then verify.
 
         ateles#285 — root cause and fix.  This used to prompt Lanius to perform
@@ -6182,106 +6184,135 @@ class SwarmDispatcher:
           4. RE-READS and asserts every targeted gate is now cleared,
           5. reports the outcome to the operator on GitHub either way.
 
-        Returns the :class:`WaiveOutcome` so the caller can decide whether to
-        re-trigger the PR pipeline.  Never raises.
+        Returns the :class:`AggregateWaiveOutcome` so the caller can decide
+        whether to re-trigger the PR pipeline.  Never raises.
+
+        ateles#390 — TARGET RESOLUTION.  Gate state lives on the ISSUE entity;
+        a PR never carries ``gate_status``.  This used to resolve the target as
+        ``_parent_issue_number(body) or trigger.number``, and that ``or`` was a
+        second false-success bug layered on the one above: a PR whose body names
+        no parent silently waived against the PR NUMBER, which has no gates.
+        Once ateles#416 added entity backfill, the miss stopped even being a
+        loud "no entity" error — the dispatcher would BACKFILL an issue entity
+        for the PR number and waive gates on that phantom, reporting success
+        while the real parent stayed pending.  There is now NO fallback: an
+        unresolvable parent is its own loud failure.  A PR may also close more
+        than one issue, so every parent is waived, not just the first.
         """
         ref = f"{trigger.repository}#{trigger.number}"
-        issue_number = trigger.number
-        # comment_on_pr means trigger.number IS the PR number; the parent issue
-        # number is in the PR body.  Extract it.
+
         if trigger.comment_on_pr:
-            issue_number = (
-                self._parent_issue_number(trigger.body, trigger.repository)
-                or trigger.number
+            # trigger.number IS the PR number. Never waive against it.
+            issue_numbers = self._parent_issue_numbers(
+                trigger.body, trigger.repository
             )
+        else:
+            # Comment posted directly on an issue: that issue IS the target.
+            issue_numbers = [trigger.number]
 
         store = IssueGateStore(
             self.config.neotoma_base_url, self.config.neotoma_token
         )
-        try:
-            outcome = await store.waive(
-                trigger.repository, issue_number, PRE_IMPL_GATES
-            )
-        except Exception as exc:  # noqa: BLE001 — never crash the pipeline
+
+        if not issue_numbers:
             log.error(
-                f"[{DAEMON_NAME}] gate waive raised on {ref}: {exc} — "
-                "reporting failure to the operator"
+                f"[{DAEMON_NAME}] gate waive on {ref}: the PR body names no "
+                "parent issue, so there is no gate_status to waive — NOTHING "
+                "was written (gates live on the issue, never on the PR)"
             )
-            outcome = WaiveOutcome(
-                entity_found=True, targeted=list(PRE_IMPL_GATES),
-                failed=list(PRE_IMPL_GATES),
+            aggregate = AggregateWaiveOutcome(unresolved=True)
+            await self._safe_post_gate_waive_comment(trigger, aggregate, ref)
+            self.notifier.send(
+                f"Gate waive on {ref} FAILED — this PR's body names no parent "
+                "issue, so no issue entity could be resolved and nothing was "
+                "waived. Add a `Closes #N` (or `Part of #N`) line to the PR "
+                "description linking it to its parent issue, then re-issue the "
+                "command.",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
             )
+            return aggregate
+
+        aggregate = await store.waive_many(
+            trigger.repository, issue_numbers, PRE_IMPL_GATES
+        )
+
+        # ateles#416: back-fill any parent whose entity is missing and retry
+        # that parent once. A gate that can be neither signed nor waived is a
+        # dead end, and the PR closing that issue is unmergeable by every path.
+        for index, (number, outcome) in enumerate(list(aggregate.per_issue)):
+            if outcome.entity_found:
+                continue
+            if not await self.ensure_issue_entity(trigger.repository, number):
+                continue
+            log.info(
+                f"[{DAEMON_NAME}] gate waive on {ref}: entity for "
+                f"{trigger.repository}#{number} backfilled — retrying"
+            )
+            retried = await store.waive(
+                trigger.repository, number, PRE_IMPL_GATES
+            )
+            aggregate.per_issue[index] = (number, retried)
 
         # ALWAYS surface the result on GitHub — success, no-op, and failure.
         # The 2026-07-27 failure produced ZERO GitHub-visible output, which is
         # a core part of the bug (#285 point 3).
+        await self._safe_post_gate_waive_comment(trigger, aggregate, ref)
+
+        for number, outcome in aggregate.per_issue:
+            target = f"{trigger.repository}#{number}"
+            if not outcome.entity_found:
+                log.error(
+                    f"[{DAEMON_NAME}] gate waive on {ref}: no Neotoma issue "
+                    f"entity for {target} and backfill did not produce one — "
+                    "nothing waived"
+                )
+                self.notifier.send(
+                    f"Gate waive on {ref} FAILED for parent issue {target} — "
+                    "no Neotoma issue entity, and automatic backfill did not "
+                    "create one. Run `python3 execution/scripts/"
+                    f"trigger_swarm_pr.py issue {number}` to triage it "
+                    "manually; the pipeline stays blocked until it exists.",
+                    priority=Priority.BLOCKER,
+                    handler=DAEMON_NAME,
+                )
+            elif outcome.failed:
+                log.error(
+                    f"[{DAEMON_NAME}] gate waive on {ref} VERIFICATION FAILED "
+                    f"for {target} — still unsigned: "
+                    f"{', '.join(outcome.failed)}"
+                )
+                self.notifier.send(
+                    f"Gate waive on {ref} FAILED verification for parent issue "
+                    f"{target} — these gates are still unsigned after the "
+                    f"write: {', '.join(outcome.failed)}. The review pipeline "
+                    "will keep blocking.",
+                    priority=Priority.BLOCKER,
+                    handler=DAEMON_NAME,
+                )
+            elif outcome.waived:
+                log.info(
+                    f"[{DAEMON_NAME}] gate waive on {ref}: waived and verified "
+                    f"{', '.join(outcome.waived)} on {target}"
+                )
+            else:
+                log.info(
+                    f"[{DAEMON_NAME}] gate waive on {ref}: no gates needed "
+                    f"waiving on {target} (all pre-impl gates already clear)"
+                )
+        return aggregate
+
+    async def _safe_post_gate_waive_comment(
+        self, trigger: SwarmTrigger, aggregate: "AggregateWaiveOutcome", ref: str
+    ) -> None:
+        """Post the gate-waive result comment; a comment failure never raises."""
         try:
-            await self._post_gate_waive_comment(trigger, outcome)
+            await self._post_gate_waive_comment(trigger, aggregate)
         except Exception as exc:  # noqa: BLE001 — comment is best-effort
             log.warning(
                 f"[{DAEMON_NAME}] could not post gate-waive comment on {ref}: "
                 f"{exc}"
             )
-
-        if not outcome.entity_found:
-            # ateles#416: this used to report and stop, naming a remedy nothing
-            # was scheduled to perform. Back-fill the entity and retry the waive
-            # once — a gate that cannot be signed OR waived is a dead end, and
-            # the PR closing that issue is unmergeable by every available path.
-            if await self.ensure_issue_entity(trigger.repository, issue_number):
-                log.info(
-                    f"[{DAEMON_NAME}] gate waive on {ref}: entity backfilled — "
-                    "retrying the waive"
-                )
-                outcome = await store.waive(
-                    trigger.repository, issue_number, PRE_IMPL_GATES
-                )
-                try:
-                    await self._post_gate_waive_comment(trigger, outcome)
-                except Exception as exc:  # noqa: BLE001 — comment best-effort
-                    log.warning(
-                        f"[{DAEMON_NAME}] could not post retried gate-waive "
-                        f"comment on {ref}: {exc}"
-                    )
-
-        if not outcome.entity_found:
-            log.error(
-                f"[{DAEMON_NAME}] gate waive on {ref}: no Neotoma issue entity "
-                f"for {trigger.repository}#{issue_number} and backfill did not "
-                "produce one — nothing waived"
-            )
-            self.notifier.send(
-                f"Gate waive on {ref} FAILED — no Neotoma issue entity for "
-                f"{trigger.repository}#{issue_number}, and automatic backfill "
-                "did not create one. Run `python3 execution/scripts/"
-                f"trigger_swarm_pr.py issue {issue_number}` to triage it "
-                "manually; the pipeline stays blocked until the entity exists.",
-                priority=Priority.BLOCKER,
-                handler=DAEMON_NAME,
-            )
-        elif outcome.failed:
-            log.error(
-                f"[{DAEMON_NAME}] gate waive on {ref} VERIFICATION FAILED — "
-                f"still unsigned: {', '.join(outcome.failed)}"
-            )
-            self.notifier.send(
-                f"Gate waive on {ref} FAILED verification — these gates are "
-                f"still unsigned after the write: {', '.join(outcome.failed)}. "
-                "The review pipeline will keep blocking.",
-                priority=Priority.BLOCKER,
-                handler=DAEMON_NAME,
-            )
-        elif outcome.waived:
-            log.info(
-                f"[{DAEMON_NAME}] gate waive on {ref}: waived and verified "
-                f"{', '.join(outcome.waived)}"
-            )
-        else:
-            log.info(
-                f"[{DAEMON_NAME}] gate waive on {ref}: no gates needed waiving "
-                "(all pre-impl gates already clear)"
-            )
-        return outcome
 
     async def ensure_issue_entity(
         self, repository: str, issue_number: int
@@ -6410,7 +6441,7 @@ class SwarmDispatcher:
             return None
 
     async def _post_gate_waive_comment(
-        self, trigger: SwarmTrigger, outcome: WaiveOutcome
+        self, trigger: SwarmTrigger, outcome: AggregateWaiveOutcome
     ) -> None:
         """Post (or edit) the operator-visible gate-waive result comment.
 
@@ -6428,13 +6459,10 @@ class SwarmDispatcher:
             )
             return
 
-        body = format_waive_comment(
+        body = format_waive_comment_multi(
             marker=_WAIVE_MARKER,
             header=attribution_header("apis", "swarm dispatcher"),
-            waived=outcome.waived,
-            already_clear=outcome.already_clear,
-            failed=outcome.failed,
-            entity_found=outcome.entity_found,
+            aggregate=outcome,
         )
 
         list_url = (
@@ -7036,6 +7064,31 @@ class SwarmDispatcher:
                 continue
             return int(m.group("number"))
         return None
+
+    @staticmethod
+    def _parent_issue_numbers(pr_body: str, repository: str = "") -> list[int]:
+        """Resolve EVERY parent issue this PR declares, in body order.
+
+        ateles#390. :meth:`_parent_issue_number` returns only the first match,
+        which is correct for its two routing call sites (a PR has one primary
+        owner) but wrong for gate inheritance: a PR closing two issues inherits
+        both issues' gates, so waiving only the first leaves the PR blocked on
+        the second while the command reports success.
+
+        Same-repo scoping and the cross-repo filter are identical to the
+        singular helper — a foreign ``owner/repo#N`` is skipped rather than
+        returned, because every consumer feeds these numbers to a same-repo
+        lookup. Duplicates are collapsed, preserving first-mention order.
+        """
+        numbers: list[int] = []
+        for m in _PARENT_LINK.finditer(pr_body or ""):
+            qualifier = m.group("repo")
+            if qualifier and qualifier.lower() != (repository or "").lower():
+                continue
+            number = int(m.group("number"))
+            if number not in numbers:
+                numbers.append(number)
+        return numbers
 
     def _github_headers(self, repo: str = "") -> dict[str, str]:
         """Return GitHub API request headers with the per-repo token (#95).
