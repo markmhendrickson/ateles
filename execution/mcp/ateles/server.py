@@ -633,21 +633,48 @@ def _parse_issue_ref(issue_ref: str) -> tuple[str | None, int | None, str | None
     return None, None, None
 
 
+# The four field names an issue entity's GitHub number is spelled with, in
+# measured prod prevalence order (2026-09-02, all 4,434 `issue` entities):
+# github_number 61.3%, issue_number 8.7%, github_issue_number 1.8%, number 1.2%.
+# MUST stay identical to ISSUE_NUMBER_FIELDS in lib/issue_number.py — test_server.py
+# asserts that. See that module for why readers are widened rather than data migrated.
+ISSUE_NUMBER_FIELDS: tuple[str, ...] = (
+    "github_number",
+    "issue_number",
+    "github_issue_number",
+    "number",
+)
+
+
 def _issue_snapshot_matches(snap: dict, repo: str, number: int) -> bool:
     """True when *snap* is the issue entity for ``repo#number``.
 
     Tolerates the duplicated field names seen in prod — ``repo``/``repository``
-    and ``issue_number``/``github_number``/``number`` — the same tolerance
+    and all FOUR number spellings — the same tolerance
     execution/daemons/apis/gate_waive.py needs. Matching on only one spelling
     silently misses entities that use the other.
+
+    The canonical definition lives in ``lib/issue_number.py``; this module
+    deliberately does NOT import it. The MCP server runs from an isolated venv
+    (see the `mcp-server-tests` CI job, which installs only `mcp` and `httpx`
+    and has no repo root on `sys.path`), so a `lib.*` import would break the
+    server at startup. ``lib/issue_number.py`` and this function are kept in
+    sync by ``test_server.py``, which asserts the two field lists are equal.
+
+    ateles#682: ``github_issue_number`` (82 rows in prod) was missing here.
     """
     snap_repo = snap.get("repo") or snap.get("repository") or ""
     if str(snap_repo) != str(repo):
         return False
-    for key in ("issue_number", "github_number", "number"):
+    for key in ISSUE_NUMBER_FIELDS:
         value = snap.get(key)
-        if value is not None and str(value) == str(number):
-            return True
+        if value is None:
+            continue
+        try:
+            if int(str(value).strip()) == int(number):
+                return True
+        except (TypeError, ValueError):
+            continue
     return False
 
 
@@ -772,7 +799,9 @@ def _get_gate_status(issue_ref: str, history_limit: int = 5) -> dict:
 
     blocking = _blocking_gates(gate_status)
     repo_name = str(snap.get("repo") or snap.get("repository") or "")
-    number_val = snap.get("github_number") or snap.get("issue_number") or snap.get("number")
+    number_val = next(
+        (snap.get(f) for f in ISSUE_NUMBER_FIELDS if snap.get(f) is not None), None
+    )
 
     pipeline = _pipeline_state_for(repo_name, number_val)
 

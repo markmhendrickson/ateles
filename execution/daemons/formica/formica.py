@@ -65,6 +65,7 @@ from lib.daemon_runtime import (  # noqa: E402
 )
 from lib.notify import Notifier, Priority  # noqa: E402
 from lib.activity import ActivityLogger  # noqa: E402
+from lib.issue_number import extract_issue_number  # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -189,7 +190,11 @@ async def _spawn_claude_skill(
 
     title = snapshot.get("title", "")
     repo = snapshot.get("repository") or snapshot.get("repo") or ""
-    number = snapshot.get("number") or snapshot.get("issue_number") or ""
+    # ateles#682: this read omitted `github_number` — the canonical field,
+    # carried by 61.3% of prod issue entities and written by every neotoma
+    # sync path. The agent prompt therefore rendered `repo#` with no number
+    # for the majority shape. `extract_issue_number` knows all four spellings.
+    number = extract_issue_number(snapshot) or ""
     prompt = (
         f"Invoke the {skill} agent per your appended system prompt.\n\n"
         f"GitHub issue {repo}#{number}: {title}\n\n"
