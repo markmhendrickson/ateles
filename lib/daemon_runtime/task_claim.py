@@ -1,12 +1,20 @@
-"""Atomic claim + lease: the pull-model primitive.
+"""Claim + lease: the pull-model primitive (best-effort until Neotoma CAS).
 
 Agents CLAIM work from a queue rather than a router assigning owners. One
 mechanism does two jobs:
 
-  * it SERIALIZES concurrent claimants (two agents reading one queue must not
-    both take a task), and
+  * it tries to SERIALIZE concurrent claimants (two agents reading one queue
+    should not both take a task), and
   * it EXPIRES when a runner dies (a killed process writes nothing, so its
     lease simply lapses).
+
+INTERIM CONTRACT (ateles#733): prod `agent_session.holder` merges as
+`last_write`. Write + read-back proves ownership only at the read instant —
+it is NOT compare-and-swap. Interleaving A-verify-then-work / B-store-then-
+verify can still yield dual holders. Do not treat a held Claim as a hard
+single-writer guarantee across hosts until Neotoma exposes a conditional
+claim (precondition on holder / lease). Apis defaults `APIS_CLAIM_ENABLED=0`
+until that contract exists.
 
 Vocabulary: created / claimed / running / released.
 
@@ -39,14 +47,16 @@ failure this primitive exists to prevent.
 
 So the canonical key is the TASK (`native_session_id = "task:<entity_id>"`),
 which makes competing claimants collide on one row by construction, and the
-winner is decided by two signals together:
+client decides a provisional winner by two signals together:
 
   1. `action` on the store response — "created" means the row did not exist.
   2. A READ-BACK of the holder field — because the snapshot is last-writer-wins,
      `action` alone is not sufficient; a late writer can still stomp the row.
 
-A claimant holds the task only if, after writing, the persisted holder is its
-own runner id. Anything else means it lost the race and must not start work.
+A claimant treats the task as held only if, after writing, the persisted holder
+is its own runner id. That is a best-effort check against LWW rows, not a CAS
+boundary — a concurrent writer can still overwrite after the read-back returns.
+Anything else means it lost the race and must not start work.
 
 FAIL-CLOSED
 -----------

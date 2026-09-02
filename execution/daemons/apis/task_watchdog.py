@@ -212,10 +212,18 @@ class TaskWatchdog:
                 # The claim's lease lapsed: the runner is gone and wrote nothing.
                 # Put the task back in the claimable pool rather than re-routing
                 # it — under pull, whichever agent is free will take it.
+                #
+                # Count the release as an attempt so a task that keeps losing
+                # its runner eventually ESCALATEs (classify returns ESCALATE
+                # once attempts >= MAX_ATTEMPTS). Backoff applies only to the
+                # RETRY re-dispatch path — RELEASE always returns work to the
+                # queue immediately.
                 holder = (claim or {}).get("holder") or "(none)"
+                n = self.record_retry(entity_id, now)
                 log.info(
-                    "[watchdog] releasing %s (status=%s, lapsed lease, holder=%s)",
-                    entity_id, normalize(status), holder,
+                    "[watchdog] releasing %s (status=%s, lapsed lease, "
+                    "holder=%s, attempt=%d/%d)",
+                    entity_id, normalize(status), holder, n, MAX_ATTEMPTS,
                 )
                 set_task_status(
                     entity_id, TaskStatus.PENDING, handler="apis-watchdog",

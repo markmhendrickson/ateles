@@ -1,8 +1,13 @@
-"""Tests for the claim + lease primitive.
+"""Tests for the claim + lease primitive (best-effort LWW overlay).
 
-The two load-bearing assertions:
+Against the in-memory fake (which mirrors prod LWW + matched_existing), the
+client's pre-read + write + read-back path rejects an immediate second
+claimant and frees a lapsed lease. That is NOT a Neotoma CAS guarantee —
+see module docstring on ClaimStore / ateles#733.
 
-  1. Two concurrent claimants CANNOT both take one task.
+The two load-bearing client assertions under that fake:
+
+  1. Two sequential claimants do not both observe held=True after acquire.
   2. An abandoned claim becomes claimable again once its lease lapses —
      simulated by a runner that is killed and WRITES NOTHING further, which is
      the real case (a SIGKILLed process runs no cleanup).
@@ -433,17 +438,22 @@ def test_watchdog_classify_uses_the_lease_not_the_age_proxy():
     assert wd.classify("t4", "executing", age_seconds=99_999, claim=None) == WatchdogAction.RETRY
 
 
-def test_watchdog_escalates_a_repeatedly_released_task():
-    """A task that keeps losing its runner eventually reaches the operator."""
+def test_watchdog_classify_escalates_after_max_release_attempts():
+    """Pure classify: once attempts >= MAX_ATTEMPTS, a dead lease escalates.
+
+    Ship-path attempt accounting lives in sweep() (see
+    test_sweep_escalates_after_max_lapsed_lease_releases). This unit only
+    checks the classifier branch — it does not hand-call record_retry between
+    RELEASE loops and claim that covers production.
+    """
     from execution.daemons.apis.task_watchdog import (
-        MAX_ATTEMPTS, TaskWatchdog, WatchdogAction,
+        MAX_ATTEMPTS, TaskWatchdog, WatchdogAction, _AttemptState,
     )
 
     wd = TaskWatchdog(stall_seconds=3600)
     dead = {"live": False, "holder": "r"}
-    for _ in range(MAX_ATTEMPTS):
-        assert wd.classify("t", "executing", None, dead) == WatchdogAction.RELEASE
-        wd.record_retry("t", 0.0)
+    assert wd.classify("t", "executing", None, dead) == WatchdogAction.RELEASE
+    wd._state["t"] = _AttemptState(attempts=MAX_ATTEMPTS)
     assert wd.classify("t", "executing", None, dead) == WatchdogAction.ESCALATE
 
 

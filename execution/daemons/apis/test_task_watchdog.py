@@ -115,6 +115,102 @@ def test_sweep_fail_open_on_query_error(monkeypatch):
     assert counts["scanned"] == 0  # swallowed, returned empty counts
 
 
+# ── lease RELEASE path (ClaimStore wired into sweep) ─────────────────────────
+
+
+class _FakeClaims:
+    """Minimal ClaimStore stand-in for sweep() RELEASE / escalate tests."""
+
+    def __init__(self, *, live: bool = False, holder: str = "r1"):
+        self.live = live
+        self.holder = holder
+        self.released: list[str] = []
+
+    def inspect(self, task_id: str):
+        return {"live": self.live, "holder": self.holder, "task_id": task_id}
+
+    def release_expired(self, task_id: str) -> bool:
+        self.released.append(task_id)
+        return True
+
+
+def test_sweep_releases_lapsed_claim_back_to_pending(monkeypatch):
+    """With a ClaimStore injected, a dead lease returns the task to PENDING.
+
+    Catches the production miss where TaskWatchdog() was constructed without
+    `_claims=` — classify never saw a lease, RELEASE never ran, and
+    release_expired was unreachable.
+    """
+    claims = _FakeClaims(live=False, holder="r1")
+    wd = tw.TaskWatchdog(stall_seconds=3600, _claims=claims)
+
+    monkeypatch.setattr(
+        tw, "_query_tasks",
+        lambda limit: [("ent_dead", {"status": "executing", "title": "stranded"})],
+    )
+    status_calls: list[tuple] = []
+    monkeypatch.setattr(tw, "set_task_status", lambda *a, **k: status_calls.append((a, k)))
+    monkeypatch.setattr(tw, "_notify", lambda *a, **k: None)
+
+    dispatched: list = []
+
+    async def dispatch_fn(task_id, snapshot, trigger):
+        dispatched.append((task_id, trigger))
+
+    counts = asyncio.run(wd.sweep(object(), dispatch_fn))
+
+    assert counts["released"] == 1
+    assert counts["retried"] == 0
+    assert counts["escalated"] == 0
+    assert dispatched == []
+    assert claims.released == ["ent_dead"]
+    assert wd.attempts_for("ent_dead") == 1
+    assert status_calls, "expected a PENDING status write"
+    args, kwargs = status_calls[0]
+    assert args[0] == "ent_dead"
+    assert args[1] == tw.TaskStatus.PENDING
+    reason = kwargs.get("reason") or ""
+    assert "lease" in reason.lower() or "lapsed" in reason.lower()
+
+
+def test_sweep_escalates_after_max_lapsed_lease_releases(monkeypatch):
+    """N real sweep() RELEASE cycles must escalate — no manual record_retry.
+
+    The prior false-green handed record_retry between classify-only loops while
+    production RELEASE never incremented attempts, so a dead lease looped
+    forever at attempts=0.
+    """
+    claims = _FakeClaims(live=False, holder="r-dead")
+    wd = tw.TaskWatchdog(stall_seconds=3600, _claims=claims)
+
+    monkeypatch.setattr(
+        tw, "_query_tasks",
+        lambda limit: [("ent_loop", {"status": "executing", "title": "keeps dying"})],
+    )
+    status_calls: list[tuple] = []
+    monkeypatch.setattr(tw, "set_task_status", lambda *a, **k: status_calls.append((a, k)))
+    notifies: list = []
+    monkeypatch.setattr(tw, "_notify", lambda *a, **k: notifies.append(a))
+
+    async def dispatch_fn(*a):
+        raise AssertionError("RELEASE/ESCALATE must not re-dispatch")
+
+    released = 0
+    escalated = 0
+    for _ in range(tw.MAX_ATTEMPTS + 1):
+        counts = asyncio.run(wd.sweep(object(), dispatch_fn))
+        released += counts["released"]
+        escalated += counts["escalated"]
+        if counts["escalated"]:
+            break
+
+    assert released == tw.MAX_ATTEMPTS
+    assert escalated == 1
+    assert any(c[0][1] == tw.TaskStatus.BLOCKED for c in status_calls)
+    assert notifies, "operator must be paged on escalate"
+    assert wd.attempts_for("ent_loop") == 0  # forgotten after escalate
+
+
 # ── timestamp / age parsing ──────────────────────────────────────────────────
 
 

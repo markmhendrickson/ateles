@@ -285,10 +285,15 @@ READINESS_GATE = os.environ.get("APIS_READINESS_GATE", "0") == "1"
 
 # ── Claim + lease ───────────────────────────────────────────────────────────
 # The pull-model primitive: an agent CLAIMS a task rather than a router
-# assigning it. One mechanism serializes concurrent claimants AND expires when
-# a runner dies. Default ON; set APIS_CLAIM_ENABLED=0 to fall back to the old
-# unclaimed path while rolling out.
-CLAIM_ENABLED = os.environ.get("APIS_CLAIM_ENABLED", "1") == "1"
+# assigning it. One mechanism aims to serialize concurrent claimants AND expire
+# when a runner dies.
+#
+# INTERIM DEFAULT OFF (arch ateles#733): prod agent_session `holder` is
+# last-write, so client write+read-back is a best-effort LWW overlay — not a
+# CAS / single-writer boundary. Do not enable in multi-writer prod until a
+# Neotoma conditional claim (precondition on holder/lease) exists. Set
+# APIS_CLAIM_ENABLED=1 only for single-host experiments.
+CLAIM_ENABLED = os.environ.get("APIS_CLAIM_ENABLED", "0") == "1"
 
 
 def _claim_context() -> dict:
@@ -759,16 +764,24 @@ async def dispatch_task(
         return
 
     # ── Claim + lease ────────────────────────────────────────────────────────
-    # Take an atomic claim BEFORE marking EXECUTING. Two jobs, one primitive:
-    # it serializes concurrent claimants (mutual exclusion) and it expires on
-    # its own when this process dies (crash recovery).
+    # Take a claim BEFORE marking EXECUTING. Two jobs, one primitive: it tries
+    # to serialize concurrent claimants and it expires on its own when this
+    # process dies (crash recovery). Mutual exclusion is best-effort LWW until
+    # Neotoma ships a conditional claim contract — see CLAIM_ENABLED default.
     #
-    # FAIL-CLOSED (ent_670cacab2f46fd9547ced7ed, approved; ateles#714): if the
-    # claim cannot be taken or verified, do NOT start work. Running unclaimed
-    # recreates the untracked population this exists to eliminate, and would let
-    # two agents execute the same task.
+    # FAIL-CLOSED (ent_670cacab2f46fd9547ced7ed, approved; ateles#714): when
+    # claims are intended on (CLAIM_ENABLED=1), if the store is unavailable or
+    # the claim cannot be taken/verified, do NOT start work. CLAIM_ENABLED=0 is
+    # the explicit rollback path and may still dispatch unclaimed.
     _runner_id = new_runner_id()
     _claim = None
+    if CLAIM_ENABLED and _claims is None:
+        log.warning(
+            f"[{DAEMON_NAME}] CLAIM_ENABLED but claim store unavailable "
+            f"— not starting work (fail-closed)"
+        )
+        job.escalated(f"task {entity_id} unclaimable: store_unavailable")
+        return
     if CLAIM_ENABLED and _claims is not None:
         _claim = _claims.acquire(entity_id, _runner_id, context=_claim_context())
         if not _claim.held:
@@ -1174,7 +1187,10 @@ async def main() -> None:
     # 6. Stall watchdog (task #2): out-of-band sweeper that retries FAILED tasks
     #    with backoff, resumes tasks left mid-flight by a restart, and escalates
     #    once attempts are exhausted — without blocking the SSE loop.
-    watchdog = TaskWatchdog()
+    # Pass the same module-level ClaimStore dispatch uses. When claims are
+    # disabled / unavailable, `_claims` is None and the watchdog keeps the
+    # age-proxy path (RELEASE stays unreachable until a store is wired).
+    watchdog = TaskWatchdog(_claims=_claims)
 
     async def watchdog_dispatch(task_id: str, snapshot: dict, trigger: str) -> None:
         await dispatch_task(task_id, snapshot, trigger, notifier=notifier)
