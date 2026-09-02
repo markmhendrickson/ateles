@@ -7,10 +7,27 @@ as enforceable code for daemons that dispatch or execute tasks.
 
 The gate is two-axis:
 
-    confidence (0..1, agent self-scored)  ×  blast_radius (low | high)
+    confidence (0..1, agent self-scored)  ×  blast_radius (low | high | never)
 
     high confidence + low blast   → AUTO_EXECUTE
     everything else               → CHECKPOINT (blocking PLAN; await operator)
+
+``BlastRadius.NEVER`` is a third tier, not a louder HIGH. HIGH means "risky
+enough that a human should look"; a HIGH action can still auto-execute once a
+recurring series clears ``auto_execute_after_n_successful_recurrences``. NEVER
+means **an agent structurally cannot do this** — the swarm does not hold the
+credential, the consent, or the standing to act. No number of prior successes
+changes that, so NEVER bypasses the recurrence path entirely rather than
+scoring above a threshold (ateles#715).
+
+Two action types resolve to NEVER:
+
+  * ``operator_only`` — the task schema's own marking for consent-gated and
+    irreversible-outward work.
+  * any action type present in neither ``low_blast_action_types`` nor
+    ``high_blast_action_types``, when the policy's ``blast_radius_default``
+    has not been widened. An unclassified action type is a missing
+    classification, not a safe one; it logs a warning naming the value.
 
 Per-agent overrides (e.g. Monedula-strict ent_c7f81385afbd993db3dd11ff) pin
 financial actions to always-checkpoint by setting confidence_threshold=1.0 and
@@ -68,13 +85,55 @@ _FALLBACK_HIGH_BLAST = frozenset(
         "release",
         "delete_entity_or_data",
         "external_api_write",
+        # Defense in depth (ateles#715). `operator_only` is resolved to
+        # BlastRadius.NEVER before these sets are consulted, so this entry is
+        # unreachable in normal operation. It is here so that a future refactor
+        # which loses the NEVER tier degrades this action type to HIGH rather
+        # than back to the LOW default that caused the original fail-open.
+        "operator_only",
     }
 )
+
+# Action types treated as LOW blast when a policy can't be loaded. Mirrors the
+# default execution_policy entity's `low_blast_action_types`.
+#
+# Before ateles#715 this set did not exist: the fallback policy carried an
+# EMPTY low set and relied on `blast_radius_default` = LOW to wave everything
+# through. Once an unclassified action type stopped defaulting to LOW, that
+# emptiness would have failed *every* action closed whenever Neotoma was
+# unreachable — turning a policy-fetch blip into a swarm-wide halt. Naming the
+# genuinely-low actions keeps the fallback conservative about the unknown
+# without being useless about the known.
+_FALLBACK_LOW_BLAST = frozenset(
+    {
+        "local_edit",
+        "draft",
+        "neotoma_read",
+        "neotoma_internal_entity_update",
+        "compute_only_analysis",
+    }
+)
+
+
+# Action types that an agent structurally cannot perform, regardless of
+# confidence or prior successes. These resolve to BlastRadius.NEVER, which the
+# gate refuses to auto-execute on every path including recurrence graduation.
+#
+# `operator_only` is the task schema's marking for consent-gated and
+# irreversible-outward work (credential handling, payments, external comms).
+# Before ateles#715 it was in neither blast set, so `blast_radius_for()` fell
+# through to `blast_radius_default` = LOW and the field contributed nothing —
+# the more confident an authoring agent was that a task needed a human, the
+# more certainly it auto-executed.
+NEVER_AUTO_EXECUTE_ACTION_TYPES = frozenset({"operator_only"})
 
 
 class BlastRadius(str, Enum):
     LOW = "low"
     HIGH = "high"
+    #: Never auto-executable. Not "very high" — a distinct tier that no
+    #: confidence score and no number of clean recurrences can clear.
+    NEVER = "never"
 
 
 class CheckpointPosture(str, Enum):
@@ -130,19 +189,51 @@ class ExecutionPolicy:
     high_blast_action_types: frozenset[str] = field(
         default_factory=lambda: frozenset(_FALLBACK_HIGH_BLAST)
     )
-    low_blast_action_types: frozenset[str] = field(default_factory=frozenset)
+    low_blast_action_types: frozenset[str] = field(
+        default_factory=lambda: frozenset(_FALLBACK_LOW_BLAST)
+    )
     checkpoint_postures: dict[str, CheckpointPosture] = field(default_factory=dict)
     loaded: bool = False  # False = using fallbacks (Neotoma unreachable)
 
     def blast_radius_for(self, action_type: str | None) -> BlastRadius:
-        """Classify an action type's blast radius under this policy."""
+        """Classify an action type's blast radius under this policy.
+
+        Resolution order (ateles#715):
+
+        1. ``NEVER_AUTO_EXECUTE_ACTION_TYPES`` wins over every policy set. A
+           policy cannot demote ``operator_only`` by listing it as low blast —
+           that is not a tuning knob, it is the marking that says an agent
+           structurally cannot do the work.
+        2. Explicit ``low_blast_action_types`` / ``high_blast_action_types``.
+        3. An action type in *neither* set is **unrecognized**: it logs a
+           warning naming the value and resolves to NEVER — never silently to
+           LOW, and not to ``blast_radius_default`` either, since that default
+           is what produced the ateles#715 fail-open. A missing classification
+           is a gap in the policy, and the safe reading of a gap is that
+           nobody has vouched for this action being agent-executable.
+        4. Absent/empty ``action_type`` keeps the policy default — that is the
+           "nothing was declared" case the default exists for, distinct from
+           "something was declared and nobody classified it".
+        """
         if action_type:
             at = action_type.strip().lower()
+            if at in NEVER_AUTO_EXECUTE_ACTION_TYPES:
+                return BlastRadius.NEVER
             if at in self.low_blast_action_types:
                 return BlastRadius.LOW
             if at in self.high_blast_action_types:
                 return BlastRadius.HIGH
-        # Unknown action type → fall back to the policy's default.
+            # Declared, but classified by neither set. Fail closed and say so.
+            log.warning(
+                "[gating] unrecognized action_type %r under policy %r — "
+                "present in neither low_blast_action_types nor "
+                "high_blast_action_types; treating as never-auto-executable. "
+                "Add it to one of the policy's action-type sets to classify it.",
+                at,
+                self.entity_id or "(fallback)",
+            )
+            return BlastRadius.NEVER
+        # No action type declared at all → the policy's default.
         return self.blast_radius_default
 
     def posture_for(self, boundary: str | None) -> CheckpointPosture:
@@ -173,7 +264,18 @@ class GateDecision:
 
     @property
     def may_auto_execute(self) -> bool:
-        return self.action == GateAction.AUTO_EXECUTE
+        """True only for an AUTO_EXECUTE decision that is not never-tier.
+
+        The blast-radius clause is redundant against `evaluate_gate`, which
+        short-circuits NEVER before it can produce AUTO_EXECUTE. It is kept as
+        a belt-and-braces check on the value callers actually branch on, so a
+        hand-constructed or future-refactored GateDecision cannot present a
+        never-auto-executable action as dispatchable (ateles#715).
+        """
+        return (
+            self.action == GateAction.AUTO_EXECUTE
+            and self.blast_radius != BlastRadius.NEVER
+        )
 
 
 def _parse_policy(entity_id: str, data: dict) -> ExecutionPolicy:
@@ -198,7 +300,12 @@ def _parse_policy(entity_id: str, data: dict) -> ExecutionPolicy:
         threshold = _FALLBACK_THRESHOLD
 
     radius_default = str(snap.get("blast_radius_default", "low")).strip().lower()
-    default_br = BlastRadius.HIGH if radius_default == "high" else BlastRadius.LOW
+    if radius_default == "never":
+        default_br = BlastRadius.NEVER
+    elif radius_default == "high":
+        default_br = BlastRadius.HIGH
+    else:
+        default_br = BlastRadius.LOW
 
     n_recur = snap.get("auto_execute_after_n_successful_recurrences")
     try:
@@ -207,7 +314,7 @@ def _parse_policy(entity_id: str, data: dict) -> ExecutionPolicy:
         n_recur = None
 
     high = _as_set(snap.get("high_blast_action_types")) or frozenset(_FALLBACK_HIGH_BLAST)
-    low = _as_set(snap.get("low_blast_action_types"))
+    low = _as_set(snap.get("low_blast_action_types")) or frozenset(_FALLBACK_LOW_BLAST)
     postures = _parse_checkpoint_postures(snap.get("checkpoint_postures"), entity_id)
 
     return ExecutionPolicy(
@@ -349,10 +456,33 @@ def evaluate_gate(
     Auto-execute requires high confidence AND low blast radius — UNLESS the task
     is a recurring series that has cleared the policy's recurrence-graduation
     count (and the policy enables graduation, i.e. n is not None).
+
+    ``BlastRadius.NEVER`` short-circuits before any of that (ateles#715). It is
+    checked first and returns unconditionally, so no confidence score, no
+    threshold tuning, and no number of clean recurrences can produce
+    AUTO_EXECUTE for it. That is the whole point of the tier: `operator_only`
+    does not mean "risky", it means an agent cannot do this — and a hundred
+    prior successes do not hand the swarm a credential it was designed not to
+    hold.
     """
     blast = policy.blast_radius_for(action_type)
     threshold = policy.confidence_threshold
     high_conf = confidence >= threshold
+
+    # Never-auto-executable: returns before the confidence axis and before
+    # recurrence graduation are consulted at all.
+    if blast == BlastRadius.NEVER:
+        return GateDecision(
+            action=GateAction.CHECKPOINT,
+            blast_radius=blast,
+            confidence=confidence,
+            threshold=threshold,
+            policy_id=policy.entity_id,
+            reason=(
+                "operator-only action — never auto-executable at any "
+                "confidence or recurrence count"
+            ),
+        )
 
     # Recurrence graduation: a proven recurring series may auto-execute below
     # threshold, but ONLY when the policy enables it (n is not None) and the
@@ -362,7 +492,7 @@ def evaluate_gate(
         policy.auto_execute_after_n_successful_recurrences is not None
         and successful_recurrences
         >= policy.auto_execute_after_n_successful_recurrences
-        and blast == BlastRadius.LOW
+        and blast == BlastRadius.LOW  # NEVER and HIGH never graduate
     )
 
     if blast == BlastRadius.LOW and (high_conf or graduated):

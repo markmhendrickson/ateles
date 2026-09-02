@@ -92,6 +92,16 @@ class TestRouteTask(unittest.TestCase):
                 "title": "default",
                 "confidence_threshold": 0.85,
                 "high_blast_action_types": ["payment", "git_push"],
+                # Both sets are needed since ateles#715: an action type in
+                # NEITHER set is now its own verdict ("never"), so a mock with
+                # only the high set would report every low-blast action as
+                # unclassified rather than low.
+                "low_blast_action_types": [
+                    "local_edit",
+                    "draft",
+                    "neotoma_read",
+                    "compute_only_analysis",
+                ],
             },
         }
 
@@ -250,8 +260,46 @@ class TestRouteTask(unittest.TestCase):
         mock_retrieve.return_value = self.mock_agent_def
         mock_get.return_value = self.mock_policy
 
-        result = srv._route_task("read some data", "read_entity")
+        result = srv._route_task("read some data", "neotoma_read")
         self.assertEqual(result["action_blast_radius"], "low")
+
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    @patch("server._get_swarm_roster")
+    def test_operator_only_blast_radius_is_never(
+        self, mock_roster, mock_retrieve, mock_get
+    ):
+        """ateles#715: route_task must not advertise operator_only as low.
+
+        This previously reported "low" — the tool an operator would consult to
+        ask "will this auto-execute?" gave the wrong answer about the one
+        action type that exists to stop dispatch.
+        """
+        mock_roster.return_value = self.mock_roster
+        mock_retrieve.return_value = self.mock_agent_def
+        mock_get.return_value = self.mock_policy
+
+        result = srv._route_task("rotate the fly credential", "operator_only")
+        self.assertEqual(result["action_blast_radius"], "never")
+
+    @patch("server._get")
+    @patch("server._retrieve_entities")
+    @patch("server._get_swarm_roster")
+    def test_unclassified_action_type_is_not_low(
+        self, mock_roster, mock_retrieve, mock_get
+    ):
+        """An action type in neither policy set is unclassified, not safe.
+
+        The prior `else "low"` meant a typo like "read_entity" (not in the
+        vocabulary at all — and what this test file previously asserted was
+        low) was advertised as auto-executable.
+        """
+        mock_roster.return_value = self.mock_roster
+        mock_retrieve.return_value = self.mock_agent_def
+        mock_get.return_value = self.mock_policy
+
+        result = srv._route_task("read some data", "read_entity")
+        self.assertEqual(result["action_blast_radius"], "never")
 
     @patch("server._get")
     @patch("server._retrieve_entities")

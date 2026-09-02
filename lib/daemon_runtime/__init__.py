@@ -72,6 +72,7 @@ from .gating import (
     BlastRadius,
     CheckpointPosture,
     DEFAULT_CLOSED_BOUNDARIES,
+    NEVER_AUTO_EXECUTE_ACTION_TYPES,
     ExecutionPolicy,
     GateAction,
     GateDecision,
@@ -153,6 +154,7 @@ __all__ = [
     # checkpoint posture (ateles#350)
     "CheckpointPosture",
     "DEFAULT_CLOSED_BOUNDARIES",
+    "NEVER_AUTO_EXECUTE_ACTION_TYPES",
     "InvalidCheckpointPosture",
     "CheckFailure",
     "PostureOutcome",
