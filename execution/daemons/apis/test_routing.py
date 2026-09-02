@@ -8,6 +8,7 @@ Run with: pytest execution/daemons/apis/test_routing.py -v
 from __future__ import annotations
 
 from routing import (
+    canonical_assignee,
     infer_domains_from_paths,
     infer_tags_from_text,
     resolve_reviewers,
@@ -334,3 +335,73 @@ def test_unmatched_task_surfaces_as_unowned() -> None:
         "Ponder the meaning of the universe",
     ):
         assert resolve_skill(infer_tags_from_text(text)) is None, text
+
+
+# ── assigned_to canonicalization (ateles#682) ────────────────────────────────
+#
+# Stored tasks carry the same owner written several ways. These lock the
+# reduction to the one form ASSIGNED_TO_ROUTES is keyed by, and — more
+# importantly — lock the two behaviours a wrong reduction would silently break:
+# an AAuth-suffixed owner must still route, and a sentinel must read as absence.
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        # Absence, spelled every way it appears in stored data.
+        (None, None),
+        ("", None),
+        ("   ", None),
+        ("unassigned", None),
+        ("Unassigned", None),
+        ("N/A", None),
+        # Mechanical variation on a real owner.
+        ("cicada", "cicada"),
+        ("Cicada", "cicada"),
+        ("  CICADA  ", "cicada"),
+        # AAuth subject forms — the local part IS the agent name.
+        ("corvus@ateles-swarm", "corvus"),
+        ("corvus@ateles", "corvus"),
+        ("Corvus@Ateles-Swarm", "corvus"),
+        # Not an agent: reduced in form, never guessed at or dropped.
+        ("Mark", "mark"),
+        ("neotoma coding agent", "neotoma coding agent"),
+    ],
+)
+def test_canonical_assignee_reduces_form_without_inventing_owners(
+    raw: str | None, expected: str | None
+) -> None:
+    assert canonical_assignee(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw", ["corvus@ateles-swarm", "corvus@ateles", "Corvus", " corvus "]
+)
+def test_aauth_and_case_variants_route_like_the_bare_name(raw: str) -> None:
+    """Every spelling of an owner must reach that owner's skill.
+
+    Before canonicalization `corvus@ateles-swarm` resolved to None and fell
+    through to tag inference — an owner the creating agent had explicitly named
+    was silently ignored.
+    """
+    assert resolve_skill([], assigned_to=raw) == resolve_skill([], assigned_to="corvus")
+
+
+def test_sentinel_assignee_is_absence_not_an_owner() -> None:
+    """"unassigned" must behave exactly like an empty field.
+
+    It is worse than absence when treated as a value: it is truthy, so it
+    satisfies a `bool(assigned_to)` owner check while naming nobody. Tag
+    inference must still get its turn, exactly as it does for an empty field.
+    """
+    assert resolve_skill([], assigned_to="unassigned") is None
+    assert resolve_skill(["finance"], assigned_to="unassigned") == resolve_skill(
+        ["finance"], assigned_to=None
+    )
+
+
+def test_unknown_assignee_still_falls_through_to_tags() -> None:
+    """A human name is not an agent — it must not block tag inference."""
+    assert resolve_skill(["finance"], assigned_to="Mark") == resolve_skill(
+        ["finance"], assigned_to=None
+    )

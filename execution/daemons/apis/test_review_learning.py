@@ -51,6 +51,8 @@ def test_proposals_only_for_systemic_blocking_findings():
     p = proposals[0]
     assert p["entity_type"] == "proposed_skill_update"
     assert p["finding_category"] == "tenant-isolation"
+    # Cicada, not "gryllus": this test pinned the pre-rename name and so
+    # asserted the bug rather than the behaviour (ateles#682).
     assert p["owning_agent"] == "cicada"
     assert p["status"] == "proposed"
     assert p["approval_required"] is True
@@ -85,3 +87,31 @@ def test_category_history_threshold():
 def test_non_blocking_never_proposes():
     review = "[NON-BLOCKING] naming: per change_guardrails, prefer snake_case\nd"
     assert propose_skill_updates([("arch", review)], pr_ref="o/r#12") == []
+
+
+def test_default_owner_is_an_agent_the_dispatcher_can_resolve():
+    """DEFAULT_OWNER must name a LIVE agent, not a retired one.
+
+    It read "gryllus" — the pre-2026-06-12 name for Cicada — so every systemic
+    finding without a content lens was owned by an agent with no
+    agent_definition, and `routing.resolve_skill` returned None for it: filed
+    against nobody. Asserting through the resolver (rather than against a
+    literal) means a future rename fails here instead of silently orphaning
+    findings again.
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from routing import resolve_skill
+
+    from review_learning import DEFAULT_OWNER, OWNER_BY_LENS
+
+    assert resolve_skill([], assigned_to=DEFAULT_OWNER) == DEFAULT_OWNER, (
+        f"DEFAULT_OWNER={DEFAULT_OWNER!r} does not resolve to a dispatchable "
+        "agent — a systemic finding assigned to it is owned by nobody"
+    )
+    for lens, owner in OWNER_BY_LENS.items():
+        assert resolve_skill([], assigned_to=owner) == owner, (
+            f"OWNER_BY_LENS[{lens!r}]={owner!r} is not dispatchable"
+        )
