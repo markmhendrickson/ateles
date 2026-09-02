@@ -22,6 +22,8 @@ on:
       - "execution/scripts/**"
       - "pyproject.toml"
       - "uv.lock"
+      - "scripts/linters/check_agent_roster.py"
+      - "docs/agents/**"
       - ".github/workflows/ateles-tests.yml"
   workflow_dispatch:
 
@@ -36,6 +38,14 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
+      # ateles#320: retired agent names in runtime routing code. This linter
+      # lives in scripts/lint.sh, which NO workflow invokes — so it never ran in
+      # CI. Wired here as a blocking step because the failure it catches is
+      # silent: `DEFAULT_OWNER = "gryllus"` filed 107 review findings to an
+      # agent that does not exist, for seven weeks, with every test green.
+      - name: Check agent roster (no retired agent names)
+        run: python3 scripts/linters/check_agent_roster.py
+
       - name: Run ateles package tests
         run: uv run --extra dev python -m pytest ateles/ .claude/hooks/ -q
       # Swarm daemon tests (qa #254 finding): test_swarm_dispatch.py and the

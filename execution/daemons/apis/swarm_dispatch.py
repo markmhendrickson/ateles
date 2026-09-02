@@ -261,7 +261,7 @@ def parse_approve_token(text: str) -> tuple[str, int] | None:
 # These are the gates Lanius checks for GATE_INHERITANCE.
 #
 # ateles#285: `ux` was MISSING from this tuple even though the Lanius skill,
-# the workflow phase table (Phase 2 = Accipiter `ux` + Bombycilla `arch`), and
+# the workflow phase table (Phase 2 = Accipiter `ux` + Waxwing `arch`), and
 # _lanius_pr_prompt ("If pm/ux/arch are all satisfied there …") all treat it as
 # a pre-impl gate. That omission is the mechanical cause of the 2026-07-23
 # PARTIAL waive on ateles#241: the sweep waived `arch`, left `ux` pending, and
@@ -880,8 +880,8 @@ def workflow_owner_drift(
 
     ateles#441. `workflow_definition` entities name the agent that owns each
     gate; dispatch picks agents from hardcoded rosters in `issue_spec.py` and
-    `review_panel.py`. Nothing compared the two, so when Bombycilla was renamed
-    Waxwing and Gryllus renamed Cicada on 2026-06-12, the workflows kept naming
+    `review_panel.py`. Nothing compared the two, so when Bombycilla was renamed  # roster-ok: the rename narrative this function exists to prevent
+    Waxwing and Gryllus renamed Cicada on 2026-06-12, the workflows kept naming  # roster-ok: same rename narrative
     the old ones and no code noticed.
 
     The consequence is silent and slow: the renamed agent still runs, still
@@ -6988,7 +6988,7 @@ class SwarmDispatcher:
             "and that read fails. (Optionally read the Claude GHA baseline with "
             f"`gh pr view {t.number} --repo {t.repository} --comments`, but the "
             "inline reviews are authoritative.) Any [BLOCKING] finding ⇒ set the "
-            "pr_review gate to changes_requested and route back to Gryllus with "
+            "pr_review gate to changes_requested and route back to Cicada with "
             "a summary comment. All clear ⇒ approve and advance pr_review to "
             "signed_off on the parent issue entity.\n\n"
             "----- PANEL LENS REVIEWS (inline) -----\n"
