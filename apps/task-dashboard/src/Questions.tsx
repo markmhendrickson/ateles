@@ -55,6 +55,7 @@ import { useMemo, useState } from "react";
 import { type Task, isAnswered, priorityRank, relativeTime } from "./tasks";
 import { splitRecommendation } from "./questionText";
 import { type QuestionRef, questionRefs } from "./questionRefs";
+import type { QuestionTally } from "./questionCount";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -79,6 +80,12 @@ function loadExpanded(): boolean | null {
 
 interface Props {
   questions: Task[];
+  /**
+   * How many open questions exist, against how many arrived on the task page.
+   * The rail's own rows come from the newest-200 task poll, so this is the only
+   * thing that can tell it whether the queue it renders is the whole queue.
+   */
+  coverage: QuestionTally;
   /** True once the first poll has settled. Drives skeletons; see App.tsx. */
   firstLoadDone: boolean;
   /** Opens one question's detail view. Navigation only — never a write. */
@@ -87,7 +94,7 @@ interface Props {
   openId: string | null;
 }
 
-export function Questions({ questions, firstLoadDone, onOpen, openId }: Props) {
+export function Questions({ questions, coverage, firstLoadDone, onOpen, openId }: Props) {
   // Highest priority first, then newest — the question just asked is usually
   // the one being spoken about, but an urgent older one outranks it.
   const sorted = [...questions].sort(
@@ -97,6 +104,18 @@ export function Questions({ questions, firstLoadDone, onOpen, openId }: Props) {
   );
   const open = sorted.filter((q) => !isAnswered(q));
   const answered = sorted.filter(isAnswered);
+
+  /**
+   * The figure the rail states — the measured total where it is known, and the
+   * loaded count otherwise.
+   *
+   * Preferring the measured total means the badge stays correct even when a
+   * question has aged out of the task window, which is the whole point. Falling
+   * back to the loaded count when it is unmeasured means a failed count route
+   * degrades the rail to its old behaviour rather than blanking a queue the
+   * operator can plainly see rows in.
+   */
+  const railCount = coverage.totalOpen ?? open.length;
 
   // Reference numbers are keyed by entity id and derived from creation order,
   // NOT from the sorted order above — see questionRefs.ts. Sorting by priority
@@ -169,7 +188,18 @@ export function Questions({ questions, firstLoadDone, onOpen, openId }: Props) {
                     forget: outstanding work stays visible even when the panel
                     is not. It survives the loading state too — a count of zero
                     during first load would read as "nothing waiting". */}
-                {open.length > 0 && <Badge variant="counter">{open.length}</Badge>}
+                {/* The badge counts every open question that EXISTS, not the
+                    ones this page loaded — a question aged out of the newest-200
+                    task window is exactly the one that has waited longest, and a
+                    collapsed rail showing nothing is indistinguishable from an
+                    empty queue. `railCount` falls back to the loaded figure when
+                    the total could not be read. */}
+                {railCount > 0 && (
+                  <Badge variant="counter">
+                    {railCount}
+                    {coverage.missing !== null && coverage.missing > 0 && "*"}
+                  </Badge>
+                )}
                 <span className="qrail mt-[10px] max-[860px]:mt-0" aria-hidden>
                   QUESTIONS
                 </span>
@@ -182,14 +212,41 @@ export function Questions({ questions, firstLoadDone, onOpen, openId }: Props) {
           <ScrollArea className="max-h-[calc(100vh-76px)] flex-1 max-[860px]:max-h-[60vh]">
             <div className="px-[10px] pb-4 pt-[8px]">
               <div className="mb-[6px] flex items-baseline gap-[10px]">
+                {/*
+                 * "Nothing awaiting you" is the sentence with the most to lose:
+                 * said while a question sits outside the loaded window, it is
+                 * not a short list but a false all-clear. It is only ever
+                 * printed when the total was measured and is genuinely zero.
+                 */}
                 <span className="text-[11px] text-muted-foreground">
                   {pending
                     ? "Loading…"
-                    : open.length
-                      ? `${open.length} awaiting you`
-                      : "Nothing awaiting you"}
+                    : railCount > 0
+                      ? `${railCount} awaiting you`
+                      : coverage.totalOpen === null
+                        ? "None loaded — the open-question count could not be read"
+                        : "Nothing awaiting you"}
                 </span>
               </div>
+
+              {/*
+               * THE ONE THING THE RAIL COULD NOT SAY BEFORE. Rows here are
+               * whatever the newest-200 task page happened to contain; a
+               * question older than that is unreachable from any surface in
+               * this app. Naming the shortfall is the difference between a
+               * queue that is short and a queue that is lying.
+               */}
+              {!pending && coverage.missing !== null && coverage.missing > 0 && (
+                <p className="mb-[8px] rounded-[7px] border border-warn bg-[hsl(var(--warn)/0.12)] px-[8px] py-[6px] text-[11.5px] leading-[1.5]">
+                  <strong>
+                    {coverage.missing} open{" "}
+                    {coverage.missing === 1 ? "question is" : "questions are"} not shown.
+                  </strong>{" "}
+                  This rail lists questions found in the most recent 200 tasks, so the ones
+                  missing are the oldest — and the longest unanswered. Open the Tasks tab and
+                  filter to reach them.
+                </p>
+              )}
 
               {pending ? (
                 <QuestionsSkeleton cards={3} />

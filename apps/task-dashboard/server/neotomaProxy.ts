@@ -1036,6 +1036,62 @@ async function fetchFacets(): Promise<unknown> {
   };
 }
 
+/**
+ * HOW MANY OPEN QUESTIONS EXIST — not how many the task page happened to load.
+ *
+ * THE DEFECT THIS CLOSES. The open-questions rail has no fetch of its own: it
+ * filters `App.tsx`'s `/api/tasks?limit=200` page for `category:
+ * "open_question"`, and prints the survivors as "N awaiting you" plus a
+ * counter badge on the collapsed rail. Both figures describe the newest 200
+ * tasks. Today every question is recent enough to be inside that window, so
+ * the numbers are right — by coincidence, not by construction.
+ *
+ * WHY IT IS THE WORST PLACE IN THE APP FOR THIS BUG. Every other list here can
+ * be re-queried; the rail is the surface whose ENTIRE PURPOSE is that a
+ * question does not get lost. The tasks page is sorted newest-first, so the
+ * question at risk of falling out of the window is precisely the one that has
+ * gone longest unanswered. The badge would keep reading like a complete queue
+ * while the oldest question silently left it — and a collapsed rail showing no
+ * badge is indistinguishable from having nothing to answer.
+ *
+ * Count-only, no snapshots, same cheap shape as `/api/facets` and
+ * `/api/lifecycle`. The category is fixed here rather than client-supplied, so
+ * this route cannot be pointed at an arbitrary filter.
+ *
+ * `open` is deliberately NOT computed by subtracting done from total: the
+ * status vocabulary is an open-ended bare string (see `fetchLifecycle`), so a
+ * question in some third spelling would be silently absorbed into whichever
+ * side the subtraction favoured. Each figure is asked for directly, and either
+ * may be null — meaning "could not ask", never "none".
+ */
+const QUESTION_CATEGORY = "open_question";
+
+async function countQuestions(extra?: Record<string, unknown>): Promise<number | null> {
+  try {
+    const body = (await neotomaPost("/entities/query", {
+      entity_type: "task",
+      limit: 1,
+      include_snapshots: false,
+      snapshot_filters: {
+        category: { op: "eq", value: QUESTION_CATEGORY },
+        ...(extra ?? {}),
+      },
+    })) as { total?: unknown };
+    return typeof body.total === "number" ? body.total : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchQuestionCounts(): Promise<unknown> {
+  const [total, done] = await Promise.all([
+    countQuestions(),
+    countQuestions({ status: { op: "eq", value: "done" } }),
+  ]);
+
+  return { total, done };
+}
+
 async function fetchLifecycle(): Promise<unknown> {
   const [counts, totalTasks] = await Promise.all([
     Promise.all(
@@ -1904,6 +1960,24 @@ export function neotomaProxy(): Plugin {
         res.setHeader("Cache-Control", "no-store");
         try {
           res.end(JSON.stringify(await fetchFacets()));
+        } catch (err) {
+          res.statusCode = 502;
+          res.end(JSON.stringify({ error: (err as Error).message }));
+        }
+      });
+
+      /**
+       * GET /api/questions — how many open questions EXIST.
+       *
+       * Rows still arrive on the task poll; this route supplies only the
+       * denominator the rail was missing, so the badge can say when the queue
+       * it is showing is not the whole queue. Takes no parameters.
+       */
+      server.middlewares.use("/api/questions", async (_req, res) => {
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Cache-Control", "no-store");
+        try {
+          res.end(JSON.stringify(await fetchQuestionCounts()));
         } catch (err) {
           res.statusCode = 502;
           res.end(JSON.stringify({ error: (err as Error).message }));

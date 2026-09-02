@@ -26,6 +26,8 @@ import {
 } from "./agents";
 import { type Task, type TaskEntity, entityUrl, parseTask, relativeTime, toBucket } from "./tasks";
 import { isSpawnable } from "./taskState";
+import { type Coverage, coverageOf, coverageText, isPartial } from "./listTotal";
+import { CoverageNotice } from "./ListCoverage";
 import { Markdown } from "./Markdown";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -67,6 +69,16 @@ export function AgentDirectory({ selected, onSelect, onOpenEntity }: Props) {
    */
   const [firstLoadDone, setFirstLoadDone] = useState(false);
   const [tier, setTier] = useState<TierFilter>("all");
+  /**
+   * Whether the 200-row request covered the whole roster.
+   *
+   * 43 agent_definition entities exist, so today it does and nothing renders.
+   * The tier chips below count the LOADED agents, though, so past 200 every
+   * chip would understate its tier with no indication — the tasks-page defect
+   * (#691) in a smaller room. The check costs one field that was already in
+   * the response.
+   */
+  const [coverage, setCoverage] = useState<Coverage>({ kind: "unknown", received: 0 });
 
   useEffect(() => {
     let live = true;
@@ -76,7 +88,9 @@ export function AgentDirectory({ selected, onSelect, onOpenEntity }: Props) {
         const body = await res.json();
         if (!res.ok || body.error) throw new Error(body.error ?? `HTTP ${res.status}`);
         if (!live) return;
-        const parsed = (body.entities as AgentEntity[]).map(parseAgent);
+        const rows = body.entities as AgentEntity[];
+        setCoverage(coverageOf(body, rows.length));
+        const parsed = rows.map(parseAgent);
         // Alphabetical: the server returns entity-id order, which is arbitrary
         // to a reader scanning for a name.
         parsed.sort((a, b) => a.name.localeCompare(b.name));
@@ -133,8 +147,17 @@ export function AgentDirectory({ selected, onSelect, onOpenEntity }: Props) {
     <>
       <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <h1 className="m-0 text-[16px] font-[650] tracking-[-0.01em]">Agent directory</h1>
+        {/* "N agents in the swarm" is a claim about the SWARM, not about this
+            request. It goes through Coverage so the phrase is only used when
+            the roster is fully in hand. */}
         <p className="m-0 text-[12px] text-muted-foreground">
-          {pending ? "Loading…" : `${agents.length} agents in the swarm`}
+          {pending ? (
+            "Loading…"
+          ) : coverage.kind === "complete" ? (
+            `${coverage.total.toLocaleString()} agents in the swarm`
+          ) : (
+            <>{coverageText(coverage, "agent")} — see below</>
+          )}
         </p>
       </header>
 
@@ -148,6 +171,12 @@ export function AgentDirectory({ selected, onSelect, onOpenEntity }: Props) {
         <AgentDirectorySkeleton />
       ) : (
         <>
+          <CoverageNotice
+            coverage={coverage}
+            noun="agent"
+            sortNote="The tier counts below are over the loaded agents only, so each understates its tier."
+          />
+
           <nav className="my-[10px] flex flex-wrap gap-[5px]">
             {(["all", ...TIERS] as TierFilter[])
               .filter((t) => t === "all" || counts[t] > 0)
@@ -406,6 +435,14 @@ function AssignedTasks({
   const [tasks, setTasks] = useState<Task[] | null>(null);
   /** Distinguishes "not loaded" from "loaded, and there are none". */
   const [failed, setFailed] = useState(false);
+  /**
+   * The sentence below reads "<N> assigned, <M> not yet done", and both figures
+   * were `tasks.length` over a 100-row request. No agent currently owns more
+   * than a couple of tasks, so the numbers are right — but they are right by
+   * accident, and "assigned" is precisely the kind of word a reader takes as a
+   * total. Coverage decides whether they may be stated plainly.
+   */
+  const [coverage, setCoverage] = useState<Coverage>({ kind: "unknown", received: 0 });
 
   useEffect(() => {
     let alive = true;
@@ -417,7 +454,9 @@ function AssignedTasks({
         const body = await res.json();
         if (!alive) return;
         if (!res.ok || body.error) throw new Error(body.error ?? `HTTP ${res.status}`);
-        setTasks((body.entities as TaskEntity[]).map(parseTask));
+        const rows = body.entities as TaskEntity[];
+        setCoverage(coverageOf(body, rows.length));
+        setTasks(rows.map(parseTask));
       } catch {
         // Non-fatal: the definition above is unaffected by a task list that
         // could not be read, and a broken panel would be worse than a caveat.
@@ -460,7 +499,20 @@ function AssignedTasks({
           {/* THE RATIO. Not decoration: where the agent is unspawnable, every
               one of these tasks is stranded, and the sentence says which. */}
           <p className="m-0 mb-[6px] text-[12px] leading-[1.5]">
-            <strong>{tasks.length}</strong> assigned, <strong>{open.length}</strong> not yet done.{" "}
+            <strong>{tasks.length}</strong> assigned, <strong>{open.length}</strong> not yet done
+            {isPartial(coverage) && (
+              /* The request is capped at 100 rows. "assigned" reads as a total,
+                 so when it is not one the sentence has to say so rather than
+                 letting the reader supply the wrong word. */
+              <>
+                {" "}
+                <span className="text-warn">
+                  (of {coverage.total.kind === "exact" ? coverage.total.value.toLocaleString() : "more"}{" "}
+                  assigned — this panel loads at most 100)
+                </span>
+              </>
+            )}
+            .{" "}
             {spawnable ? (
               <span className="text-muted-foreground">
                 <span className="text-live">{agent.name}</span> is in Apis's route table, so these

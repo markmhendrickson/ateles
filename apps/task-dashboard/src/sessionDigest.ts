@@ -136,6 +136,14 @@ export interface SessionsPayload {
   entities?: SessionEntity[];
   live?: LiveSessionHint | null;
   error?: string;
+  /**
+   * How many `session_digest` entities EXIST, as against how many `entities`
+   * holds. Upstream has always sent this and the route has always passed it
+   * through; it was simply absent from this type, so no consumer could reach
+   * it and the index printed its own row count as the store's total instead.
+   * An unread field is how a page ends up truthful only by coincidence.
+   */
+  total?: unknown;
 }
 
 function str(v: unknown): string | null {

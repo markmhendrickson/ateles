@@ -111,6 +111,12 @@ import {
   sessionPlans,
 } from "./conversation";
 import { DISPATCHABLE_ROLES, dispatchability } from "./taskState";
+/**
+ * Aliased: this file already has a local `Coverage` component, which reports
+ * the date range the digests span. Different question, same good word.
+ */
+import { type Coverage as ListCoverage, coverageOf } from "./listTotal";
+import { CoverageCount, CoverageNotice } from "./ListCoverage";
 import { type AgentRef, AssignedTo } from "./AssignedTo";
 import { useRoster } from "./useRoster";
 import { relativeTime, toBucket } from "./tasks";
@@ -164,6 +170,16 @@ export function Sessions({
   onOpenAgent,
 }: Props) {
   const [sessions, setSessions] = useState<SessionDigest[]>([]);
+  /**
+   * How much of the digest store the rows above actually represent.
+   *
+   * `sessions.length` used to be printed directly as "344 digested" and "344
+   * sessions". Both were right only because 344 happens to be under the 400-row
+   * request limit — the figure was a page size wearing a total's clothes, and
+   * the 401st digest would have made it silently wrong with nothing on screen
+   * to say so. `total` has always been in the response; it was simply dropped.
+   */
+  const [coverage, setCoverage] = useState<ListCoverage>({ kind: "unknown", received: 0 });
   const [live, setLive] = useState<LiveSessionHint | null>(null);
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [related, setRelated] = useState<RelatedEntity[]>([]);
@@ -201,7 +217,12 @@ export function Sessions({
       if (!alive) return;
 
       if (digests.status === "fulfilled") {
-        setSessions((digests.value.entities as SessionEntity[]).map(parseSession).sort(byRecency));
+        const rows = digests.value.entities as SessionEntity[];
+        setSessions(rows.map(parseSession).sort(byRecency));
+        // Coverage is measured against what UPSTREAM returned, before any
+        // client-side sort or filter, so it describes the query rather than
+        // whatever the table happens to be showing.
+        setCoverage(coverageOf(digests.value, rows.length));
         setLive(digests.value.live ?? null);
         setDigestFailed(false);
       } else {
@@ -290,6 +311,7 @@ export function Sessions({
     return (
       <SessionList
         sessions={sessions}
+        coverage={coverage}
         live={live}
         failed={digestFailed}
         onSelect={onSelect}
@@ -307,7 +329,7 @@ export function Sessions({
       live={live}
       digest={liveDigest}
       fallback={sessions[0] ?? null}
-      total={sessions.length}
+      coverage={coverage}
       failed={digestFailed}
       onOpenIndex={() => onSelect(null)}
       onOpenEntity={onOpenEntity}
@@ -345,7 +367,7 @@ function CurrentSession({
   live,
   digest,
   fallback,
-  total,
+  coverage,
   failed,
   onOpenIndex,
   onOpenEntity,
@@ -356,8 +378,8 @@ function CurrentSession({
   live: LiveSessionHint | null;
   digest: SessionDigest | null;
   fallback: SessionDigest | null;
-  total: number;
-  /** The digest read failed on the last poll — `total` is then not a count. */
+  coverage: ListCoverage;
+  /** The digest read failed on the last poll — the count is then not a count. */
   failed: boolean;
   onOpenIndex: () => void;
   onOpenEntity: (id: string) => void;
@@ -368,7 +390,7 @@ function CurrentSession({
   if (!live) {
     return (
       <article>
-        <ListLink total={total} failed={failed} onOpenIndex={onOpenIndex} />
+        <ListLink coverage={coverage} failed={failed} onOpenIndex={onOpenIndex} />
         <div className="mb-[18px] rounded-[10px] border border-[hsl(var(--warn)/0.26)] bg-[hsl(var(--warn)/0.08)] px-[14px] py-3 text-[13px]">
           <strong>Showing the most recent session, not the current one.</strong> No Claude Code
           transcript was found for this checkout, so there is no session id to look up a{" "}
@@ -385,7 +407,7 @@ function CurrentSession({
 
   return (
     <article>
-      <ListLink total={total} failed={failed} onOpenIndex={onOpenIndex} />
+      <ListLink coverage={coverage} failed={failed} onOpenIndex={onOpenIndex} />
 
       <header className="flex items-start justify-between gap-4">
         <div className="min-w-0">
@@ -1127,11 +1149,11 @@ function NoConversationYet({ live }: { live: LiveSessionHint }) {
  * the kind this dashboard exists to catch.
  */
 function ListLink({
-  total,
+  coverage,
   failed,
   onOpenIndex,
 }: {
-  total: number;
+  coverage: ListCoverage;
   failed: boolean;
   onOpenIndex: () => void;
 }) {
@@ -1140,9 +1162,10 @@ function ListLink({
       <Button variant="outline" size="sm" onClick={onOpenIndex}>
         All sessions
       </Button>
-      <span className="text-[12px] text-muted-foreground">
-        {failed ? "count unavailable" : `${total} digested`}
-      </span>
+      {/* "344 digested" was `sessions.length` — the request's page size, not the
+          store's total. It goes through `Coverage` now, so once digests pass
+          the 400-row limit this reads "400 of N" instead of quietly capping. */}
+      <CoverageCount coverage={coverage} noun="digest" failed={failed} />
     </div>
   );
 }
@@ -1174,12 +1197,14 @@ function ListLink({
  */
 function SessionList({
   sessions,
+  coverage,
   live,
   failed,
   onSelect,
   onOpenCurrent,
 }: {
   sessions: SessionDigest[];
+  coverage: ListCoverage;
   live: LiveSessionHint | null;
   failed: boolean;
   onSelect: (id: string | null) => void;
@@ -1244,15 +1269,40 @@ function SessionList({
           </select>
         )}
 
-        <span className="text-[12px] tabular-nums text-muted-foreground">
-          {failed
-            ? "count unavailable"
-            : narrowed
-              ? `${filtered.length} of ${sessions.length}`
-              : `${sessions.length} sessions`}
-        </span>
+        {/*
+         * THREE DIFFERENT DENOMINATORS, and conflating any two of them states a
+         * cap as a count:
+         *
+         *   filtered.length — rows surviving the search box
+         *   sessions.length — rows this request LOADED
+         *   coverage total  — digests that exist
+         *
+         * Narrowed, the honest phrasing is "N of the M loaded", because the
+         * search ran over the loaded rows only and cannot speak for the rest.
+         * Unnarrowed, the figure is the store's total via `Coverage` — which is
+         * what "344 sessions" was pretending to be while meaning page size.
+         */}
+        {failed ? (
+          <span className="text-[12px] tabular-nums text-muted-foreground">
+            count unavailable
+          </span>
+        ) : narrowed ? (
+          <span className="text-[12px] tabular-nums text-muted-foreground">
+            {filtered.length} of {sessions.length} loaded
+          </span>
+        ) : (
+          <CoverageCount coverage={coverage} noun="session" />
+        )}
       </div>
 
+      {/* The digest read is capped at 400 rows. At 344 stored digests nothing
+          renders here; past 400 it is the only thing that would say so. */}
+      <CoverageNotice
+        coverage={coverage}
+        noun="session digest"
+        nounPlural="session digests"
+        sortNote="Digests are ordered newest-first, so the oldest sessions are the ones missing."
+      />
       <Coverage sessions={sessions} live={live} failed={failed} />
       <Verification sessions={sessions} failed={failed} />
 

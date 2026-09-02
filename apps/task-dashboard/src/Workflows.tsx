@@ -30,6 +30,8 @@ import {
 } from "./workflowData";
 import { WorkflowListSkeleton } from "@/components/Skeletons";
 import { showSkeleton } from "@/lib/loading";
+import { type Coverage, coverageOf, coverageText } from "./listTotal";
+import { CoverageNotice } from "./ListCoverage";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -341,6 +343,13 @@ export function Workflows() {
   const [error, setError] = useState<string | null>(null);
   const [firstLoadDone, setFirstLoadDone] = useState(false);
   const [groupByStage, setGroupByStage] = useState(false);
+  /**
+   * "N declared definitions" is a statement about the REGISTRY. With 8
+   * workflow_definition entities against a 100-row request it is currently
+   * also the row count, which is why the distinction has never mattered here —
+   * and why it is the cheapest of the four to get right before it does.
+   */
+  const [coverage, setCoverage] = useState<Coverage>({ kind: "unknown", received: 0 });
 
   // One fetch on mount. These entities are configuration that changes a few
   // times a year, so there is nothing for a poll to catch.
@@ -351,13 +360,15 @@ export function Workflows() {
         const res = await fetch("/api/workflows?limit=100");
         const body = await res.json();
         if (!res.ok || body.error) throw new Error(body.error ?? `HTTP ${res.status}`);
-        const parsed = (body.entities as WorkflowEntity[]).map(parseWorkflow);
+        const rows = body.entities as WorkflowEntity[];
+        const parsed = rows.map(parseWorkflow);
         parsed.sort(
           (a, b) =>
             a.project.localeCompare(b.project) || a.workflowType.localeCompare(b.workflowType),
         );
         if (!cancelled) {
           setWorkflows(parsed);
+          setCoverage(coverageOf(body, rows.length));
           setError(null);
         }
       } catch (err) {
@@ -379,7 +390,7 @@ export function Workflows() {
         <GitBranch className="h-4 w-4 text-muted-foreground" aria-hidden />
         <h1 className="text-[16px] font-[650] tracking-[-0.02em]">Workflows</h1>
         <span className="text-[12px] text-muted-foreground">
-          {workflows.length} declared {workflows.length === 1 ? "definition" : "definitions"}
+          {coverageText(coverage, "declared definition", "declared definitions")}
         </span>
 
         <div className="ml-auto flex gap-[4px]">
@@ -399,6 +410,15 @@ export function Workflows() {
           </Button>
         </div>
       </header>
+
+      {/* Nothing renders at 8 definitions under a 100-row cap. It is here so
+          that a registry which outgrows the request says so on its own. */}
+      <CoverageNotice
+        coverage={coverage}
+        noun="workflow definition"
+        nounPlural="workflow definitions"
+        sortNote="Definitions load newest-first, so the oldest are the ones missing."
+      />
 
       <NotExecutedBanner />
       <LifecyclePointer grouped={groupByStage} />
