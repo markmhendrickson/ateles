@@ -23,9 +23,14 @@ nothing noticing, and separately ran with every chunk erroring while reporting
 healthy). See `HealthMonitor`: a dead socket, a stalled capture, and a silent
 mic each announce themselves, and are distinguished from one another.
 
+Capture is bound to a NAMED device (see `capture_device`). When that device is
+absent, capture STOPS and says so rather than falling back to another
+microphone: a device the operator is wearing is evidence of intent to be
+recorded, and a room microphone is not (ateles#646).
+
 Usage:
-    python execution/scripts/stream_transcript.py                  # auto-detect device
-    python execution/scripts/stream_transcript.py --device :3
+    python execution/scripts/stream_transcript.py                  # configured device
+    python execution/scripts/stream_transcript.py --device "Mark's AirPods Max"
     python execution/scripts/stream_transcript.py --fallback-only  # force chunking
 """
 
@@ -49,6 +54,14 @@ from pathlib import Path
 # The filter is a sibling module, shared verbatim with the chunking tailer.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from capture_device import (
+    DEVICE_POLL_SECONDS,
+    AudioDevice,
+    DeviceBinding,
+    SegmentedRecording,
+    describe,
+    permitted_devices,
+)
 from hallucination_filter import screen_transcription
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -444,6 +457,13 @@ class HealthMonitor:
         # (timestamp, dbfs) for the rolling silent-input window.
         self._levels: deque[tuple[float, float]] = deque()
         self._announced: set[str] = set()
+        # Capture deliberately suspended because the bound device is absent.
+        # Distinct from a stall: a stall means the recorder died and something
+        # is wrong; suspension means the operator took his headset off and the
+        # system is behaving exactly as designed. Reporting the second as the
+        # first is how a correct refusal to capture would get read as a bug —
+        # and, worse, trains the operator to ignore the alert that matters.
+        self._suspended = False
 
     # -- observations -------------------------------------------------------
 
@@ -462,6 +482,27 @@ class HealthMonitor:
             if level >= self.speech_dbfs:
                 self.last_speech_at = now
         self._trim(now)
+
+    def note_capture_suspended(self) -> None:
+        """The bound device is absent; capture is stopped on purpose."""
+        self._suspended = True
+
+    def note_capture_active(self, now: float | None = None) -> None:
+        """Capture is running again. Reset every clock the suspension froze.
+
+        All three matter. The audio and speech clocks stop the waiting gap
+        being billed as a stall. The SOCKET clock matters for a subtler
+        reason: no audio was sent while suspended, so the API correctly sent
+        nothing back, and on resume the socket looks like it has been silent
+        for the whole suspension. It was not unhealthy — it was unasked. Left
+        unreset, every device reconnection would fire a false "socket silent"
+        alarm naming the wrong component.
+        """
+        self._suspended = False
+        now = time.monotonic() if now is None else now
+        self.last_audio_at = now
+        self.last_speech_at = now
+        self.last_socket_at = now
 
     def note_socket_event(self, now: float | None = None) -> None:
         self.last_socket_at = time.monotonic() if now is None else now
@@ -492,6 +533,18 @@ class HealthMonitor:
         """Every currently-true failure, as operator-readable sentences."""
         now = time.monotonic() if now is None else now
         found: list[str] = []
+
+        if self._suspended:
+            # Every downstream check reads "no audio" and would fire — stall,
+            # then silent input — describing a correctly-behaving system with
+            # two alarms that both name the wrong cause. The absence is already
+            # announced on its own record by the capture loop, so this returns
+            # the one true statement and nothing else.
+            return [
+                "capture suspended: the bound input device is not connected, "
+                "so nothing is being recorded or transcribed. This is the "
+                "configured behaviour — no other microphone will be used."
+            ]
 
         audio_gap = now - self.last_audio_at
         if audio_gap > self.stall_seconds:
@@ -785,6 +838,40 @@ def health_record(index: int, problems: list[str], summary: dict) -> dict:
     }
 
 
+def device_lost_record(index: int, wanted: str) -> dict:
+    """Capture has STOPPED because the bound device went away.
+
+    This is the record that makes a stop non-silent. A silent stop is the
+    failure this whole path keeps rediscovering: the process is alive, the
+    socket is open, and nothing is being transcribed. The operator reads the
+    JSONL through the session Monitor, so the stop is announced there rather
+    than only on stderr, which nobody is watching.
+
+    Not fatal: the stream stays up and resumes by itself when the device comes
+    back, and saying "stopped" without "waiting" would read as a crash.
+    """
+    return error_record(
+        index,
+        f"capture STOPPED: {wanted} is no longer connected. Nothing is being "
+        f"recorded or transcribed. Capture resumes automatically when it "
+        f"reconnects — no other microphone will be used.",
+    )
+
+
+def device_resumed_record(index: int, device_name: str, arg: str) -> dict:
+    """The bound device came back and capture restarted."""
+    return {
+        "chunk": index,
+        "t": datetime.now(tz=UTC).isoformat(),
+        "ok": True,
+        "notice": (
+            f"capture RESUMED on {device_name!r} at {arg} — the durable "
+            f"recording continues in the same file"
+        ),
+        "source": "stream",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Capture: ONE ffmpeg, two outputs
 # ---------------------------------------------------------------------------
@@ -991,7 +1078,7 @@ def run_fallback(out_path: Path | None, reason: str) -> int:
 
 
 async def stream_session(
-    device: str,
+    binding: "DeviceBinding",
     recording_path: Path,
     out_path: Path,
     *,
@@ -1004,6 +1091,7 @@ async def stream_session(
     vad_prefix_padding_ms: int = VAD_PREFIX_PADDING_MS,
     raw_event_log: Path | None = None,
     health_poll: float = 5.0,
+    device_poll: float = DEVICE_POLL_SECONDS,
 ) -> tuple[int, HealthMonitor]:
     """Capture once, tee to disk and socket, append transcripts to the JSONL."""
     import websockets
@@ -1036,12 +1124,34 @@ async def stream_session(
         append(degraded_vad_record(index))
         index += 1
 
-    proc = await asyncio.create_subprocess_exec(
-        *build_capture_command(device, recording_path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    log(f"capture started -> {recording_path}")
+    recording = SegmentedRecording(recording_path)
+    # The live capture process, replaced whenever the bound device comes back.
+    # Held in a one-slot list so the shutdown path can always reach the current
+    # one without a nonlocal dance across three closures.
+    current: list[asyncio.subprocess.Process | None] = [None]
+
+    async def start_capture(device: AudioDevice) -> asyncio.subprocess.Process:
+        proc = await asyncio.create_subprocess_exec(
+            *build_capture_command(device.ffmpeg_arg, recording.next_part()),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        current[0] = proc
+        return proc
+
+    async def stop_capture(proc: asyncio.subprocess.Process | None) -> None:
+        """Signal rather than kill, so the muxer finalizes this segment.
+
+        A killed ffmpeg leaves an m4a with no moov atom — unreadable, and the
+        segment is lost. Terminating and waiting is what makes a device drop
+        cost nothing but the gap itself.
+        """
+        if proc is None or proc.returncode is not None:
+            return
+        with contextlib.suppress(ProcessLookupError):
+            proc.terminate()
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(proc.wait(), timeout=10)
 
     try:
         async with websockets.connect(
@@ -1062,28 +1172,83 @@ async def stream_session(
             log(f"socket open (model={model}, server_vad on)")
 
             async def pump_audio() -> None:
+                """Stream the bound device, and ONLY the bound device.
+
+                The loop structure is the requirement: when the device is
+                absent this waits, it does not substitute. Every resume
+                re-resolves the name to a fresh index, because an index that
+                was correct before the disconnect routinely addresses a
+                different physical microphone after it.
+                """
                 nonlocal index
-                assert proc.stdout is not None
                 import base64
 
+                wanted = ", ".join(binding.names)
+                announced_absent = False
+
                 while True:
-                    payload = await proc.stdout.read(STREAM_CHUNK_BYTES)
-                    if not payload:
-                        break
-                    # Health always sees EVERY frame: the monitor's job is to
-                    # know what the capture is really carrying, which the gate
-                    # must not be able to hide from it.
-                    monitor.note_audio(payload)
-                    if not gate.should_send(payload, time.monotonic()):
+                    device = binding.resolve()
+                    if device is None:
+                        # Absent. Say so once, capture nothing, and wait.
+                        if not announced_absent:
+                            log(f"capture STOPPED: {wanted} not connected")
+                            append(device_lost_record(index, wanted))
+                            index += 1
+                            announced_absent = True
+                            monitor.note_capture_suspended()
+                        await asyncio.sleep(device_poll)
                         continue
-                    await ws.send(
-                        json.dumps(
-                            {
-                                "type": "input_audio_buffer.append",
-                                "audio": base64.b64encode(payload).decode("ascii"),
-                            }
+
+                    if announced_absent:
+                        log(f"capture RESUMED on {device.name!r} at {device.ffmpeg_arg}")
+                        append(
+                            device_resumed_record(
+                                index, device.name, device.ffmpeg_arg
+                            )
                         )
-                    )
+                        index += 1
+                        announced_absent = False
+                    monitor.note_capture_active()
+
+                    proc = await start_capture(device)
+                    log(f"capture started on {device.name!r} ({device.ffmpeg_arg})")
+                    assert proc.stdout is not None
+
+                    while True:
+                        payload = await proc.stdout.read(STREAM_CHUNK_BYTES)
+                        if not payload:
+                            break
+                        # Health always sees EVERY frame: the monitor's job is
+                        # to know what the capture is really carrying, which
+                        # the gate must not be able to hide from it.
+                        monitor.note_audio(payload)
+                        if not gate.should_send(payload, time.monotonic()):
+                            continue
+                        await ws.send(
+                            json.dumps(
+                                {
+                                    "type": "input_audio_buffer.append",
+                                    "audio": base64.b64encode(payload).decode("ascii"),
+                                }
+                            )
+                        )
+
+                    # ffmpeg's stdout closed. Either the device vanished
+                    # underneath it or the process died; both are handled by
+                    # going back to the top and asking the device list, which
+                    # is the authority. Reap first so the segment finalizes.
+                    await stop_capture(proc)
+                    current[0] = None
+
+                    # Pace the restart. A device that is enumerated but refuses
+                    # to open — exclusively held by another process, or in the
+                    # middle of connecting — closes stdout immediately, and an
+                    # unpaced loop would then spin, spawning ffmpeg processes
+                    # and empty segments as fast as the OS allows. The device
+                    # poll interval is already the right cadence for "wait for
+                    # the hardware to settle", so reuse it rather than inventing
+                    # a second backoff.
+                    await asyncio.sleep(device_poll)
 
             async def pump_events() -> None:
                 nonlocal index
@@ -1201,12 +1366,15 @@ async def stream_session(
     finally:
         # Signal rather than kill, so the muxer finalizes the container and the
         # durable recording survives. This is the whole point of the tee.
-        if proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                proc.terminate()
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(proc.wait(), timeout=10)
-        log(f"capture stopped; recording kept at {recording_path}")
+        await stop_capture(current[0])
+        final = recording.finalize()
+        if final is not None:
+            log(f"capture stopped; recording kept at {final}")
+        else:
+            log(
+                "capture stopped; NO usable recording was produced "
+                f"(segments, if any, are under {recording.parts_dir})"
+            )
         log(f"input gate: {json.dumps(gate.summary())}")
 
     return 0, monitor
@@ -1217,7 +1385,19 @@ def build_parser() -> argparse.ArgumentParser:
     actually reaches the socket rather than only that it parses.
     """
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device", default=os.environ.get("STREAM_TRANSCRIPT_DEVICE", ":3"))
+    parser.add_argument(
+        "--device",
+        default=os.environ.get("STREAM_TRANSCRIPT_DEVICE") or None,
+        help=(
+            "device NAME to capture from, overriding the configured binding "
+            "(comma-separated for an ordered preference list). The operator "
+            "naming a device is a deliberate act and is honoured as given, "
+            "including a loopback device for a call they are party to. With "
+            "no override the permitted set comes from Neotoma "
+            "(vendor_binding:live_transcription_input), and NO other "
+            "microphone is ever used."
+        ),
+    )
     parser.add_argument("--dir", type=Path, default=DEFAULT_DIR)
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--model", default=DEFAULT_MODEL)
@@ -1309,11 +1489,29 @@ def main(argv: list[str]) -> int:
             return 2
         return run_fallback(out_path, "websockets package not installed")
 
+    binding = permitted_devices(args.device)
+    if not binding.is_configured:
+        # No configured device and no cache. Refusing is the whole point: the
+        # alternative is opening whatever microphone happens to be at hand,
+        # which is the failure this binding exists to prevent. Fall back to the
+        # offline transcriber, which reads files Audio Hijack already wrote and
+        # opens no device at all, so the operator is not left with nothing.
+        log(describe(binding, None))
+        if args.no_fallback:
+            return 2
+        return run_fallback(
+            out_path,
+            "no capture device configured (vendor_binding:"
+            "live_transcription_input) and no cached binding — refusing to "
+            "capture from an unnamed microphone",
+        )
+    log(describe(binding, binding.resolve()))
+
     log(f"live transcript -> {out_path}")
     try:
         rc, monitor = asyncio.run(
             stream_session(
-                args.device,
+                binding,
                 recording,
                 out_path,
                 model=args.model,
