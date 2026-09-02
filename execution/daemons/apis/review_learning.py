@@ -45,6 +45,15 @@ _FINDING_HEADER = re.compile(
 
 # Default systemic-finding owner by review lens. The implementer (Cicada)
 # owns correctness-class lessons; content-class lessons route to Corvus.
+#
+# This MUST name a live agent: the value is consumed by
+# `swarm_dispatch._lens_fix_agent` and becomes the owner of every systemic
+# finding raised under a lens with no dedicated reviewer. It read "gryllus"  # roster-ok: historical note on the defect this constant carried
+# for seven weeks after the 2026-06-12 rename to Cicada (fixed in #341), so
+# those findings were filed against an agent with no agent_definition, which
+# `routing.resolve_skill` cannot resolve and no dispatcher can route. Guarded
+# by test_review_learning, by test_workflow_owner_drift's roster check, and by
+# scripts/linters/check_agent_roster.py in CI.
 OWNER_BY_LENS = {
     "content": "corvus",
 }

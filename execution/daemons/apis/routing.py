@@ -486,6 +486,48 @@ def infer_tags_from_text(title: str, body: str = "") -> list[str]:
     return tags
 
 
+# Values that encode "nobody owns this" as a STRING rather than as absence.
+# They are worse than an empty field: `bool(assigned_to)` is True for them, so
+# they satisfy an owner check (`readiness.assess_readiness(has_owner=...)`) and
+# an `eq` filter without naming an owner any dispatcher can resolve.
+# `canonical_assignee` maps them to None so absence is spelled exactly one way.
+SENTINEL_ASSIGNEES = frozenset({"unassigned", "none", "nobody", "tbd", "n/a", "-"})
+
+# AAuth subjects are written `<agent>@ateles-swarm` (lib/daemon_runtime/
+# aauth_signer.py builds them as f"{name}@ateles-swarm"). The local part IS the
+# agent name by construction, so an assignee carrying the suffix names the same
+# owner as the bare form and must resolve identically.
+_AAUTH_SUFFIXES = ("@ateles-swarm", "@ateles")
+
+
+def canonical_assignee(assigned_to: str | None) -> str | None:
+    """
+    Reduce an ``assigned_to`` value to the one form the dispatcher resolves.
+
+    The canonical form is not a preference — it is whatever
+    ``ASSIGNED_TO_ROUTES`` is keyed by: a bare, lowercase, stripped agent name
+    (the keys are derived from ``DOMAIN_ROUTES.values()``). This normalizes the
+    three mechanical variations observed in stored tasks — surrounding
+    whitespace, capitalization, and the AAuth-subject suffix — and maps the
+    "unassigned" sentinel family to ``None`` so absence has a single spelling.
+
+    Returns ``None`` for absence/sentinels, otherwise the reduced string. A
+    value that is not a known agent is returned reduced but unchanged: this
+    function normalizes *form*, and never invents or guesses an owner (a human
+    name, or prose, is left for the caller to treat as unroutable).
+    """
+    if not assigned_to:
+        return None
+    key = assigned_to.strip().lower()
+    if not key or key in SENTINEL_ASSIGNEES:
+        return None
+    for suffix in _AAUTH_SUFFIXES:
+        if key.endswith(suffix):
+            key = key[: -len(suffix)].strip()
+            break
+    return key or None
+
+
 def resolve_skill(tags: list[str], assigned_to: str | None = None) -> str | None:
     """
     Pick the T4 skill for a task.
@@ -496,12 +538,11 @@ def resolve_skill(tags: list[str], assigned_to: str | None = None) -> str | None
     itself ("apis") do we fall back to domain-tag routing. First matching tag
     wins; returns None if nothing maps to a route.
     """
-    if assigned_to:
-        key = assigned_to.strip().lower()
-        if key and key != "apis":
-            skill = ASSIGNED_TO_ROUTES.get(key)
-            if skill:
-                return skill
+    key = canonical_assignee(assigned_to)
+    if key and key != "apis":
+        skill = ASSIGNED_TO_ROUTES.get(key)
+        if skill:
+            return skill
             # Unknown assignee: don't silently misroute — let tag inference try,
             # but the caller can log the miss.
     for tag in tags:

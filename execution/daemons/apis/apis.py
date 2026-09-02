@@ -294,6 +294,7 @@ GITHUB_WEBHOOK_SECRET = os.environ.get("APIS_GITHUB_WEBHOOK_SECRET", "")
 # Set APIS_DRY_RUN=1 to log intent without spawning.
 
 from routing import (  # noqa: E402
+    canonical_assignee as _canonical_assignee,
     infer_tags_from_text as _infer_tags_from_text,
     resolve_role as _resolve_role,
     resolve_skill as _resolve_skill,
@@ -468,7 +469,14 @@ async def dispatch_task(
         existing_tags = _infer_tags_from_text(title, body)
 
     # An explicit assigned_to (set by Sylvia/Turdus) wins over tag inference.
-    assigned_to = snapshot.get("assigned_to") or None
+    # Canonicalize first: a stored value may carry capitalization, whitespace,
+    # or an AAuth-subject suffix, and the "unassigned" sentinel family must read
+    # as absence rather than as an owner. Doing this here (not only inside
+    # resolve_skill) matters because `assigned_to` is ALSO used as a bare
+    # truthiness test for the readiness gate below — the literal string
+    # "unassigned" is truthy, so it used to satisfy `has_owner` while naming
+    # nobody any dispatcher could resolve.
+    assigned_to = _canonical_assignee(snapshot.get("assigned_to"))
     skill = _resolve_skill(existing_tags, assigned_to=assigned_to)
     # resolve_role returns the same string as resolve_skill in this codebase;
     # computed here for explicitness and to thread through to skill_runner so
