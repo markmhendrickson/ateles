@@ -45,6 +45,7 @@ def _stub_secrets_lib(monkeypatch, store):
 
     stub = types.ModuleType("secrets_lib")
     stub.SECRETS_BASE = Path("/fake/ateles-private")  # type: ignore[attr-defined]
+    stub.SECRETS_DIR = Path("/fake/ateles-private/secrets")  # type: ignore[attr-defined]
     stub.merge_preserve_unmanaged = real_secrets_lib.merge_preserve_unmanaged  # type: ignore[attr-defined]
 
     class _EncPath:
@@ -62,6 +63,9 @@ def _stub_secrets_lib(monkeypatch, store):
         def parent(self):
             return _NullDir()
 
+        def resolve(self):
+            return Path("/fake/ateles-private/secrets") / self.name
+
         def relative_to(self, _base):
             return Path("secrets") / self.name
 
@@ -73,7 +77,17 @@ def _stub_secrets_lib(monkeypatch, store):
             pass
 
     def enc_file(block):
+        # Mirror real secrets_lib.enc_file basename confinement so stubbed
+        # callers cannot silently accept path-shaped block names.
+        if not block or not real_secrets_lib._BLOCK_NAME_RE.fullmatch(block):
+            raise ValueError(
+                f"invalid secrets block name {block!r}: must match "
+                f"^[A-Za-z0-9._-]+$ (no path separators or '..')"
+            )
         return _EncPath(block)
+
+    def load_manifest():
+        return {"files": {"neotoma": {"default": {}}}}
 
     def sops_decrypt_dotenv(src):
         return dict(store.get(src._block, {}))
@@ -92,6 +106,7 @@ def _stub_secrets_lib(monkeypatch, store):
 
     stub.resolve_refs = real_secrets_lib.resolve_refs  # type: ignore[attr-defined]
     stub.enc_file = enc_file  # type: ignore[attr-defined]
+    stub.load_manifest = load_manifest  # type: ignore[attr-defined]
     stub.sops_decrypt_dotenv = sops_decrypt_dotenv  # type: ignore[attr-defined]
     stub.sops_encrypt_dotenv = sops_encrypt_dotenv  # type: ignore[attr-defined]
     stub.to_dotenv = to_dotenv  # type: ignore[attr-defined]
@@ -357,3 +372,137 @@ def test_main_top_level_unexpected_exception_withholds_message(monkeypatch, caps
     assert rc == 1
     assert "leaked-secret-value-xyz" not in err
     assert "ValueError" in err
+
+
+# ---------------------------------------------------------------------------
+# security canaries (Falco round-2): --key assignment guard + --block confine
+# ---------------------------------------------------------------------------
+
+def test_main_rejects_assignment_shaped_key_without_echoing_value(monkeypatch, capsys):
+    """--key NAME=VALUE must DENY at intake and never echo the value half."""
+    store = {}
+    mod = _fresh(monkeypatch, "secrets_extract_host", store)
+
+    encrypt_calls = []
+
+    def _encrypt(plaintext, dest):
+        encrypt_calls.append((plaintext, dest))
+        raise AssertionError("encrypt must not run after assignment-shaped --key")
+
+    monkeypatch.setattr(mod.sl, "sops_encrypt_dotenv", _encrypt, raising=False)
+    monkeypatch.setattr(
+        mod, "read_host_env",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("host must not be read")),
+    )
+
+    rc = mod.main([
+        "--block", "neotoma",
+        "--key", "SAFE_NAME=REDACTED_VALUE",
+        "--dry-run",
+    ])
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+
+    assert rc == 1
+    assert "REDACTED_VALUE" not in combined
+    assert "SAFE_NAME" in captured.err
+    assert encrypt_calls == []
+
+
+def test_keys_from_assignment_line_still_rejected_without_value_echo(monkeypatch, tmp_path, capsys):
+    """--keys-from with NAME=value still rejects; value half never reaches stderr."""
+    store = {}
+    mod = _fresh(monkeypatch, "secrets_extract_host", store)
+    keyfile = tmp_path / "keys.txt"
+    keyfile.write_text("SAFE_FROM_FILE=REDACTED_FROM_FILE\n")
+
+    rc = mod.main([
+        "--block", "neotoma",
+        "--keys-from", str(keyfile),
+        "--dry-run",
+    ])
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+
+    assert rc == 1
+    assert "REDACTED_FROM_FILE" not in combined
+    assert "SAFE_FROM_FILE" in captured.err
+
+
+def test_main_rejects_path_shaped_block_without_mkdir_or_encrypt(monkeypatch, capsys):
+    """Path-shaped --block must DENY before mkdir/encrypt side effects."""
+    store = {}
+    mod = _fresh(monkeypatch, "secrets_extract_host", store)
+
+    mkdir_calls = []
+    encrypt_calls = []
+
+    class _Parent:
+        def mkdir(self, parents=True, exist_ok=True):
+            mkdir_calls.append(True)
+
+    class _Dest:
+        parent = _Parent()
+        name = "escaped.sops.enc"
+
+        def exists(self):
+            return False
+
+    def _enc_file(block):
+        # If validate_block_name's regex fails first, enc_file is never reached.
+        encrypt_calls.append(("enc_file", block))
+        return _Dest()
+
+    monkeypatch.setattr(mod.sl, "enc_file", _enc_file, raising=False)
+    monkeypatch.setattr(
+        mod.sl, "sops_encrypt_dotenv",
+        lambda *a, **k: encrypt_calls.append(("encrypt", a)) or None,
+        raising=False,
+    )
+
+    for bad in ("/tmp/evil", "../outside", "foo/bar", "", "has=equals"):
+        mkdir_calls.clear()
+        encrypt_calls.clear()
+        rc = mod.main(["--block", bad, "--key", "SAFE_KEY", "--dry-run"])
+        captured = capsys.readouterr()
+        assert rc == 1, bad
+        assert mkdir_calls == [], bad
+        assert encrypt_calls == [], bad
+        # Never print a resolved absolute escape path beyond the token itself.
+        assert "/fake/ateles-private" not in captured.err
+
+
+def test_main_accepts_manifest_block_name(monkeypatch, capsys):
+    """A normal manifest block still passes confinement and reaches dry-run."""
+    store = {}
+    mod = _fresh(monkeypatch, "secrets_extract_host", store)
+
+    rc = mod.main([
+        "--block", "neotoma",
+        "--key", "NEOTOMA_HOST_URL",
+        "--dry-run",
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "DRY RUN" in out
+
+
+def test_enc_file_rejects_path_escape_before_io(monkeypatch, tmp_path):
+    """Real secrets_lib.enc_file raises on absolute / .. names before any IO."""
+    import secrets_lib as real_sl
+
+    monkeypatch.setattr(real_sl, "SECRETS_DIR", tmp_path / "secrets")
+    (tmp_path / "secrets").mkdir()
+
+    for bad in ("/tmp/evil", "../outside", "foo/bar"):
+        try:
+            real_sl.enc_file(bad)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, bad
+
+    # Basename under the secrets dir still works.
+    dest = real_sl.enc_file("neotoma")
+    assert dest.name == "neotoma.sops.enc"
+    assert dest.is_relative_to((tmp_path / "secrets").resolve())

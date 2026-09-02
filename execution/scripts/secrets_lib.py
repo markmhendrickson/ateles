@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -48,9 +49,29 @@ def op_path() -> str:
     return os.environ.get("OP_BIN", "op")
 
 
+_BLOCK_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
 def enc_file(name: str) -> Path:
-    """Path to the encrypted snapshot for a manifest file block."""
-    return SECRETS_DIR / f"{name}.sops.enc"
+    """Path to the encrypted snapshot for a manifest file block.
+
+    Confines the destination under SECRETS_DIR: only basename tokens matching
+    ``^[A-Za-z0-9._-]+$`` are accepted, and the resolved path must stay under
+    the secrets directory. Absolute segments and ``..`` would otherwise escape
+    via pathlib join (``SECRETS_DIR / "/tmp/x.sops.enc"`` → ``/tmp/x.sops.enc``).
+    """
+    if not name or not _BLOCK_NAME_RE.fullmatch(name):
+        raise ValueError(
+            f"invalid secrets block name {name!r}: must match "
+            f"^[A-Za-z0-9._-]+$ (no path separators or '..')"
+        )
+    dest = (SECRETS_DIR / f"{name}.sops.enc").resolve()
+    root = SECRETS_DIR.resolve()
+    if not dest.is_relative_to(root):
+        raise ValueError(
+            f"secrets block {name!r} resolves outside the secrets directory"
+        )
+    return dest
 
 
 # ---------------------------------------------------------------------------

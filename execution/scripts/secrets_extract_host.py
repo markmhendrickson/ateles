@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -43,9 +44,67 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import secrets_lib as sl  # noqa: E402
 
+_BLOCK_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
 
 class ExtractionError(Exception):
     """Failure carrying only a key name and a mode -- never a secret value."""
+
+
+def validate_key_name(name: str) -> str:
+    """Reject assignment-shaped or empty key tokens at intake.
+
+    Shared by ``--keys-from`` and ``--key`` so neither entry point can smuggle
+    a value half into an error message via ``', '.join(missing)``. On ``=``,
+    the message echoes only the LHS name -- never the RHS, never the raw argv.
+    """
+    cleaned = name.strip()
+    if not cleaned:
+        raise ExtractionError("empty key name")
+    if "=" in cleaned:
+        lhs = cleaned.partition("=")[0].strip()
+        raise ExtractionError(
+            f"key looks like an assignment, not a bare name: {lhs!r}. "
+            f"Pass NAMES ONLY -- never values."
+        )
+    return cleaned
+
+
+def validate_block_name(block: str) -> str:
+    """Deny path-shaped or non-manifest ``--block`` before any mkdir/encrypt.
+
+    Basename allowlist + manifest membership + resolve-under-SECRETS_DIR.
+    Error text carries the block token / reason only -- not a resolved absolute
+    path that would leak host layout beyond the success-path messages.
+    """
+    cleaned = block.strip()
+    if not cleaned or not _BLOCK_NAME_RE.fullmatch(cleaned):
+        raise ExtractionError(
+            f"invalid --block {cleaned!r}: must match ^[A-Za-z0-9._-]+$ "
+            f"(no path separators, absolute segments, or '..')"
+        )
+    try:
+        manifest = sl.load_manifest()
+    except FileNotFoundError as exc:
+        raise ExtractionError(
+            f"manifest not found ({type(exc).__name__}); cannot validate --block"
+        ) from None
+    if cleaned not in manifest.get("files", {}):
+        raise ExtractionError(
+            f"--block {cleaned!r} is not a manifest file block; "
+            f"host-only extract co-writes the same Design B snapshot as publish"
+        )
+    try:
+        dest = sl.enc_file(cleaned)
+    except ValueError as exc:
+        # enc_file already confines; surface reason without resolved paths.
+        raise ExtractionError(f"invalid --block {cleaned!r}: {exc}") from None
+    root = Path(sl.SECRETS_DIR).resolve()
+    if not dest.resolve().is_relative_to(root):
+        raise ExtractionError(
+            f"--block {cleaned!r} resolves outside the secrets directory"
+        )
+    return cleaned
 
 
 def _install_signal_guards() -> None:
@@ -78,13 +137,7 @@ def load_key_names(path: Path) -> list[str]:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        if "=" in line:
-            raise ExtractionError(
-                f"key list line looks like an assignment, not a bare name: "
-                f"{line.partition('=')[0].strip()!r}. This file must contain "
-                f"NAMES ONLY -- never values."
-            )
-        names.append(line)
+        names.append(validate_key_name(line))
     if not names:
         raise ExtractionError(f"key list is empty: {path}")
     return names
@@ -248,7 +301,9 @@ def extract(app: str, block: str, keys: list[str], machine: str | None,
 
     if not added and not replaced:
         print(f"[{block}] snapshot already current -- nothing to write")
-        merged.clear(); existing.clear(); host.clear()
+        merged.clear()
+        existing.clear()
+        host.clear()
         return 0
 
     dest = sl.enc_file(block)
@@ -267,7 +322,9 @@ def extract(app: str, block: str, keys: list[str], machine: str | None,
         ) from None
     finally:
         # Clear plaintext from our own references regardless of outcome.
-        merged.clear(); existing.clear(); host.clear()
+        merged.clear()
+        existing.clear()
+        host.clear()
 
     print(f"[{block}] wrote {dest}")
     print(f"  added ({len(added)}): {', '.join(sorted(added)) or '-'}")
@@ -290,7 +347,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--app", help="Fly app to read from (required unless --verify/--dry-run)")
     parser.add_argument("--machine", help="Specific machine id (optional)")
     parser.add_argument("--block", required=True,
-                        help="Manifest block / snapshot name, e.g. the app's block")
+                        help="Manifest file-block name under secrets/manifest.env-map.json "
+                             "(basename only: [A-Za-z0-9._-]+), e.g. neotoma")
     parser.add_argument("--keys-from", type=Path,
                         help="File of env var NAMES to capture, one per line")
     parser.add_argument("--key", action="append", default=[],
@@ -306,23 +364,27 @@ def main(argv: list[str]) -> int:
     _install_signal_guards()
 
     try:
+        block = validate_block_name(args.block)
+
         keys: list[str] | None = None
         if args.keys_from or args.key:
-            keys = list(args.key)
+            # Validate --key at intake (before any extract/verify/error join)
+            # so assignment-shaped argv never reaches a disclosure surface.
+            keys = [validate_key_name(k) for k in args.key]
             if args.keys_from:
                 keys = load_key_names(args.keys_from) + keys
             seen: set[str] = set()
             keys = [k for k in keys if not (k in seen or seen.add(k))]
 
         if args.verify:
-            return verify(args.block, keys)
+            return verify(block, keys)
 
         if keys is None:
             raise ExtractionError("--keys-from or --key is required for extraction")
         if not args.app and not args.dry_run:
             raise ExtractionError("--app is required for extraction")
 
-        return extract(args.app, args.block, keys, args.machine,
+        return extract(args.app, block, keys, args.machine,
                        args.overwrite, args.dry_run)
 
     except ExtractionError as exc:
