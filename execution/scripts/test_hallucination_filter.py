@@ -29,6 +29,7 @@ from hallucination_filter import (  # noqa: E402
     non_latin_ratio,
     normalize_language,
     screen_transcription,
+    mean_token_logprob,
 )
 
 # --------------------------------------------------------------------------
@@ -427,3 +428,95 @@ def test_the_diacritic_reason_names_the_actual_evidence():
         "A widać o mnie.", expected_language="en", vad_closed=True
     )
     assert "ć" in (verdict.detail or "")
+
+
+# --- Signal 6: decoder confidence ------------------------------------------
+
+
+def _logprobs(*values):
+    """Build the API's logprob payload shape from bare values."""
+    return [{"token": "x", "logprob": v, "bytes": []} for v in values]
+
+
+def test_low_confidence_catches_a_latin_script_fabrication():
+    """The gap this signal exists to close.
+
+    "Bitte." is Latin script, carries no foreign diacritic, does not repeat and
+    is not boilerplate — every text-based signal passes it. Only the decoder's
+    own uncertainty separates it from a real "Hello."
+    """
+    verdict = screen_transcription(
+        "Bitte.", expected_language="en", vad_closed=True,
+        logprobs=_logprobs(-3.1, -2.8, -4.0),
+    )
+    assert verdict.filtered
+    assert verdict.reason == "low_confidence"
+
+
+def test_confident_genuine_speech_survives():
+    verdict = screen_transcription(
+        "Can you hear me?", expected_language="en", vad_closed=True,
+        logprobs=_logprobs(-0.03, -0.001, -0.12, -0.4),
+    )
+    assert not verdict.filtered
+
+
+def test_absent_logprobs_leave_every_other_verdict_unchanged():
+    """The parameter is additive. A caller that does not send logprobs must get
+    byte-identical behaviour to before this signal existed."""
+    for text in ("Can you hear me?", "Bitte.", "root", "seventeen"):
+        assert screen_transcription(
+            text, expected_language="en", vad_closed=True
+        ) == screen_transcription(
+            text, expected_language="en", vad_closed=True, logprobs=None
+        )
+
+
+def test_a_single_token_mean_cannot_convict():
+    """One token is not an average. Short genuine utterances ("Cool.") must not
+    be filtered on the strength of a single unlucky token."""
+    verdict = screen_transcription(
+        "Cool.", expected_language="en", vad_closed=True,
+        logprobs=_logprobs(-4.0),
+    )
+    assert not verdict.filtered
+
+
+def test_text_signals_still_win_the_reason_when_both_fire():
+    """Ordering is by evidence strength: a non-Latin script is named as such
+    even when the confidence signal would also have caught it."""
+    verdict = screen_transcription(
+        "ありがとうございました。", expected_language="en", vad_closed=True,
+        logprobs=_logprobs(-3.5, -3.9),
+    )
+    assert verdict.reason == "script_mismatch"
+
+
+def test_mean_token_logprob_reports_none_without_data():
+    assert mean_token_logprob(None) == (None, 0)
+    assert mean_token_logprob([]) == (None, 0)
+    assert mean_token_logprob([{"token": "a"}]) == (None, 0)
+
+
+# --- The REMAINING gap, asserted so nobody overclaims coverage -------------
+
+
+def test_a_confident_latin_fabrication_is_still_not_caught():
+    """The honest limit of this filter, kept as an executable assertion.
+
+    The confidence signal catches fabrication that the decoder was UNSURE about,
+    which on measured data is nearly all of it. It cannot catch a fabrication the
+    decoder was confident in — and no text-based signal can either, because such
+    output is orthographically ordinary speech in a plausible session language.
+
+    If a future signal closes this, this test should fail and be rewritten. It
+    exists so the coverage claim stays honest: high, not total.
+    """
+    verdict = screen_transcription(
+        "Felipe.", expected_language="en", vad_closed=True,
+        logprobs=_logprobs(-0.05, -0.02),
+    )
+    assert not verdict.filtered, (
+        "a confidently-decoded Latin-script fabrication remains undetected; "
+        "this is the known remaining gap"
+    )
