@@ -109,7 +109,11 @@ def test_no_markers_does_not_block():
 
 
 def test_newest_marker_wins_retirement_clears_the_block():
-    """Oldest-first, as the real API returns them (ateles#430)."""
+    """A retirement newer than the block clears it.
+
+    Input is oldest-first, mirroring the real API, so selection must be by
+    ``created_at`` and never by position (ateles#430).
+    """
     assert not sd.verdict_recording_is_blocked([
         _comment(1, "2026-09-01T10:00:00Z", f"{UNRECORDED}\nfailed"),
         _comment(2, "2026-09-01T11:00:00Z", f"{RECORDED}\nlanded"),
@@ -164,6 +168,51 @@ async def test_transient_connection_error_is_retried_and_succeeds(monkeypatch):
 
 async def _no_sleep(_seconds):
     return None
+
+
+@pytest.mark.asyncio
+async def test_non_transport_error_is_not_retried_but_still_fails_closed(
+    monkeypatch,
+):
+    """A programming error is a bug, not a blip — fail closed on attempt 1.
+
+    Retrying a misconfigured header three times just delays the block. The catch
+    is narrowed to `httpx.TransportError` so only genuine transport failures are
+    retried; everything else still lands on the fail-closed path immediately.
+    """
+    d = _dispatcher(monkeypatch)
+    attempts = {"n": 0}
+    posted: list[str] = []
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, json=None, headers=None):  # noqa: ANN001
+            if url.endswith("/reviews"):
+                attempts["n"] += 1
+                raise ValueError("misconfigured header")
+            posted.append((json or {}).get("body", ""))
+            return _Resp()
+
+        async def get(self, url, params=None, headers=None):  # noqa: ANN001
+            return _Resp(payload=[])
+
+    monkeypatch.setattr(sd.httpx, "AsyncClient", lambda **kw: _Client())
+    monkeypatch.setattr(sd.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(d, "_claim_escalation", _true)
+
+    review_id = await d._emit_formal_review(_trigger(), "approve", "**APPROVE**")
+
+    assert attempts["n"] == 1, "a non-transport error must not be retried"
+    assert review_id is None
+    assert any(UNRECORDED in b for b in posted), (
+        "a bug must still fail closed — an unrecorded verdict is unenforceable "
+        "whatever the cause"
+    )
 
 
 # ---------------------------------------------------------------------------

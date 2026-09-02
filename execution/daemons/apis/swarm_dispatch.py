@@ -4022,7 +4022,7 @@ class SwarmDispatcher:
             for attempt in range(_REVIEW_POST_ATTEMPTS):
                 try:
                     return await _post_once(p)
-                except Exception as exc:  # noqa: BLE001 — transport only
+                except httpx.TransportError as exc:
                     last_exc = exc
                     if attempt == _REVIEW_POST_ATTEMPTS - 1:
                         break
