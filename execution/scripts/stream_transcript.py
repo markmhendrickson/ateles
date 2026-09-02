@@ -23,6 +23,14 @@ nothing noticing, and separately ran with every chunk erroring while reporting
 healthy). See `HealthMonitor`: a dead socket, a stalled capture, and a silent
 mic each announce themselves, and are distinguished from one another.
 
+Failure is also ACTED ON (ateles#682). Announcing a dead socket and then
+continuing to pump audio into it still loses the operator's words — detection
+without recovery is the same defect wearing a better log line. A detected stall
+now tears the socket down and rebuilds it, with exponential backoff and a
+bounded number of consecutive attempts, while the ffmpeg capture and its single
+durable recording carry on untouched. The same path covers the API's 60-minute
+session cap, which arrives as an ordinary server-side close.
+
 Usage:
     python execution/scripts/stream_transcript.py                  # auto-detect device
     python execution/scripts/stream_transcript.py --device :3
@@ -102,6 +110,44 @@ SILENT_INPUT_DBFS = float(os.environ.get("STREAM_TRANSCRIPT_SILENT_DBFS", "-65")
 # talking sits well below. -50 leaves margin under his quietest verified line
 # without admitting ordinary room noise.
 SPEECH_PRESENT_DBFS = float(os.environ.get("STREAM_TRANSCRIPT_SPEECH_DBFS", "-50"))
+
+# --- Socket recovery --------------------------------------------------------
+# Detection without recovery still drops the operator's words (ateles#682).
+#
+# The socket-silent check above is a good DETECTOR — it correlates against the
+# capture's own RMS, so it fires on a genuinely unanswered socket rather than on
+# a quiet room. What it lacked was an ACTION: the run logged UNHEALTHY and kept
+# pumping audio into a socket that would never answer, and the operator had to
+# notice and restart the process by hand. Observed three times in fifteen
+# minutes on one session, losing up to 16s of continuous speech each time.
+#
+# Reconnecting closes that gap. The socket is the only thing torn down: the
+# ffmpeg capture and its single durable recording live ACROSS reconnects, so a
+# recovery never fragments the .m4a that Tyto and analyze-meeting consume.
+RECONNECT_ENABLED = os.environ.get("STREAM_TRANSCRIPT_RECONNECT", "1") != "0"
+
+# Bounded, because a reconnect loop against a genuinely down API is a different
+# failure from a single dead socket and must not become a hot retry loop.
+# Exhausting the budget hands control back to `main`, which degrades to chunked
+# transcription rather than leaving the operator with nothing.
+MAX_RECONNECT_ATTEMPTS = int(os.environ.get("STREAM_TRANSCRIPT_MAX_RECONNECTS", "8"))
+
+# Exponential with a ceiling: fast enough that an ordinary blip costs a second,
+# capped so a sustained outage settles into polling rather than hammering.
+RECONNECT_BACKOFF_BASE_SECONDS = float(
+    os.environ.get("STREAM_TRANSCRIPT_RECONNECT_BACKOFF_S", "1.0")
+)
+RECONNECT_BACKOFF_MAX_SECONDS = float(
+    os.environ.get("STREAM_TRANSCRIPT_RECONNECT_BACKOFF_MAX_S", "30.0")
+)
+
+# Consecutive attempts are what is bounded, not lifetime attempts: a session
+# that reconnects once an hour across the API's 60-minute cap is healthy, and
+# must not eventually exhaust a budget meant for a hard outage. A socket that
+# survives this long is treated as proof the previous failure is over.
+RECONNECT_SUCCESS_RESET_SECONDS = float(
+    os.environ.get("STREAM_TRANSCRIPT_RECONNECT_RESET_S", "60.0")
+)
 
 # --- Input gate -------------------------------------------------------------
 # The single most effective defence against fabrication, and the one this path
@@ -456,6 +502,13 @@ class HealthMonitor:
         self.bytes_streamed = 0
         self.transcripts = 0
         self.errors = 0
+        # Counted and reported: a session that stayed up by reconnecting eight
+        # times is not the same as one that never faltered, and the summary
+        # must not present them identically.
+        self.reconnects = 0
+        # Speech-bearing audio offered to a socket that never answered. This is
+        # the operator's "how much do I have to repeat" number.
+        self.dropped_speech_seconds = 0.0
         # (timestamp, dbfs) for the rolling silent-input window.
         self._levels: deque[tuple[float, float]] = deque()
         self._announced: set[str] = set()
@@ -503,6 +556,58 @@ class HealthMonitor:
             return None
         return max(level for _, level in self._levels)
 
+    def socket_stalled(self, now: float | None = None) -> bool:
+        """Is the socket taking speech and not answering?
+
+        The RECOVERY trigger, and deliberately the same predicate the
+        "socket silent" message is built from rather than a second copy of the
+        condition: a detector and an actuator that can disagree about what
+        counts as a stall is how a reconnect ends up firing on a quiet room, or
+        never firing at all.
+
+        Both clauses are load-bearing, and they are what keeps a stall distinct
+        from an intentional stop:
+
+        * `socket_gap > threshold` — the socket has said nothing for a while.
+          True of a dead socket AND of a working socket in a silent room.
+        * `unanswered_speech < socket_gap` — speech has arrived MORE RECENTLY
+          than the socket last spoke, i.e. audio was offered into the silence.
+          False when the operator stopped talking or paused the recording,
+          because then the last speech predates the socket's last event.
+
+        A user who stops talking therefore never triggers a reconnect: his
+        silence makes `unanswered_speech` grow past `socket_gap`, not under it.
+        """
+        now = time.monotonic() if now is None else now
+        socket_gap = now - self.last_socket_at
+        unanswered_speech = now - self.last_speech_at
+        return socket_gap > self.socket_silent_seconds and unanswered_speech < socket_gap
+
+    def unanswered_speech_seconds(self, now: float | None = None) -> float:
+        """How long speech has been going unanswered — the size of the gap.
+
+        Reported to the operator as "roughly this much needs repeating". It is
+        bounded by the socket gap because audio offered before the socket went
+        quiet was, by definition, answered.
+        """
+        now = time.monotonic() if now is None else now
+        return min(now - self.last_speech_at, now - self.last_socket_at)
+
+    def note_reconnected(self, now: float | None = None) -> None:
+        """Reset the socket clocks after a fresh socket is open.
+
+        Without this the stall that triggered the reconnect is still true on the
+        very next poll — `last_socket_at` is still the dead socket's — and the
+        recovery loop would immediately tear down the socket it just built.
+        """
+        now = time.monotonic() if now is None else now
+        self.last_socket_at = now
+        # The speech clock moves too: audio offered to the dead socket is gone,
+        # and leaving it in the past would make the NEW socket look guilty of
+        # the old one's silence.
+        self.last_speech_at = now
+        self.reconnects += 1
+
     def problems(self, now: float | None = None) -> list[str]:
         """Every currently-true failure, as operator-readable sentences."""
         now = time.monotonic() if now is None else now
@@ -530,7 +635,7 @@ class HealthMonitor:
         # goes unanswered is the actual evidence.
         socket_gap = now - self.last_socket_at
         unanswered_speech = now - self.last_speech_at
-        if socket_gap > self.socket_silent_seconds and unanswered_speech < socket_gap:
+        if self.socket_stalled(now):
             found.append(
                 f"socket silent: speech has been arriving for "
                 f"{unanswered_speech:.0f}s with no event from the transcription "
@@ -578,6 +683,8 @@ class HealthMonitor:
             "seconds_streamed": round(self.bytes_streamed / BYTES_PER_SECOND, 1),
             "transcripts": self.transcripts,
             "errors": self.errors,
+            "reconnects": self.reconnects,
+            "dropped_speech_seconds": round(self.dropped_speech_seconds, 1),
             "peak_dbfs": (
                 round(self.peak_dbfs(now), 1) if self.peak_dbfs(now) is not None else None
             ),
@@ -788,6 +895,71 @@ def degraded_vad_record(index: int, *, fatal: bool = False) -> dict:
     `fatal` is set only when the operator asked for --require-local-vad.
     """
     return error_record(index, DEGRADED_VAD_MESSAGE, fatal=fatal)
+
+
+def reconnect_backoff_delay(
+    attempt: int,
+    *,
+    base: float = RECONNECT_BACKOFF_BASE_SECONDS,
+    ceiling: float = RECONNECT_BACKOFF_MAX_SECONDS,
+) -> float:
+    """Delay before reconnect attempt `attempt` (1-based), capped.
+
+    Exponential so a transient blip recovers in about a second while a genuine
+    outage backs off to polling. The ceiling is the part that matters: without
+    it the delay doubles unbounded and a session that recovers after ten
+    minutes waits another ten before noticing.
+    """
+    if attempt < 1:
+        attempt = 1
+    return min(ceiling, base * (2 ** (attempt - 1)))
+
+
+def reconnect_record(
+    index: int,
+    *,
+    attempt: int,
+    reason: str,
+    dropped_seconds: float | None = None,
+    recovered: bool = False,
+    fatal: bool = False,
+) -> dict:
+    """A reconnect, on the channel the operator actually reads.
+
+    A SILENT reconnect is nearly as bad as a silent stall: the operator needs to
+    know a gap happened and roughly where, because audio spoken into a dead
+    socket is not recoverable and he has to repeat it. `dropped_seconds` is the
+    span of speech-bearing audio that was offered to a socket which never
+    answered — an estimate of what he has to say again, not a guess at content.
+    """
+    if recovered:
+        message = f"transcription socket reconnected (attempt {attempt}) after {reason}"
+        if dropped_seconds:
+            message += (
+                f" — approximately {dropped_seconds:.0f}s of speech was offered to the "
+                f"dead socket and was NOT transcribed; please repeat anything said in "
+                f"that window"
+            )
+    else:
+        message = (
+            f"transcription socket reconnect attempt {attempt} after {reason}"
+        )
+    return {
+        "chunk": index,
+        "t": datetime.now(tz=UTC).isoformat(),
+        "ok": False,
+        "error": message,
+        "reconnect": {
+            "attempt": attempt,
+            "reason": reason,
+            "recovered": recovered,
+            "dropped_seconds": (
+                round(dropped_seconds, 1) if dropped_seconds is not None else None
+            ),
+        },
+        "fatal": fatal,
+        "source": "stream",
+    }
 
 
 def health_record(index: int, problems: list[str], summary: dict) -> dict:
@@ -1058,6 +1230,10 @@ async def stream_session(
     vad_prefix_padding_ms: int = VAD_PREFIX_PADDING_MS,
     raw_event_log: Path | None = None,
     health_poll: float = 5.0,
+    reconnect: bool = RECONNECT_ENABLED,
+    max_reconnects: int = MAX_RECONNECT_ATTEMPTS,
+    connect_factory: "object | None" = None,
+    sleep: "object | None" = None,
 ) -> tuple[int, HealthMonitor]:
     """Capture once, tee to disk and socket, append transcripts to the JSONL."""
     monitor = HealthMonitor()
@@ -1117,8 +1293,24 @@ async def stream_session(
             log("local VAD required but unavailable — aborting (--require-local-vad)")
             return 2, monitor
 
-    import websockets
+    if connect_factory is None:
+        import websockets
 
+        def connect_factory():  # type: ignore[misc]
+            return websockets.connect(
+                REALTIME_URL,
+                additional_headers={"Authorization": f"Bearer {api_key}"},
+                max_size=None,
+            )
+
+    if sleep is None:
+        sleep = asyncio.sleep
+
+    # ONE capture, outside the reconnect loop. The socket is the thing that
+    # fails and the only thing torn down; restarting ffmpeg would start a new
+    # .m4a per reconnect and fragment the recording that Tyto and
+    # analyze-meeting later consume. The recording is never sacrificed to fix
+    # the stream.
     proc = await asyncio.create_subprocess_exec(
         *build_capture_command(device, recording_path),
         stdout=asyncio.subprocess.PIPE,
@@ -1126,12 +1318,35 @@ async def stream_session(
     )
     log(f"capture started -> {recording_path}")
 
-    try:
-        async with websockets.connect(
-            REALTIME_URL,
-            additional_headers={"Authorization": f"Bearer {api_key}"},
-            max_size=None,
-        ) as ws:
+    # Carried ACROSS sockets: server VAD reports offsets on the audio clock,
+    # and that clock belongs to the capture, which does not restart. Rebuilding
+    # these per socket would reset turn boundaries to zero mid-session and make
+    # every post-reconnect timestamp a fabrication.
+    boundaries = TurnBoundaries()
+    previous_end_s: float | None = None
+    # Set only by the audio pump reaching EOF, i.e. the recorder stopped. It is
+    # the single flag that distinguishes "we are done" from "the socket died",
+    # and it is what keeps an intentional stop out of the reconnect path.
+    capture_ended = False
+
+    class _SocketClosed(Exception):
+        """The socket ended and the capture is still alive — a reconnect case."""
+
+        def __init__(self, reason: str) -> None:
+            super().__init__(reason)
+            self.reason = reason
+
+    async def run_one_socket() -> None:
+        """Own one socket for as long as it works.
+
+        Returns normally when the CAPTURE ends (the intentional stop: ffmpeg
+        closed stdout, so there is nothing left to transcribe and reconnecting
+        would be wrong). Raises `_SocketClosed` when the SOCKET is what failed,
+        which is the reconnectable case.
+        """
+        nonlocal index, previous_end_s
+
+        async with connect_factory() as ws:
             await ws.send(
                 json.dumps(
                     session_update_message(
@@ -1149,13 +1364,19 @@ async def stream_session(
             )
 
             async def pump_audio() -> None:
-                nonlocal index
+                nonlocal index, capture_ended
                 assert proc.stdout is not None
                 import base64
 
                 while True:
                     payload = await proc.stdout.read(STREAM_CHUNK_BYTES)
                     if not payload:
+                        # The CAPTURE ended, not the socket. This is the
+                        # intentional stop — the operator hit Ctrl-C or the
+                        # recorder was stopped — and it must never be treated
+                        # as a stall: reconnecting here would rebuild a socket
+                        # with no audio left to feed it.
+                        capture_ended = True
                         break
                     # Health always sees EVERY frame: the monitor's job is to
                     # know what the capture is really carrying, which the gate
@@ -1173,9 +1394,10 @@ async def stream_session(
                     )
 
             async def pump_events() -> None:
-                nonlocal index
-                boundaries = TurnBoundaries()
-                previous_end_s: float | None = None
+                # `boundaries` and `previous_end_s` come from the enclosing
+                # session, NOT from this socket: they track positions on the
+                # capture's audio clock, which survives a reconnect.
+                nonlocal index, previous_end_s
 
                 async for raw in ws:
                     monitor.note_socket_event()
@@ -1271,21 +1493,136 @@ async def stream_session(
                             log(f"UNHEALTHY: {problem}")
                         append(health_record(index, fresh, monitor.summary()))
                         index += 1
+                    # Detection is not enough: reporting a dead socket and then
+                    # continuing to pump audio into it is what cost the
+                    # operator his words three times in one session
+                    # (ateles#682). Raising hands the stall to the reconnect
+                    # loop, which is the only thing here that can fix it.
+                    if reconnect and monitor.socket_stalled():
+                        raise _SocketClosed(
+                            "a stalled socket (speech offered, no events returned)"
+                        )
 
             tasks = [
                 asyncio.create_task(pump_audio()),
                 asyncio.create_task(pump_events()),
                 asyncio.create_task(watch_health()),
             ]
-            done, pending = await asyncio.wait(
-                tasks, return_when=asyncio.FIRST_COMPLETED
-            )
-            for task in pending:
-                task.cancel()
+            try:
+                done, pending = await asyncio.wait(
+                    tasks, return_when=asyncio.FIRST_COMPLETED
+                )
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                # Awaited so a cancelled pump cannot outlive the socket it
+                # writes to and resurface as a stray exception on the NEXT
+                # socket — the classic reconnect leak.
+                await asyncio.gather(*tasks, return_exceptions=True)
             for task in done:
                 exc = task.exception()
                 if exc is not None:
                     raise exc
+            # Every pump finishing without an exception while the capture is
+            # still running means the SOCKET ended under us (`async for raw in
+            # ws` returns cleanly on a server-side close — which is exactly how
+            # the 60-minute session cap arrives).
+            if not capture_ended:
+                raise _SocketClosed("the socket closed while audio was still being captured")
+
+    try:
+        attempt = 0
+        while True:
+            socket_opened_at = time.monotonic()
+            try:
+                await run_one_socket()
+            except _SocketClosed as closed:
+                if not reconnect:
+                    raise
+                # How much speech went into the socket that never answered.
+                # Measured BEFORE note_reconnected resets the clocks.
+                dropped = monitor.unanswered_speech_seconds()
+
+                # Consecutive failures are what is bounded. A socket that ran
+                # for a good while before dying is evidence the previous
+                # trouble is over, so its failure starts a fresh budget —
+                # otherwise a session that reconnects hourly across the API's
+                # 60-minute cap would eventually exhaust a budget meant for a
+                # hard outage.
+                if time.monotonic() - socket_opened_at >= RECONNECT_SUCCESS_RESET_SECONDS:
+                    attempt = 0
+                attempt += 1
+
+                if attempt > max_reconnects:
+                    # Giving up LOUDLY, and by returning rather than sitting
+                    # there: `main` degrades to chunked transcription, which
+                    # still produces a transcript. Producing nothing is the one
+                    # outcome that is never acceptable.
+                    message = (
+                        f"transcription socket could not be recovered after "
+                        f"{max_reconnects} consecutive attempts ({closed.reason})"
+                    )
+                    log(f"UNRECOVERABLE: {message}")
+                    append(
+                        reconnect_record(
+                            index,
+                            attempt=attempt,
+                            reason=closed.reason,
+                            dropped_seconds=dropped,
+                            fatal=True,
+                        )
+                    )
+                    index += 1
+                    monitor.dropped_speech_seconds += dropped
+                    raise RuntimeError(message) from closed
+
+                delay = reconnect_backoff_delay(attempt)
+                log(
+                    f"RECOVERING: {closed.reason} — reconnecting "
+                    f"(attempt {attempt}/{max_reconnects}) in {delay:.1f}s"
+                )
+                append(
+                    reconnect_record(
+                        index,
+                        attempt=attempt,
+                        reason=closed.reason,
+                        dropped_seconds=dropped,
+                    )
+                )
+                index += 1
+                await sleep(delay)
+
+                # Audio spoken during the gap is GONE, and is reported rather
+                # than quietly absorbed. The Realtime API buffers on the server
+                # side of a socket that no longer exists, so there is nothing
+                # local to replay: frames were handed to `ws.send` and the
+                # socket that owned them is dead. Re-sending would also be
+                # wrong even if we held them — server VAD would cut turns from
+                # audio whose boundaries were already claimed, producing
+                # duplicated text at fabricated timestamps. Saying how much was
+                # lost lets the operator repeat it; pretending it survived
+                # would not.
+                monitor.dropped_speech_seconds += dropped
+                monitor.note_reconnected()
+                append(
+                    reconnect_record(
+                        index,
+                        attempt=attempt,
+                        reason=closed.reason,
+                        dropped_seconds=dropped,
+                        recovered=True,
+                    )
+                )
+                index += 1
+                log(
+                    f"socket recovered on attempt {attempt}; "
+                    f"~{dropped:.0f}s of speech was not transcribed"
+                )
+                continue
+            # run_one_socket returned normally: the capture ended, which is the
+            # intentional stop. Nothing to reconnect to.
+            break
     finally:
         # Signal rather than kill, so the muxer finalizes the container and the
         # durable recording survives. This is the whole point of the tee.
@@ -1327,6 +1664,24 @@ def build_parser() -> argparse.ArgumentParser:
             "abort instead of degrading when the local VAD cannot load. Off by "
             "default: the RMS gate still works without it, and failing closed "
             "would lose speech rather than fabricate it"
+        ),
+    )
+    parser.add_argument(
+        "--no-reconnect",
+        action="store_true",
+        help=(
+            "do not rebuild the transcription socket when it stalls. Off by "
+            "default: a detected stall that is not acted on still loses the "
+            "operator's speech (ateles#682)"
+        ),
+    )
+    parser.add_argument(
+        "--max-reconnects",
+        type=int,
+        default=MAX_RECONNECT_ATTEMPTS,
+        help=(
+            "consecutive reconnect attempts before giving up and degrading to "
+            f"chunked transcription (default: {MAX_RECONNECT_ATTEMPTS})"
         ),
     )
     parser.add_argument(
@@ -1439,6 +1794,8 @@ def main(argv: list[str]) -> int:
                 vad_silence_ms=args.vad_silence_ms,
                 vad_prefix_padding_ms=args.vad_prefix_padding_ms,
                 raw_event_log=args.raw_event_log,
+                reconnect=RECONNECT_ENABLED and not args.no_reconnect,
+                max_reconnects=args.max_reconnects,
             )
         )
     except KeyboardInterrupt:
