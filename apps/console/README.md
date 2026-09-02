@@ -1,16 +1,21 @@
-# Task Dashboard
+# Ateles Console
 
-A live view of `task` entities in Neotoma, so the operator can watch work
-propagate into the swarm while talking to the orchestrating agent — instead of
-the agent narrating every dispatch in chat.
+A live view of the swarm's own state in Neotoma — agents, sessions, workflows,
+deployments, schemas, plans, task lifecycle, and the issues and PRs linked to
+them — so the operator can watch work propagate while talking to the
+orchestrating agent, instead of the agent narrating every dispatch in chat.
 
-Tasks are the central dispatch entity, so this is deliberately task-centric:
-one screen, newest first, refreshing every 10 seconds.
+It began as a task-only screen, which is why it was called the task dashboard
+until 2026-09-02. It now spans the swarm, and the name follows the thing: this
+is the console for Ateles, not a view of one entity type.
+
+Tasks remain the central dispatch entity and the busiest view — one screen,
+newest first, refreshing every 10 seconds.
 
 ## Running it
 
 ```bash
-cd apps/task-dashboard
+cd apps/console
 npm install
 npm run dev
 ```
@@ -98,7 +103,7 @@ Two modes, and they do not conflict.
 ### Local dev (unchanged)
 
 ```
-npm run dev --prefix apps/task-dashboard
+npm run dev --prefix apps/console
 ```
 
 Vite on port 5273 with HMR, no sign-in, reading Neotoma through the same
@@ -116,9 +121,9 @@ never resolved for anyone else in the first place.
 definition (`registerApiRoutes` in `server/neotomaProxy.ts`) — one route table,
 two hosts, so dev and production cannot drift.
 
-**Deploys are automatic**: a merge to `main` touching `apps/task-dashboard/**`
-triggers `.github/workflows/deploy-task-dashboard.yml`, which waits for CI to be
-green on that exact commit, deploys with `-c fly.dashboard.toml`, and then
+**Deploys are automatic**: a merge to `main` touching `apps/console/**`
+triggers `.github/workflows/deploy-console.yml`, which waits for CI to be
+green on that exact commit, deploys with `-c fly.console.toml`, and then
 verifies the deploy actually happened. The app name, hostname and region come
 from repository secrets; the canonical binding lives in the
 `deployment_configuration` entity in Neotoma, never in this public repo.
@@ -129,9 +134,9 @@ Deployed, the dashboard is behind Google sign-in against an email allowlist —
 the same mechanism Neotoma itself uses. Without it, a Fly URL would publish the
 entire task graph to anyone who learned the address.
 
-It **fails closed**: if `DASHBOARD_GOOGLE_CLIENT_ID`,
-`DASHBOARD_GOOGLE_CLIENT_SECRET`, `DASHBOARD_APPROVED_EMAILS` or
-`DASHBOARD_SESSION_KEY` is missing, the server refuses to serve anything rather
+It **fails closed**: if `CONSOLE_GOOGLE_CLIENT_ID`,
+`CONSOLE_GOOGLE_CLIENT_SECRET`, `CONSOLE_APPROVED_EMAILS` or
+`CONSOLE_SESSION_KEY` is missing, the server refuses to serve anything rather
 than serving it unprotected. `/healthz` is the only unauthenticated route (Fly's
 health checker has no Google account) and exposes no graph data.
 

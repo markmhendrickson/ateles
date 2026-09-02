@@ -49,7 +49,7 @@ const PORT = Number(process.env.PORT) || 8080;
  * than assumed from `flyctl deploy` exiting 0 — the defect that shipped a
  * month-old Neotoma image twice while reporting success.
  */
-const GIT_SHA = process.env.DASHBOARD_GIT_SHA || "";
+const GIT_SHA = process.env.CONSOLE_GIT_SHA || "";
 
 // ── A minimal Connect-compatible stack ──────────────────────────────────────
 // `registerApiRoutes` wants `.use(path, handler)` with prefix matching, which
@@ -229,7 +229,7 @@ app.use("/", (req, res) => {
 
 createServer(runStack).listen(PORT, "0.0.0.0", () => {
   const cfg = authConfigured();
-  console.log(`task-dashboard listening on 0.0.0.0:${PORT} (sha ${GIT_SHA || "unknown"})`);
+  console.log(`ateles-console listening on 0.0.0.0:${PORT} (sha ${GIT_SHA || "unknown"})`);
   if (!cfg.ok) {
     console.error(
       `REFUSING TO SERVE: auth not configured — missing ${cfg.missing.join(", ")}`,

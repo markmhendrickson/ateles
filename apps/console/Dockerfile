@@ -1,4 +1,4 @@
-# Build and run the Ateles task dashboard.
+# Build and run the Ateles console.
 #
 # Two stages: the first installs dev dependencies and builds the SPA plus the
 # server bundle; the second carries only production dependencies and the built
@@ -16,8 +16,8 @@ COPY . .
 # The commit being deployed, surfaced at /healthz so a deploy can be PROVEN to
 # have shipped this code. Declared here rather than baked into the source
 # because it changes on every build and must not invalidate the npm ci layer.
-ARG DASHBOARD_GIT_SHA=""
-ENV DASHBOARD_GIT_SHA=$DASHBOARD_GIT_SHA
+ARG CONSOLE_GIT_SHA=""
+ENV CONSOLE_GIT_SHA=$CONSOLE_GIT_SHA
 
 RUN npm run build:deploy
 
@@ -34,8 +34,8 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/server-dist ./server-dist
 
-ARG DASHBOARD_GIT_SHA=""
-ENV DASHBOARD_GIT_SHA=$DASHBOARD_GIT_SHA
+ARG CONSOLE_GIT_SHA=""
+ENV CONSOLE_GIT_SHA=$CONSOLE_GIT_SHA
 ENV PORT=8080
 EXPOSE 8080
 
