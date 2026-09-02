@@ -65,12 +65,45 @@ def content_hash(payload: "dict[str, Any]") -> str:
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
+#: Fields excluded from the content hash because they change every run without
+#: the SOURCE having changed. See ``observation_payload`` for why this matters.
+_VOLATILE_FIELDS = frozenset({"observed_at", "observed_by", "connector_name"})
+
+
+def observation_payload(fields: "dict[str, Any]") -> "dict[str, Any]":
+    """The part of a record that reflects the SOURCE, with our clock stripped.
+
+    ## The trap this avoids
+
+    Neotoma's idempotency check hashes the **full entity payload** server-side,
+    not just the key. So a wall-clock field inside the entity makes the content
+    differ on every run while the key stays stable — and the store is then
+    rejected with ``ERR_IDEMPOTENCY_MISMATCH`` **forever**.
+
+    That is not a hypothesis. `sync_issues_from_github.ts` carries a long
+    comment about exactly this: a wall-clock ``last_synced_at`` in the payload
+    froze every already-synced issue, unfixable without a one-time
+    ``SYNC_KEY_MIGRATION`` token ("m2") to abandon the poisoned rows. Their fix
+    was to derive provenance from the source's own ``updated_at`` rather than
+    from ``Date.now()``.
+
+    ``observed_at`` is precisely that shape of field, so connectors must key on
+    the source's own identity and content, never on when we happened to look.
+    """
+    return {k: v for k, v in fields.items() if k not in _VOLATILE_FIELDS}
+
+
 def idempotency_key(connector: str, external_id: str, payload: "dict[str, Any]") -> str:
     """``connector-{name}-{external_id}-{content_hash}`` — never a clock.
 
     A timestamp here would make every run's key unique, which is precisely how
     a re-run becomes a duplicate rather than a no-op.
+
+    Volatile fields are stripped before hashing, so an unchanged source
+    produces a byte-stable payload under a stable key and the intended
+    idempotent no-op actually holds. See ``observation_payload``.
     """
+    payload = observation_payload(payload)
     safe_id = str(external_id).replace(" ", "-")[:80]
     return f"connector-{connector}-{safe_id}-{content_hash(payload)}"
 
@@ -252,6 +285,8 @@ class ConnectorStore:
                     poll_interval_seconds=int(f.get("poll_interval_seconds") or 0),
                     stale_after_seconds=int(f.get("stale_after_seconds") or 0),
                     consecutive_failures=int(f.get("consecutive_failures") or 0),
+                    ingestion_mode=str(f.get("ingestion_mode") or "poll"),
+                    last_push_at=f.get("last_push_at"),
                     entity_id=str(ent.get("entity_id") or "") or None,
                 )
         except NeotomaUnavailable as exc:

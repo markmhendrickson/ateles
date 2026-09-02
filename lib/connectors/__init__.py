@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from .base import (
     DEFAULT_MAX_WRITES,
+    INGESTION_MODES,
     MIN_STALE_AFTER_SECONDS,
     STALE_INTERVAL_MULTIPLIER,
     Connector,
@@ -42,6 +43,7 @@ __all__ = [
     "assess_freshness",
     "stale_after_for",
     "DEFAULT_MAX_WRITES",
+    "INGESTION_MODES",
     "MIN_STALE_AFTER_SECONDS",
     "STALE_INTERVAL_MULTIPLIER",
 ]

@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from lib.connectors.base import (
+    INGESTION_MODES,
     MIN_STALE_AFTER_SECONDS,
     ConnectorResult,
     ConnectorStatus,
@@ -166,3 +167,62 @@ def test_success_carries_count_and_detail():
     r = ConnectorResult.success(records_written=16, releases=16)
     assert r.ok and r.records_written == 16
     assert r.detail["releases"] == 16
+
+
+# ── hybrid ingestion: push supplies latency, verify supplies liveness ───────
+
+
+def test_push_does_not_refresh_freshness():
+    """The load-bearing rule of the hybrid model.
+
+    If a webhook delivery reset the staleness clock, a source that went quiet —
+    because it genuinely had nothing to say, OR because deliveries silently
+    stopped — would be indistinguishable from a healthy one. That is the 88-day
+    SSE silence exactly.
+    """
+    s = ConnectorStatus(
+        connector_name="github",
+        ingestion_mode="hybrid",
+        last_success_at=_ago(hours=9),   # last VERIFY, long ago
+        last_push_at=_ago(seconds=30),   # a delivery arrived just now
+        stale_after_seconds=2700,
+    )
+    assert s.freshness(now=NOW).state == "stale"
+
+
+def test_verify_refreshes_even_when_push_is_silent():
+    """A quiet webhook is not a problem when verification is current."""
+    s = ConnectorStatus(
+        connector_name="github",
+        ingestion_mode="hybrid",
+        last_success_at=_ago(minutes=5),
+        last_push_at=_ago(days=7),
+        stale_after_seconds=2700,
+    )
+    assert s.freshness(now=NOW).state == "fresh"
+
+
+def test_hybrid_connector_still_declares_a_verify_interval():
+    """A push source is never exempt: unfalsifiable freshness is not freshness."""
+    # Hourly verify under hybrid — generous, because push supplies currency.
+    assert stale_after_for(3600) == 10800
+
+
+def test_ingestion_mode_defaults_to_poll():
+    """Assume a connector cannot receive push until it says otherwise."""
+    assert ConnectorStatus(connector_name="fly").ingestion_mode == "poll"
+
+
+def test_push_only_is_not_an_offered_mode():
+    """A mode nobody can use safely is a mode worth not offering."""
+    assert "push" not in INGESTION_MODES
+    assert set(INGESTION_MODES) == {"poll", "hybrid"}
+
+
+def test_last_push_at_is_recorded_in_the_snapshot():
+    """Recorded but never used for freshness — it makes a dead webhook visible."""
+    fields = ConnectorStatus(
+        connector_name="github", ingestion_mode="hybrid", last_push_at="2026-09-02T00:00:00+00:00"
+    ).to_entity_fields()
+    assert fields["last_push_at"] == "2026-09-02T00:00:00+00:00"
+    assert fields["ingestion_mode"] == "hybrid"

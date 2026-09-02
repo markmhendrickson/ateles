@@ -171,3 +171,40 @@ def test_one_connector_failing_does_not_stop_the_others():
     assert not results["b"].ok
     assert results["c"].ok
     assert good_c.calls == 1  # ran despite b blowing up first
+
+
+# ── hybrid: the verify loop must not disturb the push clock ────────────────
+
+
+def test_verify_preserves_last_push_at():
+    """The push path runs outside this loop; a verify must not clear its clock.
+
+    'Verified, events also arriving' and 'verified, nothing pushed in a week'
+    are different situations — the second is how a silently-dead webhook
+    becomes visible at all.
+    """
+    prior = ConnectorStatus(
+        connector_name="stub",
+        ingestion_mode="hybrid",
+        last_push_at="2026-09-01T10:00:00+00:00",
+    )
+    store = FakeStore({"stub": prior})
+
+    run_connector(StubConnector(), store)
+
+    assert store.writes[-1].last_push_at == "2026-09-01T10:00:00+00:00"
+
+
+def test_ingestion_mode_is_carried_from_the_connector():
+    class Hybrid(StubConnector):
+        ingestion_mode = "hybrid"
+
+    store = FakeStore()
+    run_connector(Hybrid(), store)
+    assert store.writes[-1].ingestion_mode == "hybrid"
+
+
+def test_connector_without_a_declared_mode_records_poll():
+    store = FakeStore()
+    run_connector(StubConnector(), store)
+    assert store.writes[-1].ingestion_mode == "poll"

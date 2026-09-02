@@ -114,6 +114,11 @@ def _record_status(
     prior = store.read_status(name)
     prior_success = prior.last_success_at if prior else None
     prior_failures = prior.consecutive_failures if prior else 0
+    # The push clock belongs to the push path, which runs outside this loop.
+    # A verify must never clear it: "verified, and events are also arriving" and
+    # "verified, but nothing has pushed in a week" are different situations, and
+    # the second is how a silently-dead webhook becomes visible.
+    prior_push = prior.last_push_at if prior else None
 
     status = ConnectorStatus(
         connector_name=name,
@@ -127,6 +132,8 @@ def _record_status(
         poll_interval_seconds=interval,
         stale_after_seconds=stale_after_for(interval),
         consecutive_failures=0 if result.ok else prior_failures + 1,
+        ingestion_mode=str(getattr(connector, "ingestion_mode", "poll") or "poll"),
+        last_push_at=prior_push,
     )
 
     try:

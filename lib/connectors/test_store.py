@@ -12,6 +12,7 @@ import pytest
 
 from lib.connectors.base import ConnectorStatus
 from lib.connectors.store import (
+    observation_payload,
     ConnectorStore,
     NeotomaUnavailable,
     content_hash,
@@ -232,3 +233,46 @@ def test_unconfigured_store_refuses_rather_than_silently_skipping():
     assert not store.configured
     with pytest.raises(NeotomaUnavailable, match="no NEOTOMA_BEARER_TOKEN"):
         store.query("task")
+
+
+# ── the ERR_IDEMPOTENCY_MISMATCH trap ───────────────────────────────────────
+#
+# Neotoma hashes the FULL entity payload server-side. A wall-clock field inside
+# the entity therefore changes the content every run under a stable key, and the
+# store is rejected forever. This froze every synced issue in
+# sync_issues_from_github.ts and needed a one-time migration token to escape.
+
+
+def test_observed_at_does_not_change_the_key():
+    """The load-bearing property: our clock must not poison the content hash."""
+    a = idempotency_key("fly", "v16", {"version": "0.17.0", "observed_at": "2026-09-01T00:00:00Z"})
+    b = idempotency_key("fly", "v16", {"version": "0.17.0", "observed_at": "2026-09-02T12:34:56Z"})
+    assert a == b
+
+
+def test_a_real_source_change_still_changes_the_key():
+    """Stripping volatile fields must not make genuine changes invisible."""
+    a = idempotency_key("fly", "v16", {"version": "0.17.0", "observed_at": "2026-09-01T00:00:00Z"})
+    b = idempotency_key("fly", "v16", {"version": "0.22.1", "observed_at": "2026-09-01T00:00:00Z"})
+    assert a != b
+
+
+def test_observation_payload_strips_only_our_own_clock():
+    payload = observation_payload(
+        {
+            "version": "0.17.0",
+            "deployed_at": "2026-08-27T14:46:00Z",  # the SOURCE's timestamp — kept
+            "observed_at": "2026-09-02T00:00:00Z",  # OUR clock — stripped
+            "observed_by": "fly",
+            "connector_name": "fly",
+        }
+    )
+    assert payload == {"version": "0.17.0", "deployed_at": "2026-08-27T14:46:00Z"}
+
+
+def test_unchanged_source_is_byte_stable_across_runs():
+    """An unchanged record re-observed must hash identically, or the no-op fails."""
+    record = {"version": "0.17.0", "image_ref": "deployment-01M1", "deployed_at": "2026-08-27T14:46:00Z"}
+    run1 = content_hash(observation_payload({**record, "observed_at": "2026-09-01T08:00:00Z"}))
+    run2 = content_hash(observation_payload({**record, "observed_at": "2026-09-02T09:15:00Z"}))
+    assert run1 == run2

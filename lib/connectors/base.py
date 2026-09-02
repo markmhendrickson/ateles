@@ -37,14 +37,37 @@ from typing import Protocol, runtime_checkable
 
 # ── Staleness policy ────────────────────────────────────────────────────────
 #
-# stale_after = max(3 * poll_interval, 15 minutes)
+# stale_after = max(3 * verify_interval, 15 minutes)
 #
-# THREE POLL INTERVALS, because one missed run is routine — a laptop sleeps, a
-# fetch times out — and three consecutive misses is a broken connector. Alarming
-# on a single miss is how the checkout-drift log became something nobody reads.
+# THREE INTERVALS, because one missed run is routine — a laptop sleeps, a fetch
+# times out — and three consecutive misses is a broken connector. Alarming on a
+# single miss is how the checkout-drift log became something nobody reads.
 #
-# A FIFTEEN-MINUTE FLOOR, so a fast-polling connector does not declare itself
-# stale during a brief network blip.
+# A FIFTEEN-MINUTE FLOOR, so a fast connector does not declare itself stale
+# during a brief network blip.
+#
+# ## Why this keys off the VERIFY interval, not a fetch interval
+#
+# A push-fed connector (webhook, SSE) still declares this, and it still means
+# "how often we confirm the record matches reality" — not "how often we fetch".
+#
+# A webhook tells you what CHANGED; a poll tells you what IS. If a delivery is
+# dropped — endpoint down, subscription expired, secret rotated — nothing ever
+# tells you. The record diverges permanently while every timestamp still looks
+# fresh, because nothing was expected and so nothing aged.
+#
+# That is not hypothetical. It is the SSE failure exactly: the subscription ID
+# was absent for 88 days, ``sse_client`` logged a WARNING and returned, and the
+# swarm processed 67,450 silent skips with no task event after 2026-06-04. The
+# stream even receives server heartbeats — and discards them (`yield None`), so
+# nothing records that events are still arriving and nothing can notice when
+# they stop. The transport carries the liveness signal; the application throws
+# it away.
+#
+# So a push source is never exempt from this field. Push supplies LATENCY;
+# the periodic verify supplies LIVENESS, and only liveness can age. A connector
+# that cannot say how it would notice its own silence has no business claiming
+# freshness.
 
 STALE_INTERVAL_MULTIPLIER = 3
 MIN_STALE_AFTER_SECONDS = 900  # 15 minutes
@@ -56,11 +79,29 @@ DEFAULT_MAX_WRITES = int(os.environ.get("ATELES_CONNECTOR_MAX_WRITES", "200"))
 
 
 def stale_after_for(poll_interval_seconds: int) -> int:
-    """The age past which this connector's observations stop being trustworthy."""
+    """The age past which this connector's observations stop being trustworthy.
+
+    The argument is the VERIFY interval — how often the connector confirms its
+    record against the source — which for a push-fed connector is its poll
+    backstop, not its event rate.
+    """
     return max(
         STALE_INTERVAL_MULTIPLIER * int(poll_interval_seconds),
         MIN_STALE_AFTER_SECONDS,
     )
+
+
+#: How a connector learns that something changed.
+#:
+#:   poll   — periodic fetch only. Cannot silently diverge: the observation
+#:            either arrives or it ages into staleness.
+#:   hybrid — push for latency, poll for liveness. The push path updates
+#:            between verifies; the poll path is what can actually age.
+#:
+#: There is deliberately no ``push`` mode. A push-only connector has no way to
+#: notice its own silence, which is the SSE failure this package is built
+#: against — and a mode nobody can use safely is a mode worth not offering.
+INGESTION_MODES = ("poll", "hybrid")
 
 
 class WriteBudgetExceeded(RuntimeError):
@@ -247,16 +288,31 @@ class ConnectorStatus:
     poll_interval_seconds: int = 0
     stale_after_seconds: int = 0
     consecutive_failures: int = 0
+    ingestion_mode: str = "poll"
+    #: When a push delivery (webhook/SSE) last updated this connector's records.
+    #:
+    #: Recorded but NEVER used to compute freshness — see ``freshness()``. It
+    #: exists so a hybrid connector's push path is observable: "events arriving,
+    #: verify overdue" and "no events for a week" are different situations, and
+    #: a webhook that silently stopped is invisible without this field.
+    last_push_at: str | None = None
     #: Set when this status was read back from Neotoma; None for a fresh
     #: in-memory record. Its presence is what tells the store to correct an
     #: existing entity rather than create a second one.
     entity_id: str | None = None
 
     def freshness(self, now: datetime | None = None) -> Freshness:
-        """How stale this connector's DATA is — judged on last SUCCESS.
+        """How stale this connector's DATA is — judged on last successful VERIFY.
 
         Deliberately not ``last_attempt_at``: a connector failing every minute
         has a recent attempt and worthless data. Attempts do not refresh facts.
+
+        Deliberately not ``last_push_at`` either, and this is the load-bearing
+        choice in the hybrid model. Letting a webhook delivery reset the clock
+        would mean a source that goes quiet — because it genuinely had nothing
+        to say, OR because deliveries silently stopped — is indistinguishable
+        from a healthy one. Only a verify proves the record still matches
+        reality, so only a verify may refresh it.
         """
         if not self.last_success_at:
             return Freshness(
@@ -282,6 +338,8 @@ class ConnectorStatus:
             "poll_interval_seconds": self.poll_interval_seconds,
             "stale_after_seconds": self.stale_after_seconds,
             "consecutive_failures": self.consecutive_failures,
+            "ingestion_mode": self.ingestion_mode,
+            "last_push_at": self.last_push_at,
         }
 
 
@@ -306,10 +364,23 @@ class Connector(Protocol):
     #: and as the ``connector_status`` canonical key, so it must not change.
     name: str
 
-    #: How often this connector expects to run. It declares its own cadence
-    #: because the right staleness threshold is a property of how fast the
-    #: source changes, not a global constant.
+    #: How often this connector VERIFIES its record against the source.
+    #:
+    #: REQUIRED even for push-fed connectors, where it is the poll backstop
+    #: rather than the primary path. A push source that never verifies cannot
+    #: notice a dropped delivery, so its freshness is unfalsifiable — see the
+    #: staleness note above and the 88-day SSE silence.
+    #:
+    #: Under ``hybrid`` this can be generous — hourly rather than every fifteen
+    #: minutes — because its job is catching drift, not being current. Push
+    #: already supplies currency. That makes the combination much cheaper than
+    #: polling hard, which is the main argument against polling at all.
     poll_interval_seconds: int
+
+    #: "poll" or "hybrid". Defaults to "poll" when a connector omits it, which
+    #: is the safe direction: a connector is assumed unable to receive push
+    #: until it says otherwise.
+    ingestion_mode: str
 
     def observe(self) -> ConnectorResult:
         """Read the external system and write observations to Neotoma.

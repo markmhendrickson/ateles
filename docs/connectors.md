@@ -87,6 +87,57 @@ failed fetch as `unknown` rather than drift: *we could not tell* and *we can
 tell, and it is bad* are different facts, and collapsing them produces either
 false alarms or ignored ones.
 
+## Polling and webhooks
+
+### What the two sources actually support (checked, not assumed)
+
+| Source | Webhooks? | Evidence |
+|---|---|---|
+| **GitHub** | **Yes, and already in use** | Live hooks on both repos (`gh api .../hooks`): active, six event types — `check_suite`, `issues`, `issue_comment`, `pull_request`, `pull_request_review`, `push` — delivering to an Apis gateway. Recent deliveries all `OK`. `execution/daemons/apis/swarm_dispatch.py` is the existing consumer. |
+| **Fly** | **No — not for ordinary app owners** | Machine-event webhooks exist only in the [Extensions API](https://fly.io/docs/reference/extensions_api/), for registered Extension *providers* through Fly's provider onboarding path. General deploy/machine webhooks have been requested repeatedly on the community forum and remain unshipped; the standing community advice is "API polling and direct Prometheus integration are the two threads I'd pull on". |
+
+So the answer is **asymmetric**, which settles the design cleanly: Fly is poll-only because nothing else is on offer, and GitHub already has a live push path that a connector should align with rather than replace.
+
+### Are webhooks preferable? Not uniformly — they trade away the one property this design guarantees
+
+Webhooks win on **latency** (seconds, not up to a poll interval) and **cost** (no ~96 daily calls to learn nothing changed).
+
+They lose on **falsifiability**:
+
+> A webhook tells you what **changed**. A poll tells you what **is**.
+
+If a delivery is dropped — endpoint down, subscription expired, secret rotated — nothing ever tells you. The record diverges permanently while every timestamp still looks fresh, **because nothing was expected and so nothing aged**.
+
+That is not hypothetical. It is the SSE failure exactly, and the code makes the mechanism plain:
+
+- the subscription ID came from an env var that was absent for **88 days**;
+- `sse_client.py` logged a `WARNING`, set `_running = False`, and **returned** — a clean exit indistinguishable from a healthy idle stream;
+- **67,450 silent skips**, no task event after 2026-06-04;
+- the stream *does* receive server heartbeats — and **discards them** (`yield None`), so nothing records that events are still arriving and nothing can notice when they stop;
+- the streaming client runs with `timeout=None`, so a permanently silent stream blocks forever rather than aging.
+
+The transport carried the liveness signal the whole time. The application threw it away.
+
+Polling has the inverse properties: wasteful and slow, and **it cannot silently diverge** — the observation either arrives or it ages into staleness.
+
+### The shape: both, with different jobs
+
+**Push for latency, poll for liveness.** The verify poll can then be *infrequent* — hourly rather than every fifteen minutes — because its job is catching drift, not being current. That collapses most of the cost objection to polling, which makes the hybrid cheaper than it first appears.
+
+Concretely, in the contract:
+
+- `poll_interval_seconds` is **required on every connector, push-fed included**, and means **"how often we verify"**, not "how often we fetch". A small change in meaning, a large change in what the field guarantees.
+- `stale_after = max(3 × verify_interval, 15 min)` keys off that verify cadence — the liveness guarantee — while push supplies freshness in between.
+- `last_push_at` is **recorded but never used to compute freshness**. If a delivery reset the staleness clock, a source that went quiet would be indistinguishable from a healthy one — the SSE failure again. It exists so the push path is *observable*: "verified, events also arriving" and "verified, nothing pushed in a week" are different situations.
+- There is **no `push` ingestion mode**, only `poll` and `hybrid`. A push-only connector cannot notice its own silence, and a mode nobody can use safely is a mode worth not offering.
+
+### Where this lands per stage
+
+- **Fly (stage 2): poll-only**, because Fly offers nothing else.
+- **GitHub (stage 5): `hybrid` is the target** — reconciling with the existing Apis webhook consumer rather than standing up a second one — but stage 5 is held regardless, and **poll-only is the correct first implementation**. The verify path is what makes push safe to add; building it in the other order reproduces the failure.
+
+There is already precedent for the backstop pattern: `execution/scripts/triage_backfill_sweep.py` exists precisely because triage fires on an `issue.opened` webhook "and nowhere else — one-shot, no sweep, no retry", leaving 176 issues silently untriaged. That sweep is a poll backstop for a webhook, written after the fact. This contract makes it the default rather than the remedy.
+
 ## The connector contract
 
 A connector is a small object that knows how to observe one external system.
@@ -149,6 +200,81 @@ more than `ATELES_CONNECTOR_MAX_WRITES` (default 200) in one run it aborts and
 reports the overrun instead of continuing. The runaway wrote 520+ records; a
 budget would have stopped it at 200 with a loud error. Cheap insurance against
 the failure that already happened once.
+
+## The idempotency trap: never put your own clock in the payload
+
+Neotoma's idempotency check hashes the **full entity payload** server-side, not
+just the key. A wall-clock field *inside* the entity therefore changes the
+content on every run while the key stays stable — and the store is then
+rejected with `ERR_IDEMPOTENCY_MISMATCH` **permanently**.
+
+This already happened. `sync_issues_from_github.ts` carries a long comment
+about it: a wall-clock `last_synced_at` in the issue payload froze every
+already-synced issue, and the only escape was a one-time `SYNC_KEY_MIGRATION`
+token (`"m2"`) that abandons the poisoned rows wholesale, because they cannot
+be overwritten. Their fix was to derive provenance from the source's own
+`updated_at` rather than `Date.now()`.
+
+`observed_at` is exactly that shape of field, so this design would have walked
+into the same wall. `observation_payload()` strips our own clock
+(`observed_at`, `observed_by`, `connector_name`) before hashing, so an
+unchanged source is byte-stable across runs and the intended no-op holds, while
+a genuine change still produces a new key.
+
+**The rule: key on what the source says, never on when we happened to look.**
+
+## Relationship to the existing status shapes
+
+Neotoma already has three near-identical records of "is this connection
+working", and this design deliberately does not become a fourth unrelated one:
+
+| Entity | Success clock | Failure counter | Splits attempt from success? |
+|---|---|---|---|
+| `subscription` | `last_delivered_at` | `consecutive_failures` + `max_failures` | No |
+| `peer_config` | `last_sync_at` | `consecutive_failures` | No |
+| `credential_health` (spec only, unbuilt) | `last_verified_at` | — (`status`) | **Yes** (`last_checked_at`) |
+| `connector_status` (this design) | `last_success_at` | `consecutive_failures` | **Yes** (`last_attempt_at`) |
+
+Only the unbuilt `credential_health` spec and this design separate *attempted*
+from *succeeded*. `subscription` and `peer_config` record success only, so a
+peer failing every minute has a stale `last_sync_at` and no way to distinguish
+"not attempted" from "attempted and failed" except by reading the failure
+counter as a proxy. That is the blind spot the split exists to close.
+
+Per-record freshness rides **`observed_at`**, which is already the universal
+observation timestamp in Neotoma (243 uses) rather than a new sibling field.
+
+Two consolidation opportunities follow, neither taken here:
+
+- **`credential_health` is unbuilt and is a connector**, not a fourth entity
+  type — a periodic probe recording status and freshness is exactly this
+  contract.
+- **The SSE subscription is itself an unmonitored connector.** A connector
+  reading `subscription.active` + `last_delivered_at` would have caught the
+  88-day silence on day one, because a subscription that is inactive or has not
+  delivered is precisely a stale observation. Nothing polls the transport
+  today; every existing backstop sits one level down, at the *effect*
+  (stranded tasks, untriaged issues) rather than at the *cause*.
+
+## The backstop pattern already has a reference implementation
+
+`execution/daemons/apis/task_reconciler.py` is a level-triggered sweep under an
+edge-triggered SSE path, written because of the 88-day failure. Its
+double-dispatch argument is the part to reuse when stage 5 adds a push path:
+
+1. **Status filter** — the push path writes `ROUTED` before any gate, so a task
+   it picks up leaves the sweep's eligible set immediately.
+2. **Grace window** — a minimum age longer than a dispatch takes, so the live
+   path always wins the race and the sweep only sees what push demonstrably
+   missed.
+3. **In-process claim ledger** — because the status write is fail-open, a lost
+   write must not let layers 1–2 re-select.
+
+Also worth copying: bounded work per pass, a closed-vocabulary skip reason so
+skips are countable rather than invisible, and the boot-time disclosure rule —
+*a reconciler that is off must say so, or its absence looks identical to one
+that ran and found nothing*, which is the exact ambiguity that hid the dead
+subscription for 88 days.
 
 ## Status model — what the app reads
 
