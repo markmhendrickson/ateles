@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 log = logging.getLogger("apis.review_panel")
 
 # Provider the security lens prefers, so its adversarial pass does not run on
-# the same model that authored the code (Cicada/Gryllus default to `claude`).
+# the same model that authored the code (Cicada defaults to `claude`).
 # Deployments that do not have a second provider authenticated can set this to
 # "" to disable the preference outright rather than eat a per-review fallback.
 _DEFAULT_SECURITY_LENS_PROVIDER = "codex"
@@ -248,7 +248,7 @@ LENSES: tuple[Lens, ...] = (
             r"bypass|escalation|exploit|cve|ghsa|hardening|sanitiz)\b",
         ),
         # Prefer a different model than the one that most often authors the
-        # code under review (Cicada/Gryllus default to the claude provider), so
+        # code under review (Cicada defaults to the claude provider), so
         # the adversarial pass does not inherit the author's priors — the
         # documented same-priors blind spot. Overridable per deployment.
         preferred_provider=_security_lens_provider(),

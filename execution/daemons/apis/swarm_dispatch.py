@@ -880,8 +880,8 @@ def workflow_owner_drift(
 
     ateles#441. `workflow_definition` entities name the agent that owns each
     gate; dispatch picks agents from hardcoded rosters in `issue_spec.py` and
-    `review_panel.py`. Nothing compared the two, so when Bombycilla was renamed
-    Waxwing and Gryllus renamed Cicada on 2026-06-12, the workflows kept naming
+    `review_panel.py`. Nothing compared the two, so when Bombycilla was renamed  # roster-ok: the rename narrative this function exists to prevent
+    Waxwing and Gryllus renamed Cicada on 2026-06-12, the workflows kept naming  # roster-ok: same rename narrative
     the old ones and no code noticed.
 
     The consequence is silent and slow: the renamed agent still runs, still
