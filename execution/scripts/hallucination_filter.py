@@ -38,7 +38,7 @@ Six signals, ordered by observed catch rate on real chunks:
    false positives.
 6. ``low_confidence`` — the decoder's own mean token logprob. The only signal
    that sees a Latin-script fabrication whose orthography is entirely ordinary
-   ("Bitte.", "Hallo.", "Rio.", "Felipe."), which every text-based signal above
+   ("Bitte.", "Hallo.", "Rio.", "Takk."), which every text-based signal above
    structurally cannot. Requires the session to request logprobs; when they are
    absent the signal is skipped and nothing else changes. Held-out measurement
    (different audio, frozen threshold): 25/25 Latin-script fabrications caught,

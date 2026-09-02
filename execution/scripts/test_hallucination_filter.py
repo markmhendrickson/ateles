@@ -513,7 +513,7 @@ def test_a_confident_latin_fabrication_is_still_not_caught():
     exists so the coverage claim stays honest: high, not total.
     """
     verdict = screen_transcription(
-        "Felipe.", expected_language="en", vad_closed=True,
+        "Takk.", expected_language="en", vad_closed=True,
         logprobs=_logprobs(-0.05, -0.02),
     )
     assert not verdict.filtered, (
