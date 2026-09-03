@@ -46,6 +46,11 @@ jobs:
       # execution/daemons/apis/** changes.
       - name: Run swarm daemon (apis) tests
         run: uv run --extra dev python -m pytest execution/daemons/apis/ -q
+      # ateles#697 (qa lens): named eval artifact for Neotoma unroutable-ledger
+      # coordination. Separate step so Phoenicurus can link a green run by
+      # EVAL_ID — ateles has no neotoma agentic_eval harness (QE3 pending).
+      - name: Eval apis_unroutable_ledger_neotoma_coordination
+        run: uv run --extra dev python -m pytest execution/daemons/apis/evals/apis_unroutable_ledger_neotoma_coordination.py -q
       - name: Run phoenicurus-release daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/phoenicurus-release/ -q
       - name: Run monedula daemon tests
