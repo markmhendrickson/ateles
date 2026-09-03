@@ -17,6 +17,9 @@ So this fake implements the STORAGE SEMANTICS, not a canned response:
     always matched would hide the opposite.
   * `/correct` writes one field and leaves the others alone — the property that
     makes the clobbering bug impossible now, so a test can actually assert it.
+  * Idempotency keys match Neotoma's contract: same key + same payload →
+    replay/no-op; same key + different payload → reject. A fake that merged
+    unconditionally hid the key/payload mismatch ateles#697 review found.
   * State survives "restarts", because the fake outlives the client objects that
     talk to it. A restart in these tests is a NEW store and a NEW ledger against
     the SAME fake, which is the only arrangement that can catch state that looks
@@ -29,15 +32,11 @@ through the real `httpx` call sites rather than by patching them out.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
-ENTITY_TYPE = "apis_unroutable_ledger"
-
-# The field Neotoma resolves identity on, per the registered schema's
-# canonical_name_fields. Named here so the fake's identity rule and the real
-# schema cannot drift apart silently.
-IDENTITY_FIELD = "ledger_key"
+from unroutable_store import ENTITY_TYPE, IDENTITY_FIELD
 
 
 class _Resp:
@@ -50,10 +49,42 @@ class _Resp:
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
-            raise RuntimeError(f"HTTP {self.status_code}")
+            raise RuntimeError(f"HTTP {self.status_code}: {self.text}")
 
     def json(self) -> dict:
         return self._payload
+
+
+def _payload_fingerprint(path: str, payload: dict) -> str:
+    """Semantic fingerprint of a write, route-independent.
+
+    `/store` and `/correct` wrap the same field update differently. Neotoma's
+    idempotency key is meant to cover the *intent* (which field value), so the
+    fake compares normalized field writes — otherwise a create-via-store
+    followed by a replay-via-correct under the same key would 400 even when
+    the field value is identical (and would hide the real mismatch bug).
+    """
+    if path == "correct":
+        content = {
+            "field": payload.get("field"),
+            "value": payload.get("value"),
+        }
+    elif path == "store":
+        ents = payload.get("entities") or []
+        ent = ents[0] if ents else {}
+        field = next(
+            (f for f in ("tasks", "roles", "unreadable") if f in ent),
+            None,
+        )
+        content = {
+            "field": field,
+            "value": ent.get(field) if field else ent,
+        }
+    else:
+        content = {k: v for k, v in payload.items() if k != "idempotency_key"}
+    return hashlib.sha256(
+        json.dumps(content, sort_keys=True, default=str).encode()
+    ).hexdigest()
 
 
 class FakeNeotoma:
@@ -68,6 +99,8 @@ class FakeNeotoma:
         # Every request, for assertions about idempotency keys and call counts.
         self.calls: list[tuple[str, dict]] = []
         self.idempotency_keys: list[str] = []
+        # key -> fingerprint of the first payload that used it (ingestion contract)
+        self._idem_seen: dict[str, str] = {}
 
     # ── identity ───────────────────────────────────────────────────────────
 
@@ -97,6 +130,9 @@ class FakeNeotoma:
         if self.fail_writes:
             raise RuntimeError("simulated Neotoma write failure")
         if payload.get("idempotency_key"):
+            conflict = self._check_idempotency(path, payload)
+            if conflict is not None:
+                return conflict
             self.idempotency_keys.append(payload["idempotency_key"])
         if path == "store":
             return self._store(payload)
@@ -112,6 +148,30 @@ class FakeNeotoma:
         if snap is None:
             return _Resp({"error": "not found"}, status=404)
         return _Resp({"entity_id": entity_id, "snapshot": dict(snap)})
+
+    def _check_idempotency(self, path: str, payload: dict) -> _Resp | None:
+        """Mirror Neotoma: same key + different payload → validation error."""
+        key = payload.get("idempotency_key")
+        if not key:
+            return None
+        fp = _payload_fingerprint(path, payload)
+        prior = self._idem_seen.get(key)
+        if prior is None:
+            self._idem_seen[key] = fp
+            return None
+        if prior != fp:
+            return _Resp(
+                {
+                    "error": "idempotency_key_reuse_with_different_payload",
+                    "message": (
+                        f"idempotency key {key!r} was already used with a "
+                        "different payload"
+                    ),
+                },
+                status=400,
+            )
+        # Same key + same payload → replay / no-op success (do not re-apply).
+        return _Resp({"success": True, "replayed": True, "entities": []})
 
     # ── routes ─────────────────────────────────────────────────────────────
 

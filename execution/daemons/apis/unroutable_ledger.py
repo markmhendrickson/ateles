@@ -215,7 +215,12 @@ class _Pending:
 
 @dataclass
 class UnroutableLedger:
-    """Disk-backed dedup + aggregation for no-owner escalations.
+    """Neotoma-backed dedup + aggregation for no-owner escalations.
+
+    Persists through a `NeotomaLedgerStore` (the default). Decision logic —
+    dedup, bounded re-assertion, aggregation — is unchanged; only the store
+    moved off disk. `APIS_UNROUTABLE_LEDGER` is legacy migration input only
+    (`_migrate_from_disk`); it is never written and is not the live backend.
 
     Call `note(...)` for every unroutable task; it returns True when the task is
     newly escalatable. Call `drain(...)` to get the aggregated message for the

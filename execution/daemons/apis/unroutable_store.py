@@ -69,15 +69,23 @@ Note the asymmetry — reads fail CLOSED (hold the page), writes fail OPEN (log
 and continue). A write that cannot land costs at most a duplicate page later; a
 read treated as empty costs the flood immediately.
 
-IDEMPOTENCY KEYS CARRY NO CLOCK
--------------------------------
-Neotoma hashes the full payload server-side, so a wall-clock value inside a
-written entity permanently poisons that row's key — a prior sync learned this by
-freezing every affected row. Keys here are derived from the ledger key and the
-field name only, plus a content digest of the value being written. Timestamps
-DO live inside the record (`last_escalated` is load-bearing for re-assertion),
-but they are excluded from the digest that forms the key, so a rewrite of
-identical logical state is a replay rather than a new row.
+IDEMPOTENCY: LOGICAL STATE AND CLOCKS ARE SEPARATE WRITES
+---------------------------------------------------------
+Neotoma's idempotency contract keys the payload it receives: same key + same
+payload is a replay; same key + different payload is a validation error. So a
+key derived from a volatile-stripped view must never escort a payload that still
+carries `last_escalated` / `reported`.
+
+`save_field` therefore splits:
+
+  1. Logical membership (`_keyable(value)`) under a digest of that stripped
+     shape — replay-safe when only clocks moved.
+  2. The full clock-bearing value under a *separate* key that digests the full
+     payload — so re-assertions land new `last_escalated` / `reported` without
+     reusing the logical key with a different body.
+
+Timestamps stay load-bearing for bounded re-assertion; they just do not ride the
+logical keyed call.
 
 Environment:
   NEOTOMA_BASE_URL       Neotoma base URL.
@@ -103,6 +111,61 @@ NEOTOMA_BASE_URL = os.environ.get(
 )
 
 ENTITY_TYPE = "apis_unroutable_ledger"
+
+# The field Neotoma resolves identity on. Must match SCHEMA_DEFINITION and the
+# registered prod schema — FakeNeotoma imports this so the fake cannot drift.
+IDENTITY_FIELD = "ledger_key"
+
+# In-repo register_schema artifact (ateles#697). Provision lists this type in
+# CONTEXT_SCHEMAS; --commit will POST this body when live provisioning lands.
+# Until then this is the reviewable contract — not "verified in prod" prose.
+SCHEMA_DEFINITION = {
+    "entity_type": ENTITY_TYPE,
+    "schema_version": "1.0",
+    "canonical_name_fields": [IDENTITY_FIELD],
+    "fields": {
+        "ledger_key": {
+            "type": "string",
+            "required": True,
+            "description": (
+                "Stable singleton key identifying this ledger row "
+                "(e.g. 'apis-unroutable'). The identity field — exactly one "
+                "entity per key."
+            ),
+        },
+        "daemon": {
+            "type": "string",
+            "description": "Daemon that owns this ledger (e.g. 'apis').",
+        },
+        "tasks": {
+            "type": "object",
+            "description": (
+                "Map of task entity_id -> {fp, last_escalated, count}. "
+                "Dedup state for unroutable-task escalations."
+            ),
+        },
+        "roles": {
+            "type": "object",
+            "description": (
+                "Map of role name -> last escalation epoch seconds, for roles "
+                "with no agent_definition."
+            ),
+        },
+        "unreadable": {
+            "type": "object",
+            "description": (
+                "Map of task entity_id -> {n, reported}: consecutive failed "
+                "hydrations and when last reported."
+            ),
+        },
+        "schema_note": {
+            "type": "string",
+            "description": (
+                "Human note describing the ledger's purpose and owning module."
+            ),
+        },
+    },
+}
 
 # The three state maps this ledger persists. Named once so a future field is
 # added in one place and every read/write path picks it up.
@@ -174,6 +237,17 @@ def _keyable(value):
     if isinstance(value, list):
         return [_keyable(v) for v in value]
     return value
+
+
+def _contains_volatile(value) -> bool:
+    """True when `value` carries nested `last_escalated` / `reported` keys."""
+    if isinstance(value, dict):
+        if _VOLATILE_KEYS & value.keys():
+            return True
+        return any(_contains_volatile(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_contains_volatile(v) for v in value)
+    return False
 
 
 def _unwrap(row: dict) -> dict:
@@ -315,18 +389,35 @@ class NeotomaLedgerStore:
         if self._cache is not None:
             self._cache[field] = value
 
-        key = f"apis-unroutable-{self.ledger_key}-{field}-{_digest(_keyable(value))}"
+        # Split logical vs volatile writes so the idempotency key always
+        # matches the payload Neotoma receives (ingestion contract).
+        logical = _keyable(value)
+        logical_key = (
+            f"apis-unroutable-{self.ledger_key}-{field}-{_digest(logical)}"
+        )
+        ok = self._persist(field, logical, logical_key)
 
+        if _contains_volatile(value):
+            # Clocks are load-bearing for re-assertion but must not reuse the
+            # logical key with a different body. Key digests the full payload.
+            full_key = (
+                f"apis-unroutable-{self.ledger_key}-{field}-ts-{_digest(value)}"
+            )
+            ok = self._persist(field, value, full_key) and ok
+
+        return ok
+
+    def _persist(self, field: str, value: dict, idempotency_key: str) -> bool:
+        """Write one field via correct (when known) or store (create-or-match)."""
         if self.entity_id:
-            ok = self._correct(field, value, key)
-            if ok:
+            if self._correct(field, value, idempotency_key):
                 return True
             # Fall through to store: a correct against a stale/absent entity_id
             # should not silently lose the write.
             log.warning(
                 "[unroutable] correct failed for %r — retrying as a store", field
             )
-        return self._store(field, value, key)
+        return self._store(field, value, idempotency_key)
 
     def _correct(self, field: str, value: dict, idempotency_key: str) -> bool:
         try:
@@ -387,3 +478,47 @@ class NeotomaLedgerStore:
         """Drop the cache so the next `load` re-reads."""
         self._cache = None
         self._cached_at = 0.0
+
+
+def register_schema(
+    *,
+    base_url: str | None = None,
+    token: str | None = None,
+    activate: bool = True,
+) -> dict:
+    """POST SCHEMA_DEFINITION to Neotoma `/register_schema`.
+
+    The in-repo provisioning artifact for `apis_unroutable_ledger`. Called by
+    live `ateles provision --commit` once W3/W4 land; callable today for a
+    fresh instance. Returns the response body.
+    """
+    url = (base_url or NEOTOMA_BASE_URL).rstrip("/") + "/register_schema"
+    bearer = token if token is not None else _bearer()
+    if not bearer:
+        raise LedgerUnavailable(
+            "NEOTOMA_BEARER_TOKEN is not set — cannot register "
+            f"{ENTITY_TYPE} schema"
+        )
+    body = {
+        "entity_type": SCHEMA_DEFINITION["entity_type"],
+        "schema_version": SCHEMA_DEFINITION["schema_version"],
+        "schema_definition": {
+            "canonical_name_fields": list(
+                SCHEMA_DEFINITION["canonical_name_fields"]
+            ),
+            "fields": dict(SCHEMA_DEFINITION["fields"]),
+        },
+        "activate": activate,
+        "force": True,  # "ledger" pluralization false-positive (see #671)
+    }
+    resp = httpx.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {bearer}",
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()

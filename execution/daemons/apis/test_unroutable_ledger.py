@@ -574,37 +574,98 @@ def test_clear_on_an_unreadable_ledger_does_not_raise(neotoma):
     _ledger().clear_unreadable("ent_x")  # must not raise
 
 
-# ── idempotency keys carry no clock ─────────────────────────────────────────
+# ── idempotency: key must match the payload Neotoma receives ────────────────
 #
-# Neotoma hashes the full payload server-side, so a wall-clock value inside a
-# written entity permanently poisons that row's key — a prior sync froze every
-# affected row that way. Timestamps are real state and ARE written; they are
-# excluded from the DIGEST that forms the key.
+# Neotoma rejects same key + different payload. Logical membership and
+# volatile clocks therefore travel on separate keyed writes (see save_field).
 
 
 def test_identical_logical_state_reuses_one_idempotency_key(neotoma):
-    """Re-writing the same membership must be a replay, not a new row."""
-    from unroutable_store import _digest, _keyable
+    """Same membership, different clocks: logical key replays; clocks use a new key.
 
+    Driven through save_field → FakeNeotoma so a key/payload mismatch would 400
+    (the prior unit test called _keyable/_digest standalone and could not catch it).
+    """
+    store = _store()
     state = {"ent_a": {"fp": "x", "last_escalated": 1000.0, "count": 1}}
     later = {"ent_a": {"fp": "x", "last_escalated": 9999.0, "count": 1}}
-    assert _digest(_keyable(state)) == _digest(_keyable(later))
+
+    assert store.save_field("tasks", state) is True
+    keys_after_first = list(neotoma.idempotency_keys)
+    assert store.save_field("tasks", later) is True
+
+    logical_keys = [k for k in neotoma.idempotency_keys if "-ts-" not in k]
+    ts_keys = [k for k in neotoma.idempotency_keys if "-ts-" in k]
+    # Logical key emitted once (second call is a replay — not re-recorded).
+    assert len(logical_keys) == 1, logical_keys
+    # Each distinct clock payload gets its own ts- key.
+    assert len(ts_keys) == 2, ts_keys
+    assert ts_keys[0] != ts_keys[1]
+    # Final row holds the later clock (load-bearing for re-assertion).
+    assert neotoma.row_for("test")["tasks"]["ent_a"]["last_escalated"] == 9999.0
+    # Sanity: first write did produce keys (guards against a silent no-op fake).
+    assert keys_after_first
 
 
 def test_changed_membership_changes_the_key(neotoma):
-    from unroutable_store import _digest, _keyable
-
+    store = _store()
     one = {"ent_a": {"fp": "x", "last_escalated": 1000.0}}
     two = {"ent_a": {"fp": "x", "last_escalated": 1000.0}, "ent_b": {"fp": "y"}}
-    assert _digest(_keyable(one)) != _digest(_keyable(two))
+    assert store.save_field("tasks", one) is True
+    assert store.save_field("tasks", two) is True
+    logical_keys = [k for k in neotoma.idempotency_keys if "-ts-" not in k]
+    assert len(set(logical_keys)) == 2, logical_keys
 
 
 def test_changed_fingerprint_changes_the_key(neotoma):
-    from unroutable_store import _digest, _keyable
-
+    store = _store()
     before = {"ent_a": {"fp": "no-tags", "last_escalated": 1000.0}}
     after = {"ent_a": {"fp": "has-tags", "last_escalated": 1000.0}}
-    assert _digest(_keyable(before)) != _digest(_keyable(after))
+    assert store.save_field("tasks", before) is True
+    assert store.save_field("tasks", after) is True
+    logical_keys = [k for k in neotoma.idempotency_keys if "-ts-" not in k]
+    assert len(set(logical_keys)) == 2, logical_keys
+
+
+def test_fake_rejects_idempotency_key_reuse_with_different_payload(neotoma):
+    """Effect test: FakeNeotoma mirrors Neotoma's reuse-rejection (ateles#697)."""
+    # Bypass save_field and force the pre-fix mismatch shape directly.
+    bad = {
+        "entities": [
+            {
+                "entity_type": "apis_unroutable_ledger",
+                "ledger_key": "test",
+                "daemon": "apis",
+                "tasks": {"ent_a": {"fp": "x", "last_escalated": 1.0}},
+            }
+        ],
+        "idempotency_key": "forced-same-key",
+    }
+    r1 = neotoma.post("http://fake/store", json=bad)
+    assert r1.status_code == 200
+    bad2 = {
+        "entities": [
+            {
+                "entity_type": "apis_unroutable_ledger",
+                "ledger_key": "test",
+                "daemon": "apis",
+                "tasks": {"ent_a": {"fp": "x", "last_escalated": 9999.0}},
+            }
+        ],
+        "idempotency_key": "forced-same-key",
+    }
+    r2 = neotoma.post("http://fake/store", json=bad2)
+    assert r2.status_code == 400
+    assert "idempotency" in r2.json()["error"]
+
+
+def test_schema_definition_identity_is_ledger_key_only():
+    """In-repo schema artifact: identity is ledger_key (not daemon / field keys)."""
+    from unroutable_store import IDENTITY_FIELD, SCHEMA_DEFINITION
+
+    assert SCHEMA_DEFINITION["canonical_name_fields"] == [IDENTITY_FIELD]
+    assert IDENTITY_FIELD == "ledger_key"
+    assert SCHEMA_DEFINITION["entity_type"] == "apis_unroutable_ledger"
 
 
 def test_no_idempotency_key_contains_a_wall_clock(neotoma):
