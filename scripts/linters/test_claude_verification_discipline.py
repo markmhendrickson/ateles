@@ -143,7 +143,8 @@ def test_e1_skip_tests_form_under_standing_or_commit_hygiene():
     assert "SKIP_TESTS_REASON=" in text
 
 
-def test_section_ordering_after_standing_constraints_not_after_session_conduct():
+def test_verification_follows_standing_constraints():
+    """#731 places Verification after Standing; #711 places Session before Standing."""
     text = _claude_text()
     offsets = _h2_offsets(text)
     titles = [t for _, t in offsets]
@@ -156,9 +157,9 @@ def test_section_ordering_after_standing_constraints_not_after_session_conduct()
 
     session = next((o for o, t in offsets if "Session conduct" in t), None)
     if session is not None:
-        # UX forbids interleaving Verification after Session conduct.
-        assert verification < session, (
-            "Verification must come before Session conduct when both exist"
+        # #711 Session conduct → Standing; #731 Verification after Standing.
+        assert session < standing < verification, (
+            "Expected Session conduct → Standing constraints → Verification discipline"
         )
 
 
