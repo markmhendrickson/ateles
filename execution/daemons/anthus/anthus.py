@@ -44,6 +44,11 @@ from lib.daemon_runtime import (  # noqa: E402
     SSEClient,
     hydrate_snapshot,
 )
+from lib.daemon_runtime.tool_allowlist import (  # noqa: E402
+    apply_to_claude_argv,
+    log_tool_plan,
+    plan_enforcement,
+)
 from lib.notify import Notifier, Priority  # noqa: E402
 from lib.activity import ActivityLogger  # noqa: E402
 
@@ -375,13 +380,41 @@ async def _spawn_agent(
         "--append-system-prompt",
         skill_md,
     ]
-    if owner_agent in _AGENTS_NEEDING_SKIP_PERMISSIONS:
+
+    # ── Apply the agent's tool_allowlist (previously never read here) ─────────
+    # Anthus already loads the agent_definition above — but only to pin
+    # `agent_definition_ref` for provenance. It never consulted `.tools`, so
+    # every gate dispatch ran with whatever the ambient CLI allowed. The
+    # decision now comes from the same shared module skill_runner uses, so
+    # both paths reach the same verdict for the same agent.
+    #
+    # Note the ORDER: the allowlist is planned with knowledge of whether this
+    # agent gets --dangerously-skip-permissions, because bypass mode makes
+    # --allowed-tools a no-op (the CLI returns "allow" at the bypass branch
+    # before it consults allow rules). Passing both would produce argv that
+    # LOOKS confined and behaves unconfined — so plan_enforcement reports
+    # "defeated" and we add nothing, letting the log say so plainly.
+    skip_permissions = owner_agent in _AGENTS_NEEDING_SKIP_PERMISSIONS
+    try:
+        tools = AgentLoader(owner_agent).load().tools
+    except Exception as exc:  # noqa: BLE001 — never block a dispatch on this
+        log.warning(
+            f"[{DAEMON_NAME}] could not load tool_allowlist for {owner_agent}: {exc}"
+        )
+        tools = ["*"]
+    plan = plan_enforcement(
+        tools, provider="claude", skip_permissions=skip_permissions
+    )
+    args = apply_to_claude_argv(args, plan)
+    log_tool_plan(log, role=owner_agent, provider="claude", plan=plan)
+
+    if skip_permissions:
         args.append("--dangerously-skip-permissions")
     args.append(prompt)
 
     log.info(
         f"[{DAEMON_NAME}] spawning {owner_agent} for {work_entity_id} "
-        f"(skip_perms={owner_agent in _AGENTS_NEEDING_SKIP_PERMISSIONS})"
+        f"(skip_perms={skip_permissions}, tools={plan.status})"
     )
 
     # Fire-and-forget: agent runs as background subprocess. Its artifact is

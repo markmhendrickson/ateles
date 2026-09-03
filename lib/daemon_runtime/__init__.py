@@ -68,6 +68,19 @@ from .drift import (
     parse_drift_signals,
 )
 from .checkpoint_posture import CheckFailure, PostureOutcome, evaluate_with_posture
+from .tool_allowlist import (
+    ALIAS_TOKENS,
+    EnforcementMode,
+    TokenKind,
+    ToolPlan,
+    apply_to_claude_argv,
+    build_claude_argv,
+    classify_token,
+    enforcement_mode,
+    log_tool_plan,
+    plan_enforcement,
+    provider_supports_allowlist,
+)
 from .gating import (
     BlastRadius,
     CheckpointPosture,
@@ -159,6 +172,18 @@ __all__ = [
     "CheckFailure",
     "PostureOutcome",
     "evaluate_with_posture",
+    # tool allowlist enforcement (shared across every agent spawner)
+    "ALIAS_TOKENS",
+    "EnforcementMode",
+    "TokenKind",
+    "ToolPlan",
+    "apply_to_claude_argv",
+    "build_claude_argv",
+    "classify_token",
+    "enforcement_mode",
+    "log_tool_plan",
+    "plan_enforcement",
+    "provider_supports_allowlist",
     # drift / generalization
     "DriftSignal",
     "DriftCluster",

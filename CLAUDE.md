@@ -99,6 +99,36 @@ The shared clones (`~/repos/ateles`, `~/repos/neotoma`) are for sessions and are
 
 ---
 
+## Tool allowlist enforcement (dispatch)
+
+`lib/daemon_runtime/tool_allowlist.py` is the single shared decision for whether a dispatched agent's `tool_allowlist` actually binds. Every daemon that spawns a `claude --print` process — directly or via `execution/daemons/apis/skill_runner.py` — routes through it, rather than each daemon building its own restriction (or none).
+
+**Opt-in and log-only by default**: the restriction is always computed and logged; whether it is actually applied to argv is controlled by `ATELES_ENFORCE_TOOL_ALLOWLIST`.
+
+| Env var value | Effect |
+|---|---|
+| `1` / `true` / `yes` / `enforce` | **ENFORCE** — `--allowed-tools` is appended to the dispatch argv |
+| `0` / `false` / `no` / `off` | **OFF** — no restriction computed or applied |
+| unset, or any other/typo value | **LOG_ONLY** (default) — restriction computed and logged, argv unchanged |
+
+An unrecognised value degrades to LOG_ONLY rather than raising, so a plist typo cannot take a daemon down.
+
+`plan_enforcement()` reports one of these `status` values per dispatch — the vocabulary a log line or test asserts against:
+
+| Status | Meaning |
+|---|---|
+| `enforced` | Restriction applied — `--allowed-tools` is in argv |
+| `would_enforce` | LOG_ONLY — dispatch runs unrestricted; log records what WOULD have been passed |
+| `wildcard` | Agent declares `tools: ["*"]` — nothing to restrict |
+| `unsupported` | Provider (codex/cursor) cannot accept a per-dispatch tool restriction |
+| `defeated` | `--dangerously-skip-permissions` is also set — it defeats `--allowed-tools` at the CLI's permission-flow stage 4, before stage 5 ever reads the allow rules |
+| `unenforceable` | Every token in the allowlist is a capability-slot alias (e.g. `git`, `github`) that matches no real CLI tool — enforcing would leave the agent unable to act |
+| `off` | Enforcement disabled via the env var |
+
+**Under ENFORCE, `unsupported` refuses the dispatch** (the provider genuinely cannot honour a restriction, so running unconfined and unremarked is not an option) — **`unenforceable` and `defeated` still run, just unconfined**, and the log line says so at WARNING rather than silently dropping the intended restriction. Do not read `would_enforce`/`defeated`/`unenforceable` as "confined" — only `enforced` is; see `ToolPlan.is_confined`.
+
+---
+
 ## Gmail send-gate hook (mechanical enforcement)
 
 - **`gmail_send_gate.py`** (PreToolUse: `Bash`) — blocks Gmail operations that can deliver mail without a per-message operator approval: `gws gmail users drafts update` (the misfiring call), `drafts send`, `messages send`, and the `+send`/`+reply`/`+reply-all`/`+forward` helpers. Staging and reads stay allowed (`drafts create`/`get`/`list`, `messages list`/`get`, `+read`), as does every non-Gmail `gws` service. Compound commands are split on `&&`/`;`/`|`/newlines so a send hidden after an innocuous segment is still caught. Approved sends run with the override prefixed inline (`ATELES_ALLOW_GMAIL_SEND=1 …`, or the `env VAR=1 …` form) — the override is scoped to the segment it prefixes, so it cannot vouch for a different send later in the chain. An **exported/ambient** `ATELES_ALLOW_GMAIL_SEND` is deliberately ignored: honouring it would let one `export` silently approve every send for the rest of the session, which is the carries-forward failure the gate exists to close. The inline prefix is the only approval path, re-typed per command. Segments led by a text-bearing command (`git commit`, `echo`, `grep`, `gh pr create`) carry the pattern as prose rather than invoking it and are skipped; a real invocation chained after one is still judged on its own. That allowlist must never include an interpreter — `python -c`, `node -e`, and `cat` were in an early revision and were live bypasses, since the gated command rode through as the exempt leader's argument. `.claude/hooks/test_gmail_send_gate.py` covers 51 cases, including 18 evasion vectors (wrappers, command substitution, subshells, line continuations, path and quoting variants). Fail-open (stdlib-only; any error → exit 0). Motivated by 2026-07-08 and again 2026-07-31, when a reply staged as an unsent draft was delivered to an external contact by a later `drafts update` — no send command was ever issued and the operator had given no approval. `drafts update` is not a safe staging operation: re-supplying `raw` + `threadId` can consume the draft into a sent message. To edit a staged draft, build a NEW draft rather than updating in place. See memory `feedback_gws_draft_update_can_send`.

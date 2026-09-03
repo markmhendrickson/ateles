@@ -21,9 +21,35 @@ try:
     from ..handler_base import PaymentHandler
 except ImportError:
     from handler_base import PaymentHandler  # type: ignore[no-redef]
+from lib.daemon_runtime.tool_allowlist import build_claude_argv
+
 from .payment_profile import PaymentProfile
 
 log = logging.getLogger(__name__)
+
+
+# ── Tool allowlist (ateles: shared enforcement) ───────────────────────────────
+# Monedula's payment dispatch built its own argv and never consulted the
+# agent's tool_allowlist. It also passes --dangerously-skip-permissions, which
+# defeats an allowlist outright (the CLI allows at the bypass branch before
+# reading allow rules) — so the shared planner reports this dispatch as
+# unconfined rather than appending a flag the CLI would step over.
+#
+# Worth naming for this daemon specifically: monedula's declared allowlist is
+# largely capability-slot aliases (`btc_wallet_send_transfer`) and mis-cased
+# MCP server names, neither of which would match a real tool. Enforcing it
+# as-declared would strip the wallet operations this handler exists to perform.
+# That is a grant defect to fix in the agent_definition, NOT something to
+# paper over by widening here.
+def _agent_tools() -> list[str]:
+    """Load monedula's declared tool_allowlist, falling back to unrestricted."""
+    try:
+        from lib.daemon_runtime import AgentLoader
+
+        return AgentLoader("monedula").load().tools
+    except Exception as exc:  # noqa: BLE001 — never block a payment on this
+        log.warning(f"[monedula] could not load tool_allowlist: {exc}")
+        return ["*"]
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.parent  # ateles repo root
 
@@ -81,7 +107,14 @@ class BtcTransferHandler(PaymentHandler):
 
         try:
             result = subprocess.run(
-                [claude_path, "--print", "--dangerously-skip-permissions", prompt],
+                build_claude_argv(
+                    [claude_path, "--print"],
+                    _agent_tools(),
+                    log=log,
+                    role="monedula",
+                    skip_permissions=True,
+                    prompt=prompt,
+                ),
                 capture_output=True,
                 text=True,
                 timeout=300,
