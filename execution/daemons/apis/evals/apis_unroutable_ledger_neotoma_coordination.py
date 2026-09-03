@@ -2,8 +2,10 @@
 
 This module is the CI-attributable eval artifact for moving Apis's unroutable
 ledger from disk into Neotoma. It does not re-implement FakeNeotoma cases —
-it selects the existing storage-semantic tests and adds one skill_runner
-entry-point case the unit suite did not bind.
+thin wrappers call the existing storage-semantic tests (with their fixtures
+re-established here so a dedicated CI step that collects only this file still
+wires FakeNeotoma into apis/skill_runner), plus one skill_runner entry-point
+case the unit suite did not bind.
 
 QE3: ateles has no neotoma agentic_eval harness yet; this pytest module IS the
 eval substrate for this repo until a Python harness exists.
@@ -18,58 +20,23 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Parent daemon dir is on sys.path via apis/conftest.py; keep a local bootstrap
-# so `pytest path/to/this/file.py` also works when run in isolation.
 _DAEMON_DIR = Path(__file__).resolve().parent.parent
 if str(_DAEMON_DIR) not in sys.path:
     sys.path.insert(0, str(_DAEMON_DIR))
 
+import apis  # noqa: E402
+import harness_router  # noqa: E402
+import skill_runner  # noqa: E402
+import test_noowner_escalation as noowner  # noqa: E402
+import test_unroutable_ledger as ledger_tests  # noqa: E402
+import unroutable_ledger as ul  # noqa: E402
+import unroutable_store as us  # noqa: E402
 from fake_neotoma import FakeNeotoma  # noqa: E402
 from lib.daemon_runtime import AgentDefinition  # noqa: E402
 from unroutable_ledger import UnroutableLedger  # noqa: E402
 from unroutable_store import NeotomaLedgerStore  # noqa: E402
-import skill_runner  # noqa: E402
-import harness_router  # noqa: E402
-import unroutable_ledger as ul  # noqa: E402
-import unroutable_store as us  # noqa: E402
-
-# Re-export the FakeNeotoma cases that already assert the required behaviours.
-# Collected here so CI can attribute a green run to this EVAL_ID by module path.
-from test_unroutable_ledger import (  # noqa: E402
-    test_one_singleton_row_not_one_per_write,
-    test_concurrent_writers_across_a_restart,
-    test_all_three_fields_survive_interleaved_writers,
-    test_identical_logical_state_reuses_one_idempotency_key,
-    test_fake_rejects_idempotency_key_reuse_with_different_payload,
-)
-from test_noowner_escalation import (  # noqa: E402
-    test_unreadable_ledger_holds_the_page_instead_of_flooding,
-    test_the_task_is_still_marked_blocked_when_the_page_is_held,
-)
 
 EVAL_ID = "apis_unroutable_ledger_neotoma_coordination"
-
-# Keep re-exports discoverable / prevent unused-import lint.
-__all__ = [
-    "EVAL_ID",
-    "test_one_singleton_row_not_one_per_write",
-    "test_concurrent_writers_across_a_restart",
-    "test_all_three_fields_survive_interleaved_writers",
-    "test_identical_logical_state_reuses_one_idempotency_key",
-    "test_fake_rejects_idempotency_key_reuse_with_different_payload",
-    "test_unreadable_ledger_holds_the_page_instead_of_flooding",
-    "test_the_task_is_still_marked_blocked_when_the_page_is_held",
-    "test_skill_runner_holds_undefined_role_page_when_ledger_unreadable",
-]
-
-
-def _stub_def(name: str = "pavo") -> AgentDefinition:
-    """Empty prompt_markdown → degraded / undefined-role path in skill_runner."""
-    return AgentDefinition(
-        name=name,
-        aauth_sub=f"{name}@ateles-swarm",
-        tool_allowlist="*",
-    )
 
 
 def _ledger_against_fake() -> UnroutableLedger:
@@ -85,12 +52,24 @@ def _ledger_against_fake() -> UnroutableLedger:
 
 @pytest.fixture()
 def neotoma(monkeypatch, tmp_path):
-    """Fake Neotoma wired into the store's httpx sites (same as ledger unit suite)."""
+    """Fake Neotoma for ledger-unit wrappers (same contract as test_unroutable_ledger)."""
     fake = FakeNeotoma()
     monkeypatch.setattr(us.httpx, "post", fake.post)
     monkeypatch.setattr(us.httpx, "get", fake.get)
     monkeypatch.setenv("APIS_UNROUTABLE_LEDGER", str(tmp_path / "absent.json"))
-    monkeypatch.setattr(ul, "_SHARED", None)
+    return fake
+
+
+@pytest.fixture()
+def apis_neotoma(monkeypatch, tmp_path):
+    """Fake Neotoma + apis._unroutable (same contract as test_noowner_escalation)."""
+    fake = FakeNeotoma()
+    monkeypatch.setattr(us.httpx, "post", fake.post)
+    monkeypatch.setattr(us.httpx, "get", fake.get)
+    monkeypatch.setenv("APIS_UNROUTABLE_LEDGER", str(tmp_path / "absent.json"))
+    monkeypatch.setattr(apis, "_unroutable", _ledger_against_fake())
+    monkeypatch.setattr(apis, "_created_seen", {})
+    monkeypatch.setattr(apis, "set_task_status", lambda *a, **k: True)
     return fake
 
 
@@ -105,6 +84,62 @@ def _claude_only_router(monkeypatch, tmp_path):
     harness_router.reset_state()
     yield
     harness_router.reset_state()
+
+
+# ── re-export wrappers (ledger unit cases) ───────────────────────────────────
+
+
+def test_one_singleton_row_not_one_per_write(neotoma):
+    ledger_tests.test_one_singleton_row_not_one_per_write(neotoma)
+
+
+def test_concurrent_writers_across_a_restart(neotoma):
+    ledger_tests.test_concurrent_writers_across_a_restart(neotoma)
+
+
+def test_all_three_fields_survive_interleaved_writers(neotoma):
+    ledger_tests.test_all_three_fields_survive_interleaved_writers(neotoma)
+
+
+def test_identical_logical_state_reuses_one_idempotency_key(neotoma):
+    ledger_tests.test_identical_logical_state_reuses_one_idempotency_key(neotoma)
+
+
+def test_fake_rejects_idempotency_key_reuse_with_different_payload(neotoma):
+    ledger_tests.test_fake_rejects_idempotency_key_reuse_with_different_payload(
+        neotoma
+    )
+
+
+# ── re-export wrappers (dispatch entry points) ───────────────────────────────
+
+
+def test_unreadable_ledger_holds_the_page_instead_of_flooding(
+    apis_neotoma, monkeypatch
+):
+    noowner.test_unreadable_ledger_holds_the_page_instead_of_flooding(
+        apis_neotoma, monkeypatch
+    )
+
+
+def test_the_task_is_still_marked_blocked_when_the_page_is_held(
+    apis_neotoma, monkeypatch
+):
+    noowner.test_the_task_is_still_marked_blocked_when_the_page_is_held(
+        apis_neotoma, monkeypatch
+    )
+
+
+# ── new skill_runner surface case ────────────────────────────────────────────
+
+
+def _stub_def(name: str = "pavo") -> AgentDefinition:
+    """Empty prompt_markdown → degraded / undefined-role path in skill_runner."""
+    return AgentDefinition(
+        name=name,
+        aauth_sub=f"{name}@ateles-swarm",
+        tool_allowlist="*",
+    )
 
 
 def test_skill_runner_holds_undefined_role_page_when_ledger_unreadable(
