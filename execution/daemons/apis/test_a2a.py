@@ -242,6 +242,9 @@ def test_a2a_and_sse_routing_paths_agree():
     equivalents and asserts identical output for the same input text, so a
     future edit that reintroduces a second routing implementation on either
     surface fails loudly here instead of silently drifting.
+
+    assigned_to three-way parity lives in
+    test_a2a_and_sse_assigned_to_three_way_agree (sibling).
     """
     import apis as apis_module  # noqa: E402 - imported lazily to avoid apis.py's
 
@@ -262,6 +265,40 @@ def test_a2a_and_sse_routing_paths_agree():
         a2a_skill = ax.resolve_skill(a2a_tags)
         assert sse_skill == a2a_skill, (title, sse_skill, a2a_skill)
     print("✓ A2A and SSE paths produce identical routing output (≥3 inputs)")
+
+
+def test_a2a_and_sse_assigned_to_three_way_agree():
+    """
+    Cross-surface parity for the #702 three-way assigned_to contract.
+
+    SSE (apis._resolve_skill) and A2A (a2a_executor.resolve_skill) must agree
+    on human park, unknown-agent terminal None (no monedula fallthrough), and
+    tag inference when assigned_to is absent. Locks ent_2ad0677fe23c0c1878ae43e8
+    + ent_db0b7855d47012084477fb00 for the A2A surface specifically.
+    """
+    import apis as apis_module  # noqa: E402 - imported lazily to avoid apis.py's
+
+    assigned_cases = [
+        # human owner → park sentinel on both surfaces
+        (["engineering"], "operator", routing.HUMAN_OWNED),
+        # roster agent without ASSIGNED_TO_ROUTES entry → None, not monedula
+        (["finance"], "pavo", None),
+        # no assignee → tag inference still agrees (finance → monedula)
+        (["finance"], None, "monedula"),
+    ]
+    for tags, assigned_to, expected in assigned_cases:
+        sse_skill = apis_module._resolve_skill(tags, assigned_to=assigned_to)
+        a2a_skill = ax.resolve_skill(tags, assigned_to=assigned_to)
+        assert sse_skill == a2a_skill == expected, (
+            tags,
+            assigned_to,
+            sse_skill,
+            a2a_skill,
+        )
+        if assigned_to == "pavo":
+            assert sse_skill != "monedula"
+            assert a2a_skill != "monedula"
+    print("✓ A2A and SSE agree on assigned_to three-way outcomes")
 
 
 # ── a2a_gateway: authorization ──────────────────────────────────────────────
@@ -388,6 +425,7 @@ _TESTS = [
     test_format_submission_failure,
     test_advisory_allow_response_differs_from_normal_accept,
     test_a2a_and_sse_routing_paths_agree,
+    test_a2a_and_sse_assigned_to_three_way_agree,
     test_authorize_caller,
 ]
 

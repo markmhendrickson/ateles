@@ -7,11 +7,17 @@ Run with: pytest execution/daemons/apis/test_routing.py -v
 
 from __future__ import annotations
 
+import pytest
+
 from routing import (
+    ASSIGNED_TO_ROUTES,
+    DOMAIN_ROUTES,
+    HUMAN_OWNED,
     canonical_assignee,
     infer_domains_from_paths,
     infer_tags_from_text,
     resolve_reviewers,
+    resolve_role,
     resolve_skill,
 )
 
@@ -113,9 +119,6 @@ def test_mixed_agent_doc_and_real_code_selects_specialist() -> None:
 # NOTE: these routes are INERT until Apis's task-event subscription is restored
 # (ateles#589) — a merged routing table does not by itself make dispatch work.
 
-import pytest  # noqa: E402
-
-from routing import ASSIGNED_TO_ROUTES, DOMAIN_ROUTES  # noqa: E402
 
 # The 13 work descriptions that resolved to NO owner (or the WRONG owner) on
 # main, each with the agent that owns that role on the swarm roster.
@@ -400,8 +403,141 @@ def test_sentinel_assignee_is_absence_not_an_owner() -> None:
     )
 
 
-def test_unknown_assignee_still_falls_through_to_tags() -> None:
-    """A human name is not an agent — it must not block tag inference."""
-    assert resolve_skill(["finance"], assigned_to="Mark") == resolve_skill(
-        ["finance"], assigned_to=None
-    )
+# ── unrecognized assignees must NOT fall through to tags (ateles#702) ────────
+#
+# This block replaces `test_unknown_assignee_still_falls_through_to_tags`, which
+# asserted the fallthrough as intended behaviour and so pinned the bug: it
+# passed for exactly as long as the defect existed. The fallthrough IS the
+# silent misroute that resolve_skill's own docstring disclaimed.
+
+
+@pytest.mark.parametrize(
+    "assignee",
+    # Real roster agents that own no domain, so ASSIGNED_TO_ROUTES has no key
+    # for them. 17 owners against a ~38-name roster: every one of these was
+    # treated as "absent" and reassigned by keyword.
+    ["pavo", "apus", "turdus", "waxwing", "lanius", "sylvia", "tyto", "formica"],
+)
+def test_unrouted_roster_agent_does_not_reach_the_payment_executor(
+    assignee: str,
+) -> None:
+    """The blast-radius case, asserted as the misroute rather than around it.
+
+    A finance-tagged task assigned to ANY non-domain-owning agent used to fall
+    through to `DOMAIN_ROUTES["finance"]` and reach `monedula`, the payment
+    EXECUTOR. Naming monedula explicitly is the point: a test that merely
+    checked a known-good assignee routes correctly passes against the live bug.
+    """
+    assert resolve_skill(["finance"], assigned_to=assignee) != "monedula"
+    assert resolve_skill(["finance"], assigned_to=assignee) is None
+
+
+def test_pm_assignee_does_not_become_a_code_change() -> None:
+    """`pavo` (PM) + a product tag used to resolve to `cicada`, the issue worker.
+
+    A design task silently became a code change by a different agent.
+    """
+    assert resolve_skill(["product"], assigned_to="pavo") != "cicada"
+    assert resolve_skill(["product"], assigned_to="pavo") is None
+
+
+def test_unknown_assignee_is_terminal_not_a_lookup_miss() -> None:
+    """An owner nobody can spawn must block visibly, not be silently replaced.
+
+    Contrast with an ABSENT assignee, where tag inference is correct: the
+    difference between "no owner named" and "an owner named that we cannot
+    resolve" is exactly what the old code collapsed.
+    """
+    assert resolve_skill(["finance"], assigned_to="not-on-roster") is None
+    # ...while genuine absence still infers.
+    assert resolve_skill(["finance"], assigned_to=None) == "monedula"
+
+
+def test_human_assignee_is_owned_not_unowned() -> None:
+    """`operator` is a valid owner, not an unknown name.
+
+    It must be distinguishable from `None` so dispatch can park it for the
+    operator instead of paging about it as an unroutable defect.
+    """
+    assert resolve_skill(["engineering"], assigned_to="operator") == HUMAN_OWNED
+    assert resolve_skill(["engineering"], assigned_to=" Operator ") == HUMAN_OWNED
+    # Never a spawnable skill, and never a fake agent in the routing table.
+    assert HUMAN_OWNED not in ASSIGNED_TO_ROUTES
+    assert HUMAN_OWNED not in DOMAIN_ROUTES.values()
+
+
+def test_env_operator_login_is_human_owned(monkeypatch) -> None:
+    """Operator identity is env-sourced — never a hardcoded login in routing.py."""
+    monkeypatch.setenv("APIS_OPERATOR_LOGIN", "Some-Operator")
+    assert resolve_skill(["finance"], assigned_to="some-operator") == HUMAN_OWNED
+    # A login absent from env is NOT silently treated as human-owned.
+    assert resolve_skill(["finance"], assigned_to="someone-else") is None
+
+
+def test_role_and_skill_agree_on_all_three_outcomes() -> None:
+    """resolve_role mirrors resolve_skill across the full three-way contract."""
+    for tags, assignee in (
+        (["finance"], "monedula"),
+        (["finance"], "operator"),
+        (["finance"], "not-on-roster"),
+        (["finance"], None),
+    ):
+        assert resolve_role(tags, assigned_to=assignee) == resolve_skill(
+            tags, assigned_to=assignee
+        )
+
+
+# ── unmapped tags must not suppress inference (ateles#702, defect b) ──────────
+
+
+def test_bookkeeping_tags_do_not_suppress_text_inference() -> None:
+    """Tags that route nowhere are the same state of knowledge as no tags.
+
+    Reproduced on this plan's own step-1 task: a well-formed task
+    (action_type=fix, confidence=0.9) carrying five bookkeeping tags blocked,
+    because `dispatch_task` only consulted the text when `tags` was EMPTY. Tags
+    a human wrote for their own filing are not a routing decision, so having
+    them was strictly worse than having none.
+
+    This asserts the routing table's half of the fix — that none of those tags
+    maps to a route, so inference is the only thing that can rescue the task.
+    `test_noowner_escalation` asserts the dispatcher half through dispatch_task.
+    """
+    stored = ["apis", "swarm", "gates", "observability", "ateles-682"]
+    assert resolve_skill(stored) is None, "a stored tag unexpectedly routes"
+    inferred = infer_tags_from_text("Make swarm dispatch gates observable")
+    assert resolve_skill(inferred) is not None, "inference cannot rescue the task"
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Add dispatch gate sequencing to workflow_definition",
+        "Route tasks by claim predicate instead of assigner",
+        "Make swarm dispatch gates observable",
+    ],
+)
+def test_swarm_mechanics_work_is_routable(title: str) -> None:
+    """Work ON the dispatcher must itself be dispatchable.
+
+    Added from measured misses: the first two inferred NO tags at all, so a
+    task about the routing table could not be routed by the routing table.
+    """
+    assert resolve_skill(infer_tags_from_text(title)) is not None, title
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Gate the release behind a manual approval",
+        "Claim expenses for the trip",
+        "Find the best route to the airport",
+    ],
+)
+def test_swarm_mechanics_pattern_does_not_overmatch(text: str) -> None:
+    """The new terms are qualified, not bare — ordinary English must not match.
+
+    "gate", "route" and "claim" alone are exactly the over-broad single words
+    this module's own docstring warns produce silent misroutes.
+    """
+    assert "agents" not in infer_tags_from_text(text), text

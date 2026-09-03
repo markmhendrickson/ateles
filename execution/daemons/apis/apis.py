@@ -306,6 +306,8 @@ GITHUB_WEBHOOK_SECRET = os.environ.get("APIS_GITHUB_WEBHOOK_SECRET", "")
 # Set APIS_DRY_RUN=1 to log intent without spawning.
 
 from routing import (  # noqa: E402
+    DOMAIN_ROUTES as _DOMAIN_ROUTES,
+    HUMAN_OWNED as _HUMAN_OWNED,
     canonical_assignee as _canonical_assignee,
     infer_tags_from_text as _infer_tags_from_text,
     resolve_role as _resolve_role,
@@ -475,10 +477,27 @@ async def dispatch_task(
         except (ValueError, TypeError):
             existing_tags = []
 
-    # Fall back to local inference if tags not set yet
-    if not existing_tags:
+    # Fall back to local inference when the tags we have cannot route.
+    #
+    # This used to run only when `existing_tags` was EMPTY, which made tags that
+    # are present but unmapped strictly worse than no tags at all: they
+    # suppressed inference entirely and the task went straight to BLOCKED. That
+    # is not hypothetical — a well-formed task carrying
+    # ['apis','swarm','gates','observability','ateles-682'] (action_type=fix,
+    # confidence=0.9) blocked on exactly this, because none of those five is a
+    # DOMAIN_ROUTES key. Tags a human or agent wrote for their own bookkeeping
+    # are not a routing decision; asking the text is what we already do when the
+    # field is blank, and an unroutable tag set is the same state of knowledge.
+    #
+    # Inference AUGMENTS rather than replaces: the stored tags are kept ahead of
+    # the inferred ones so an explicit routable tag always keeps precedence, and
+    # so the escalation reason still reports what the task actually carried.
+    if not any(tag in _DOMAIN_ROUTES for tag in existing_tags):
         body = snapshot.get("body", "") or snapshot.get("description", "")
-        existing_tags = _infer_tags_from_text(title, body)
+        inferred = _infer_tags_from_text(title, body)
+        existing_tags = existing_tags + [
+            tag for tag in inferred if tag not in existing_tags
+        ]
 
     # An explicit assigned_to (set by Sylvia/Turdus) wins over tag inference.
     # Canonicalize first: a stored value may carry capitalization, whitespace,
@@ -494,6 +513,36 @@ async def dispatch_task(
     # computed here for explicitness and to thread through to skill_runner so
     # agent_definition loading asks for "the role" rather than "the skill".
     role = _resolve_role(existing_tags, assigned_to=assigned_to)
+
+    # ── Human-owned: a routing ANSWER, not a routing failure ─────────────────
+    # Must come before EVERY truthy-skill path (activity, ROUTED, readiness,
+    # execution gate, spawn) and before the `skill is None` escalation, because
+    # it is neither: the task has an owner, that owner is a person. Parking it
+    # for the operator is the correct terminal state — spawning an agent onto
+    # work the operator deliberately reserved (merge approvals, auth-path
+    # changes) is the failure this closes. `gate_override` does NOT bypass this:
+    # operator approval of some earlier checkpoint is not consent to hand a
+    # human-owned task to an agent.
+    if skill == _HUMAN_OWNED:
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} is human-owned "
+            f"(assigned_to={assigned_to}) — parking for the operator, not spawning"
+        )
+        set_task_status(
+            entity_id, TaskStatus.AWAITING_INPUT, handler=DAEMON_NAME,
+            from_status=current_status,
+            reason=f"human-owned (assigned_to={assigned_to})",
+            key_suffix=trigger,
+        )
+        # Title + id + reason only. The body may carry auth or merge details,
+        # and this page is a notification channel, not a place to echo them.
+        notifier.send(
+            f"Human-owned task awaiting you: {title[:70]}\n"
+            f"  assigned_to={assigned_to} task={entity_id}",
+            priority=Priority.OPERATOR_DECISION,
+            handler=DAEMON_NAME,
+        )
+        return
 
     if skill is None:
         # ── Guard: never escalate "no owner" on a snapshot we never read ─────
