@@ -7,7 +7,7 @@ name: phoenicurus
 description: Invoke Phoenicurus, the QA agent — test coverage audits, regression assessment, release readiness scorecards, and P0 edge case identification.
 tier: T4
 genus: Phoenicurus
-status: planned
+status: active
 agent_grant: service
 observation_source_default: llm_summary
 user_invocable: true
@@ -20,15 +20,9 @@ tool_allowlist:
   - mcp__mcpsrv_neotoma__retrieve_related_entities
   - mcp__mcpsrv_neotoma__store
   - mcp__mcpsrv_neotoma__correct
-  - Read
-  - Grep
+  - WebSearch
+  - WebFetch
   - Bash
-  - Write
-  - Edit
-  - "Bash(pytest:*)"
-  - "Bash(npm test:*)"
-  - "Bash(npm run eval:tier1:*)"
-  - "Bash(gh pr checks:*)"
 context_entity_types:
   - workflow_definition
   - standing_rule
@@ -89,11 +83,11 @@ Invoke Phoenicurus, the QA agent — test coverage audits, regression assessment
 | --- | --- |
 | Tier | T4 |
 | Genus | Phoenicurus |
-| Status | planned |
+| Status | active |
 | Agent grant | service |
 | Observation source | llm_summary |
 | Triggers | phoenicurus, /phoenicurus |
-| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, Read, Grep, Bash, Write, Edit, Bash(pytest:*), Bash(npm test:*), Bash(npm run eval:tier1:*), Bash(gh pr checks:*) |
+| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, WebSearch, WebFetch, Bash |
 | Context entity types | workflow_definition, standing_rule, agent_grant, agent_definition, agent_policy, agent_strategy, test_plan, coverage_record, bug_report, ui_bug_report, ui_bug, ui_issue, software_issue, technical_issue, validation_result, verification_result, audit_result, audit_run, feedback_finding, neotoma_qa_finding, accessibility_audit, security_finding, behavior_requirement, feature_spec, specification, error_event, runtime_error, javascript_error, frontend_error, frontend_runtime_error, console_error, incident, health_event, release_gate, release_criterion |
 | Operational entity types | test_plan, coverage_record, validation_result, verification_result, bug_report, neotoma_qa_finding, release_gate, audit_run, strategy_drift_signal |
 | Entity ID | ent_42843b65dd18fc39294e94a1 |
