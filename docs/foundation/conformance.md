@@ -1,7 +1,8 @@
 # Conformance: how work binds to the foundation
 
-**Vision phase:** P1 (governed execution for one principal). **Kind:** consolidation, not design: this
-document describes the binding ateles#744 built. **Derived from:** plan `ent_533d4ec2f7bfb60f66fb3fce`
+**Keyed document:** read when `docs/foundation/` changes. **Kind:** foundation; describes the binding
+mechanism (built as ateles#744), which is evergreen by construction: it names documents and paths, never
+what a checkout implements. **Derived from:** plan `ent_533d4ec2f7bfb60f66fb3fce`
 decisions `binding_is_the_reviewer_reading_a_kernel_not_a_loading_order` and
 `ateles_binding_extends_three_existing_mechanisms`, synthesis `ent_b0ce322f768e4fc676b73139` (PR-29, C7),
 prior art `ent_08460968e6f49dac21510f4a` (OPA: decision decoupled from enforcement).
@@ -32,6 +33,13 @@ the PR is the review.
 `docs/architecture.md`, `docs/taxonomy.md`, and `docs/phases.md` are outside
 this scope: they are render targets of the architecture plan and are corrected
 through it.
+
+`docs/foundation/status.md` is in this directory and deliberately not in the
+reading list. It is the dated, perishable measurement of the gap between the
+foundation and a checkout; it is regenerated, never maintained, and no
+foundation document cites it. The parser reads only the tables below, so it is
+never inlined; a reviewer who needs to know whether a stated mechanism exists
+reads it by hand and checks its as-of date first.
 
 ## Always read
 
@@ -131,6 +139,7 @@ authoritative side; the others are mirrors or restatements that are wrong until 
 
 | Artifact class | Authoritative side | Mirror or restatement |
 |---|---|---|
+| Implementation state: what is built, what fails open, every count | `docs/foundation/status.md`, as of its date, regenerated from `origin/main` and the record | none; a foundation document that states implementation state is wrong |
 | A design invariant, the work model, the gate model, the failure posture, the authority model | this directory, repo-authored, PR-reviewed | plan `decisions` maps hold the event log of when each was decided; `CLAUDE.md`'s session-only section restates six of the principles for interactive sessions and says it does not bind dispatched agents |
 | An agent's behavioural rule | `agent_policy` entities in Neotoma | `.claude/skills/<name>/SKILL.md` and `docs/agents/*.md`, rendered by `render_agent_docs.py` |
 | The system's composition, roster, and roadmap | plan `ent_99ace4dd6673aa36ed08b1fe` fields | `docs/architecture.md`, `docs/taxonomy.md`, `docs/phases.md`, rendered by `render_plan_docs.py` |
@@ -147,12 +156,28 @@ consolidates (plan entity id and decision key), so the event log and the
 reviewed statement stay traceable to each other. That PR is reviewed like any
 other; the keyed entry above ensures this document is read when it is.
 
-## Vision phase
+## Phases and implementation state
 
-Each foundation document carries in its header the vision phase it belongs to
-(P1 governed execution for one principal, P2 multi-operator identity and
-ownership, P3 delegation and approval, P4 distributed authority, P5
-organizational operating system). Implementation items cite the vision-phase
-document they implement; an item with no citable document is either P1, in
-which case it cites the foundation, or premature, in which case it is marked
-with its phase and waits.
+The foundation is phase-agnostic. Each document defines its part of the design
+whole, marks a decision the operator has not taken as **open** with its options,
+and says nothing about which parts a checkout implements. The README's vision
+phases (P1 governed execution for one principal, P2 multi-operator identity and
+ownership, P3 delegation and approval, P4 distributed authority and initiative,
+P5 organizational operating system) are a roadmap over that one design, and
+`status.md` records, as of its date, which sections of which documents are built,
+which are designed and unbuilt, and which are open. Implementation phases
+(`docs/phases.md`, Phase 0 to 9) are the other axis and are never merged with
+the roadmap: an implementation item cites the foundation document and section it
+implements, not a vision phase.
+
+An implementation item whose section is marked open in the foundation is
+premature: it waits on the decision, marked with the roadmap phase that decision
+belongs to, and stays open. An item with no citable section is either covered by
+the design as written, in which case it cites the foundation, or conforms to
+nothing (above).
+
+Two rules keep the split: a foundation document never carries "today", "on main",
+a commit hash, a count, or an open-issue reference as evidence a defect is live;
+and an issue or PR is cited in a foundation document only as the record of a
+decision (a merged PR, an operator-authored issue), never as state. A PR that
+adds either to a foundation document is blocked on this section.

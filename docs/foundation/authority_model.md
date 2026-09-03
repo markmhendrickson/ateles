@@ -1,149 +1,159 @@
-# Authority model: the tuple as implemented, where it fails open, and a verdict on "extension, not rewrite"
+# Authority model: who may act, on what, under which conditions
 
-**Vision phase:** P1 (governed execution for one principal). **Kind:** consolidation with a verdict, not
-design. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-20 to PR-28, section 4 the
-single-principal inventory, C8, C9, C13, C14, C17, C19), prior art `ent_08460968e6f49dac21510f4a` (Track 2),
-the README's Vision section, ateles#560, #561, #669, #487, #423, #471, #378. Code read on `origin/main` at
-`496bab3`, 2026-09-02. `docs/aauth.md` is an input, not a source: #471 records it must be rewritten against
-verified state.
+**Keyed document:** read when the loader, grant checker, signer, approval, notify, checkpoint, grant proxy,
+or A2A paths change (`conformance.md`). **Kind:** foundation; defines the model whole and marks each
+undecided question **open** with its options, never resolving one to make the document complete.
+**Derived from:** the README's Vision section (the tuple, the object set), ateles#378 (the operator-authored
+section as decision; the swarm-spec section as proposal), synthesis `ent_b0ce322f768e4fc676b73139` (PR-20
+to PR-28, PR-34 to PR-38, C8, C9, C10, C13, C14, C17), prior art `ent_08460968e6f49dac21510f4a` (Track 2),
+the P4 brief `ent_683200acfb3ff5f03add966c`, and `docs/multi_tenant.md`. What is built, and where the
+substrate fails open, is `status.md`.
 
 ## Purpose
 
-State the authority tuple `principal + domain + scope + action + conditions + time` as the code implements
-it, the paths where it fails open, the single-principal inventory as measured, and a verdict per extension
-point on the README's claim that multi-operator is an extension of the entity model, not a rewrite. This is
-the baseline the P2 and P3 documents (phase 2.1) extend from.
+Define authority whole: the tuple, what a principal is, how capability is granted, how it is delegated,
+how an action is approved, and the structural checks and initiative objects above them. One design, so the
+roadmap in `status.md` is a roadmap over it rather than a partition of it.
 
 ## Scope
 
-`lib/daemon_runtime/grant_checker.py`, `agent_loader.py`, `aauth_signer.py`, `gating.py`,
-`execution/mcp/mcp_tool_grant_proxy/proxy.py`, `execution/daemons/apis/a2a_gateway.py` and `a2a_executor.py`,
-`lib/approval/`, `lib/notify/`, and the entities `agent_grant` (29), `execution_policy` (13), `agent_policy`
-(25), `checkpoint_brief` (288), `operator_profile` (1). P2+ design is out of scope; its open decisions are
-named, not answered.
+Every policy decision point and enforcement point, and the entities `agent_grant`, `execution_policy`,
+`agent_policy`, `checkpoint_brief`, the principal entity, and the edges below. The execution gate's decision
+function is `gates_and_workflows.md`; the posture for an unreachable policy source is `failure_posture.md`.
 
-## The tuple as implemented
+## The tuple
 
-| Term | Implemented as | Where |
+Authority is `principal + domain + scope + action + conditions + time`.
+
+| Term | Meaning | Carried by |
 |---|---|---|
-| principal | the AAuth `(sub, iss)` pair for agents, realm literal `@ateles-swarm`; plus one operator as a GitHub login (`_OPERATOR_LOGIN`, env with a literal default), one email (`OPERATOR_EMAIL`), one chat id (`TELEGRAM_CHAT_ID`), and the magic value `agent_grant == "operator"` | `swarm_dispatch.py:275`, `github_gateway.py:63`, `email_channel.py:62-64`, `notifier.py:116-118`, `agent_loader.py:235-236` |
-| domain, scope | `agent_grant.capabilities` (op × entity types × repos, per-tool `param_constraints`), matched on `sub` and `iss`; 20 of 29 auto-derived 2026-06-17; two human-device grants are full wildcards; `execution_policy.permission_scope` | `grant_checker.py`, `proxy.py` |
-| action | `action_type`, resolved to `LOW`, `HIGH`, or `NEVER` | `gating.py` `blast_radius_for()` |
-| conditions | `confidence_threshold`, `auto_execute_after_n_successful_recurrences`, per-boundary checkpoints, `operator_only` | `gating.py` `evaluate_gate()` |
-| time | **not implemented.** No `expir`, `valid_until`, `expires_at`, or `ttl` token in `grant_checker.py`, `agent_loader.py`, or `gating.py`. The lease on a claimed task is the only time-bounded authority, and it is not on main either (`work_model.md`) | |
+| principal | the actor the authority belongs to (below) | the principal entity; an agent's `principal_binding` |
+| domain | the region the authority covers: entity types, repositories, a workflow, a queue | `agent_grant.capabilities`; `ownership_grant` |
+| scope | the operations within the domain, with per-tool parameter constraints | `agent_grant.capabilities`, `param_constraints`; `execution_policy.permission_scope` |
+| action | the declared `action_type`, resolved to a blast tier | `gating` (`gates_and_workflows.md`) |
+| conditions | confidence threshold, recurrence graduation, per-boundary checkpoints, `operator_only` | `execution_policy` |
+| time | an expiry on every grant and delegation, evaluated at check time; the lease is the same term on work | `agent_grant.expires_at`; `delegation_edge.expires_at` |
 
-The shape is ABAC (XACML; Cedar). `gating.py` and `grant_checker.py` are the policy decision point; their
-call sites are enforcement points. `time` has a minimal form in OpenFGA's `current_time < grant_time +
-grant_duration` evaluated at check time: an expiry on `agent_grant` read by the checker, no engine required.
+The shape is ABAC (XACML; Cedar). The gate and the grant checker are the policy decision points; their call
+sites are enforcement points. Every decision is `Permit`, `Deny`, or `Indeterminate`, and an enforcement
+point treats `Indeterminate` (unreachable policy source, no policy found, timed-out load) as `Deny`
+(`failure_posture.md`, principles 5 and 7). Zero grants is deny; a grant that declares no such tool is deny
+for that tool; a policy check that raises is deny. `time` needs no engine: `now < granted_at + duration`
+read by the checker (OpenFGA's form).
 
-## Where it fails open
+## Principals
 
-Each is an enforcement point mapping an `Indeterminate` decision (unreachable policy source, no policy
-found, timed-out load) to `Permit`. Under `failure_posture.md` and principles 5 and 7 each is wrong; the fix
-in every case is default-deny with a distinct `unknown`.
+A principal is any actor authority is attributed to: a human (an operator) or an agent. A principal is an
+entity in the record, so an ownership or delegation edge has somewhere to point (prior art: ReBAC as a data
+model, not Zanzibar as a system). A credential (the store's `user_id`, an AAuth `sub`, a GitHub login, an
+email address, a chat id) is a binding to a principal, many-to-one, never the principal itself; a login
+string, an address, or a magic value compared as `"operator"` is a credential standing in for a principal.
+An agent carries a `principal_binding`: the principal it acts as; it is recorded as itself for attribution.
 
-1. **ateles#560, open, live on main.** `grant_checker.py:171` `return True  # no grants recorded =
-   permissive`; lines 110 to 124 make unreachable Neotoma a permissive fallback; `check_tool()` allows when
-   no grant declares any tool. The docstring calls this "advisory in Phase 5". An agent with no grant is
-   indistinguishable from one with full permission.
-2. **ateles#561, open, live on main.** Delegation does not attenuate: the delegate runs on its own full
-   standing grant, not a subset of the dispatcher's; `authorize_caller()` gates whether a caller may
-   delegate, never what. `agent_grant` has no `scope`, `expiry`, or `delegated_by`. The chain exists only as
-   prose: `a2a_executor.py:190` appends `— delegated via A2A by: <caller>` to the task description.
-3. **ateles#669, open; fixed at the loader, not at the caller.** The synthesis reports #669 fixed at
-   `496bab3`; on inspection, half true. `agent_loader.py` `_stub()` now marks a failed load `is_stub=True`,
-   logs at ERROR, sets status `UNDEFINED_STATUS`, and still returns `tool_allowlist="*"`; its docstring says
-   callers must check `is_stub`. No dispatch caller does: `skill_runner.py:164` caches `AgentLoader(role).load()`
-   per process with no `is_stub` branch, and nothing under `execution/daemons/apis/` or `lib/daemon_runtime/`
-   reads `AgentDefinition.is_stub` (the nine `is_stub` reads on main are all `signer.is_stub`). A timed-out
-   load still dispatches an agent with no instructions and wildcard tools, cached for the process lifetime.
-4. **`a2a_gateway.authorize_caller()`, no issue.** Returns `(True, "grant_check_unavailable_advisory")` when
-   the grant checker raises.
-5. **`mcp_tool_grant_proxy/proxy.py:108-110`, no issue; beyond the task's list.** With no `ATELES_AGENT_SUB`,
-   every tool call passes through. The proxy is otherwise the nearest thing to a real enforcement point
-   (`GrantEnforcer(agent_sub, server_name)` gates every call), which is why its identity-absent branch matters.
+**Open, the one identity decision (C9): which entity type is the human principal.** Two candidates:
+`operator_profile` (exists; named by the agent policies; kept by `multi_tenant.md`) and the `operator`
+entity #378 proposes (`operator_id`, `principal_id`); with it, the mapping from that entity to `user_id`
+and to the AAuth `sub`. Not open: `user_id` is the store's authenticated credential and collapses every
+writer onto one value on a shared instance, and the AAuth `sub` is an agent's credential; neither is a
+human principal. Left open because picking here would hand the identity design two models, and
+`multi_tenant.md` section 7's decisions 1 and 2 (slug or UUID; tenant derived from the `sub` or matched on
+the grant) are the operator's. Every other statement in this document is written against "the principal
+entity" and holds under either answer.
 
-## The single principal, measured
+**Tenant.** The isolation boundary; `tenant_id` and `user_id` are separate fields; default-deny tenant
+scoping at the access layer; per-tenant AAuth namespacing; no cross-tenant read, write, routing, or key
+reuse (`multi_tenant.md` sections 2 and 3). Open: section 7's five decisions.
 
-Sweep of `lib/`, `execution/daemons/`, `execution/mcp/`, `.claude/hooks/`, and daemon-imported
-`execution/scripts/` modules at `496bab3` (synthesis section 4, file and line per site): **138 sites; 60
-hardcoded literals or magic values; 63 single-valued parameters (an env or config read once for the whole
-swarm); 15 per-principal (resolved from an entity per call). All 15 key on an agent identity. None keys on a
-human.** `operator_profile`, which the agent policies say holds operator identity, has one instance and zero
-runtime readers under `lib/` and `execution/daemons/`; 26 of 40 prompts mention it, 3 of 40 declare it.
+**Ownership.** Named accountability for a workflow, domain, queue, or configuration entity, as an edge from
+the object to a principal (`ownership_grant`), never over a routing keyword. Open (brief Q7): what owning
+confers, sole decision below the domain's blast tier, a required seat above it and on cross-domain
+actions, or both.
 
-Three chokepoints answer most of the 123 human-assuming sites at once: `notifier.py:116-118` (who to
-notify); `email_channel.py:62-64` with `swarm_dispatch.py:4781/4981` (who may approve, by email and GitHub);
-`gating.py:573` with `server.py:509/555` (a checkpoint has no owner, so the queue cannot be scoped and
-resolution cannot be authorized). ateles#487 and #423 are two of these sites filed as bugs.
+## Grants
 
-## The extension points, and the verdict per point
+An `agent_grant` is matched on the credential (`sub`, `iss`) and lists capabilities as operation × entity
+types × repositories with parameter constraints; a human's grant is bound to a principal and a tenant, never
+a wildcard. The per-agent pattern is the template a principal dimension extends: a loader keyed on the
+agent name, a grant checker and a tool proxy keyed on the `sub`, a per-agent keypair threaded into signed
+writes, a per-agent policy override, per-agent GitHub logins, a workflow resolved per project. A failed
+agent-definition load is a stub: the loader marks it, and no caller dispatches one (principle 5); a stub
+with a wildcard tool allowlist is the fail-open shape.
 
-The README asserts agents carry verified identities, capability is entity-scoped, high-blast actions
-checkpoint to a principal, and every action is attributed and replayable, so multi-operator is an extension
-of the entity model. Four extension points carry the claim, each judged against the inventory's per-site
-classification.
+## Attribution
 
-| Extension point | Holds today? | Evidence |
-|---|---|---|
-| A second `operator_profile` | **No.** Adding the entity changes nothing: zero runtime readers. | inventory |
-| Agent-to-principal binding per principal | **No.** `agent_grant` keys on the agent's `sub` with no principal or tenant dimension; the human grants are wildcards; the operator is the string `"operator"`. A second human today is another wildcard grant. | PR-22, C9 |
-| Ownership edges | **No.** No principal entity exists to draw an edge to; the principal is a login string, an email, and a chat id. | C9, C10 |
-| Delegation edges that attenuate | **No.** #561; no `scope`, `expiry`, `delegated_by`; the chain is prose. | C14 |
+Every write carries the agent that made it (a per-agent signature) and the principal it acted for; a shared
+bearer that never identifies its caller is not attribution. Input attribution (what was read, at which
+version, from how trusted a source) is part of the record. Output attribution is the precondition for
+credit (below); a credit model on attribution that does not hold credits the wrong principal.
 
-**Verdict.** True of the entity model, false of the substrate. The per-agent pattern is a real template:
-`AgentLoader(name)`, `GrantChecker(aauth_sub)`, `GrantEnforcer(agent_sub)`, per-agent keypairs with the `sub`
-threaded into signed writes, `resolve_policy_for_agent()`, per-agent GitHub logins, and Anthus resolving
-`workflow_definition` per project are the 15 sites where identity is a parameter, and a principal dimension
-extends each. But 123 of 138 sites resolve "the operator" without asking, concentrated in the notify,
-approve, and checkpoint paths P3 is about; each README property exists per agent and stops at the human
-boundary (identity at the swarm realm and one bearer; capability at agent grants with no principal;
-checkpoints at one unowned queue; attribution at `sender_kind="operator"`). Measured answer: extension of the
-model, rewrite of the notify/approve/checkpoint substrate, with three chokepoints that convert most of it at
-once. The first P2 change is a principal that is an entity, so an edge has somewhere to point (prior art:
-ReBAC as a data model, not Zanzibar as a system).
+## Delegation
 
-## Contradictions this document touches
+A delegation is a scoped, time-bounded transfer of action rights, recorded as an edge (`delegation_edge`:
+delegator, delegate, scope, expiry) so the chain is readable. Each hop attenuates: the delegate's authority
+is a subset of the delegator's, restrictions only added (macaroons), enforced by reading the chain in the
+record while the record is single and central. Delegation is not impersonation: A acting for B is recorded
+as A-for-B (RFC 8693), never as B. A delegate running on its own full standing grant is the failure this
+section forbids. The `authority_chain` is a derived read model over delegation edges, grants, and
+checkpoints, tenant-filtered per hop, never stored. The acceptance test for any design here is the
+hardest-problem chain: A delegates to X, X dispatches Y, Y's action needs B's approval, using C's state
+under D's policy, and every hop is reconstructible.
 
-**C9, what identifies the principal: open, deliberately.** Four candidate keys, no mapping:
-`operator_profile` (one entity, zero runtime readers); Neotoma's `user_id` (the store's authenticated
-principal, which collapses every writer onto one value on a shared instance, so it does not identify the
-human there); the AAuth `sub` (agents only; issuer default a personal domain at `skill_runner.py:1283`); and
-#378's proposed `operator` entity with `operator_id` and `principal_id`. `multi_tenant.md` keeps
-`operator_profile`; #378 introduces `operator`. This document does not pick: picking silently would hand P2
-two identity models. The choice is an operator decision for `principals_and_ownership.md` (phase 2.1), stated
-with the mapping to `user_id` and the AAuth `sub`. Canonical today is none of the four; the de facto principal
-is the login string, the email, and the chat id.
+## Approval
 
-**C8, "every action is attributed to a verified agent identity": unverified.** The AAuth signing audit
-(`ent_eaa198482b7bbe4c965eeed0`, 2026-08-06) found daemons loaded signers but attributed writes to the
-operator bearer; the fallback strings are still at `aauth_signer.py:163-165` and six daemon sites, and the
-ateles MCP server holds one bearer and never identifies its caller (`server.py:64, 99`). Not re-tested on
-2026-09-02. Open: the README's sentence is not restated until a write is traced to a per-agent signature.
+An approval is an explicit yes, no, or veto by a required principal on a `checkpoint_brief`, ending in a
+terminal state; a timeout is a terminal state that never continues. The checkpoint records whom it awaits
+and who resolved it; resolution is authorized against the required approvers, not accepted from whoever
+writes the status; the queue is scoped to the principals whose decision it awaits; a decline is
+attributed. Notification routes to a principal or a role through the roster and channel configuration
+within the tenant, never to one address for the whole swarm. No cross-principal auto-approve. Silence never
+accepts.
 
-**C14 and C17.** Resolved above and in `failure_posture.md`.
+Open: whether the raiser of a checkpoint may resolve it (the minimal separation of duties; prior art and
+brief Q2 and Q3 recommend forbidding it, and it applies at one operator between an agent and its human).
+Open (C13): which entities carry the routing table, `swarm_roster` with `channel_config`
+(`multi_tenant.md`) or `operator` with `team` (#378).
 
-**C13, per-human routing.** `multi_tenant.md` section 4 routes through `swarm_roster` and `channel_config`;
-#378 puts `approving_principal_id` on `checkpoint_brief` and defines `operator` and `team`. Neither is what
-the code does, and they name different entities for one routing table. Open for phase 2.1; the three
-chokepoints are where it lands.
+## Structural checks: quorum and separation of duties
 
-**C19, #378's gate map says implement while the plan says design.** #378 shows pm, ux, and arch signed off
-with a build checklist for seven new and five delta schemas; plan `ent_533d4ec2f7bfb60f66fb3fce` records no
-P2 design exists and phase 2.1 is blocked on the operator's `multi_tenant.md` section 7 decisions and the
-proving-ground pick. One must yield before a schema PR opens. Open; recorded for #378's owner.
+Rights scope what a principal may do; structural checks make an outcome depend on more than one interest,
+and both are required (README). Decided: the design is multi-principal in earnest, with real separation of
+duties, real quorum, and real attenuating delegation, and without enterprise-scale machinery (policy
+administration consoles, role mining, certification campaigns, hierarchy-shaped approval routing); the risk
+is scale, not applicability (`prior_art_for_p2_plus_is_governance_and_authorization`). Open, each with the
+brief's options: **Q1** the counting rule (an agent counts as its bound principal for quorum and separation
+of duties, or as itself, or as itself for attribution only); **Q2** whether structural checks are count and
+disjointness over the one approval object above or a second mechanism; **Q3** which checks at a dozen
+principals, and the threshold's home (Safe's shape: on the governed object).
+
+## Initiative, proposal, reprioritization
+
+Decided (README; #378 operator section): initiative, proposal, approval, ownership, and reprioritization
+are first-class objects; proposal rights are distinct from execution rights; accepting an initiative
+records an explicit "what stops?" confirmed by a principal; contribution attribution and credit are in
+scope; approval is risk-tiered, and a sandbox tier carries the rights to investigate and experiment without
+a per-act yes. Order of first moves: the entity-model delta, then the initiative, proposal, and
+reprioritization types with the tiered flow, then one bounded two-principal proving ground. Open (brief):
+**Q4** one approval object or two; **Q5** the unit that stops, who confirms it, who may propose; **Q6**
+budget as a scope term that attenuates or as a blast tier, and over which resources; **Q8** credit as a
+stored object or a read model.
+
+## Contradictions this document settles
+
+**C9**: open, deliberately, above. **C14** and **C17**: delegation attenuates; `Indeterminate` is deny.
+**C8**: attribution is per agent by design; whether a write is traced to a per-agent signature is
+`status.md`. **C13**: open, above. **C19** (#378's gate map says implement while the plan says design) is
+a state of two records, not a design question: `status.md`.
 
 ## Prior art
 
-XACML's four decisions name the failure class: every fail-open path treats `Indeterminate` as `Permit`;
-Cedar's rule (zero permits is deny; forbid wins) is the fix at the enforcement point. Attenuation by
-construction (macaroons: a subset at every hop, restrictions only added) is the invariant #561 lacks,
-enforced by reading the chain in the record rather than by cryptography while the record is single and
-central. RFC 8693's nested `act` claim is the shape of `authority_chain`. Separation of duties survives at a
-dozen principals only if an operator and the agents they built count as one principal (Clark-Wilson), a P3
-and P4 rule stated so the P1 seed (`gates_and_workflows.md`) is not built against a different one. Sources: `ent_08460968e6f49dac21510f4a`.
+XACML's four decisions name the failure class an enforcement point must not have: `Indeterminate` treated
+as `Permit`. Cedar's rule (zero permits is deny; forbid wins) is the fix. Attenuation by construction
+(macaroons) is the invariant delegation carries. RFC 8693's nested `act` claim is the shape of
+`authority_chain`. Clark-Wilson's caveat, that separation of duties fails under collusion, is why an
+operator and the agents they built may count as one interest (Q1). GitHub's prevent-self-review and NIST
+dynamic separation of duty are the smallest structural check. Sources: `ent_08460968e6f49dac21510f4a`.
 
 ## Beyond the sources
 
-The verdict per extension point, the fifth fail-open path, and the correction on #669 are this document's;
-the inventory, counts, and chokepoints are the synthesis's.
+The phase-agnostic statement of the tuple and the "open" markers are this document's; every open question
+is the brief's, with its options as the brief states them.

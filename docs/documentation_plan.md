@@ -62,7 +62,7 @@ deep reference consulted occasionally. "Status" = does an adequate doc exist tod
 | --- | --- | --- | --- |
 | 14 | **Gates and workflows** (`foundation/gates_and_workflows.md`) | `workflow_definition` / `participation_record` / `gate_status`; one gate-set constant; the execution gate. Supersedes `swarm_orchestration.md` and `swarm_hitl_checkpoints_design.md` (archived 2026-09-02) | ✅ foundation |
 | 15 | **Agent execution** (`agent_execution_runbook.md`, `foundation/work_model.md`) | How a dispatch runs end-to-end; the pull work model. `task_execution_loop.md` described the retired push model (archived 2026-09-02) | ✅ exists |
-| 16 | **HITL & gating** (`foundation/gates_and_workflows.md`, `foundation/authority_model.md`) | Blast tiers, checkpoint_brief approval, who may resolve | ✅ foundation |
+| 16 | **HITL & gating** (`foundation/gates_and_workflows.md`, `foundation/authority_model.md`) | Blast tiers, checkpoint_brief approval, who may resolve; what is built as of a date is `foundation/status.md` | ✅ foundation |
 | 17 | **GitHub interaction** (`pr_review_routing.md`, `swarm-trigger-layer.md`, `swarm_github_interaction_design.md`) | Issue/PR triage, PR-review routing, webhook→Apis | ✅ exists |
 | 18 | **A2A gateway** (`a2a.md`) | Inbound agent-to-agent task receiver | ✅ exists |
 | 19 | **Session integrity** (`session_integrity.md`) | Plan-link / turn-storage / artifact-linkage invariant + hooks | ✅ exists |
@@ -101,7 +101,7 @@ docs from this sediment.
 Architecture/operating docs that match the audited reality:
 
 `architecture.md`, `taxonomy.md`, `phases.md`, `data_types.md`, `neotoma_vs_alternatives.md`,
-`foundation/*` (the seven P1 documents), `swarm_smoke_test_plan.md`, `smoke_test_runbook.md`,
+`foundation/*` (the seven foundation documents, plus `foundation/status.md`, the dated implementation-gap measurement), `swarm_smoke_test_plan.md`, `smoke_test_runbook.md`,
 `agent_execution_runbook.md`, `agent_execution_architecture.md`, `a2a.md`, `pr_review_routing.md`,
 `swarm-trigger-layer.md`, `swarm_github_interaction_design.md`,
 `swarm_qa_evals_design.md`, `swarm_qa_evals_qe3_design.md`, `durable_execution_substrate.md`, `aauth.md`,

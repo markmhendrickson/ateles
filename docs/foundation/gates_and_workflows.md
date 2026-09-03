@@ -1,135 +1,123 @@
 # Gates and workflows: declaration, instance, projection, and the gate that decides
 
-**Vision phase:** P1 (governed execution for one principal). **Kind:** consolidation, not design.
-**Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-04 to PR-08, PR-20, PR-21, C3 to C6, C11),
-prior art `ent_08460968e6f49dac21510f4a`, gate-state plan `ent_4222e5d52edd9bdba7b78cc1` (decisions cited
-inline), architecture plan `ent_99ace4dd6673aa36ed08b1fe` decisions
-`operator_only_is_never_auto_executable_not_merely_high_blast`, `unclassified_action_type_fails_closed_and_loudly`,
-`gate_advisory_and_enforcing_paths_must_agree`, throughput plan `ent_18b902cf72822373f9da8ced` decision
-`gate_machinery_is_already_pr_independent`. Code read on `origin/main` at `496bab3`, 2026-09-02. Supersedes
-`swarm_orchestration.md` and `swarm_hitl_checkpoints_design.md` (archived).
+**Kernel document:** read on every review (`conformance.md`). **Kind:** foundation; states the design and
+never the state of a checkout. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-04 to PR-08,
+PR-20, PR-21, C3 to C6, C11), prior art `ent_08460968e6f49dac21510f4a`, gate-state plan
+`ent_4222e5d52edd9bdba7b78cc1` (decisions cited inline), architecture plan `ent_99ace4dd6673aa36ed08b1fe`
+decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
+`unclassified_action_type_fails_closed_and_loudly`, `gate_advisory_and_enforcing_paths_must_agree`,
+`gating_vocabulary_order_is_load_bearing`, throughput plan `ent_18b902cf72822373f9da8ced` decision
+`gate_machinery_is_already_pr_independent`. Supersedes `docs/archive/swarm_orchestration.md` and
+`docs/archive/swarm_hitl_checkpoints_design.md`. What is built is `status.md`.
 
 ## Purpose
 
 State the gate model: which entity declares a workflow, which is its instance, which field is the read-path
 projection; that the gate set is defined once; that the execution gate is independent of GitHub and decides
-on three blast tiers; and what is true today about the approval substrate where stored policy and running
-configuration disagree.
+on confidence and three blast tiers; and how an approval object is shaped.
 
 ## Scope
 
-`lib/daemon_runtime/gating.py` (enforcing), `execution/mcp/ateles/server.py` (advisory), the engines in
-`swarm_dispatch.py` and `execution/daemons/anthus/`, and the entities `workflow_definition`,
-`participation_record`, `checkpoint_brief`, `execution_policy`. Who may resolve a checkpoint is
-`authority_model.md`.
+The workflow engines, the execution gate, and the entities `workflow_definition`, `participation_record`,
+`checkpoint_brief`, and `execution_policy`. Who may resolve a checkpoint, and how an approval is attributed,
+is `authority_model.md`; what happens when a workflow cannot be read is `failure_posture.md`.
 
 ## The invariants
 
 ### Declaration, instance, projection
 
-`workflow_definition` declares: one entity per (project, workflow type), 8 on prod, each an ordered gate
-list with `phase`, `gate_name`, `owner_agent`, `parallel_group`, `join_gate`, `required`, plus `fast_paths`.
-`participation_record` is the instance: one per (work entity, gate), with status, timestamps, agent, artifact
-refs, and the pinned `agent_definition` version. `gate_status` on the issue is a projection for the hot path:
-`_gates_green()` must fail closed in one entity read. End state: `gate_status` is a projection of
-`participation_record` with a reconciler proving they agree; neither is deleted, neither is a second source
-of truth (`gate_status_map_should_remain`). No transition event type; history is the record's observations
-(`no_gate_transition_event_type`). The name `workflow_definition` stays; `participation_record` is the weaker
-name (`keep_the_name_workflow_definition`).
-
-**On main:** the two engines are mutually blind (`real_defect_is_two_blind_engines`): Apis sequences from a
-code literal and writes `gate_status`; Anthus sequences from the entities and writes `participation_record`;
-neither reads the other. Zero records reach `satisfied`, because the terminal writes never supplied the
-schema's required `agent` and the writer swallowed the rejection (ateles#736, open); history through
-observations is trustworthy only from that fix forward, and the stranded rows were not backfilled.
+`workflow_definition` declares: one entity per (project, workflow type), an ordered gate list with `phase`,
+`gate_name`, `owner_agent`, `parallel_group`, `join_gate`, `required`, plus `fast_paths`. Gate names are
+data: a workflow may declare gates beyond the review sequence (a draft gate, a deterministic lint, an
+operator preview). `participation_record` is the instance: one per (work entity, gate), with status,
+timestamps, agent, artifact refs, and the pinned `agent_definition` version; a terminal write supplies every
+field the schema requires, and a rejected write is an error, never swallowed. `gate_status` on the issue is
+a projection for the hot path: `_gates_green()` must fail closed in one entity read. `gate_status` is a
+projection of `participation_record` with a reconciler proving they agree; neither is deleted, neither is a
+second source of truth (`gate_status_map_should_remain`). No transition event type; history is the record's
+observations (`no_gate_transition_event_type`). The name `workflow_definition` stays; `participation_record`
+is the weaker name (`keep_the_name_workflow_definition`). One engine sequences gates from the entities and
+writes the instance; a second engine that sequences from a code literal and cannot see the first is the
+defect the model exists to remove (`real_defect_is_two_blind_engines`).
 
 ### One gate set, defined once, tested for parity
 
-Four copies at `496bab3`, two wrong: `swarm_dispatch.py:271` `PRE_IMPL_GATES = ("pm", "ux", "arch")`, the
-executor; `lib/issue_labels.py:100` `PRE_IMPL_GATE_NAMES = ("pm", "arch")` under a comment claiming it
-mirrors the former, so `blocked/gates` can read clear while `ux` is pending (the ateles#285 class, recurred);
-`server.py:609` `_GATE_ORDER` omitting `qa`, `legal`, `release`; and the 8 `workflow_definition` entities,
-advisory only, of which `ateles|bug` and `ateles|security` declare `pm` alone before `impl`. Consolidating to
-one constant with a parity test is step zero (`four_divergent_copies_of_the_gate_set`,
-`migration_is_incremental_no_flag_day`). A data-sourced list may add gates and never remove one, as a
-correctness rule, not an availability fallback (C5). ateles#719 (drive sequences from the entities) is open.
+The gate sequence has one home. Where a copy is unavoidable (a module that must not import the executor), it
+is derived at import time or held equal by a parity test; a comment claiming it mirrors another constant is
+not parity (principle 9). A data-sourced list may add gates and never remove one, as a correctness rule,
+not an availability fallback (C5). Migration is incremental, never a flag day
+(`migration_is_incremental_no_flag_day`).
 
-### The gate is PR-independent
+### The execution gate is PR-independent
 
 `evaluate_gate()` takes confidence, `action_type`, policy, and successful recurrences; no PR, issue, or
-repository. `write_checkpoint_brief()` keys on `task_entity_id`. The default policy
-(`ent_dfce6edecefe3eb7fc9e0337`) lists `send_external_comms` and `publish` as high blast; Apis maps Corvus
-and Struthio to them, subscribes to `checkpoint_brief` on SSE, and re-dispatches on resolution; the operator
-answers over Telegram. The consent gate for outbound non-code work exists and closes off GitHub; do not
-build a second one (principle 6). What is PR-shaped is only the review machinery in `swarm_dispatch.py`
-(issue `gate_status`, review verdicts, Vanellus merges), a separate mechanism layered on GitHub.
+repository. `write_checkpoint_brief()` keys on the task. The consent gate for outbound non-code work is this
+gate: a policy lists `send_external_comms` and `publish` as high blast, the dispatcher maps the content
+agents to them, subscribes to `checkpoint_brief`, and re-dispatches on resolution. Do not build a second
+consent gate (principle 6). What is PR-shaped is only the review machinery (issue `gate_status`, review
+verdicts, the steward's merge), a separate mechanism layered on GitHub.
 
-### Three blast tiers; `operator_only` is `NEVER`; unclassified fails closed and loudly
+### Confidence and three blast tiers; `operator_only` is `NEVER`; unclassified fails closed and loudly
 
-`blast_radius_for()` on main (ateles#724, merged): `NEVER_AUTO_EXECUTE_ACTION_TYPES = {"operator_only"}` wins
+The order is load-bearing (`gating_vocabulary_order_is_load_bearing`): `action_type` is declared when the
+task is created, from what the task does, never inferred from which agent would handle it; blast radius is
+resolved from `action_type` under the `execution_policy`; confidence is scored by the proposing agent. The
+gate decides on confidence and blast together. `NEVER_AUTO_EXECUTE_ACTION_TYPES = {"operator_only"}` wins
 ahead of both policy sets, so a policy cannot demote it; a declared action type in neither set logs a
-warning naming the value and resolves to `NEVER`, never to `blast_radius_default`; an absent action type
-keeps the policy default, since "nothing declared" stays distinct from "declared and unclassified". `NEVER`
-is a third tier: `HIGH` still auto-executes once a recurring series clears its count; `NEVER` short-circuits
-ahead of the confidence axis and the recurrence path. The advisory path (`_route_task`) and the enforcing
-path resolve identically, and a test asserts the duplicated never-set stays identical across the two
-modules. `_FALLBACK_LOW_BLAST` exists because the fallback policy carried an empty low set; under
-`failure_posture.md` an unreachable policy source is a halt, so that fallback is transitional.
+warning naming the value and resolves to `NEVER`, never to the policy default; an absent action type keeps
+the policy default, since "nothing declared" stays distinct from "declared and unclassified". `NEVER` is a
+third tier: `HIGH` still auto-executes once a recurring series clears its count; `NEVER` short-circuits
+ahead of the confidence axis and the recurrence path. The advisory path (`route_task`) and the enforcing
+path resolve identically, and a test holds the duplicated never-set equal across the two modules. A
+fallback policy with an empty low-blast set is transitional: under `failure_posture.md` an unreachable
+policy source is a halt, not a fallback.
 
-### An unreadable workflow is `unknown`, and `unknown` holds
+### An unreadable `workflow_definition` is `unknown`, and `unknown` holds
 
 Never proceed on an empty sequence. An unreadable `workflow_definition` is a distinct state: dispatch held,
-one aggregated escalation, never an exception swallowed into an empty tuple. Precedents on main: `_required_ci_state`
-returns `"unknown"`; `_gates_green()` fails closed on an unreadable issue.
+one aggregated escalation, never an exception swallowed into an empty tuple. The same holds for an
+unreadable issue and an unreadable CI state (principle 7).
 
 ### Non-code deliverables pass through the same gate
 
-A post, an outreach mail, a release, or a payment reaches approval through `action_type` and blast radius on
-the task path, as code does. What non-code agents lack is delivery of the task (`work_model.md`), not a gate.
+A post, an outreach mail, a release, or a payment reaches approval through `action_type` and blast radius
+on the task path, as code does. What non-code agents lack is delivery of the task (`work_model.md`), not a
+gate.
 
-## Not enforced today, stated so nobody reads it as settled
+### The approval object
 
-- **The raiser cannot resolve.** `write_checkpoint_brief()` takes no principal; `read_checkpoint_resolution()`
-  and the MCP `resolve_checkpoint` classify on `status` alone; nothing records who flipped it. An approval is
-  whoever writes the status. Prior art names the smallest fix (GitHub prevent-self-review; NIST dynamic
-  separation of duty); it is the P1 seed of P3 and is not built.
-- **A waiting checkpoint has no timeout.** A brief sits at `awaiting_operator` indefinitely. Step Functions'
-  heartbeat timeout on a waiting task is the analog; #378 requires explicit timeout states; none exists.
+A `checkpoint_brief` is the execution gate's request for a decision: interrupted, not terminal (A2A's
+`input-required`). It records who it awaits, who resolved it, and ends in a terminal state; a deferral is
+bounded and a timeout is a terminal state that never continues
+(`deferral_must_be_bounded_and_escalate_off_neotoma`). The raiser and the resolver are distinct roles on the
+object; whether the same principal may hold both is `authority_model.md`.
 
-## Contradictions this document touches
+## Contradictions this document settles
 
-**C3, four copies.** Resolved: one constant, above.
+**C3, four copies of the gate set.** Resolved: one home, parity where a copy is unavoidable, above.
 
-**C5, the floor.** The gate-state plan body argues for `PRE_IMPL_GATES` as a floor the data may add to; its
-decisions map retracts that (`hardcoded_floor_proposal_is_retired`). Resolved for the retraction;
+**C5, the floor.** The gate-state plan body argues for a hardcoded gate list as a floor the data may add
+to; its decisions map retracts that (`hardcoded_floor_proposal_is_retired`). Resolved for the retraction;
 `failure_posture.md` states why.
 
-**C6, merge authority, three states.** Stored policy says merge is operator-gated: `execution_policy`
-`ent_e3ea122f7dc286fc0868e4a1` ("merge stays gated"), `ent_dfce6edecefe3eb7fc9e0337` with blocking merge
-checkpoints, operator-ratified 2026-07-07. The code default agrees: `APIS_AUTONOMY_AUTO_MERGE` defaults to
-`"0"` (`swarm_dispatch.py:1385`). The running configuration disagrees: the flag was set to `1`
-(`analysis_finding` `ent_ca1a3f3c0dea2d9b583249fe`), Vanellus merged with auto-merge on twice on 2026-09-02
-(throughput `abandon_merge_owner_hypothesis`), and 49 of 49 sampled merge briefs from June and July are still
-`open`, so the merge queue was never drained through the entity. What is true today, as far as stored
-evidence reaches: PRs merge without an operator checkpoint, and the stored policy is stale as a description
-of the running system. Resolved by saying so. Open, and operator-only: whether the policy changes to match
-the flag or the flag returns to the policy. The flag is per-checkout runtime state; its current value is
-verified from the running process, not from this document.
+**C6, merge authority.** Merge is a boundary the `execution_policy` governs, and the stored policy is the
+source of truth for whether it is operator-gated. A runtime flag that disagrees with the stored policy is a
+configuration defect, and its resolution is the operator's: change the policy to match the flag, or return
+the flag to the policy. Neither the flag's value nor the queue's state is stated here; both are `status.md`.
 
-**C11, confidence × blast is blast-only in practice.** The default policy is labelled calibrated at 0.85; 14
-of 20 sampled PLAN briefs carry confidence 0 with empty `proposed_alternatives`, and blast radius is inferred
-from the handling agent (ateles#682). Resolved by stating it: today the gate decides on blast radius alone,
-until agents produce the score (#688) and blast comes from what the task does (#689), both open, in the
-order `gating_vocabulary_order_is_load_bearing` fixes.
+**C11, confidence × blast.** The gate decides on both axes by design; a confidence input that is not
+produced degrades the gate to blast radius alone, which is a gap in the proposing agents, not a change to
+the design. Whether the input is produced is `status.md`.
 
-**C4, retired agent names in workflow data.** Three of eight `workflow_definition` entities name `gryllus`
-(retired 2026-06-12), one `paradisaea`; `agent_policy` `ent_bf7732d200868ea64d5e8182` names Bombycilla for
-the arch gate. The no-stale-mirror constraint is enforced for `docs/agents/`, not for design entities.
-Stated; the fix is a data correction under the gate-state plan.
+**C4, retired agent names in workflow data.** A renamed or retired agent leaves no stale mirror, in code
+and in design entities alike. The data correction is the gate-state plan's; whether it has been made is
+`status.md`.
 
 ## Prior art
 
 GitHub environment protection rules are the nearest declarative gate model; Ateles shares the declarative
-definition and pre-step approval, not per-environment routing or the 1-of-n rule, since blast radius selects
-the gate. Cedar's rule (zero permits is deny; any forbid wins) is the semantics the advisory and enforcing
-paths share. Sources: `ent_08460968e6f49dac21510f4a`.
+definition and pre-step approval, not per-environment routing or the 1-of-n rule, since blast radius
+selects the gate. Cedar's rule (zero permits is deny; any forbid wins) is the semantics the advisory and
+enforcing paths share. A2A's `input-required` and `auth-required` are the interrupted states a checkpoint
+is; Ateles does not share A2A's agent-asserted `working`, which has no owner and no expiry. Sources:
+`ent_08460968e6f49dac21510f4a`.
