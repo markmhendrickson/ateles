@@ -23,6 +23,9 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - "scripts/linters/check_agent_roster.py"
+      - "CLAUDE.md"
+      - "scripts/linters/test_claude_verification_discipline.py"
+      - "scripts/linters/test_*.py"
       - "docs/agents/**"
       - ".github/workflows/ateles-tests.yml"
   workflow_dispatch:
@@ -76,6 +79,11 @@ jobs:
       # transcription) but no lane ran them — this closes that gap.
       - name: Run execution/scripts tests
         run: uv run --extra dev python -m pytest execution/scripts/ -q
+      # ateles#727 / #731 (qa lens): CLAUDE.md Verification discipline effect
+      # test was committed but collected by no lane — same defect class as
+      # roster-in-lint.sh-only, anthus (#584/#596), execution/scripts (#524/#527).
+      - name: Run CLAUDE.md verification-discipline effect tests
+        run: uv run --extra dev python -m pytest scripts/linters/test_claude_verification_discipline.py -q
 
   mcp-server-tests:
     runs-on: ubuntu-latest
