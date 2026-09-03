@@ -36,10 +36,12 @@ through it.
 
 `docs/foundation/status.md` is in this directory and deliberately not in the
 reading list. It is the dated, perishable measurement of the gap between the
-foundation and a checkout; it is regenerated, never maintained, and no
-foundation document cites it. The parser reads only the tables below, so it is
-never inlined; a reviewer who needs to know whether a stated mechanism exists
-reads it by hand and checks its as-of date first.
+foundation and a checkout; it is regenerated, never maintained. Foundation
+documents may name `status.md` only as the non-authoritative home of
+implementation-state measurements (a pointer). They must not embed dated
+figures, counts, commit SHAs, or checkout claims from it as design evidence.
+The parser reads only the tables below, so it is never inlined; a reviewer who
+needs state reads it by hand and checks its as-of date first.
 
 ## Always read
 

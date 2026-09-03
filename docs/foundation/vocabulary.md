@@ -202,7 +202,9 @@ applies` with a reason; checked mechanically, judged by reading. **Forbidden:** 
 
 ### status
 **Definition:** the dated measurement of the gap between the foundation and a checkout (`status.md`);
-regenerated, never maintained. **Forbidden:** citing it from a foundation document.
+regenerated, never maintained. **Allowed:** naming `status.md` as the state home / pointer
+(for example, "what is built is `status.md`"). **Forbidden:** embedding dated figures, counts, or
+checkout claims from it into a foundation document; treating it as design evidence.
 
 ## Owner: five meanings, one word forbidden alone
 

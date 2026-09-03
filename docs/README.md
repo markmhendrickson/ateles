@@ -46,9 +46,12 @@ in [`foundation/status.md`](foundation/status.md), dated and regenerated rather 
   conditions + time` defined whole: principals, tenancy, ownership, grants, attribution, delegation,
   approval, quorum and separation of duties, and the initiative objects, with the one identity decision
   (C9) and the P4 brief's questions marked open.
-- [**Status**](foundation/status.md) — as of its date: the roadmap of vision phases over the foundation,
-  what fires per invariant, the fail-open paths, the single-principal inventory, and the contradictions
-  whose resolution is state rather than design.
+
+Companion report (not a foundation design document; not in the review reading list):
+
+- [**Status**](foundation/status.md) — dated, perishable measurement of the gap between the foundation and
+  a checkout; regenerated, never maintained. Foundation docs may name it as the state home only; they must
+  not embed its figures as design evidence.
 
 ## P0 · Decide & orient
 
