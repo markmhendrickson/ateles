@@ -52,6 +52,11 @@ Keyed (read when matching paths change — see `conformance.md`):
 - [**Data model**](foundation/data_model.md) — how each concept is recorded: entity type, key fields,
   edges, derived reads, projections, and what is deliberately not a field; the relationships table; the
   record conventions (observations, corrections, idempotency keys, schema versions, `raw_fragments`).
+- [**Adapters**](foundation/adapters.md) — how external systems reach the work model and how it reaches
+  them: inbound events are signals about artifacts (a sign-off by a named principal, an observation, an
+  action confirmation, or a task for intake, never a workflow instruction); outbound operations are
+  actions through the action gate; GitHub tabled in full, Gmail, Telegram, calendar, and payments in the
+  same shape.
 - [**Conformance**](foundation/conformance.md) — how issue-based work binds to the foundation: the
   always-read kernel, the path-keyed reading list, the design-basis statement, the direction of truth per
   record class, and the rule that keeps state out of the foundation.

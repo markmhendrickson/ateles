@@ -89,6 +89,12 @@ documents to read. Each document at most once per review, kernel first.
 |---|---|
 | `lib/neotoma`, `execution/scripts/.*schema`, `execution/scripts/render_data_model`, `docs/foundation/data_model\.md` | `docs/foundation/data_model.md` |
 
+### Adapters
+
+| Changed path | Read |
+|---|---|
+| `execution/daemons/apis/github_gateway`, `execution/daemons/apis/swarm_dispatch`, `execution/daemons/apus/`, `execution/daemons/formica/`, `execution/scripts/lanius_sweep`, `execution/mcp/github_harness`, `execution/daemons/turdus/`, `execution/daemons/riparia/`, `lib/daemon_runtime/run_email`, `execution/daemons/monedula/`, `execution/daemons/cotinga/`, `lib/notify`, `execution/lib/telegram`, `docs/foundation/adapters\.md` | `docs/foundation/adapters.md` |
+
 ### The foundation itself
 
 | Changed path | Read |
@@ -154,6 +160,7 @@ the swarm's own records, and the word is not used for them.)
 | Core workflow step lists / fast paths / successors | the `workflow` entity for (project, type) | `docs/foundation/workflows.md` tables via `render_workflow_docs.py --check` (prose authored in the file) |
 | Entity types, fields, and edge types the design names | the schema registry on the record | `docs/foundation/data_model.md` tables via `render_data_model.py --check` (prose authored in the file) |
 | Walkthroughs of the work/gate model | the kernel documents | `docs/foundation/scenarios.md` (+ `scenarios_extended.md`) |
+| External-system mapping (what an event becomes; what a step's operation is) | `docs/foundation/adapters.md`, PR-reviewed | the adapter daemons' code; the per-instance binding of a system to an operator is the `channel_config` and `vendor_binding` entities, which bind and never redefine the mapping |
 
 A rule in two classes is written once in its authoritative home and cited from the other, never copied: a
 comment or a second document claiming to mirror the first is not a mechanism that keeps them matching

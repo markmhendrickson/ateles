@@ -60,8 +60,10 @@ a state).
 a pull request, a release, a published page, or a sent message, linked to the batch and its tasks by edge
 and never the subject of a step.
 An action is the intended effect; the artifact is the record the effect leaves.
-**Related:** [batch](#batch), [task](#task), [action](#action), [issue](#issue), [sign-off](#sign-off);
-[`work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject`](work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject).
+**Related:** [batch](#batch), [task](#task), [action](#action), [issue](#issue), [sign-off](#sign-off),
+[adapter](#adapter), [signal](#signal);
+[`work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject`](work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject),
+[`adapters.md#the-two-invariants`](adapters.md#the-two-invariants).
 **Never:** —
 **Not for:** "deliverable" for the record; task for the artifact.
 
@@ -320,8 +322,9 @@ timestamps, the agent, artifact refs, and the pinned `agent_definition` version.
 A terminal write that supplies every field the schema requires; a rejected write is an error, never
 swallowed.
 **Related:** [step owner](#step-owner), [step state](#step-state), [batch](#batch), [terminal](#terminal),
-[read-back](#read-back), [artifact](#artifact);
-[`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
+[read-back](#read-back), [artifact](#artifact), [adapter](#adapter), [signal](#signal);
+[`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection),
+[`adapters.md#no-external-event-advances-a-step-by-itself`](adapters.md#no-external-event-advances-a-step-by-itself).
 **Never:** "participation_record", "step_run", "LGTM", "audit row".
 **Not for:** approval for a sign-off (an approval is on a checkpoint); "green" without the record.
 
@@ -420,8 +423,9 @@ Created when the effect becomes known, which may be mid-workflow; a task may pro
 creation; an internal operational write to Neotoma is not an action.
 **Related:** [task](#task), [action_type](#action_type), [action gate](#action-gate),
 [take (an action)](#take-an-action), [effect dedup](#effect-dedup), [artifact](#artifact) (the record the
-effect leaves);
-[`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`](gates_and_workflows.md#actions-are-entities-only-actions-are-taken).
+effect leaves), [adapter](#adapter), [action confirmation](#action-confirmation);
+[`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`](gates_and_workflows.md#actions-are-entities-only-actions-are-taken),
+[`adapters.md#outbound-steps-produce-actions-adapters-take-them`](adapters.md#outbound-steps-produce-actions-adapters-take-them).
 **Never:** "side effect" (unrecorded).
 **Not for:** task for the effect; operation for an action.
 
@@ -530,12 +534,51 @@ re-claimed task never repeats an effect that already happened.
 route the task, and whose closing sign-off names the successor workflow, or none, or operator-only.
 A task with no intake batch is unrouted by that fact; no unrouted state is stored.
 **Related:** [task](#task), [batch](#batch), [successor](#successor), [chain](#chain),
-[operator-facing agent](#operator-facing-agent), [action_type](#action_type);
+[operator-facing agent](#operator-facing-agent), [action_type](#action_type), [adapter](#adapter),
+[signal](#signal);
 [`workflows.md#intake`](workflows.md#intake),
-[`work_model.md#intake-is-every-tasks-first-workflow`](work_model.md#intake-is-every-tasks-first-workflow).
+[`work_model.md#intake-is-every-tasks-first-workflow`](work_model.md#intake-is-every-tasks-first-workflow),
+[`adapters.md#no-external-event-advances-a-step-by-itself`](adapters.md#no-external-event-advances-a-step-by-itself).
 **Never:** "undispatched".
 **Not for:** "triage" for the whole workflow (its first stage); unrouted as a stored status; routing by
 a router (the `route` step is a sign-off by a step owner).
+
+## Adapters (`adapters.md`)
+
+### adapter
+**Definition:** the component that translates between one external system and the record in both
+directions, inbound events into signals about artifacts and outbound actions into operations on that
+system, and the only component that touches the system.
+An adapter is a daemon in the work model's sense: it self-triggers on the external system and receives no
+task; the engine reads only what the adapter wrote.
+**Related:** [signal](#signal), [artifact](#artifact), [action](#action),
+[action confirmation](#action-confirmation), [daemon](#daemon), [intake](#intake), [credential](#credential);
+[`adapters.md#the-two-invariants`](adapters.md#the-two-invariants),
+[`adapters.md#what-the-adapter-does-with-every-event`](adapters.md#what-the-adapter-does-with-every-event).
+**Never:** "connector", "plugin".
+**Not for:** the engine for the adapter (the engine reads the record; the adapter reads the system);
+"gateway" for an adapter, unqualified.
+
+### signal
+**Definition:** what an inbound external event is to the record: information about an artifact, which an
+adapter translates into a sign-off by a named principal, an observation on an artifact, an action
+confirmation, or a new task for intake, and never into an instruction to a workflow.
+**Related:** [adapter](#adapter), [artifact](#artifact), [observation](#observation), [sign-off](#sign-off),
+[intake](#intake), [action confirmation](#action-confirmation);
+[`adapters.md#no-external-event-advances-a-step-by-itself`](adapters.md#no-external-event-advances-a-step-by-itself).
+**Never:** —
+**Not for:** "trigger" for a signal (nothing outside the record opens a step); "command" for a signal.
+
+### action confirmation
+**Definition:** the observation an adapter writes on an action once its effect exists in the external
+system, carrying `taken_at` and `result_ref`, read back from that system and never inferred from the
+operation's return.
+**Related:** [action](#action), [adapter](#adapter), [artifact](#artifact), [read-back](#read-back),
+[effect dedup](#effect-dedup);
+[`adapters.md#outbound-steps-produce-actions-adapters-take-them`](adapters.md#outbound-steps-produce-actions-adapters-take-them).
+**Never:** —
+**Not for:** sign-off for a confirmation (a confirmation closes no step); a success response for a
+confirmation.
 
 ## Authority model (`authority_model.md`)
 

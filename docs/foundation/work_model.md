@@ -136,7 +136,7 @@ batch continues with the tasks still attached. Attach and detach are edges, neve
 An `artifact` is an external record (issue, PR, release, message) linked by edge. A step is signed off on
 the batch's tasks; the PR is the record left behind. An action is the intended effect; the artifact is
 what the effect leaves. Which system holds the artifact, and what that system calls it, is outside the
-design.
+design; how that system's events and operations map onto the record is `adapters.md`.
 
 ### A task is in at most one batch at a time
 

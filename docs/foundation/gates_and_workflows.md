@@ -24,7 +24,8 @@ Workflow engines, the action gate, and the concepts `workflow`, batch, `sign-off
 `checkpoint`, `action_policy`. Checkpoint resolution and approval attribution: `authority_model.md`.
 Unreadable workflow and the checkpoints the swarm raises on tasks: `failure_posture.md`. Tasks in
 batches, artifacts: `work_model.md`. Per-workflow step lists: `workflows.md` (authored companion; binds
-via the `workflow` entity + `render_workflow_docs.py --check`, not the review prompt).
+via the `workflow` entity + `render_workflow_docs.py --check`, not the review prompt). External systems,
+and the adapters that reach them: `adapters.md`.
 
 ## The invariants
 
@@ -132,6 +133,18 @@ state (principle 7).
 A post, an outreach mail, a release, or a payment is an action with a class and a blast radius, and it
 reaches approval through the action gate on the task path, as a merge does. What non-code agents lack
 is delivery of the task (`work_model.md`), not a gate.
+
+### External systems are reached only through adapters
+
+Two invariants hold at the boundary; `adapters.md` states them in full and tables the mapping per
+system. First, the workflow engine never reads an external system; it reads the record (batches, leases,
+sign-offs, actions, checkpoints, artifacts), and only an adapter touches the external system, writing
+what it learns there as a signal about an artifact, with provenance. This is "one engine sequences from
+the entities" applied to the boundary. Second, no external event advances a step by itself: an event can
+yield only a sign-off by a named principal, an observation on an artifact, an action confirmation, or a
+new task for intake, and an automated account's approval never stands in for a lens. Outbound, a step's
+effect on an external system is an action through this gate, which the adapter takes on permit and
+confirms by reading the system back.
 
 ### The checkpoint
 
