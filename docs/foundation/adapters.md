@@ -3,7 +3,7 @@
 **Keyed document:** read when a webhook receiver, a mail, chat, calendar, or payment daemon, the
 notification path, the GitHub pipeline, or this document changes (`conformance.md`). **Kind:** foundation;
 states the design and never the state of a checkout. **Derived from:** `work_model.md` (artifacts, intake,
-the three execution mechanisms), `gates_and_workflows.md` (one engine sequences from the entities; actions
+the four execution mechanisms), `gates_and_workflows.md` (one engine sequences from the entities; actions
 and the action gate), `authority_model.md` (credentials bind to principals; approval), `workflows.md` (the
 steps whose effects leave the system), and PR #745 operator review (2026-09-04, the adapter decision).
 What is built, and where the adapter and the engine are still one process, is `status.md`.
@@ -155,6 +155,21 @@ lists the class the comment carries. The class names in the tables below are the
 closed set: `open_issue` and `notify_operator` are this document's, beside the classes the workflows
 already name.
 
+**A recovery is an outbound operation like any other.** `failure_posture.md` names, per action class, what
+undoes an effect already taken, and every one of those is an operation an adapter performs at the same
+boundary the original effect crossed: a revert, a deprecate-and-supersede, a delete-and-retag, a rollback.
+Each is its own `action`, of its own class, evaluated at the action gate at the moment it would be taken —
+there is no privileged undo path that reaches the external system around the gate, and none that an
+adapter takes on its own initiative because it judged the first effect wrong. The adapter reads the
+recovery's result back and writes the confirmation exactly as it does for the effect being recovered, so a
+recovered action and its recovery are both readable, in order, rather than the record showing only the
+corrected end state. Where a class's recovery is forward-only, the adapter performs the forward operation
+and the superseded record stays where it is; it does not simulate a reversal the external system does not
+offer. The `publish` class is the clearest such case: unpublishing is barred once a window has passed, so
+its recovery is `deprecate_publication` — the superseding version is published and the earlier one marked
+superseded, read back at both — and the adapter never deletes the published surface to make the record
+look clean.
+
 ## GitHub
 
 The code host holds three kinds of artifact the work model names: `issue`, `pull_request`, and `release`;
@@ -200,6 +215,9 @@ the check runs on a pull request are read as a field of that artifact.
 | `merge` | merge the pull request | `merge_pr` | the pull request reads `merged` with a merge commit; the commit is an artifact of the batch |
 | `release` | create the tag; publish the release | `release` | the tag and the release exist, read back at their terminal state |
 | `dedupe`, `record`, a closing sign-off | close the issue, with the reason | `external_api_write` | the issue reads `closed`; the task's own status was written by the sign-off, before the action |
+| recovery of a merge | open and merge the inverse change | `revert_merge` | the revert commit is on the branch, read back; both the merge and its revert stay readable |
+| recovery of a release tag | delete the tag and retag | `retag_release` | the tag resolves to the intended commit, read back; a tag that consumers may already hold is superseded rather than silently moved |
+| recovery of a deploy | roll back to the prior release | `rollback_deploy` | the deployed version equals the prior release, read from the deployment target rather than from the command's exit |
 
 **An artifact with no batch never receives retroactive step state.** No step of any workflow is opened on
 an artifact that no batch addresses, and neither an adapter nor the workflow engine may initialize a step
@@ -227,7 +245,7 @@ outbound effect is a send.
 
 | External event | What it is a signal about | Outcome in the record |
 |---|---|---|
-| message received on a thread the record does not track | a new record | a task with the thread as its artifact, entering intake; the mail poller is the daemon mechanism of `work_model.md#the-three-execution-mechanisms`, which produces tasks and never receives one |
+| message received on a thread the record does not track | a new record | a task with the thread as its artifact, entering intake; the mail poller is the daemon mechanism of `work_model.md#the-four-execution-mechanisms`, which produces tasks and never receives one |
 | message received on a thread attached to an open outreach batch | a reply | an observation on the thread artifact; the `follow_up` step owner reads it as the reply the step closes on (`workflows.md#outreach`) |
 | message received from the operator's address, answering a message the operator-facing agent sent for a checkpoint | the operator's decision | resolution of that checkpoint by the operator principal, read back on the checkpoint; from any other address, an observation |
 | message sent from the operator's account, observed in the sent folder | the effect of a send | an action confirmation on the `send_external_comms` action whose `dedup_key` matches; a sent message with no action is an observation and a defect to surface |
@@ -304,7 +322,7 @@ never performs an operation and reports success without reading the external sys
 ## The adapter and the engine are two roles
 
 Whether one process hosts both is an implementation choice; the design's requirement is that they meet
-only in the record. An adapter is a daemon in the sense of `work_model.md#the-three-execution-mechanisms`:
+only in the record. An adapter is a daemon in the sense of `work_model.md#the-four-execution-mechanisms`:
 it self-triggers on the external system's events, produces writes to the record, and receives no task.
 The engine opens steps from the entities. The two are separable because the only thing that passes
 between them is what the adapter wrote and the engine read, with provenance on every write; a process

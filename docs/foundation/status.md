@@ -330,6 +330,33 @@ none was found on this branch, not that none exists anywhere.
 | adapter vocabulary: `inbound`, `outbound`, `delivery`, `disposition`, `dropped`, `sourcing`, `coverage`, `freshness` | used in `adapters.md`, defined nowhere | `dropped` and `disposition` have the revision 8 row above (deliveries drop at log level with no disposition written); the remaining terms name design concepts with no built counterpart | the adapter daemons' event handlers |
 | a task is executed only through a workflow; a daemon's tasks enter intake like any other | implied by "intake is every task's first workflow", never stated as a prohibition | not assessed as a whole; the known divergence is the one revision 8 already records — pre-implementation steps back-filled on artifacts no batch addresses — which is the same shape as work advancing outside a workflow | `swarm_dispatch.py`, `lib/issue_labels.py` |
 
+## Revision 12 (2026-09-04): the twelve rulings, and the one rename they imply
+
+The twelve open decisions were ruled and written into the design this revision. Every one of them is
+**designed and not built**: each row below names a mechanism, a verdict rule, or a type that now exists in
+`docs/foundation/` and has no counterpart in this checkout. Read from the code on this branch by grepping
+the tokens named; nothing on prod and no deployed checkout was inspected, so "no mechanism" means none was
+found on this branch, not that none exists anywhere. As with every earlier revision, what is built keeps
+the old name and lacks the new mechanism; that gap is what these rows record.
+
+| Design term / rule (revision 12) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| `agent`, the entity type for a non-human principal, pairing with `operator` | `agent_definition`, whose "definition" said nothing that "every entity is one" does not already say — the same rule that retired `workflow_definition` | the built name is `agent_definition` everywhere: 22 files under `execution/`, 5 under `lib/`, 40 under `.claude/skills/`, and 41 under `docs/agents/`. The last two are generated mirrors that a re-render fixes; the first two are code. **Designed and not built** — no entity of type `agent` exists and nothing reads one | `agent_definition` entities on prod; the loader, the grant checker, the skill and agent-doc renderers |
+| `operator`, the human principal, whose only job is to be a principal; `operator_profile` stays descriptive and carries no authority edges | C9, left open in `authority_model.md`'s own voice | **designed and not built.** `operator_profile` is referenced once in this checkout and carries no `ownership_grant` or `delegation_edge`; no entity of type `operator` exists, so no write resolves to a human principal and the two credential systems are still joined by nothing. The fallback to a shared per-repo identity on an unprovisioned agent credential is unchanged | the identity resolver; `operator_profile` entities on prod |
+| `reads_to_enter`, `reads_to_close`, and `freshness` on `workflow.steps[]`; a required read returning `unknown` holds the step, bounded, then raises `undeclared_dependency` | nothing; a step's read dependencies were unstated, and each call site chose its own posture | **designed and not built.** The tokens `reads_to_enter` and `reads_to_close` appear nowhere in this checkout; no step declares a dependency and no read is checked against one. The per-site postures the design replaces are unchanged, including the sites where a failed read returns a value indistinguishable from an empty result | `workflow_definition.gates[]`; every read path a step depends on |
+| the operator-invoked halt, confirmed stopped by a read-back | nothing; the only halt was the automatic one, on an unreachable record | **designed and not built.** No operator-invoked halt exists: the two `kill_switch` hits on this branch are a transcript tailer's own retry streak in `execution/scripts/test_live_transcript_tail.py` and are unrelated. There is no command to stop the swarm and nothing to read back | unbuilt; no module owns it |
+| a named recovery per action class — revert, deprecate-and-supersede, delete-and-retag, rollback — each an action through the gate | nothing; no document said what undoes an action already taken | **designed and not built.** The action classes `revert_merge`, `retag_release`, `rollback_deploy`, and `deprecate_publication` appear nowhere in this checkout; no recovery is modelled as an action and none reaches the gate | the adapter outbound paths; `action_policy` entities |
+| a restore obligation with a stated cadence | nothing; both backup paths existed and neither had been exercised | **designed and not built.** No restore drill is scheduled or recorded on this branch, so both recovery paths remain unexercised — which under principle 4 makes them indistinguishable from absent | unbuilt; no module owns it |
+| findings bind; a verdict contradicting its own findings is rejected at submission; three verdict values, a host's review tokens mapped inbound | nothing; the disagreement was an open decision in `vocabulary.md` and `gates_and_workflows.md` | **designed and not built.** Nothing validates a verdict against its findings, so a blocking finding under a non-blocking token still closes a step. The review perspectives still emit two vocabularies onto one projection, with no declared mapping between the host's tokens and the design's three | `review_learning.py`'s finding parser; the review posting path |
+| a verdict is terminal and never revised in place; latest per step owner per head stands; no conditional verdicts | `data_model.md` stated the latest-per-lens read; terminality and conditions were open | **designed and not built.** No mechanism prevents a verdict being rewritten in place, and none rejects a conditional one; the latest-per-head read exists in the design and was not found implemented as a general rule on this branch | the sign-off writer (built: `participation_record`) |
+| waiver: operator principal only, one batch's unsigned required steps, one `waived` sign-off **per step** | the open marker in `gates_and_workflows.md`, and an operator command that wrote no record | partially built, and the built half diverges. `gate_waive.py` waives batch-scoped as the design rules, but writes `waived` into a `gate_status` map plus an `owner_history` entry and a host comment reading "Gates waived by operator override" — **not** one sign-off per step. So a waived step is not queryable as a sign-off, and the reason is prose | `execution/daemons/apis/gate_waive.py`; `swarm_dispatch.py`; `lib/issue_labels.py` |
+| governance writes and lossy record mutations are actions, reason class `lossy_record_mutation` | "neither policy governs internal operational writes to Neotoma, which are not actions" | **designed and not built.** No write to `agent_definition`, `agent_grant`, `swarm_roster`, `execution_policy`, or the schema registry reaches the action gate, and no blast count is declared for a record write. The token `lossy_record_mutation` appears nowhere on this branch | `lib/daemon_runtime/gating.py`; every governance write path |
+| the interactive session as a fourth execution mechanism, and `session_digestion` as its declared workflow | three mechanisms; the sessions-to-tasks sequence ran in practice with no counterpart in any document | **designed and not built** as a workflow. The seven-stage sequence exists as user-level skills that an operator invokes by hand; no `workflow` entity declares `session_digestion`, no role owns it, and nothing files its output as a batch | the session-pipeline skills; no `workflow_definition` for it |
+| an unclaimed open step raises `unclaimed_step` against its owner role after a declared interval; a role resolving to no principal is a declaration-time defect | the open marker revision 9 left in `failure_posture.md` | **designed and not built.** The tokens `unclaimed_step` and `unspawnable_assignee` appear nowhere in this checkout; the watchdog counts lapses on claimed tasks only and has no notion of a step nobody claimed. No parity check runs at declaration time | the watchdog; the workflow declaration path |
+| a rule binds where it is read at the moment of the action it governs (C7's axis) | four homes named as equivalent audiences | not a mechanism, so not buildable as one — but its consequence is measurable and unmeasured: no inventory exists of which rules live on which surface, so how many rules are written to a surface nobody reads at the action is unknown | `CLAUDE.md`, the agent prompts, the hooks, the point-of-use hints |
+| a failure that left no effect retries with backoff; one stating its own retry time defers to that time; exhaustion escalates | nothing; rule 5 bounded a task's deferral and not the runner's failure to start | **designed and not built.** A provider misconfiguration, a transport reset, and a rate limit that names its own reset time are each still recorded as an ordinary task failure, and the stated reset time is discarded rather than used as the deferral | the runner-start path; the provider selection |
+| a denial raises `capability_denied` on the task; the denied principal does not route around the denial | nothing; a denial was terminal with no successor | **designed and not built.** The token `capability_denied` appears nowhere in this checkout, so a denied agent still has nowhere designated to put the need, and nothing prevents the three forbidden repairs (asking a peer to write, parking the verdict on an artifact, acting under another principal's credential) | the grant checker; the tool proxy |
+
 ## `adapters.md`: the adapter and the engine are one process (revision 7, 2026-09-04)
 
 Read from the code on this branch (`c221ff2` plus revision 7) on 2026-09-04 by reading the module
@@ -496,7 +523,30 @@ Revision 8 (2026-09-04) re-measured only the documents it touched, with `wc -c` 
 | `principles.md` | 11.1k | kernel | no |
 | `workflows.md` | 36.5k | **unkeyed** | — |
 
-The kernel is 39.0k of the 40k block after revision 8, still under it and with less room than before;
+Revision 12 (2026-09-04) re-measured every document it touched, with `wc -c` on this branch:
+
+| Document | Characters | Reading-list role on revision 12 | Over the per-document cap |
+|---|---|---|---|
+| `gates_and_workflows.md` | 28.4k | kernel | yes |
+| `work_model.md` | 16.1k | kernel | yes |
+| `principles.md` | 13.4k | kernel | yes, by 1.4k |
+| `vocabulary.md` | 71.2k | keyed | yes |
+| `adapters.md` | 30.7k | keyed (also keyed to itself) | yes |
+| `data_model.md` | 30.5k | keyed | yes |
+| `failure_posture.md` | 20.4k | keyed | yes |
+| `authority_model.md` | 18.5k | keyed | yes |
+| `workflows.md` | 39.3k | **unkeyed** | — |
+
+**The kernel is 57.9k of the 40k block after revision 12 — over it by 17.9k, and over for the first
+time.** `gates_and_workflows.md` grew most, carrying the step read-declaration, the findings-bind and
+terminal-verdict rules, the waiver scope, and the two action classes. Revision 12 wrote the twelve
+rulings and deliberately did not trim, on the same instruction that governed revisions 6 through 9 —
+content settles before budget, and the budget pass is the operator's, run last and separately. What
+changes with this revision is that the budget decision is no longer deferrable on the kernel: it was
+under the block at every earlier revision and is not now, so the pass that follows is a cut, a split, or
+an amendment of the caps rather than a tidying.
+
+The kernel was 39.0k of the 40k block after revision 8, still under it and with less room than before;
 `data_model.md` grew most, carrying the record-usage contract's two tables. Revision 8 wrote content the
 mining showed was settled and deliberately did not trim, on the same instruction that governed revisions 6
 and 7 — content settles before budget, and the budget pass is the operator's, run last and separately.

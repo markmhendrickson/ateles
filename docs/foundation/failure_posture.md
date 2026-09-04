@@ -13,9 +13,10 @@ how a checkpoint is recorded is `data_model.md`.
 
 ## Purpose
 
-State the operator's decision that Neotoma is a hard dependency and the seven rules that follow from it, so
+State the operator's decision that Neotoma is a hard dependency and the eight rules that follow from it, so
 the posture lives where the review lenses read it rather than in a task description; state which
-failures the swarm escalates as checkpoints on a task, and which it does not. `durable_execution_substrate.md`
+failures the swarm escalates as checkpoints on a task, and which it does not; and state the halt the
+operator invokes and what undoes an action already taken. `durable_execution_substrate.md`
 records the position on execution engines and replay that this document relies on; it stays.
 
 ## Scope
@@ -89,6 +90,72 @@ refuse-and-requeue-as-fallback, and the hardcoded step-list floor (C5, below).
    grant, or drift state carries a third value; an error is never coerced to pending or to clear. Principle
    7 of `principles.md`; at a policy enforcement point the third value resolves to deny (`authority_model.md`).
 
+8. **A failure that left no effect is retried; one that states its own retry time is deferred to it.** Rule
+   5 bounds a task's deferral. This rule covers the path rule 5 does not: the mechanism that starts an
+   agent failing, rather than the work. A misconfiguration that matched no provider, a transport reset, a
+   rate limit that names its own reset time — each left no effect at all, so none of them is a failure of
+   the work, and recording one as a task failure writes a false terminal state (principle 7). A failure
+   that left no effect is retried with backoff. A failure that states its own retry time is deferred to
+   **that** time rather than discarded, because a stated bound is better information than a guessed one and
+   discarding it spends a retry on a failure that said exactly when to try again. Exhaustion escalates
+   exactly as rule 5 says: one checkpoint, reason `rounds_exhausted`. The runner's exit is read before a
+   retry is spent, so a failure of the mechanism stays distinguishable from a failure of the work. Which
+   providers exist, and in what order they are tried, is a `vendor_binding` and not a foundation concern —
+   the classification is what outlives the vendors.
+
+## The operator-invoked halt, and what undoes an action already taken
+
+The halt of *The decision* above is automatic and has one cause: the record is unreachable. This section
+states the halt the operator invokes, and the recovery for an action already taken — the two things the
+action gate's decision to permit an action does not cover, because the gate decides whether an effect is
+taken and says nothing about stopping the swarm or undoing the effect afterwards.
+
+**The operator-invoked halt is verified to have stopped, by a read-back.** The operator may halt the swarm
+on their own word, at any time, for any reason or none. The halt takes effect the way the automatic one
+does — no claim of a task or a step, no step opening, no gate decision, nothing claimed complete — and
+observation continues. What makes it a control rather than a request is the confirmation: **the halt is
+confirmed stopped by a read of the swarm's state, never by the command returning.** A command that returns
+is a write reporting success, and principle 2 applies here more forcefully than anywhere else in this
+document, because the operator invokes this one precisely when they believe the swarm is doing something
+wrong. The read-back is the absence of live leases and open claims, read from the record; the absence of
+new activity is not the read-back, since an idle swarm and a halted one are indistinguishable by that
+measure — which is rule 2's failure restated. Until the read-back confirms it, the swarm is not halted,
+and the operator is told so.
+
+**Every action class names its recovery, even where the recovery is only a forward fix.** An action is an
+intended effect outside the system, and the classes with the largest blast are the ones the design has been
+silent on. Each is named here so that the answer exists before it is needed rather than being improvised
+under pressure:
+
+| Action class | Recovery |
+|---|---|
+| merge | a revert — the inverse change, taken as its own action |
+| publish | deprecate and supersede; unpublishing is barred after a window, so the recovery is forward-only and the superseded version stays readable |
+| release tag | delete and retag |
+| deploy | a rollback to the prior release |
+
+A recovery is itself an [action](vocabulary.md#action): it goes through the [action gate](vocabulary.md#action-gate),
+under its own class, and is recorded like any other. There is no privileged undo path that bypasses the
+gate, because an undo taken in haste is exactly the shape the gate exists to hold. Where a class's recovery
+is forward-only, the design says so plainly rather than implying a reversal that does not exist. The
+outbound operation each recovery takes is the adapter's (`adapters.md`), which is where the systems these
+classes reach are tabled.
+
+**A restore obligation, with a stated cadence.** A backup nobody has restored is indistinguishable from no
+backup. Every recovery path this document names — a record snapshot, a repository bundle, a rollback target
+— is **exercised on a declared cadence**, and the exercise is a real restore, not an inspection of the
+artifact. This is principle 4 applied to recovery: a restore that has never been run cannot fail, so until
+it is run it is decoration. The cadence is declared where the path is declared; a path with no stated
+cadence is an unexercised path and is reported as one.
+
+**Whatever detects does not remediate.** A mechanism that observes the swarm — a watchdog, an external
+prober, a health check — raises and escalates, and holds no authority to act on what it found. It performs
+no restart, no scale, no rollback, no re-claim, and no infrastructure mutation of any kind. This is the
+rule `vocabulary.md#watchdog` already states for the lease watchdog, generalized: the value of a detector
+is that its judgement is independent of the thing it watches, and a detector that also remediates has both
+an opinion and a hand on the lever. Remediation is an action, taken by a principal through the gate, on the
+detector's report.
+
 ## Repeated lapse raises a checkpoint
 
 A lease that lapses is not returned by anything; the task is simply claimable again (`work_model.md`).
@@ -108,7 +175,12 @@ entity the action gate writes when it holds an action (`gates_and_workflows.md#t
 its subject and its reason class differ. The reason classes the design names: `gate_hold` (an action held
 at the gate), `repeated_lapse` (above), `unreadable_workflow` (`gates_and_workflows.md`, no step opened),
 `rounds_exhausted` (rule 5, or a declared cap on an `on_fail` loop), `unspawnable_assignee`
-(`work_model.md`, an `assigned_to` nobody can run); a policy may declare more. A checkpoint on a task
+(`work_model.md`, an `assigned_to` nobody can run, and a declared `owner_role` the roster resolves to
+nobody), `unclaimed_step` (above), `undeclared_dependency` (a step could not read a type it declared, and
+the hold reached its bound — `gates_and_workflows.md#declaration-batch-projection`), `capability_denied`
+(a principal was denied a capability its step needed — `authority_model.md#grants`), and
+`lossy_record_mutation` (a write to the record whose blast exceeds the declared count —
+`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`); a policy may declare more. A checkpoint on a task
 carries the reason, the needed input, the options, and whom it awaits, and is presented and resolved
 through the one decision queue, by the one resolution protocol, that checkpoints on actions use. Do not
 build a second gate, a second queue, or a second notification path for task-level failure (principle 6):
@@ -122,8 +194,27 @@ is closed by that step owner's sign off or it stays open. **No step is closed by
 a pass is a gate that fails open on a timer, which is the shape this model exists to remove — the whole
 value of a required step is that its absence is visible, and a timer converts that absence into a silent
 permit. So a checkpoint raised on an unclaimed step names the step, its owner role, and how long it has
-been open, and stops there; whether an interval raises such a checkpoint at all is an open decision, but
-no form of it may advance the step.
+been open, and stops there.
+
+**An open step nobody has claimed raises a checkpoint after a declared interval, against its owner role.**
+Nothing else bounds it: no lease exists on an unclaimed step, so nothing lapses, and pending is a
+legitimate state, so no reader errors. The checkpoint's subject is the step's batch and its reason class is
+`unclaimed_step`; it names the step, the `owner_role` declared for it, and how long the step has been open,
+and it awaits the operator. It is routed against the **owner role** rather than the batch because the
+condition is an owner who is absent or does not exist, not work that is unimportant — routing it at the
+role is what makes an absent step owner legible as one. The interval is declared on the workflow, not
+inferred; an undeclared interval raises no checkpoint. And the constraint above holds without exception:
+the checkpoint alerts, and **it never signs**. It changes no verdict, closes no step, and its resolution is
+the operator's decision about the role, not a clearance of the step — a step is closed by its owner's
+sign-off or by the operator's `waived` sign-off, and by nothing else.
+
+**A role that resolves to no principal is a declaration error, not only a claim-time failure.** A step
+whose `owner_role` the roster resolves to nobody raises a checkpoint with reason `unspawnable_assignee`
+(`work_model.md`) when a claim is attempted. That fires too late: whether a role resolves is knowable when
+the workflow is **declared**, so the same check runs at declaration and the same reason class is raised
+there. A workflow naming a role no roster resolves is a defect in the declaration, caught in the pull
+request that introduces it, rather than a step that becomes permanently unsignable the first time someone
+tries to claim it and errors nowhere in between.
 
 ## What a checkpoint does not absorb
 

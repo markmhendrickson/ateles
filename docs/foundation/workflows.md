@@ -580,6 +580,49 @@ sign-off, not by a new intake, because the classification did not change.
 
 **Fast paths:** none.
 
+## session digestion
+
+**Purpose:** turn what an [interactive session](vocabulary.md#interactive-session) did and left undone
+into tasks, so that the one execution mechanism holding no lease has a recovery path that is designed and
+owned rather than emergent. A session claims nothing, so nothing lapses when it dies and there is no task
+to make claimable again; digestion is what stands in for the lease, and it is a workflow because a
+recovery nobody owns is not a recovery.
+
+**Entry condition:** intake closed naming `session_digestion`; the task references one or more sessions by
+their transcripts. A session is eligible whether it ended cleanly or was interrupted — an interrupted one
+is the case the workflow exists for, and waiting for a session to "finish" would exclude it.
+
+**Steps**
+
+<!-- rendered: workflow=<project>|session_digestion steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `digest` | analyst | yes | | each session in scope has one digest in the record, stating what it claimed to do and what it left open; a session whose transcript cannot be read is recorded as unread, never as empty |
+| 2 | `verify` | analyst | yes | on fail: `digest` | every claim the digest carries is checked against the system of record that would hold its effect, and each is marked confirmed, refuted, or unverifiable; an unverifiable claim stays unverifiable and is never promoted to confirmed |
+| 3 | `reconcile` | analyst | yes | | claims that survive verification are reconciled against the tasks that already exist, so that a claim already tracked produces no duplicate |
+| 4 | `file` | analyst | yes | | every unreconciled item is created as a task and enters its own intake; each is read back; the sign-off closes the batch |
+
+<!-- /rendered -->
+
+`verify` is required and separate from `digest` because a session's own account of itself is a claim and
+not evidence: the digest states what the session said it did, and only the system that would hold the
+effect can say whether it happened (principle 2). `file` creates tasks and completes none — digestion
+recovers work by making it claimable again, which is the guarantee the lease gives the other three
+mechanisms, and it never marks the recovered work done on the strength of the session having attempted it
+(principle 10).
+
+**Stages:** reconstruction (`digest`); confirmation (`verify`, `reconcile`); output (`file`).
+
+**Artifacts:** the session transcripts. The digests and the tasks are entities in the record.
+
+**Typical action classes:** none. Every outward effect the digestion finds outstanding becomes a task for
+the workflow that owns it.
+
+**Successors:** none. Each filed task enters intake on its own.
+
+**Fast paths:** none.
+
 ## What no workflow in this document does
 
 None lets a task that has no intake batch enter it, except intake itself. None names two successors.

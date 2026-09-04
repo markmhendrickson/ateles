@@ -33,7 +33,8 @@ and the adapters that reach them: `adapters.md`.
 
 `workflow` declares one entity per (project, workflow type): ordered `steps[]` (`phase`, `step_name`,
 `owner_role`, `parallel_group`, `join_step`, `required`, `on_fail` — the earlier step a failing sign-off
-opens again), plus `fast_paths` and `successors`. `owner_role` holds a **role**, never an agent name: the
+opens again — plus `reads_to_enter`, `reads_to_close`, and `freshness`, the read dependencies below), plus
+`fast_paths` and `successors`. `owner_role` holds a **role**, never an agent name: the
 roster resolves it to a principal when the step is claimed (`vocabulary.md#step-owner`), so one
 declaration serves every project and a renamed agent leaves no stale name in it. Step names are data: a workflow may declare steps
 beyond the review sequence (a draft step, a deterministic lint, an operator preview). A contiguous named
@@ -45,9 +46,50 @@ subject is tasks; issues and pull requests are artifacts by edge, never the thin
 A step has no entity of its own. Derived state: batch + step → **open**; lease from step owner →
 **claimed**; `sign-off` → **signed**. Opening a step publishes claimable step work; the step owner claims it
 with the same lease primitive as a task (`work_model.md`). A `sign-off` is the terminal write that closes
-a step (verdict, timestamps, agent, artifact refs, pinned `agent_definition` version); a rejected write is
+a step (verdict, timestamps, agent, artifact refs, pinned `agent` version); a rejected write is
 an error, never swallowed. This is principle 11 applied to steps: a per-step status row would need a
 process to keep it true, and the three edges are read.
+
+**A step declares what it must be able to read, to enter and to close.** The posture is not a judgement
+each author makes at each call site: **the swarm does not advance a batch, or continue within a step, when
+data the step depends on cannot be read.** What makes that enforceable rather than exhortative is the
+declaration. Each step names `reads_to_enter` — the entity types it must read before it opens — and
+`reads_to_close` — the types it must read before its sign-off is written. A step that cannot read a type it
+declared does not proceed; a step that reads a type it did not declare is a **declaration error**, caught
+the way an undeclared action class is, in the pull request that introduced it. That is the point of putting
+the dependency in the declaration rather than in the code: an undeclared dependency is visibly missing,
+where an unstated one is invisible until a read fails silently and something proceeds on the gap.
+
+**For adapter-sourced types the declaration also states the freshness it requires.** `freshness` is read
+the way `adapters.md` defines it — derived from an artifact's sourcing and coverage across its
+observations, never a stored `last_synced_at` field a process would have to keep true (principle 11). So
+this half adds a requirement, not a mechanism: what the adapter asked the external system for, against what
+it actually got back, is already readable, and the step states what it needs of it. A read that returned
+successfully but partially — scoped short, truncated, paged and not followed — is neither a failed read nor
+an empty result, and coverage is what tells the three apart.
+
+**A required read that returns `unknown` holds the step, bounded, then escalates.** The step does not open,
+or does not close, and the condition is announced on the off-record path (`failure_posture.md` rule 2)
+along with every other blocked claim in the window — cheap and correct while the cause is transient. The
+hold is **bounded**: when the bound is reached, the step raises one checkpoint naming the dependency it
+could not read, reason `undeclared_dependency`, so a permanently unreadable dependency stops being
+indistinguishable from a slow one. This is rule 5's existing shape — deferral is bounded, exhaustion
+escalates — applied to a read rather than to a task, which is why it extends a mechanism instead of
+building a second one (principle 6).
+
+**A degraded read never synthesizes a permissive value.** This holds however the declaration is written,
+and it is the one shape that is dangerous under every posture. A failed read that returns a value *more*
+permissive than success would have returned inverts the direction of authority: a stub granting a wildcard
+capability set, an empty finding list standing in for a check that never ran, a missing policy read as no
+restriction. Principle 5 forbids it in general terms and `authority_model.md#grants` states it for the
+grant read; it is stated here because a step's declared reads are where it most often arises.
+
+**`unknown` must be representable distinctly from empty at every read.** This is principle 7 stated where
+it bites, and it is the precondition for everything above: until a failed read is distinguishable from a
+legitimately empty result, no declaration can be enforced and no posture has anything true to act on. A
+reader that collapses the two — an exception handler returning an empty list, a lookup returning the zero
+value — has destroyed the distinction before any rule can apply to it. The recorded shape of `unknown` is
+`data_model.md`.
 
 **A required step is closed only by a sign-off, and no principal signs for another.** The step owner named
 on the step is the only principal whose sign-off closes it; a second principal cannot supply the verdict,
@@ -60,8 +102,23 @@ primitive, no override flag, and no field a principal sets on itself — a self-
 sign-off, step state stays derived from edges (principle 11), the audit trail names who cleared the step
 and why, and a waived step is visible as waived in `step_status` rather than indistinguishable from a
 signed one. The action gate is unaffected: a waived workflow step does not permit an action, which is
-evaluated on its own (below). Open: whether any principal other than the operator may hold the right to
-waive, and whether a waiver may be scoped to one step or to a batch's remaining unsigned steps.
+evaluated on its own (below).
+
+**Only the operator principal may waive, and a waiver is scoped to one batch's unsigned required steps,
+written as one `waived` sign-off per step.** The right is not delegable: a step owner able to write
+`waived` on its own step is the self-settable clearance this model exists to remove, restated in a verdict
+value instead of a boolean. The scope is the batch — one invocation from the operator clears the unsigned
+required steps of one batch, which is the shape in use and costs the operator nothing — but the **record**
+is per step: one `waived` sign-off for each step cleared, each attributed to the operator principal, each
+naming its step and carrying the reason. That keeps step state derived from sign-offs rather than from a
+batch-level flag (principle 11), and it makes a waived step queryable as waived: how often, which steps,
+and why, rather than a comment on an artifact that no reader reads. A clearance recorded only as prose on
+an artifact is an observation and never a sign-off (`failure_posture.md` rule 4).
+
+And the negative, restated here because this is where a reader will look for it: **no step is closed by
+elapsed time.** A waiver is an operator's deliberate act, not a timer; the answer to a step nobody has
+claimed is a checkpoint against its owner role (`failure_posture.md`), never an automatic clearance. A gate
+that expires into a pass is a gate that fails open on a timer.
 
 **Scope amendment versus scope creep.** A batch carries acceptance criteria, and implementation regularly
 turns up work that was not in view when they were written. A scope boundary is a decision record, not a
@@ -89,9 +146,36 @@ and cannot see the first is the defect this model removes (`real_defect_is_two_b
 A step owner judging a batch records **findings** (`vocabulary.md#finding`): one defect or objection each,
 each carrying its own severity. The sign off carries a **verdict** (`vocabulary.md#verdict`), the summary
 token that closes the step and states whether the step's **condition** (`vocabulary.md#condition`) is met.
-The severity of the findings, not the summary token, is what blocks — a blocking finding filed under a
-non-blocking summary is still a blocking finding, and whether a verdict may disagree with the findings it
-carries is an open decision this document does not settle.
+**The findings bind, and a verdict that contradicts its own findings is rejected, not swallowed.** The
+severity of the findings, not the summary token, is what blocks. A sign-off carrying a blocking finding
+under a non-blocking verdict is a contradiction in one write, and the write is **refused at submission** —
+which is not a new rule but the existing one applied, since a rejected sign-off write is an error, never
+swallowed (above). The step owner is told its verdict contradicts its own finding and re-submits; the step
+does not close in the meantime. Severity in the envelope is the only version an authoring mistake cannot
+defeat: where only the summary token is read, a step owner who files a blocker in the wrong envelope has
+blocked nothing, and the sole trace is prose no reader reads.
+
+**The design's verdict values are three, and a host's review tokens are the adapter's inbound mapping.**
+A verdict is `signed`, a blocking value, or `waived`, and nothing else. Where an external code host has its
+own review vocabulary — approve, request changes, comment — those are **signals** the adapter maps inbound
+to the record's three values, exactly as it maps every other inbound signal (`adapters.md`), and they are
+never the record's vocabulary. A projection fed tokens the design does not define is a projection whose
+meaning is per-author, which is how one step set comes to speak two languages onto one field.
+
+**A verdict is terminal, and never revised in place.** A sign-off is the terminal write that closes a step.
+A step owner that reaches a different judgement writes a **new sign-off**, and the latest per step owner
+per artifact head is the one that stands; the superseded verdict stays readable, which the append-only
+record gives for free. Rewriting a verdict in place is forbidden for the reason a sign-off is pinned to the
+head it judged: a re-pointed verdict shows one approval of work its author never read, and destroys exactly
+the reading the pinning exists to give. The cost is more rows and a read rule, and both are cheap against
+an audit trail that silently misreports what was judged.
+
+**A verdict carries no condition.** A verdict states whether the step's condition is met; it may not close
+its step while binding what a later step must do. A conditional block hands the verdict to the party being
+blocked — a step owner blocking "provided the fix lands" has delegated its own judgement to the
+implementer, and the guarantee that a closed step was judged unconditionally is gone. A requirement that
+must hold later has two homes that already exist: a task, or an acceptance criterion the batch already
+carries. Neither is a clause in a verdict.
 
 **A blocking finding is one of two kinds, and the kind decides what may be done about it.** An
 **implementation-only** finding names a determinate defect with a determinate fix: the work is inside the
@@ -141,7 +225,27 @@ workflows: the workflow's declared step owners together with the `agent_grant`s 
 (`authority_model.md`). Action policy answers which actions may be taken and under what gate: the
 `action_policy` entity, the policy a principal evaluates the action gate against. A step owner's right to
 sign off a step is workflow policy; whether the merge that follows may be taken is action policy. Neither
-policy governs internal operational writes to Neotoma, which are not actions.
+policy governs internal operational writes to Neotoma, which are not actions — **except for two named
+classes, which are.**
+
+**Governance writes are actions.** A write to `agent`, `action_policy`, `agent_grant`, `swarm_roster`, or
+the schema registry is an action, evaluated at the action gate under the project's `action_policy`. These
+five types define what the swarm may do: a write to a grant changes which capabilities a principal holds,
+and a write to an agent changes what a principal is. That is the same question the gate exists to ask,
+arriving through a door the gate cannot see while the rule is "where the write goes". The list is closed
+and short, so the rule is checkable by inspection rather than judged per write.
+
+**Lossy record mutations are actions.** A write that can destroy what the record already holds is an
+action: merging entities, splitting one into several, migrating a field, and **any write whose blast
+exceeds a declared entity count**. The count is declared in the `action_policy`, so what counts as bulk is a policy value
+rather than each author's estimate. A held one carries the reason class `lossy_record_mutation`
+(`vocabulary.md#checkpoint`). A single-field correction is not in this class; a template applied across
+every agent's capability set is.
+
+Everything else stays an internal operational write and reaches no gate. The line these two classes draw is
+**what the write can destroy**, not where it goes — which is the distinction that separates the writes
+worth holding from the routine ones — and both use the gate and the checkpoint queue that already exist
+rather than a second path for record writes (principle 6).
 
 ### Actions are entities; only actions are taken
 

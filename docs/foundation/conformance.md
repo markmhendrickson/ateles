@@ -162,7 +162,7 @@ the swarm's own records, and the word is not used for them.)
 | Entity types, fields, and edge types the design names | the schema registry on the record | `docs/foundation/data_model.md` tables via `render_data_model.py --check` (prose authored in the file) |
 | Walkthroughs of the work/gate model | the kernel documents | `docs/foundation/scenarios.md` (+ `scenarios_extended.md`) |
 | Skill bodies (what a skill instructs) | the `agent_policy` entity the skill renders from | `.claude/skills/<name>/SKILL.md` on disk |
-| Agent prompt text | `agent_definition.prompt_markdown` | `docs/agents/` and the rendered skill mirrors, via `render_agent_docs.py --check`, which also prunes a mirror whose definition is gone |
+| Agent prompt text | `agent.prompt_markdown` | `docs/agents/` and the rendered skill mirrors, via `render_agent_docs.py --check`, which also prunes a mirror whose definition is gone |
 | Operator preferences and feedback | `task_policy` and `feedback` entities on the record | none; a harness memory file is a cache of them, never their home, and a preference that exists only in one is unreadable by every agent that is not that harness |
 | External-system mapping (what an event becomes; what a step's operation is) | `docs/foundation/adapters.md`, PR-reviewed | the adapter daemons' code; the per-instance binding of a system to an operator is the `channel_config` and `vendor_binding` entities, which bind and never redefine the mapping |
 

@@ -284,7 +284,7 @@ of its siblings.
 **Not for:** a child with two parents.
 
 ### operator-facing agent
-**Definition:** the [agent](#agent), defined by the `ateles` `agent_definition`, that [claims](#claim) operator-only [tasks](#task),
+**Definition:** the [agent](#agent), defined by the `ateles` `agent`, that [claims](#claim) operator-only [tasks](#task),
 carries them and their [checkpoints](#checkpoint) to the [operator](#operator), and records the outcome.
 **See:** [`work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent`](work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent).
 **Never:** —
@@ -293,7 +293,7 @@ carries them and their [checkpoints](#checkpoint) to the [operator](#operator), 
 ### daemon
 **Definition:** a long-lived process that self-triggers on its own loop, producing [tasks](#task) or [actions](#action)
 without receiving a task.
-**See:** [`work_model.md#the-three-execution-mechanisms`](work_model.md#the-three-execution-mechanisms).
+**See:** [`work_model.md#the-four-execution-mechanisms`](work_model.md#the-four-execution-mechanisms).
 **Never:** —
 **Not for:** service for a daemon, unqualified.
 
@@ -301,9 +301,22 @@ without receiving a task.
 **Definition:** the GitHub-hosted execution mechanism that opens each [step](#step) of a [workflow](#workflow) for a [batch](#batch) as
 [claimable](#claimable) step work, which the [step owner](#step-owner) [claims](#claim), and never writes a [task](#task) status.
 It delivers nothing; it is the same pull, over steps.
-**See:** [`work_model.md#the-three-execution-mechanisms`](work_model.md#the-three-execution-mechanisms).
+**See:** [`work_model.md#the-four-execution-mechanisms`](work_model.md#the-four-execution-mechanisms).
 **Never:** —
 **Not for:** workflow for the pipeline (the declaration); CI for the pipeline (one of its checks).
+
+### interactive session
+**Definition:** the execution mechanism in which an [operator](#operator) works directly with an
+[agent](#agent): a work **source** whose output becomes [tasks](#task), holding no [lease](#lease) and
+receiving no task.
+Because it holds no lease, none of the lease-borne [recovery](#recovery) reaches it — nothing lapses when a session
+dies, and there is no task to make [claimable](#claimable) again. Work an interrupted session left
+unfinished is recovered by **digestion**, reading the session back and filing what it left, which is a
+declared [workflow](#workflow) with an owning role rather than an emergent practice.
+**See:** [`work_model.md#the-four-execution-mechanisms`](work_model.md#the-four-execution-mechanisms).
+**Never:** —
+**Not for:** [daemon](#daemon) for a session (a daemon self-triggers; a session is driven by the operator);
+[runner](#runner) for a session (the runner is the process); a session as something that [claims](#claim).
 
 ## Gate model (`gates_and_workflows.md`)
 
@@ -317,8 +330,9 @@ a [batch](#batch) may take, and the [successors](#successor) a closing [sign-off
 
 ### step
 **Definition:** one declared position in a [workflow](#workflow)'s ordered list, carrying a name, a [step owner](#step-owner), a
-`required` flag, an `on_fail` target, and parallel-group and join fields, [claimed](#claim) by its step owner on a
-[batch](#batch) and closed by that owner's [sign-off](#sign-off).
+`required` flag, an `on_fail` target, its [read dependencies](#read-dependency), and parallel-group and
+join fields, [claimed](#claim) by its step owner on a [batch](#batch) and closed by that owner's
+[sign-off](#sign-off).
 Step names are data (`pm`, `ux`, `arch`, `impl`, `pr_review`, `qa`, `legal`, `release`, and any a workflow
 declares).
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
@@ -326,6 +340,23 @@ declares).
 **Not for:** gate, phase, or check for a step — neither after a step name (a qa gate, an impl phase) nor
 in front of a step's own attributes (a gate owner, a gate sequence); `gate` is the action gate. Also not
 checkpoint for a step, in either order.
+
+### read dependency
+**Definition:** an entity type a [step](#step) declares it must be able to read — `reads_to_enter` before
+the step opens, `reads_to_close` before its [sign-off](#sign-off) is written — with a required
+[freshness](#freshness) for [adapter](#adapter)-sourced types.
+A step that cannot read a type it declared does not proceed: the read returns `unknown`, the step holds,
+the condition is announced off-record, and when the bounded hold reaches its bound one
+[checkpoint](#checkpoint) names the dependency (reason `undeclared_dependency`). A step that reads a type
+it did not declare is a **declaration error**, caught in review the way an undeclared
+[action_type](#action_type) is. The point of the declaration is that a missing one is visible, where an
+unstated dependency is invisible until a read fails silently and something proceeds on the gap.
+**Field:** `workflow.steps[].reads_to_enter`, `reads_to_close`, `freshness`.
+**See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
+**Never:** —
+**Not for:** a read dependency for a [grant](#grant)'s admitted types (the grant is the outer bound, the
+dependency is what this step needs); a read dependency for `context_entity_types[]` (that is the
+[agent](#agent)'s information diet, declared on the agent and not on the step).
 
 ### stage
 **Definition:** a named group of contiguous [steps](#step) in a [workflow](#workflow), such as the review stage or the release
@@ -350,14 +381,19 @@ declarations and holds a role there too — `status.md`).
 ### sign-off
 **Definition:** the record a [step owner](#step-owner) writes to close a [step](#step) on a
 [batch](#batch), carrying the [verdict](#verdict), the [findings](#finding) that produced it, timestamps,
-the [agent](#agent), [artifact](#artifact) refs, and the pinned `agent_definition` version.
+the [agent](#agent), [artifact](#artifact) refs, and the pinned `agent` version.
 A terminal write that supplies every field the schema requires; a rejected write is an error, never
 swallowed. Written as a hyphenated noun (a sign-off); the act is to sign off, two words.
 **Verdict values:** `signed` (the step's [condition](#condition) is met), a blocking verdict (it is not,
 and the step's `on_fail` says which earlier step opens again), and `waived` (the [operator](#operator) [principal](#principal) closed
 an unsigned required step, carrying the reason). `waived` is the only verdict a principal other than the
-step owner may write, and only the operator principal may write it
+step owner may write, and only the operator principal may write it — the right is not delegable
 ([`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection)).
+**Waiver scope:** one [batch](#batch)'s unsigned required steps, one `waived` sign-off **per step**, each
+naming its step and carrying its reason — so a waived step is queryable as waived rather than recorded as a
+batch-level flag or as prose on an artifact.
+**Terminal, and never revised in place:** a later judgement is a new sign-off, and the latest per step
+owner per artifact head is the one that stands; the superseded one stays readable.
 **Evidence:** a blocking verdict names the executed check and the output it produced, or the mechanism
 that executed it; unexecuted reasoning is a non-blocking [finding](#finding), never a block
 ([`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges)).
@@ -386,9 +422,16 @@ finding that names no executed check.
 ### verdict
 **Definition:** the summary a [sign-off](#sign-off) carries, stating whether the [step](#step)'s
 [condition](#condition) is met: `signed`, a blocking value, or `waived`.
-A verdict is expected to agree with the [findings](#finding) the sign-off carries, and the case where it
-does not — a blocking finding under a non-blocking verdict — is an **open decision**, so this entry names
-the term without settling which of the two governs.
+Those three are the only values, and a host's own review tokens are the [adapter](#adapter)'s [inbound](#inbound)
+mapping onto them, never the record's vocabulary.
+**Against its findings:** the [findings](#finding) bind. A verdict must agree with the findings its
+[sign-off](#sign-off) carries, and a write whose verdict contradicts them — a blocking finding under a
+non-blocking verdict — is **rejected at submission**, never swallowed; the step stays open until the step
+owner re-submits.
+**Terminal:** a verdict is never revised in place. A [step owner](#step-owner) reaching a different judgement writes a new
+sign-off, and the latest per step owner per [artifact](#artifact) head stands.
+**Unconditional:** a verdict carries no [condition](#condition); a requirement that must hold later is a
+[task](#task) or an acceptance criterion, not a clause in a verdict.
 **See:** [`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges),
 [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
 **Never:** —
@@ -398,9 +441,10 @@ the term without settling which of the two governs.
 
 ### condition
 **Definition:** a stated requirement that a later [step](#step) must satisfy.
-Whether a [verdict](#verdict) may carry one — a [sign-off](#sign-off) that closes its step while binding what follows
-— is an **open decision**; the word is defined here so that the documents use it in one sense, and its use
-on a verdict is not settled by this entry.
+A [verdict](#verdict) may **not** carry one. A [sign-off](#sign-off) that closed its step while binding
+what follows would hand its own judgement to the party it was binding, and the guarantee that a closed step
+was judged unconditionally is what makes a signed step readable. A requirement that must hold later is a
+[task](#task) or an acceptance criterion of the [batch](#batch).
 **See:** [`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges).
 **Never:** —
 **Not for:** condition for a [gate](#gate)'s inputs (those are the action's class, blast radius, and
@@ -551,7 +595,12 @@ advance, awaiting a [principal](#principal)'s decision.
 Recorded as an entity linked to its subject, carrying a reason class, the needed input, the options, whom
 it awaits, and who resolved it, and ending in a terminal approval. To checkpoint a subject is to write one
 and hold. The reason classes are `gate_hold`, `repeated_lapse`, `unreadable_workflow`, `rounds_exhausted`,
-`unspawnable_assignee`, and any a policy declares. "Brief" described its content, not its identity, and is
+`unspawnable_assignee`, `unclaimed_step` (an open [step](#step) no [step owner](#step-owner) has [claimed](#claim) after the
+interval its [workflow](#workflow) declares, routed against the owner role — it alerts and never signs),
+`undeclared_dependency` (a step could not read a type it declared, and the bounded hold reached its bound),
+`capability_denied` (a [principal](#principal) was denied a capability its step needed; the checkpoint is a
+request, never a [grant](#grant)), `lossy_record_mutation` (a write to the record whose blast exceeds the
+count the [action_policy](#action_policy) declares), and any a policy declares. "Brief" described its content, not its identity, and is
 retired from the name for the same reason as `_record` and `_definition`.
 **See:** [`gates_and_workflows.md#the-checkpoint`](gates_and_workflows.md#the-checkpoint),
 [`failure_posture.md#what-a-checkpoint-does-not-absorb`](failure_posture.md#what-a-checkpoint-does-not-absorb),
@@ -730,15 +779,23 @@ principal itself.
 **Not for:** identity for the principal; account for a credential.
 
 ### operator
-**Definition:** a human [principal](#principal) who directs [agents](#agent).
+**Definition:** a human [principal](#principal) who directs [agents](#agent), recorded as an `operator`
+entity whose only job is to be a principal.
+The [authority](#authority) [edges](#edge) attach here: an `ownership_grant`, a [delegation](#delegation) endpoint, a [quorum](#quorum) seat,
+a [separation-of-duties](#separation-of-duties) constraint. `operator_profile` is a **descriptive** record — identity details,
+locale, preferences — and carries none of them. [Credentials](#credential) bind to the `operator`,
+many-to-one, as they do to any principal.
 **See:** [`authority_model.md#principals`](authority_model.md#principals).
 **Never:** "admin".
-**Not for:** user when authority is meant.
+**Not for:** user when authority is meant; `operator_profile` for the principal (it is the descriptive
+record beside it).
 
 ### agent
-**Definition:** a non-human [principal](#principal) defined by an `agent_definition` and acting as a bound principal.
+**Definition:** a non-human [principal](#principal) defined by an `agent` entity and acting as a bound principal.
+The entity type is `agent`: "definition" said nothing that "every entity is one" does not already say, and
+the pair the model names is [operator](#operator) and agent — the human principal and the non-human one.
 **See:** [`authority_model.md#principals`](authority_model.md#principals).
-**Never:** —
+**Never:** "agent_definition".
 **Not for:** worker for an agent (the process running an agent is a runner).
 
 ### tenant
@@ -836,13 +893,35 @@ execution rights.
 ## Failure posture (`failure_posture.md`)
 
 ### halt
-**Definition:** the state in which the swarm does no work because its record is unreachable, while it keeps
-observing and announces itself off-Neotoma.
-Not a [checkpoint](#checkpoint): a checkpoint is written to the record, and the halt is the state in which nothing can be.
+**Definition:** the state in which the swarm does no work, while it keeps observing and announces itself
+off-Neotoma.
+Two causes, one state. It is **automatic** when the record is unreachable, since work with no record is
+unaccountable work. It is **operator-invoked** on the [operator](#operator)'s word, at any time and for any
+reason — and that one is confirmed stopped by a [read-back](#read-back) of the swarm's state, never by the command
+returning, because a command that returns is a write reporting success (principle 2). In both, no
+[task](#task) or [step](#step) is [claimed](#claim), no step opens, no [gate](#gate) decides, and nothing
+is claimed complete; [watchdogs](#watchdog), forensic capture, and alerting stay live. Not a [checkpoint](#checkpoint):
+a checkpoint is written to the record, and the automatic halt is the state in which nothing can be.
 **See:** [`failure_posture.md#the-decision`](failure_posture.md#the-decision),
+[`failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`](failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken),
 [`failure_posture.md#what-a-checkpoint-does-not-absorb`](failure_posture.md#what-a-checkpoint-does-not-absorb).
-**Never:** "degraded mode", "fallback mode", "offline mode".
-**Not for:** —
+**Never:** "degraded mode", "fallback mode", "offline mode", "kill switch".
+**Not for:** halt for a single blocked [step](#step) (that is the step staying open); halt for a
+[recovery](#recovery) (a halt stops work, a recovery undoes an effect).
+
+### recovery
+**Definition:** the [action](#action) that undoes, or forward-fixes, an [action](#action) already taken.
+Named per action class so the answer exists before it is needed: a merge is a revert; a publish is a
+deprecate-and-supersede, since unpublishing is barred after a window; a release tag is a delete-and-retag;
+a deploy is a rollback to the prior release. A recovery is itself an action through the
+[action gate](#action-gate), recorded like any other — there is no privileged undo that bypasses the [gate](#gate).
+**See:** [`failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`](failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken).
+**Never:** —
+**Not for:** rollback as the general word for a recovery (it names the deploy class's recovery only, and
+a merge's is a revert, a publish's a deprecate-and-supersede, a tag's a delete-and-retag); "undo" for a
+recovery, which reads as a path outside the [action gate](#action-gate) and there is none; recovery for a
+re-claim after a [lapsed](#lapsed) [lease](#lease) (no effect was taken); recovery for a restore drill
+(that exercises a backup, it undoes nothing).
 
 ### reachability probe
 **Definition:** one real read, at the moment a [task](#task) is [claimed](#claim), of what the work will read.

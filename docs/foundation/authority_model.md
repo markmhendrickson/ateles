@@ -51,15 +51,33 @@ email address, a chat id) is a binding to a principal, many-to-one, never the pr
 string, an address, or a magic value compared as `"operator"` is a credential standing in for a principal.
 An agent carries a `principal_binding`: the principal it acts as; it is recorded as itself for attribution.
 
-**Open, the one identity decision (C9): which entity type is the human principal.** Two candidates:
-`operator_profile` (exists; named by the agent policies; kept by `multi_tenant.md`) and the `operator`
-entity #378 proposes (`operator_id`, `principal_id`); with it, the mapping from that entity to `user_id`
-and to the AAuth `sub`. Not open: `user_id` is the store's authenticated credential and collapses every
-writer onto one value on a shared instance, and the AAuth `sub` is an agent's credential; neither is a
-human principal. Left open because picking here would hand the identity design two models, and
-`multi_tenant.md` section 7's decisions 1 and 2 (slug or UUID; tenant derived from the `sub` or matched on
-the grant) are the operator's. Every other statement in this document is written against "the principal
-entity" and holds under either answer.
+**The human principal is an `operator` entity (C9, settled).** The type whose only job is to be a
+principal is the human principal: an `operator` entity, carrying identity and nothing descriptive, and
+holding the ownership and delegation edges. It is the simplest of the candidates, and it pairs
+symmetrically with the agent side — an `agent` is the non-human principal, an `operator` the human one, and
+each is a type that exists to be pointed at. `operator_profile` remains what its name says, a **descriptive
+record** — identity details, locale, preferences — and it carries no authority edges: an `ownership_grant`,
+a `delegation_edge` endpoint, a quorum seat, and a separation-of-duties constraint attach to the `operator`
+entity, never to the profile. A descriptive record that also carries authority is a record two unrelated
+changes can touch, and one of them changes who may act.
+
+**The mapping down.** A [credential](vocabulary.md#credential) binds to the `operator`, many-to-one, as
+every credential binds to a principal. Two of them are already excluded from being the principal
+themselves, and this is where they attach instead: the store's `user_id` is an authenticated credential
+that binds to the `operator` acting through it, and it collapses every writer onto one value on a shared
+instance — so on such an instance `user_id` identifies the instance's account and not the principal, and a
+write whose only identity is that value **resolves to no principal and is recorded as unattributed**,
+which is a state a reader can see rather than a silent default to the operator. The AAuth `sub` is an
+agent's credential: it binds to the `agent` that presented it, and reaches the human principal only
+through that agent's `principal_binding` — which is what joins the two credential systems, and what was
+missing while no type sat above them.
+
+**What stays open, and it is not this document's to close.** The shape of the identifier on the `operator`
+entity, and whether a tenant is derived from the `sub` or matched on the grant, are `multi_tenant.md`
+section 7's decisions 1 and 2. They are the operator's and are not settled here. Until they are, the
+mapping above states which credential binds to which principal, and does not state the identifier's form
+or the tenant derivation. Every other statement in this document is written against "the principal entity"
+and is unchanged by this ruling.
 
 **Tenant.** The isolation boundary; `tenant_id` and `user_id` are separate fields; default-deny tenant
 scoping at the access layer; per-tenant AAuth namespacing; no cross-tenant read, write, routing, or key
@@ -78,8 +96,42 @@ types × repositories with parameter constraints; a human's grant is bound to a 
 a wildcard. The per-agent pattern is the template a principal dimension extends: a loader keyed on the
 agent name, a grant checker and a tool proxy keyed on the `sub`, a per-agent keypair threaded into signed
 writes, a per-agent policy override, per-agent GitHub logins, a workflow resolved per project. A failed
-agent-definition load is a stub: the loader marks it, and no caller starts a runner from one (principle
+agent load is a stub: the loader marks it, and no caller starts a runner from one (principle
 5); a stub with a wildcard tool allowlist is the fail-open shape.
+
+**A degraded read never synthesizes a value more permissive than success would have returned.** The stub
+above is the case, and it is not a posture choice: a failed read that yields a wildcard capability set
+inverts the direction of authority, granting *more* than the successful read would have. Principle 5 —
+fail closed on the field that carries the safety meaning — forbids it outright, whatever the posture for
+that read otherwise is.
+
+**The grant is read at every enforcement point.** Not from a cache: a checker answering from state it can
+no longer confirm is enforcing a snapshot, and a revocation then waits for however long the cache holds,
+silently, because the checker keeps answering confidently. Reading at the check is what makes revocation's
+reach immediate rather than eventual. This settles the disjunction the revocation paragraph below leaves
+open in favour of its first branch.
+
+**The decision precedes the effect.** A call outside a principal's grant is refused before any effect is
+taken, not after — the denial is a decision the enforcement point reaches first, and the refusal is
+structured: it names the principal, the capability, and what was refused.
+
+**A denial raises a checkpoint, and the denied principal does not route around it.** A denial ends the
+attempt, and until now nothing followed it — so a denied agent improvised, and the improvisations were
+each already forbidden somewhere else. The successor is the queue that exists: the principal raises one
+**checkpoint on the task**, reason `capability_denied`, naming itself, the exact capability it was denied,
+and the step the denial blocked. The step stays open. The checkpoint is a **request, never a grant**:
+provisioning remains operator-only and out of band — joining a workspace, issuing a token, widening a
+grant are the operator's actions and an agent neither performs them nor is empowered by raising the
+checkpoint to have them performed. Resolving it is the operator deciding, and the grant change that may
+follow is their write, not the checkpoint's effect.
+
+And the negative, collected here because a denied principal reading one rule should find all three:
+**an agent denied a capability does not route around the denial.** It does not ask another principal to
+make the write on its behalf — no principal signs for another, and a verdict attributed to a principal that
+did not reach it is a false record. It does not park the result on an artifact — a verdict that reached
+only the artifact is an observation and never a sign-off (`failure_posture.md` rule 4). And it does not act
+under another principal's credential — that is impersonation, which delegation forbids by name (below). Each
+of the three is forbidden elsewhere; what was missing is one place a denied agent would actually read them.
 
 **Custody by revocability.** A credential's custody follows from whether revoking it is possible. A
 credential that *is* the asset — a wallet seed, a signing key whose compromise cannot be undone by

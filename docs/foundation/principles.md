@@ -35,7 +35,10 @@ report. Sources: #727 rule 1; synthesis PR-14 (analysis `ent_8104c890c581ccf9094
 
 **Enforced by:** a blocking CI step per linter (`continue-on-error` is the anti-pattern); a review that
 names, for every proposed control, what it stops. The foundation binding (`conformance.md`) applies this to
-documents: a listed document not on disk is reported as not yet written, never assumed to bind.
+documents: a listed document not on disk is reported as not yet written, never assumed to bind. And the
+placement test for a rule itself: a rule binds where it is read at the moment of the action it governs
+(C7, below), so a control written to a surface nobody reads at that moment is reporting, however
+prominently it is placed.
 
 ### 2. A write that reports success has not necessarily happened; read it back
 
@@ -163,6 +166,30 @@ subject. Resolved: these are different audiences, not copies. The #727 section s
 that it does not bind agents the swarm runs; this document is what the review lenses read; the derivation is shared and
 cited. Direction of truth per class of record is in `conformance.md`. When the two diverge, this document is
 wrong until a PR corrects it, and that PR is the review.
+
+**The axis that separates the four homes, and it decides which of them binds:** *a rule binds where it is
+read at the moment of the action it governs.* Four homes are four audiences, but they are not four equal
+controls, and the difference is when the text is read against when the thing it governs happens. Read the
+four against that axis:
+
+| Surface | When it is read | What that makes it |
+|---|---|---|
+| Code and hooks | at the action, every time | binding — the rule and the action are the same event |
+| A tool's point of use | in the result the caller is reading, on the condition that fires it | binding — it arrives in the loop, at the moment the caller can still act on it |
+| An agent's prompt | once, when the agent starts | weakly binding — identity and judgement, not enforcement; distance grows with every turn after |
+| `CLAUDE.md` | re-injected after compaction, in interactive sessions only | binding for that surface alone; it reaches no agent the swarm runs and no daemon |
+
+Always-present instruction text at the top of a context window is not an exception to this, it is the
+clearest case of it: a rule can sit in context for a whole session, be violated repeatedly, and be
+corrected by hand each time — the text was present and was never read *at the action*. That is principle 1
+turned on the foundation's own surfaces, and principle 4 with it: a control that could not have failed the
+session it was meant to govern is decoration. So a rule that must bind goes where it will be read when the
+action is taken, and putting it somewhere more visible instead is not a substitute.
+
+The one deliberate exception, recorded as the narrow thing it is: **a rule may live in `CLAUDE.md` when
+its audience is interactive sessions and compaction survival is the binding property.** That is a real
+reason on the axis above — for that surface, re-injection is when the rule is read — and it is not a
+general licence, because the same text reaches no agent the swarm runs.
 
 ## Beyond the sources
 

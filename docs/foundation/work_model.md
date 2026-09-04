@@ -31,7 +31,7 @@ Work reaches an agent only by claim. No router chooses claimants; no principal d
 step is claimed by its step owner the same way (`gates_and_workflows.md`). Reason: the actor that judges fit
 must be the actor that acts and answers for the outcome. A router's inference sits in an actor that
 neither acts nor answers for a misroute, so a wrong guess reaches an executor with nobody accountable for
-the choice. A claim is a 1:1 judgment, "is this mine", bounded by the claimant's own `agent_definition`,
+the choice. A claim is a 1:1 judgment, "is this mine", bounded by the claimant's own `agent`,
 which no central table encodes; routing is a 1:N choice with fallthrough, and fallthrough is where an
 unknown principal is quietly resolved to somebody. A claim cannot fall through: the predicate reads
 `assigned_to` directly, and an `assigned_to` naming a principal nobody can run raises a checkpoint
@@ -135,7 +135,7 @@ urgent or trivial. Work small enough that most steps are unnecessary takes a dec
 declaration, judged once, and visible to every reader — rather than a task escaping the model.
 
 **What this means for the self-triggering daemons.** A daemon produces tasks and takes actions, and it
-receives no task itself (the three execution mechanisms, below); none of that is an exception to this
+receives no task itself (the four execution mechanisms, below); none of that is an exception to this
 rule. Any task a daemon produces enters intake exactly like a task from any other source and is executed
 through a workflow from there — the daemon that created it holds no privilege over it and does not
 execute it outside the model. The daemon's own outbound effects are not task execution at all: they are
@@ -182,14 +182,29 @@ Children `PART_OF` a parent (at most one parent). Parent completion is derived f
 states. Children go through workflows independently. A parent never enters a workflow — it is a
 grouping, and a batch carries tasks that are executed, which a parent never is.
 
-## The three execution mechanisms
+## The four execution mechanisms
 
 (1) Task path above. (2) Dedicated daemons that self-trigger (a mail poller produces tasks and never
 receives one). (3) The GitHub pipeline, which sequences steps for a batch and never writes task status — a
 step opening is publication of claimable step work; the step owner claims it with a lease, the same
 primitive as on a task (`gates_and_workflows.md`). It is the same pull, over steps. A roster role reachable
-by none of the three cannot receive work; the count is `status.md`. A daemon showing that a non-code agent
+by none of these cannot receive work; the count is `status.md`. A daemon showing that a non-code agent
 can self-trigger does not show it can receive work.
+
+(4) **The interactive session, a work source that holds no lease.** An operator working directly with an
+agent produces work, takes actions, and receives none of the swarm's work: it claims nothing, so it holds
+no lease. Naming it a mechanism is what makes its consequence statable rather than merely true. Every
+recovery guarantee in this document runs through the lease — a lapsed lease makes a task claimable again
+with no process acting on it, and repeated lapse raises a checkpoint — and none of them reaches a session.
+A session that dies mid-request leaves no lease to lapse and no task to re-claim.
+
+So the session's output becomes **tasks**, and the sequence that turns it into them is a declared workflow
+like any other (`workflows.md`), with an owning role, rather than an emergent practice. Work an
+interrupted session left unfinished is recovered by **digestion** — reading the session back and filing
+what it left — and that is stated as the design, not as a habit: the recovery is a workflow someone owns,
+and its absence would be visible. Requiring a session to claim a lease like the other three would close the
+gap in theory and be bypassed in practice, and a rule that is bypassed is not a control (principle 1);
+naming the mechanism honestly and designing its recovery is what the model can actually hold.
 
 ## Contradictions this document settles
 
