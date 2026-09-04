@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -48,9 +49,29 @@ def op_path() -> str:
     return os.environ.get("OP_BIN", "op")
 
 
+_BLOCK_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
 def enc_file(name: str) -> Path:
-    """Path to the encrypted snapshot for a manifest file block."""
-    return SECRETS_DIR / f"{name}.sops.enc"
+    """Path to the encrypted snapshot for a manifest file block.
+
+    Confines the destination under SECRETS_DIR: only basename tokens matching
+    ``^[A-Za-z0-9._-]+$`` are accepted, and the resolved path must stay under
+    the secrets directory. Absolute segments and ``..`` would otherwise escape
+    via pathlib join (``SECRETS_DIR / "/tmp/x.sops.enc"`` → ``/tmp/x.sops.enc``).
+    """
+    if not name or not _BLOCK_NAME_RE.fullmatch(name):
+        raise ValueError(
+            f"invalid secrets block name {name!r}: must match "
+            f"^[A-Za-z0-9._-]+$ (no path separators or '..')"
+        )
+    dest = (SECRETS_DIR / f"{name}.sops.enc").resolve()
+    root = SECRETS_DIR.resolve()
+    if not dest.is_relative_to(root):
+        raise ValueError(
+            f"secrets block {name!r} resolves outside the secrets directory"
+        )
+    return dest
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +122,36 @@ def parse_dotenv(text: str) -> dict[str, str]:
         k, _, v = line.partition("=")
         out[k.strip()] = v.strip().strip('"').strip("'")
     return out
+
+
+def merge_preserve_unmanaged(existing: dict[str, str], managed_keys: set[str],
+                              resolved: dict[str, str]) -> dict[str, str]:
+    """Merge a freshly-resolved key set into an existing snapshot, Design B contract.
+
+    A `.sops.enc` snapshot can be dual-written: `secrets_publish.py` owns the
+    keys in the manifest's `refs` (1Password-backed), while
+    `secrets_extract_host.py` merge-writes host-only keys into the SAME file
+    (see docs/secrets_management.md, "Host-only keys" / Design B). A publish
+    that blindly replace-encrypts from `resolved` alone drops any key the host
+    extractor wrote, because that key is absent from `resolved` (it does not
+    live in 1Password) and not in `managed_keys` either.
+
+    Contract: a key survives untouched unless it is in `managed_keys`. Keys
+    outside `managed_keys` -- host-only keys, or any key this run didn't
+    resolve -- pass through from `existing` unchanged. Keys in
+    `managed_keys` always take the freshly `resolved` value.
+
+    Callers MUST pass `managed_keys == set(resolved.keys())` (i.e. only keys
+    this run actually resolved a fresh value for) -- never a broader set like
+    "every key this run was asked to look up." A key the caller intended to
+    manage but didn't resolve this run (skipped, or the read failed) must
+    stay in `managed_keys`'s complement, or it is silently deleted here
+    instead of left untouched -- the exact host-only-key-loss bug this
+    function exists to prevent, just triggered from the other side.
+    """
+    merged = {k: v for k, v in existing.items() if k not in managed_keys}
+    merged.update(resolved)
+    return merged
 
 
 def merge_into_env_file(env_file: Path, updates: dict[str, str]) -> list[str]:

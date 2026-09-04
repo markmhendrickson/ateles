@@ -46,9 +46,41 @@ def publish_file(manifest: dict, name: str, environment: str | None) -> int:
         return 0
 
     dest = sl.enc_file(name)
-    sl.sops_encrypt_dotenv(sl.to_dotenv(pairs), dest)
+
+    # Design B is a dual-writer contract: secrets_extract_host.py can
+    # merge-write host-only keys into this SAME snapshot (see
+    # docs/secrets_management.md). Decrypt what's there first and preserve
+    # every key this publish run did not just resolve, or a plain
+    # replace-encrypt from `pairs` alone would silently drop them.
+    #
+    # managed_keys is `set(pairs)` -- ONLY the refs actually resolved this
+    # run -- not `set(refs)`. A ref skipped as a placeholder (line 36) or one
+    # `op_read` failed on (line 41, which returns 1 before reaching here) is
+    # never in `pairs`; treating it as "managed" would delete its existing
+    # snapshot value instead of leaving it untouched, exactly the
+    # host-only-key-loss bug this merge exists to prevent.
+    existing: dict[str, str] = {}
+    if dest.exists():
+        try:
+            existing = sl.sops_decrypt_dotenv(dest)
+        except Exception as exc:  # noqa: BLE001 — type only, never sops' message
+            print(f"[{name}] FAILED to decrypt existing snapshot before merge "
+                  f"({type(exc).__name__}; sops output withheld) — refusing to "
+                  f"publish, since a blind replace here would drop any "
+                  f"host-only keys already in the snapshot")
+            return 1
+
+    preserved = sorted(k for k in existing if k not in pairs)
+    merged = sl.merge_preserve_unmanaged(existing, set(pairs), pairs)
+    existing.clear()
+
+    sl.sops_encrypt_dotenv(sl.to_dotenv(merged), dest)
     print(f"[{name}] encrypted {len(pairs)} var(s) → {dest.relative_to(sl.SECRETS_BASE)}")
     print(f"[{name}] vars: {', '.join(sorted(pairs))}")
+    if preserved:
+        print(f"[{name}] preserved {len(preserved)} unmanaged key(s) already in "
+              f"the snapshot: {', '.join(preserved)}")
+    merged.clear()
     return 0
 
 
