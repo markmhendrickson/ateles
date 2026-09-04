@@ -10,10 +10,11 @@ PR-05, C1, C2), prior art `ent_08460968e6f49dac21510f4a` (Track 1), task `ent_da
 
 ## Purpose
 
-State how a unit of work is created, taken, worked, and returned: pull over push with assignment as the
-only push; the claim and the lease as one primitive, the lease a relationship rather than task fields;
-liveness derived from activity at read time; no assignment log; the transition vocabulary; how tasks
-aggregate into workflow runs, split out of them, and nest under parents.
+State how a unit of work is created, taken, worked, and returned: pull as the only delivery, with
+assignment a constraint on eligibility; the claim and the lease as one primitive, the lease a relationship
+rather than task fields; liveness derived from activity at read time; no assignment log; the transition
+vocabulary; how tasks aggregate into passages, split out of them, and nest under parents; what an artifact
+is and is not.
 
 ## Scope
 
@@ -23,28 +24,31 @@ named below; the step and gate model is `gates_and_workflows.md`; who may act on
 
 ## The invariants
 
-### Pull over push; assignment is the only push
+### Pull is the only delivery; assignment constrains eligibility
 
-Agents claim work from the queue. No central router chooses owners on the common path; the one push is
-assignment, a principal restricting a task's eligibility to one named principal, used where the named
-principal is the point: a step handed to its declared step owner, work a principal wants a particular
-agent to take. Reason: the actor that judges fit should be the actor that acts and answers for the
-outcome. A router's inference sits in an actor that neither acts nor answers for a misroute, so a wrong
-guess reaches an executor with nobody accountable for the choice. A claim is a 1:1 judgment, "is this
-mine", bounded by the claimant's own `agent_definition`, which no central table encodes; routing is a 1:N
-choice with fallthrough, and fallthrough is where an unknown assignee is quietly resolved to somebody. A
-claim also cannot fall through: the predicate reads `assigned_to` directly, and an `assigned_to` naming a
-principal nobody can run blocks visibly. Non-code agents are the first consumers: their work has no file
-paths or closure keywords for a keyword matcher, and a claim bounded by their own definition needs none.
+Work reaches an agent one way: the agent claims it. There is no second path. No central router chooses
+claimants, no principal delivers a task to another, and a step of a workflow is claimed by its owner
+like a task is (`gates_and_workflows.md`). Reason: the actor that judges fit should be the actor that
+acts and answers for the outcome. A router's inference sits in an actor that neither acts nor answers for
+a misroute, so a wrong guess reaches an executor with nobody accountable for the choice. A claim is a 1:1
+judgment, "is this mine", bounded by the claimant's own `agent_definition`, which no central table
+encodes; routing is a 1:N choice with fallthrough, and fallthrough is where an unknown assignee is quietly
+resolved to somebody. A claim also cannot fall through: the predicate reads `assigned_to` directly, and an
+`assigned_to` naming a principal nobody can run blocks visibly. Non-code agents are the first consumers:
+their work has no file paths or closure keywords for a keyword matcher, and a claim bounded by their own
+definition needs none. Subscriptions wake an agent; they never deliver work, and a woken agent still
+claims.
 
 ### Assignment restricts eligibility; it never creates a lease
 
-`assigned_to` is eligibility: who may claim. It is not the holder. An assignment leaves the task
-unclaimed until the assignee claims it, so no principal ever "has claimed" a task it has not acted on; the
-lease holder is always the claimant, and the claimant is read from the lease. Camunda's `setAssignee()`,
-which installs a holder with no check, is the operation this design does not have. A task with an
-`assigned_to` that names a principal who never claims is visible as assigned-and-unclaimed, which is a
-fact about the assignee, not a stranded lease.
+Assignment is not delivery. `assigned_to` is a field on the task, written like any other field, and it
+means eligibility: who may claim. It is not the holder. A principal writes it where the named principal is
+the point (work it wants a particular agent to take); the assignee still pulls, by claiming, on its own
+loop. An assignment leaves the task unclaimed until then, so no principal ever "has claimed" a task it
+has not acted on; the lease holder is always the claimant, and the claimant is read from the lease.
+Camunda's `setAssignee()`, which installs a holder with no check, is the operation this design does not
+have. A task with an `assigned_to` that names a principal who never claims is visible as
+assigned-and-unclaimed, which is a fact about the assignee, not a stranded lease.
 
 ### The claim and the lease are one primitive
 
@@ -79,7 +83,7 @@ lease is an edge with its own timestamps, so when a task became claimable, who c
 went quiet are answerable from the task and its edges. A parallel assignment or claim-history entity would
 be a second source of truth (principle 9). Leases are 1:N with tasks over time; the current lease answers
 the one question history cannot: is a principal holding this right now. `agent_session` carries the
-identity half observations lack (host, checkout, branch, head), not a run history.
+identity half observations lack (host, checkout, branch, head), not a history of runners.
 
 ### The transition vocabulary
 
@@ -115,44 +119,55 @@ Each such effect is an `action` entity (`gates_and_workflows.md`), which is wher
 
 ### Operator-only tasks are claimed by the operator-facing agent
 
-A task whose declared action classes include `operator_only` is not pushed to the operator; it is claimed
-by the operator-facing agent (the `ateles` `agent_definition`), which carries the task to the operator,
-holds the lease while the operator decides, and records the outcome. The `NEVER` tier still governs the
+A task whose declared action classes include `operator_only` is claimed like any other, by the
+operator-facing agent (the `ateles` `agent_definition`), which carries the task to the operator, holds the
+lease while the operator decides, and records the outcome. The `NEVER` tier still governs the
 action: nothing executes without the operator, because the execution gate resolves `operator_only` to
 `NEVER` ahead of any policy (`gates_and_workflows.md`). The task path stays pull; only the action waits on
 a human.
 
-### The unit that enters a workflow is the run, not the task
+### What passes through a workflow is a passage of tasks
 
-A task does not pass through a workflow; a `workflow_run` does, carrying a work item (an issue, a pull
-request, a release) through the workflow's steps. Tasks attach to a run by an `ADDRESSED_BY` edge from
-each task to the run, so several tasks may be addressed by one pull request that is then reviewed and
-carried to release as one passage. Splitting is the reverse: detach one task's edge from the run and start a new run
-for it; the original run continues with the tasks still attached. Aggregation and split are recorded as
-edges, never as a field on the task or on the run (principle 11).
+The subject of a workflow is tasks, one or many, and nothing else. A `passage` is one passage of tasks
+through a workflow's steps. Tasks attach to a passage by an `ADDRESSED_BY` edge from each task to the
+passage, so several tasks may be aggregated into one passage that is reviewed and carried to release
+together. Splitting is the reverse: end one task's edge to the passage and start a new passage for it; the
+original passage continues with the tasks still attached. Aggregation and split are recorded as edges,
+never as a field on the task or on the passage (principle 11).
 
-### A task is in at most one workflow run at a time
+### Artifacts are records a passage leaves, never its subject
 
-A task has at most one `ADDRESSED_BY` edge to a run that is not terminal. Sequential runs are normal: a
-task addressed by a pull-request run and then by a release run has two edges, one to a finished run and
-one to a live one. Work that needs two workflows at once is split into child tasks, one per run.
+An `artifact` is a record in an external system that a passage produces or references: a GitHub issue, a
+pull request, a release, a published page, a sent message. It is linked to the passage and to its tasks by
+edge, and it is never the subject of a step: a step is signed off on the passage's tasks, and the pull
+request that carries their change is the record the step's work left behind. An action is the intended
+effect (`gates_and_workflows.md`); the artifact is the record the effect leaves. Which system holds the
+artifact, and what that system calls it, is outside the design.
+
+### A task is in at most one passage at a time
+
+A task has at most one `ADDRESSED_BY` edge to a passage that is not terminal. Sequential passages are
+normal: a task carried through a pull-request workflow and then through a release workflow has two edges,
+one to a finished passage and one to a live one. Work that needs two workflows at once is split into child
+tasks, one per passage.
 
 ### Parent and child tasks
 
 A parent aggregates children through `PART_OF` edges from each child to the parent; a task has at most one
 parent. A parent's completion is derived from its children's terminal states, never stored. Children enter
-workflow runs independently of one another. A parent never enters a workflow run itself; it is an
-aggregate, and a run needs a work item, which a parent is not.
+passages independently of one another. A parent never enters a passage itself; it is an aggregate, and a
+passage carries tasks that are worked, which a parent never is.
 
 ## The three execution mechanisms
 
 The invariants above describe the task path. Two others exist (`three_execution_mechanisms_not_one`):
 dedicated daemons that self-trigger on their own loop (a mail poller produces tasks and never receives one),
-and the GitHub pipeline, which spawns a runner for the implementer, the steward, a step-inheritance
-checker, and each lens of the review panel by declared step owner and never writes a task status. The
-pipeline is assignment at scale: every spawn is to a step's declared owner, and the spawned runner still
-claims the step it works. A roster role reachable by none of the three cannot receive work; the count is
-`status.md`. A daemon showing that a non-code agent can self-trigger does not show it can receive work.
+and the GitHub pipeline, which sequences a workflow's steps for a passage and never writes a task status.
+The pipeline delivers nothing: a step opening is a publication of claimable step work, and the step owner
+(the implementer, the steward, a step-inheritance checker, each lens of the review panel) claims it, a
+lease on the step, the same primitive as on a task (`gates_and_workflows.md`). It is the same pull, over
+steps. A roster role reachable by none of the three cannot receive work; the count is `status.md`. A
+daemon showing that a non-code agent can self-trigger does not show it can receive work.
 
 ## Contradictions this document settles
 

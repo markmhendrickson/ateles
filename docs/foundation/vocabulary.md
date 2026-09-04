@@ -24,9 +24,10 @@ definition does not change when its implementation lands.
 
 ### task
 **Definition:** the atomic unit of accountable work, recorded as a Neotoma `task` entity.
-**Related:** [work item](#work-item), [claim](#claim), [action](#action), [parent task](#parent-task),
-[workflow_run](#workflow_run); [`work_model.md#the-transition-vocabulary`](work_model.md#the-transition-vocabulary).
-**Forbidden:** "chip", "ticket" (a GitHub issue is an `issue`; a task may refer to one).
+**Related:** [claim](#claim), [action](#action), [artifact](#artifact), [parent task](#parent-task),
+[passage](#passage); [`work_model.md#the-transition-vocabulary`](work_model.md#the-transition-vocabulary).
+**Forbidden:** "chip", "ticket" (a GitHub issue is an `issue`, an artifact; a task may refer to one), "work
+item", "work entity" (retired; the thing that moves through a workflow is a task).
 
 ### work (a task)
 **Definition:** to claim, progress, and complete a task.
@@ -35,22 +36,24 @@ Tasks are worked; only actions are executed.
 [`gates_and_workflows.md#actions-are-entities-only-actions-execute`](gates_and_workflows.md#actions-are-entities-only-actions-execute).
 **Forbidden:** "execute" for a task, "run" for a task.
 
-### work item
-**Definition:** the artifact a workflow_run carries through a workflow's steps, such as an issue, a pull
-request, or a release, which the tasks attached to that run are addressed by.
-**Related:** [workflow_run](#workflow_run), [task](#task), [aggregation](#aggregation);
-[`work_model.md#the-unit-that-enters-a-workflow-is-the-run-not-the-task`](work_model.md#the-unit-that-enters-a-workflow-is-the-run-not-the-task).
-**Forbidden:** "task" when the run's subject is meant, "ticket".
+### artifact
+**Definition:** a record in an external system that a passage produces or references, such as a GitHub
+issue, a pull request, a release, a published page, or a sent message, linked to the passage and its tasks
+by edge and never the subject of a step.
+An action is the intended effect; the artifact is the record the effect leaves.
+**Related:** [passage](#passage), [task](#task), [action](#action), [issue](#issue), [sign-off](#sign-off);
+[`work_model.md#artifacts-are-records-a-passage-leaves-never-its-subject`](work_model.md#artifacts-are-records-a-passage-leaves-never-its-subject).
+**Forbidden:** "work item", "work entity" (retired), "deliverable" for the record, "task" for the artifact.
 
 ### claim
-**Definition:** the act by which an agent takes the lease on a task itself, atomic among concurrent
-claimants and keyed on the task.
+**Definition:** the act by which an agent takes the lease on a task, or on a step of a passage, itself,
+atomic among concurrent claimants and keyed on the task or the step.
 **Use:** "Corvus claims a task that is eligible for it: `assigned_to` is unset or names Corvus, and no
 lease is held. The claim, not the assignment, makes Corvus the claimant."
 **Related:** [lease](#lease), [claimant](#claimant), [claimable](#claimable), [assign](#assign);
 [`work_model.md#the-claim-and-the-lease-are-one-primitive`](work_model.md#the-claim-and-the-lease-are-one-primitive).
-**Forbidden:** "assign" (the push path, which restricts eligibility and creates no lease), "pick up",
-"dispatch".
+**Forbidden:** "assign" (an eligibility constraint, which creates no lease), "pick up", "dispatch",
+"push", "hand off", "spawn" for delivery (a runner is started; work is claimed).
 
 ### claimant
 **Definition:** the principal that holds the lease on a task, read back from the persisted lease and never
@@ -62,19 +65,21 @@ from a task field.
 
 ### assign
 **Definition:** the act by which a principal restricts a task's eligibility to one named principal by
-writing `assigned_to`, creating no lease.
-An assignment is the resulting state, and it is the push exception, the only one; the assignee still claims.
+writing `assigned_to`, a field write like any other, creating no lease.
+An assignment is the resulting state; it is not delivery, and the assignee still claims. Pull is the only
+delivery.
 **Related:** [claim](#claim), [claimant](#claimant), [claimable](#claimable), [step owner](#step-owner);
 [`work_model.md#assignment-restricts-eligibility-it-never-creates-a-lease`](work_model.md#assignment-restricts-eligibility-it-never-creates-a-lease).
 **Forbidden:** "dispatch" (retired; it once named publication, claim, assignment, and execution), "route",
-"hand off" without the field, Camunda's `setAssignee` (which installs a holder without a claim).
+"push" (there is no push path), "hand off", "spawn" for delivery, Camunda's `setAssignee` (which installs a
+holder without a claim).
 
 ### lease
-**Definition:** a relationship between a principal and a task, carrying `claimed_at` and `expires_at`, that
-lapses without cooperation from its holder.
+**Definition:** a relationship between a principal and a task, or between a step owner and a step on a
+passage, carrying `claimed_at` and `expires_at`, that lapses without cooperation from its holder.
 The claim and the lease are one primitive; renewal is the heartbeat; the task carries no lease fields.
 **Related:** [claim](#claim), [claimant](#claimant), [held](#held), [lapsed](#lapsed), [returned](#returned),
-[active](#active);
+[active](#active), [step state](#step-state);
 [`work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields`](work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields).
 **Forbidden:** "lock" (a lock outlives its holder), "heartbeat" alone (the heartbeat renews the lease; it
 is not the lease), "claim fields".
@@ -126,7 +131,7 @@ The task's own transition vocabulary is `created` plus its status; lease transit
 **Forbidden:** "available", "open" as a synonym (a status value).
 
 ### terminal
-**Definition:** a status value after which a task, a step_run, or a checkpoint_brief changes no further.
+**Definition:** a status value after which a task, a passage, or a checkpoint_brief changes no further.
 **Related:** [claimable](#claimable), [parent task](#parent-task), [approval](#approval);
 [`work_model.md#what-a-claim-predicate-treats-as-claimable`](work_model.md#what-a-claim-predicate-treats-as-claimable).
 **Forbidden:** "closed" unqualified, "final".
@@ -139,7 +144,7 @@ runner id the persisted lease names.
 **Forbidden:** "worker", "bot", "agent" when the process is meant.
 
 ### agent_session
-**Definition:** the entity carrying the identity half of a run that observations lack, such as host,
+**Definition:** the entity carrying the identity half of a runner's work that observations lack, such as host,
 checkout, branch, and head, related to the task it works.
 **Related:** [runner](#runner), [active](#active), [observation](#observation);
 [`work_model.md#no-assignment-log-history-is-the-tasks-own-observations`](work_model.md#no-assignment-log-history-is-the-tasks-own-observations).
@@ -155,8 +160,8 @@ which the entity's history is read.
 ### hot path
 **Definition:** a read path on which a decision must be taken from one entity read, for which a projection
 such as `step_status` exists.
-**Related:** [step_status](#step_status), [step_run](#step_run);
-[`gates_and_workflows.md#declaration-run-projection`](gates_and_workflows.md#declaration-run-projection).
+**Related:** [step_status](#step_status), [sign-off](#sign-off);
+[`gates_and_workflows.md#declaration-passage-projection`](gates_and_workflows.md#declaration-passage-projection).
 **Forbidden:** "fast path" (a declared skip of steps), "cache".
 
 ### watchdog
@@ -174,31 +179,31 @@ whose lapse already stops it counting for claimability.
 **Forbidden:** "reaper", "release an expired claim", "re-route".
 
 ### aggregation
-**Definition:** the attachment of several tasks to one workflow_run by an `ADDRESSED_BY` edge from each
-task to the run.
-**Related:** [workflow_run](#workflow_run), [task](#task), [split](#split), [work item](#work-item);
-[`work_model.md#the-unit-that-enters-a-workflow-is-the-run-not-the-task`](work_model.md#the-unit-that-enters-a-workflow-is-the-run-not-the-task).
-**Forbidden:** "batch", "bundle", a task field listing runs.
+**Definition:** the attachment of several tasks to one passage by an `ADDRESSED_BY` edge from each task to
+the passage.
+**Related:** [passage](#passage), [task](#task), [split](#split), [artifact](#artifact);
+[`work_model.md#what-passes-through-a-workflow-is-a-passage-of-tasks`](work_model.md#what-passes-through-a-workflow-is-a-passage-of-tasks).
+**Forbidden:** "batch", "bundle", a task field listing passages.
 
 ### split
-**Definition:** detaching a task from a workflow_run and starting a new run for it, while the original run
-continues with the remaining tasks.
-**Related:** [aggregation](#aggregation), [workflow_run](#workflow_run), [child task](#child-task);
-[`work_model.md#the-unit-that-enters-a-workflow-is-the-run-not-the-task`](work_model.md#the-unit-that-enters-a-workflow-is-the-run-not-the-task).
+**Definition:** ending a task's edge to a passage and starting a new passage for it, while the original
+passage continues with the remaining tasks.
+**Related:** [aggregation](#aggregation), [passage](#passage), [child task](#child-task);
+[`work_model.md#what-passes-through-a-workflow-is-a-passage-of-tasks`](work_model.md#what-passes-through-a-workflow-is-a-passage-of-tasks).
 **Forbidden:** "fork", "re-run".
 
 ### parent task
 **Definition:** a task that aggregates child tasks through `PART_OF` edges from each child, whose
-completion is derived from its children's terminal states and which never enters a workflow_run itself.
-**Related:** [child task](#child-task), [task](#task), [terminal](#terminal), [workflow_run](#workflow_run);
+completion is derived from its children's terminal states and which never enters a passage itself.
+**Related:** [child task](#child-task), [task](#task), [terminal](#terminal), [passage](#passage);
 [`work_model.md#parent-and-child-tasks`](work_model.md#parent-and-child-tasks).
 **Forbidden:** "epic", "umbrella", a stored parent status.
 
 ### child task
-**Definition:** a task with one `PART_OF` edge to a parent task, which enters workflow runs independently of
-its siblings.
+**Definition:** a task with one `PART_OF` edge to a parent task, which enters passages independently of its
+siblings.
 **Allowed:** "subtask" in prose.
-**Related:** [parent task](#parent-task), [task](#task), [workflow_run](#workflow_run), [split](#split);
+**Related:** [parent task](#parent-task), [task](#task), [passage](#passage), [split](#split);
 [`work_model.md#parent-and-child-tasks`](work_model.md#parent-and-child-tasks).
 **Forbidden:** "story", a child with two parents.
 
@@ -217,88 +222,101 @@ without receiving a task.
 **Forbidden:** "service" unqualified, "bot".
 
 ### pipeline
-**Definition:** the GitHub-hosted execution mechanism that spawns a runner for each declared step owner and
-never writes a task status.
-**Related:** [step owner](#step-owner), [assign](#assign), [steward](#steward), [review panel](#review-panel);
+**Definition:** the GitHub-hosted execution mechanism that opens each step of a workflow for a passage as
+claimable step work, which the step owner claims, and never writes a task status.
+It delivers nothing; it is the same pull, over steps.
+**Related:** [step owner](#step-owner), [claim](#claim), [step state](#step-state), [steward](#steward),
+[review panel](#review-panel);
 [`work_model.md#the-three-execution-mechanisms`](work_model.md#the-three-execution-mechanisms).
-**Forbidden:** "workflow" (the declaration), "CI" (one of its checks).
+**Forbidden:** "workflow" (the declaration), "CI" (one of its checks), "spawns a role" (a runner is
+started; the step is claimed).
 
 ## Gate model (`gates_and_workflows.md`)
 
 ### workflow
 **Definition:** the entity declaring, per (project, workflow type), an ordered list of steps and the fast
-paths a run may take.
-**Related:** [step](#step), [stage](#stage), [workflow_run](#workflow_run), [step owner](#step-owner),
+paths a passage may take.
+**Related:** [step](#step), [stage](#stage), [passage](#passage), [step owner](#step-owner),
 [workflow policy](#workflow-policy), [fast path](#fast-path);
-[`gates_and_workflows.md#declaration-run-projection`](gates_and_workflows.md#declaration-run-projection).
+[`gates_and_workflows.md#declaration-passage-projection`](gates_and_workflows.md#declaration-passage-projection).
 **Forbidden:** `workflow_definition` (retired), "pipeline" (one engine that runs workflows), "template".
 
 ### step
 **Definition:** one declared position in a workflow's ordered list, carrying a name, an owner, a `required`
-flag, and parallel-group and join fields, closed by its owner's sign-off.
+flag, and parallel-group and join fields, claimed by its owner on a passage and closed by its owner's
+sign-off.
 Step names are data (`pm`, `ux`, `arch`, `impl`, `pr_review`, `qa`, `legal`, `release`, and any a workflow
 declares).
-**Related:** [workflow](#workflow), [step owner](#step-owner), [sign-off](#sign-off), [step_run](#step_run),
+**Related:** [workflow](#workflow), [step owner](#step-owner), [sign-off](#sign-off), [step state](#step-state),
 [stage](#stage);
-[`gates_and_workflows.md#declaration-run-projection`](gates_and_workflows.md#declaration-run-projection).
+[`gates_and_workflows.md#declaration-passage-projection`](gates_and_workflows.md#declaration-passage-projection).
 **Forbidden:** "gate" (reserved for the execution gate), "phase" alone, "check" (a CI status), "checkpoint".
 
 ### stage
 **Definition:** a named group of contiguous steps in a workflow, such as the review stage or the release
 stage.
 **Related:** [step](#step), [workflow](#workflow);
-[`gates_and_workflows.md#declaration-run-projection`](gates_and_workflows.md#declaration-run-projection).
+[`gates_and_workflows.md#declaration-passage-projection`](gates_and_workflows.md#declaration-passage-projection).
 **Forbidden:** "stage" for a single step, "phase" when a group of steps is meant.
 
 ### step owner
-**Definition:** the agent declared on a step as the principal whose sign-off closes it.
+**Definition:** the agent declared on a step as the principal that claims it on a passage and whose
+sign-off closes it.
 **Field:** `workflow.steps[].owner_agent`.
-**Related:** [step](#step), [sign-off](#sign-off), [agent](#agent), [assign](#assign),
+**Related:** [step](#step), [sign-off](#sign-off), [agent](#agent), [claim](#claim),
 [workflow policy](#workflow-policy);
 [`gates_and_workflows.md#two-policies-workflow-policy-and-execution-policy`](gates_and_workflows.md#two-policies-workflow-policy-and-execution-policy).
 **Forbidden:** "gate owner" (retired), "owner" alone, "assignee".
 
 ### sign-off
-**Definition:** the step owner's recorded verdict that closes a step_run, written as a terminal status
-with every field the schema requires.
-**Related:** [step owner](#step-owner), [step_run](#step_run), [terminal](#terminal), [read-back](#read-back);
-[`gates_and_workflows.md#declaration-run-projection`](gates_and_workflows.md#declaration-run-projection).
-**Forbidden:** "LGTM", "approval" (an approval is on a `checkpoint_brief`), "green" without the record.
+**Definition:** the record a step owner writes to close a step on a passage, carrying the verdict,
+timestamps, the agent, artifact refs, and the pinned `agent_definition` version.
+A terminal write that supplies every field the schema requires; a rejected write is an error, never
+swallowed.
+**Related:** [step owner](#step-owner), [step state](#step-state), [passage](#passage), [terminal](#terminal),
+[read-back](#read-back), [artifact](#artifact);
+[`gates_and_workflows.md#declaration-passage-projection`](gates_and_workflows.md#declaration-passage-projection).
+**Forbidden:** "LGTM", "approval" (an approval is on a `checkpoint_brief`), "green" without the record,
+`step_run` and `participation_record` (retired; a step's state is derived, and the sign-off is the one
+record written), "audit row".
 
-### workflow_run
-**Definition:** the entity recording one passage of a work item through a workflow, to which the tasks it
-addresses attach by `ADDRESSED_BY` edges.
-**Related:** [workflow](#workflow), [work item](#work-item), [step_run](#step_run),
+### passage
+**Definition:** the entity recording one passage of tasks through a workflow, to which the tasks attach by
+`ADDRESSED_BY` edges.
+Reads: "the passage is at `qa`", "tasks aggregated into one passage", "a task split out of a passage".
+**Related:** [workflow](#workflow), [task](#task), [artifact](#artifact), [step state](#step-state),
 [aggregation](#aggregation), [split](#split);
-[`work_model.md#the-unit-that-enters-a-workflow-is-the-run-not-the-task`](work_model.md#the-unit-that-enters-a-workflow-is-the-run-not-the-task).
-**Forbidden:** "instance" unqualified, "pipeline run", "execution".
+[`work_model.md#what-passes-through-a-workflow-is-a-passage-of-tasks`](work_model.md#what-passes-through-a-workflow-is-a-passage-of-tasks).
+**Forbidden:** `workflow_run` (retired; `run` collides with the retired liveness vocabulary), "run",
+"instance" unqualified, "pipeline run", "execution".
 
-### step_run
-**Definition:** the entity recording the state of one step within one workflow_run, with status,
-timestamps, the acting agent, artifact refs, and the pinned `agent_definition` version.
-**Related:** [step](#step), [workflow_run](#workflow_run), [sign-off](#sign-off), [step_status](#step_status);
-[`gates_and_workflows.md#declaration-run-projection`](gates_and_workflows.md#declaration-run-projection).
-**Forbidden:** `participation_record` (retired), "gate status" (the projection), "audit row".
+### step state
+**Definition:** the state of one step within one passage, derived at read time from edges and never
+stored: open (the passage and the step), claimed (a lease from the step owner to the step on that
+passage), or signed (a sign-off).
+**Related:** [step](#step), [passage](#passage), [lease](#lease), [sign-off](#sign-off), [step_status](#step_status);
+[`gates_and_workflows.md#declaration-passage-projection`](gates_and_workflows.md#declaration-passage-projection).
+**Forbidden:** `step_run` (retired), a stored per-step status row, "gate status" (the projection).
 
 ### step_status
-**Definition:** the map on the issue entity projecting each step's state for the hot path, derived from
-the step_runs and proved equal to them by a reconciler.
-**Related:** [step_run](#step_run), [hot path](#hot-path), [issue](#issue);
-[`gates_and_workflows.md#declaration-run-projection`](gates_and_workflows.md#declaration-run-projection).
+**Definition:** the map on the task projecting each step's state on its passage for the hot path, derived
+from the sign-offs and proved equal to them by a reconciler.
+**Related:** [sign-off](#sign-off), [step state](#step-state), [hot path](#hot-path), [passage](#passage);
+[`gates_and_workflows.md#declaration-passage-projection`](gates_and_workflows.md#declaration-passage-projection).
 **Forbidden:** `gate_status` (retired), treating it as history, a second source of truth.
 
 ### fast path
-**Definition:** a declared skip of steps that a workflow permits for a named class of work item.
+**Definition:** a declared skip of steps that a workflow permits for a named class of tasks.
 **Related:** [workflow](#workflow), [step](#step);
-[`gates_and_workflows.md#declaration-run-projection`](gates_and_workflows.md#declaration-run-projection).
+[`gates_and_workflows.md#declaration-passage-projection`](gates_and_workflows.md#declaration-passage-projection).
 **Forbidden:** "hot path", "shortcut".
 
 ### issue
-**Definition:** a GitHub issue, recorded as an `issue` entity, that may stand as the work item of a
-workflow_run and carries the step_status projection.
-**Related:** [work item](#work-item), [step_status](#step_status), [task](#task);
-[`gates_and_workflows.md#declaration-run-projection`](gates_and_workflows.md#declaration-run-projection).
-**Forbidden:** "ticket", "task" for the issue.
+**Definition:** a GitHub issue, recorded as an `issue` entity, which is an artifact a passage produces or
+references, linked to the passage and its tasks by edge.
+**Related:** [artifact](#artifact), [passage](#passage), [task](#task);
+[`work_model.md#artifacts-are-records-a-passage-leaves-never-its-subject`](work_model.md#artifacts-are-records-a-passage-leaves-never-its-subject).
+**Forbidden:** "ticket", "task" for the issue, "work item", the subject of a step.
 
 ### gate
 **Definition:** short for the execution gate, and nothing else.
@@ -340,7 +358,8 @@ publish, a merge, a payment, or a release, related to the task it serves.
 Created when the effect becomes known, which may be mid-workflow; a task may produce many, most unknown at
 creation; an internal operational write to Neotoma is not an action.
 **Related:** [task](#task), [action_type](#action_type), [execution gate](#execution-gate),
-[execute (an action)](#execute-an-action), [effect dedup](#effect-dedup);
+[execute (an action)](#execute-an-action), [effect dedup](#effect-dedup), [artifact](#artifact) (the
+record the effect leaves);
 [`gates_and_workflows.md#actions-are-entities-only-actions-execute`](gates_and_workflows.md#actions-are-entities-only-actions-execute).
 **Forbidden:** "side effect" (unrecorded), "task" for the effect, "operation".
 
@@ -377,7 +396,7 @@ checkpoints until a recurring series graduates; `NEVER` is cleared by no confide
 **Forbidden:** a default of zero standing in for a score.
 
 ### recurring series
-**Definition:** a run of successful executions of one action class that, on reaching the policy's count,
+**Definition:** a series of successful executions of one action class that, on reaching the policy's count,
 graduates that class from checkpointing to auto-execution.
 **Related:** [blast radius](#blast-radius), [execution_policy](#execution_policy), [action_type](#action_type);
 [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers).
@@ -394,7 +413,7 @@ The task that carries it is still claimable, by the operator-facing agent.
 "unclaimable".
 
 ### checkpoint_brief
-**Definition:** the artifact the execution gate writes when an action cannot auto-execute, holding the
+**Definition:** the entity the execution gate writes when an action cannot auto-execute, holding the
 action in an interrupted state that awaits a principal's decision and records whom it awaits and who
 resolved it.
 To checkpoint an action is to write one and hold.
@@ -637,7 +656,7 @@ treating it as design evidence.
 | Meaning | Term | Field |
 |---|---|---|
 | the agent whose sign-off closes a step | **step owner** | `workflow.steps[].owner_agent` |
-| the step currently holding a work item | **current step** | issue `current_owner` |
+| the step a passage is at | **current step** | derived from the passage's step states; projected as `current_owner` |
 | the agent a finding is routed to | **routed agent** | `proposed_skill_update.owning_agent` |
 | the operator with the book of business for a customer | **book-of-business owner** | `multi_tenant.md` section 5 |
 | named accountability for a workflow, domain, or queue | **ownership** (above) | `ownership_grant` |

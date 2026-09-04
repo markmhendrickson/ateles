@@ -77,8 +77,8 @@ types × repositories with parameter constraints; a human's grant is bound to a 
 a wildcard. The per-agent pattern is the template a principal dimension extends: a loader keyed on the
 agent name, a grant checker and a tool proxy keyed on the `sub`, a per-agent keypair threaded into signed
 writes, a per-agent policy override, per-agent GitHub logins, a workflow resolved per project. A failed
-agent-definition load is a stub: the loader marks it, and no caller spawns one (principle 5); a stub
-with a wildcard tool allowlist is the fail-open shape.
+agent-definition load is a stub: the loader marks it, and no caller starts a runner from one (principle
+5); a stub with a wildcard tool allowlist is the fail-open shape.
 
 ## Attribution
 

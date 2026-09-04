@@ -17,7 +17,7 @@ this document on every review.
 
 Eleven invariants. The first six are the rules ateles#727 put in `CLAUDE.md` for interactive sessions
 (throughput plan `ent_18b902cf72822373f9da8ced`, decision
-`verification_discipline_principles_and_where_they_bind`), which do not bind agents the swarm spawns; this
+`verification_discipline_principles_and_where_they_bind`), which do not bind agents the swarm runs; this
 is the copy the review lenses read. The last five are consolidated from stored decisions and the operator review of
 this foundation. Authority and delegation
 invariants are `authority_model.md`; the posture when the record is unreachable is `failure_posture.md`.
@@ -89,7 +89,7 @@ name that is already accurate. Sources: #727 rule 6; throughput `gate_machinery_
 reversed in `gates_and_workflows.md`, because the name was not accurate); agent_policy
 `ent_4d34c6f96312be686f572add`.
 
-**Enforced by:** the prior-art contract on the spawned-prompt path (`SWARM_PRIOR_ART_CONTRACT`) and the
+**Enforced by:** the prior-art contract in every runner's prompt (`SWARM_PRIOR_ART_CONTRACT`) and the
 design-basis check on every issue and PR (`conformance.md`).
 
 ### 7. Unknown stays distinct from a verdict
@@ -138,8 +138,9 @@ wherever a field would need a watchdog, reaper, or reconciler to stay correct. A
 with its own timestamps is read, and what is read cannot go stale because the process that would have
 updated it died. The lease is the canonical case: an edge from principal to task with `expires_at`, whose
 `held` or `lapsed` state is derived at read time, needs no process to expire it; a `claimed_by` field on
-the task needs one. Aggregation, split, parent and child, and the attachment of an action to its task are
-edges for the same reason (`work_model.md`, `gates_and_workflows.md`). Sources: PR #745 operator review;
+the task needs one. Aggregation, split, parent and child, the attachment of an action or an artifact to
+its task, and a step's state within a passage (open, claimed, or signed, read from the passage, a lease,
+and a sign-off) are edges for the same reason (`work_model.md`, `gates_and_workflows.md`). Sources: PR #745 operator review;
 synthesis PR-02 and PR-05 (liveness derived, no assignment log) are earlier instances of the same rule.
 
 **Enforced by:** review of any schema change that adds a field whose correctness depends on a process
@@ -151,8 +152,8 @@ staying alive; the design-basis check names this invariant when such a field is 
 synced to skills), `CLAUDE.md` (re-injected after compaction, so it binds interactive sessions), this
 directory (diffable, PR-reviewed, read by the review lenses), and a warning against a second document on one
 subject. Resolved: these are different audiences, not copies. The #727 section states in its first line
-that it does not bind agents the swarm spawns; this document is what the review lenses read; the derivation is shared and
-cited. Direction of truth per artifact class is in `conformance.md`. When the two diverge, this document is
+that it does not bind agents the swarm runs; this document is what the review lenses read; the derivation is shared and
+cited. Direction of truth per class of record is in `conformance.md`. When the two diverge, this document is
 wrong until a PR corrects it, and that PR is the review.
 
 ## Beyond the sources

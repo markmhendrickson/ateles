@@ -47,11 +47,14 @@ design.
 |---|---|---|
 | `workflow` | `workflow_definition` (8 entities on prod) | `lib/daemon_runtime/workflow_resolver`, Anthus, the gate-state plan's `keep_the_name_workflow_definition` |
 | `step`, `steps[]`, `step_name`, `join_step` | `gates[]`, `gate_name`, `join_gate` | the same entities and resolver |
-| `step_run` | `participation_record` | Anthus writer; the stranded rows under C15 |
-| `workflow_run` | none | no entity records one passage of a work item; the issue stands in for it |
-| `step_status`; "all required steps signed off" | `gate_status`; `_gates_green()` | `swarm_dispatch.py`, `lib/issue_labels.py`, `server.py` |
+| `sign-off` (the one record a step owner writes) | `participation_record` | Anthus writer; the stranded rows under C15 |
+| step state derived from edges (open / claimed / signed) | none; `participation_record` rows hold a per-step status | Anthus writer |
+| `passage` (one passage of tasks through a workflow) | none | no entity records one passage; the issue stands in for it |
+| the passage's subject is the task; issues and PRs are `artifact`s attached by edge | the pipeline sequences issues and PRs, not tasks; `gate_status` lives on the issue | `swarm_dispatch.py`, `lib/issue_labels.py`; the task dashboard's task-to-issue and task-to-PR links are the artifact edges, unnamed as such |
+| `step_status` on the task; "all required steps signed off" | `gate_status` on the issue; `_gates_green()` | `swarm_dispatch.py`, `lib/issue_labels.py`, `server.py` |
 | step owner | gate owner, `owner_agent` | `workflow_definition.gates[].owner_agent` |
-| `assign`, assignment | `dispatch`, dispatcher, `route_task` | `swarm_dispatch.py`, `routing.py`, the MCP server's `route_task` |
+| `assign`, assignment (an eligibility field; pull is the only delivery) | `dispatch`, dispatcher, `route_task` | `swarm_dispatch.py`, `routing.py`, the MCP server's `route_task` |
+| a step opening is published and its owner claims it (a lease on the step) | the pipeline spawns a runner by role name per gate | `swarm_dispatch.py`, `skill_runner.py` |
 | lease as an edge with `held / lapsed / returned` | none; `executing` status and `updated_at` age | `task_lifecycle.py:61`; `task_watchdog.py:268` |
 | `active` (derived) | `executing` written by the dispatcher | `task_lifecycle.py` |
 | watchdog counts lapses and escalates; no reaper | watchdog requeues on `updated_at` age | `task_watchdog.py` |
@@ -61,7 +64,9 @@ design.
 | `ADDRESSED_BY`, `PART_OF` edges for aggregation and parents | no `ADDRESSED_BY` relationship type in use; `PART_OF` exists for plan membership | relationship types on prod |
 
 The agent prompts and skills rendered from `agent_policy` entities still say "dispatch" and "gate owner";
-the correction is to the entities (`conformance.md`, direction of truth), then a re-render.
+the correction is to the entities (`conformance.md`, direction of truth), then a re-render. The terms
+`work item` and `work entity`, retired on 2026-09-04, appear in no code identifier; they were the
+foundation's own earlier wording for what is now the task (subject) and the artifact (record).
 
 ## `principles.md`: what fires
 
@@ -87,7 +92,7 @@ the correction is to the entities (`conformance.md`, direction of truth), then a
   dispatcher writes it before the spawn with no `finally` (synthesis, 2026-09-02). The design's `active` is
   a derived read with no writer; nothing on the checkout derives it.
 - **The misroute is fixed**: #702 closed 2026-09-03 by #732; `routing.py:586` on `285a873` states an
-  unrecognized `assigned_to` is "a HARD STOP, never a fallthrough". The foundation's pull-over-push
+  unrecognized `assigned_to` is "a HARD STOP, never a fallthrough". The foundation's pull-only
   reasoning cites the class of defect, not this instance.
 - **The watchdog's signal is still `updated_at`**: `task_watchdog.py:268` infers age from
   `updated_at`, `last_observation_at`, `updated_date`, `computed_at`, `created_at`, so any write resets it.
@@ -202,10 +207,12 @@ yield before a schema PR opens; recorded for #378's owner.
 ## `vocabulary.md`
 
 `executing` is still a status value (above). `dispatch`, retired from the vocabulary on 2026-09-04, still
-names the GitHub pipeline's spawns and the push path throughout the code and the rendered agent prompts;
-the design's word is assignment (the renames table above). `gate owner`, `workflow_definition`,
-`participation_record`, and `gate_status` are likewise the checkout's names for the design's step owner,
-`workflow`, `step_run`, and `step_status`. Retired agent names persist in design entities (C4, above).
+names the GitHub pipeline's spawn-by-role and the notification path throughout the code and the rendered
+agent prompts; the design has no delivery but the claim, and its word for the eligibility field is
+assignment (the renames table above). `gate owner`, `workflow_definition`, `participation_record`, and
+`gate_status` are likewise the checkout's names for the design's step owner, `workflow`, `sign-off`, and
+`step_status`; the design's `passage` and derived step state have no built counterpart. Retired agent
+names persist in design entities (C4, above).
 `docs/aauth.md` is to be rewritten against verified state (#471, open).
 
 ## `conformance.md`
@@ -238,8 +245,8 @@ by #732), #724, #727. An open issue is not evidence a defect is live; each entry
 3. Re-read prod: `workflow_definition` (all; owners named), `checkpoint_brief` (count; count at status
    `open`; sample confidence on PLAN briefs), a 500-row `task` status sample, `agent_grant` count and
    wildcard grants, `operator_profile` count; and, for the renames table, whether any entity of type
-   `workflow`, `workflow_run`, `step_run`, `action`, or `lease` exists, and whether `ADDRESSED_BY` is a
-   relationship type in use.
+   `workflow`, `passage`, `sign-off`, `action`, or `lease` exists, whether `ADDRESSED_BY` is a
+   relationship type in use, and whether task-to-issue and task-to-PR edges exist (the artifact edges).
 4. Re-run the single-principal sweep when the notify, approve, or checkpoint paths change; otherwise carry
    the synthesis figure with its date.
 5. Re-fetch the state of every issue and PR in the list above.

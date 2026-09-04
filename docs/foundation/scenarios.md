@@ -15,9 +15,9 @@ against it.
 
 ## Scope
 
-Nine passages: the plain task life, a lapse and its escalation, assignment, aggregation through a workflow
-run, a split, a parent with children, an operator-only task, an action discovered mid-workflow at each
-blast tier, and a halt. Names of agents are placeholders for roles; no scenario names a checkout, a count,
+Nine walkthroughs: the plain task life, a lapse and its escalation, assignment, aggregation of tasks into
+one passage, a split, a parent with children, an operator-only task, an action discovered mid-workflow at
+each blast tier, and a halt. Names of agents are placeholders for roles; no scenario names a checkout, a count,
 or a date.
 
 ## (a) Create, claim, work, return, complete
@@ -83,9 +83,10 @@ flowchart TD
 
 ## (c) Assignment, then the assignee claims
 
-A principal writes `assigned_to` naming one agent. The task is now eligible for that agent alone; it is
-not claimed, and no lease exists. Other agents read it as not claimable for them. The assignee, on its own
-loop, reads it as claimable, claims it, and from that point the scenario is (a). If the assignee never
+A principal writes `assigned_to` naming one agent, a field write like any other. Nothing was delivered:
+the task is now eligible for that agent alone; it is not claimed, and no lease exists. Other agents read it
+as not claimable for them. The assignee, on its own loop, reads it as claimable, claims it, and from that
+point the scenario is (a). If the assignee never
 claims, the task is visible as assigned-and-unclaimed, a fact about the assignee rather than a stranded
 lease. If `assigned_to` names a principal nobody can run, the task blocks visibly and never falls through
 to inference.
@@ -105,89 +106,98 @@ sequenceDiagram
     Note over Y,N: from here, scenario (a)
 ```
 
-**Invariants:** [`work_model.md#pull-over-push-assignment-is-the-only-push`](work_model.md#pull-over-push-assignment-is-the-only-push),
+**Invariants:** [`work_model.md#pull-is-the-only-delivery-assignment-constrains-eligibility`](work_model.md#pull-is-the-only-delivery-assignment-constrains-eligibility),
 [`#assignment-restricts-eligibility-it-never-creates-a-lease`](work_model.md#assignment-restricts-eligibility-it-never-creates-a-lease),
 [`#what-a-claim-predicate-treats-as-claimable`](work_model.md#what-a-claim-predicate-treats-as-claimable).
 
-## (d) Several tasks aggregated into one workflow run, review through release
+## (d) Several tasks aggregated into one passage, review through release
 
-Three tasks are each addressed by one pull request. A `workflow_run` is created for the PR against the
-project's `workflow`; each task gets an `ADDRESSED_BY` edge to the run. The run passes through the
-workflow's steps: each step gets a `step_run`, closed by its step owner's sign-off, and `step_status` on
-the issue projects the same state for the hot path. When every required step is signed off, the merge is
-an `action` that the steward evaluates at the execution gate; on permit it executes. A second run, for
-the release workflow, then addresses the same tasks sequentially. The tasks never entered a workflow
-themselves.
+Three tasks belong in one change. A `passage` is created against the project's `workflow`; each task gets
+an `ADDRESSED_BY` edge to the passage. The passage moves through the workflow's steps: each step opens,
+its step owner claims it (a lease on the step), and closes it with a `sign-off`; `step_status` on each
+task projects the same state for the hot path. The pull request that carries the change is an `artifact`
+attached to the passage by edge; no step is taken on it. When every required step is signed off, the
+merge is an `action` that the steward evaluates at the execution gate; on permit it executes, and the
+merged PR is the record it leaves. A second passage, for the release workflow, then carries the same tasks
+sequentially, with the release as its artifact. The subject of every step was the tasks.
 
 ```mermaid
 flowchart LR
-    T1[task 1] -->|ADDRESSED_BY| R[workflow_run: PR]
+    T1[task 1] -->|ADDRESSED_BY| R[passage: PR workflow]
     T2[task 2] -->|ADDRESSED_BY| R
     T3[task 3] -->|ADDRESSED_BY| R
-    R --> S1[step_run pm: signed off]
-    S1 --> S2[step_run arch: signed off]
-    S2 --> S3[step_run impl: signed off]
-    S3 --> S4[step_run pr_review: signed off]
-    S4 --> S5[step_run qa: signed off]
+    PR[artifact: pull request] -.->|attached by edge| R
+    R --> S1[step pm: claimed, signed off]
+    S1 --> S2[step arch: claimed, signed off]
+    S2 --> S3[step impl: claimed, signed off]
+    S3 --> S4[step pr_review: claimed, signed off]
+    S4 --> S5[step qa: claimed, signed off]
     S5 --> M{all required steps signed off?}
     M -->|yes| ACT[action: merge]
     ACT --> G{execution gate}
     G -->|permit| X[merge executes]
-    X --> R2[workflow_run: release]
+    X --> R2[passage: release workflow]
+    REL[artifact: release] -.-> R2
     T1 -.->|ADDRESSED_BY, later| R2
     T2 -.-> R2
     T3 -.-> R2
 ```
 
-**Invariants:** [`work_model.md#the-unit-that-enters-a-workflow-is-the-run-not-the-task`](work_model.md#the-unit-that-enters-a-workflow-is-the-run-not-the-task),
-[`#a-task-is-in-at-most-one-workflow-run-at-a-time`](work_model.md#a-task-is-in-at-most-one-workflow-run-at-a-time),
-[`gates_and_workflows.md#declaration-run-projection`](gates_and_workflows.md#declaration-run-projection),
+**Invariants:** [`work_model.md#what-passes-through-a-workflow-is-a-passage-of-tasks`](work_model.md#what-passes-through-a-workflow-is-a-passage-of-tasks),
+[`#artifacts-are-records-a-passage-leaves-never-its-subject`](work_model.md#artifacts-are-records-a-passage-leaves-never-its-subject),
+[`#a-task-is-in-at-most-one-passage-at-a-time`](work_model.md#a-task-is-in-at-most-one-passage-at-a-time),
+[`gates_and_workflows.md#declaration-passage-projection`](gates_and_workflows.md#declaration-passage-projection),
 [`#actions-are-entities-only-actions-execute`](gates_and_workflows.md#actions-are-entities-only-actions-execute),
 [`#two-policies-workflow-policy-and-execution-policy`](gates_and_workflows.md#two-policies-workflow-policy-and-execution-policy).
 
-## (e) A task split out of a run
+## (e) A task split out of a passage
 
-Review finds that one of the three tasks does not belong in the pull request. Its `ADDRESSED_BY` edge to
-the run is ended and a new `workflow_run` is started for it, with its own step runs from the first step.
-The original run continues with the two tasks still attached and loses no sign-off. Nothing on either task
-or either run records the split as a field; the two edges, one ended and one live, are the record.
+Review finds that one of the three tasks does not belong in the change. Its `ADDRESSED_BY` edge to the
+passage is ended and a new passage is started for it, from the first step, with no sign-offs carried
+over. The original passage continues with the two tasks still attached and loses no sign-off; its pull
+request stays attached to it as an artifact, and the new passage will leave its own. Nothing on either
+task or either passage records the split as a field; the two edges, one ended and one live, are the
+record.
 
 ```mermaid
 flowchart TD
     subgraph before
-        T1a[task 1] --> Ra[run A]
+        T1a[task 1] --> Ra[passage A]
         T2a[task 2] --> Ra
         T3a[task 3] --> Ra
+        PRa[artifact: PR] -.-> Ra
     end
     before -->|review: task 3 does not belong| after
     subgraph after
-        T1b[task 1] --> Rb[run A continues]
+        T1b[task 1] --> Rb[passage A continues]
         T2b[task 2] --> Rb
+        PRb[artifact: PR] -.-> Rb
         T3b[task 3] -.->|edge ended| Rb
-        T3b -->|new ADDRESSED_BY| Rc[run B, from step 1]
+        T3b -->|new ADDRESSED_BY| Rc[passage B, from step 1]
     end
 ```
 
-**Invariants:** [`work_model.md#the-unit-that-enters-a-workflow-is-the-run-not-the-task`](work_model.md#the-unit-that-enters-a-workflow-is-the-run-not-the-task),
-[`#a-task-is-in-at-most-one-workflow-run-at-a-time`](work_model.md#a-task-is-in-at-most-one-workflow-run-at-a-time);
+**Invariants:** [`work_model.md#what-passes-through-a-workflow-is-a-passage-of-tasks`](work_model.md#what-passes-through-a-workflow-is-a-passage-of-tasks),
+[`#artifacts-are-records-a-passage-leaves-never-its-subject`](work_model.md#artifacts-are-records-a-passage-leaves-never-its-subject),
+[`#a-task-is-in-at-most-one-passage-at-a-time`](work_model.md#a-task-is-in-at-most-one-passage-at-a-time);
 `principles.md` invariant 11.
 
-## (f) A parent task with children in independent runs
+## (f) A parent task with children in independent passages
 
 A parent task is created as the aggregate of a piece of work; three child tasks each carry a `PART_OF`
-edge to it. Each child is claimed, worked, and addressed by its own workflow run on its own schedule. The
-parent is never claimed and never enters a run. When a reader asks whether the parent is complete, the
+edge to it. Each child is claimed, worked, and carried through its own passage on its own schedule. The
+parent is never claimed and never enters a passage. When a reader asks whether the parent is complete, the
 answer is derived from the children's terminal states at that moment and is stored nowhere.
 
 ```mermaid
 flowchart TD
-    P[parent task: never claimed, never in a run]
+    P[parent task: never claimed, never in a passage]
     C1[child 1] -->|PART_OF| P
     C2[child 2] -->|PART_OF| P
     C3[child 3] -->|PART_OF| P
-    C1 -->|ADDRESSED_BY| R1[run 1]
-    C2 -->|ADDRESSED_BY| R2[run 2]
-    C3 -->|ADDRESSED_BY| R3[run 3]
+    C1 -->|ADDRESSED_BY| R1[passage 1]
+    C2 -->|ADDRESSED_BY| R2[passage 2]
+    C3 -->|ADDRESSED_BY| R3[passage 3]
     R1 --> D{all children terminal?}
     R2 --> D
     R3 --> D
@@ -298,7 +308,8 @@ invariants 2 and 7.
 
 ## What the scenarios do not show
 
-None of them shows a router choosing a claimant, a process returning a lapsed lease, a task entering a
-workflow directly, a parent task being claimed, a task being "executed", a stored liveness flag, or a
-gate consulted on anything but an `action`. Each absence is an invariant; a change that needs one of
+None of them shows a router choosing a claimant, work reaching an agent by any path but its own claim, a
+process returning a lapsed lease, a pull request or an issue as the subject of a step, a per-step status
+row, a parent task being claimed, a task being "executed", a stored liveness flag, or a gate consulted on
+anything but an `action`. Each absence is an invariant; a change that needs one of
 these to appear is a change to the foundation, made through a PR that says so (`conformance.md`).

@@ -18,7 +18,7 @@ records the position on execution engines and replay that this document relies o
 
 ## Scope
 
-Every daemon and every spawned agent, on the task path and off it.
+Every daemon and every agent runner, on the task path and off it.
 
 ## The decision
 
@@ -31,8 +31,8 @@ refuse-and-requeue-as-fallback, and the hardcoded step-list floor (C5, below).
 
 ## The rules
 
-1. **Halt work; never stop observing.** No claim, no assignment, no gate decisions, nothing claimed
-   complete without a record. Watchdogs, forensic capture, health checks, and alerting stay live. A diagnostic capture asserts
+1. **Halt work; never stop observing.** No claim of a task or a step, no assignment, no step opening, no
+   gate decision, nothing claimed complete without a record. Watchdogs, forensic capture, health checks, and alerting stay live. A diagnostic capture asserts
    nothing about the record, so it does not require the record; it writes to local disk, always, because
    writing evidence of an outage into the thing that is out is the wrong move, and a hard dependency that
    stops the thing diagnosing it makes recovery impossible.
@@ -41,8 +41,8 @@ refuse-and-requeue-as-fallback, and the hardcoded step-list floor (C5, below).
    indistinguishable from an idle one, this codebase's signature failure. The announcement travels a path
    that survives the outage, aggregated per window, never one page per blocked claim.
 
-3. **The reachability check is a real read at claim time, never `/health`.** One probe when a task is
-   claimed or a step is taken, not per operation. A health endpoint can return green while every read hangs on a wedged database, so the probe
+3. **The reachability check is a real read at claim time, never `/health`.** One probe when a task or a
+   step is claimed, not per operation. A health endpoint can return green while every read hangs on a wedged database, so the probe
    reads what the work will read.
 
 4. **A mid-task write failure leaves the task in its prior state.** The agent is already at work when the

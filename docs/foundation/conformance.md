@@ -17,7 +17,7 @@ happens to an issue that conforms to nothing.
 
 This is the reading list. It is consumed by code, not only by people: the arch
 lens and the other review lenses load it at review time
-(`execution/daemons/apis/foundation.py`), every spawned agent's system prompt
+(`execution/daemons/apis/foundation.py`), every runner's system prompt
 names it (`skill_runner.SWARM_FOUNDATION_CONTRACT`), and the issue spec's
 design-basis section is checked against it. Neotoma's equivalent is
 `docs/developer/pr_review_reading_list.md`.
@@ -54,8 +54,8 @@ any diff was read; every other document is keyed to a path below.
 | Doc | What it states |
 |-----|----------------|
 | `docs/foundation/principles.md` | The invariants: a mechanism that does not bind is not a control; a write that reports success has not necessarily happened; a test that cannot fail on the thing it watches is decoration; fail closed on the field that carries the safety meaning; unknown stays distinct from a verdict. |
-| `docs/foundation/work_model.md` | How work moves: pull over push, assignment the only push; the claim and the lease are one primitive, the lease a relationship; liveness derived from activity at read time; tasks aggregate into workflow runs and nest under parents. |
-| `docs/foundation/gates_and_workflows.md` | The step and gate model: `workflow` declares steps, `workflow_run` and `step_run` record a passage, `step_status` projects; one step set; actions are entities and only actions execute; the execution gate decides per action; advisory and enforcing paths agree. |
+| `docs/foundation/work_model.md` | How work moves: pull is the only delivery, assignment constrains eligibility; the claim and the lease are one primitive, the lease a relationship; liveness derived from activity at read time; tasks aggregate into passages and nest under parents; artifacts are records a passage leaves, never its subject. |
+| `docs/foundation/gates_and_workflows.md` | The step and gate model: `workflow` declares steps, a `passage` carries tasks through them, a step's state is derived from the passage, a lease, and a `sign-off`, `step_status` projects; one step set; actions are entities and only actions execute; the execution gate decides per action; advisory and enforcing paths agree. |
 
 A kernel document that is not yet written is reported to the reviewer as such.
 It states nothing; that domain is reviewed on the lens's standing criteria, and
@@ -141,15 +141,17 @@ close (conforms to nothing), supersede (already a step in a sibling plan), or
 premature (work for a later vision phase, marked with that phase and kept
 open).
 
-## Direction of truth per artifact class
+## Direction of truth per class of record
 
 Rules and decisions have four homes, chosen for four audiences (synthesis C7). Each class has one
-authoritative side; the others are mirrors or restatements that are wrong until corrected.
+authoritative side; the others are mirrors or restatements that are wrong until corrected. (An
+`artifact` in `vocabulary.md` is a record in an external system that a passage leaves; the classes
+below are the swarm's own records, and the word is not used for them.)
 
-| Artifact class | Authoritative side | Mirror or restatement |
+| Class of record | Authoritative side | Mirror or restatement |
 |---|---|---|
 | Implementation state: what is built, what fails open, every count | `docs/foundation/status.md`, as of its date, regenerated from `origin/main` and the record | none; a foundation document that states implementation state is wrong |
-| A design invariant, the work model, the step and gate model, the failure posture, the authority model | this directory, repo-authored, PR-reviewed | plan `decisions` maps hold the event log of when each was decided; `CLAUDE.md`'s session-only section restates six of the principles for interactive sessions and says it does not bind agents the swarm spawns |
+| A design invariant, the work model, the step and gate model, the failure posture, the authority model | this directory, repo-authored, PR-reviewed | plan `decisions` maps hold the event log of when each was decided; `CLAUDE.md`'s session-only section restates six of the principles for interactive sessions and says it does not bind agents the swarm runs |
 | An agent's behavioural rule | `agent_policy` entities in Neotoma | `.claude/skills/<name>/SKILL.md` and `docs/agents/*.md`, rendered by `render_agent_docs.py` |
 | The system's composition, roster, and roadmap | plan `ent_99ace4dd6673aa36ed08b1fe` fields | `docs/architecture.md`, `docs/taxonomy.md`, `docs/phases.md`, rendered by `render_plan_docs.py` |
 | A session's standing instruction | `CLAUDE.md` (re-injected after compaction) | none |

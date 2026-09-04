@@ -1,4 +1,4 @@
-# Gates and workflows: the workflow's steps, their runs, the projection, and the gate that decides
+# Gates and workflows: the workflow's steps, the passage, the sign-off, the projection, and the gate that decides
 
 **Kernel document:** read on every review (`conformance.md`). **Kind:** foundation; states the design and
 never the state of a checkout. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-04 to PR-08,
@@ -13,38 +13,49 @@ is `status.md`.
 
 ## Purpose
 
-State the step and gate model: which entity declares a workflow, which records a run of it, which field is
-the read-path projection; that the step set is defined once; that the word `gate` names one decision, the
+State the step and gate model: which entity declares a workflow, which records a passage of tasks through
+it, how a step's state within a passage is derived from edges and closed by a sign-off, which field is the
+read-path projection; that the step set is defined once; that the word `gate` names one decision, the
 execution gate, which is independent of GitHub and decides per action on confidence and three blast
 tiers; that actions are entities and only actions execute; which two policies govern claiming and
 executing; and how an approval object is shaped.
 
 ## Scope
 
-The workflow engines, the execution gate, and the entities `workflow`, `workflow_run`, `step_run`,
-`action`, `checkpoint_brief`, and `execution_policy`. Who may resolve a checkpoint, and how an approval is
+The workflow engines, the execution gate, and the entities `workflow`, `passage`, `sign-off`, `action`,
+`checkpoint_brief`, and `execution_policy`. Who may resolve a checkpoint, and how an approval is
 attributed, is `authority_model.md`; what happens when a workflow cannot be read is `failure_posture.md`;
-how tasks attach to a run is `work_model.md`.
+how tasks attach to a passage, and what an artifact is, is `work_model.md`.
 
 ## The invariants
 
-### Declaration, run, projection
+### Declaration, passage, projection
 
 `workflow` declares: one entity per (project, workflow type), an ordered list of steps (`steps[]`) with
 `phase`, `step_name`, `owner_agent`, `parallel_group`, `join_step`, `required`, plus `fast_paths`. Step
 names are data: a workflow may declare steps beyond the review sequence (a draft step, a deterministic
 lint, an operator preview), and a named group of contiguous steps is a stage (the review stage, the
-release stage). A `workflow_run` is one passage of a work item through a workflow. A `step_run` is the
-instance of one step within one run, with status, timestamps, agent, artifact refs, and the pinned
-`agent_definition` version; a step is closed by its owner's sign-off, a terminal write that supplies every
-field the schema requires, and a rejected write is an error, never swallowed. `step_status` on the issue
-is a projection for the hot path: the question "are all required steps signed off" must fail closed in
-one entity read. `step_status` is a projection of the step runs with a reconciler proving they agree;
-neither is deleted, neither is a second source of truth (`gate_status_map_should_remain`, under its former
-name). No transition event type; history is the record's observations (`no_gate_transition_event_type`).
-One engine sequences steps from the entities and writes the runs; a second engine that sequences from a
-code literal and cannot see the first is the defect the model exists to remove
-(`real_defect_is_two_blind_engines`).
+release stage). A `passage` is one passage of tasks through a workflow (`work_model.md`); the tasks are
+its subject, and the issue, pull request, or release it produces or references is an artifact attached
+to it by edge, never the thing a step is taken on.
+
+A step has no entity of its own within a passage. Its state is derived from edges: the passage and the
+step give an **open** step; a lease from the step owner to the step on that passage gives a **claimed**
+step; a `sign-off` gives a **signed** step. Opening a step is the publication of claimable step work, and
+the step owner claims it as it would a task, a lease on the step with the same primitive and the same
+lapse (`work_model.md`). A `sign-off` is the record a step owner writes to close a step on a passage,
+carrying the verdict, timestamps, the agent, artifact refs, and the pinned `agent_definition` version; it
+is a terminal write that supplies every field the schema requires, and a rejected write is an error,
+never swallowed. This is principle 11 applied to steps: a per-step status row would need a process to
+keep it true, and the three edges are read.
+
+`step_status` on the task is the hot-path projection of the passage's sign-offs: the question "are all
+required steps signed off" must fail closed in one entity read. It is a projection with a reconciler
+proving it agrees with the sign-offs; neither is deleted, neither is a second source of truth
+(`gate_status_map_should_remain`, under its former name). No transition event type; history is the
+record's observations (`no_gate_transition_event_type`). One engine opens steps from the entities and
+reads the sign-offs; a second engine that sequences from a code literal and cannot see the first is the
+defect the model exists to remove (`real_defect_is_two_blind_engines`).
 
 ### One step set, defined once, tested for parity
 
@@ -80,8 +91,9 @@ successful recurrences; no PR, issue, or repository. `write_checkpoint_brief()` 
 task. The consent gate for outbound non-code work is this gate: a policy lists `send_external_comms` and
 `publish` as high blast, the content agents' actions carry those classes, the runner subscribes to
 `checkpoint_brief`, and the task is re-claimed on resolution. Do not build a second consent gate
-(principle 6). What is PR-shaped is only the review machinery (issue `step_status`, review verdicts, the
-steward's merge action), a separate mechanism layered on GitHub.
+(principle 6). What is PR-shaped is only the review machinery (the `step_status` projection, review
+verdicts, the steward's merge action), a separate mechanism layered on GitHub, whose pull request is an
+artifact of the passage.
 
 ### Confidence and three blast tiers
 
@@ -103,7 +115,7 @@ under `failure_posture.md` an unreachable policy source is a halt, not a fallbac
 ### An unreadable workflow is unknown, and unknown holds
 
 Never proceed on an empty sequence. An unreadable `workflow` is a distinct state: no step of it is
-assigned or claimed, one aggregated escalation is raised, and no exception is swallowed into an empty
+opened or claimed, one aggregated escalation is raised, and no exception is swallowed into an empty
 tuple. The same holds for an unreadable issue and an unreadable CI state (principle 7).
 
 ### Non-code deliverables pass through the same gate
@@ -142,13 +154,16 @@ the design. Whether the input is produced is `status.md`.
 and in design entities alike. The data correction is the gate-state plan's; whether it has been made is
 `status.md`.
 
-**The names `workflow`, `step_run`, `workflow_run`.** This reverses the recorded decision
+**The names `workflow`, `passage`, `sign-off`.** This reverses the recorded decision
 `keep_the_name_workflow_definition` in the gate-state plan `ent_4222e5d52edd9bdba7b78cc1`. Reason:
 "definition" and "record" are redundant qualifiers when every entity in the store is a definition or a
-record of something; `workflow` declares, `workflow_run` is one passage, `step_run` is one step's instance
-within it, and `participation_record` named the weakest of the three. `gate` is withdrawn from the step
-vocabulary so that the word names exactly one thing, the execution gate. The correction to that plan is a
-request to its maintainer; the decision keys cited above keep their recorded names.
+record of something; `workflow` declares, a `passage` is one passage of tasks through it, and a `sign-off`
+is what a step owner writes to close a step on it; `participation_record` named the weakest of the three.
+No entity carries `run` in its name: `run` collided with the retired liveness vocabulary (`running`,
+`executing`), and a step's state is derived from edges rather than held in a per-step record. `gate` is
+withdrawn from the step vocabulary so that the word names exactly one thing, the execution gate. The
+correction to that plan is a request to its maintainer; the decision keys cited above keep their recorded
+names.
 
 ## Prior art
 
