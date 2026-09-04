@@ -319,15 +319,15 @@ import github_gateway  # noqa: E402
 from skill_runner import run_skill  # noqa: E402
 from swarm_dispatch import SwarmDispatcher  # noqa: E402
 from task_reconciler import TaskReconciler  # noqa: E402
-from unroutable_ledger import shared_ledger  # noqa: E402
+from unroutable_ledger import LedgerUnavailable, shared_ledger  # noqa: E402
 
-# Dedup + aggregation for no-owner escalations. Disk-backed so a restart does
-# not re-page the operator about the whole standing backlog (ateles#636's
-# lesson: state that looks recorded but is not).
+# Dedup + aggregation for no-owner escalations. Backed by a Neotoma entity so a
+# restart does not re-page the operator about the whole standing backlog
+# (ateles#636's lesson: state that looks recorded but is not).
 #
-# MUST be the shared instance: skill_runner writes undefined-role records to the
-# same file, and two instances each saving their own stale view silently drop
-# each other's records.
+# Reads FAIL CLOSED: `LedgerUnavailable` means "we do not know what was already
+# paged", and every call site below holds the notification rather than guessing
+# "nothing was" — that guess re-escalates the entire backlog at once.
 _unroutable = shared_ledger()
 
 # Event-level idempotency for `task.created`. Bounded so a long-lived dispatcher
@@ -565,12 +565,22 @@ async def dispatch_task(
                 f"(trigger={trigger}) — NOT escalating 'no owner' on an unread "
                 "snapshot; recording it as unread and retrying"
             )
-            if _unroutable.note_unreadable(entity_id):
-                report = _unroutable.drain_unreadable()
-                if report:
-                    notifier.send(
-                        report, priority=Priority.WARN, handler=DAEMON_NAME
-                    )
+            try:
+                if _unroutable.note_unreadable(entity_id):
+                    report = _unroutable.drain_unreadable()
+                    if report:
+                        notifier.send(
+                            report, priority=Priority.WARN, handler=DAEMON_NAME
+                        )
+            except LedgerUnavailable as exc:
+                # Neotoma is unreachable, which is very likely WHY the snapshot
+                # would not hydrate. Reporting now would page once per affected
+                # task for one underlying outage — the flood the ledger exists
+                # to stop. Hold; the task stays pending and is re-examined.
+                log.warning(
+                    f"[{DAEMON_NAME}] unroutable ledger unreadable ({exc}) — "
+                    f"holding the unreadable-task report for {entity_id!r}"
+                )
             return
 
         # No inferable owner. Previously this was a silent log-and-skip — the task
@@ -590,12 +600,26 @@ async def dispatch_task(
             key_suffix=trigger,
         )
         # Stage it; the aggregated report goes out on the window boundary.
-        if _unroutable.note(entity_id, title, existing_tags, assigned_to):
-            report = _unroutable.drain()
-            if report:
-                notifier.send(
-                    report, priority=Priority.BLOCKER, handler=DAEMON_NAME
-                )
+        try:
+            if _unroutable.note(entity_id, title, existing_tags, assigned_to):
+                report = _unroutable.drain()
+                if report:
+                    notifier.send(
+                        report, priority=Priority.BLOCKER, handler=DAEMON_NAME
+                    )
+        except LedgerUnavailable as exc:
+            # THE case this ledger exists for. An unreadable ledger says nothing
+            # about whether this task was already paged, and guessing "not yet"
+            # re-pages the ENTIRE standing backlog the moment Neotoma is slow —
+            # 131 pages, reconstructed by the dedup that was meant to prevent
+            # them. Hold the page instead: the task is already marked BLOCKED
+            # above, so it is visible in the backlog and re-examined next cycle.
+            # A suppressed page is recoverable; a flood is not.
+            log.warning(
+                f"[{DAEMON_NAME}] unroutable ledger unreadable ({exc}) — "
+                f"task {entity_id!r} is BLOCKED as unroutable but the page is "
+                "held to avoid re-escalating the whole backlog"
+            )
         return
 
     job = _activity.started(f"routing task {entity_id} → {skill}: {title[:60]}")
@@ -1273,6 +1297,14 @@ async def main() -> None:
                     notifier.send(
                         unread, priority=Priority.WARN, handler=DAEMON_NAME
                     )
+            except LedgerUnavailable as exc:
+                # `drain` reads nothing, but a pending buffer can only exist if
+                # a `note` already succeeded, so this is defensive: hold rather
+                # than emit a report assembled from a half-known ledger.
+                log.warning(
+                    f"[{DAEMON_NAME}] unroutable ledger unreadable ({exc}) — "
+                    "holding this flush; the pending buffer is retained"
+                )
             except Exception as exc:  # noqa: BLE001 — never kill the daemon
                 log.warning(f"[{DAEMON_NAME}] unroutable flush failed: {exc}")
 
