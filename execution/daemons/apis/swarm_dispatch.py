@@ -665,6 +665,55 @@ _REVIEW_EVENT_APPROVE = "APPROVE"
 _REVIEW_EVENT_REQUEST_CHANGES = "REQUEST_CHANGES"
 _REVIEW_EVENT_COMMENT = "COMMENT"
 
+# ateles#682 — recording a verdict is retried before it is allowed to fail.
+# Most observed failures are a transient `error connecting to api.github.com`.
+_REVIEW_POST_ATTEMPTS = 3
+_REVIEW_POST_BACKOFF_SECONDS = 2
+
+# Durable marker for "the panel reached a verdict that GitHub never recorded".
+# Lives in a PR comment so it survives daemon restarts, exactly like the
+# fix-round counter. While it stands, no merge gate may report merge-ready.
+_UNRECORDED_VERDICT_MARKER = "<!-- apis-unrecorded-verdict -->"
+# Posted when the verdict is later recorded successfully, retiring the marker
+# above. Both markers are matched literally, newest-wins, by
+# `verdict_recording_is_blocked`.
+_VERDICT_RECORDED_MARKER = "<!-- apis-verdict-recorded -->"
+
+
+def verdict_recording_is_blocked(comments: list[dict]) -> bool:
+    """True when a PR carries an unretired unrecorded-verdict marker.
+
+    ateles#682. The panel's verdict is only binding once it exists as a GitHub
+    *review*. When recording fails, `_emit_formal_review` posts the unrecorded
+    marker; a later successful recording posts the retiring marker. This
+    resolves the pair the same way `latest_aggregation_comment` resolves
+    aggregations — newest wins, selected CLIENT-SIDE by ``created_at``, because
+    GitHub's issue-comments endpoint silently ignores ``sort``/``direction``
+    and always returns oldest-first (ateles#430). Reading these positionally
+    would let a stale marker block a recorded verdict forever, or — far worse —
+    let an old retirement clear a current block.
+
+    Returns False for a PR that has neither marker: this gate only ever fires
+    on evidence that a specific recording attempt failed, so it cannot block
+    PRs whose panel never ran.
+    """
+    newest: dict | None = None
+    for c in comments:
+        body = c.get("body") or ""
+        if _UNRECORDED_VERDICT_MARKER not in body and (
+            _VERDICT_RECORDED_MARKER not in body
+        ):
+            continue
+        key = (c.get("created_at") or "", c.get("id") or 0)
+        if newest is None or key > (
+            newest.get("created_at") or "",
+            newest.get("id") or 0,
+        ):
+            newest = c
+    if newest is None:
+        return False
+    return _UNRECORDED_VERDICT_MARKER in (newest.get("body") or "")
+
 
 def parse_merge_refusal(text: str | None) -> str | None:
     """The stated reason a merge was refused, or None when none was reported.
@@ -3957,11 +4006,40 @@ class SwarmDispatcher:
         )
         payload = {"event": event, "body": text[:65000]}
 
-        async def _post(p: dict) -> httpx.Response:
+        async def _post_once(p: dict) -> httpx.Response:
             async with httpx.AsyncClient(timeout=30) as client:
                 return await client.post(
                     url, json=p, headers=self._github_headers(t.repository)
                 )
+
+        async def _post(p: dict) -> httpx.Response:
+            """POST the review, retrying transport failures with backoff.
+
+            ateles#682. The overwhelming majority of observed failures here are
+            a transient `error connecting to api.github.com` — the exact string
+            two Vanellus reviews on neotoma#2267 quote verbatim. Retrying costs
+            seconds; NOT retrying turned a blip into a silently non-binding
+            verdict. Only transport-level errors are retried: an HTTP response
+            (422, 403, …) is a decision by GitHub, not a blip, and is returned
+            to the caller on the first attempt.
+            """
+            last_exc: Exception | None = None
+            for attempt in range(_REVIEW_POST_ATTEMPTS):
+                try:
+                    return await _post_once(p)
+                except httpx.TransportError as exc:
+                    last_exc = exc
+                    if attempt == _REVIEW_POST_ATTEMPTS - 1:
+                        break
+                    delay = _REVIEW_POST_BACKOFF_SECONDS * (2**attempt)
+                    log.warning(
+                        f"[{DAEMON_NAME}] formal review POST to {ref} failed "
+                        f"(attempt {attempt + 1}/{_REVIEW_POST_ATTEMPTS}: {exc})"
+                        f" — retrying in {delay}s"
+                    )
+                    await asyncio.sleep(delay)
+            assert last_exc is not None
+            raise last_exc
 
         try:
             resp = await _post(payload)
@@ -3985,6 +4063,15 @@ class SwarmDispatcher:
                 # ateles-agent reviewing ateles-agent, and 28 such downgrades
                 # appear in apis.log. Only a distinct reviewer identity fixes
                 # this, so page the operator instead of burying it in a WARNING.
+                # ateles#682: make the "Merge held" claim below TRUE. A
+                # downgraded COMMENT sets no reviewDecision, so this verdict is
+                # every bit as unenforceable as one that never posted — and
+                # until now no gate read the downgrade, so the notification
+                # promised a hold that nothing implemented. Mark it like any
+                # other unrecorded verdict, and the merge gates hold it.
+                await self._mark_verdict_unrecorded(
+                    t, event, verdict, f"downgraded to COMMENT (422): {detail}"
+                )
                 if await self._claim_escalation(t, "self-review-422"):
                     self.notifier.send(
                         f"PR {ref}: GitHub refused the `{event}` review "
@@ -4007,14 +4094,158 @@ class SwarmDispatcher:
                 f"(id={review_id}, verdict={verdict}"
                 f"{', DOWNGRADED from ' + event + ' — non-binding' if downgraded else ''})"
             )
+            # A verdict landed on the reviews API: clear any standing block from
+            # an earlier failed attempt (ateles#682). Not done for a downgraded
+            # COMMENT — that sets no reviewDecision, so it is not a recording.
+            if not downgraded:
+                await self._retire_unrecorded_verdict_marker(t)
             return str(review_id) if review_id is not None else None
         except Exception as exc:
-            # Never fail the handler on a review-post problem.
-            log.warning(
-                f"[{DAEMON_NAME}] formal review post failed on {ref} "
-                f"({event}): {exc}"
+            # ateles#682 — FAIL CLOSED. Retries are exhausted: the verdict could
+            # not be recorded in the one channel GitHub enforces.
+            #
+            # This used to return None quietly, and the caller discarded the
+            # return value. The verdict then existed only as prose in an issue
+            # comment, which no gate and no branch protection can honour — so
+            # the PR stayed mergeable and merged over a standing REQUEST_CHANGES
+            # (neotoma#2278 merged 7s after one; #2284, 4s).
+            #
+            # A verdict that cannot be recorded must BLOCK, not downgrade its
+            # own channel. We mark the PR as having an unrecorded verdict; the
+            # merge gates (`_gate_merge_readiness`, `_pr_review_is_clear`) both
+            # refuse to signal merge-ready while that marker stands. The comment
+            # posted below is a human-readable SUPPLEMENT, never the verdict of
+            # record.
+            log.error(
+                f"[{DAEMON_NAME}] formal review post FAILED CLOSED on {ref} "
+                f"({event}) after {_REVIEW_POST_ATTEMPTS} attempts: {exc} — "
+                "verdict is unrecorded; merge is blocked until it lands"
             )
+            await self._mark_verdict_unrecorded(t, event, verdict, str(exc))
             return None
+
+    async def _verdict_recording_blocked(self, t: SwarmTrigger) -> bool:
+        """True when this PR has a standing unrecorded-verdict block.
+
+        ateles#682. Fail-closed on a read error, matching `_pr_review_is_clear`:
+        if we cannot prove the verdict was recorded, we must not act as though
+        it was. The failure mode this guards is a PR presenting as merge-ready
+        on a verdict GitHub never stored, so an unreadable comment list is
+        exactly when holding is correct.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._all_issue_comments(
+                    t.repository, t.number, client
+                )
+            return verdict_recording_is_blocked(comments)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: could not read the "
+                f"unrecorded-verdict marker ({exc}) — holding merge"
+            )
+            return True
+
+    async def _post_issue_comment(
+        self, repository: str, number: int, body: str
+    ) -> None:
+        """POST one issue comment. Raises on failure — callers decide the posture."""
+        url = f"https://api.github.com/repos/{repository}/issues/{number}/comments"
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                url, json={"body": body}, headers=self._github_headers(repository)
+            )
+            resp.raise_for_status()
+
+    async def _mark_verdict_unrecorded(
+        self, t: SwarmTrigger, event: str, verdict: str | None, detail: str
+    ) -> None:
+        """Record — durably and visibly — that a verdict never reached GitHub.
+
+        ateles#682. This is the fail-closed half of the fix. It does two things,
+        in decreasing order of importance:
+
+        1. Posts a marker comment the merge gates read. While the marker stands,
+           `_gate_merge_readiness` refuses to file the merge checkpoint and
+           `_pr_review_is_clear` returns False, so the PR cannot present as
+           merge-ready through any path.
+        2. Pages the operator, who is the only party that can distinguish a
+           GitHub outage from a bug in this daemon.
+
+        The comment body is explicitly a SUPPLEMENT: it says in plain words that
+        it is not the verdict of record. That distinction is the entire lesson of
+        this bug — prose in a comment reads like a verdict and enforces nothing.
+
+        Best-effort by necessity: if GitHub is unreachable, this post may fail
+        too. That is acceptable and non-circular, because the operator
+        notification does not depend on GitHub, and an unreachable GitHub also
+        means the merge APIs the swarm would use are down.
+        """
+        ref = f"{t.repository}#{t.number}"
+        body = (
+            f"{_UNRECORDED_VERDICT_MARKER}\n"
+            f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+            f"🔴 **Verdict not recorded — merge blocked.**\n\n"
+            f"The panel reached a verdict of `{verdict or 'unparseable'}` "
+            f"(GitHub review event `{event}`), but it could not be submitted to "
+            f"the reviews API after {_REVIEW_POST_ATTEMPTS} attempts:\n\n"
+            f"```\n{detail[:500]}\n```\n\n"
+            "**This comment is a human-readable supplement, not the verdict of "
+            "record.** Only a GitHub *review* is binding, and none was created, "
+            "so the swarm is holding this PR rather than letting an "
+            "unenforceable verdict pass as review. The merge gates will refuse "
+            "to signal merge-ready until the verdict is recorded — re-run the "
+            "panel once the reviews API is reachable."
+        )
+        try:
+            await self._post_issue_comment(t.repository, t.number, body)
+        except Exception as exc:  # noqa: BLE001 — the notification still fires
+            log.error(
+                f"[{DAEMON_NAME}] {ref}: could not post the unrecorded-verdict "
+                f"marker ({exc}) — merge gates still hold, operator notified"
+            )
+        if await self._claim_escalation(t, "verdict-unrecorded"):
+            self.notifier.send(
+                f"PR {ref}: the panel verdict `{verdict or 'unparseable'}` could "
+                f"NOT be recorded as a GitHub review ({detail[:120]}). The "
+                "verdict is unenforceable, so merge is blocked until it lands. "
+                "If api.github.com is healthy, this is a bug in the dispatcher, "
+                "not an outage.",
+                priority=Priority.OPERATOR_DECISION,
+                handler=DAEMON_NAME,
+            )
+
+    async def _retire_unrecorded_verdict_marker(self, t: SwarmTrigger) -> None:
+        """Clear a prior unrecorded-verdict block after a verdict lands.
+
+        Posts the retiring marker only when a block is actually standing, so a
+        healthy PR does not accumulate bookkeeping comments on every panel run.
+        """
+        ref = f"{t.repository}#{t.number}"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._all_issue_comments(
+                    t.repository, t.number, client
+                )
+            if not verdict_recording_is_blocked(comments):
+                return
+            body = (
+                f"{_VERDICT_RECORDED_MARKER}\n"
+                f"{attribution_header('apis', 'swarm dispatcher')}\n\n"
+                "✅ **Verdict recorded.** A GitHub review now carries the panel's "
+                "verdict, so the earlier unrecorded-verdict block is retired and "
+                "the merge gates read the review state as usual."
+            )
+            await self._post_issue_comment(t.repository, t.number, body)
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: retired the unrecorded-verdict block "
+                "— verdict is now on the reviews API"
+            )
+        except Exception as exc:  # noqa: BLE001 — never fail the handler
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: could not retire the unrecorded-verdict "
+                f"marker ({exc}) — it will be retried on the next panel run"
+            )
 
     # ── loop closure: findings → fix → readiness (ateles#179) ────────────────
 
@@ -4423,14 +4654,32 @@ class SwarmDispatcher:
         API round-trips); when None we compute it here as before.
         """
         ref = f"{trigger.repository}#{trigger.number}"
-        if self.config.auto_merge:
-            return  # auto-merge path: Vanellus handles merge, no checkpoint.
 
         ci = ci_state if ci_state is not None else await self._required_ci_state(trigger)
         if ci == "failing":
             # Route a red CI back for a fix, bounded like review findings.
+            # Deliberately AHEAD of the unrecorded-verdict hold below: an
+            # unrecordable verdict must stop the PR from MERGING, it must not
+            # stop a broken build from being FIXED. Suppressing the fix round
+            # here would leave the PR stuck with nothing driving it forward.
             await self._route_ci_failure(trigger, parent)
             return
+
+        # ateles#682 — fail closed on an unrecorded verdict. Ahead of the
+        # auto_merge early-return, because under APIS_AUTONOMY_AUTO_MERGE=1 that
+        # return hands the merge to Vanellus: letting an unrecorded verdict
+        # through here is precisely the 4-second merge on neotoma#2284. A
+        # verdict GitHub never recorded cannot gate anything, so nothing
+        # downstream may treat this PR as reviewed.
+        if await self._verdict_recording_blocked(trigger):
+            log.error(
+                f"[{DAEMON_NAME}] {ref}: HOLDING merge — the panel verdict was "
+                "never recorded as a GitHub review, so it is unenforceable"
+            )
+            return
+
+        if self.config.auto_merge:
+            return  # auto-merge path: Vanellus handles merge, no checkpoint.
         if ci != "green":
             # pending / unknown — hold without paging; don't claim ready.
             log.info(
@@ -5249,6 +5498,17 @@ class SwarmDispatcher:
                 comments = await self._all_issue_comments(
                     repository, pr_number, client
                 )
+                # ateles#682: a verdict the reviews API never recorded is not a
+                # verdict. Checked BEFORE reading the aggregation, because the
+                # aggregation comment is exactly the unenforceable prose channel
+                # that made this bug invisible — it can read perfectly clear
+                # while GitHub holds no review at all.
+                if verdict_recording_is_blocked(comments):
+                    log.warning(
+                        f"[{DAEMON_NAME}] {repository}#{pr_number}: panel verdict "
+                        "was never recorded as a GitHub review — not clear"
+                    )
+                    return False
                 comment = latest_aggregation_comment(comments)
                 if comment is None:
                     return False
