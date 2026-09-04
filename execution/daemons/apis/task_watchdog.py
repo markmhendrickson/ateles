@@ -78,6 +78,7 @@ _RETRYABLE_INFLIGHT = frozenset({TaskStatus.ROUTED.value, TaskStatus.EXECUTING.v
 class WatchdogAction(str, Enum):
     NONE = "none"
     RETRY = "retry"        # re-dispatch (failed, or stalled in-flight / resume)
+    RELEASE = "release"    # lease lapsed → return the task to the claimable queue
     ESCALATE = "escalate"  # attempts exhausted → BLOCKED + page operator
 
 
@@ -93,6 +94,26 @@ class TaskWatchdog:
 
     stall_seconds: int = STALL_SECONDS
     _state: dict[str, _AttemptState] = field(default_factory=dict)
+    # Optional ClaimStore (lib.daemon_runtime.task_claim). When set, the lease
+    # replaces `updated_at` as the liveness signal. Left None the watchdog keeps
+    # its previous age-proxy behaviour, so this rolls out without a flag day.
+    _claims: object | None = None
+
+    def _claim_for(self, task_id: str) -> dict | None:
+        """The task's claim row with its derived `live` flag, or None.
+
+        Fail-soft: a claim lookup that errors returns None, which falls the
+        classifier back to the age proxy rather than releasing a task whose
+        liveness we could not read. Releasing on a read error would be the
+        dangerous direction — it could yank a task from a healthy runner.
+        """
+        if self._claims is None:
+            return None
+        try:
+            return self._claims.inspect(task_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[watchdog] claim lookup failed for %s: %s", task_id, exc)
+            return None
 
     # ── pure decision logic (unit-tested) ──────────────────────────────────
 
@@ -100,8 +121,24 @@ class TaskWatchdog:
         st = self._state.get(task_id)
         return st.attempts if st else 0
 
-    def classify(self, task_id: str, status: str, age_seconds: float | None) -> WatchdogAction:
-        """Decide what to do with one task, given its status and age."""
+    def classify(self, task_id: str, status: str, age_seconds: float | None,
+                 claim: dict | None = None) -> WatchdogAction:
+        """Decide what to do with one task, given its status, age and claim.
+
+        `claim` is the task's claim row (see lib/daemon_runtime/task_claim.py),
+        already carrying a derived `live` flag. When present it REPLACES
+        `age_seconds` as the liveness signal for in-flight tasks.
+
+        Why the lease beats the age proxy: `_age_seconds` reads updated_at /
+        last_observation_at, so ANY unrelated Neotoma write to the task resets
+        the clock and a genuinely dead runner looks alive indefinitely. A lease
+        is only refreshed by the runner's own heartbeat, so it decays when the
+        process dies — which is what lets the window be minutes instead of the
+        3600s STALL_SECONDS the proxy forces.
+
+        Under PULL the action for an expired claim is RELEASE, not re-route:
+        the task goes back on the queue and whichever agent is free claims it.
+        """
         s = normalize(status)
         attempts = self.attempts_for(task_id)
 
@@ -109,6 +146,16 @@ class TaskWatchdog:
             return WatchdogAction.RETRY if attempts < MAX_ATTEMPTS else WatchdogAction.ESCALATE
 
         if s in _RETRYABLE_INFLIGHT:
+            if claim is not None:
+                # A real lease is authoritative: a live claim means a runner is
+                # genuinely holding this, no matter how stale the task row is.
+                if claim.get("live"):
+                    return WatchdogAction.NONE
+                # Lease lapsed (or never held) → release it back to the queue.
+                return (
+                    WatchdogAction.RELEASE if attempts < MAX_ATTEMPTS
+                    else WatchdogAction.ESCALATE
+                )
             if age_seconds is not None and age_seconds >= self.stall_seconds:
                 return WatchdogAction.RETRY if attempts < MAX_ATTEMPTS else WatchdogAction.ESCALATE
             return WatchdogAction.NONE
@@ -143,7 +190,8 @@ class TaskWatchdog:
         dispatch_task closure) used to re-dispatch a retryable task.
         """
         now = time.time()
-        counts = {"scanned": 0, "retried": 0, "escalated": 0, "skipped_backoff": 0}
+        counts = {"scanned": 0, "retried": 0, "released": 0, "escalated": 0,
+                  "skipped_backoff": 0}
         try:
             tasks = _query_tasks(QUERY_LIMIT)
         except Exception as exc:  # noqa: BLE001 — never let a query error kill the loop
@@ -154,9 +202,42 @@ class TaskWatchdog:
             counts["scanned"] += 1
             status = snapshot.get("status", "")
             age = _age_seconds(snapshot, now)
-            action = self.classify(entity_id, status, age)
+            claim = self._claim_for(entity_id)
+            action = self.classify(entity_id, status, age, claim)
 
             if action == WatchdogAction.NONE:
+                continue
+
+            if action == WatchdogAction.RELEASE:
+                # The claim's lease lapsed: the runner is gone and wrote nothing.
+                # Put the task back in the claimable pool rather than re-routing
+                # it — under pull, whichever agent is free will take it.
+                #
+                # Count the release as an attempt so a task that keeps losing
+                # its runner eventually ESCALATEs (classify returns ESCALATE
+                # once attempts >= MAX_ATTEMPTS). Backoff applies only to the
+                # RETRY re-dispatch path — RELEASE always returns work to the
+                # queue immediately.
+                holder = (claim or {}).get("holder") or "(none)"
+                n = self.record_retry(entity_id, now)
+                log.info(
+                    "[watchdog] releasing %s (status=%s, lapsed lease, "
+                    "holder=%s, attempt=%d/%d)",
+                    entity_id, normalize(status), holder, n, MAX_ATTEMPTS,
+                )
+                set_task_status(
+                    entity_id, TaskStatus.PENDING, handler="apis-watchdog",
+                    from_status=status,
+                    reason=f"claim lease lapsed (holder={holder}) — released to queue",
+                    key_suffix="watchdog-release",
+                )
+                if self._claims is not None:
+                    try:
+                        self._claims.release_expired(entity_id)
+                    except Exception as exc:  # noqa: BLE001 — never kill the sweep
+                        log.warning("[watchdog] claim release failed for %s: %s",
+                                    entity_id, exc)
+                counts["released"] += 1
                 continue
 
             if action == WatchdogAction.ESCALATE:
