@@ -384,6 +384,19 @@ async def _spawn_agent(
         f"(skip_perms={owner_agent in _AGENTS_NEEDING_SKIP_PERMISSIONS})"
     )
 
+    # Anthropic auth for the spawned `claude --print`: prefer the operator's
+    # Claude subscription (Max plan) over metered pay-as-you-go API credits.
+    # `claude setup-token` mints a long-lived subscription token exposed as
+    # CLAUDE_CODE_OAUTH_TOKEN; when it is present we hand it to the child and
+    # REMOVE ANTHROPIC_API_KEY so the API key can't win and bill metered
+    # credits (the failure that exhausted the panel's balance and produced the
+    # "credit balance is too low" / 401 errors on dispatched agents). When the
+    # OAuth token is absent this is a no-op — the child still authenticates on
+    # whatever ambient credentials exist. Mirrors Apis skill_runner behaviour.
+    subprocess_env = {**os.environ}
+    if subprocess_env.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
+        subprocess_env.pop("ANTHROPIC_API_KEY", None)
+
     # Fire-and-forget: agent runs as background subprocess. Its artifact is
     # posted to the GitHub issue/PR; Anthus picks up satisfaction on the next
     # SSE comment event.
@@ -392,6 +405,7 @@ async def _spawn_agent(
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=subprocess_env,
         )
         # Don't await proc.wait() — let it run independently so we don't block
         # the event loop. The SSE handler picks up the artifact when posted.
