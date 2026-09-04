@@ -32,8 +32,10 @@ and the adapters that reach them: `adapters.md`.
 ### Declaration, batch, projection
 
 `workflow` declares one entity per (project, workflow type): ordered `steps[]` (`phase`, `step_name`,
-`owner_agent`, `parallel_group`, `join_step`, `required`, `on_fail` — the earlier step a failing sign-off
-opens again), plus `fast_paths` and `successors`. Step names are data: a workflow may declare steps
+`owner_role`, `parallel_group`, `join_step`, `required`, `on_fail` — the earlier step a failing sign-off
+opens again), plus `fast_paths` and `successors`. `owner_role` holds a **role**, never an agent name: the
+roster resolves it to a principal when the step is claimed (`vocabulary.md#step-owner`), so one
+declaration serves every project and a renamed agent leaves no stale name in it. Step names are data: a workflow may declare steps
 beyond the review sequence (a draft step, a deterministic lint, an operator preview). A contiguous named
 group of steps is a stage.
 
@@ -46,6 +48,20 @@ with the same lease primitive as a task (`work_model.md`). A `sign-off` is the t
 a step (verdict, timestamps, agent, artifact refs, pinned `agent_definition` version); a rejected write is
 an error, never swallowed. This is principle 11 applied to steps: a per-step status row would need a
 process to keep it true, and the three edges are read.
+
+**A required step is closed only by a sign-off, and no principal signs for another.** The step owner named
+on the step is the only principal whose sign-off closes it; a second principal cannot supply the verdict,
+and a step with no sign-off is open however long it has been open and however clear its outcome looks. The
+one way an unsigned required step is closed by someone other than its owner is the operator closing it,
+and that is not an exception to the rule but an instance of it: **the operator's close is a sign-off,
+attributed to the operator principal, with verdict `waived`, carrying the reason.** There is no waiver
+primitive, no override flag, and no field a principal sets on itself — a self-settable clearance re-states
+"probably fine" in one boolean, which is the shape this model exists to remove. Because the close is a
+sign-off, step state stays derived from edges (principle 11), the audit trail names who cleared the step
+and why, and a waived step is visible as waived in `step_status` rather than indistinguishable from a
+signed one. The action gate is unaffected: a waived workflow step does not permit an action, which is
+evaluated on its own (below). Open: whether any principal other than the operator may hold the right to
+waive, and whether a waiver may be scoped to one step or to a batch's remaining unsigned steps.
 
 `step_status` on the task is the hot-path projection of the batch's sign-offs, so "all required steps
 signed?" fails closed in one read. A reconciler proves it agrees with the sign-offs; neither is deleted,

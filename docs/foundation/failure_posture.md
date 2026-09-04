@@ -55,6 +55,23 @@ refuse-and-requeue-as-fallback, and the hardcoded step-list floor (C5, below).
    sign-off whose write failed is the unaccountable work this posture exists to prevent. Silence beats a
    false verdict.
 
+   **The step owner does not post its verdict anywhere else.** A verdict that cannot reach the record is
+   not a verdict. The step stays open; the condition is announced on the off-record path of rule 2, along
+   with every other blocked claim in the window; and the work is re-claimed when the record returns,
+   because the lease lapses on its own and publishes the step again. The verdict is re-derived then, not
+   replayed from wherever it was parked — the artifact may have moved under it, and a sign-off is pinned
+   to the artifact state it judged (`data_model.md#concepts`).
+
+   The anti-pattern, named so it is recognizable: the step owner writes the verdict to the code host as a
+   review or a comment, treats that comment as the authoritative record because it is the only surface
+   that accepted the write, and a later reader — the steward, the engine, or the owner itself on a second
+   pass — replays the comment as though it were the sign-off. Every part of that is forbidden. A verdict
+   that reached only the artifact is an **observation** on the artifact and never a sign-off
+   (`adapters.md#no-external-event-advances-a-step-by-itself`); the code host is not a write-ahead log
+   for the record; and a step is closed by a sign-off or it is open. The same holds for a verdict parked
+   on local disk, in a chat message, or in the runner's own scratch state: those are diagnostic capture
+   under rule 1, which asserts nothing about the record.
+
 5. **Deferral is bounded; exhaustion escalates.** Backoff is mandatory: a slow instance under retry
    pressure is how slow becomes unreachable, and unreachable stays distinguishable from slow. A task requeued
    indefinitely against a store that never returns is a silent stall, so every deferral has a ceiling. When

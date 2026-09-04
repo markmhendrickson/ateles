@@ -23,9 +23,12 @@ this document cannot give is a step to question.
 Twelve core workflows: intake, feature, bug, security, copy, social content, release, outreach, payment,
 research and analysis, meeting processing, and operator-only. Each is a workflow type; a `workflow` entity
 is declared per (project, workflow type), so one type may have several declarations that share the design
-stated here and differ in step owners and thresholds. Step owners are named by role, never by agent: the roster
-binds a role to an agent per project (`swarm_roster`, by role), and a renamed agent leaves no stale name
-here. No section names an operator, a payee, a contact, or a channel; those are context entities the step
+stated here and differ in step owners and thresholds. A step owner is declared as a **role** and resolved
+to a principal at claim time: the declaration's `owner_role` holds the role, the roster binds that role to
+an agent per project (`swarm_roster`, by role), and the binding is read when the step is claimed, so a
+renamed or replaced agent leaves no stale name here or in the declaration (`vocabulary.md#step-owner`).
+The step-owner column of every table below is therefore a role, and a role that resolves to no principal
+raises a checkpoint (reason `unspawnable_assignee`) rather than falling through to any available agent. No section names an operator, a payee, a contact, or a channel; those are context entities the step
 owner retrieves at runtime.
 
 ## How to read a workflow section

@@ -290,6 +290,24 @@ what is built keeps the old names; the rename is the gap.
 | payment workflow steps `consent`, `pay` | `checkpoint`, `execute` (revision 5) | no payment `workflow_definition` exists (prod, 2026-09-04), so nothing built changes | — |
 | operator-only tasks are ordinary tasks; they raise a checkpoint only at the action gate | operator-only work as its own escalation path (revision 5's `await` bound "escalates") | operator-only work is pushed by notification (`notifier.py`, `email_channel.py`) | same |
 
+## Revision 8 (2026-09-04): the rename and what the newly written rules do not yet have
+
+One rename and the built-state divergences of the rules revision 8 wrote. As with every earlier revision,
+what is built keeps the old name and lacks the new mechanism; that gap is what these rows record.
+
+| Design term / rule (revision 8) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| `workflow.steps[].owner_role`, a role the roster resolves to a principal at claim time | `owner_agent`, whose name said agent while every declaration held a role and `vocabulary.md` called it a principal | the field is `owner_agent` on all 8 `workflow_definition` entities and holds a role; nothing resolves it through the roster at claim time — the pipeline spawns a runner by role name when it opens the step | `workflow_definition.gates[].owner_agent`; `swarm_dispatch.py`, `skill_runner.py`; a role name in an owner field has been treated as a data-quality defect to be "fixed" to an agent name |
+| verdict `waived` on a `sign_off`, written by the operator principal, closing an unsigned required step with its reason | no design term; the mechanism existed only as an operator command | an operator comment command clears every unsigned pre-implementation step and re-triggers the pipeline, writing no record of who cleared what or why; the token `waived` appears in no schema | the PR pipeline's comment handling; no `sign_off` (built: `participation_record`) carries a verdict field admitting it |
+| every delivery resolves to an outcome or to `dropped` with a reason, counted per window and announced off-record | `adapters.md`'s "or nothing" branch (revision 7) | deliveries are dropped at log level with no disposition written and no count surfaced; a refused command and a delivery that never arrived are indistinguishable from the external system | the adapter daemons' event handlers |
+| no step state on an artifact with no batch | the same rule, stated only positively (a PR with no batch yields a task for intake) | pre-implementation steps are back-filled on PRs no batch addresses, as `not_applicable`, `waived`, or "legacy clear", and the review panel then runs | `swarm_dispatch.py`, `lib/issue_labels.py` |
+| `artifact_refs[]` carry the head each sign-off judged | nothing; refs named the artifact only | no head is recorded with a verdict, so a verdict against a superseded head reads as current; the merge path pins its own head SHA independently | Anthus writer (`participation_record`); the merge tool |
+| a credential that is the asset is loaded only in the subprocess taking the action; grants read at every check | nothing stated | grants load once at daemon startup and are never re-polled, so a revocation waits for a restart | the grant loader and checker |
+| one `ownership_grant` per registered entity type; tests never register into the shared registry | nothing stated | the production registry holds timestamped throwaway types from test runs, and no entity type carries an `ownership_grant` | the schema registry on prod |
+| the record-usage contract (`data_model.md`, "What each actor reads and writes") | nothing; retrieval and write boundaries were stated per-document | no mechanism reads or enforces the contract; `context_entity_types[]` exists on `agent_definition` but nothing bounds a runtime read to it | `agent_definition` entities; the Neotoma client |
+| principle 10's checkout-drift check named as reporting, not enforcement | "**Enforced by:** the checkout-drift check" | `checkout_drift.py` logs at ERROR and continues unless `ATELES_ENFORCE_CHECKOUT_FRESHNESS=1`; the flag is unset in every deployment checkout | `lib/daemon_runtime/checkout_drift.py` |
+| a richer mirror is merged upward as a correction, then re-rendered | `conformance.md`'s "wrong until corrected" read as licence to regenerate | the render `--check` scripts report a difference without saying which side is ahead, and the habitual response is to regenerate | `render_agent_docs.py`, `render_plan_docs.py`, `render_workflow_docs.py` |
+
 ## `adapters.md`: the adapter and the engine are one process (revision 7, 2026-09-04)
 
 Read from the code on this branch (`c221ff2` plus revision 7) on 2026-09-04 by reading the module
@@ -442,7 +460,26 @@ Revision 7 (2026-09-04) re-measured only the documents it touched, with `wc -c` 
 | `data_model.md` | 13.8k | keyed | yes |
 | `conformance.md` | 13.0k | keyed (itself) | yes |
 
-The kernel is 35.7k of the 40k block, so no keyed document fits beside it and each is named as omitted on
+Revision 8 (2026-09-04) re-measured only the documents it touched, with `wc -c` on this branch:
+
+| Document | Characters | Reading-list role on revision 8 | Over the per-document cap |
+|---|---|---|---|
+| `data_model.md` | 26.0k | keyed | yes |
+| `adapters.md` | 26.7k | keyed (also keyed to itself) | yes |
+| `gates_and_workflows.md` | 15.7k | kernel | yes |
+| `vocabulary.md` | 55.6k | keyed | yes |
+| `conformance.md` | 14.8k | keyed (itself) | yes |
+| `authority_model.md` | 14.2k | keyed | yes |
+| `failure_posture.md` | 11.9k | keyed | no |
+| `principles.md` | 11.1k | kernel | no |
+| `workflows.md` | 36.5k | **unkeyed** | — |
+
+The kernel is 39.0k of the 40k block after revision 8, still under it and with less room than before;
+`data_model.md` grew most, carrying the record-usage contract's two tables. Revision 8 wrote content the
+mining showed was settled and deliberately did not trim, on the same instruction that governed revisions 6
+and 7 — content settles before budget, and the budget pass is the operator's, run last and separately.
+
+The kernel was 35.7k of the 40k block at revision 7, so no keyed document fits beside it and each is named as omitted on
 a change that keys it. `workflows.md`, `scenarios.md`, and `scenarios_extended.md` are unkeyed because the
 review panel's revision (641744f, "restore #744 reading-list budget after review panel") removed their
 keyed rows and split `scenarios.md` to bring the block under the caps; revision 6 kept that split and the

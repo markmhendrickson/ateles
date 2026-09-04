@@ -35,11 +35,11 @@ projection is the one exception, and it is reconciled.
 | task | `task` | `status` (`open`, `blocked`, or a terminal value); `title`, `description`; `action_type[]` (declared classes); `assigned_to` (eligibility); `priority` | `ADDRESSED_BY` → batch; `PART_OF` → parent task; `PRODUCES` → action; `REFERS_TO` → artifact; `LEASE` ← principal; `CHECKPOINTS` ← checkpoint | claimable; active; chain; current batch; parent completion | `step_status` | claimant, `claimed_at`, any lease field; a liveness flag; the workflow it is in; the list of batches it has gone through; a parent's stored status |
 | batch | `batch` | `project`, `workflow_type`; `status` (open or terminal); `opened_at`, `closed_at`; `successor` named by the closing sign-off, or none | `ADDRESSED_BY` ← task; `FOLLOWS` → batch (the one it follows); `CLOSES` ← sign-off; `PRODUCES` → artifact; `LEASE` ← principal (on a step, `step_name` on the edge) | step state per step (open, claimed, signed); current step; the successor's batch | — | the list of attached tasks (edges); a per-step status row; a sequence of workflows above it |
 | lease | relationship `LEASE` | `claimed_at`, `expires_at`, `returned_at`; `runner_id`; `step_name` when the lease is on a step of a batch | principal → task, or principal → batch (step) | `held` (`expires_at` future, no `returned_at`); `lapsed` (`expires_at` past, no `returned_at`); `returned` | — | a stored state; a lock; anything on the task |
-| sign-off | `sign_off` | `step_name`; `verdict`; `signed_at`; `agent`; `agent_definition_version`; `artifact_refs[]`; `successor` (closing sign-off only, one or none) | `CLOSES` → batch; `SIGNED_BY` → agent; `REFERS_TO` → artifact | the signed step state | contributes to `step_status` | a verdict on an issue or a PR (the subject is the batch's tasks) |
+| sign-off | `sign_off` | `step_name`; `verdict` (`signed`, a blocking verdict, or `waived` — the operator principal's close of an unsigned required step, carrying the reason); `signed_at`; `agent`; `agent_definition_version`; `artifact_refs[]`, each carrying the artifact's observed `head` at the moment the verdict was made; `successor` (closing sign-off only, one or none) | `CLOSES` → batch; `SIGNED_BY` → agent; `REFERS_TO` → artifact | the signed step state; whether a referenced artifact's current `head` differs from the one judged | contributes to `step_status` | a verdict on an issue or a PR (the subject is the batch's tasks); a stored stale-or-current flag |
 | action | `action` | `action_type`; `confidence`; `dedup_key` (idempotency of the effect); `taken_at` and `result_ref` (the action confirmation, written by the adapter as an observation naming the external record the effect left) | `PRODUCES` ← task; `REFERS_TO` → artifact it acts on; `CHECKPOINTS` ← checkpoint | blast radius under the policy; whether it may be taken | — | a stored gate decision; the artifact it leaves (an entity of its own) |
 | checkpoint | `checkpoint` | `reason` (`gate_hold`, `repeated_lapse`, `unreadable_workflow`, `rounds_exhausted`, `unspawnable_assignee`, or a policy-declared class); `needed_input`; `options[]`; `status` (open, or a terminal approval: approved, denied, vetoed, timed out); `deferral_until`; `raised_at`, `resolved_at`; `resolution_note` | `CHECKPOINTS` → action or task (the subject, exactly one); `AWAITS` → principal (one or more); `RESOLVED_BY` → principal; `RAISED_BY` → principal or agent | the queue (open checkpoints whose `AWAITS` names the reader); quorum and separation of duties over its principals | — | the subject as free text; a resolver as a bare status write; a page or notification record |
 | artifact | `artifact` | `kind` (`issue`, `pull_request`, `release`, `page`, `message`, `thread`, `event`, `transfer`, …); `system`; `external_id`; `url`; `state` (per kind: `open`, `closed`, `merged`, `sent`, `settled`, …); `labels[]`; `head`; `checks` (`passing`, `failing`, `pending`, or `unknown`) — the last four written by the adapter as observations (`adapters.md`) | `PRODUCES` ← batch; `REFERS_TO` ← task; `REFERS_TO` ← action; `REFERS_TO` ← sign-off | whether the record tracks it (any batch or task edge) | — | step state or verdicts (they belong to the batch and its sign-offs); a workflow instruction; the delivery log of the events that updated it (they are its observations) |
-| workflow | `workflow` | `project`, `workflow_type`; `steps[]` (`phase`, `step_name`, `owner_agent`, `parallel_group`, `join_step`, `required`, `on_fail`); `fast_paths[]`; `successors[]` | — | which batches are of it | — | a copy of the step list in code; a floor list |
+| workflow | `workflow` | `project`, `workflow_type`; `steps[]` (`phase`, `step_name`, `owner_role` — a role the roster resolves at claim time, never an agent name; `parallel_group`, `join_step`, `required`, `on_fail`); `fast_paths[]`; `successors[]` | — | which batches are of it | — | a copy of the step list in code; a floor list |
 | action policy | `action_policy` | `low_blast_action_types[]`, `high_blast_action_types[]`; `confidence_threshold`; `recurrence_count`; `always_checkpoint_boundaries[]`; `permission_scope` | — | blast radius for a class; whether a series has graduated | — | `operator_only` as a policy value (it is `NEVER` ahead of any policy) |
 | agent session | `agent_session` | `runner_id`; `host`, `checkout`, `branch`, `head`; `started_at`, `last_seen_at` | `REFERS_TO` → task | active (with the lease) | — | a history of runners |
 | agent | `agent_definition` | `name`, `prompt_markdown`, `context_entity_types[]`, version | `principal_binding` → principal; `LEASE` → task or batch | — | — | a claimant field on a task |
@@ -87,6 +87,18 @@ projection is the one exception, and it is reconciled.
   to the effect outside the system.
 - **Read-back after every write that carries a decision** (principle 2): the retrieval that asserts the
   field holds the value written. A response code is not evidence.
+- **A sign-off is pinned to the artifact state it judged.** Each entry in a sign-off's `artifact_refs[]`
+  carries the artifact's `head` as observed when the verdict was made, so a verdict against a superseded
+  head is readable as one instead of being indistinguishable from a live verdict. The head is resolved
+  before the work of the step begins, so new commits arriving mid-step cannot re-anchor a verdict onto a
+  commit the step owner never read; a round that reopens after a blocking verdict starts from the artifact's
+  recorded head, not from the earlier round's branch point. The second half, which `adapters.md` states
+  from the event side and this document states from the record side: **a later head does not invalidate a
+  sign-off automatically.** A new-commits event is an observation updating the artifact's `head`, and open
+  sign-offs are unaffected; a workflow that wants a step to open again on a new head declares that on the
+  step, and the event does not do it. A reader that needs to know whether a verdict is current derives it
+  by comparing the pinned head to the artifact's — a derived read, never a stored freshness flag that a
+  process would have to keep true (principle 11).
 - **Schema versions.** Every entity type is registered with a version, and a sign-off pins the
   `agent_definition` version it was made under; a write that names a field the registered version does not
   declare is not silently accepted as that field.
@@ -103,6 +115,83 @@ projection is the one exception, and it is reconciled.
 - **Edges carry their own timestamps and fields.** A relationship is written with `created_at` and,
   where it can end, an explicit end (`returned_at`, `ended_at`); a state derived from an edge is read from
   those, never from a status the edge would have to be transitioned to.
+- **A registered entity type carries at most one `ownership_grant`.** One principal is accountable for
+  the type's shape and answers when it needs a decision (`authority_model.md#grants`). A type with no
+  owner is the one that accumulates use-specific fields from whichever writer arrived first, so that a
+  later generic write lands undeclared; a type with two owners has neither. Ownership is the edge the
+  record already has for named accountability, not a new field.
+- **Type registration is an owned decision write, read back; tests never register into the shared
+  registry.** Registering a type, or a new version of one, is a write carrying a decision, so it is read
+  back against the registry (principle 2) and made by or on behalf of the type's owner. A test run that
+  registers a type — most visibly one whose name carries a timestamp to keep runs from colliding — leaves
+  that type in the production registry permanently, where nothing distinguishes it from a designed one.
+  Tests register into their own registry or use a type that already exists.
+- **A schema version does not migrate values already sitting in `raw_fragments`.** Declaring a field
+  changes what *subsequent* writes may land in it; every earlier write that carried that field is still in
+  `raw_fragments`, and stays there until something reads it out and re-writes it as the declared field.
+  So registering the schema does not close a gap it appeared to close: a read-back of the declared field
+  on an old entity still finds nothing, and the backfill is separate work with its own read-back.
+- **Key on what the source says, never on when we happened to look.** An idempotency key, a dedup key, or
+  any identity derived for a write is built from the source's own stable values. A wall-clock value inside
+  a key permanently poisons the row it keys, because no later write can reproduce it. The converse error
+  is as costly: a key derived from *(entity, field, value)* silently refuses any re-submission of a value
+  the field has held before while reporting success, so a field that alternates between two values becomes
+  unwritable after its first change — the key must distinguish the write, not the value.
+- **Merging duplicate entities is a write that carries decisions.** A merge chooses, per field, which of
+  two recorded values survives, and each choice is a decision — so every field is read back against both
+  sources afterwards, not merely the merge's success response. Edges are repointed from the absorbed
+  entity to the survivor rather than re-derived: re-deriving asks whatever produced an edge to produce it
+  again, which silently drops every edge whose producer is gone, and edge loss after a merge is invisible
+  because the survivor still looks well-formed. The bounded retrieval below is what keeps most merges from
+  being necessary at all.
+
+## What each actor reads and writes
+
+The tables above say where each concept lives. This section says who touches it: what an actor must
+retrieve before it acts, what it may not read, what it writes to close its work, and what it may never
+write. The rows are actor kinds, not named agents — a roster binds roles to agents, and a role appears
+here once however many agents fill it. Two documents supply the boundaries the columns enforce:
+`adapters.md` (the engine never reads an external system; the adapter never reads a workflow) and
+`authority_model.md#grants` (an actor reads what its grant admits, and nothing else).
+
+### Retrieval contract
+
+| Actor kind | Retrieves before acting | Must not read | What absence means |
+|---|---|---|---|
+| agent claiming a step | the batch and its tasks; the `workflow` declaring the step, its `required` and `on_fail`; the sign-offs already on the batch; the artifacts the tasks refer to, with their current `head` and `checks`; the context entity types its own `agent_definition` names | another step owner's in-progress reasoning (there is none in the record — only sign-offs); the external system directly, except through an adapter's observations | the step is not judgeable: `unknown` holds the step, and the owner raises the condition rather than signing. An absent `on_fail`, an absent artifact, an unreadable workflow are each `unknown`, never a permissive default |
+| adapter | the artifact for the event, by `system` and `external_id`; the credential binding that resolves the event's actor to a principal; the open steps and open checkpoints that principal owns, to decide which of the four outcomes applies; the action and its `dedup_key` for an outbound operation | **a `workflow`** — an adapter never reads step declarations, sequencing, `on_fail`, or fast paths, because mapping an event to a step's meaning is the engine's judgement, not the boundary's; another adapter's deliveries | the event is unmapped: an observation saying so, or `dropped` with the reason (`adapters.md`). An unresolvable credential is never resolved to the operator; an artifact that is not found is an untracked record, not an implicit new one |
+| operator-facing agent | the open checkpoints whose `AWAITS` names the operator, with each subject and its options; the tasks whose `assigned_to` names the operator principal; the `task_policy` and preference entities that govern how the operator is addressed | the operator's grants as a source of what to present (the checkpoint carries its own options); another principal's checkpoint queue | there is nothing to present. An empty queue is reported as an empty queue, never inferred from a failed read — a read that failed is `unknown` and is announced as such |
+| self-triggering daemon | its own `agent_definition` and grant; the record's reachability, by a real read of what its work will read; the tasks or artifacts its poll produces work about; the `dedup_key` space of any effect it may repeat | step state, which it neither derives nor advances; a workflow; another daemon's leases | the record is unreachable: it halts work and keeps observing (`failure_posture.md` rule 1), announcing on the path that survives the outage. An empty poll is an empty poll only if the poll itself succeeded |
+| reviewing lens | the batch's tasks and their acceptance conditions; the artifact at a resolved `head`, and that head recorded for its own sign-off; earlier sign-offs on the batch, to see what has already been judged and at which head; the design basis its review claims to apply | the host's own review state as a substitute for the record's sign-offs; another lens's verdict as grounds for its own | it cannot judge: the step stays open with the condition announced. A check it could not run is not a passing check, and a blocking verdict rests on what the lens executed |
+
+### Write contract
+
+| Actor kind | Writes to close its work | Reads back | Never writes |
+|---|---|---|---|
+| agent claiming a step | one `sign-off` on the step, carrying the verdict, the artifact refs with their judged heads, and the pinned `agent_definition` version; the observations its work produced | the sign-off, retrieved and asserted to hold the verdict written — a response code is not evidence | another principal's sign-off; step state as a field; a verdict anywhere but the record (`failure_posture.md` rule 4); a parallel log of what it did |
+| adapter | observations on artifacts; action confirmations on actions (`taken_at`, `result_ref`); a task for intake, where a new-record event concerns a record the swarm does not track; a `dropped` disposition with its reason | every write that carries a decision — a sign-off it carried in, a checkpoint resolution, an action confirmation — before it acknowledges the event to the external system | **step state, in any form** — it never opens, claims, closes, or initializes a step, and never writes `not_required`, `not_applicable`, or clear on an artifact with no batch; a task's status; a binding it inferred |
+| operator-facing agent | the checkpoint's resolution, attributed to the operator principal and to itself as the agent that carried it (A-for-B, never as B); tasks the operator's instructions produce | the resolution, before it reports to the operator that the decision landed | the operator's decision where the operator gave none; a sign-off on a step it does not own; the operator's `waived` verdict on its own initiative |
+| self-triggering daemon | the tasks its poll produces, each entering intake; observations carrying its provenance; nothing else | each task it created, so a poll that appears to have produced work but wrote none is caught | step state; a claim on a task it created (creating is publishing, not claiming); a routing decision that hands work to a named runner |
+| reviewing lens | one `sign-off` on its review step, with the head it judged and the evidence it executed | the sign-off | a verdict on a step another lens owns; a comment on the host in place of the sign-off; a second verdict on the same head as a way of revising the first (a revision is stated as such, and the latest per lens per head is the one that stands) |
+
+**Bounded retrieval before creating an entity.** Any actor about to create an entity first retrieves for
+the one that may already exist, by identifier where it has a concrete one and by type-and-search where it
+has a category. The retrieval is bounded — it names the type and the identifying values, rather than
+scanning — and its result decides between creating and correcting. Duplicates in the record arise almost
+entirely where this step was skipped: two actors resolve the same external record, the same person, or the
+same task independently, and each creates. Merging them afterwards is a write carrying decisions, with
+edge loss as its failure mode (above), so the retrieval is cheaper than every path that follows from
+omitting it.
+
+**An agent's context entity types come from its own definition.** What an agent may retrieve is
+`agent_definition.context_entity_types[]` — the types its role needs — and a type it was not granted is
+not read, whether or not a grant would admit the read. The definition is where an agent's information
+diet is declared and reviewed; reading past it makes the declaration decorative and makes an agent's
+behaviour depend on what happened to be reachable. Where an agent needs a type its definition does not
+name, the definition is corrected, which is an owned, reviewed write — never circumvented at runtime. The
+grant is the outer bound and the definition the inner one: a read must satisfy both, and a grant that
+admits more than the definition names is not permission to read more
+(`authority_model.md#grants`).
 
 ## Rendering
 

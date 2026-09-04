@@ -307,9 +307,14 @@ stage.
 **Not for:** stage for a single step; phase when a group of steps is meant.
 
 ### step owner
-**Definition:** the agent declared on a step as the principal that claims it on a batch and whose sign-off
-closes it.
-**Field:** `workflow.steps[].owner_agent`.
+**Definition:** the **role** declared on a step, which the roster resolves to a principal at claim time;
+that principal claims the step on a batch and its sign-off closes it. The declaration names a role so that
+one workflow serves every project and a renamed or replaced agent leaves no stale name in it; the
+resolution to a principal happens when the step is claimed, against `swarm_roster` for the batch's
+project, and a step whose role resolves to no principal raises a checkpoint (reason
+`unspawnable_assignee`) rather than falling through to any available agent.
+**Field:** `workflow.steps[].owner_role` (the design's name; the field is `owner_agent` in the built
+declarations and holds a role there too — `status.md`).
 **Related:** [step](#step), [sign-off](#sign-off), [agent](#agent), [claim](#claim),
 [workflow policy](#workflow-policy);
 [`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`](gates_and_workflows.md#two-policies-workflow-policy-and-action-policy).
@@ -321,6 +326,11 @@ closes it.
 timestamps, the agent, artifact refs, and the pinned `agent_definition` version.
 A terminal write that supplies every field the schema requires; a rejected write is an error, never
 swallowed.
+**Verdict values:** `signed` (the step's condition is met), a blocking verdict (it is not, and the step's
+`on_fail` says which earlier step opens again), and `waived` (the operator principal closed an unsigned
+required step, carrying the reason). `waived` is the only verdict a principal other than the step owner
+may write, and only the operator principal may write it
+([`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection)).
 **Related:** [step owner](#step-owner), [step state](#step-state), [batch](#batch), [terminal](#terminal),
 [read-back](#read-back), [artifact](#artifact), [adapter](#adapter), [signal](#signal);
 [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection),
@@ -877,7 +887,7 @@ they appear in a document, a schema, a prompt, or an error message.
 
 | Meaning | Term | Field |
 |---|---|---|
-| the agent whose sign-off closes a step | **step owner** | `workflow.steps[].owner_agent` |
+| the role the roster resolves to the principal whose sign-off closes a step | **step owner** | `workflow.steps[].owner_role` |
 | the step a batch is at | **current step** | derived from the batch's step states; projected as `current_owner` |
 | the agent a finding is routed to | **routed agent** | `proposed_skill_update.owning_agent` |
 | the operator with the book of business for a customer | **book-of-business owner** | `multi_tenant.md` section 5 |

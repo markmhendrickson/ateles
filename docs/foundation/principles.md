@@ -128,8 +128,15 @@ Whoever hands work to the swarm owns it through merge and release; "shipped" is 
 main and in the deployed checkout. Sources: agent_policy `ent_5456a8a2224d8211ef33749c`; throughput
 `shipped_is_not_landed_for_this_plan`; synthesis PR-18, PR-19.
 
-**Enforced by:** the checkout-drift check at daemon start; the read-back of terminal release status
-(invariant 2). A PR's path from open to deployed has no single tracker; the owning session is the mechanism.
+**Enforced by:** the read-back of terminal release status (invariant 2). The checkout-drift check at daemon
+start is **reporting, not enforcement**, and is named here as such: it logs the divergence and the daemon
+runs anyway, so nothing fails when the invariant is violated, and by invariant 1's own test a check that
+cannot fail is a report. That is a deliberate choice rather than a defect — a guard that halts every daemon
+on a stale checkout causes a larger outage than the drift it prevents — but it means drift is *detected*
+and never *prevented*, and a report only binds a reader who acts on it. What binds is the release
+read-back, which fails on a release that did not reach its terminal state. A PR's path from open to
+deployed has no single tracker; the owning session is the mechanism, and it is a person or an agent, not a
+control.
 
 ### 11. State that needs a watchdog belongs in a relationship, not a field
 

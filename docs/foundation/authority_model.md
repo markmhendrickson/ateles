@@ -81,6 +81,35 @@ writes, a per-agent policy override, per-agent GitHub logins, a workflow resolve
 agent-definition load is a stub: the loader marks it, and no caller starts a runner from one (principle
 5); a stub with a wildcard tool allowlist is the fail-open shape.
 
+**Custody by revocability.** A credential's custody follows from whether revoking it is possible. A
+credential that *is* the asset — a wallet seed, a signing key whose compromise cannot be undone by
+withdrawing it — is never materialized into a resident process: not in a daemon's environment, not in a
+long-lived runner, not in a variable that outlives the operation. It is loaded inside the short-lived
+subprocess that takes the one action, and that subprocess ends with the action. A revocable credential — a
+token, a scoped key, anything whose reach ends when the issuer withdraws it — may be materialized, because
+the recovery from its exposure exists. Two rules apply to both kinds. A credential read from a file is
+returned as a value and never written into the process environment, since an environment is inherited by
+every child process a runner starts, and an outbound credential so placed becomes an inbound admission
+secret for anything below it. And a credential is resolved once per invocation and reused for every
+retry of that invocation, because idempotency is scoped per principal: re-resolving mid-retry can present
+a different credential and make the retry a second first attempt.
+
+**Rotation is staged, never a flag day.** Because a grant is matched on the credential (`sub`, `iss`), a
+credential replaced in one step is a principal whose grants stop matching. So the new credential is
+admitted alongside the old one — the grant matching it is written and read back — *before* the agent
+presents it, and the old credential is retired only after read-back shows admissions arriving on the new
+one. The dual-admit window is the whole point: at no moment is the set of matching grants empty.
+
+**Revocation's reach is every grant that matched the credential, and it is only as fast as the check that
+reads it.** Withdrawing a credential withdraws every capability any grant conferred on it, across every
+entity type and repository those grants named — a credential shared between two purposes cannot be revoked
+for one of them. Reach is therefore a reason to keep credentials narrow. And revocation takes effect only
+where the grant is read: a checker that loads grants once at startup and never re-reads them enforces a
+snapshot, so a revocation waits for a restart, and the failure is silent because the checker keeps
+answering confidently from stale data. Grants are read at every check, or from a cache whose staleness
+bound is declared and whose expiry resolves to `Indeterminate` — which denies — rather than to the last
+value it held.
+
 ## Attribution
 
 Every write carries the agent that made it (a per-agent signature) and the principal it acted for; a shared

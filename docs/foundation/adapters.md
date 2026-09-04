@@ -84,7 +84,8 @@ and the adapter carries the verdict in.
 **Linkage.** An event names an external record; the adapter finds the artifact for it by `system` and
 `external_id` (`data_model.md#concepts`). An artifact with no batch and no task is one the record does
 not track: a new-record event on such a record (an issue opened, a message received) yields a task for
-intake with the artifact attached; any other event on it is dropped. The adapter never attaches an
+intake with the artifact attached; any other event on it is dropped with that reason, counted and
+surfaced under the disposition rule below. The adapter never attaches an
 artifact to a batch on its own guess: intake's `link` step and the implementer's `impl` sign-off do that
 (`workflows.md#intake`, `workflows.md#feature`).
 
@@ -93,11 +94,24 @@ write it produces, so a redelivered event lands once (`data_model.md#record-conv
 action carries its `dedup_key`, and the adapter refuses to take an action whose key it has already
 confirmed (`work_model.md#at-least-once-implies-effect-dedup`).
 
-**Unknown.** An event the adapter cannot map (an unknown event type, a payload missing the field the
-mapping keys on, an artifact it cannot resolve) is an observation that says so, or nothing; it is never
-coerced to the nearest outcome (principle 7). A CI state the adapter cannot read is `unknown` on the
-artifact, and unknown holds the step
+**Unknown, and every delivery's disposition.** An event the adapter cannot map (an unknown event type, a
+payload missing the field the mapping keys on, an artifact it cannot resolve) is an observation that says
+so; it is never coerced to the nearest outcome (principle 7). A CI state the adapter cannot read is
+`unknown` on the artifact, and unknown holds the step
 (`gates_and_workflows.md#an-unreadable-workflow-is-unknown-and-unknown-holds`).
+
+**Every delivery resolves to one of the four outcomes or to `dropped` with a reason, and the disposition
+is what is recorded — never receipt alone.** Receipt without disposition is indistinguishable from
+handling, and an adapter discarding every delivery at a hidden log level is indistinguishable from one
+with nothing to do, which is the signature failure `failure_posture.md` rule 2 names. So there is no
+silent branch: an event outside the adapter's mapping, an event on an artifact the record does not track
+and that is not a new-record event, a command the adapter refuses, and an outbound operation it cannot
+take for want of a credential each resolve to `dropped` with the reason that decided it. Drops are counted
+per window and surfaced on the same off-record announcement path as a halt, aggregated rather than one
+message per drop. This is what makes a refusal distinguishable from a delivery that never arrived, which
+from the external system's side look identical: where the refusal concerns a request a person made on the
+external system, the reason goes back to that system as an observation the person can see, because a log
+the operator does not read is not feedback.
 
 **Provenance and read-back.** Every write names the adapter, the external system, and the delivery id;
 every write that carries a decision (a sign-off, a resolution, a confirmation) is read back before the
@@ -165,6 +179,19 @@ the check runs on a pull request are read as a field of that artifact.
 | `merge` | merge the pull request | `merge_pr` | the pull request reads `merged` with a merge commit; the commit is an artifact of the batch |
 | `release` | create the tag; publish the release | `release` | the tag and the release exist, read back at their terminal state |
 | `dedupe`, `record`, a closing sign-off | close the issue, with the reason | `external_api_write` | the issue reads `closed`; the task's own status was written by the sign-off, before the action |
+
+**An artifact with no batch never receives retroactive step state.** No step of any workflow is opened on
+an artifact that no batch addresses, and neither an adapter nor the workflow engine may initialize a step
+on its behalf — not as `not_required`, not as `not_applicable`, not as clear, not as anything. Step state
+is derived from a batch, a lease, and a sign-off (`gates_and_workflows.md#declaration-batch-projection`);
+where there is no batch there is nothing to derive it from, and a value written in place of that
+derivation is a fabricated verdict on work no principal judged. A pull request opened before any task
+exists for it is therefore an artifact with no batch, and it yields a task for intake like any other
+untracked record. The batch that later addresses that task opens its own steps, from the beginning of its
+workflow, and its `impl` sign-off cites the existing pull request in `artifact_refs[]` — the earlier
+existence of the artifact buys the batch nothing and skips nothing. A companion rule of the same kind: a
+pull request whose shipped change exceeds the scope a lens signed does not inherit that narrower sign-off,
+because a sign-off is pinned to the artifact state it judged (`data_model.md#record-conventions`).
 
 Two things the tables show. A review's `APPROVE` becomes a sign-off only through identity: the same
 verdict from the same login is a sign-off when the login binds to the step owner of an open step and an

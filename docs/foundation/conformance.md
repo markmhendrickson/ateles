@@ -160,11 +160,27 @@ the swarm's own records, and the word is not used for them.)
 | Core workflow step lists / fast paths / successors | the `workflow` entity for (project, type) | `docs/foundation/workflows.md` tables via `render_workflow_docs.py --check` (prose authored in the file) |
 | Entity types, fields, and edge types the design names | the schema registry on the record | `docs/foundation/data_model.md` tables via `render_data_model.py --check` (prose authored in the file) |
 | Walkthroughs of the work/gate model | the kernel documents | `docs/foundation/scenarios.md` (+ `scenarios_extended.md`) |
+| Skill bodies (what a skill instructs) | the `agent_policy` entity the skill renders from | `.claude/skills/<name>/SKILL.md` on disk |
+| Agent prompt text | `agent_definition.prompt_markdown` | `docs/agents/` and the rendered skill mirrors, via `render_agent_docs.py --check`, which also prunes a mirror whose definition is gone |
+| Operator preferences and feedback | `task_policy` and `feedback` entities on the record | none; a harness memory file is a cache of them, never their home, and a preference that exists only in one is unreadable by every agent that is not that harness |
 | External-system mapping (what an event becomes; what a step's operation is) | `docs/foundation/adapters.md`, PR-reviewed | the adapter daemons' code; the per-instance binding of a system to an operator is the `channel_config` and `vendor_binding` entities, which bind and never redefine the mapping |
 
 A rule in two classes is written once in its authoritative home and cited from the other, never copied: a
 comment or a second document claiming to mirror the first is not a mechanism that keeps them matching
 (principle 9).
+
+**When the mirror holds more than the canonical side.** "Wrong until corrected" describes the mirror's
+*authority*, not its *content*: a mirror that has been edited in place can carry material the
+authoritative side never received, and regenerating over it destroys work rather than fixing a defect.
+The direction never flips — the mirror does not become canonical because it is currently richer, and no
+item is exempt. What the richer mirror is, is a **draft of a correction to the authoritative side**: its
+content is read, merged upward as a correction to the canonical entity or document, read back there, and
+only then is the mirror re-rendered from it. So the sequence is merge upward, then render downward, and a
+regeneration that has not been preceded by the merge is the destructive step. Two consequences worth
+stating. Editing a mirror is not forbidden, but it is drafting, and a draft that is never merged upward
+is lost at the next render — the merge is the author's obligation, not the renderer's. And a `--check`
+failure means only that the two sides differ; it does not say which one is ahead, so the correct response
+is to read both before regenerating, never to regenerate reflexively because the check went red.
 
 ## Amending a foundation document
 
