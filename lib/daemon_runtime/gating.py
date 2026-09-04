@@ -52,6 +52,11 @@ from enum import Enum
 
 import httpx
 
+try:  # package import (production) and bare import (in-dir pytest) both work
+    from .neotoma_timeout import neotoma_timeout
+except ImportError:  # pragma: no cover
+    from neotoma_timeout import neotoma_timeout  # type: ignore
+
 log = logging.getLogger(__name__)
 
 NEOTOMA_BASE_URL = os.environ.get(
@@ -376,7 +381,7 @@ def _fetch_entity(entity_id: str) -> dict | None:
         resp = httpx.get(
             url,
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            timeout=10,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         return resp.json()
@@ -589,7 +594,7 @@ def write_checkpoint_brief(
             f"{NEOTOMA_BASE_URL}/store",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             json=body,
-            timeout=15,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         data = resp.json()
@@ -682,7 +687,7 @@ def stamp_checkpoint_dispatched(checkpoint_entity_id: str, *, handler: str) -> b
             f"{NEOTOMA_BASE_URL}/correct",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             json=body,
-            timeout=15,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         return True
@@ -714,7 +719,7 @@ def mark_task_declined(task_entity_id: str, *, reason: str, handler: str) -> boo
             f"{NEOTOMA_BASE_URL}/correct",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             json=body,
-            timeout=15,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         log.info(f"[gating] task {task_entity_id} marked declined ({reason})")

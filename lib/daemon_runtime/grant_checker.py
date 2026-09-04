@@ -32,6 +32,11 @@ from typing import Optional
 
 import httpx
 
+try:  # package import (production) and bare import (in-dir pytest) both work
+    from .neotoma_timeout import neotoma_timeout
+except ImportError:  # pragma: no cover
+    from neotoma_timeout import neotoma_timeout  # type: ignore
+
 log = logging.getLogger(__name__)
 
 NEOTOMA_BASE_URL = os.environ.get(
@@ -142,7 +147,7 @@ class GrantChecker:
                     "Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}",
                     "Content-Type": "application/json",
                 },
-                timeout=10,
+                timeout=neotoma_timeout(),
             )
             resp.raise_for_status()
             entities = resp.json().get("entities", [])
@@ -351,7 +356,7 @@ def _write_grant_state(
     ]
     try:
         for update in updates:
-            resp = httpx.post(base, json=update, headers=headers, timeout=10)
+            resp = httpx.post(base, json=update, headers=headers, timeout=neotoma_timeout())
             resp.raise_for_status()
         return True
     except Exception as exc:
@@ -376,7 +381,7 @@ def restore_grant(entity_id: str) -> bool:
             base,
             json={"field": "status", "value": "active", "idempotency_key": f"grant-restore-{entity_id}-{now}"},
             headers=headers,
-            timeout=10,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         return True
