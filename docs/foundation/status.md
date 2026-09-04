@@ -447,6 +447,47 @@ normalizes events into one shape and hands them on in-process, so writing that s
 observation on an artifact, and having the pipeline read it from there, is the design's cut applied to
 the code that exists.
 
+## `github.md`: the events with no defined response (revision 13, 2026-09-04)
+
+`docs/foundation/github.md` enumerates every event GitHub can deliver, from GitHub's own webhook event and
+payload reference read 2026-09-04, and marks each row handled, deliberately ignored, or unhandled. The
+enumeration is complete against the host's published list; the *handled* marking states the design, not the
+checkout. What the checkout actually receives is five event types (`issues`, `pull_request`,
+`issue_comment`, `pull_request_review`, `check_suite`) plus the ref-update event, and within those only
+these actions: `issues.opened`; `pull_request` opened, reopened, and synchronize; `issue_comment.created`;
+`pull_request_review.submitted`; `check_suite.completed`. Every other row in that document has no code path
+on this branch, which the adapter entry below already states in general terms.
+
+**The unhandled rows.** These are gaps in the *design*, not merely in the build — each is an event whose
+response the foundation does not yet state, and each needs a decision before it can be built.
+
+| Event or condition | Why it is unhandled | What it needs |
+|---|---|---|
+| `issues.transferred`; `repository.renamed`; `repository.transferred` | the artifact's `system`/`external_id` pair stops resolving, and the record has no re-identification rule | a decision on whether an artifact's external identity may be corrected in place, or whether a moved record is a new artifact with an edge to the old |
+| `issues.deleted` | the artifact ceases to exist at the host while the record still refers to it | a rule for an artifact whose external record is gone: tombstone, or `unknown` on every field the adapter maintained |
+| `sub_issues.*` (four actions) | the host's sub-issue edge is a second parent/child structure beside `PART_OF` | a decision on which is authoritative; the design's position is that `PART_OF` is, and the host's edge is an observation |
+| `pull_request.auto_merge_enabled` / `_disabled` | the host holds a permit the action gate did not issue | the design says the swarm never enables it and a steward reads a person's auto-merge as blocking; the blocking read has no built path |
+| `pull_request.enqueued` / `.dequeued`; `merge_group.*` | the host's merge queue is a second sequencer over the same merge | a decision on whether the queue may be used at all, given the merge is an action through the gate |
+| `pull_request.stacked` | a stacked pull request's base is another pull request, so "the change this batch shipped" is not the diff against the default branch | a rule for what a lens judges and what a sign-off pins on a stacked head |
+| `pull_request_review.dismissed` after a step was signed | the observation is defined; the *surfacing* is not | the steward reading the dismissal before taking the merge, which no step declares as a read |
+| a pull request becoming unmergeable | no step owns the conflict | the design's position is that `impl`'s sign-off closes on the artifact being mergeable and `on_fail` opens it again; the condition is a read, not an event, and neither is declared |
+| base retargeting leaving a stale required check | the response is stated (`checks` set to `unknown`, which holds the step) but nothing implements it, and the host's `changes` payload was not confirmed to distinguish a base change from a title edit in every case | confirmation of the payload shape, then the implementation |
+| `deployment_review.*`; `deployment_protection_rule` | the host's environment protection is a second approval surface beside the action gate | a decision on whether it may be configured at all; an approval there is never a checkpoint resolution |
+
+**The drop that was not counted.** The failure this document is written against is an early return at a
+debug log level behind a label test, discarding issue deliveries with no recorded disposition — receipt
+indistinguishable from handling, which is `failure_posture.md` rule 2's signature failure at the boundary.
+The count of deliveries discarded that way on this checkout is not measured here; measuring it requires the
+disposition rule to be built, which is the point. Under the rule the branch does not exist: every delivery
+resolves to an outcome or to `dropped` with a reason, counted per window and announced. Nothing on this
+branch counts drops, so the invariant that makes `github.md`'s table auditable is designed and unbuilt.
+
+**Security narrowing.** `github.md` states what the adapter withholds from an inbound advisory (exploit
+detail, proofs of concept, reproduction steps, matched secret values) and that a narrowed observation's
+coverage says fields were withheld by policy. No advisory, alert, or scanning event has an inbound path on
+this checkout at all, so the narrowing is a rule with nothing yet to apply it to — and the release notes it
+protects are still built by hand.
+
 ## Schemas the design needs and the registry lacks (prod, read 2026-09-04)
 
 `data_model.md` names each. Entity types read from prod through the Neotoma MCP on 2026-09-04
@@ -536,6 +577,17 @@ Revision 12 (2026-09-04) re-measured every document it touched, with `wc -c` on 
 | `failure_posture.md` | 20.4k | keyed | yes |
 | `authority_model.md` | 18.5k | keyed | yes |
 | `workflows.md` | 39.3k | **unkeyed** | — |
+
+Revision 13 (2026-09-04) added `github.md` and moved the code host's tables into it:
+
+| Document | Characters | Reading-list role on revision 13 | Over the per-document cap |
+|---|---|---|---|
+| `github.md` | 45.9k | keyed (new; also keyed to itself) | yes |
+| `adapters.md` | 25.1k | keyed (also keyed to itself) | yes; **down from 30.7k**, the GitHub tables having moved |
+| `conformance.md` | 15.1k | keyed (itself) | yes |
+
+The kernel is unchanged by revision 13: `github.md` is keyed, not kernel, so the 57.9k block below is
+neither improved nor worsened by it. `adapters.md` shrank by 5.6k, which is the only budget movement.
 
 **The kernel is 57.9k of the 40k block after revision 12 — over it by 17.9k, and over for the first
 time.** `gates_and_workflows.md` grew most, carrying the step read-declaration, the findings-bind and

@@ -94,6 +94,7 @@ documents to read. Each document at most once per review, kernel first.
 | Changed path | Read |
 |---|---|
 | `execution/daemons/apis/github_gateway`, `execution/daemons/apis/swarm_dispatch`, `execution/daemons/apus/`, `execution/daemons/formica/`, `execution/scripts/lanius_sweep`, `execution/mcp/github_harness`, `execution/daemons/turdus/`, `execution/daemons/riparia/`, `lib/daemon_runtime/run_email`, `execution/daemons/monedula/`, `execution/daemons/cotinga/`, `lib/notify`, `execution/lib/telegram`, `docs/foundation/adapters\.md` | `docs/foundation/adapters.md` |
+| `execution/daemons/apis/github_gateway`, `execution/daemons/apis/swarm_dispatch`, `execution/scripts/lanius_sweep`, `\.claude/skills/lanius/`, `docs/agents/lanius\.md`, `\.claude/skills/vanellus/`, `docs/agents/vanellus\.md`, `execution/daemons/apis/review_panel`, `execution/mcp/github_harness`, `docs/foundation/github\.md` | `docs/foundation/github.md` |
 
 ### The foundation itself
 
@@ -165,6 +166,7 @@ the swarm's own records, and the word is not used for them.)
 | Agent prompt text | `agent.prompt_markdown` | `docs/agents/` and the rendered skill mirrors, via `render_agent_docs.py --check`, which also prunes a mirror whose definition is gone |
 | Operator preferences and feedback | `task_policy` and `feedback` entities on the record | none; a harness memory file is a cache of them, never their home, and a preference that exists only in one is unreadable by every agent that is not that harness |
 | External-system mapping (what an event becomes; what a step's operation is) | `docs/foundation/adapters.md`, PR-reviewed | the adapter daemons' code; the per-instance binding of a system to an operator is the `channel_config` and `vendor_binding` entities, which bind and never redefine the mapping |
+| The code host's per-event mapping and per-step operation, in full | `docs/foundation/github.md`, PR-reviewed | the GitHub receiver and the pipeline reading from it; `adapters.md` holds the general rules the document applies and carries the pointer to it |
 
 A rule in two classes is written once in its authoritative home and cited from the other, never copied: a
 comment or a second document claiming to mirror the first is not a mechanism that keeps them matching

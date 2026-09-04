@@ -55,8 +55,13 @@ Keyed (read when matching paths change — see `conformance.md`):
 - [**Adapters**](foundation/adapters.md) — how external systems reach the work model and how it reaches
   them: inbound events are signals about artifacts (a sign-off by a named principal, an observation, an
   action confirmation, or a task for intake, never a workflow instruction); outbound operations are
-  actions through the action gate; GitHub tabled in full, Gmail, Telegram, calendar, and payments in the
-  same shape.
+  actions through the action gate; Gmail, Telegram, calendar, and payments tabled, and the code host in
+  its own document below.
+- [**GitHub**](foundation/github.md) — the code host's full event surface: every event GitHub can deliver
+  across issues, pull requests, reviews, releases, security advisories, checks, and repository-level
+  operations, each marked handled, deliberately ignored, or unhandled, and each resolving to one of the
+  four adapter outcomes or to a counted drop; the outbound operation, action class, and confirmation for
+  every step that reaches the host; and what the adapter withholds from a security advisory.
 - [**Conformance**](foundation/conformance.md) — how issue-based work binds to the foundation: the
   always-read kernel, the path-keyed reading list, the design-basis statement, the direction of truth per
   record class, and the rule that keeps state out of the foundation.

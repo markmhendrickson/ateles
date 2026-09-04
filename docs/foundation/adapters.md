@@ -15,7 +15,8 @@ connected to the work model: through an adapter that translates in two direction
 Inbound, an external event is a signal about an artifact, never an instruction to a workflow; the adapter
 writes to the record, and the record drives the workflow. Outbound, a step's effect on an external system
 is an action, taken through the action gate, whose result the adapter reads back and confirms on the
-record. Table the mapping for GitHub in full and for the other systems in the same shape.
+record. Table the mapping for each system; the code host's, being the largest, is its own document
+(`github.md`).
 
 ## Scope
 
@@ -23,9 +24,10 @@ Every boundary between the record and a system the swarm does not own. In scope:
 the boundary, what an inbound event may become in the record, what an outbound operation is, and the
 identity, linkage, dedup, unknown, and provenance rules every adapter applies. Out of scope: the
 workflows themselves (`workflows.md`), the gate's decision function (`gates_and_workflows.md`), what an
-adapter is granted (`authority_model.md#grants`), and the per-instance binding of a system to an operator,
-which is the `channel_config` and `vendor_binding` context entities, resolved at runtime and never named
-here.
+adapter is granted (`authority_model.md#grants`), the code host's per-event mapping in full
+(`github.md`, which applies these rules to every event GitHub can deliver), and the per-instance binding
+of a system to an operator, which is the `channel_config` and `vendor_binding` context entities, resolved
+at runtime and never named here.
 
 ## The two invariants
 
@@ -173,51 +175,24 @@ look clean.
 ## GitHub
 
 The code host holds three kinds of artifact the work model names: `issue`, `pull_request`, and `release`;
-the check runs on a pull request are read as a field of that artifact.
+the check runs on a pull request are read as a field of that artifact. Security advisories, dependency and
+secret-scanning alerts are artifacts of their own kinds, and they carry a disclosure constraint no other
+system's do.
 
-### Inbound
+**The GitHub adapter is `github.md`, in full.** That document enumerates every event the host can deliver
+— not only what the swarm subscribes to today — with each row marked handled, deliberately ignored, or
+unhandled, and it tables the outbound operation, action class, and confirmation for every step that
+reaches the host. It applies the rules above and does not restate them; the rules stay here, and the
+per-event mapping lives there (principle 9, one home). Two things it settles that a reader of this section
+would otherwise look for here: what the adapter withholds from an inbound security advisory, and why a
+derived condition such as mergeability is an observation from a read rather than a fifth outcome.
 
-| External event | What it is a signal about | Outcome in the record |
-|---|---|---|
-| issue opened by a person | a new record the swarm does not track | a task is created with the issue as its artifact (`REFERS_TO`) and enters intake; the opener's credential is recorded on the task, resolved to a principal where one binds |
-| issue opened by the swarm's own account | an artifact a batch left | an action confirmation on the batch's `open_issue`-class action; the artifact is `PRODUCES` from the batch |
-| issue edited, labelled, or unlabelled | the artifact's text or labels | an observation on the artifact (`labels[]`, title, body); a label never opens, claims, or closes a step, and a label naming a step is not that step's state |
-| issue assigned or unassigned on the host | the host's own assignment | an observation on the artifact; `assigned_to` on the task is written only by intake's `classify` |
-| issue comment | a message on the artifact | an observation on the artifact; a comment from the step owner of an open step, carrying a verdict in the declared form, may be that step owner's sign-off, by the same identity rule as a review (below) |
-| issue closed by a person | the host's state of the artifact | an observation on the artifact (`state: closed`); the task's status is written by the batch's sign-offs, never by the host |
-| issue closed by the host on a merge | the effect of the merge action | an observation on the artifact; the merge confirmation (below) already covers the effect |
-| pull request opened | a record left by the implementer | the artifact is linked to the batch whose tasks it addresses; the implementer's sign-off on `impl` cites it in `artifact_refs[]`; a pull request that names no batch is an artifact with no batch, and yields a task for intake |
-| pull request synchronized (new commits) | the artifact's head | an observation on the artifact (`head`); open sign-offs are unaffected; a workflow that wants review to open again on a new head declares that on the step, and the event does not do it |
-| review submitted, `APPROVE`, by a lens's principal on the review step of the batch linked to the pull request | that lens's verdict | that lens's sign-off on its review step, verdict signed |
-| review submitted, `REQUEST_CHANGES`, by a lens's principal | that lens's verdict | that lens's sign-off, signed with a blocking verdict; the step's `on_fail` says which earlier step opens again |
-| review submitted, `COMMENT`, by anyone | remarks on the artifact | an observation on the artifact only; no sign-off |
-| review submitted by a credential that binds to no principal, or to a principal who does not own an open step | an account's opinion | an observation on the artifact; an automated account's `APPROVE` never stands in for a lens |
-| review submitted, `APPROVE`, by the operator's credential while a checkpoint on the batch's merge action awaits the operator | the operator's decision | resolution of that checkpoint by the operator principal (`authority_model.md#approval`), recorded on the checkpoint and read back; not a sign-off |
-| review requested from an account | the host's own routing | an observation on the artifact; the step owner claims the review step on its own loop, never because the host asked |
-| check run or check suite completed | the head's CI state | an observation on the artifact: `checks` set to `passing`, `failing`, or `pending`, or `unknown` where the payload cannot be read; a condition the `impl` and `qa` step owners read before signing, never a sign-off |
-| commit status set | the same | the same |
-| pull request merged | the effect of the merge action | an action confirmation on the batch's `merge_pr`-class action (`taken_at`, `result_ref` naming the merge commit); the merge commit is an artifact `PRODUCES` from the batch; a merge the record has no action for is an observation on the artifact and a defect to surface, never a confirmation |
-| pull request closed unmerged | the host's state of the artifact | an observation on the artifact (`state: closed`); the batch's open step stays open until a principal signs it, with the verdict that the change is withdrawn or that a new pull request follows |
-| pull request reopened | the same | an observation on the artifact (`state: open`) |
-| release published | the effect of the release action | an action confirmation on the release batch's `release`-class action; the release is an artifact `PRODUCES` from that batch; the `verify_deployed` step still reads the deployed checkout (`workflows.md#release`) |
-| branch or tag created or deleted | a ref the host holds | an observation on the artifact that refers to it, where one exists; otherwise dropped |
-| commits reach a branch | the same | the same; a commit reaching the default branch is not a release and not a merge confirmation on its own |
-
-### Outbound
-
-| Step | Operation on the host | Action class | What the adapter confirms |
-|---|---|---|---|
-| `pm` | open an issue, where the task has none and the project keeps its specification on the host | `open_issue` | the issue exists, read back by number; artifact `issue` attached to the batch |
-| `impl` | open a pull request | `open_pr` | the pull request exists, read back by number; artifact `pull_request` attached to the batch |
-| `impl` | commits reach a branch | `git_push` | the branch head equals the commit the adapter sent |
-| any review step | comment on the issue or the pull request | `external_api_write` | the comment exists, read back by id |
-| `pm`, `impl` | request review from an account; apply or remove a label; edit the issue | `external_api_write` | the host reflects the change, read back |
-| `merge` | merge the pull request | `merge_pr` | the pull request reads `merged` with a merge commit; the commit is an artifact of the batch |
-| `release` | create the tag; publish the release | `release` | the tag and the release exist, read back at their terminal state |
-| `dedupe`, `record`, a closing sign-off | close the issue, with the reason | `external_api_write` | the issue reads `closed`; the task's own status was written by the sign-off, before the action |
-| recovery of a merge | open and merge the inverse change | `revert_merge` | the revert commit is on the branch, read back; both the merge and its revert stay readable |
-| recovery of a release tag | delete the tag and retag | `retag_release` | the tag resolves to the intended commit, read back; a tag that consumers may already hold is superseded rather than silently moved |
-| recovery of a deploy | roll back to the prior release | `rollback_deploy` | the deployed version equals the prior release, read from the deployment target rather than from the command's exit |
+The two rules of this section that a reader should carry into it, because they are what the host most
+often erodes: a review's `APPROVE` becomes a sign-off only through identity — the same verdict from the
+same login is a sign-off when the login binds to the step owner of an open step and an observation
+otherwise, and nothing in the payload changes that. And every host state that looks like step state (a
+label, a review decision, a check, a closed pull request) reaches the step only through a principal who
+reads it and signs.
 
 **An artifact with no batch never receives retroactive step state.** No step of any workflow is opened on
 an artifact that no batch addresses, and neither an adapter nor the workflow engine may initialize a step
@@ -231,12 +206,6 @@ workflow, and its `impl` sign-off cites the existing pull request in `artifact_r
 existence of the artifact buys the batch nothing and skips nothing. A companion rule of the same kind: a
 pull request whose shipped change exceeds the scope a lens signed does not inherit that narrower sign-off,
 because a sign-off is pinned to the artifact state it judged (`data_model.md#record-conventions`).
-
-Two things the tables show. A review's `APPROVE` becomes a sign-off only through identity: the same
-verdict from the same login is a sign-off when the login binds to the step owner of an open step and an
-observation otherwise, and nothing in the payload changes that. And every host state that looks like step
-state (a label, a review decision, a check, a closed pull request) reaches the step only through a
-principal who reads it and signs.
 
 ## Gmail
 
