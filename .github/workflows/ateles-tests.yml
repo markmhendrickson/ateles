@@ -16,9 +16,10 @@ on:
       - "execution/daemons/phoenicurus-release/**"
       - "execution/daemons/monedula/**"
       - "execution/daemons/anthus/**"
+      - "execution/daemons/formica/**"
+      - "execution/daemons/neotoma-agent/**"
       - "execution/mcp/**"
-      - "lib/daemon_runtime/**"
-      - "lib/approval/**"
+      - "lib/**"
       - "execution/scripts/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -74,6 +75,21 @@ jobs:
         run: uv run --extra dev python -m pytest execution/daemons/anthus/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
+      # ateles#741: lib/ has root-level test files (test_issue_labels.py,
+      # test_neotoma_forensics.py, test_issue_number.py) that NO lane collected
+      # — the step above is scoped to lib/approval/ only. So the shared helpers
+      # every daemon imports had tests that never ran in CI.
+      #
+      # `lib/notify/` is excluded deliberately, NOT because it is unimportant:
+      # test_email_failure_falls_back_to_telegram passes alone but fails when
+      # the notify suite runs as a whole, on clean origin/main (8f2db88) with
+      # none of this branch's changes. That is a pre-existing test-pollution
+      # bug, not a regression here, and it is tracked separately — wiring it in
+      # red would just train people to ignore this lane.
+      - name: Run shared lib tests
+        run: >-
+          uv run --extra dev python -m pytest lib/
+          --ignore=lib/approval --ignore=lib/notify -q
       # ateles#524 (qa lens, PR #527 round 2): execution/scripts/ has its own
       # test_*.py files (SOPS token fallback, Loxia review, agent-doc render,
       # transcription) but no lane ran them — this closes that gap.

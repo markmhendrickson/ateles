@@ -197,10 +197,14 @@ def test_load_falls_back_across_number_field_names(monkeypatch):
     async def fake_post(path, payload):
         filters = payload.get("snapshot_filters") or {}
         field = next(
-            (k for k in filters if k != "repo"), "<unfiltered-scan>"
+            (k for k in filters if k not in ("repo", "repository")),
+            "<unfiltered-scan>",
         )
+        repo_field = next((k for k in filters if k in ("repo", "repository")), "")
         seen.append(field)
-        if field != "number":
+        # This entity carries `number` + `repo`; every other combination misses,
+        # exactly as prod does.
+        if field != "number" or repo_field != "repo":
             return {"entities": []}
         return {
             "entities": [
@@ -220,6 +224,12 @@ def test_load_falls_back_across_number_field_names(monkeypatch):
 
     assert state.found and state.entity_id == "ent_390"
     assert state.gate_status == {"arch": "pending"}
-    # `number` is tried first, and the miss never reached the unbounded scan.
-    assert seen[0] == "number"
+    # `number` is among the filters tried, and the miss never reached the
+    # unbounded scan. ateles#682 reordered the candidates by measured prod
+    # prevalence, so `github_number` (61.3% of rows) is attempted before
+    # `number` (1.2%) — the common case now resolves on the first query
+    # instead of the third. What matters here is that `number` is still
+    # tried at all, and that the scan is never reached.
+    assert "number" in seen
+    assert seen[0] == "github_number", "the canonical, most common field must be tried first"
     assert "<unfiltered-scan>" not in seen

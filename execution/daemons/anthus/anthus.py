@@ -46,6 +46,7 @@ from lib.daemon_runtime import (  # noqa: E402
 )
 from lib.notify import Notifier, Priority  # noqa: E402
 from lib.activity import ActivityLogger  # noqa: E402
+from lib.issue_number import extract_issue_number  # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -347,16 +348,11 @@ async def _spawn_agent(
     title = snapshot.get("title", "")
     body = snapshot.get("body", "")
     repo = snapshot.get("repository") or snapshot.get("repo") or ""
-    # Neotoma `issue`/`pull_request` entities store the GitHub number as
-    # `github_number`; keep `number`/`issue_number` as fallbacks for other
-    # snapshot shapes. Without github_number the agent gets `#` and can't
-    # locate the GitHub issue to post its artifact.
-    number = (
-        snapshot.get("github_number")
-        or snapshot.get("number")
-        or snapshot.get("issue_number")
-        or ""
-    )
+    # Neotoma `issue`/`pull_request` entities spell the GitHub number four
+    # different ways; `extract_issue_number` knows all of them and normalises
+    # str/int. Without a number the agent gets `repo#` and can't locate the
+    # GitHub issue to post its artifact.
+    number = extract_issue_number(snapshot) or ""
     # NOTE: do NOT prefix the prompt with `/<agent>`. In `claude --print` mode
     # a leading slash is interpreted as a slash-command and consumed silently,
     # producing zero-token output. The agent's identity comes from the
@@ -443,7 +439,11 @@ async def _fetch_comments(snap: dict) -> list:
     import json as _json
     import subprocess as _sp
 
-    number = snap.get("github_number") or snap.get("number")
+    # ateles#741: this omitted `issue_number` (8.7% of prod rows) and
+    # `github_issue_number` (1.8%). A miss returns [] here, which the
+    # orchestrator reads as "nothing satisfied yet" — so participation
+    # state silently stalls rather than erroring.
+    number = extract_issue_number(snap)
     repo = snap.get("repository") or snap.get("repo")
     if not number or not repo:
         return []

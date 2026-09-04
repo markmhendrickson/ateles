@@ -860,7 +860,7 @@ class TestSwarmObservability(unittest.TestCase):
 
     def test_issue_match_tolerates_field_spellings(self):
         """Prod entities disagree on field names; matching one spelling misses the rest."""
-        for number_field in ("issue_number", "github_number", "number"):
+        for number_field in ("github_number", "issue_number", "github_issue_number", "number"):
             for repo_field in ("repo", "repository"):
                 snap = {repo_field: "o/r", number_field: 2169}
                 self.assertTrue(srv._issue_snapshot_matches(snap, "o/r", 2169))
@@ -991,6 +991,62 @@ class TestSwarmObservability(unittest.TestCase):
     def test_get_gate_status_rejects_unparseable_ref(self):
         out = srv._get_gate_status("garbage")
         self.assertIn("error", out)
+
+    # ── ateles#390/#722: issue-number field spellings ───────────────────────
+
+    def test_issue_number_fields_match_the_shared_definition(self):
+        """This server's field list MUST equal lib/issue_number.py's.
+
+        The server cannot import `lib.issue_number` — it runs from an isolated
+        venv with only `mcp` and `httpx` installed and no repo root on
+        sys.path, so the constant is duplicated here deliberately. Duplication
+        without a guard is how the four spellings diverged in the first place:
+        this reads the canonical list out of the source file and compares.
+        """
+        import ast
+        import pathlib
+
+        shared = (
+            pathlib.Path(__file__).resolve().parents[3] / "lib" / "issue_number.py"
+        )
+        self.assertTrue(shared.is_file(), f"missing {shared}")
+        tree = ast.parse(shared.read_text(encoding="utf-8"))
+        canonical = None
+        for node in tree.body:
+            if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "ISSUE_NUMBER_FIELDS":
+                canonical = tuple(ast.literal_eval(node.value))
+        self.assertIsNotNone(canonical, "ISSUE_NUMBER_FIELDS not found in lib/issue_number.py")
+        self.assertEqual(
+            srv.ISSUE_NUMBER_FIELDS,
+            canonical,
+            "server.py and lib/issue_number.py disagree on the number spellings",
+        )
+
+    def test_matcher_finds_entity_under_every_number_spelling(self):
+        """All four spellings resolve; matching one alone is the bug."""
+        for field in ("github_number", "issue_number", "github_issue_number", "number"):
+            for repo_field in ("repo", "repository"):
+                for value in (682, "682"):
+                    with self.subTest(field=field, repo_field=repo_field, value=value):
+                        self.assertTrue(
+                            srv._issue_snapshot_matches(
+                                {field: value, repo_field: "o/r"}, "o/r", 682
+                            )
+                        )
+
+    def test_matcher_rejects_a_different_issue(self):
+        self.assertFalse(
+            srv._issue_snapshot_matches({"github_number": 683, "repo": "o/r"}, "o/r", 682)
+        )
+        self.assertFalse(
+            srv._issue_snapshot_matches({"github_number": 682, "repo": "x/y"}, "o/r", 682)
+        )
+
+    def test_matcher_uses_the_first_parseable_issue_number(self):
+        """A later alias must not override the leading issue identity."""
+        snap = {"github_number": 2237, "issue_number": 521, "repo": "o/r"}
+        self.assertFalse(srv._issue_snapshot_matches(snap, "o/r", 521))
+        self.assertTrue(srv._issue_snapshot_matches(snap, "o/r", 2237))
 
 
 if __name__ == "__main__":
