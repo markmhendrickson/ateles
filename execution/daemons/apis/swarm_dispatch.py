@@ -314,6 +314,65 @@ def _is_bot_author(login: str) -> bool:
     return False
 
 
+# ── attempted-command detection (ateles#732 decline feedback) ────────────────
+#
+# Every decline in _handle_issue_comment used to be a bare `log.debug` + return,
+# and apis.py configures INFO — so a declined operator command produced NOTHING
+# on GitHub and NOTHING in the log. The operator could not distinguish a command
+# the dispatcher refused from one that never arrived. Observed 2026-09-02 on
+# ateles#711: the webhook was received at 11:42:18, the handler declined, and
+# the PR shows no comment at all.
+#
+# The fix is to answer on GitHub whenever a comment ATTEMPTED a command. The
+# boundary matters as much as the feature: this handler sees EVERY comment on
+# every issue and PR in both repos, so replying to all of them would be a
+# comment flood (this codebase already has a 131-page flood in its history).
+#
+# "Attempted a command" is therefore defined narrowly: the body contains a
+# slash-token at the start of some line that is either one of ours, or close
+# enough to one of ours to be a typo of it. Ordinary prose, code blocks, and
+# review discussion contain no such token and are still answered with silence.
+_KNOWN_COMMANDS: tuple[str, ...] = (
+    _CONFIRM_GATES_CLEAR_CMD,
+    _SWARM_RUN_CMD,
+    _APPROVE_CMD,
+    _REJECT_CMD,
+    _HOLD_CMD,
+)
+
+# A slash-token anchored to the start of a line (allowing leading whitespace and
+# list markers, since operators write "- /approve" in checklists). Anchoring to
+# line-start is what keeps ordinary prose out: a URL path, a regex in a code
+# fence, or "and/or" mid-sentence never matches.
+_SLASH_TOKEN_RE = re.compile(
+    r"^[ \t]*(?:[-*+][ \t]+)?(/[a-zA-Z][a-zA-Z0-9-]*)", re.MULTILINE
+)
+
+
+def _looks_like_command_attempt(comment_body: str) -> str:
+    """Return the slash-token this comment appears to be attempting, else "".
+
+    Answers "did the author mean to invoke a swarm command?" for a body that
+    matched NO known command. Only a near-miss counts — a token whose stem
+    overlaps a real command, e.g. ``/aprove``, ``/confirm-gates``,
+    ``/swarm-runs``. An unrelated slash-token (``/etc``, ``/usr/bin``, another
+    tool's ``/rebase``) is NOT ours to answer and returns "", so this handler
+    stays silent on comments aimed at somebody else.
+    """
+    for match in _SLASH_TOKEN_RE.finditer(comment_body):
+        token = match.group(1)
+        lowered = token.lower()
+        for command in _KNOWN_COMMANDS:
+            # Prefix relation in EITHER direction catches both truncation
+            # ("/confirm-gates" for "/confirm-gates-clear") and extension
+            # ("/approved" for "/approve").
+            if lowered.startswith(command) or command.startswith(lowered):
+                # A bare "/" or single letter is too weak a signal to act on.
+                if len(lowered) >= 4:
+                    return token
+    return ""
+
+
 # Marker the pre-registration pass embeds in issue comments so the PR
 # pipeline can recover which agents pre-registered (and what they promised
 # to check) straight from GitHub — no Neotoma query in the hot path.
@@ -4747,7 +4806,16 @@ class SwarmDispatcher:
         # come first so it cannot be bypassed by a comment_author that happens to
         # match the operator login (defence-in-depth).
         if _is_bot_author(comment_author):
-            log.debug(
+            # Raised from debug to INFO (ateles#732) — apis.py configures INFO,
+            # so this decline was previously invisible in the log as well as on
+            # GitHub. Deliberately NOT answered with a comment: this is the one
+            # decline that must stay silent. A reply here would be a comment on
+            # a bot's comment, and Lanius's own gate board quotes the literal
+            # command token in its "operator override" instructions — so
+            # answering bot comments would have the dispatcher reply to every
+            # gate board it posts, which is the self-trigger feedback loop
+            # Guard 0 exists to prevent (neotoma#1686).
+            log.info(
                 f"[{DAEMON_NAME}] issue_comment on {ref} from bot/machine "
                 f"account {comment_author!r} — ignored (self-trigger prevention)"
             )
@@ -4770,11 +4838,35 @@ class SwarmDispatcher:
         )
 
         # Guard 1: only react when a known command is present.
+        #
+        # ateles#732: a comment that merely LOOKS like a command attempt gets an
+        # answer naming the commands that exist; everything else stays silent.
+        # This handler sees every comment in both repos, so answering all of
+        # them would be a comment flood — the near-miss test is what keeps
+        # ordinary review discussion out.
         if not any([has_gates_clear, has_swarm_run, has_approve, has_reject, has_hold]):
-            log.debug(
-                f"[{DAEMON_NAME}] issue_comment on {ref} has no recognised "
-                f"command — ignored"
-            )
+            attempted = _looks_like_command_attempt(comment_body)
+            if attempted:
+                log.info(
+                    f"[{DAEMON_NAME}] issue_comment on {ref} from "
+                    f"{comment_author!r} names {attempted!r}, which is not a "
+                    "recognised command — declined, and the decline was "
+                    "reported on GitHub"
+                )
+                await self._post_command_decline_comment(
+                    trigger,
+                    reason_key="unrecognized",
+                    detail=(
+                        f"`{attempted}` is not a command this dispatcher "
+                        "recognises, so nothing was run and nothing was "
+                        "written."
+                    ),
+                )
+            else:
+                log.debug(
+                    f"[{DAEMON_NAME}] issue_comment on {ref} has no recognised "
+                    f"command — ignored"
+                )
             return
 
         # Guard 2: operator-only guardrail (applies to all commands).
@@ -4790,6 +4882,23 @@ class SwarmDispatcher:
             log.warning(
                 f"[{DAEMON_NAME}] {cmd} from non-operator {comment_author!r} "
                 f"on {ref} — ignored (operator login: {_OPERATOR_LOGIN!r})"
+            )
+            # ateles#732: a well-formed command from a non-operator is an
+            # attempted command and gets an answer. The decline names WHO may
+            # run it, so the commenter can ask the operator rather than
+            # re-posting the same command and getting the same silence. The
+            # guard itself is unchanged — this reports the refusal, it does not
+            # soften it.
+            await self._post_command_decline_comment(
+                trigger,
+                reason_key="not-operator",
+                detail=(
+                    f"Swarm commands may only be run by the repository "
+                    f"operator (`{_OPERATOR_LOGIN}`); this comment is from "
+                    f"`{comment_author}`. Nothing was run and nothing was "
+                    "written. Ask the operator to post the command if this "
+                    "pull request needs it."
+                ),
             )
             return
 
@@ -6439,6 +6548,121 @@ class SwarmDispatcher:
                 f"{exc}"
             )
             return None
+
+    # Stable marker per decline reason. Distinct markers mean an "unrecognized"
+    # decline and a "not-operator" decline do not overwrite one another, while a
+    # repeat of the SAME decline edits in place rather than stacking — the
+    # SWARM_GITHUB_CONTRACT edit-not-duplicate rule, and the reason an operator
+    # retrying a typo three times gets one comment instead of three.
+    _DECLINE_MARKER = "<!-- swarm-command-declined:{reason_key} -->"
+
+    async def _post_command_decline_comment(
+        self, trigger: SwarmTrigger, reason_key: str, detail: str
+    ) -> None:
+        """Tell the commenter, on GitHub, that their command was declined.
+
+        ateles#732. Every guard in :meth:`_handle_issue_comment` used to decline
+        with a bare ``log.debug`` and return. ``apis.py`` configures INFO, so a
+        declined command produced no GitHub comment AND no log line: the
+        operator's only manual override had no observable effect and no
+        feedback, and a command the dispatcher refused was indistinguishable
+        from one that never arrived.
+
+        The comment is the deliverable, not the log line — a log the operator
+        does not read is not feedback. So this is called from the decline paths
+        themselves, and each message says what would make the command work,
+        not merely that it did not.
+
+        Best-effort, exactly like every other comment poster here: a GitHub
+        failure is logged and swallowed, never raised, because a decline that
+        cannot be reported must still not crash the delivery.
+
+        The body carries NO command token, so the dispatcher's own decline can
+        never re-trigger the command detector (neotoma#1686 self-trigger
+        defence — the same reason the waive and swarm-run comments describe
+        commands in prose rather than naming them).
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
+        marker = self._DECLINE_MARKER.format(reason_key=reason_key)
+
+        if not _token_for_repo(trigger.repository):
+            log.warning(
+                f"[{DAEMON_NAME}] no GitHub token — command-decline comment "
+                f"skipped for {ref}; the decline is logged but the commenter "
+                "will see nothing"
+            )
+            return
+
+        body = "\n".join(
+            [
+                marker,
+                attribution_header("apis", "swarm dispatcher"),
+                "",
+                "🚫 **Command declined — nothing was run.**",
+                "",
+                detail,
+                "",
+                "The commands this dispatcher accepts are: the gate-clear "
+                "override (waives unsigned pre-impl gates on a PR's parent "
+                "issue), the issue-pipeline re-run, and the checkpoint "
+                "approve / reject / hold verdicts. Their exact spelling is in "
+                "`docs/swarm_hitl_checkpoints_design.md`, and Lanius quotes "
+                "the gate-clear override verbatim in the gate board it posts "
+                "when a PR is blocked.",
+            ]
+        )
+
+        list_url = (
+            f"https://api.github.com/repos/{trigger.repository}/issues/"
+            f"{trigger.number}/comments"
+        )
+        headers = self._github_headers(trigger.repository)
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                existing_id: int | None = None
+                try:
+                    resp = await client.get(
+                        list_url, params={"per_page": 100}, headers=headers
+                    )
+                    resp.raise_for_status()
+                    for comment in resp.json():
+                        if marker in comment.get("body", ""):
+                            existing_id = comment["id"]
+                            break
+                except Exception as exc:  # noqa: BLE001 — dedup is advisory
+                    log.warning(
+                        f"[{DAEMON_NAME}] could not list comments for "
+                        f"command-decline dedup on {ref}: {exc} — will post new"
+                    )
+
+                if existing_id is not None:
+                    resp = await client.patch(
+                        f"https://api.github.com/repos/{trigger.repository}/"
+                        f"issues/comments/{existing_id}",
+                        json={"body": body},
+                        headers=headers,
+                    )
+                    resp.raise_for_status()
+                    log.info(
+                        f"[{DAEMON_NAME}] edited command-decline comment "
+                        f"#{existing_id} on {ref} (reason: {reason_key})"
+                    )
+                else:
+                    resp = await client.post(
+                        list_url, json={"body": body}, headers=headers
+                    )
+                    resp.raise_for_status()
+                    log.info(
+                        f"[{DAEMON_NAME}] posted command-decline comment on "
+                        f"{ref} (reason: {reason_key})"
+                    )
+        except Exception as exc:  # noqa: BLE001 — comment is best-effort
+            log.warning(
+                f"[{DAEMON_NAME}] could not post command-decline comment on "
+                f"{ref} (reason: {reason_key}): {exc} — the commenter will see "
+                "nothing on GitHub"
+            )
 
     async def _post_gate_waive_comment(
         self, trigger: SwarmTrigger, outcome: AggregateWaiveOutcome
