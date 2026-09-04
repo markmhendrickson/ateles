@@ -54,8 +54,8 @@ any diff was read; every other document is keyed to a path below.
 | Doc | What it states |
 |-----|----------------|
 | `docs/foundation/principles.md` | The invariants: a mechanism that does not bind is not a control; a write that reports success has not necessarily happened; a test that cannot fail on the thing it watches is decoration; fail closed on the field that carries the safety meaning; unknown stays distinct from a verdict. |
-| `docs/foundation/work_model.md` | How work moves: pull is the only delivery, assignment constrains eligibility; the claim and the lease are one primitive, the lease a relationship; liveness derived from activity at read time; tasks aggregate into passages and nest under parents; artifacts are records a passage leaves, never its subject. |
-| `docs/foundation/gates_and_workflows.md` | The step and gate model: `workflow` declares steps, a `passage` carries tasks through them, a step's state is derived from the passage, a lease, and a `sign-off`, `step_status` projects; one step set; actions are entities and only actions execute; the execution gate decides per action; advisory and enforcing paths agree. |
+| `docs/foundation/work_model.md` | How work is taken and worked: pull is the only delivery, assignment constrains eligibility; the claim and the lease are one primitive, the lease a relationship; liveness derived from activity at read time; a task carries only its status and its edges, every other state a passage, a lease, a sign-off, or an activity entity; intake is every task's first passage; tasks aggregate into passages and nest under parents; artifacts are records a passage leaves, never its subject. |
+| `docs/foundation/gates_and_workflows.md` | The step and gate model: `workflow` declares steps, a `passage` carries tasks through them, a step's state is derived from the passage, a lease, and a `sign-off`, `step_status` projects; one step set; sequencing is data, a declared `successors` list and a `FOLLOWS` edge between passages, the chain derived; actions are entities and only actions execute; the execution gate decides per action; advisory and enforcing paths agree. |
 
 A kernel document that is not yet written is reported to the reviewer as such.
 It states nothing; that domain is reviewed on the lens's standing criteria, and
@@ -76,6 +76,12 @@ first.
 | `lib/daemon_runtime/task_claim`, `lib/daemon_runtime/task_lifecycle`, `execution/daemons/apis/apis\.py`, `execution/daemons/apis/task_watchdog`, `execution/daemons/apis/routing` | `docs/foundation/work_model.md` |
 | `execution/daemons/apis/swarm_dispatch`, `execution/daemons/apis/review_panel`, `execution/daemons/apis/issue_spec`, `lib/daemon_runtime/workflow_resolver`, `lib/issue_labels`, `lib/daemon_runtime/checkpoint`, `lib/daemon_runtime/gating`, `execution/daemons/anthus/`, `execution/mcp/ateles/` | `docs/foundation/gates_and_workflows.md` |
 | `execution/daemons/apis/skill_runner`, `execution/daemons/apis/harness_router` | `docs/foundation/work_model.md`, `docs/foundation/gates_and_workflows.md` |
+
+### Core workflows
+
+| Changed path | Read |
+|---|---|
+| `execution/daemons/apis/swarm_dispatch`, `execution/daemons/apis/gating`, `lib/daemon_runtime/workflow_resolver`, `lib/daemon_runtime/gating`, `execution/daemons/anthus/`, `execution/scripts/render_workflow_docs`, `docs/foundation/workflows\.md` | `docs/foundation/workflows.md` |
 
 ### Failure posture
 
@@ -113,8 +119,9 @@ Every issue and every PR states its design basis: the foundation document and
 section it conforms to, or the explicit statement that no design applies.
 
 - On an issue, the design basis is the first section of the swarm
-  specification (`issue_spec.py`, section `basis`). The pm step's owner states it
-  at intake, from the kernel; the arch step's owner checks it.
+  specification (`issue_spec.py`, section `basis`). The pm step's owner, the
+  product lens, states it at the intake passage's `classify` step
+  (`workflows.md#intake`), from the kernel; the arch step's owner checks it.
 - On a PR, the design basis is one line in the body:
   `Design basis: docs/foundation/work_model.md#claim-and-lease`, or
   `Design basis: no design applies — <one line why>`.
@@ -155,6 +162,7 @@ below are the swarm's own records, and the word is not used for them.)
 | An agent's behavioural rule | `agent_policy` entities in Neotoma | `.claude/skills/<name>/SKILL.md` and `docs/agents/*.md`, rendered by `render_agent_docs.py` |
 | The system's composition, roster, and roadmap | plan `ent_99ace4dd6673aa36ed08b1fe` fields | `docs/architecture.md`, `docs/taxonomy.md`, `docs/phases.md`, rendered by `render_plan_docs.py` |
 | A session's standing instruction | `CLAUDE.md` (re-injected after compaction) | none |
+| A core workflow's step list, fast paths, and successors | the `workflow` entity for that (project, workflow type) | the step table in `docs/foundation/workflows.md`, rendered by `render_workflow_docs.py` and held equal by its `--check`; the prose around each table (purpose, entry condition, the reason for each step) is authored in the document |
 
 A rule that belongs to two classes is written once in its authoritative home and cited from the other, never
 copied: a comment or a second document claiming to mirror the first is not a mechanism that keeps them

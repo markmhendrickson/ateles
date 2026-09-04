@@ -1,4 +1,4 @@
-# Work model: how work moves through the swarm
+# Work model: how work is created, claimed, worked, and passed through workflows
 
 **Kernel document:** read on every review (`conformance.md`). **Kind:** foundation; states the design and
 never the state of a checkout. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-01 to PR-03,
@@ -13,14 +13,15 @@ PR-05, C1, C2), prior art `ent_08460968e6f49dac21510f4a` (Track 1), task `ent_da
 State how a unit of work is created, taken, worked, and returned: pull as the only delivery, with
 assignment a constraint on eligibility; the claim and the lease as one primitive, the lease a relationship
 rather than task fields; liveness derived from activity at read time; no assignment log; the transition
-vocabulary; how tasks aggregate into passages, split out of them, and nest under parents; what an artifact
-is and is not.
+vocabulary; that a task carries nothing but its status and its edges, every other state being a passage,
+a lease, a sign-off, or an activity entity; that intake is every task's first passage; how tasks aggregate
+into passages, split out of them, and nest under parents; what an artifact is and is not.
 
 ## Scope
 
 The task path: a Neotoma `task` claimed and worked by an agent. The two other execution mechanisms are
-named below; the step and gate model is `gates_and_workflows.md`; who may act on what is
-`authority_model.md`; terms are `vocabulary.md`.
+named below; the step and gate model is `gates_and_workflows.md`; the core workflows, intake among them,
+are `workflows.md`; who may act on what is `authority_model.md`; terms are `vocabulary.md`.
 
 ## The invariants
 
@@ -94,6 +95,31 @@ whose claimant died is a task with a lapsed lease, not a task "stuck in executin
 assignee has not taken is assigned-and-unclaimed, not "dispatched". Definitions and forbidden synonyms:
 `vocabulary.md`.
 
+### There is no task lifecycle; there are passages
+
+A task carries a status, one of open, blocked, or a terminal value, and its edges; nothing else. Every
+other state the swarm needs to know about a task is a passage (where it is in a workflow), a lease (who
+holds it), a sign-off (what was judged), or an activity entity (what was done). There is no per-task
+state to advance and no transition to log: a task is never `routed`, `executing`, `verified`, or "in
+review"; it is in a passage whose step states say which of those is true, and the passage's `FOLLOWS`
+chain says which workflows it has passed through
+(`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`). This is C1 (below), already
+settled, stated as the rule it implies: each state of the push model was a fact about a passage, a lease,
+or a sign-off, written onto the task where a process then had to keep it true (principle 11).
+
+### Intake is every task's first passage
+
+Every task passes through intake before any other workflow (`workflows.md#intake`). Its steps, by role:
+`classify` (the task declares the classes of action it expects to produce as `action_type`, its
+eligibility as `assigned_to` where a named principal is the point, and its parent or its children where
+the work is an aggregate), `link` (the issues, pull requests, threads, and transcripts the task already
+concerns are attached as artifacts), `dedupe` (against open tasks), `prioritize` (from the
+`priority_rubric` entity, retrieved by type), and `route` (the closing sign-off names one successor
+workflow, or none, or operator-only). Consequence: an unrouted task is observable as a task with no
+intake passage, and no separate unrouted or undispatched state exists to be written, cleared, or
+reconciled. Tasks that a passage creates (children, split-outs, tasks extracted from a meeting) open
+their own intake passages; a child may take intake's declared fast path and never skips intake.
+
 ### What a claim predicate treats as claimable
 
 The status vocabulary in the record is what tasks actually carry, not what an enum in code declares; a
@@ -154,9 +180,9 @@ tasks, one per passage.
 ### Parent and child tasks
 
 A parent aggregates children through `PART_OF` edges from each child to the parent; a task has at most one
-parent. A parent's completion is derived from its children's terminal states, never stored. Children enter
-passages independently of one another. A parent never enters a passage itself; it is an aggregate, and a
-passage carries tasks that are worked, which a parent never is.
+parent. A parent's completion is derived from its children's terminal states, never stored. Children pass
+through workflows independently of one another. No passage ever opens for a parent; it is an aggregate, and
+a passage carries tasks that are worked, which a parent never is.
 
 ## The three execution mechanisms
 

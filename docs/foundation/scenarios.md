@@ -15,9 +15,9 @@ against it.
 
 ## Scope
 
-Nine walkthroughs: the plain task life, a lapse and its escalation, assignment, aggregation of tasks into
+Ten walkthroughs: the plain task life, a lapse and its escalation, assignment, aggregation of tasks into
 one passage, a split, a parent with children, an operator-only task, an action discovered mid-workflow at
-each blast tier, and a halt. Names of agents are placeholders for roles; no scenario names a checkout, a count,
+each blast tier, a halt, and a task routed by intake to its successor workflow. Names of agents are placeholders for roles; no scenario names a checkout, a count,
 or a date.
 
 ## (a) Create, claim, work, return, complete
@@ -113,13 +113,15 @@ sequenceDiagram
 ## (d) Several tasks aggregated into one passage, review through release
 
 Three tasks belong in one change. A `passage` is created against the project's `workflow`; each task gets
-an `ADDRESSED_BY` edge to the passage. The passage moves through the workflow's steps: each step opens,
+an `ADDRESSED_BY` edge to the passage. The passage advances from step to step: each step opens,
 its step owner claims it (a lease on the step), and closes it with a `sign-off`; `step_status` on each
 task projects the same state for the hot path. The pull request that carries the change is an `artifact`
-attached to the passage by edge; no step is taken on it. When every required step is signed off, the
-merge is an `action` that the steward evaluates at the execution gate; on permit it executes, and the
-merged PR is the record it leaves. A second passage, for the release workflow, then carries the same tasks
-sequentially, with the release as its artifact. The subject of every step was the tasks.
+attached to the passage by edge; no step is taken on it. When every required review step is signed off,
+the `merge` step opens and the steward claims it; the merge is an `action` the steward evaluates at the
+execution gate; on permit it executes, the merged PR is the record it leaves, and the steward's sign-off
+closes the passage naming `release` as its successor. A second passage, for the release workflow, then
+opens for the same tasks with a `FOLLOWS` edge to the closed one, and the release is its artifact. The
+subject of every step was the tasks.
 
 ```mermaid
 flowchart LR
@@ -132,11 +134,13 @@ flowchart LR
     S2 --> S3[step impl: claimed, signed off]
     S3 --> S4[step pr_review: claimed, signed off]
     S4 --> S5[step qa: claimed, signed off]
-    S5 --> M{all required steps signed off?}
-    M -->|yes| ACT[action: merge]
+    S5 --> M{all required review steps signed off?}
+    M -->|yes| S6[step merge: steward claims]
+    S6 --> ACT[action: merge]
     ACT --> G{execution gate}
-    G -->|permit| X[merge executes]
+    G -->|permit| X[merge executes; sign-off names release]
     X --> R2[passage: release workflow]
+    R2 -.->|FOLLOWS| R
     REL[artifact: release] -.-> R2
     T1 -.->|ADDRESSED_BY, later| R2
     T2 -.-> R2
@@ -148,7 +152,9 @@ flowchart LR
 [`#a-task-is-in-at-most-one-passage-at-a-time`](work_model.md#a-task-is-in-at-most-one-passage-at-a-time),
 [`gates_and_workflows.md#declaration-passage-projection`](gates_and_workflows.md#declaration-passage-projection),
 [`#actions-are-entities-only-actions-execute`](gates_and_workflows.md#actions-are-entities-only-actions-execute),
-[`#two-policies-workflow-policy-and-execution-policy`](gates_and_workflows.md#two-policies-workflow-policy-and-execution-policy).
+[`#two-policies-workflow-policy-and-execution-policy`](gates_and_workflows.md#two-policies-workflow-policy-and-execution-policy),
+[`#sequencing-is-data-successors-and-the-chain`](gates_and_workflows.md#sequencing-is-data-successors-and-the-chain);
+[`workflows.md#feature`](workflows.md#feature).
 
 ## (e) A task split out of a passage
 
@@ -186,7 +192,7 @@ flowchart TD
 
 A parent task is created as the aggregate of a piece of work; three child tasks each carry a `PART_OF`
 edge to it. Each child is claimed, worked, and carried through its own passage on its own schedule. The
-parent is never claimed and never enters a passage. When a reader asks whether the parent is complete, the
+parent is never claimed, and no passage ever opens for it. When a reader asks whether the parent is complete, the
 answer is derived from the children's terminal states at that moment and is stored nowhere.
 
 ```mermaid
@@ -306,10 +312,47 @@ flowchart TD
 [`authority_model.md#the-tuple`](authority_model.md#the-tuple) (`Indeterminate` is deny); `principles.md`
 invariants 2 and 7.
 
+## (j) A task created, routed by intake, and handed to its successor
+
+A task is created; that is its publication. It has no intake passage, so it is unrouted by that fact, and
+nothing else records it as such. An intake passage opens for it, and the product lens claims each step
+in turn, a lease on the step and a sign-off to close it: `classify` writes the task's `action_type` and,
+where a named principal is the point, `assigned_to`; `link` attaches the issue the task already concerns
+as an artifact; `dedupe` finds no open duplicate; `prioritize` sets the priority from the
+`priority_rubric` entity; `route`'s sign-off, the closing sign-off of the passage, names `feature` as the
+successor. A passage of the feature workflow opens for the task with a `FOLLOWS` edge to the intake
+passage, and from there the scenario is (d). At any moment the task's chain is read along `FOLLOWS` from
+its live passage back to intake; nothing on the task records which workflows it has passed through, and
+no router chose the successor: a step owner signed it.
+
+```mermaid
+flowchart TD
+    C[task created: publication] --> U{intake passage exists?}
+    U -->|no: unrouted by that fact| I[intake passage opens]
+    I --> S1[classify: action_type, assigned_to, parent or children]
+    S1 --> S2[link: existing issue attached as artifact]
+    S2 --> S3[dedupe: no open duplicate]
+    S3 --> S4[prioritize: from the priority_rubric entity]
+    S4 --> S5[route: closing sign-off names feature]
+    S5 --> F[passage: feature workflow opens]
+    F -.->|FOLLOWS| I
+    F --> D[from here, scenario d]
+    D --> R[passage: release workflow]
+    R -.->|FOLLOWS| F
+    R --> CH[chain, read along FOLLOWS: intake → feature → release; stored nowhere]
+```
+
+**Invariants:** [`work_model.md#intake-is-every-tasks-first-passage`](work_model.md#intake-is-every-tasks-first-passage),
+[`#there-is-no-task-lifecycle-there-are-passages`](work_model.md#there-is-no-task-lifecycle-there-are-passages),
+[`#pull-is-the-only-delivery-assignment-constrains-eligibility`](work_model.md#pull-is-the-only-delivery-assignment-constrains-eligibility),
+[`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`](gates_and_workflows.md#sequencing-is-data-successors-and-the-chain),
+[`workflows.md#intake`](workflows.md#intake); `principles.md` invariant 11.
+
 ## What the scenarios do not show
 
 None of them shows a router choosing a claimant, work reaching an agent by any path but its own claim, a
 process returning a lapsed lease, a pull request or an issue as the subject of a step, a per-step status
-row, a parent task being claimed, a task being "executed", a stored liveness flag, or a gate consulted on
-anything but an `action`. Each absence is an invariant; a change that needs one of
+row, a parent task being claimed, a task being "executed", a stored liveness flag, a gate consulted on
+anything but an `action`, a task in any passage but intake with no intake passage before it, a passage
+naming two successors, or a program entity holding a sequence of workflows. Each absence is an invariant; a change that needs one of
 these to appear is a change to the foundation, made through a PR that says so (`conformance.md`).

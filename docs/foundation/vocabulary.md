@@ -25,9 +25,12 @@ definition does not change when its implementation lands.
 ### task
 **Definition:** the atomic unit of accountable work, recorded as a Neotoma `task` entity.
 **Related:** [claim](#claim), [action](#action), [artifact](#artifact), [parent task](#parent-task),
-[passage](#passage); [`work_model.md#the-transition-vocabulary`](work_model.md#the-transition-vocabulary).
+[passage](#passage), [intake](#intake), [chain](#chain);
+[`work_model.md#the-transition-vocabulary`](work_model.md#the-transition-vocabulary),
+[`work_model.md#there-is-no-task-lifecycle-there-are-passages`](work_model.md#there-is-no-task-lifecycle-there-are-passages).
 **Forbidden:** "chip", "ticket" (a GitHub issue is an `issue`, an artifact; a task may refer to one), "work
-item", "work entity" (retired; the thing that moves through a workflow is a task).
+item", "work entity" (retired; the thing that passes through a workflow is a task), "lifecycle" for the
+task (its only states are its status and its edges; there is no task state machine, C1).
 
 ### work (a task)
 **Definition:** to claim, progress, and complete a task.
@@ -194,14 +197,14 @@ passage continues with the remaining tasks.
 
 ### parent task
 **Definition:** a task that aggregates child tasks through `PART_OF` edges from each child, whose
-completion is derived from its children's terminal states and which never enters a passage itself.
+completion is derived from its children's terminal states and for which no passage ever opens.
 **Related:** [child task](#child-task), [task](#task), [terminal](#terminal), [passage](#passage);
 [`work_model.md#parent-and-child-tasks`](work_model.md#parent-and-child-tasks).
 **Forbidden:** "epic", "umbrella", a stored parent status.
 
 ### child task
-**Definition:** a task with one `PART_OF` edge to a parent task, which enters passages independently of its
-siblings.
+**Definition:** a task with one `PART_OF` edge to a parent task, which passes through workflows independently
+of its siblings.
 **Allowed:** "subtask" in prose.
 **Related:** [parent task](#parent-task), [task](#task), [passage](#passage), [split](#split);
 [`work_model.md#parent-and-child-tasks`](work_model.md#parent-and-child-tasks).
@@ -234,10 +237,11 @@ started; the step is claimed).
 ## Gate model (`gates_and_workflows.md`)
 
 ### workflow
-**Definition:** the entity declaring, per (project, workflow type), an ordered list of steps and the fast
-paths a passage may take.
+**Definition:** the entity declaring, per (project, workflow type), an ordered list of steps, the fast
+paths a passage may take, and the successors a closing sign-off may name.
 **Related:** [step](#step), [stage](#stage), [passage](#passage), [step owner](#step-owner),
-[workflow policy](#workflow-policy), [fast path](#fast-path);
+[workflow policy](#workflow-policy), [fast path](#fast-path), [successor](#successor);
+[`workflows.md`](workflows.md) (the core workflows);
 [`gates_and_workflows.md#declaration-passage-projection`](gates_and_workflows.md#declaration-passage-projection).
 **Forbidden:** `workflow_definition` (retired), "pipeline" (one engine that runs workflows), "template".
 
@@ -283,9 +287,10 @@ record written), "audit row".
 ### passage
 **Definition:** the entity recording one passage of tasks through a workflow, to which the tasks attach by
 `ADDRESSED_BY` edges.
-Reads: "the passage is at `qa`", "tasks aggregated into one passage", "a task split out of a passage".
+Reads: "the passage is at `qa`", "tasks aggregated into one passage", "a task split out of a passage",
+"a passage opens", "the passage advances to `impl`", "the passage closes naming `release`".
 **Related:** [workflow](#workflow), [task](#task), [artifact](#artifact), [step state](#step-state),
-[aggregation](#aggregation), [split](#split);
+[aggregation](#aggregation), [split](#split), [successor](#successor), [chain](#chain);
 [`work_model.md#what-passes-through-a-workflow-is-a-passage-of-tasks`](work_model.md#what-passes-through-a-workflow-is-a-passage-of-tasks).
 **Forbidden:** `workflow_run` (retired; `run` collides with the retired liveness vocabulary), "run",
 "instance" unqualified, "pipeline run", "execution".
@@ -310,6 +315,24 @@ from the sign-offs and proved equal to them by a reconciler.
 **Related:** [workflow](#workflow), [step](#step);
 [`gates_and_workflows.md#declaration-passage-projection`](gates_and_workflows.md#declaration-passage-projection).
 **Forbidden:** "hot path", "shortcut".
+
+### successor
+**Definition:** a workflow that a `workflow` declares in `successors` as one a passage of it may hand its
+tasks to on closing, of which the closing sign-off selects exactly one or none.
+The closing sign-off is the sign-off on the workflow's last step, which is always a single step.
+**Related:** [workflow](#workflow), [passage](#passage), [sign-off](#sign-off), [chain](#chain),
+[intake](#intake), [split](#split);
+[`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`](gates_and_workflows.md#sequencing-is-data-successors-and-the-chain).
+**Forbidden:** "next stage" (a stage is within a workflow), "downstream workflow", "handoff", two
+successors at once (that is a split), a successor named by anything but the closing sign-off.
+
+### chain
+**Definition:** the derived, never stored, sequence of passages a task has passed through, read along
+`FOLLOWS` edges from its live passage back to its intake passage.
+**Related:** [passage](#passage), [successor](#successor), [intake](#intake), [task](#task);
+[`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`](gates_and_workflows.md#sequencing-is-data-successors-and-the-chain).
+**Forbidden:** "program", "super-workflow", "pipeline" for the sequence, "lifecycle", a stored list of
+passages on the task.
 
 ### issue
 **Definition:** a GitHub issue, recorded as an `issue` entity, which is an artifact a passage produces or
@@ -441,6 +464,20 @@ re-claimed task never repeats an effect that already ran.
 **Related:** [action](#action), [lapsed](#lapsed), [claim](#claim);
 [`work_model.md#at-least-once-implies-effect-dedup`](work_model.md#at-least-once-implies-effect-dedup).
 **Forbidden:** "replay protection" (replay is refused outright), "retry".
+
+## Core workflows (`workflows.md`)
+
+### intake
+**Definition:** the workflow every task passes through first, whose steps classify, link, dedupe,
+prioritize, and route the task, and whose closing sign-off names the successor workflow, or none, or
+operator-only.
+A task with no intake passage is unrouted by that fact; no unrouted state is stored.
+**Related:** [task](#task), [passage](#passage), [successor](#successor), [chain](#chain),
+[operator-facing agent](#operator-facing-agent), [action_type](#action_type);
+[`workflows.md#intake`](workflows.md#intake),
+[`work_model.md#intake-is-every-tasks-first-passage`](work_model.md#intake-is-every-tasks-first-passage).
+**Forbidden:** "triage" for the whole workflow (its first stage), "undispatched", "unrouted" as a stored
+status, "routing" by a router (the `route` step is a sign-off by a step owner).
 
 ## Authority model (`authority_model.md`)
 
@@ -648,6 +685,21 @@ design applies` with a reason, checked mechanically and judged by reading.
 [`conformance.md#phases-and-implementation-state`](conformance.md#phases-and-implementation-state).
 **Forbidden:** embedding dated figures, counts, or checkout claims from it into a foundation document;
 treating it as design evidence.
+
+## Verbs
+
+Each subject has its verb. The pairs are canonical; the phrases in the last column are replaced by them
+wherever they appear in a document, a schema, a prompt, or an error message.
+
+| Subject | Verb | Not |
+|---|---|---|
+| a task, with respect to a workflow | **passes through** it; a passage **opens** for it and **closes** | "runs through", "goes through", "moves through", "enters" a workflow or a passage |
+| a passage, from step to step | **advances** | "moves", "progresses", "transitions" |
+| a step, within a passage | **opens**; **closes** by sign-off | "fires", "clears", "is satisfied", "goes green" |
+| a lease | is **claimed**, **renewed**, **returned**; it **lapses** on its own | "acquired", "released", "freed", "expired and released" |
+| an action | is **executed** | "fired", "run", "performed" |
+| a task | is **worked** | "executed", "run", "processed" |
+| a passage, on closing | **hands** its tasks to one successor, or closes with none | "flows into", "triggers", "enters" the next workflow |
 
 ## Owner: five meanings, one word forbidden alone
 

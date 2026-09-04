@@ -15,7 +15,9 @@ is `status.md`.
 
 State the step and gate model: which entity declares a workflow, which records a passage of tasks through
 it, how a step's state within a passage is derived from edges and closed by a sign-off, which field is the
-read-path projection; that the step set is defined once; that the word `gate` names one decision, the
+read-path projection; that the step set is defined once; that sequencing between workflows is data, a
+declared `successors` list and a `FOLLOWS` edge, with no program entity above it; that the word `gate`
+names one decision, the
 execution gate, which is independent of GitHub and decides per action on confidence and three blast
 tiers; that actions are entities and only actions execute; which two policies govern claiming and
 executing; and how an approval object is shaped.
@@ -25,14 +27,16 @@ executing; and how an approval object is shaped.
 The workflow engines, the execution gate, and the entities `workflow`, `passage`, `sign-off`, `action`,
 `checkpoint_brief`, and `execution_policy`. Who may resolve a checkpoint, and how an approval is
 attributed, is `authority_model.md`; what happens when a workflow cannot be read is `failure_posture.md`;
-how tasks attach to a passage, and what an artifact is, is `work_model.md`.
+how tasks attach to a passage, and what an artifact is, is `work_model.md`; the design of each core
+workflow, its steps, and its successors, is `workflows.md`.
 
 ## The invariants
 
 ### Declaration, passage, projection
 
 `workflow` declares: one entity per (project, workflow type), an ordered list of steps (`steps[]`) with
-`phase`, `step_name`, `owner_agent`, `parallel_group`, `join_step`, `required`, plus `fast_paths`. Step
+`phase`, `step_name`, `owner_agent`, `parallel_group`, `join_step`, `required`, and `on_fail` (the earlier
+step a failing sign-off opens again), plus `fast_paths` and `successors` (below). Step
 names are data: a workflow may declare steps beyond the review sequence (a draft step, a deterministic
 lint, an operator preview), and a named group of contiguous steps is a stage (the review stage, the
 release stage). A `passage` is one passage of tasks through a workflow (`work_model.md`); the tasks are
@@ -64,6 +68,23 @@ it is derived at import time or held equal by a parity test; a comment claiming 
 constant is not parity (principle 9). A data-sourced list may add steps and never remove one, as a
 correctness rule, not an availability fallback (C5). Migration is incremental, never a flag day
 (`migration_is_incremental_no_flag_day`).
+
+### Sequencing is data: successors and the chain
+
+A `workflow` declares `successors`: the workflows a passage of it may hand its tasks to on closing. A
+workflow's last step is a single step, never a parallel group, and its sign-off is the passage's closing
+sign-off; that sign-off selects exactly one successor from the declared list, or none. None is the normal
+close of a task that needs no further workflow. One opens a passage of the successor for the same tasks,
+carrying a `FOLLOWS` edge from the new passage to the closed one. A task's history across workflows is
+its chain: the passages read along `FOLLOWS` edges from its live passage back to its intake passage,
+derived at read time and never stored. There is no super-workflow, program, or pipeline entity that
+holds a sequence of workflows; a stored sequence would need a process to keep it true against the
+passages (principle 11). Parallel successors are not allowed: a passage names one or none, and work that
+needs two workflows at once is split into child tasks, one per passage
+(`work_model.md#a-task-is-in-at-most-one-passage-at-a-time`). Intake is the universal entry
+(`work_model.md#intake-is-every-tasks-first-passage`), so every chain begins with an intake passage, and
+a `successors` list that names intake is a declaration error. The core workflows, each with its declared
+successors, are `workflows.md`.
 
 ### Two policies: workflow policy and execution policy
 
