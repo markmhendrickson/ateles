@@ -8,12 +8,14 @@ from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-12 to PR-15, C5, C17), prio
 `halt_work_but_never_stop_observing`, `the_halt_must_announce_itself_off_neotoma`,
 `reachability_check_belongs_at_dispatch_with_mid_task_writes_failing_closed`,
 `deferral_must_be_bounded_and_escalate_off_neotoma`, `unknown_must_stay_distinct_from_a_verdict`,
-`nyctea_635_becomes_load_bearing`, and PR #745 operator review (2026-09-04). What is built is `status.md`.
+`nyctea_635_becomes_load_bearing`, and PR #745 operator review (2026-09-04). What is built is `status.md`;
+how a checkpoint is recorded is `data_model.md`.
 
 ## Purpose
 
 State the operator's decision that Neotoma is a hard dependency and the seven rules that follow from it, so
-the posture lives where the review lenses read it rather than in a task description. `durable_execution_substrate.md`
+the posture lives where the review lenses read it rather than in a task description; state which
+failures the swarm escalates as checkpoints on a task, and which it does not. `durable_execution_substrate.md`
 records the position on execution engines and replay that this document relies on; it stays.
 
 ## Scope
@@ -46,17 +48,20 @@ refuse-and-requeue-as-fallback, and the hardcoded step-list floor (C5, below).
    reads what the work will read.
 
 4. **A mid-task write failure leaves the task in its prior state.** The agent is already at work when the
-   record goes away. It does not abandon in-flight work, and it never claims a completion it cannot record:
+   record goes away. It does not abandon work already under way, and it never claims a completion it
+   cannot record:
    finish the reasoning, attempt the write, and on failure leave the task as it was: the lease lapses on
    its own and the task is claimable again (`work_model.md`), with no process needed to return it. A
    sign-off whose write failed is the unaccountable work this posture exists to prevent. Silence beats a
    false verdict.
 
-5. **Deferral is bounded and escalates off-Neotoma.** Backoff is mandatory: a slow instance under retry
+5. **Deferral is bounded; exhaustion escalates.** Backoff is mandatory: a slow instance under retry
    pressure is how slow becomes unreachable, and unreachable stays distinguishable from slow. A task requeued
-   indefinitely against a store that never returns is a silent stall, so the deferral has a ceiling and its
-   terminal escalation travels a path that survives the outage. The drain is the lapse rule below
-   (backoff, lapse cap, escalate-on-exhaustion), connected to the gating path rather than rebuilt.
+   indefinitely against a store that never returns is a silent stall, so every deferral has a ceiling. When
+   the ceiling is reached and the record is reachable, the task is escalated: one checkpoint with reason
+   `rounds_exhausted` (below). When the record is not reachable, nothing can be written, and the exhaustion
+   is announced on the path that survives the outage (rule 2). The drain is the lapse rule below (backoff,
+   lapse cap, checkpoint on exhaustion), connected to the gating path rather than rebuilt.
 
 6. **Every write is read back.** Principle 2 of `principles.md`, restated here because an outage is when a
    write most plausibly reports success without landing: a store can return 200 with a warning and persist
@@ -67,15 +72,45 @@ refuse-and-requeue-as-fallback, and the hardcoded step-list floor (C5, below).
    grant, or drift state carries a third value; an error is never coerced to pending or to clear. Principle
    7 of `principles.md`; at a policy enforcement point the third value resolves to deny (`authority_model.md`).
 
-## Repeated lapse escalates
+## Repeated lapse raises a checkpoint
 
 A lease that lapses is not returned by anything; the task is simply claimable again (`work_model.md`).
-The rule that survives the reaper's retirement is about repetition: the watchdog counts lapses per task,
-with bounded backoff between re-claims, and when one task's count reaches the cap it raises one
-`escalation` rather than letting the task be re-claimed forever. The watchdog observes and escalates; it
-holds no authority over any lease and never chooses the next claimant. During a halt the count still
-accrues, because a lapse during an outage is still a lapse, and the escalation travels the off-Neotoma
-path (rule 2). This is OTP's supervisor rule (prior art, below) applied to a lease.
+The rule that survives the retired reaper is about repetition: the watchdog counts lapses per task,
+with bounded backoff between re-claims, and when one task's count reaches the cap it escalates the task:
+one checkpoint, subject the task, reason `repeated_lapse`, carrying the count and the last claimants,
+rather than letting the task be re-claimed forever. The watchdog observes and escalates; it holds no
+authority over any lease and never chooses the next claimant. During a halt the count still accrues,
+because a lapse during an outage is still a lapse; the checkpoint is written when the record returns, and
+until then the condition is announced on the off-Neotoma path (rule 2). This is OTP's supervisor rule
+(prior art, below) applied to a lease.
+
+## Checkpoints on tasks: one queue, one protocol
+
+To escalate is to raise a checkpoint on a task the swarm cannot advance. The checkpoint is the same
+entity the action gate writes when it holds an action (`gates_and_workflows.md#the-checkpoint`); only
+its subject and its reason class differ. The reason classes the design names: `gate_hold` (an action held
+at the gate), `repeated_lapse` (above), `unreadable_workflow` (`gates_and_workflows.md`, no step opened),
+`rounds_exhausted` (rule 5, or a declared cap on an `on_fail` loop), `unspawnable_assignee`
+(`work_model.md`, an `assigned_to` nobody can run); a policy may declare more. A checkpoint on a task
+carries the reason, the needed input, the options, and whom it awaits, and is presented and resolved
+through the one decision queue, by the one resolution protocol, that checkpoints on actions use. Do not
+build a second gate, a second queue, or a second notification path for task-level failure (principle 6):
+a queue nobody consumes is a report, not a control (principle 1).
+
+## What a checkpoint does not absorb
+
+Two things look like escalation and are not checkpoints.
+
+**The halt.** A checkpoint is written to the record. The halt is the state in which nothing can be
+written, so it cannot be a checkpoint; it is announced off-Neotoma (rule 2), and the conditions that
+would have raised checkpoints during it (a lapse count reaching its cap, a deferral exhausted) are
+announced the same way and become checkpoints when the record returns.
+
+**Operator-only tasks.** A task whose action classes include `operator_only` is an ordinary task, claimed
+by the operator-facing agent and carried to the operator on the task path
+(`work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent`). Being operator-only is
+not a failure to advance; the task raises a checkpoint only when an action inside it reaches the action
+gate, which resolves `operator_only` to `NEVER` and holds the action (reason `gate_hold`).
 
 ## Refuse resume-by-replay where actions are consent-gated
 
@@ -88,10 +123,10 @@ mandatory (`work_model.md`).
 
 ## Contradictions this document settles
 
-**C5, the gate-state plan's body versus its decisions.** The plan body argues for a hardcoded gate list as
+**C5, the gate-state plan's body versus its decisions.** The plan body argues for a hardcoded step list as
 a floor the data may add to; the decisions map records `hardcoded_floor_proposal_is_retired`. Resolved: the
-retraction stands. Under a hard dependency an unreadable workflow means no step of it is claimed, so a
-code-side fallback has nothing to fall back for. The constants are consolidated as a correctness fix
+retraction stands. Under a hard dependency an unreadable workflow means no step of it is claimed and the
+tasks are checkpointed, so a code-side fallback has nothing to fall back for. The constants are consolidated as a correctness fix
 (`gates_and_workflows.md`), not as an availability fallback. A reader of the plan body gets the retracted
 design; this document is the corrected statement.
 
@@ -104,8 +139,8 @@ enforcement-point rule, and `status.md` lists the paths that still fail open.
 
 ## Prior art
 
-OTP supervision supplies the escalation rule for repeated failure: more than `MaxR` restarts in `MaxT`
-seconds and the supervisor stops itself; Ateles shares bounded-retry-then-escalate, not the in-process tree.
+OTP supervision supplies the rule for repeated failure: more than `MaxR` restarts in `MaxT` seconds and
+the supervisor stops itself; Ateles shares bounded-retry-then-checkpoint, not the in-process tree.
 XACML's `Indeterminate` and Cedar's default-deny are the posture for an unreachable policy source. SQS and
 `SKIP LOCKED` both assume at-least-once, which is why rule 4 leaves the prior state rather than writing a
 guess. Sources: `ent_08460968e6f49dac21510f4a`.

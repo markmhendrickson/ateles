@@ -354,6 +354,14 @@ class TestRealDocumentBudget:
     review prompts carry the contract they are supposed to enforce.
     """
 
+    @pytest.mark.xfail(
+        strict=False,
+        reason=(
+            "PR #745 revision 6: the operator directed that content settles before budget; the "
+            "kernel and vocabulary.md are over the caps until the operator's budget pass "
+            "(docs/foundation/status.md, 'Reading-list budget and keying')."
+        ),
+    )
     def test_real_documents_fit_reading_block_budget(self) -> None:
         """Every Always-read + keyed path on disk is ≤ MAX_DOC_CHARS;
         representative kernel and kernel+keyed reading_block() outputs have no
@@ -449,3 +457,53 @@ class TestRealDocumentBudget:
         )
         assert "docs/foundation/scenarios.md" not in members
         assert "docs/foundation/workflows.md" not in members
+
+
+# ── Vocabulary lint (docs/foundation/vocabulary.md Never / Not for) ──────────
+
+
+class TestVocabularyLint:
+    """The banned words in vocabulary.md are a control only if something fails on them
+    (principles.md invariant 1): this test runs the lint against the real documents and
+    fails on any Never hit."""
+
+    def _lint(self):
+        import importlib.util
+
+        script = _REPO_ROOT / "execution" / "scripts" / "check_foundation_vocabulary.py"
+        spec = importlib.util.spec_from_file_location("check_foundation_vocabulary", script)
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = mod  # dataclasses resolve annotations through sys.modules
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_zero_never_hits_in_foundation_prose(self) -> None:
+        mod = self._lint()
+        vocab = (_REPO_ROOT / "docs" / "foundation" / "vocabulary.md").read_text(encoding="utf-8")
+        never, not_for = mod.parse_bans(vocab)
+        assert never, "vocabulary.md declares no Never items; the lint would pass vacuously"
+        never_hits, _advisory = mod.scan(_REPO_ROOT, never, not_for)
+        assert never_hits == [], [
+            f"{h.file}:{h.line_no}: {h.ban.term}" for h in never_hits
+        ]
+
+    def test_lint_fails_on_a_planted_never_word(self, tmp_path: Path) -> None:
+        """Revert-the-fix check: a Never word in a foundation doc is reported as a hit."""
+        mod = self._lint()
+        fdir = tmp_path / "docs" / "foundation"
+        fdir.mkdir(parents=True)
+        (fdir / "vocabulary.md").write_text(
+            "# V\n\n### task\n**Definition:** x.\n**Never:** \"work item\", /\\bdispatch\\w*/.\n"
+            "**Not for:** \"ticket\" for a task.\n"
+        )
+        (fdir / "work_model.md").write_text(
+            "# W\n\nA work item is dispatched here. A ticket too.\nThe reaper is retired.\n"
+        )
+        (fdir / "status.md").write_text("# S\n\nwork item work item dispatch\n")
+        never, not_for = mod.parse_bans((fdir / "vocabulary.md").read_text())
+        never_hits, advisory = mod.scan(tmp_path, never, not_for)
+        assert sorted(h.ban.term for h in never_hits) == ["/\\bdispatch\\w*/", "work item"]
+        assert all(h.file.endswith("work_model.md") for h in never_hits)  # status.md skipped
+        assert [h.ban.term for h in advisory] == ["ticket"]
+        assert mod.main(["--root", str(tmp_path), "--quiet-advisory"]) == 1

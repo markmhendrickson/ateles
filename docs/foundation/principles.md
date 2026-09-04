@@ -30,7 +30,7 @@ that class exists, and which instances are missing, is `status.md`.
 ### 1. A mechanism that does not bind is not a control
 
 Before treating a linter, gate, review, verdict, or status as enforcement, name the thing that fails when it
-is violated. If nothing fails, it is reporting. A queue of approval requests that nothing consumes is a
+is violated. If nothing fails, it is reporting. A queue of checkpoints that nothing consumes is a
 report. Sources: #727 rule 1; synthesis PR-14 (analysis `ent_8104c890c581ccf9094eab25`).
 
 **Enforced by:** a blocking CI step per linter (`continue-on-error` is the anti-pattern); a review that
@@ -134,13 +134,14 @@ main and in the deployed checkout. Sources: agent_policy `ent_5456a8a2224d8211ef
 ### 11. State that needs a watchdog belongs in a relationship, not a field
 
 Prefer representing state as a relationship to another entity over a field on the entity, and insist on it
-wherever a field would need a watchdog, reaper, or reconciler to stay correct. A field asserts; an edge
+wherever a field would need a watchdog, a sweeper, or a reconciler to stay correct. A field asserts; an edge
 with its own timestamps is read, and what is read cannot go stale because the process that would have
 updated it died. The lease is the canonical case: an edge from principal to task with `expires_at`, whose
 `held` or `lapsed` state is derived at read time, needs no process to expire it; a `claimed_by` field on
-the task needs one. Aggregation, split, parent and child, the attachment of an action or an artifact to
-its task, and a step's state within a passage (open, claimed, or signed, read from the passage, a lease,
-and a sign-off) are edges for the same reason (`work_model.md`, `gates_and_workflows.md`). Sources: PR #745 operator review;
+the task needs one. A task's attachment to a batch, parent and child, the attachment of an action or an
+artifact to its task, a checkpoint's link to its subject, and a step's state within a batch (open,
+claimed, or signed, read from the batch, a lease, and a sign-off) are edges for the same reason
+(`work_model.md`, `gates_and_workflows.md`, `data_model.md`). Sources: PR #745 operator review;
 synthesis PR-02 and PR-05 (liveness derived, no assignment log) are earlier instances of the same rule.
 
 **Enforced by:** review of any schema change that adds a field whose correctness depends on a process

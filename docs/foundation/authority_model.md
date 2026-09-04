@@ -17,9 +17,10 @@ roadmap in `status.md` is a roadmap over it rather than a partition of it.
 
 ## Scope
 
-Every policy decision point and enforcement point, and the entities `agent_grant`, `execution_policy`,
-`agent_policy`, `checkpoint_brief`, the principal entity, and the edges below. The execution gate's decision
-function is `gates_and_workflows.md`; the posture for an unreachable policy source is `failure_posture.md`.
+Every policy decision point and enforcement point, and the entities `agent_grant`, `action_policy`,
+`agent_policy`, `checkpoint`, the principal entity, and the edges below. The action gate's decision
+function is `gates_and_workflows.md`; the posture for an unreachable policy source is `failure_posture.md`;
+how each is recorded is `data_model.md`.
 
 ## The tuple
 
@@ -29,9 +30,9 @@ Authority is `principal + domain + scope + action + conditions + time`.
 |---|---|---|
 | principal | the actor the authority belongs to (below) | the principal entity; an agent's `principal_binding` |
 | domain | the region the authority covers: entity types, repositories, a workflow, a queue | `agent_grant.capabilities`; `ownership_grant` |
-| scope | the operations within the domain, with per-tool parameter constraints | `agent_grant.capabilities`, `param_constraints`; `execution_policy.permission_scope` |
+| scope | the operations within the domain, with per-tool parameter constraints | `agent_grant.capabilities`, `param_constraints`; `action_policy.permission_scope` |
 | action | the class of an `action` entity, its `action_type`, resolved to a blast tier | `gating` (`gates_and_workflows.md`) |
-| conditions | confidence threshold, recurrence graduation, per-boundary checkpoints, `operator_only` | `execution_policy` |
+| conditions | confidence threshold, recurrence graduation, per-boundary checkpoints, `operator_only` | `action_policy` |
 | time | an expiry on every grant and delegation, evaluated at check time; the lease's `expires_at` is the same term on work | `agent_grant.expires_at`; `delegation_edge.expires_at` |
 
 The shape is ABAC (XACML; Cedar). The gate and the grant checker are the policy decision points; their call
@@ -101,9 +102,10 @@ using C's state under D's policy, and every hop is reconstructible.
 
 ## Approval
 
-An approval is an explicit yes, no, or veto by a required principal on a `checkpoint_brief`, ending in a
-terminal state; a timeout is a terminal state that never continues. The checkpoint records whom it awaits
-and who resolved it; resolution is authorized against the required approvers, not accepted from whoever
+An approval is an explicit yes, no, or veto by a required principal on a `checkpoint`, whose subject is
+an action held at the gate or a task the swarm cannot advance (`gates_and_workflows.md#the-checkpoint`),
+ending in a terminal state; a timeout is a terminal state that never continues. The checkpoint records
+whom it awaits and who resolved it; resolution is authorized against the required approvers, not accepted from whoever
 writes the status; the queue is scoped to the principals whose decision it awaits; a decline is
 attributed. Notification routes to a principal or a role through the roster and channel configuration
 within the tenant, never to one address for the whole swarm. No cross-principal auto-approve. Silence never

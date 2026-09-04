@@ -33,20 +33,25 @@ Kernel (always read):
 
 - [**Principles**](foundation/principles.md) — the eleven invariants, each with the class of mechanism that
   makes it bind.
-- [**Work model**](foundation/work_model.md) — pull over push; assignment constrains eligibility;
-  claim and lease as one primitive (lease as relationship); liveness derived at read time; no
-  assignment log; task status + lease `held` / `lapsed` / `returned` (never a push-model lifecycle on the task).
-- [**Gates and workflows**](foundation/gates_and_workflows.md) — `workflow` declares steps;
-  a `passage` carries tasks through them; step state from passage + lease + `sign-off`;
-  `step_status` projects; one step set; the PR-independent execution gate on confidence and three
-  blast tiers; the approval object.
+- [**Work model**](foundation/work_model.md) — pull as the only delivery; assignment constrains
+  eligibility; claim and lease as one primitive (lease as relationship); liveness derived at read time;
+  no assignment log; task status + lease `held` / `lapsed` / `returned`; tasks go through workflows in
+  batches; artifacts are records a batch leaves.
+- [**Gates and workflows**](foundation/gates_and_workflows.md) — `workflow` declares steps; a batch is
+  the tasks going through them and the record of that; step state from batch + lease + `sign-off`;
+  `step_status` projects; one step set; actions are entities and are taken through the PR-independent
+  action gate on confidence and three blast tiers; the checkpoint.
 
 Keyed (read when matching paths change — see `conformance.md`):
 
 - [**Failure posture**](foundation/failure_posture.md) — Neotoma as a hard dependency: halt work, never stop
   observing, announce off-Neotoma, read back every write, refuse resume-by-replay.
-- [**Vocabulary**](foundation/vocabulary.md) — compact canonical term index with forbidden synonyms,
-  grouped by the document that owns each.
+- [**Vocabulary**](foundation/vocabulary.md) — canonical terms, each with a definition, its related
+  terms, the words it bans outright (**Never**) and the senses it bans (**Not for**), grouped by the
+  document that owns each; linted by `execution/scripts/check_foundation_vocabulary.py`.
+- [**Data model**](foundation/data_model.md) — how each concept is recorded: entity type, key fields,
+  edges, derived reads, projections, and what is deliberately not a field; the relationships table; the
+  record conventions (observations, corrections, idempotency keys, schema versions, `raw_fragments`).
 - [**Conformance**](foundation/conformance.md) — how issue-based work binds to the foundation: the
   always-read kernel, the path-keyed reading list, the design-basis statement, the direction of truth per
   record class, and the rule that keeps state out of the foundation.
@@ -58,8 +63,8 @@ Keyed (read when matching paths change — see `conformance.md`):
 Authored companions (design prose; **not** inlined into review prompts):
 
 - [**Scenarios**](foundation/scenarios.md) — walkthroughs of the work model and gate model in motion
-  (claim/lease/lapse, assignment, aggregation); further scenarios in
-  [`scenarios_extended.md`](foundation/scenarios_extended.md).
+  (claim/lease/lapse, assignment, several tasks going through a workflow as one batch); further
+  scenarios in [`scenarios_extended.md`](foundation/scenarios_extended.md).
 - [**Workflows**](foundation/workflows.md) — designs of the core workflows (intake and successors);
   purpose, steps, fast paths — binds via `workflow` entities and `render_workflow_docs.py --check`.
 
@@ -103,8 +108,8 @@ Companion report (not a foundation design document; not in the review reading li
 
 *Run it daily; add agents and workflows.*
 
-- [**Gates and workflows**](foundation/gates_and_workflows.md) — `workflow` / `passage` / `sign-off` /
-  `step_status`, and the PR-independent execution gate (the former
+- [**Gates and workflows**](foundation/gates_and_workflows.md) — `workflow` / batch / `sign-off` /
+  `step_status`, and the PR-independent action gate (the former
   [`swarm_orchestration.md`](archive/swarm_orchestration.md) and
   [`swarm_hitl_checkpoints_design.md`](archive/swarm_hitl_checkpoints_design.md) are archived with pointers).
 - [**Agent execution runbook**](agent_execution_runbook.md) ·
