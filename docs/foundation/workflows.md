@@ -1,5 +1,9 @@
 # Workflows: the core workflows, each from its own purpose
 
+**Authored companion (not on the review reading list):** binds via the `workflow` entity for each
+(project, type) and `execution/scripts/render_workflow_docs.py --check`. Too large to inline under
+`MAX_DOC_CHARS` / `MAX_BLOCK_CHARS`; reviewers load the kernel + gates instead. See `conformance.md`.
+
 **Keyed document:** read when a `workflow` declaration, the workflow resolver, the pipeline's step
 sequencing, the gating paths, or this document change (`conformance.md`). **Kind:** foundation; states the
 design of each core workflow, why its steps exist, and what it hands its tasks to, and never the state of

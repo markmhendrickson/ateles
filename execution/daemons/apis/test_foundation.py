@@ -341,3 +341,111 @@ def test_default_root_is_the_repo_checkout(monkeypatch) -> None:
     monkeypatch.delenv("ATELES_FOUNDATION_ROOT", raising=False)
     assert foundation.foundation_root() == _REPO_ROOT
     assert (foundation.foundation_root() / CONFORMANCE_DOC).is_file()
+
+
+# ── Real-document reading-list budget (QA acceptance for foundation docs) ─────
+
+
+class TestRealDocumentBudget:
+    """Prove the committed docs/foundation/ files fit #744 caps without clip/omit.
+
+    Fixture-only budget tests (``test_budget_truncates_a_long_doc``) show ``_clip``
+    works. These assert the *real* reading-list members stay under the caps so
+    review prompts carry the contract they are supposed to enforce.
+    """
+
+    def test_real_documents_fit_reading_block_budget(self) -> None:
+        """Every Always-read + keyed path on disk is ≤ MAX_DOC_CHARS;
+        representative kernel and kernel+keyed reading_block() outputs have no
+        'truncated at' / '[omitted:' markers and len(block) ≤ MAX_BLOCK_CHARS."""
+        rl = load_reading_list(_REPO_ROOT)
+        assert rl is not None
+        docs = list(
+            dict.fromkeys([*rl.kernel, *(d for e in rl.keyed for d in e.docs)])
+        )
+        for doc in docs:
+            text = (_REPO_ROOT / doc).read_text(encoding="utf-8")
+            assert len(text) <= foundation.MAX_DOC_CHARS, (
+                doc,
+                len(text),
+                foundation.MAX_DOC_CHARS,
+            )
+        for paths in (
+            [],
+            ["lib/daemon_runtime/gating.py"],
+            ["lib/daemon_runtime/workflow_resolver.py"],
+            ["lib/daemon_runtime/task_claim.py"],
+            ["lib/daemon_runtime/agent_loader.py"],
+            ["lib/daemon_runtime/neotoma_reachability.py"],
+            [".claude/skills/foo/SKILL.md"],
+            ["docs/foundation/work_model.md"],
+            ["docs/foundation/workflows.md"],
+            ["docs/foundation/scenarios.md"],
+        ):
+            block = reading_block(list(paths), root=_REPO_ROOT)
+            assert "truncated at" not in block, paths
+            assert "[omitted:" not in block, paths
+            assert len(block) <= foundation.MAX_BLOCK_CHARS, (
+                paths,
+                len(block),
+                foundation.MAX_BLOCK_CHARS,
+            )
+
+    def test_status_md_is_never_selected(self) -> None:
+        """docs/foundation/status.md absent from kernel+keyed; select_readings
+        never returns it for [] / docs/foundation/ / skill / gating paths."""
+        rl = load_reading_list(_REPO_ROOT)
+        assert rl is not None
+        members = list(
+            dict.fromkeys([*rl.kernel, *(d for e in rl.keyed for d in e.docs)])
+        )
+        assert not any(m.endswith("status.md") for m in members)
+        for paths in (
+            [],
+            ["docs/foundation/x.md"],
+            [".claude/skills/foo/SKILL.md"],
+            ["lib/daemon_runtime/gating.py"],
+        ):
+            selected = [r.doc for r in select_readings(rl, paths, _REPO_ROOT)]
+            assert not any(d.endswith("status.md") for d in selected), paths
+
+    def test_real_keyed_rows_match_conformance_contracts(self) -> None:
+        """After dual-key fix: claim/lifecycle/watchdog/gating paths do NOT
+        select scenarios.md; docs/foundation/ selects conformance (and only
+        what conformance tables still name); skill path selects vocabulary
+        (or its ≤12k split)."""
+        rl = load_reading_list(_REPO_ROOT)
+        assert rl is not None
+        # scenarios / workflows are authored companions — never selected on runtime or foundation paths
+        for paths in (
+            ["lib/daemon_runtime/task_claim.py"],
+            ["lib/daemon_runtime/task_lifecycle.py"],
+            ["execution/daemons/apis/task_watchdog.py"],
+            ["lib/daemon_runtime/workflow_resolver.py"],
+            ["lib/daemon_runtime/gating.py"],
+            ["docs/foundation/work_model.md"],
+            ["docs/foundation/scenarios.md"],
+            ["docs/foundation/workflows.md"],
+        ):
+            selected = [r.doc for r in select_readings(rl, paths, _REPO_ROOT)]
+            assert "docs/foundation/scenarios.md" not in selected, paths
+            assert "docs/foundation/workflows.md" not in selected, paths
+        foundation_docs = [
+            r.doc
+            for r in select_readings(
+                rl, ["docs/foundation/work_model.md"], _REPO_ROOT
+            )
+        ]
+        assert CONFORMANCE_DOC in foundation_docs
+        skill_docs = [
+            r.doc
+            for r in select_readings(
+                rl, [".claude/skills/foo/SKILL.md"], _REPO_ROOT
+            )
+        ]
+        assert "docs/foundation/vocabulary.md" in skill_docs
+        members = list(
+            dict.fromkeys([*rl.kernel, *(d for e in rl.keyed for d in e.docs)])
+        )
+        assert "docs/foundation/scenarios.md" not in members
+        assert "docs/foundation/workflows.md" not in members
