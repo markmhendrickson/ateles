@@ -3,15 +3,24 @@
 
 `docs/foundation/vocabulary.md` ends every term entry with two lists:
 
-    **Never:** "chip", "work item", /\\bdispatch\\w*/, "executing".
-    **Not for:** "ticket" for a task; "owner" alone; /\\bopen\\s+pool\\b/ ("open" for claimable).
+    **Never:** "chip", "work item", "executing".
+    **Not for:** "ticket" for a task; "owner" alone.
 
 Never items are banned in every sense: a hit anywhere in the foundation prose fails the check (exit 1),
 printed as ``file:line``. Not-for items are banned in the stated sense only: a hit is advisory, printed
 with the sense so the author can judge it, and never fails the check.
 
-An item written ``/.../`` is a regular expression (case insensitive). Any other item is a whole-word,
-case-insensitive match in which a space also matches a hyphen (``"in flight"`` matches ``in-flight``).
+Two sources feed the ban list, and they are deliberately separate:
+
+* **The vocabulary's prose.** Each quoted phrase in a Never or Not-for list is a banned item, matched as a
+  whole word, case insensitively, with a space also matching a hyphen (``"in flight"`` matches
+  ``in-flight``). The vocabulary states forbidden words in words a person reads.
+* **``PATTERNS`` below.** The bans that need more than a phrase — a sense distinction, an inflection set, a
+  span between two words — live here as regular expressions, keyed by the ``###`` entry heading they belong
+  to and by class (Never or Not-for). They used to be written inline in the vocabulary, which put regex
+  syntax into a foundation document a person is meant to read. The prose still states the ban; this table
+  holds the machinery. ``test_foundation.py`` asserts every key here names an entry that still exists in
+  ``vocabulary.md``, so renaming a term fails the test rather than silently un-linting itself.
 
 Lines not scanned: any line carrying a Never or Not-for list; any line containing "retired" (a retired
 name may be named where it is retired); in vocabulary.md, the continuation lines of a wrapped Never or
@@ -42,6 +51,108 @@ _NEVER_MARK = "**Never:**"
 _NOT_FOR_MARK = "**Not for:**"
 _QUOTED_RE = re.compile(r'"([^"]+)"')
 _REGEX_ITEM_RE = re.compile(r"(?<![\w`])/((?:\\/|[^/])+)/(?![\w`])")
+
+# Regex bans, keyed by the ``### heading`` in vocabulary.md that states them in prose, then by class.
+# Each item is (regex source, sense) — the sense is printed with a Not-for advisory and ignored for Never.
+# Every key must name an entry that exists in vocabulary.md; test_foundation.py asserts that, so a term
+# rename fails loudly instead of quietly dropping the ban.
+PATTERNS: dict[str, dict[str, list[tuple[str, str]]]] = {
+    "execute (a task)": {
+        "never": [
+            (r"\bworked\b(?!\s+on\b)", ""),
+            (r"\bwork(?:s|ing)?\s+(?:a|an|the|that|its|each|every|one|this|those|these)\s+tasks?\b", ""),
+            (r"\btasks?\s+(?:is|are|was|were|be|been|being)\s+worked\b", ""),
+            (r"`executing`", ""),
+            (r"\b(?:is|are|was|were|status|state|stays?|stayed)\s+executing\b", ""),
+            (r"\bexecuting\s+(?:status|state|flag)\b", ""),
+        ],
+    },
+    "claim": {
+        "never": [
+            (r"\bdispatch\w*", ""),
+            (r"\bpick(?:s|ed|ing)?[\s-]up\b", ""),
+            (r"\bhand(?:s|ed|ing)?[\s-]off\b", ""),
+            (r"\bpush(?:es|ed|ing)?\b", ""),
+            (r"\bspawn\w*\b", ""),
+        ],
+    },
+    "claimant": {
+        "not_for": [
+            (
+                r"(?<!step )(?<!plan )(?<!grant )(?<!business )(?<!current )(?<!routed )\bowners?\b",
+                "owner alone, for the claimant or anything else",
+            ),
+            (r"(?<!lease )\bholders?\b", "holder without the lease"),
+        ],
+    },
+    "held": {
+        "not_for": [
+            (r"\bstatus\s+(?:of\s+|=\s*|is\s+)?`?claimed`?", "claimed as a stored task status"),
+        ],
+    },
+    "returned": {
+        "never": [
+            (r"\blease\w*\s+(?:is|are|was|were|be|been|being|gets?|got)\s+released\b", ""),
+            (
+                r"\breleas(?:e|es|ed|ing)\s+(?:a|an|the|its|their|one|any|each|every|expired|lapsed)"
+                r"\s+(?:\w+\s+)?leases?\b",
+                "",
+            ),
+        ],
+        "not_for": [
+            (r"\breleas\w*\b[^.;:]{0,30}\bleases?\b", "release for a lease"),
+            (r"\bleases?\b[^.;:]{0,30}\breleas\w*", "release for a lease"),
+        ],
+    },
+    "claimable": {
+        "not_for": [
+            (r"\bopen\s+(?:tasks?|pool)\b", "open for claimable; `open` is a status value"),
+            (r"\btasks?\s+(?:is|are)\s+open\b", "open for claimable; `open` is a status value"),
+        ],
+    },
+    "batch": {
+        "never": [
+            (r"\b(?:a|an|the|one|this|that|each|every)\s+splits?\b", ""),
+            (r"\bsplit-?outs?\b", ""),
+        ],
+    },
+    "step": {
+        "not_for": [
+            (
+                r"\b(?:pm|ux|arch|impl|pr_review|qa|legal|merge|review|release)\s+(?:gate|phase|check)\b",
+                "gate, phase or check for a step; `gate` is the action gate",
+            ),
+            (
+                r"\bgates?\s+(?:owner|name|set|sequence|list)s?\b",
+                "gate, phase or check for a step; `gate` is the action gate",
+            ),
+            (r"\bcheckpoint\s+step\b", "checkpoint for a step"),
+            (r"\bstep\s+(?:named\s+)?`?checkpoint`?", "checkpoint for a step"),
+        ],
+    },
+    "take (an action)": {
+        "never": [
+            (r"\bexecut\w*\b[^.;:]{0,40}\bactions?\b", ""),
+            (r"\bactions?\b[^.;:]{0,40}\bexecut\w*", ""),
+            (r"\bauto-?execut\w*", ""),
+        ],
+    },
+    "checkpoint": {
+        "not_for": [
+            (r"\bcheckpoint\s+step\b", "checkpoint for a step"),
+        ],
+    },
+    "escalate": {
+        "never": [
+            (r"`escalations?`", ""),
+            (r"\bescalation\s+(?:entity|entities|record|schema|object)s?\b", ""),
+            (
+                r"\b(?:an|one|raises?|raised|raising|writes?|written|wrote)\s+(?:aggregated\s+)?escalations?\b",
+                "",
+            ),
+        ],
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -150,7 +261,42 @@ def parse_bans(vocab_text: str) -> tuple[list[Ban], list[Ban]]:
                 never.append(Ban(term, pattern, "", entry))
             else:
                 not_for.append(Ban(term, pattern, _sense_for(list_text, term), entry))
+    # PATTERNS is attached per entry, not per list, so an entry whose prose list is empty (or absent)
+    # still carries its regex bans. An entry the text does not declare contributes nothing: the table
+    # describes this vocabulary, and ``missing_pattern_entries`` is what reports a key gone stale.
+    entries = _entry_headings(vocab_text)
+    for entry, by_kind in PATTERNS.items():
+        if entry not in entries:
+            continue
+        for kind, items in by_kind.items():
+            for source, sense in items:
+                try:
+                    pattern = re.compile(source, re.IGNORECASE)
+                except re.error as exc:  # a bad regex in the table is a defect in the table
+                    raise SystemExit(
+                        f"check_foundation_vocabulary.py: bad PATTERNS regex /{source}/: {exc}"
+                    ) from exc
+                ban = Ban(f"/{source}/", pattern, "" if kind == "never" else sense, entry)
+                (never if kind == "never" else not_for).append(ban)
     return never, not_for
+
+
+def _entry_headings(vocab_text: str) -> set[str]:
+    """Every ``### heading`` in the vocabulary, as written."""
+    return {
+        line.strip()[4:].strip() for line in vocab_text.splitlines() if line.strip().startswith("### ")
+    }
+
+
+def missing_pattern_entries(vocab_text: str) -> list[str]:
+    """PATTERNS keys that no longer name a ``###`` entry in vocabulary.md.
+
+    A term rename that leaves a key behind silently un-lints that term's regex bans, because nothing in
+    the vocabulary carries them any more. ``test_foundation.py`` asserts this list is empty against the
+    real document; ``main`` refuses to report a pass with a stale key.
+    """
+    entries = _entry_headings(vocab_text)
+    return sorted(k for k in PATTERNS if k not in entries)
 
 
 def _scannable(line: str, *, is_vocab: bool) -> bool:
@@ -210,7 +356,10 @@ def main(argv: list[str] | None = None) -> int:
     if not vocab_path.is_file():
         print(f"no {vocab_path}; nothing to check")
         return 0
-    never, not_for = parse_bans(vocab_path.read_text(encoding="utf-8"))
+    vocab_text = vocab_path.read_text(encoding="utf-8")
+    for key in missing_pattern_entries(vocab_text):
+        print(f"PATTERNS key {key!r} names no ### entry in {VOCABULARY}; its regex bans are not applied")
+    never, not_for = parse_bans(vocab_text)
     if not never:
         print("vocabulary.md declares no Never items; the check would pass vacuously")
         return 1

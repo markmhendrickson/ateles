@@ -488,6 +488,41 @@ class TestVocabularyLint:
             f"{h.file}:{h.line_no}: {h.ban.term}" for h in never_hits
         ]
 
+    def test_every_pattern_key_still_names_an_entry(self) -> None:
+        """A renamed term must fail here rather than silently un-lint itself.
+
+        The regex bans live in the checker's PATTERNS table, keyed by the ``### heading`` whose prose
+        states them. Rename or delete that heading and the key goes stale: the vocabulary would still
+        read as if the ban existed while nothing enforced it.
+        """
+        mod = self._lint()
+        vocab = (_REPO_ROOT / "docs" / "foundation" / "vocabulary.md").read_text(encoding="utf-8")
+        assert mod.missing_pattern_entries(vocab) == []
+
+    def test_pattern_bans_reach_the_ban_lists(self) -> None:
+        """Every PATTERNS item is compiled into the class it is keyed under."""
+        mod = self._lint()
+        vocab = (_REPO_ROOT / "docs" / "foundation" / "vocabulary.md").read_text(encoding="utf-8")
+        never, not_for = mod.parse_bans(vocab)
+        by_kind = {"never": {b.pattern.pattern for b in never}, "not_for": {b.pattern.pattern for b in not_for}}
+        for entry, kinds in mod.PATTERNS.items():
+            for kind, items in kinds.items():
+                for source, _sense in items:
+                    assert source in by_kind[kind], f"{entry} / {kind}: /{source}/ never reached the ban list"
+
+    def test_the_vocabulary_carries_no_regex_syntax(self) -> None:
+        """The vocabulary is prose a person reads; the matching machinery lives in the checker.
+
+        Regression guard for PR #745 revision 11: five Never lines rendered raw regex on GitHub.
+        """
+        vocab = (_REPO_ROOT / "docs" / "foundation" / "vocabulary.md").read_text(encoding="utf-8")
+        offenders = [
+            f"{no}: {line.strip()[:100]}"
+            for no, line in enumerate(vocab.splitlines(), 1)
+            if any(tok in line for tok in ("\\b", "\\w", "\\s", "(?:", "(?!", "(?<"))
+        ]
+        assert offenders == [], offenders
+
     def test_lint_fails_on_a_planted_never_word(self, tmp_path: Path) -> None:
         """Revert-the-fix check: a Never word in a foundation doc is reported as a hit."""
         mod = self._lint()

@@ -50,12 +50,18 @@ Each entry ends with two lists, read by `execution/scripts/check_foundation_voca
 (`conformance.md#mechanical-checks-on-this-directory`):
 
 - **Never:** bare words and phrases banned in all foundation prose, in every sense. A hit fails the check.
-  An item written `/…/` is a regular expression; every other item is matched as a whole word, case
-  insensitive; a phrase matches across a space or a hyphen. A line that carries a Never or Not-for list,
-  or the word "retired", is not scanned, and neither is a table row of this file (the Verbs, Owner, and
-  Retired tables name banned words on purpose).
+  Each quoted item is matched as a whole word, case insensitive; a phrase matches across a space or a
+  hyphen. A line that carries a Never or Not-for list, or the word "retired", is not scanned, and neither
+  is a table row of this file (the Verbs, Owner, and Retired tables name banned words on purpose).
 - **Not for:** words allowed in some senses and banned in the stated one. A hit is advisory: the check
   lists it, and the author judges the sense.
+
+Both lists are prose, and they are read as prose. Some bans need more than a phrase — an inflection set, a
+sense distinction, a span between two words — and those are held as regular expressions in the checker's
+own `PATTERNS` table, keyed by the entry heading above them, so that no regex syntax appears in this
+document. The entry states the ban in words; the checker holds the machinery for matching it. A test
+asserts every key in that table still names an entry here, so renaming a term fails loudly rather than
+quietly dropping its ban.
 
 ## Work model (`work_model.md`)
 
@@ -72,10 +78,9 @@ machine, C1).
 **Definition:** to claim a task, do its work, and complete it.
 Tasks are executed; actions are taken. Plain synonyms in prose: do, work on.
 **See:** [`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`](gates_and_workflows.md#actions-are-entities-only-actions-are-taken).
-**Never:** /\bworked\b(?!\s+on\b)/, /\bwork(?:s|ing)?\s+(?:a|an|the|that|its|each|every|one|this|those|these)\s+tasks?\b/,
-/\btasks?\s+(?:is|are|was|were|be|been|being)\s+worked\b/, /`executing`/,
-/\b(?:is|are|was|were|status|state|stays?|stayed)\s+executing\b/, /\bexecuting\s+(?:status|state|flag)\b/ (executing as
-a state).
+**Never:** worked, in any form, of a task — a task is executed, and the only permitted use of the verb is
+work on; executing as a state, status, or flag — executing is what an agent is doing, never a value the
+record holds.
 **Not for:** run for a task; process for a task.
 
 ### artifact
@@ -102,8 +107,8 @@ atomic among concurrent claimants and keyed on the task or the step.
 **Use:** "Corvus claims a task that is eligible for it: `assigned_to` is unset or names Corvus, and no
 lease is held. The claim, not the assignment, makes Corvus the claimant."
 **See:** [`work_model.md#the-claim-and-the-lease-are-one-primitive`](work_model.md#the-claim-and-the-lease-are-one-primitive).
-**Never:** /\bdispatch\w*/, /\bpick(?:s|ed|ing)?[\s-]up\b/, /\bhand(?:s|ed|ing)?[\s-]off\b/,
-/\bpush(?:es|ed|ing)?\b/, /\bspawn\w*\b/ (a runner is started; work is claimed).
+**Never:** dispatch, pick up, hand off, push, and spawn, in any of their forms — a runner is started; work
+is claimed.
 **Not for:** assign for a claim (an eligibility constraint, which creates no lease).
 
 ### claimant
@@ -111,8 +116,9 @@ lease is held. The claim, not the assignment, makes Corvus the claimant."
 from a task field.
 **See:** [`work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields`](work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields).
 **Never:** "assignee" (say: the principal the assignment names, who has not necessarily claimed).
-**Not for:** /(?<!step )(?<!plan )(?<!grant )(?<!business )(?<!current )(?<!routed )\bowners?\b/ alone, for the
-claimant or anything else; /(?<!lease )\bholders?\b/ ("holder" without the lease).
+**Not for:** owner standing alone, for the claimant or for anything else — the word carries five meanings
+and always takes its qualifier (step owner, plan owner, grant owner, business owner, current owner, routed
+owner); holder without the lease in front of it.
 
 ### assign
 **Definition:** the act by which a principal restricts a task's eligibility to one named principal by
@@ -137,7 +143,8 @@ renews the lease; it is not the lease).
 **Definition:** the lease state, derived at read time, in which `expires_at` is in the future.
 **See:** [`work_model.md#the-transition-vocabulary`](work_model.md#the-transition-vocabulary).
 **Never:** —
-**Not for:** "locked" for a held lease; /\bstatus\s+(?:of\s+|=\s*|is\s+)?`?claimed`?/ ("claimed" as a stored task status).
+**Not for:** "locked" for a held lease; claimed as a stored task status (the lease is what is claimed, and
+it is read back, never stored on the task).
 
 ### lapsed
 **Definition:** the lease state, derived at read time, in which `expires_at` has passed and the claimant
@@ -152,12 +159,10 @@ on the lease.
 **Definition:** the lease state in which the claimant ended the lease explicitly, on completion or on
 failure.
 **See:** [`work_model.md#the-transition-vocabulary`](work_model.md#the-transition-vocabulary).
-**Never:** /\blease\w*\s+(?:is|are|was|were|be|been|being|gets?|got)\s+released\b/,
-/\breleas(?:e|es|ed|ing)\s+(?:a|an|the|its|their|one|any|each|every|expired|lapsed)\s+(?:\w+\s+)?leases?\b/
-(collides with the `release` step and the software release), "surrendered" (expiry is not volitional and
-gets no such word).
-**Not for:** /\breleas\w*\b[^.;:]{0,30}\bleases?\b/ and /\bleases?\b[^.;:]{0,30}\breleas\w*/ ("release"
-for a lease).
+**Never:** released, of a lease, in either voice — a lease is returned, because release collides with the
+`release` step and with a software release; "surrendered" (expiry is not volitional and gets no such
+word).
+**Not for:** release, in any form, anywhere near a lease — a lease is returned.
 
 ### active
 **Definition:** the derived read that a held lease has activity entities, such as an `agent_session` or
@@ -180,8 +185,8 @@ The task's own transition vocabulary is `created` plus its status; lease transit
 `assigned_to` is unset or names the would-be claimant, and on which no lease is held.
 **See:** [`work_model.md#what-a-claim-predicate-treats-as-claimable`](work_model.md#what-a-claim-predicate-treats-as-claimable).
 **Never:** —
-**Not for:** "available" for claimable; /\bopen\s+(?:tasks?|pool)\b/ and /\btasks?\s+(?:is|are)\s+open\b/
-("open" for claimable; `open` is a status value).
+**Not for:** "available" for claimable; open for claimable, whether as an open task, an open pool, or a
+task said to be open — `open` is a status value and means something else.
 
 ### terminal
 **Definition:** a status value after which a task, a batch, or a checkpoint changes no further.
@@ -235,8 +240,8 @@ Reads: "the tasks entered the feature workflow", "the batch is at `qa`", "the ba
 `qa`", "the tasks leave the workflow when `merge` is signed off".
 **See:** [`work_model.md#what-goes-through-a-workflow-is-a-batch-of-tasks`](work_model.md#what-goes-through-a-workflow-is-a-batch-of-tasks),
 [`data_model.md#concepts`](data_model.md#concepts).
-**Never:** "passage", "workflow_run", "aggregation", /\b(?:a|an|the|one|this|that|each|every)\s+splits?\b/,
-/\bsplit-?outs?\b/ (aggregation and split are retired as nouns; the verbs are attach and detach).
+**Never:** "passage", "workflow_run", "aggregation"; split as a noun, and split-out in any form
+(aggregation and split are retired as nouns; the verbs are attach and detach).
 **Not for:** run for a batch; instance for a batch, unqualified; bundle for a batch.
 
 ### parent task
@@ -294,9 +299,9 @@ Step names are data (`pm`, `ux`, `arch`, `impl`, `pr_review`, `qa`, `legal`, `re
 declares).
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
 **Never:** "gate owner".
-**Not for:** /\b(?:pm|ux|arch|impl|pr_review|qa|legal|merge|review|release)\s+(?:gate|phase|check)\b/ and
-/\bgates?\s+(?:owner|name|set|sequence|list)s?\b/ ("gate", "phase", "check" for a step; `gate` is the action
-gate); /\bcheckpoint\s+step\b/ and /\bstep\s+(?:named\s+)?`?checkpoint`?/ ("checkpoint" for a step).
+**Not for:** gate, phase, or check for a step — neither after a step name (a qa gate, an impl phase) nor
+in front of a step's own attributes (a gate owner, a gate sequence); `gate` is the action gate. Also not
+checkpoint for a step, in either order.
 
 ### stage
 **Definition:** a named group of contiguous steps in a workflow, such as the review stage or the release
@@ -472,8 +477,8 @@ creation; an internal operational write to Neotoma is not an action.
 **Definition:** to carry out an action's effect outside the system once the action gate permits it.
 Actions are taken; tasks are executed.
 **See:** [`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`](gates_and_workflows.md#actions-are-entities-only-actions-are-taken).
-**Never:** /\bexecut\w*\b[^.;:]{0,40}\bactions?\b/, /\bactions?\b[^.;:]{0,40}\bexecut\w*/,
-/\bauto-?execut\w*/.
+**Never:** execute, in any form, anywhere near an action — an action is taken, never executed; and
+auto-execute, in any form, spelled with or without the hyphen.
 **Not for:** "fire" or "perform" for an action.
 
 ### action_type
@@ -528,8 +533,8 @@ retired from the name for the same reason as `_record` and `_definition`.
 [`failure_posture.md#what-a-checkpoint-does-not-absorb`](failure_posture.md#what-a-checkpoint-does-not-absorb),
 [`data_model.md#concepts`](data_model.md#concepts).
 **Never:** "checkpoint_brief", "approval request".
-**Not for:** /\bcheckpoint\s+step\b/ ("checkpoint" for a step); checkpoint for the halt (the halt is not a
-checkpoint: nothing can be written).
+**Not for:** checkpoint for a step; checkpoint for the halt (the halt is not a checkpoint: nothing can be
+written).
 
 ### steward
 **Definition:** the pipeline role that merges a pull request once every required step is signed off and
@@ -845,9 +850,9 @@ One decision queue, one resolution protocol: a checkpoint on a task is resolved 
 action is (principle 6, do not build a second gate).
 **See:** [`failure_posture.md#repeated-lapse-raises-a-checkpoint`](failure_posture.md#repeated-lapse-raises-a-checkpoint),
 [`failure_posture.md#what-a-checkpoint-does-not-absorb`](failure_posture.md#what-a-checkpoint-does-not-absorb).
-**Never:** /`escalations?`/, /\bescalation\s+(?:entity|entities|record|schema|object)s?\b/,
-/\b(?:an|one|raises?|raised|raising|writes?|written|wrote)\s+(?:aggregated\s+)?escalations?\b/ (the
-entity is the checkpoint).
+**Never:** escalation as a thing that is raised, written, or counted — as an entity, a record, a schema, or
+an object, and as the code-font `escalation` type name. Escalate is the verb; the entity it writes is the
+checkpoint.
 **Not for:** page for a checkpoint (one delivery of it); alert for a checkpoint.
 
 ## Data model (`data_model.md`)
