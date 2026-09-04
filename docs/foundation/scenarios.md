@@ -162,9 +162,8 @@ flowchart LR
 
 Scenarios (e)–(j) — split-out, parent/child, operator-only claim, mid-workflow action at NEVER/HIGH/LOW,
 halt on unreachable Neotoma, and intake→successor routing — live in
-[`scenarios_extended.md`](scenarios_extended.md). That companion is **not** on the review reading list;
-runtime paths load the kernel (and gates) instead. Key this file only when `docs/foundation/scenarios.md`
-itself changes (`conformance.md`).
+[`scenarios_extended.md`](scenarios_extended.md). Neither this file nor that companion is on the review
+reading list; runtime paths load the kernel (and gates) instead (`conformance.md`).
 
 ## What the scenarios do not show
 
