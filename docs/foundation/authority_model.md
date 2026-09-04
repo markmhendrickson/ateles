@@ -6,8 +6,8 @@ undecided question **open** with its options, never resolving one to make the do
 **Derived from:** the README's Vision section (the tuple, the object set), ateles#378 (the operator-authored
 section as decision; the swarm-spec section as proposal), synthesis `ent_b0ce322f768e4fc676b73139` (PR-20
 to PR-28, PR-34 to PR-38, C8, C9, C10, C13, C14, C17), prior art `ent_08460968e6f49dac21510f4a` (Track 2),
-the P4 brief `ent_683200acfb3ff5f03add966c`, and `docs/multi_tenant.md`. What is built, and where the
-substrate fails open, is `status.md`.
+the P4 brief `ent_683200acfb3ff5f03add966c`, `docs/multi_tenant.md`, and PR #745 operator review
+(2026-09-04). What is built, and where the substrate fails open, is `status.md`.
 
 ## Purpose
 
@@ -30,9 +30,9 @@ Authority is `principal + domain + scope + action + conditions + time`.
 | principal | the actor the authority belongs to (below) | the principal entity; an agent's `principal_binding` |
 | domain | the region the authority covers: entity types, repositories, a workflow, a queue | `agent_grant.capabilities`; `ownership_grant` |
 | scope | the operations within the domain, with per-tool parameter constraints | `agent_grant.capabilities`, `param_constraints`; `execution_policy.permission_scope` |
-| action | the declared `action_type`, resolved to a blast tier | `gating` (`gates_and_workflows.md`) |
+| action | the class of an `action` entity, its `action_type`, resolved to a blast tier | `gating` (`gates_and_workflows.md`) |
 | conditions | confidence threshold, recurrence graduation, per-boundary checkpoints, `operator_only` | `execution_policy` |
-| time | an expiry on every grant and delegation, evaluated at check time; the lease is the same term on work | `agent_grant.expires_at`; `delegation_edge.expires_at` |
+| time | an expiry on every grant and delegation, evaluated at check time; the lease's `expires_at` is the same term on work | `agent_grant.expires_at`; `delegation_edge.expires_at` |
 
 The shape is ABAC (XACML; Cedar). The gate and the grant checker are the policy decision points; their call
 sites are enforcement points. Every decision is `Permit`, `Deny`, or `Indeterminate`, and an enforcement
@@ -65,7 +65,8 @@ scoping at the access layer; per-tenant AAuth namespacing; no cross-tenant read,
 reuse (`multi_tenant.md` sections 2 and 3). Open: section 7's five decisions.
 
 **Ownership.** Named accountability for a workflow, domain, queue, or configuration entity, as an edge from
-the object to a principal (`ownership_grant`), never over a routing keyword. Open (brief Q7): what owning
+the object to a principal (`ownership_grant`), never over a routing keyword. A step owner is ownership of
+one step of one workflow; a claimant is not an owner (`vocabulary.md`). Open (brief Q7): what owning
 confers, sole decision below the domain's blast tier, a required seat above it and on cross-domain
 actions, or both.
 
@@ -76,7 +77,7 @@ types × repositories with parameter constraints; a human's grant is bound to a 
 a wildcard. The per-agent pattern is the template a principal dimension extends: a loader keyed on the
 agent name, a grant checker and a tool proxy keyed on the `sub`, a per-agent keypair threaded into signed
 writes, a per-agent policy override, per-agent GitHub logins, a workflow resolved per project. A failed
-agent-definition load is a stub: the loader marks it, and no caller dispatches one (principle 5); a stub
+agent-definition load is a stub: the loader marks it, and no caller spawns one (principle 5); a stub
 with a wildcard tool allowlist is the fail-open shape.
 
 ## Attribution
@@ -92,11 +93,11 @@ A delegation is a scoped, time-bounded transfer of action rights, recorded as an
 delegator, delegate, scope, expiry) so the chain is readable. Each hop attenuates: the delegate's authority
 is a subset of the delegator's, restrictions only added (macaroons), enforced by reading the chain in the
 record while the record is single and central. Delegation is not impersonation: A acting for B is recorded
-as A-for-B (RFC 8693), never as B. A delegate running on its own full standing grant is the failure this
+as A-for-B (RFC 8693), never as B. A delegate acting on its own full standing grant is the failure this
 section forbids. The `authority_chain` is a derived read model over delegation edges, grants, and
 checkpoints, tenant-filtered per hop, never stored. The acceptance test for any design here is the
-hardest-problem chain: A delegates to X, X dispatches Y, Y's action needs B's approval, using C's state
-under D's policy, and every hop is reconstructible.
+hardest-problem chain: A delegates to X, X assigns a task that Y claims, Y's action needs B's approval,
+using C's state under D's policy, and every hop is reconstructible.
 
 ## Approval
 
@@ -141,7 +142,7 @@ stored object or a read model.
 
 **C9**: open, deliberately, above. **C14** and **C17**: delegation attenuates; `Indeterminate` is deny.
 **C8**: attribution is per agent by design; whether a write is traced to a per-agent signature is
-`status.md`. **C13**: open, above. **C19** (#378's gate map says implement while the plan says design) is
+`status.md`. **C13**: open, above. **C19** (#378's step map says implement while the plan says design) is
 a state of two records, not a design question: `status.md`.
 
 ## Prior art

@@ -2,23 +2,24 @@
 
 **Kernel document:** read on every review (`conformance.md`). **Kind:** foundation; states the design and
 never the state of a checkout. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` (phase 0 of plan
-`ent_533d4ec2f7bfb60f66fb3fce`), prior art `ent_08460968e6f49dac21510f4a` (phase 3), ateles#727, and the
-decision keys cited per invariant. Which mechanisms exist on a given checkout, and where nothing fires, is
+`ent_533d4ec2f7bfb60f66fb3fce`), prior art `ent_08460968e6f49dac21510f4a` (phase 3), ateles#727, the
+decision keys cited per invariant, and PR #745 operator review (2026-09-04). Which mechanisms exist on a given checkout, and where nothing fires, is
 measured in `status.md`, not here.
 
 ## Purpose
 
 State the invariants issue-based work in this repository conforms to, and for each the kind of mechanism
 that makes it bind. An invariant with no enforcing mechanism is applied by a reviewer by hand, and the first
-invariant says why that difference must never be papered over. The arch gate and the review lenses read
+invariant says why that difference must never be papered over. The arch lens and the other review lenses read
 this document on every review.
 
 ## Scope
 
-Ten invariants. The first six are the rules ateles#727 put in `CLAUDE.md` for interactive sessions
+Eleven invariants. The first six are the rules ateles#727 put in `CLAUDE.md` for interactive sessions
 (throughput plan `ent_18b902cf72822373f9da8ced`, decision
-`verification_discipline_principles_and_where_they_bind`), which do not bind dispatched agents; this is the
-copy the gates read. The last four are consolidated from stored decisions. Authority and delegation
+`verification_discipline_principles_and_where_they_bind`), which do not bind agents the swarm spawns; this
+is the copy the review lenses read. The last five are consolidated from stored decisions and the operator review of
+this foundation. Authority and delegation
 invariants are `authority_model.md`; the posture when the record is unreachable is `failure_posture.md`.
 
 **Enforced by** names the class of mechanism that makes the invariant a control. Whether an instance of
@@ -84,9 +85,11 @@ default-deny at every policy enforcement point (`authority_model.md`).
 Search the code, not memory of it, before building; reuse the existing entity or relationship type; keep a
 name that is already accurate. Sources: #727 rule 6; throughput `gate_machinery_is_already_pr_independent`
 (the consent gate for outbound content already existed); gate-state plan `ent_4222e5d52edd9bdba7b78cc1`
-`keep_the_name_workflow_definition`; agent_policy `ent_4d34c6f96312be686f572add`.
+`keep_the_name_workflow_definition` (cited for the rule, keep an accurate name; its particular example is
+reversed in `gates_and_workflows.md`, because the name was not accurate); agent_policy
+`ent_4d34c6f96312be686f572add`.
 
-**Enforced by:** the prior-art contract on the dispatched-prompt path (`SWARM_PRIOR_ART_CONTRACT`) and the
+**Enforced by:** the prior-art contract on the spawned-prompt path (`SWARM_PRIOR_ART_CONTRACT`) and the
 design-basis check on every issue and PR (`conformance.md`).
 
 ### 7. Unknown stays distinct from a verdict
@@ -114,7 +117,7 @@ in `status.md` carries its as-of date and instrument, and that document is regen
 A value the swarm reads has one home. When a copy is needed for import hygiene, derive it at import time or
 assert equality in a test. Sources: gate-state `four_divergent_copies_of_the_gate_set`; synthesis PR-07;
 throughput `positive_design_rules_strengthen_existing_ones_not_new_ones`; the no-transition-log and
-no-dispatch-log decisions are the same rule applied to history.
+no-assignment-log decisions are the same rule applied to history.
 
 **Enforced by:** a hardcoded-config linter in the lint path; a parity test wherever a copy is unavoidable;
 the direction-of-truth table in `conformance.md`.
@@ -128,17 +131,31 @@ main and in the deployed checkout. Sources: agent_policy `ent_5456a8a2224d8211ef
 **Enforced by:** the checkout-drift check at daemon start; the read-back of terminal release status
 (invariant 2). A PR's path from open to deployed has no single tracker; the owning session is the mechanism.
 
+### 11. State that needs a watchdog belongs in a relationship, not a field
+
+Prefer representing state as a relationship to another entity over a field on the entity, and insist on it
+wherever a field would need a watchdog, reaper, or reconciler to stay correct. A field asserts; an edge
+with its own timestamps is read, and what is read cannot go stale because the process that would have
+updated it died. The lease is the canonical case: an edge from principal to task with `expires_at`, whose
+`held` or `lapsed` state is derived at read time, needs no process to expire it; a `claimed_by` field on
+the task needs one. Aggregation, split, parent and child, and the attachment of an action to its task are
+edges for the same reason (`work_model.md`, `gates_and_workflows.md`). Sources: PR #745 operator review;
+synthesis PR-02 and PR-05 (liveness derived, no assignment log) are earlier instances of the same rule.
+
+**Enforced by:** review of any schema change that adds a field whose correctness depends on a process
+staying alive; the design-basis check names this invariant when such a field is proposed.
+
 ## Contradictions this document settles
 
 **C7, where rules live.** Four homes, chosen for four audiences: `agent_policy` entities (agent behaviour,
 synced to skills), `CLAUDE.md` (re-injected after compaction, so it binds interactive sessions), this
-directory (diffable, PR-reviewed, read by the gates), and a warning against a second document on one
+directory (diffable, PR-reviewed, read by the review lenses), and a warning against a second document on one
 subject. Resolved: these are different audiences, not copies. The #727 section states in its first line
-that it does not bind dispatched agents; this document is what the gates read; the derivation is shared and
+that it does not bind agents the swarm spawns; this document is what the review lenses read; the derivation is shared and
 cited. Direction of truth per artifact class is in `conformance.md`. When the two diverge, this document is
 wrong until a PR corrects it, and that PR is the review.
 
 ## Beyond the sources
 
-Invariants 8, 9, and 10 are not in #727; they are consolidated from the decisions cited under each. The
+Invariants 8, 9, 10, and 11 are not in #727; they are consolidated from the decisions cited under each. The
 grouping, the one-sentence statements, and the "Enforced by" mechanism classes are this document's.

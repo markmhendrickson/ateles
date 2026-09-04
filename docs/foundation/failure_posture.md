@@ -7,18 +7,18 @@ from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-12 to PR-15, C5, C17), prio
 `ent_4222e5d52edd9bdba7b78cc1` decisions `neotoma_is_a_hard_dependency_swarm_halts`,
 `halt_work_but_never_stop_observing`, `the_halt_must_announce_itself_off_neotoma`,
 `reachability_check_belongs_at_dispatch_with_mid_task_writes_failing_closed`,
-`deferral_must_be_bounded_and_escalate_off_neotoma`, `unknown_must_stay_distinct_from_a_verdict`, and
-`nyctea_635_becomes_load_bearing`. What is built is `status.md`.
+`deferral_must_be_bounded_and_escalate_off_neotoma`, `unknown_must_stay_distinct_from_a_verdict`,
+`nyctea_635_becomes_load_bearing`, and PR #745 operator review (2026-09-04). What is built is `status.md`.
 
 ## Purpose
 
 State the operator's decision that Neotoma is a hard dependency and the seven rules that follow from it, so
-the posture lives where the gates read it rather than in a task description. `durable_execution_substrate.md`
+the posture lives where the review lenses read it rather than in a task description. `durable_execution_substrate.md`
 records the position on execution engines and replay that this document relies on; it stays.
 
 ## Scope
 
-Every daemon and every dispatched agent, on the task path and off it.
+Every daemon and every spawned agent, on the task path and off it.
 
 ## The decision
 
@@ -27,35 +27,36 @@ work.** Not degraded operation, not a hardcoded fallback. The reasoning is stron
 swarm that operates while its record is unreachable produces work with no record. Across a fleet of
 unattended daemons that is unaccountable work, worse than the work not happening, because the swarm then
 acts on a history it cannot reconstruct. This decision superseded degrade-on-capability,
-refuse-and-requeue-as-fallback, and the hardcoded gate floor (C5, below).
+refuse-and-requeue-as-fallback, and the hardcoded step-list floor (C5, below).
 
 ## The rules
 
-1. **Halt work; never stop observing.** No dispatch, no gate decisions, nothing claimed complete without a
-   record. Watchdogs, forensic capture, health checks, and alerting stay live. A diagnostic capture asserts
+1. **Halt work; never stop observing.** No claim, no assignment, no gate decisions, nothing claimed
+   complete without a record. Watchdogs, forensic capture, health checks, and alerting stay live. A diagnostic capture asserts
    nothing about the record, so it does not require the record; it writes to local disk, always, because
    writing evidence of an outage into the thing that is out is the wrong move, and a hard dependency that
    stops the thing diagnosing it makes recovery impossible.
 
 2. **Announce the halt off-Neotoma, on entering and on leaving.** A silently halted swarm is
    indistinguishable from an idle one, this codebase's signature failure. The announcement travels a path
-   that survives the outage, aggregated per window, never one page per blocked dispatch.
+   that survives the outage, aggregated per window, never one page per blocked claim.
 
-3. **The reachability check is a real read at dispatch, never `/health`.** One probe per work item, not per
-   operation. A health endpoint can return green while every read hangs on a wedged database, so the probe
+3. **The reachability check is a real read at claim time, never `/health`.** One probe when a task is
+   claimed or a step is taken, not per operation. A health endpoint can return green while every read hangs on a wedged database, so the probe
    reads what the work will read.
 
-4. **A mid-task write failure leaves the task in its prior state.** The agent is already running when the
+4. **A mid-task write failure leaves the task in its prior state.** The agent is already at work when the
    record goes away. It does not abandon in-flight work, and it never claims a completion it cannot record:
-   finish the reasoning, attempt the write, and on failure leave the task for the watchdog to requeue. A
+   finish the reasoning, attempt the write, and on failure leave the task as it was: the lease lapses on
+   its own and the task is claimable again (`work_model.md`), with no process needed to return it. A
    sign-off whose write failed is the unaccountable work this posture exists to prevent. Silence beats a
    false verdict.
 
 5. **Deferral is bounded and escalates off-Neotoma.** Backoff is mandatory: a slow instance under retry
    pressure is how slow becomes unreachable, and unreachable stays distinguishable from slow. A task requeued
    indefinitely against a store that never returns is a silent stall, so the deferral has a ceiling and its
-   terminal escalation travels a path that survives the outage. The drain is the existing watchdog
-   (backoff, attempt cap, escalate-on-exhaustion), connected to the gating path rather than rebuilt.
+   terminal escalation travels a path that survives the outage. The drain is the lapse rule below
+   (backoff, lapse cap, escalate-on-exhaustion), connected to the gating path rather than rebuilt.
 
 6. **Every write is read back.** Principle 2 of `principles.md`, restated here because an outage is when a
    write most plausibly reports success without landing: a store can return 200 with a warning and persist
@@ -66,9 +67,19 @@ refuse-and-requeue-as-fallback, and the hardcoded gate floor (C5, below).
    grant, or drift state carries a third value; an error is never coerced to pending or to clear. Principle
    7 of `principles.md`; at a policy enforcement point the third value resolves to deny (`authority_model.md`).
 
+## Repeated lapse escalates
+
+A lease that lapses is not returned by anything; the task is simply claimable again (`work_model.md`).
+The rule that survives the reaper's retirement is about repetition: the watchdog counts lapses per task,
+with bounded backoff between re-claims, and when one task's count reaches the cap it raises one
+`escalation` rather than letting the task be re-claimed forever. The watchdog observes and escalates; it
+holds no authority over any lease and never chooses the next claimant. During a halt the count still
+accrues, because a lapse during an outage is still a lapse, and the escalation travels the off-Neotoma
+path (rule 2). This is OTP's supervisor rule (prior art, below) applied to a lease.
+
 ## Refuse resume-by-replay where actions are consent-gated
 
-A halted or expired task is re-claimed, not replayed. Re-executing pre-interrupt code repeats every outbound
+A task whose lease lapsed, in a halt or otherwise, is re-claimed, not replayed. Re-executing pre-interrupt code repeats every outbound
 effect that ran before the interrupt; with consent-gated sends and payments, that is a repeat send.
 `durable_execution_substrate.md` already refuses deterministic replay for this reason; prior art adds
 LangGraph's resume semantics (the runtime restarts the whole node) as the pattern to refuse. The
@@ -79,8 +90,8 @@ mandatory (`work_model.md`).
 
 **C5, the gate-state plan's body versus its decisions.** The plan body argues for a hardcoded gate list as
 a floor the data may add to; the decisions map records `hardcoded_floor_proposal_is_retired`. Resolved: the
-retraction stands. Under a hard dependency an unreadable workflow means no dispatch, so a code-side fallback
-has nothing to fall back for. The constants are consolidated as a correctness fix
+retraction stands. Under a hard dependency an unreadable workflow means no step of it is claimed, so a
+code-side fallback has nothing to fall back for. The constants are consolidated as a correctness fix
 (`gates_and_workflows.md`), not as an availability fallback. A reader of the plan body gets the retracted
 design; this document is the corrected statement.
 
