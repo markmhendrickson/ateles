@@ -140,6 +140,7 @@ is `status.md`.
 | Reading-list budget | `execution/daemons/apis/test_foundation.py` (`TestRealDocumentBudget`) | a kernel or keyed document over `MAX_DOC_CHARS`, or a reading block over `MAX_BLOCK_CHARS`; the caps are `foundation.py`'s |
 | Anchors | `execution/scripts/check_foundation_anchors.py` | any link or backticked citation of a document and section in this directory that names a file or heading that does not exist |
 | Vocabulary | `execution/scripts/check_foundation_vocabulary.py`; asserted zero in `test_foundation.py` | any **Never** item from `vocabulary.md` in the prose of any document here but `status.md`; **Not for** items are printed as advisory and never fail |
+| Term links | `execution/scripts/link_vocabulary_terms.py --check`; asserted in `test_foundation.py` | a first mention of a defined term, in an entry or section of `vocabulary.md`, that carries no link to its definition; run the script without `--check` to link them |
 | Workflow tables | `execution/scripts/render_workflow_docs.py --check` (contract; `status.md` says whether it exists) | a step table in `workflows.md` that differs from its `workflow` entity |
 | Data-model tables | `execution/scripts/render_data_model.py --check` (contract; `status.md` says whether it exists) | a concept or relationship table in `data_model.md` that differs from the schema registry |
 

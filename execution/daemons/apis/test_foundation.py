@@ -523,6 +523,44 @@ class TestVocabularyLint:
         ]
         assert offenders == [], offenders
 
+    def test_every_first_mention_is_linked(self) -> None:
+        """A defined term mentioned in another entry links to its definition.
+
+        The vocabulary states the rule under "Scope": first mention per entry, never inside its own
+        entry, never inside a ban list, and the ordinary-English terms in the linker's GENERIC set left
+        to the author. This asserts the document satisfies it, so the 328-mention gap that revision 10
+        opened cannot reopen unnoticed.
+        """
+        import importlib.util
+
+        script = _REPO_ROOT / "execution" / "scripts" / "link_vocabulary_terms.py"
+        spec = importlib.util.spec_from_file_location("link_vocabulary_terms", script)
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+
+        vocab = (_REPO_ROOT / "docs" / "foundation" / "vocabulary.md").read_text(encoding="utf-8")
+        _out, unlinked = mod.link(vocab)
+        assert unlinked == [], [f"{block}: {term}" for block, term in unlinked][:40]
+
+    def test_linking_a_term_does_not_change_the_lint_verdict(self) -> None:
+        """``[step owner](#step-owner)`` must read as "step owner" to the ban patterns.
+
+        Several bans use a negative lookbehind to permit a qualified use (owner is allowed after "step ",
+        forbidden alone). Link markup inserts ``](#`` in front of the second word and defeats it, which
+        would report the exact phrase the vocabulary permits. ``as_read`` strips the markup first.
+        """
+        mod = self._lint()
+        plain = "the record a step owner writes"
+        linked = "the record a [step owner](#step-owner) writes"
+        assert mod.as_read(linked) == plain
+        never, not_for = mod.parse_bans(
+            (_REPO_ROOT / "docs" / "foundation" / "vocabulary.md").read_text(encoding="utf-8")
+        )
+        for ban in never + not_for:
+            assert bool(ban.pattern.search(mod.as_read(linked))) == bool(ban.pattern.search(plain)), ban.term
+
     def test_lint_fails_on_a_planted_never_word(self, tmp_path: Path) -> None:
         """Revert-the-fix check: a Never word in a foundation doc is reported as a hit."""
         mod = self._lint()

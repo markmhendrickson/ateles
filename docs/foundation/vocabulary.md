@@ -1,11 +1,11 @@
 # Vocabulary: canonical terms
 
-**Keyed document:** read when a skill, an agent document, or the agent-doc renderer changes
+**Keyed document:** read when a skill, an [agent](#agent) document, or the agent-doc renderer changes
 (`conformance.md`). **Kind:** foundation; defines terms by what they are in the design, never by what a
 checkout implements. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-03, PR-08, C10), prior
-art `ent_08460968e6f49dac21510f4a` (A2A `TaskState`, RFC 8693, Camunda), task
-`ent_da60df3beccb675ef8c8c0c5`, the ateles#378 glossary (operator section, and the ux-signed swarm section
-cited as proposal), `docs/multi_tenant.md` section 5, and PR #745 operator review (2026-09-04). Format
+art `ent_08460968e6f49dac21510f4a` (A2A `TaskState`, RFC 8693, Camunda), [task](#task)
+`ent_da60df3beccb675ef8c8c0c5`, the ateles#378 glossary ([operator](#operator) section, and the ux-signed swarm section
+cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, and PR #745 operator review (2026-09-04). Format
 follows Neotoma's `docs/vocabulary/canonical_terms.md`.
 
 ## Purpose
@@ -18,17 +18,41 @@ at the end: the link belongs where the reader meets the word.
 ## Scope
 
 Every definition is one sentence and names the concept; how the concept is recorded (entity type, fields,
-edges) is `data_model.md`. A definition links the terms it depends on inline, where they are mentioned,
+[edges](#edge)) is `data_model.md`. A definition links the terms it depends on inline, where they are mentioned,
 and names its owning section. Terms carry no phase marker: the roadmap is `status.md`, and a definition
 does not change when its implementation lands.
+
+**How the inline links are applied.** One rule, so that a later editor follows the same one and the links
+stay predictable rather than accumulating by taste:
+
+- **The first mention of a term in an entry is linked; later mentions in that entry are not.** A short
+  entry that links the same word three times is noisier than one that links it once.
+- **A term is never linked inside its own entry.** A self-link says nothing.
+- **The word is linked as it appears**, in whatever form the sentence needs — [task](#task) or tasks,
+  [claim](#claim) or claimed, [sign-off](#sign-off) or sign-offs.
+- **A multi-word term is linked whole, never as its parts**: [step owner](#step-owner), not [step](#step)
+  followed by a bare owner.
+- **Ban lists are never linked.** A `**Never:**` or `**Not for:**` line names words the foundation
+  forbids; linking one would present it as canonical. Neither are code spans, headings, table rows, or
+  the `**See:**` citation lists, which are links already.
+- **A term that is also an ordinary English word is left to the author.** Sixteen entries — among them
+  [status](#status), [active](#active), [held](#held), [condition](#condition), and the two verb entries
+  [execute (a task)](#execute-a-task) and [take (an action)](#take-an-action) — are words this file binds
+  to a particular sense while English uses them for other things. Linking their every first occurrence
+  would mislabel the ordinary use, so the linker leaves them alone and the author links them where the
+  bound sense is meant.
+
+`execution/scripts/link_vocabulary_terms.py` applies this mechanically and `--check` reports any first
+mention that has gone unlinked, so adding a term relinks the file rather than leaving the new word
+dangling.
 
 ### Two things a reader is looking at, and how they are written
 
 This file names concepts; the record names rows and fields. The two are written differently on purpose,
 so that a reader always knows which one is in front of them.
 
-**A vocabulary term is written in plain words, with spaces:** step status, sign off, action gate, blast
-radius, step owner, fast path. It is prose and it is set as prose. Two consequences worth stating, because
+**A vocabulary term is written in plain words, with spaces:** [step](#step) status, [sign off](#sign-off), [action gate](#action-gate), blast
+radius, [step owner](#step-owner), [fast path](#fast-path). It is prose and it is set as prose. Two consequences worth stating, because
 this file previously mixed all three forms. First, no underscores: the concept is "step status", never
 `step_status`, whatever the field is called. Second, a hyphen only where the term is a compound noun that
 reads wrongly without one — **sign-off** as a noun (the thing a step owner writes) keeps its hyphen,
@@ -41,7 +65,7 @@ every other multi-word term is spaced.
 or a column, not the vocabulary's name for a concept, and it is quoted exactly as the record spells it —
 underscores included — because a reader who sees it needs to be able to write it into a query. Where a
 concept and its recorded form differ only in spelling, both appear: the concept is step status, the
-projection on the task is `step_status`, and the entry says so.
+[projection](#projection) on the [task](#task) is `step_status`, and the entry says so.
 
 So: `checkpoint` and `action` are set in code font when the entity type is meant and written plainly when
 the concept is, and a heading that names an entity type is written as that entity type.
@@ -75,8 +99,8 @@ quietly dropping its ban.
 machine, C1).
 
 ### execute (a task)
-**Definition:** to claim a task, do its work, and complete it.
-Tasks are executed; actions are taken. Plain synonyms in prose: do, work on.
+**Definition:** to [claim](#claim) a [task](#task), do its work, and complete it.
+Tasks are executed; [actions](#action) are taken. Plain synonyms in prose: do, work on.
 **See:** [`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`](gates_and_workflows.md#actions-are-entities-only-actions-are-taken).
 **Never:** worked, in any form, of a task — a task is executed, and the only permitted use of the verb is
 work on; executing as a state, status, or flag — executing is what an agent is doing, never a value the
@@ -87,7 +111,7 @@ record holds.
 **Definition:** a record living in an external system, reached only through that system's
 [adapter](#adapter) and always identified by its `system` and `external_id`, that a [batch](#batch)
 produces or references — a GitHub [issue](#issue), a pull request, a release, a sent message — linked to
-the batch and its [tasks](#task) by edge and never the subject of a [step](#step).
+the batch and its [tasks](#task) by [edge](#edge) and never the subject of a [step](#step).
 An [action](#action) is the intended effect; the artifact is the record the effect leaves.
 **The word is bound; it is not a catch-all for outputs.** Anything the swarm produces that lives in the
 record is an **entity**, not an artifact: a [sign-off](#sign-off), a [checkpoint](#checkpoint), an
@@ -102,8 +126,8 @@ output-shaped it feels.
 into the record (that is an entity of its own type).
 
 ### claim
-**Definition:** the act by which an agent takes the lease on a task, or on a step of a batch, itself,
-atomic among concurrent claimants and keyed on the task or the step.
+**Definition:** the act by which an [agent](#agent) takes the [lease](#lease) on a [task](#task), or on a [step](#step) of a [batch](#batch), itself,
+atomic among concurrent [claimants](#claimant) and keyed on the task or the step.
 **Use:** "Corvus claims a task that is eligible for it: `assigned_to` is unset or names Corvus, and no
 lease is held. The claim, not the assignment, makes Corvus the claimant."
 **See:** [`work_model.md#the-claim-and-the-lease-are-one-primitive`](work_model.md#the-claim-and-the-lease-are-one-primitive).
@@ -112,7 +136,7 @@ is claimed.
 **Not for:** assign for a claim (an eligibility constraint, which creates no lease).
 
 ### claimant
-**Definition:** the principal that holds the lease on a task, read back from the persisted lease and never
+**Definition:** the [principal](#principal) that holds the [lease](#lease) on a [task](#task), [read back](#read-back) from the persisted lease and never
 from a task field.
 **See:** [`work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields`](work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields).
 **Never:** "assignee" (say: the principal the assignment names, who has not necessarily claimed).
@@ -121,9 +145,9 @@ and always takes its qualifier (step owner, plan owner, grant owner, business ow
 owner); holder without the lease in front of it.
 
 ### assign
-**Definition:** the act by which a principal restricts a task's eligibility to one named principal by
-writing `assigned_to`, a field write like any other, creating no lease.
-An assignment is the resulting state; it is not delivery, and the named principal still claims. Pull is the
+**Definition:** the act by which a [principal](#principal) restricts a [task](#task)'s eligibility to one named principal by
+writing `assigned_to`, a field write like any other, creating no [lease](#lease).
+An assignment is the resulting state; it is not delivery, and the named principal still [claims](#claim). Pull is the
 only delivery.
 **See:** [`work_model.md#assignment-restricts-eligibility-it-never-creates-a-lease`](work_model.md#assignment-restricts-eligibility-it-never-creates-a-lease).
 **Never:** —
@@ -131,32 +155,32 @@ only delivery.
 claim).
 
 ### lease
-**Definition:** a relationship between a principal and a task, or between a step owner and a step on a
-batch, carrying `claimed_at` and `expires_at`, that lapses without cooperation from its holder.
-The claim and the lease are one primitive; renewal is the heartbeat; the task carries no lease fields.
+**Definition:** a relationship between a [principal](#principal) and a [task](#task), or between a [step owner](#step-owner) and a [step](#step) on a
+[batch](#batch), carrying `claimed_at` and `expires_at`, that lapses without cooperation from its holder.
+The [claim](#claim) and the lease are one primitive; renewal is the heartbeat; the task carries no lease fields.
 **See:** [`work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields`](work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields).
 **Never:** —
 **Not for:** "claim fields" for the lease (the task carries none); "lock" for a lease (a lock outlives its holder); "heartbeat" for the lease (the heartbeat
 renews the lease; it is not the lease).
 
 ### held
-**Definition:** the lease state, derived at read time, in which `expires_at` is in the future.
+**Definition:** the [lease](#lease) state, derived at read time, in which `expires_at` is in the future.
 **See:** [`work_model.md#the-transition-vocabulary`](work_model.md#the-transition-vocabulary).
 **Never:** —
 **Not for:** "locked" for a held lease; claimed as a stored task status (the lease is what is claimed, and
 it is read back, never stored on the task).
 
 ### lapsed
-**Definition:** the lease state, derived at read time, in which `expires_at` has passed and the claimant
-has not returned the lease.
-A lapsed lease does not count for claimability, so the task is claimable again without any process acting
+**Definition:** the [lease](#lease) state, derived at read time, in which `expires_at` has passed and the [claimant](#claimant)
+has not [returned](#returned) the lease.
+A lapsed lease does not count for claimability, so the [task](#task) is [claimable](#claimable) again without any process acting
 on the lease.
 **See:** [`work_model.md#a-lapsed-lease-is-not-reaped-repeated-lapse-raises-a-checkpoint`](work_model.md#a-lapsed-lease-is-not-reaped-repeated-lapse-raises-a-checkpoint).
 **Never:** "stuck", "stranded", "expired and released".
 **Not for:** —
 
 ### returned
-**Definition:** the lease state in which the claimant ended the lease explicitly, on completion or on
+**Definition:** the [lease](#lease) state in which the [claimant](#claimant) ended the lease explicitly, on completion or on
 failure.
 **See:** [`work_model.md#the-transition-vocabulary`](work_model.md#the-transition-vocabulary).
 **Never:** released, of a lease, in either voice — a lease is returned, because release collides with the
@@ -165,45 +189,45 @@ word).
 **Not for:** release, in any form, anywhere near a lease — a lease is returned.
 
 ### active
-**Definition:** the derived read that a held lease has activity entities, such as an `agent_session` or
-observations, related to the task within the lease window.
+**Definition:** the [derived read](#derived-read) that a held [lease](#lease) has activity entities, such as an `agent_session` or
+[observations](#observation), related to the [task](#task) within the lease window.
 Never stored; a dashboard derives live-versus-quiet from it.
 **See:** [`work_model.md#liveness-is-derived-from-activity-at-read-time-never-declared`](work_model.md#liveness-is-derived-from-activity-at-read-time-never-declared).
 **Never:** "running", "in flight".
 **Not for:** active as a status value.
 
 ### created
-**Definition:** the task transition in which the task comes to exist in the record, publication being
+**Definition:** the [task](#task) transition in which the task comes to exist in the record, publication being
 creation.
-The task's own transition vocabulary is `created` plus its status; lease transitions belong to the lease.
+The task's own transition vocabulary is `created` plus its status; [lease](#lease) transitions belong to the lease.
 **See:** [`work_model.md#the-transition-vocabulary`](work_model.md#the-transition-vocabulary).
 **Never:** —
 **Not for:** published as a separate state; routed, claimed, or released as task transitions.
 
 ### claimable
-**Definition:** the derived property of a task whose status is neither terminal nor `blocked`, whose
-`assigned_to` is unset or names the would-be claimant, and on which no lease is held.
+**Definition:** the derived property of a [task](#task) whose status is neither terminal nor `blocked`, whose
+`assigned_to` is unset or names the would-be [claimant](#claimant), and on which no [lease](#lease) is held.
 **See:** [`work_model.md#what-a-claim-predicate-treats-as-claimable`](work_model.md#what-a-claim-predicate-treats-as-claimable).
 **Never:** —
 **Not for:** "available" for claimable; open for claimable, whether as an open task, an open pool, or a
 task said to be open — `open` is a status value and means something else.
 
 ### terminal
-**Definition:** a status value after which a task, a batch, or a checkpoint changes no further.
+**Definition:** a status value after which a [task](#task), a [batch](#batch), or a [checkpoint](#checkpoint) changes no further.
 **See:** [`work_model.md#what-a-claim-predicate-treats-as-claimable`](work_model.md#what-a-claim-predicate-treats-as-claimable).
 **Never:** —
 **Not for:** "final" for terminal.
 
 ### runner
-**Definition:** the process that runs an agent and holds a lease on the agent's behalf, identified by a
+**Definition:** the process that runs an [agent](#agent) and holds a [lease](#lease) on the agent's behalf, identified by a
 runner id the persisted lease names.
 **See:** [`work_model.md#the-claim-and-the-lease-are-one-primitive`](work_model.md#the-claim-and-the-lease-are-one-primitive).
 **Never:** "worker", "bot".
 **Not for:** agent when the process is meant.
 
 ### agent_session
-**Definition:** the identity half of a runner's work that observations lack, such as host, checkout,
-branch, and head, related to the task it executes.
+**Definition:** the identity half of a [runner](#runner)'s work that [observations](#observation) lack, such as host, checkout,
+branch, and head, related to the [task](#task) it executes.
 **See:** [`work_model.md#no-assignment-log-history-is-the-tasks-own-observations`](work_model.md#no-assignment-log-history-is-the-tasks-own-observations).
 **Never:** "run history", "dispatch record".
 **Not for:** —
@@ -217,7 +241,7 @@ which the entity's history is read.
 **Not for:** event for a stored change.
 
 ### hot path
-**Definition:** a read path on which a decision must be taken from one entity read, for which a projection
+**Definition:** a read path on which a decision must be taken from one entity read, for which a [projection](#projection)
 such as `step_status` exists.
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
 **Never:** —
@@ -225,14 +249,14 @@ such as `step_status` exists.
 projection.
 
 ### watchdog
-**Definition:** the observer that counts lapses on a task and raises a checkpoint when the count reaches
-its cap, holding no authority over any lease.
+**Definition:** the observer that counts lapses on a [task](#task) and raises a [checkpoint](#checkpoint) when the count reaches
+its cap, holding no [authority](#authority) over any [lease](#lease).
 **See:** [`failure_posture.md#repeated-lapse-raises-a-checkpoint`](failure_posture.md#repeated-lapse-raises-a-checkpoint).
 **Never:** "reaper", "retry loop".
 **Not for:** "router" for the watchdog.
 
 ### batch
-**Definition:** one or more tasks going through a workflow together, and the record of that.
+**Definition:** one or more [tasks](#task) going through a [workflow](#workflow) together, and the record of that.
 A single task is a batch of one; only batches go through workflows, so there is no separate single-task
 path. Tasks are attached to and detached from a batch; batches chain along `FOLLOWS`.
 Reads: "the tasks entered the feature workflow", "the batch is at `qa`", "the batch advances to `impl`",
@@ -245,14 +269,14 @@ Reads: "the tasks entered the feature workflow", "the batch is at `qa`", "the ba
 **Not for:** run for a batch; instance for a batch, unqualified; bundle for a batch.
 
 ### parent task
-**Definition:** a task that groups child tasks through `PART_OF` edges from each child, whose completion is
-derived from its children's terminal states and which never enters a workflow.
+**Definition:** a [task](#task) that groups [child tasks](#child-task) through `PART_OF` [edges](#edge) from each child, whose completion is
+derived from its children's terminal states and which never enters a [workflow](#workflow).
 **See:** [`work_model.md#parent-and-child-tasks`](work_model.md#parent-and-child-tasks).
 **Never:** "epic", "umbrella".
 **Not for:** a stored parent status.
 
 ### child task
-**Definition:** a task with one `PART_OF` edge to a parent task, which goes through workflows independently
+**Definition:** a [task](#task) with one `PART_OF` [edge](#edge) to a [parent task](#parent-task), which goes through [workflows](#workflow) independently
 of its siblings.
 **Allowed:** "subtask" in prose.
 **See:** [`work_model.md#parent-and-child-tasks`](work_model.md#parent-and-child-tasks).
@@ -260,22 +284,22 @@ of its siblings.
 **Not for:** a child with two parents.
 
 ### operator-facing agent
-**Definition:** the agent, defined by the `ateles` `agent_definition`, that claims operator-only tasks,
-carries them and their checkpoints to the operator, and records the outcome.
+**Definition:** the [agent](#agent), defined by the `ateles` `agent_definition`, that [claims](#claim) operator-only [tasks](#task),
+carries them and their [checkpoints](#checkpoint) to the [operator](#operator), and records the outcome.
 **See:** [`work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent`](work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent).
 **Never:** —
 **Not for:** the operator for the agent; concierge for the agent, unqualified.
 
 ### daemon
-**Definition:** a long-lived process that self-triggers on its own loop, producing tasks or actions
+**Definition:** a long-lived process that self-triggers on its own loop, producing [tasks](#task) or [actions](#action)
 without receiving a task.
 **See:** [`work_model.md#the-three-execution-mechanisms`](work_model.md#the-three-execution-mechanisms).
 **Never:** —
 **Not for:** service for a daemon, unqualified.
 
 ### pipeline
-**Definition:** the GitHub-hosted execution mechanism that opens each step of a workflow for a batch as
-claimable step work, which the step owner claims, and never writes a task status.
+**Definition:** the GitHub-hosted execution mechanism that opens each [step](#step) of a [workflow](#workflow) for a [batch](#batch) as
+[claimable](#claimable) step work, which the [step owner](#step-owner) [claims](#claim), and never writes a [task](#task) status.
 It delivers nothing; it is the same pull, over steps.
 **See:** [`work_model.md#the-three-execution-mechanisms`](work_model.md#the-three-execution-mechanisms).
 **Never:** —
@@ -284,17 +308,17 @@ It delivers nothing; it is the same pull, over steps.
 ## Gate model (`gates_and_workflows.md`)
 
 ### workflow
-**Definition:** the declaration, per (project, workflow type), of an ordered list of steps, the fast paths
-a batch may take, and the successors a closing sign-off may name.
+**Definition:** the declaration, per (project, workflow type), of an ordered list of [steps](#step), the [fast paths](#fast-path)
+a [batch](#batch) may take, and the [successors](#successor) a closing [sign-off](#sign-off) may name.
 **See:** [`workflows.md`](workflows.md),
 [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
 **Never:** "workflow_definition".
 **Not for:** pipeline for a workflow (one engine that runs workflows); "template" for a workflow.
 
 ### step
-**Definition:** one declared position in a workflow's ordered list, carrying a name, a step owner, a
-`required` flag, an `on_fail` target, and parallel-group and join fields, claimed by its step owner on a
-batch and closed by that owner's sign-off.
+**Definition:** one declared position in a [workflow](#workflow)'s ordered list, carrying a name, a [step owner](#step-owner), a
+`required` flag, an `on_fail` target, and parallel-group and join fields, [claimed](#claim) by its step owner on a
+[batch](#batch) and closed by that owner's [sign-off](#sign-off).
 Step names are data (`pm`, `ux`, `arch`, `impl`, `pr_review`, `qa`, `legal`, `release`, and any a workflow
 declares).
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
@@ -304,18 +328,18 @@ in front of a step's own attributes (a gate owner, a gate sequence); `gate` is t
 checkpoint for a step, in either order.
 
 ### stage
-**Definition:** a named group of contiguous steps in a workflow, such as the review stage or the release
+**Definition:** a named group of contiguous [steps](#step) in a [workflow](#workflow), such as the review stage or the release
 stage.
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
 **Never:** —
 **Not for:** stage for a single step; phase when a group of steps is meant.
 
 ### step owner
-**Definition:** the **role** declared on a step, which the roster resolves to a principal at claim time;
-that principal claims the step on a batch and its sign-off closes it. The declaration names a role so that
-one workflow serves every project and a renamed or replaced agent leaves no stale name in it; the
+**Definition:** the **role** declared on a [step](#step), which the roster resolves to a [principal](#principal) at [claim](#claim) time;
+that principal claims the step on a [batch](#batch) and its [sign-off](#sign-off) closes it. The declaration names a role so that
+one [workflow](#workflow) serves every project and a renamed or replaced [agent](#agent) leaves no stale name in it; the
 resolution to a principal happens when the step is claimed, against `swarm_roster` for the batch's
-project, and a step whose role resolves to no principal raises a checkpoint (reason
+project, and a step whose role resolves to no principal raises a [checkpoint](#checkpoint) (reason
 `unspawnable_assignee`) rather than falling through to any available agent.
 **Field:** `workflow.steps[].owner_role` (the design's name; the field is `owner_agent` in the built
 declarations and holds a role there too — `status.md`).
@@ -326,11 +350,11 @@ declarations and holds a role there too — `status.md`).
 ### sign-off
 **Definition:** the record a [step owner](#step-owner) writes to close a [step](#step) on a
 [batch](#batch), carrying the [verdict](#verdict), the [findings](#finding) that produced it, timestamps,
-the agent, [artifact](#artifact) refs, and the pinned `agent_definition` version.
+the [agent](#agent), [artifact](#artifact) refs, and the pinned `agent_definition` version.
 A terminal write that supplies every field the schema requires; a rejected write is an error, never
 swallowed. Written as a hyphenated noun (a sign-off); the act is to sign off, two words.
 **Verdict values:** `signed` (the step's [condition](#condition) is met), a blocking verdict (it is not,
-and the step's `on_fail` says which earlier step opens again), and `waived` (the operator principal closed
+and the step's `on_fail` says which earlier step opens again), and `waived` (the [operator](#operator) [principal](#principal) closed
 an unsigned required step, carrying the reason). `waived` is the only verdict a principal other than the
 step owner may write, and only the operator principal may write it
 ([`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection)).
@@ -350,7 +374,7 @@ The severity of the finding, not the summary token of the [sign-off](#sign-off) 
 blocks: a blocking finding filed under a non-blocking [verdict](#verdict) is still a blocking finding. A
 blocking finding is either **implementation-only** — a named defect with a determinate fix, which may be
 routed to an implementer, though the step owner still holds the terminal sign-off — or **decision or
-attestation**, needing a judgement only a principal can make, which is not routable at all. A blocking
+attestation**, needing a judgement only a [principal](#principal) can make, which is not routable at all. A blocking
 finding cites an executed command and its output; one reasoned about but not reproduced is filed as
 non-blocking, stating what could not be verified.
 **See:** [`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges).
@@ -374,7 +398,7 @@ the term without settling which of the two governs.
 
 ### condition
 **Definition:** a stated requirement that a later [step](#step) must satisfy.
-Whether a [verdict](#verdict) may carry one — a sign-off that closes its step while binding what follows
+Whether a [verdict](#verdict) may carry one — a [sign-off](#sign-off) that closes its step while binding what follows
 — is an **open decision**; the word is defined here so that the documents use it in one sense, and its use
 on a verdict is not settled by this entry.
 **See:** [`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges).
@@ -383,10 +407,10 @@ on a verdict is not settled by this entry.
 confidence); "requirement" for an acceptance criterion of a [batch](#batch).
 
 ### step state
-**Definition:** the state of one [step](#step) within one [batch](#batch), derived at read time from edges
-and never stored: open (the batch and the step), claimed (a [lease](#lease) from the
+**Definition:** the state of one [step](#step) within one [batch](#batch), derived at read time from [edges](#edge)
+and never stored: open (the batch and the step), [claimed](#claim) (a [lease](#lease) from the
 [step owner](#step-owner) to the step on that batch), or signed (a [sign-off](#sign-off)).
-The concept is written in spaced words, "step state"; the map that projects it onto the task is the field
+The concept is written in spaced words, "step state"; the map that projects it onto the [task](#task) is the field
 [`step_status`](#step_status), and the two are not the same thing.
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
 **Never:** "gate status".
@@ -405,67 +429,67 @@ projects is the spaced concept step state.
 concept.
 
 ### fast path
-**Definition:** a declared skip of steps that a workflow permits for a named class of tasks.
+**Definition:** a declared skip of [steps](#step) that a [workflow](#workflow) permits for a named class of [tasks](#task).
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
 **Never:** "shortcut".
 **Not for:** hot path for a fast path.
 
 ### successor
-**Definition:** a workflow that a `workflow` declares in `successors` as one a batch of it may enter on
-closing, of which the closing sign-off selects exactly one or none.
-The closing sign-off is the sign-off on the workflow's last step, which is always a single step.
+**Definition:** a [workflow](#workflow) that a `workflow` declares in `successors` as one a [batch](#batch) of it may enter on
+closing, of which the closing [sign-off](#sign-off) selects exactly one or none.
+The closing sign-off is the sign-off on the workflow's last [step](#step), which is always a single step.
 **See:** [`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`](gates_and_workflows.md#sequencing-is-data-successors-and-the-chain).
 **Never:** "downstream workflow", "handoff".
 **Not for:** next stage for a successor (a stage is within a workflow); two successors at once (that is a
 detach); a successor named by anything but the closing sign-off.
 
 ### chain
-**Definition:** the derived, never stored, sequence of batches a task has gone through, read along
-`FOLLOWS` edges from its live batch back to its intake batch.
+**Definition:** the derived, never stored, sequence of [batches](#batch) a [task](#task) has gone through, read along
+`FOLLOWS` [edges](#edge) from its live batch back to its [intake](#intake) batch.
 **See:** [`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`](gates_and_workflows.md#sequencing-is-data-successors-and-the-chain).
 **Never:** "super-workflow".
 **Not for:** pipeline for the sequence; "program" for the chain; a stored list of batches on the task.
 
 ### issue
-**Definition:** a GitHub issue, an artifact a batch produces or references, linked to the batch and its
-tasks by edge.
+**Definition:** a GitHub issue, an [artifact](#artifact) a [batch](#batch) produces or references, linked to the batch and its
+[tasks](#task) by [edge](#edge).
 **See:** [`work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject`](work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject).
 **Never:** —
 **Not for:** "ticket" for an issue; task for the issue; the subject of a step.
 
 ### gate
-**Definition:** short for the action gate, and nothing else.
+**Definition:** short for the [action gate](#action-gate), and nothing else.
 **See:** [`gates_and_workflows.md#the-action-gate-is-pr-independent`](gates_and_workflows.md#the-action-gate-is-pr-independent).
 **Never:** "gates green".
 **Not for:** gate for a step or a stage.
 
 ### action gate
-**Definition:** the decision, taken by a principal evaluating one action against the action policy,
-whether that action is taken or checkpointed.
-Inputs are the action's class, blast radius, confidence, and successful recurrences; no PR, issue, or
+**Definition:** the decision, taken by a [principal](#principal) evaluating one [action](#action) against the action policy,
+whether that action is taken or [checkpointed](#checkpoint).
+Inputs are the action's class, [blast radius](#blast-radius), [confidence](#confidence), and successful recurrences; no PR, [issue](#issue), or
 repository.
 **See:** [`gates_and_workflows.md#the-action-gate-is-pr-independent`](gates_and_workflows.md#the-action-gate-is-pr-independent).
 **Never:** "execution gate".
 **Not for:** "merge gate" for the action gate (merge is one boundary among several).
 
 ### action_policy
-**Definition:** the policy a principal evaluates the action gate against, listing the low- and high-blast
-action classes, the confidence threshold, the recurrence count that graduates a series, the
+**Definition:** the policy a [principal](#principal) evaluates the [action gate](#action-gate) against, listing the low- and high-blast
+[action](#action) classes, the [confidence](#confidence) threshold, the recurrence count that graduates a series, the
 always-checkpoint boundaries, and the permission scope.
 **See:** [`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`](gates_and_workflows.md#two-policies-workflow-policy-and-action-policy).
 **Never:** "execution_policy", "execution policy".
 **Not for:** "config" or "settings" for the policy; workflow policy for the action policy.
 
 ### workflow policy
-**Definition:** the rule set stating which principals may claim which steps of which workflows, composed
-of the workflow's step owners and the `agent_grant`s in force.
+**Definition:** the rule set stating which [principals](#principal) may [claim](#claim) which [steps](#step) of which [workflows](#workflow), composed
+of the workflow's [step owners](#step-owner) and the `agent_grant`s in force.
 **See:** [`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`](gates_and_workflows.md#two-policies-workflow-policy-and-action-policy).
 **Never:** —
 **Not for:** action policy for the workflow policy; permissions for the workflow policy.
 
 ### action
 **Definition:** one intended effect outside the Ateles system, such as a send, a publish, a merge, a
-payment, or a release, related to the task it serves.
+payment, or a release, related to the [task](#task) it serves.
 Created when the effect becomes known, which may be mid-workflow; a task may produce many, most unknown at
 creation; an internal operational write to Neotoma is not an action.
 **See:** [`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`](gates_and_workflows.md#actions-are-entities-only-actions-are-taken),
@@ -474,15 +498,15 @@ creation; an internal operational write to Neotoma is not an action.
 **Not for:** task for the effect; operation for an action.
 
 ### take (an action)
-**Definition:** to carry out an action's effect outside the system once the action gate permits it.
-Actions are taken; tasks are executed.
+**Definition:** to carry out an [action](#action)'s effect outside the system once the [action gate](#action-gate) permits it.
+Actions are taken; [tasks](#task) are executed.
 **See:** [`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`](gates_and_workflows.md#actions-are-entities-only-actions-are-taken).
 **Never:** execute, in any form, anywhere near an action — an action is taken, never executed; and
 auto-execute, in any form, spelled with or without the hyphen.
 **Not for:** "fire" or "perform" for an action.
 
 ### action_type
-**Definition:** the class an action belongs to, on which blast radius keys, and which a task declares at
+**Definition:** the class an [action](#action) belongs to, on which [blast radius](#blast-radius) keys, and which a [task](#task) declares at
 creation as the classes of action it expects to produce.
 Values include `build`, `docs`, `publish`, `send_external_comms`, and `operator_only`; a declared but
 unclassified value fails closed.
@@ -491,39 +515,39 @@ unclassified value fails closed.
 **Not for:** "category" or "kind" for the class; inferring it from the handling agent.
 
 ### blast radius
-**Definition:** the tier an action_type resolves to under an action_policy, one of `LOW`, `HIGH`, or
+**Definition:** the tier an [action_type](#action_type) resolves to under an [action_policy](#action_policy), one of `LOW`, `HIGH`, or
 `NEVER`.
-`LOW` is taken at or above the confidence threshold or once a recurring series graduates; `HIGH` is
-checkpointed until a recurring series graduates; `NEVER` is cleared by no confidence and no recurrence.
+`LOW` is taken at or above the [confidence](#confidence) threshold or once a [recurring series](#recurring-series) graduates; `HIGH` is
+[checkpointed](#checkpoint) until a recurring series graduates; `NEVER` is cleared by no confidence and no recurrence.
 **See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers).
 **Never:** "risk level" (unbounded).
 **Not for:** "severity" for a tier.
 
 ### confidence
-**Definition:** the proposing agent's score that an action is right, compared with the policy's threshold.
+**Definition:** the proposing [agent](#agent)'s score that an [action](#action) is right, compared with the policy's threshold.
 **See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers).
 **Never:** —
 **Not for:** a default of zero standing in for a score.
 
 ### recurring series
-**Definition:** a series of one action class taken successfully that, on reaching the policy's count,
-graduates that class from checkpointing to being taken without one.
+**Definition:** a series of one [action](#action) class taken successfully that, on reaching the policy's count,
+graduates that class from [checkpointing](#checkpoint) to being taken without one.
 **See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers).
 **Never:** "streak".
 **Not for:** history for a series, unqualified.
 
 ### operator_only
-**Definition:** the action_type marking an effect an agent structurally cannot carry out, which resolves to
+**Definition:** the [action_type](#action_type) marking an effect an [agent](#agent) structurally cannot carry out, which resolves to
 `NEVER` ahead of any policy.
-The task that carries it is still claimable, by the operator-facing agent.
+The [task](#task) that carries it is still [claimable](#claimable), by the [operator-facing agent](#operator-facing-agent).
 **See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers).
 **Never:** "unclaimable".
 **Not for:** "high blast" for `operator_only` (a louder `HIGH` delays the wrong outcome rather than
 preventing it).
 
 ### checkpoint
-**Definition:** the held state of a subject, an action held at the action gate or a task the swarm cannot
-advance, awaiting a principal's decision.
+**Definition:** the held state of a subject, an [action](#action) held at the [action gate](#action-gate) or a [task](#task) the swarm cannot
+advance, awaiting a [principal](#principal)'s decision.
 Recorded as an entity linked to its subject, carrying a reason class, the needed input, the options, whom
 it awaits, and who resolved it, and ending in a terminal approval. To checkpoint a subject is to write one
 and hold. The reason classes are `gate_hold`, `repeated_lapse`, `unreadable_workflow`, `rounds_exhausted`,
@@ -537,21 +561,21 @@ retired from the name for the same reason as `_record` and `_definition`.
 written).
 
 ### steward
-**Definition:** the pipeline role that merges a pull request once every required step is signed off and
-the action gate permits the merge action.
+**Definition:** the [pipeline](#pipeline) role that merges a pull request once every required [step](#step) is signed off and
+the [action gate](#action-gate) permits the merge [action](#action).
 **See:** [`gates_and_workflows.md#the-action-gate-is-pr-independent`](gates_and_workflows.md#the-action-gate-is-pr-independent).
 **Never:** "merger".
 **Not for:** "bot" for the steward.
 
 ### review panel
-**Definition:** the set of lenses the pipeline runs on a pull request, each by its step owner.
+**Definition:** the set of [lenses](#lens) the [pipeline](#pipeline) runs on a pull request, each by its [step owner](#step-owner).
 **See:** [`conformance.md#always-read`](conformance.md#always-read).
 **Never:** —
 **Not for:** "reviewers" for the panel, unqualified; CI for the panel.
 
 ### effect dedup
-**Definition:** the rule that every outbound effect is idempotent or deduplicated on its own key, so a
-re-claimed task never repeats an effect that already happened.
+**Definition:** the rule that every [outbound](#outbound) effect is idempotent or deduplicated on its own key, so a
+re-claimed [task](#task) never repeats an effect that already happened.
 **See:** [`work_model.md#at-least-once-implies-effect-dedup`](work_model.md#at-least-once-implies-effect-dedup),
 [`data_model.md#record-conventions`](data_model.md#record-conventions).
 **Never:** "replay protection" (replay is refused outright).
@@ -560,9 +584,9 @@ re-claimed task never repeats an effect that already happened.
 ## Core workflows (`workflows.md`)
 
 ### intake
-**Definition:** the workflow every task enters first, whose steps classify, link, dedupe, prioritize, and
-route the task, and whose closing sign-off names the successor workflow, or none, or operator-only.
-A task with no intake batch is unrouted by that fact; no unrouted state is stored.
+**Definition:** the [workflow](#workflow) every [task](#task) enters first, whose [steps](#step) classify, link, dedupe, prioritize, and
+route the task, and whose closing [sign-off](#sign-off) names the [successor](#successor) workflow, or none, or operator-only.
+A task with no intake [batch](#batch) is unrouted by that fact; no unrouted state is stored.
 **See:** [`workflows.md#intake`](workflows.md#intake),
 [`work_model.md#intake-is-every-tasks-first-workflow`](work_model.md#intake-is-every-tasks-first-workflow),
 [`adapters.md#no-external-event-advances-a-step-by-itself`](adapters.md#no-external-event-advances-a-step-by-itself).
@@ -574,10 +598,10 @@ a router (the `route` step is a sign-off by a step owner).
 
 ### adapter
 **Definition:** the component that translates between one external system and the record in both
-directions, inbound events into signals about artifacts and outbound actions into operations on that
+directions, [inbound](#inbound) events into [signals](#signal) about [artifacts](#artifact) and [outbound](#outbound) [actions](#action) into operations on that
 system, and the only component that touches the system.
-An adapter is a daemon in the work model's sense: it self-triggers on the external system and receives no
-task; the engine reads only what the adapter wrote.
+An adapter is a [daemon](#daemon) in the work model's sense: it self-triggers on the external system and receives no
+[task](#task); the engine reads only what the adapter wrote.
 **See:** [`adapters.md#the-two-invariants`](adapters.md#the-two-invariants),
 [`adapters.md#what-the-adapter-does-with-every-event`](adapters.md#what-the-adapter-does-with-every-event).
 **Never:** "connector", "plugin".
@@ -585,16 +609,16 @@ task; the engine reads only what the adapter wrote.
 "gateway" for an adapter, unqualified.
 
 ### signal
-**Definition:** what an inbound external event is to the record: information about an artifact, which an
-adapter translates into a sign-off by a named principal, an observation on an artifact, an action
-confirmation, or a new task for intake, and never into an instruction to a workflow.
+**Definition:** what an [inbound](#inbound) external event is to the record: information about an [artifact](#artifact), which an
+[adapter](#adapter) translates into a [sign-off](#sign-off) by a named [principal](#principal), an [observation](#observation) on an artifact, an [action](#action)
+confirmation, or a new [task](#task) for [intake](#intake), and never into an instruction to a [workflow](#workflow).
 **See:** [`adapters.md#no-external-event-advances-a-step-by-itself`](adapters.md#no-external-event-advances-a-step-by-itself).
 **Never:** —
 **Not for:** "trigger" for a signal (nothing outside the record opens a step); "command" for a signal.
 
 ### action confirmation
-**Definition:** the observation an adapter writes on an action once its effect exists in the external
-system, carrying `taken_at` and `result_ref`, read back from that system and never inferred from the
+**Definition:** the [observation](#observation) an [adapter](#adapter) writes on an [action](#action) once its effect exists in the external
+system, carrying `taken_at` and `result_ref`, [read back](#read-back) from that system and never inferred from the
 operation's return.
 **See:** [`adapters.md#outbound-steps-produce-actions-adapters-take-them`](adapters.md#outbound-steps-produce-actions-adapters-take-them).
 **Never:** —
@@ -619,7 +643,7 @@ action).
 ### delivery
 **Definition:** one arrival of an external event at an [adapter](#adapter), carrying the external system's
 own delivery id, which is the idempotency key of the write it produces.
-Every delivery resolves to one of the four inbound outcomes or to [dropped](#dropped) with a reason; that
+Every delivery resolves to one of the four [inbound](#inbound) outcomes or to [dropped](#dropped) with a reason; that
 [disposition](#disposition), never receipt alone, is what is recorded.
 **See:** [`adapters.md#what-the-adapter-does-with-every-event`](adapters.md#what-the-adapter-does-with-every-event).
 **Never:** —
@@ -628,7 +652,7 @@ Every delivery resolves to one of the four inbound outcomes or to [dropped](#dro
 
 ### disposition
 **Definition:** what an [adapter](#adapter) resolved one [delivery](#delivery) to, recorded on every
-delivery without exception: one of the four inbound outcomes, or [dropped](#dropped) with the reason that
+delivery without exception: one of the four [inbound](#inbound) outcomes, or [dropped](#dropped) with the reason that
 decided it.
 There is no silent branch; receipt without a disposition is indistinguishable from handling.
 **See:** [`adapters.md#what-the-adapter-does-with-every-event`](adapters.md#what-the-adapter-does-with-every-event).
@@ -639,9 +663,9 @@ a disposition.
 ### dropped
 **Definition:** the [disposition](#disposition) of a [delivery](#delivery) an [adapter](#adapter) resolved
 to no outcome, recorded with the reason that decided it and counted per window.
-A drop is announced on the same off-record path a halt uses, aggregated rather than one message each;
+A drop is announced on the same off-record path a [halt](#halt) uses, aggregated rather than one message each;
 where the drop concerns a request a person made on the external system, the reason goes back to that
-system as an observation the person can see.
+system as an [observation](#observation) the person can see.
 **See:** [`adapters.md#what-the-adapter-does-with-every-event`](adapters.md#what-the-adapter-does-with-every-event).
 **Never:** —
 **Not for:** "swallowed" or "ignored" for a drop (each names the failure this disposition exists to
@@ -650,7 +674,7 @@ event resolved to an observation.
 
 ### sourcing
 **Definition:** what an [adapter](#adapter) records through the record's provenance about a read it made:
-the external system and adapter the observation came from, the time the system itself states for it, and
+the external system and adapter the [observation](#observation) came from, the time the system itself states for it, and
 the [coverage](#coverage) of the read.
 An adapter records sourcing through provenance and never through bookkeeping of its own.
 **See:** [`adapters.md#what-the-adapter-does-with-every-event`](adapters.md#what-the-adapter-does-with-every-event),
@@ -672,7 +696,7 @@ returned, not a verdict on completeness).
 ### freshness
 **Definition:** how current the record's picture of an external system is, and whether an interval was
 ever completely read — derived by reading [sourcing](#sourcing) and [coverage](#coverage) across an
-[artifact](#artifact)'s observations, never stored.
+[artifact](#artifact)'s [observations](#observation), never stored.
 A stored freshness field would need a process to keep it true (principle 11) and goes stale into a
 confident-looking value at the moment that process stops.
 **See:** [`adapters.md#what-the-adapter-does-with-every-event`](adapters.md#what-the-adapter-does-with-every-event),
@@ -685,48 +709,48 @@ read); a stored freshness flag.
 ## Authority model (`authority_model.md`)
 
 ### authority
-**Definition:** the right to take an action, expressed as `principal + domain + scope + action +
+**Definition:** the right to take an [action](#action), expressed as `[principal](#principal) + domain + scope + action +
 conditions + time`.
 **See:** [`authority_model.md#the-tuple`](authority_model.md#the-tuple).
 **Never:** —
 **Not for:** "permission" alone for authority (a scope term); "access" for authority.
 
 ### principal
-**Definition:** an actor, human or agent, that authority is attributed to.
+**Definition:** an actor, human or [agent](#agent), that [authority](#authority) is attributed to.
 **See:** [`authority_model.md#principals`](authority_model.md#principals).
 **Never:** —
 **Not for:** owner for a principal unless ownership is meant; identity for a principal (the
 credential, not the actor); user for a principal (the store's authenticated credential).
 
 ### credential
-**Definition:** a binding from a login, key, address, or chat id to a principal, many-to-one, and never the
+**Definition:** a binding from a login, key, address, or chat id to a [principal](#principal), many-to-one, and never the
 principal itself.
 **See:** [`authority_model.md#principals`](authority_model.md#principals).
 **Never:** —
 **Not for:** identity for the principal; account for a credential.
 
 ### operator
-**Definition:** a human principal who directs agents.
+**Definition:** a human [principal](#principal) who directs [agents](#agent).
 **See:** [`authority_model.md#principals`](authority_model.md#principals).
 **Never:** "admin".
 **Not for:** user when authority is meant.
 
 ### agent
-**Definition:** a non-human principal defined by an `agent_definition` and acting as a bound principal.
+**Definition:** a non-human [principal](#principal) defined by an `agent_definition` and acting as a bound principal.
 **See:** [`authority_model.md#principals`](authority_model.md#principals).
 **Never:** —
 **Not for:** worker for an agent (the process running an agent is a runner).
 
 ### tenant
-**Definition:** the isolation boundary, an organization or a solo operator, that no read, write, routing,
+**Definition:** the isolation boundary, an organization or a solo [operator](#operator), that no read, write, routing,
 or key crosses.
 **See:** [`authority_model.md#principals`](authority_model.md#principals).
 **Never:** —
 **Not for:** account for a tenant; "workspace" alone for a tenant.
 
 ### grant
-**Definition:** an `agent_grant` holding the domain and scope a principal may act in, matched on its
-credential, as operation × entity types × repositories with parameter constraints and an expiry.
+**Definition:** an `agent_grant` holding the domain and scope a [principal](#principal) may act in, matched on its
+[credential](#credential), as operation × entity types × repositories with parameter constraints and an expiry.
 Zero grants is deny.
 **See:** [`authority_model.md#grants`](authority_model.md#grants).
 **Never:** —
@@ -734,42 +758,42 @@ Zero grants is deny.
 enforcement of it).
 
 ### decision point
-**Definition:** the function, the action gate or the grant checker, that returns `Permit`, `Deny`, or
+**Definition:** the function, the [action gate](#action-gate) or the grant checker, that returns `Permit`, `Deny`, or
 `Indeterminate` for one request.
 **See:** [`authority_model.md#the-tuple`](authority_model.md#the-tuple).
 **Never:** "policy engine".
 **Not for:** checker for a decision point, unqualified.
 
 ### enforcement point
-**Definition:** a call site that acts on a decision point's answer and treats `Indeterminate` as `Deny`.
+**Definition:** a call site that acts on a [decision point](#decision-point)'s answer and treats `Indeterminate` as `Deny`.
 **See:** [`authority_model.md#the-tuple`](authority_model.md#the-tuple).
 **Never:** "advisory check", "passthrough".
 **Not for:** —
 
 ### ownership
-**Definition:** named accountability for a workflow, domain, queue, or configuration entity, carried as an
-`ownership_grant` edge to a principal.
+**Definition:** named accountability for a [workflow](#workflow), domain, queue, or configuration entity, carried as an
+`ownership_grant` [edge](#edge) to a [principal](#principal).
 **See:** [`authority_model.md#principals`](authority_model.md#principals).
 **Never:** —
 **Not for:** owner alone for the accountable principal.
 
 ### delegation
-**Definition:** a scoped, time-bounded transfer of action rights, recorded as a `delegation_edge` from
-delegator to delegate, in which each hop holds a subset of the delegator's authority.
+**Definition:** a scoped, time-bounded transfer of [action](#action) rights, recorded as a `delegation_edge` from
+delegator to delegate, in which each hop holds a subset of the delegator's [authority](#authority).
 Delegation is A acting for B and recorded as such; impersonation is A indistinguishable from B (RFC 8693).
 **See:** [`authority_model.md#delegation`](authority_model.md#delegation).
 **Never:** —
 **Not for:** "impersonation" for delegation; "handover" for delegation without scope.
 
 ### authority_chain
-**Definition:** the derived, never stored, read model over delegation edges, grants, and checkpoints that
-gives the path from a principal through each delegation hop to the approver for one action.
+**Definition:** the derived, never stored, read model over [delegation](#delegation) [edges](#edge), grants, and [checkpoints](#checkpoint) that
+gives the path from a [principal](#principal) through each delegation hop to the approver for one [action](#action).
 **See:** [`authority_model.md#delegation`](authority_model.md#delegation).
 **Never:** —
 **Not for:** "audit log" alone for the chain.
 
 ### approval
-**Definition:** an explicit yes, no, or veto by a required principal on a checkpoint, ending in a terminal
+**Definition:** an explicit yes, no, or veto by a required [principal](#principal) on a [checkpoint](#checkpoint), ending in a terminal
 state.
 A timeout is a terminal state that never continues.
 **See:** [`authority_model.md#approval`](authority_model.md#approval).
@@ -777,13 +801,13 @@ A timeout is a terminal state that never continues.
 **Not for:** resolved without who; sign-off for an approval (that closes a step).
 
 ### quorum
-**Definition:** a structural check requiring m-of-n named principals on one checkpoint.
+**Definition:** a structural check requiring m-of-n named [principals](#principal) on one [checkpoint](#checkpoint).
 **See:** [`authority_model.md#structural-checks-quorum-and-separation-of-duties`](authority_model.md#structural-checks-quorum-and-separation-of-duties).
 **Never:** —
 **Not for:** "required reviewers" for a quorum (1-of-n is not a quorum); sign-off for a quorum.
 
 ### separation of duties
-**Definition:** a structural check requiring disjointness between the roles on one checkpoint, such as
+**Definition:** a structural check requiring disjointness between the roles on one [checkpoint](#checkpoint), such as
 raiser and resolver or proposer and approver.
 **See:** [`authority_model.md#structural-checks-quorum-and-separation-of-duties`](authority_model.md#structural-checks-quorum-and-separation-of-duties).
 **Never:** —
@@ -804,7 +828,7 @@ execution rights.
 
 ### reprioritization
 **Definition:** the explicit "what stops?" recorded when an initiative is accepted, confirmed by a
-principal.
+[principal](#principal).
 **See:** [`authority_model.md#initiative-proposal-reprioritization`](authority_model.md#initiative-proposal-reprioritization).
 **Never:** "priority bump", "re-plan".
 **Not for:** —
@@ -814,14 +838,14 @@ principal.
 ### halt
 **Definition:** the state in which the swarm does no work because its record is unreachable, while it keeps
 observing and announces itself off-Neotoma.
-Not a checkpoint: a checkpoint is written to the record, and the halt is the state in which nothing can be.
+Not a [checkpoint](#checkpoint): a checkpoint is written to the record, and the halt is the state in which nothing can be.
 **See:** [`failure_posture.md#the-decision`](failure_posture.md#the-decision),
 [`failure_posture.md#what-a-checkpoint-does-not-absorb`](failure_posture.md#what-a-checkpoint-does-not-absorb).
 **Never:** "degraded mode", "fallback mode", "offline mode".
 **Not for:** —
 
 ### reachability probe
-**Definition:** one real read, at the moment a task is claimed, of what the work will read.
+**Definition:** one real read, at the moment a [task](#task) is [claimed](#claim), of what the work will read.
 **See:** [`failure_posture.md#the-rules`](failure_posture.md#the-rules).
 **Never:** "ping".
 **Not for:** "health check" for the probe (`/health` can be green while every read hangs).
@@ -834,20 +858,20 @@ value written.
 **Not for:** treating a 2xx or `success: true` as evidence.
 
 ### unknown
-**Definition:** the third state of any gate, grant, drift, or reachability reader, meaning the value could
+**Definition:** the third state of any [gate](#gate), grant, drift, or reachability reader, meaning the value could
 not be determined.
-Never coerced to pending or to clear; at an enforcement point it resolves to deny.
+Never coerced to pending or to clear; at an [enforcement point](#enforcement-point) it resolves to deny.
 **See:** [`failure_posture.md#the-rules`](failure_posture.md#the-rules).
 **Never:** "legacy fail-open" (no such category exists).
 **Not for:** pending or clear for a failed read.
 
 ### escalate
-**Definition:** to raise a checkpoint on a task the swarm cannot advance, with the reason class that says
+**Definition:** to raise a [checkpoint](#checkpoint) on a [task](#task) the swarm cannot advance, with the reason class that says
 why.
-The watchdog escalates on repeated lapse; the engine escalates on an unreadable workflow; a bounded loop
-escalates when its rounds are exhausted; a claim predicate escalates on an `assigned_to` nobody can run.
+The [watchdog](#watchdog) escalates on repeated lapse; the engine escalates on an unreadable [workflow](#workflow); a bounded loop
+escalates when its rounds are exhausted; a [claim](#claim) predicate escalates on an `assigned_to` nobody can run.
 One decision queue, one resolution protocol: a checkpoint on a task is resolved as a checkpoint on an
-action is (principle 6, do not build a second gate).
+[action](#action) is (principle 6, do not build a second [gate](#gate)).
 **See:** [`failure_posture.md#repeated-lapse-raises-a-checkpoint`](failure_posture.md#repeated-lapse-raises-a-checkpoint),
 [`failure_posture.md#what-a-checkpoint-does-not-absorb`](failure_posture.md#what-a-checkpoint-does-not-absorb).
 **Never:** escalation as a thing that is raised, written, or counted — as an entity, a record, a schema, or
@@ -865,14 +889,14 @@ timestamps and fields.
 **Not for:** link for an edge in schema text (a link is a URL); field for what an edge carries.
 
 ### derived read
-**Definition:** a value computed from entities and edges at read time and never stored, such as `active`,
-a step state, the chain, or a parent's completion.
+**Definition:** a value computed from entities and [edges](#edge) at read time and never stored, such as `active`,
+a [step state](#step-state), the chain, or a parent's completion.
 **See:** [`data_model.md#concepts`](data_model.md#concepts).
 **Never:** —
 **Not for:** cached for a derived read; flag for a derived read.
 
 ### projection
-**Definition:** a stored copy of a derived read, kept for a hot path and proved equal to its source by a
+**Definition:** a stored copy of a [derived read](#derived-read), kept for a [hot path](#hot-path) and proved equal to its source by a
 reconciler, such as `step_status`.
 **See:** [`data_model.md#concepts`](data_model.md#concepts).
 **Never:** —
@@ -894,14 +918,14 @@ Each header says which kind it is.
 **Not for:** —
 
 ### lens
-**Definition:** one reviewing perspective on the review panel (pm, ux, arch, qa, and the rest), run by its
-step owner.
+**Definition:** one reviewing perspective on the [review panel](#review-panel) (pm, ux, arch, qa, and the rest), run by its
+[step owner](#step-owner).
 **See:** [`conformance.md#always-read`](conformance.md#always-read).
 **Never:** —
 **Not for:** "reviewer" for a lens, unqualified.
 
 ### design basis
-**Definition:** the foundation document and section an issue or PR conforms to, or the statement `no
+**Definition:** the foundation document and section an [issue](#issue) or PR conforms to, or the statement `no
 design applies` with a reason, checked mechanically and judged by reading.
 **See:** [`conformance.md#design-basis`](conformance.md#design-basis).
 **Never:** —
@@ -918,7 +942,7 @@ treating it as design evidence.
 
 ## Verbs
 
-Each subject has its verb. The subject of a movement verb is a task or a batch, never the batch record:
+Each subject has its verb. The subject of a movement verb is a [task](#task) or a [batch](#batch), never the batch record:
 "the batch records who signed off `qa`" is a fact about the record; "the batch advances" is the batch
 of tasks moving. The pairs are canonical; the phrases in the last column are replaced by them wherever
 they appear in a document, a schema, a prompt, or an error message.
@@ -947,7 +971,7 @@ they appear in a document, a schema, a prompt, or an error message.
 | the operator with the book of business for a customer | **book-of-business owner** | `multi_tenant.md` section 5 |
 | named accountability for a workflow, domain, or queue | **ownership** (above) | `ownership_grant` |
 
-The principal holding a task's lease is its [claimant](#claimant), never its owner; the principal an
+The [principal](#principal) holding a [task](#task)'s [lease](#lease) is its [claimant](#claimant), never its owner; the principal an
 assignment names is not yet its claimant.
 
 ## Retired names

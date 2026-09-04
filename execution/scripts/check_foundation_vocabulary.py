@@ -299,6 +299,20 @@ def missing_pattern_entries(vocab_text: str) -> list[str]:
     return sorted(k for k in PATTERNS if k not in entries)
 
 
+_INLINE_LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)\s]*)\)")
+
+
+def as_read(line: str) -> str:
+    """The line as a reader sees it: an inline link reduced to its display text.
+
+    A ban is about the words in the prose, not the markup around them. ``[step owner](#step-owner)`` reads
+    as "step owner", but matched raw it puts a ``[`` in front of "step" and a ``](#step-`` in front of
+    "owner", which defeats every lookbehind in ``PATTERNS`` and reports the phrase the vocabulary
+    explicitly permits. Linking a term must not change the verdict on the sentence containing it.
+    """
+    return _INLINE_LINK_RE.sub(lambda m: m.group(1), line)
+
+
 def _scannable(line: str, *, is_vocab: bool) -> bool:
     if _NEVER_MARK in line or _NOT_FOR_MARK in line:
         return False
@@ -336,11 +350,12 @@ def scan(root: Path, never: list[Ban], not_for: list[Ban]) -> tuple[list[Hit], l
                     continue  # link lists name terms, not prose
             if skip_section or not _scannable(line, is_vocab=is_vocab):
                 continue
+            prose = as_read(line)
             for ban in never:
-                if ban.pattern.search(line):
+                if ban.pattern.search(prose):
                     never_hits.append(Hit(ban, rel, no, line.strip()))
             for ban in not_for:
-                if ban.pattern.search(line):
+                if ban.pattern.search(prose):
                     advisory.append(Hit(ban, rel, no, line.strip()))
     return never_hits, advisory
 
