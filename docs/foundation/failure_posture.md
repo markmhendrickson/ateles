@@ -114,6 +114,17 @@ through the one decision queue, by the one resolution protocol, that checkpoints
 build a second gate, a second queue, or a second notification path for task-level failure (principle 6):
 a queue nobody consumes is a report, not a control (principle 1).
 
+**Escalation reorders; it never signs.** A checkpoint raised on a step nobody has claimed, or on a task
+the swarm cannot advance, changes the order in which claimable work is offered and what a principal
+attends to first. It changes no verdict and closes no step. A step blocked on a step owner who never
+acted is a liveness condition, not an ordering one, and reordering the queue cannot release it: the step
+is closed by that step owner's sign off or it stays open. **No step is closed by elapsed time.** A gate that expires into
+a pass is a gate that fails open on a timer, which is the shape this model exists to remove — the whole
+value of a required step is that its absence is visible, and a timer converts that absence into a silent
+permit. So a checkpoint raised on an unclaimed step names the step, its owner role, and how long it has
+been open, and stops there; whether an interval raises such a checkpoint at all is an open decision, but
+no form of it may advance the step.
+
 ## What a checkpoint does not absorb
 
 Two things look like escalation and are not checkpoints.

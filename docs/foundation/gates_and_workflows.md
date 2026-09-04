@@ -63,12 +63,55 @@ signed one. The action gate is unaffected: a waived workflow step does not permi
 evaluated on its own (below). Open: whether any principal other than the operator may hold the right to
 waive, and whether a waiver may be scoped to one step or to a batch's remaining unsigned steps.
 
+**Scope amendment versus scope creep.** A batch carries acceptance criteria, and implementation regularly
+turns up work that was not in view when they were written. A scope boundary is a decision record, not a
+rule that outranks evidence gathered after it was written — so the addition **amends** the criterion when
+three conditions hold together: it is disclosed rather than absorbed, it is escalated to the step owner
+whose sign off the change touches, and it is defended against an acceptance criterion the batch already
+carries. On all three the criterion is amended by that owner's ruling and the batch continues with the
+work inside it. Absent any one of them the addition is scope creep, and the unrelated work is split into
+its own batch, from the first step of its workflow
+(`work_model.md#a-task-is-in-at-most-one-batch-at-a-time`). What separates the two is not the size of the
+addition but whether the step owner ruled on it: undisclosed bundling is refused however small, and a
+large amendment the owner ruled on is legitimate. Scope moving silently is the failure — a batch whose
+shipped change exceeds what any principal judged carries sign offs pinned to an artifact state that no
+longer describes it (`data_model.md#record-conventions`).
+
 `step_status` on the task is the hot-path projection of the batch's sign-offs, so "all required steps
 signed?" fails closed in one read. A reconciler proves it agrees with the sign-offs; neither is deleted,
 neither is a second source of truth (`gate_status_map_should_remain`, under its former name). No
 transition event type; history is the record's observations (`no_gate_transition_event_type`). One engine
 opens steps from the entities and reads the sign-offs; a second engine that sequences from a code literal
 and cannot see the first is the defect this model removes (`real_defect_is_two_blind_engines`).
+
+### Findings, verdicts, and what a blocking finding obliges
+
+A step owner judging a batch records **findings** (`vocabulary.md#finding`): one defect or objection each,
+each carrying its own severity. The sign off carries a **verdict** (`vocabulary.md#verdict`), the summary
+token that closes the step and states whether the step's **condition** (`vocabulary.md#condition`) is met.
+The severity of the findings, not the summary token, is what blocks — a blocking finding filed under a
+non-blocking summary is still a blocking finding, and whether a verdict may disagree with the findings it
+carries is an open decision this document does not settle.
+
+**A blocking finding is one of two kinds, and the kind decides what may be done about it.** An
+**implementation-only** finding names a determinate defect with a determinate fix: the work is inside the
+swarm's reach, so it may be routed to an implementer like any other task, and the step opens again on the
+result. A **decision or attestation** finding needs a judgement or a statement of fact that only a
+principal can make — that a trade-off is acceptable, that a risk was considered, that something is true of
+the world — and it is not routable at all, because routing it would ask an implementer to supply the
+judgement the finding exists to demand. In both kinds the step owner keeps the terminal sign off:
+**routing the remedy never transfers the verdict.** An implementer that fixes the named defect produces
+an artifact the step owner then judges; it does not close the step by having done the work.
+
+**A blocking verdict names its evidence.** A blocking finding cites an executed command and the output it
+produced — the check that was run and what it actually said. A verdict may rest on evidence another
+mechanism executed, a CI run or a deterministic lint, provided the sign off names that mechanism as its
+evidence and the result it read. What a blocking verdict may never do is present unexecuted reasoning as
+an executed finding: a lens that could not run the check files a **non-blocking** finding stating what it
+could not verify, and says so plainly, rather than blocking on a defect it inferred. Reasoning about a
+defect is a reason to look; it is not a reason to block, because a block asserts that the defect is there
+and a principal downstream will act on that assertion without re-deriving it. This is principle 2 at the
+verdict: a claim that was never read back is not evidence.
 
 ### One step set, defined once, tested for parity
 

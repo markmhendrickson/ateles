@@ -82,7 +82,11 @@ directly and needs no event, while a principal whose only interface is the host 
 and the adapter carries the verdict in.
 
 **Linkage.** An event names an external record; the adapter finds the artifact for it by `system` and
-`external_id` (`data_model.md#concepts`). An artifact with no batch and no task is one the record does
+`external_id` (`data_model.md#concepts`) — the pair that identifies every artifact, because an artifact
+is by definition a record in an external system reached through an adapter, and never a thing the swarm
+produced into the record (`work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject`). An
+adapter therefore never mints an artifact for something the record already holds: what the swarm writes
+for itself is an entity, and only what the external system holds gets a `system` and an `external_id`. An artifact with no batch and no task is one the record does
 not track: a new-record event on such a record (an issue opened, a message received) yields a task for
 intake with the artifact attached; any other event on it is dropped with that reason, counted and
 surfaced under the disposition rule below. The adapter never attaches an
@@ -118,6 +122,23 @@ every write that carries a decision (a sign-off, a resolution, a confirmation) i
 adapter acknowledges the event (principle 2). During a halt the adapter writes nothing, acknowledges
 nothing, and lets the external system redeliver; a signal the record cannot hold is not a signal the
 engine may act on (`failure_posture.md#the-rules`).
+
+**Sourcing, coverage, and freshness.** The record already holds, for every observation, where it came
+from, when, and through which interpretation, so an adapter records its sourcing through that mechanism
+and never builds freshness bookkeeping of its own
+(`data_model.md#record-conventions`). Concretely, every observation an adapter
+writes carries three things: its **source**, the external system and the adapter that read it; the time it
+was **sourced** from that system, which is the system's own time for the event and not the time the write
+landed; and the **coverage** of the read that produced it — the window or page the adapter asked the
+system for and what it actually returned. Coverage is the part an adapter is most tempted to omit and the
+part that matters most: without it a truncated page, a request the system rate-limited into a partial
+answer, and a system with genuinely nothing to report all produce the same record, so the gap is
+undetectable until something downstream has already relied on it. With it, an incomplete read is readable
+as incomplete and can be asked for again. Freshness — how current the record's picture of a system is,
+and whether any interval was ever completely read — is then **derived** by reading provenance across an
+artifact's observations, never a `last_synced_at` field the adapter maintains: a maintained field needs a
+process to keep it true, which is what principle 11 forbids, and it fails in the worst direction, going
+stale into a confident-looking value at exactly the moment the adapter stops reading the system.
 
 ## Outbound: steps produce actions, adapters take them
 

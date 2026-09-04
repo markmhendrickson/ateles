@@ -123,6 +123,26 @@ the operator and holds the lease while the operator decides. It is not itself a 
 only when an action inside it reaches the action gate, which resolves `operator_only` to `NEVER`
 (`gates_and_workflows.md`). The task path stays pull; only the action waits on a human.
 
+### A task is executed only through a workflow
+
+There is no path by which a task is executed outside a workflow. Every task enters intake, and intake's
+closing sign off names the successor workflow it goes to, or none, or operator-only; whatever it does
+after that, it does inside a batch going through a declared workflow, with that workflow's steps, step
+owners, and sign offs. The design offers no side door: no status a principal sets that means "done
+without a workflow", no direct-execution mode for small work, no class of task exempt because it is
+urgent or trivial. Work small enough that most steps are unnecessary takes a declared fast path
+(`gates_and_workflows.md`), which is a workflow saying which steps it skips — a decision recorded in the
+declaration, judged once, and visible to every reader — rather than a task escaping the model.
+
+**What this means for the self-triggering daemons.** A daemon produces tasks and takes actions, and it
+receives no task itself (the three execution mechanisms, below); none of that is an exception to this
+rule. Any task a daemon produces enters intake exactly like a task from any other source and is executed
+through a workflow from there — the daemon that created it holds no privilege over it and does not
+execute it outside the model. The daemon's own outbound effects are not task execution at all: they are
+actions, and each passes the action gate on its own (`gates_and_workflows.md`, C2). So the daemon loop
+sits beside the task path rather than around it, and the two meet where a daemon's output becomes a task
+in intake.
+
 ### What goes through a workflow is a batch of tasks
 
 Tasks go through a workflow in a batch: one or more tasks together, and the record of that. A single task
@@ -137,6 +157,18 @@ An `artifact` is an external record (issue, PR, release, message) linked by edge
 the batch's tasks; the PR is the record left behind. An action is the intended effect; the artifact is
 what the effect leaves. Which system holds the artifact, and what that system calls it, is outside the
 design; how that system's events and operations map onto the record is `adapters.md`.
+
+**The word is bound, and it is not a catch-all for outputs.** An artifact is a record living in an
+external system, reachable only through that system's adapter, and always identified by the pair `system`
+and `external_id` — a thing the swarm can point at but does not hold. Anything the swarm produces that
+lives in the record is an **entity**, not an artifact: a sign off, an analysis, a draft, a checkpoint, a
+plan, a page the swarm rendered into the record. The test is where the thing lives and how it is reached,
+never how output-shaped it feels: if reading it means asking an external system through an adapter, it is
+an artifact; if reading it is a retrieval from the record, it is an entity. Keeping the word this narrow
+is what lets every rule about artifacts hold at once — that they are found by `system` and `external_id`,
+that only an adapter touches them, that they are never the subject of a step, and that what happens to
+them reaches a step only through a principal who reads and signs. A word that also covered the swarm's
+own outputs would break all four.
 
 ### A task is in at most one batch at a time
 

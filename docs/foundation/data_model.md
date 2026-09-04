@@ -28,6 +28,13 @@ The rule that decides each row (principle 11): state that would need a watchdog,
 reconciler to stay correct is an edge with its own timestamps or a derived read, never a field. A
 projection is the one exception, and it is reconciled.
 
+One row is easy to over-read. `artifact` is the record of a thing in an **external** system, identified by
+`system` and `external_id` and reached only through that system's adapter; it is not the general row for
+anything the swarm produces. What the swarm writes into the record — a sign off, a checkpoint, an
+analysis, a draft, a rendered page held here — is an entity of its own type, and the question that tells
+them apart is where the thing lives and how it is read, never how much it looks like an output
+(`work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject`).
+
 <!-- rendered: data_model concepts -->
 
 | Concept | Entity type | Key fields | Edges (type, direction, target) | Derived reads | Projections | Deliberately not a field |
@@ -99,6 +106,23 @@ projection is the one exception, and it is reconciled.
   step, and the event does not do it. A reader that needs to know whether a verdict is current derives it
   by comparing the pinned head to the artifact's — a derived read, never a stored freshness flag that a
   process would have to keep true (principle 11).
+- **Tolerant readers, canonical writers.** Where one concept has been written under several field names,
+  the remedy is a tolerant reader and a canonical writer, never a bulk migration. Every new write uses the
+  canonical name only; every reader checks all known spellings, canonical first. A migration cannot make
+  readers safely narrow, because the record is append-only: the superseded spelling stays readable in the
+  observations that carried it, and any writer or checkout not yet updated keeps producing it. So the
+  tolerant reader is permanent, not transitional, and a reader narrowed on the strength of a completed
+  migration silently stops seeing everything written before it. The reader also may not assume the query
+  layer's coercions hold in process: a server filter that matches `{"value":459}` and `{"value":"459"}`
+  alike says nothing about an in-process comparison of the two.
+- **A registered type declares how competing observations resolve.** Registration sets the per-field merge
+  policy (`reducer_config`): which fields are last-write, what breaks a tie between two writes (the
+  `observed_at` the source states, never the arrival time we happened to record), and which types need no
+  reducer at all because they are immutable and never corrected. This is why registration is explicit
+  rather than inferred from the first store: an inferred type has no declared merge behaviour, and the
+  first concurrent writer is the one who discovers that. A field with several concurrent writers is
+  written through the correction path, which re-reads and merges; a whole-field store clobbers whatever
+  landed in between.
 - **Schema versions.** Every entity type is registered with a version, and a sign-off pins the
   `agent_definition` version it was made under; a write that names a field the registered version does not
   declare is not silently accepted as that field.
@@ -112,6 +136,18 @@ projection is the one exception, and it is reconciled.
   `result_ref`), read back from the external system. No edge type is introduced for either: the record
   the effect left is `PRODUCES` from the batch, and the artifact an event concerns is found by `system`
   and `external_id` (`adapters.md`).
+- **Sourcing rides on provenance; freshness is a read over it, never a maintained field.** The record
+  already carries, for every observation, where it came from, when, and through which interpretation — so
+  an adapter records its own sourcing through that mechanism rather than inventing bookkeeping beside it.
+  Every observation an adapter writes carries its source (the external system and the adapter), the time
+  it was sourced from that system rather than the time it was stored, and the **coverage** of the read
+  that produced it: what range the adapter asked for and what it actually got back, so a partial,
+  truncated, or paged read is distinguishable from a complete one. That last part is what makes silence
+  readable — without it, a page cut short and a system with nothing to report produce identical records,
+  and the gap is invisible until something downstream depends on it. How stale a system's picture is, and
+  whether it was ever completely read, are then derived by reading provenance across those observations:
+  a derived read (principle 11), not a freshness or last-synced field that a process would have to keep
+  true and that goes quietly wrong the moment that process stops.
 - **Edges carry their own timestamps and fields.** A relationship is written with `created_at` and,
   where it can end, an explicit end (`returned_at`, `ended_at`); a state derived from an edge is read from
   those, never from a status the edge would have to be transitioned to.
