@@ -7,7 +7,15 @@ and the daemons. Even in a private repo the snapshots stay age-encrypted for
 defense-in-depth (a leaked token or an accidental public flip never exposes them).
 
 Stdlib-only by design — these run in minimal daemon/CI environments.
-Security: secret VALUES are never logged or printed by anything in this module.
+
+Security: secret VALUES are never logged or printed by anything in this module,
+and — the part that is easy to get wrong — they are never carried in an
+EXCEPTION either. See `SecretsToolError` below: a failing `sops`/`op` run has
+its stderr dropped at the raise site rather than scrubbed, because the tools
+echo the input they choked on (sops' dotenv parser prints the offending line
+verbatim, which for our input IS `KEY=<secret>`). A caller that formats the
+exception the obvious way — ``f"failed: {exc}"`` — must not be able to disclose
+a value no matter how it handles it.
 """
 
 from __future__ import annotations
@@ -16,6 +24,40 @@ import json
 import os
 import subprocess
 from pathlib import Path
+
+
+class SecretsToolError(RuntimeError):
+    """A secrets subprocess (`sops`, `op`) failed.
+
+    Deliberately holds NO tool output. `sops` and `op` echo fragments of their
+    input on failure — sops' dotenv parser prints the offending line verbatim,
+    and our input lines are literally ``KEY=<secret value>`` — so embedding
+    stderr in the message turns any caller's ``f"...: {exc}"`` into a
+    credential disclosure. That is not hypothetical: it was caught by a canary
+    in ateles#712.
+
+    Two designs were available: scrub the stderr at the raise site, or refuse to
+    carry it at all. Scrubbing loses — it needs a pattern for every shape of
+    secret the snapshot might ever hold (tokens, PATs, age keys, IBANs, values
+    with no distinguishing form at all), and a scrubber that misses one is worse
+    than none because it looks safe. Dropping the payload needs no such
+    prediction and cannot regress. The operator debugs by re-running the same
+    `sops`/`op` command by hand, where the output is theirs to see; `tool`,
+    `action` and `returncode` below say what failed and how, without quoting it.
+    """
+
+    def __init__(self, tool: str, action: str, *, returncode: int, context: str = ""):
+        self.tool = tool
+        self.action = action
+        self.returncode = returncode
+        self.context = context
+        detail = f" ({context})" if context else ""
+        super().__init__(
+            f"{tool} {action} failed with exit code {returncode}{detail}. "
+            f"Output withheld: it can echo secret values. "
+            f"Re-run {tool} manually to see it."
+        )
+
 
 # The private secrets repo holds the .sops.yaml, manifest, and encrypted
 # snapshots. Override with ATELES_SECRETS_DIR; default to the conventional clone.
@@ -148,8 +190,12 @@ def op_read(reference: str) -> str:
         capture_output=True, text=True, timeout=20,
     )
     if result.returncode != 0:
-        # stderr may name the item but never the value
-        raise RuntimeError(f"op read failed for {reference}: {result.stderr.strip()}")
+        # `op`'s stderr is dropped wholesale rather than trusted to name only
+        # the item: it is not contractually value-free, and `reference` alone
+        # already identifies what to re-run by hand.
+        raise SecretsToolError(
+            "op", "read", returncode=result.returncode, context=f"reference {reference}"
+        )
     return result.stdout.strip()
 
 
@@ -182,7 +228,12 @@ def sops_encrypt_dotenv(plaintext: str, dest: Path) -> None:
             cmd, capture_output=True, text=True, timeout=30, env=_sops_env(),
         )
         if result.returncode != 0:
-            raise RuntimeError(f"sops encrypt failed: {result.stderr.strip()}")
+            # The plaintext dotenv went in on stdin-equivalent (a temp file);
+            # sops echoes the line it could not parse. Never surface it.
+            raise SecretsToolError(
+                "sops", "encrypt", returncode=result.returncode,
+                context=f"destination {dest.name}",
+            )
         dest.write_text(result.stdout)
     finally:
         if tmp and tmp.exists():
@@ -197,5 +248,10 @@ def sops_decrypt_dotenv(src: Path) -> dict[str, str]:
         capture_output=True, text=True, timeout=30, env=_sops_env(),
     )
     if result.returncode != 0:
-        raise RuntimeError(f"sops decrypt failed for {src.name}: {result.stderr.strip()}")
+        # Decrypt failure output can carry recovered plaintext (sops may emit a
+        # partially-decrypted tree before erroring), so it is withheld like the
+        # encrypt path's. `src.name` is a filename, never a value.
+        raise SecretsToolError(
+            "sops", "decrypt", returncode=result.returncode, context=f"snapshot {src.name}"
+        )
     return parse_dotenv(result.stdout)
