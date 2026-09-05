@@ -7,7 +7,7 @@ decision, recorded in `status.md`):** binds via the `workflow` entity for each (
 and which successors its tasks may enter, and never the state of a checkout. **Derived from:** `work_model.md`, `gates_and_workflows.md`, the `workflow` declarations on the
 record for the built workflows (their step lists and fast paths, not their agent names), the agent
 policies governing outreach, payment, and people-data, `CLAUDE.md`'s people-data section, and PR #745
-operator review (2026-09-04). Which workflows have a declaration on the record, and which are envisioned
+operator review (2026-09-04), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`). Which workflows have a declaration on the record, and which are envisioned
 only, is `status.md`.
 
 ## Purpose
@@ -330,7 +330,7 @@ operator-facing agent carries the gate's checkpoint and records the decision
 **Successors:** none.
 
 **Fast paths:** `approved` skips `operator_preview`, permitted only when the action gate would not
-checkpoint the `publish` action: a recurring series for the class has graduated under the
+checkpoint the `publish` action: an action series for the class has graduated under the
 `action_policy`, or the operator's standing approval for the content is already recorded on the task.
 The fast path never bypasses the gate; it skips the step that would have carried a checkpoint the gate
 would not have written.

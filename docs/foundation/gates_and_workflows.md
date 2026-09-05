@@ -8,7 +8,7 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `unclassified_action_type_fails_closed_and_loudly`, `gate_advisory_and_enforcing_paths_must_agree`,
 `gating_vocabulary_order_is_load_bearing`, throughput plan `ent_18b902cf72822373f9da8ced` decision
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
-memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding). Supersedes
+memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
 is `status.md`; how each concept is recorded is `data_model.md`.
 
@@ -335,13 +335,23 @@ rather than a second path for record writes (principle 6).
 
 ### Actions are entities; only actions are taken
 
-An `action` is one intended effect outside the Ateles system (a send, a publish, a merge, a payment, a
-release), related to the task it serves (`PRODUCES` from the task; `REFERS_TO` where the action cites the
-artifact it acts on). Created when the effect becomes known — possibly mid-workflow: a task may produce
-many actions, most unknown at creation. Tasks are executed (claimed, done, completed); actions are taken;
-"take" is never said of a task. The action gate is evaluated per action, at the moment it would be taken,
-so an effect discovered late is gated no differently from one declared at creation. The dedup key lives
-on the action (`work_model.md`).
+An `action` is one intended effect on a system the swarm does not own (a send, a publish, a merge, a
+payment, a release), related to the task it serves (`PRODUCES` from the task; `REFERS_TO` where the action
+cites the artifact it acts on). Created when the effect becomes known — possibly mid-workflow: a task may
+produce many actions, most unknown at creation. Tasks are executed (claimed, done, completed); actions are
+taken; "take" is never said of a task. The action gate is evaluated per action, at the moment it would be
+taken, so an effect discovered late is gated no differently from one declared at creation. The dedup key
+lives on the action (`work_model.md`).
+
+**Which boundary "outside" names, stated once here.** There is one boundary in this design, and the record
+is on the inside of it. The swarm is the engine, the agents, the adapters, and the record they all read and
+write; outside is every system the swarm does not own — a code host, a mail system, a chat channel, a
+calendar, a payment rail. Neotoma is not a second system on the far side of that line: it *is* the record,
+and reaching it is how the swarm holds its own state (principle 9, `data_model.md`). So an internal
+operational write to the record crosses nothing and is not an action, which is the same rule the two named
+exceptions above bend on purpose — a governance write and a lossy record mutation are actions not because
+of where they go, but because of what they can destroy. The word for the far side is **external**, and
+`adapters.md` owns everything about crossing to it; the only component that does is an adapter.
 
 ### The action gate is PR-independent
 
@@ -397,9 +407,21 @@ confirms by reading the system back.
 
 ### The checkpoint
 
-A `checkpoint` is the held state of a subject awaiting a principal's decision: an action the gate would
-not let through (reason `gate_hold`), or a task the swarm cannot advance (`failure_posture.md`). It is
-interrupted, not terminal (A2A's `input-required`). It records its reason class, the needed input, the
+A `checkpoint` is the held state of its **subject** awaiting a principal's decision. The subject is the one
+entity the checkpoint holds, named by its `CHECKPOINTS` edge (`data_model.md`), and it is one of exactly
+two things: an action the gate would not let through (reason `gate_hold`), or a task the swarm cannot
+advance (`failure_posture.md`). Nothing else is ever a subject — not a step, not a batch, not an artifact —
+because those are the only two kinds of thing the swarm can be stopped in the middle of doing.
+
+**Why one term covers both, rather than two terms.** A held action and a held task are the same thing at
+the level this document defines: work that has stopped short of a decision only a principal can make, and
+that resumes on that decision or ends on it. What differs is only what resumes — the action is taken or
+refused, the task is re-claimed or closed (`data_model.md`) — and that difference is already carried by the
+subject edge's target and by the reason class. Splitting the term would give the same queue two names, two
+presentation paths, and two resolution protocols for one protocol's worth of meaning, which is the second
+gate principle 6 forbids. So: one term, one queue, and the subject says which case a reader is looking at.
+
+It is interrupted, not terminal (A2A's `input-required`). It records its reason class, the needed input, the
 options, whom it awaits, and who resolved it, and it ends in a terminal approval; a deferral is bounded
 and a timeout is a terminal state that never continues
 (`deferral_must_be_bounded_and_escalate_off_neotoma`). Its subject is linked by edge, never named in a

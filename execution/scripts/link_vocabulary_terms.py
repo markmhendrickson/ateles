@@ -23,11 +23,12 @@ re-runs whenever a term is added.
 * Nothing is linked inside a code span, a fenced block, an existing link, a bold run-in label, a heading,
   a table row, a `**See:**` / `**Related:**` citation list, or an HTML comment.
 
-**What it deliberately does not link.** A dozen terms are ordinary English words that this vocabulary
+**What it deliberately does not link.** Some terms are ordinary English words that this vocabulary
 also binds to a specific sense — `status`, `active`, `held`, `created`, `condition`, `chain`, `stage`,
-`coverage`, `delivery`, `grant`, `approval`, `initiative`, and the two verb entries `execute (a task)`
-and `take (an action)`. Linking their first occurrence mislabels the ordinary use: "bans are held as
-regular expressions" is not the lease state, and "the owner takes a view" is not the action verb. Their
+`coverage`, `delivery`, `grant`, `approval`, `initiative`, `record`, `subject`, and the two verb entries
+`execute (a task)` and `take (an action)`. Linking their first occurrence mislabels the ordinary use:
+"bans are held as regular expressions" is not the lease state, "the owner takes a view" is not the action
+verb, and "the record a step owner writes" is not the store. Their
 mentions are left to the author, who knows which sense is meant. `GENERIC` below is that list; a wrong
 link is worse than none.
 
@@ -71,7 +72,9 @@ GENERIC = frozenset(
         "grant",
         "held",
         "initiative",
+        "record",
         "stage",
+        "subject",
         "status",
         "take (an action)",
         "terminal",

@@ -115,7 +115,7 @@ mail. That effect becomes an `action` the moment it is known, with class `send_e
 declaration at creation is not amended, because it was a declaration of expectation, not a bound. The
 principal about to take the action evaluates the gate with the action's class, its confidence, the
 `action_policy`, and the class's recurrences. At `NEVER` the checkpoint is written (reason `gate_hold`)
-and nothing else is consulted. At `HIGH` the checkpoint is written unless a recurring series has
+and nothing else is consulted. At `HIGH` the checkpoint is written unless an action series has
 graduated the class. At `LOW` the action is taken at or above the confidence threshold, or once the
 series has graduated, and is checkpointed otherwise. A class in neither set logs the value and resolves
 to `NEVER`.
@@ -126,7 +126,7 @@ flowchart TD
     D --> A[create action: class send_external_comms, PRODUCES from task]
     A --> G{action gate: class under action_policy}
     G -->|operator_only, or class unclassified| N[NEVER: checkpoint, reason gate_hold; nothing else consulted]
-    G -->|HIGH| H{recurring series graduated?}
+    G -->|HIGH| H{action series graduated?}
     H -->|no| HB[checkpoint]
     H -->|yes| HX[take the action]
     G -->|LOW| L{confidence at threshold, or series graduated?}

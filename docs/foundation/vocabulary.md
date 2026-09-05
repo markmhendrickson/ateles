@@ -6,7 +6,7 @@ checkout implements. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` 
 art `ent_08460968e6f49dac21510f4a` (A2A `TaskState`, RFC 8693, Camunda), [task](#task)
 `ent_da60df3beccb675ef8c8c0c5`, the ateles#378 glossary ([operator](#operator) section, and the ux-signed swarm section
 cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 operator review (2026-09-04),
-and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)). Format
+and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`). Format
 follows Neotoma's `docs/vocabulary/canonical_terms.md`.
 
 ## Purpose
@@ -36,8 +36,9 @@ stay predictable rather than accumulating by taste:
 - **Ban lists are never linked.** A `**Never:**` or `**Not for:**` line names words the foundation
   forbids; linking one would present it as canonical. Neither are code spans, headings, table rows, or
   the `**See:**` citation lists, which are links already.
-- **A term that is also an ordinary English word is left to the author.** Sixteen entries — among them
-  [status](#status), [active](#active), [held](#held), [condition](#condition), and the two verb entries
+- **A term that is also an ordinary English word is left to the author.** Eighteen entries — among them
+  [status](#status), [active](#active), [held](#held), [condition](#condition), record, subject, and the
+  two verb entries
   [execute (a task)](#execute-a-task) and [take (an action)](#take-an-action) — are words this file binds
   to a particular sense while English uses them for other things. Linking their every first occurrence
   would mislabel the ordinary use, so the linker leaves them alone and the author links them where the
@@ -109,7 +110,7 @@ record holds.
 **Not for:** run for a task; process for a task.
 
 ### artifact
-**Definition:** a record living in an external system, reached only through that system's
+**Definition:** a record living in an [external system](#external-system), reached only through that system's
 [adapter](#adapter) and always identified by its `system` and `external_id`, that a [batch](#batch)
 produces or references — a GitHub [issue](#issue), a pull request, a release, a sent message — linked to
 the batch and its [tasks](#task) by [edge](#edge) and never the subject of a [step](#step).
@@ -540,17 +541,44 @@ of the workflow's [step owners](#step-owner) and the `agent_grant`s in force.
 **Not for:** action policy for the workflow policy; permissions for the workflow policy.
 
 ### action
-**Definition:** one intended effect outside the Ateles system, such as a send, a publish, a merge, a
-payment, or a release, related to the [task](#task) it serves.
+**Definition:** one intended effect on an [external system](#external-system) — one the swarm does not own — such as a send, a
+publish, a merge, a payment, or a release, related to the [task](#task) it serves.
 Created when the effect becomes known, which may be mid-workflow; a task may produce many, most unknown at
-creation; an internal operational write to Neotoma is not an action.
+creation. The record is inside the boundary, not across it, so an internal operational write to it is not
+an action; the two exceptions, governance writes and lossy record mutations, are actions for what they can
+destroy rather than for where they go.
 **See:** [`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`](gates_and_workflows.md#actions-are-entities-only-actions-are-taken),
 [`adapters.md#outbound-steps-produce-actions-adapters-take-them`](adapters.md#outbound-steps-produce-actions-adapters-take-them).
 **Never:** "side effect" (unrecorded).
 **Not for:** task for the effect; operation for an action.
 
+### external system
+**Definition:** a system the swarm does not own, on the far side of the design's one boundary, reached only
+through an [adapter](#adapter).
+The record is inside that boundary, not across it: the swarm's own state lives there, so writing to it
+crosses nothing. This is the boundary every use of "outside" in these documents means, and it is stated
+once in the [action](#action)'s home section.
+**See:** [`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`](gates_and_workflows.md#actions-are-entities-only-actions-are-taken),
+[`adapters.md#the-two-invariants`](adapters.md#the-two-invariants).
+**Never:** —
+**Not for:** "the Ateles system" or "the Neotoma system" as the thing an effect is outside of (there is one
+boundary, and the record is inside it); external for a component the swarm runs.
+
+### record
+**Definition:** Neotoma, the store the swarm reads and writes its own state in, inside the boundary an
+[action](#action) crosses.
+Every entity type the design names lives here (`data_model.md`); an [artifact](#artifact) is the record's
+handle on a thing that does not. The word is also ordinary English for a thing written down — the record a
+[step owner](#step-owner) writes, the record an effect leaves — and those uses stand; where the store is
+meant and the sentence could be read either way, say the record and name what is in it.
+**See:** [`data_model.md#scope`](data_model.md#scope),
+[`failure_posture.md#the-decision`](failure_posture.md#the-decision).
+**Never:** —
+**Not for:** the record for an [external system](#external-system); "database" for the record in foundation
+prose; the record as something an [adapter](#adapter) reaches across a boundary.
+
 ### take (an action)
-**Definition:** to carry out an [action](#action)'s effect outside the system once the [action gate](#action-gate) permits it.
+**Definition:** to carry out an [action](#action)'s effect on an [external system](#external-system) once the [action gate](#action-gate) permits it.
 Actions are taken; [tasks](#task) are executed.
 **See:** [`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`](gates_and_workflows.md#actions-are-entities-only-actions-are-taken).
 **Never:** execute, in any form, anywhere near an action — an action is taken, never executed; and
@@ -569,8 +597,8 @@ unclassified value fails closed.
 ### blast radius
 **Definition:** the tier an [action_type](#action_type) resolves to under an [action_policy](#action_policy), one of `LOW`, `HIGH`, or
 `NEVER`.
-`LOW` is taken at or above the [confidence](#confidence) threshold or once a [recurring series](#recurring-series) graduates; `HIGH` is
-[checkpointed](#checkpoint) until a recurring series graduates; `NEVER` is cleared by no confidence and no recurrence.
+`LOW` is taken at or above the [confidence](#confidence) threshold or once an [action series](#action-series) graduates; `HIGH` is
+[checkpointed](#checkpoint) until an action series graduates; `NEVER` is cleared by no confidence and no recurrence.
 **See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers).
 **Never:** "risk level" (unbounded).
 **Not for:** "severity" for a tier.
@@ -581,9 +609,10 @@ unclassified value fails closed.
 **Never:** —
 **Not for:** a default of zero standing in for a score.
 
-### recurring series
-**Definition:** a series of one [action](#action) class taken successfully that, on reaching the policy's count,
-graduates that class from [checkpointing](#checkpoint) to being taken without one.
+### action series
+**Definition:** a series of successfully taken [actions](#action) of one class that, on reaching the policy's
+count, graduates that class from [checkpointing](#checkpoint) to being taken without one.
+Named for what the series is made of: the members are actions, and the class they share is what graduates.
 **See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers).
 **Never:** "streak".
 **Not for:** history for a series, unqualified.
@@ -598,11 +627,12 @@ The [task](#task) that carries it is still [claimable](#claimable), by the [oper
 preventing it).
 
 ### checkpoint
-**Definition:** the held state of a subject, an [action](#action) held at the [action gate](#action-gate) or a [task](#task) the swarm cannot
-advance, awaiting a [principal](#principal)'s decision.
-Recorded as an entity linked to its subject, carrying a reason class, the needed input, the options, whom
-it awaits, and who resolved it, and ending in a terminal approval. To checkpoint a subject is to write one
-and hold. The reason classes are `gate_hold`, `repeated_lapse`, `unreadable_workflow`, `rounds_exhausted`,
+**Definition:** the held state of its [subject](#subject) — an [action](#action) held at the [action gate](#action-gate), or a [task](#task) the swarm
+cannot advance — awaiting a [principal](#principal)'s decision.
+Two cases, one term, because both are work stopped short of a decision only a principal can make; what
+resumes differs and is read from the subject [edge](#edge), not from a second term. Recorded as an entity linked to
+its subject, carrying a reason class, the needed input, the options, whom it awaits, and who resolved it,
+and ending in a terminal approval. To checkpoint a subject is to write one and hold. The reason classes are `gate_hold`, `repeated_lapse`, `unreadable_workflow`, `rounds_exhausted`,
 `unspawnable_assignee`, `unclaimed_step` (an open [step](#step) no [step owner](#step-owner) has [claimed](#claim) after the
 interval its [workflow](#workflow) declares, routed against the owner role — it alerts and never signs),
 `undeclared_dependency` (a step could not read a type it declared, and the bounded hold reached its bound),
@@ -616,6 +646,20 @@ retired from the name for the same reason as `_record` and `_definition`.
 **Never:** "checkpoint_brief", "approval request".
 **Not for:** checkpoint for a step; checkpoint for the halt (the halt is not a checkpoint: nothing can be
 written).
+
+### subject
+**Definition:** the thing a [checkpoint](#checkpoint) holds, exactly one, named by its `CHECKPOINTS`
+[edge](#edge) and never by a free-text field: an [action](#action) or a [task](#task), and nothing else.
+The word carries a second sense the work model owns — what a [step](#step) is taken on, which is always the
+[batch](#batch)'s tasks and never an [artifact](#artifact). The two agree where it matters: in both, the
+subject is the work itself, and the record an effect leaves is not it. Where a sentence could be read
+either way, name the entity — the checkpoint's subject, or the subject of a step.
+**See:** [`gates_and_workflows.md#the-checkpoint`](gates_and_workflows.md#the-checkpoint),
+[`data_model.md#concepts`](data_model.md#concepts),
+[`work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject`](work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject).
+**Never:** —
+**Not for:** an [artifact](#artifact) as the subject of anything; a [step](#step) or a [batch](#batch) as a
+checkpoint's subject; two subjects on one checkpoint; the subject held as free text.
 
 ### steward
 **Definition:** the [pipeline](#pipeline) role that merges a pull request once every required [step](#step) is signed off and
@@ -654,7 +698,7 @@ a router (the `route` step is a sign-off by a step owner).
 ## Adapters (`adapters.md`)
 
 ### adapter
-**Definition:** the component that translates between one external system and the record in both
+**Definition:** the component that translates between one [external system](#external-system) and the record in both
 directions, [inbound](#inbound) events into [signals](#signal) about [artifacts](#artifact) and [outbound](#outbound) [actions](#action) into operations on that
 system, and the only component that touches the system.
 An adapter is a [daemon](#daemon) in the work model's sense: it self-triggers on the external system and receives no
@@ -693,15 +737,22 @@ already holds, and reports on no external system —
 [`adapters.md#where-inbound-delivery-comes-from-is-an-open-decision-and-the-records-own-subscriptions-are-not-it`](adapters.md#where-inbound-delivery-comes-from-is-an-open-decision-and-the-records-own-subscriptions-are-not-it)).
 
 ### outbound
-**Definition:** the direction in which the record reaches an external system, as an [action](#action) an
+**Definition:** the direction in which the record reaches an [external system](#external-system), as an [action](#action) an
 [adapter](#adapter) takes once the [action gate](#action-gate) permits it.
+**It names a direction, not a class of action, which is why it is not redundant with `action`.** Every
+action is outbound, so "outbound action" adds nothing and is not written; what the word earns its place on
+is everything at the boundary that is *not* an action — the operation an adapter performs to take one, the
+effect that operation leaves, and a [credential](#credential) held for reaching out
+([`authority_model.md#grants`](authority_model.md#grants)) — each of which has an [inbound](#inbound)
+counterpart it must be told apart from. The pair is the axis `adapters.md` is organized on: one direction
+carries events into the record, the other carries effects out of it.
 **See:** [`adapters.md#outbound-steps-produce-actions-adapters-take-them`](adapters.md#outbound-steps-produce-actions-adapters-take-them).
 **Never:** —
-**Not for:** outbound for an internal write to the record (only an effect outside the system is an
-action).
+**Not for:** outbound for an internal write to the record (only an effect on an [external
+system](#external-system) is an action).
 
 ### delivery
-**Definition:** one arrival of an external event at an [adapter](#adapter), carrying the external system's
+**Definition:** one arrival of an external event at an [adapter](#adapter), carrying the [external system](#external-system)'s
 own delivery id, which is the idempotency key of the write it produces.
 Every delivery resolves to one of the four [inbound](#inbound) outcomes or to [dropped](#dropped) with a reason; that
 [disposition](#disposition), never receipt alone, is what is recorded.
@@ -724,7 +775,7 @@ a disposition.
 **Definition:** the [disposition](#disposition) of a [delivery](#delivery) an [adapter](#adapter) resolved
 to no outcome, recorded with the reason that decided it and counted per window.
 A drop is announced on the same off-record path a [halt](#halt) uses, aggregated rather than one message each;
-where the drop concerns a request a person made on the external system, the reason goes back to that
+where the drop concerns a request a person made on the [external system](#external-system), the reason goes back to that
 system as an [observation](#observation) the person can see.
 **See:** [`adapters.md#what-the-adapter-does-with-every-event`](adapters.md#what-the-adapter-does-with-every-event).
 **Never:** —
@@ -734,7 +785,7 @@ event resolved to an observation.
 
 ### sourcing
 **Definition:** what an [adapter](#adapter) records through the record's provenance about a read it made:
-the external system and adapter the [observation](#observation) came from, the time the system itself states for it, and
+the [external system](#external-system) and adapter the [observation](#observation) came from, the time the system itself states for it, and
 the [coverage](#coverage) of the read.
 An adapter records sourcing through provenance and never through bookkeeping of its own.
 **See:** [`adapters.md#what-the-adapter-does-with-every-event`](adapters.md#what-the-adapter-does-with-every-event),
@@ -744,7 +795,7 @@ An adapter records sourcing through provenance and never through bookkeeping of 
 
 ### coverage
 **Definition:** the part of a read's [sourcing](#sourcing) stating what an [adapter](#adapter) asked the
-external system for and what it actually got back, so a partial, truncated, or paged read is
+[external system](#external-system) for and what it actually got back, so a partial, truncated, or paged read is
 distinguishable from a complete one.
 Without it a cut-short page and a system with nothing to report produce the same record.
 **See:** [`adapters.md#what-the-adapter-does-with-every-event`](adapters.md#what-the-adapter-does-with-every-event),
@@ -754,7 +805,7 @@ Without it a cut-short page and a system with nothing to report produce the same
 returned, not a verdict on completeness).
 
 ### freshness
-**Definition:** how current the record's picture of an external system is, and whether an interval was
+**Definition:** how current the record's picture of an [external system](#external-system) is, and whether an interval was
 ever completely read — derived by reading [sourcing](#sourcing) and [coverage](#coverage) across an
 [artifact](#artifact)'s [observations](#observation), never stored.
 A stored freshness field would need a process to keep it true (principle 11) and goes stale into a
@@ -769,7 +820,7 @@ read); a stored freshness flag.
 ### hydration
 **Definition:** the phase that resolves a [step](#step)'s declared [read dependencies](#read-dependency)
 before the step runs — reading from the record what the record holds, and importing through an
-[adapter](#adapter) what an external system holds, as [observations](#observation) on
+[adapter](#adapter) what an [external system](#external-system) holds, as [observations](#observation) on
 [artifacts](#artifact) — so that the step begins only once every declared type is readable.
 It runs before a step opens against `reads_to_enter`, and again before a [sign-off](#sign-off) is written
 against `reads_to_close`; nothing is imported during the step itself. A read hydration cannot fulfil is
@@ -1110,5 +1161,6 @@ foundation prose only on a line that says it is retired.
 | `gate owner`, `gate_status` | [step owner](#step-owner), [step_status](#step_status) | `gate` names one decision |
 | `work item`, `work entity` | [task](#task) (subject), [artifact](#artifact) (record) | the subject of a workflow is the task |
 | `dispatch` | [assign](#assign), [claim](#claim), [intake](#intake) | it once named publication, claim, assignment, and execution at once |
+| `recurring series` | [action series](#action-series) | "recurring" restated what a series already is, and named nothing about the members; the series is made of actions of one class, and that is what graduates |
 | `reaper` | nothing | a lapsed lease already does not count; there is nothing to release |
 | `executing`, `running` (as states) | [active](#active) (derived) | a stored liveness flag fails when the process that would clear it dies |

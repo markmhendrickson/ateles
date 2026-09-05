@@ -5,7 +5,7 @@ document changes (`conformance.md`). **Kind:** foundation; maps each concept the
 onto the record (entity type, fields, edges, derived reads, projections) and never states which of them
 a checkout has registered. **Derived from:** `work_model.md`, `gates_and_workflows.md`,
 `failure_posture.md`, `authority_model.md`, principle 9 and principle 11 of `principles.md`, PR #745
-operator review (2026-09-04), and the operator memos of 2026-09-05 (the `undetermined_scope` reason
+operator review (2026-09-04), the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator memos of 2026-09-05 (the `undetermined_scope` reason
 class). Which types and edge types the registry holds is `status.md`.
 
 ## Purpose
@@ -92,7 +92,7 @@ them apart is where the thing lives and how it is read, never how much it looks 
 - **Idempotency keys on every mutating write.** A write that may be retried carries a key; a mismatch on
   an existing key is refused, and a refusal is stronger evidence of a prior commit than a success response
   is of the present one (`failure_posture.md`, rule 6). An action's `dedup_key` is this convention applied
-  to the effect outside the system.
+  to the effect on the external system.
 - **Read-back after every write that carries a decision** (principle 2): the retrieval that asserts the
   field holds the value written. A response code is not evidence.
 - **A sign-off is pinned to the artifact state it judged.** Each entry in a sign-off's `artifact_refs[]`

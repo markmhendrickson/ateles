@@ -7,7 +7,7 @@ the five adapter rules, which this document applies and does not restate), `work
 intake, the four execution mechanisms), `gates_and_workflows.md` (step state from edges; actions and the
 action gate; the three verdict values), `workflows.md` (the code workflows, release, and security),
 `failure_posture.md` (the halt, the recovery per action class, the checkpoint reason classes), and GitHub's
-own webhook event and payload documentation, read 2026-09-04. What is built, and which rows have no code
+own webhook event and payload documentation, read 2026-09-04, and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`). What is built, and which rows have no code
 path, is `status.md`.
 
 ## Purpose
@@ -418,7 +418,7 @@ host back** — never by the operation's return code.
 | `impl` | open a pull request | `open_pr` | as the policy lists it | the pull request read back by number; artifact attached |
 | any review step | comment on the issue or the pull request | `external_api_write` | as the policy lists it; a policy wanting a low-blast comment lists the class the comment carries | the comment read back by id |
 | `merge` (feature, bug, security, copy) | merge the pull request | `merge_pr` | ordinarily a checkpoint; the operator resolves it, and a `pull_request_review` `APPROVE` from the operator's credential is that resolution | the pull request reads `merged` with a merge commit; the commit is an artifact of the batch |
-| `release` | create the tag; publish the release | `release` | high blast; checkpoint unless a recurring series has graduated | the tag and the release read back **at their terminal state** |
+| `release` | create the tag; publish the release | `release` | high blast; checkpoint unless an action series has graduated | the tag and the release read back **at their terminal state** |
 | `release` (security) | publish release notes | `release` | the same, **and narrowed**: the notes name the advisory identifier and the fixed version, never exploit detail. Widening is an operator decision taken as its own action | the release read back, and the published notes read back as published |
 | `dedupe`, `record`, a closing sign-off | close the issue, with the reason | `external_api_write` | as the policy lists it | the issue reads `closed`; **the task's own status was written by the sign-off, before the action** |
 | recovery of a merge | open and merge the inverse change | `revert_merge` | evaluated on its own; there is no privileged undo path around the gate | the revert commit on the branch, read back; both the merge and its revert stay readable |

@@ -476,6 +476,31 @@ nothing was added for it (principle 9).
 | a standing finding whose scope cannot be determined raises a checkpoint, reason `undetermined_scope` | nothing | **designed and not built.** The token `undetermined_scope` appears nowhere on this branch. `classify_finding` returns `one_off` for anything its heuristic does not match, which coerces "cannot tell" to "not standing" — the collapse principle 7 forbids | `review_learning.py:classify_finding` |
 | open decision 17: whether institutionalizing a standing finding is itself a workflow | nothing | not a mechanism, so not buildable as one. What is measurable is that no `workflow` entity declares anything of the kind, and the built loop's output is a `proposed_skill_update` payload the operator approves out of band rather than a task entering intake | no `workflow_definition` for it |
 
+## Revision 17 (2026-09-05): the one boundary, and three terms sharpened
+
+Four terminology defects the operator found reading the documents, from the 2026-09-05 review. Three were
+wording; the first was a real ambiguity in what `action` is defined against. Read on this branch by reading
+the modules named below; nothing on prod or on any deployed checkout was inspected.
+
+| Design rule (revision 17) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| there is **one** boundary, and the record is inside it: an `action` is an intended effect on an **external system**, one the swarm does not own. `external system` and `record` are terms; the boundary is stated once, in `gates_and_workflows.md#actions-are-entities-only-actions-are-taken` | `action` defined as an effect "outside the Ateles system" while the same entry excepted "an internal operational write to Neotoma" — two different notions of the system in one definition | **not a built-state question.** The wording bound nothing mechanically; what it changed is what a reader concludes the gate is for. The gate's own inputs are unchanged (class, blast, confidence, recurrences), so no code path moves. The two named exceptions — governance writes and lossy record mutations — keep their revision 12 built state, which is still nothing | `gating.py` (unchanged by this revision); the `action_policy` entities |
+| `recurring series` renamed **`action series`** | `recurring series` (revision 12) | **designed and not built,** unchanged by the rename: no recurrence graduation is implemented, so no token moves. `action_policy.recurrence_count` is the field the design names, and the vocabulary lint carries no keyed rule for either name | `gating.py`; `action_policy` entities |
+| `subject` is a defined term: the one entity a `checkpoint` holds, an action or a task, named by its `CHECKPOINTS` edge and never by free text | the word was used across five documents and defined in none | **designed and not built.** The built `checkpoint_brief` has no subject edge at all (revision 8 row above), so nothing yet enforces "exactly one, by edge" | `gating.py`; `lib/daemon_runtime/checkpoint_posture.py` |
+| `checkpoint` is **two**-part, not three, and the document says why one term covers both cases | a definition read as a three-part "or" | same as the row above | same |
+
+**`outbound` was kept, and the reason is recorded** rather than the term being removed. The operator's
+reading — that every action is outbound, so the qualifier carries nothing — is correct about actions and
+does not settle the term, because `outbound` also qualifies things that are not actions: the *operation* an
+adapter performs to take one, the *effect* it leaves, and an outbound *credential* (`authority_model.md`).
+Each has an `inbound` counterpart it must be told apart from, and the pair is the axis `adapters.md` is
+organized on. The phrase "outbound action" is redundant and appears nowhere.
+
+**Size.** `gates_and_workflows.md` grew 2.2k (36.2k → 38.4k) and `vocabulary.md` 4.7k (74.9k → 79.6k),
+measured 2026-09-05 with `wc -c` on this branch. `vocabulary.md` is keyed, not kernel. The kernel is
+therefore **67.9k**, up from 65.7k on revision 16. Nothing was trimmed to fit: the reading-budget decision
+below is the operator's and is untouched by this revision.
+
 ## `github.md`: the events with no defined response (revision 13, 2026-09-04)
 
 `docs/foundation/github.md` enumerates every event GitHub can deliver, from GitHub's own webhook event and
@@ -627,10 +652,11 @@ changes with this revision is that the budget decision is no longer deferrable o
 under the block at every earlier revision and is not now, so the pass that follows is a cut, a split, or
 an amendment of the caps rather than a tidying.
 
-**On revision 16 the kernel is 65.7k** (`principles.md` 13.4k, `work_model.md` 16.1k,
-`gates_and_workflows.md` 36.2k), measured 2026-09-05 with `wc -c` on this branch. The whole of the growth
-since revision 12 is `gates_and_workflows.md`, which now also carries the hydration phase (revision 14)
-and the standing-finding rule (revision 16). The budget decision above is unchanged and still the
+**On revision 17 the kernel is 67.9k** (`principles.md` 13.4k, `work_model.md` 16.1k,
+`gates_and_workflows.md` 38.4k), measured 2026-09-05 with `wc -c` on this branch. The whole of the growth
+since revision 12 is `gates_and_workflows.md`, which now also carries the hydration phase (revision 14),
+the standing-finding rule (revision 16), and the boundary statement and the checkpoint's two-part reading
+(revision 17). The budget decision above is unchanged and still the
 operator's; `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected
 failure that records it.
 

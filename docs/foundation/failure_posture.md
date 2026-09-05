@@ -9,7 +9,7 @@ from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-12 to PR-15, C5, C17), prio
 `reachability_check_belongs_at_dispatch_with_mid_task_writes_failing_closed`,
 `deferral_must_be_bounded_and_escalate_off_neotoma`, `unknown_must_stay_distinct_from_a_verdict`,
 `nyctea_635_becomes_load_bearing`, PR #745 operator review (2026-09-04), and the operator memos of
-2026-09-05 (the `undetermined_scope` reason class). What is built is `status.md`;
+2026-09-05 (the `undetermined_scope` reason class), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`). What is built is `status.md`;
 how a checkpoint is recorded is `data_model.md`.
 
 ## Purpose
@@ -139,7 +139,7 @@ measure — which is rule 2's failure restated. Until the read-back confirms it,
 and the operator is told so.
 
 **Every action class names its recovery, even where the recovery is only a forward fix.** An action is an
-intended effect outside the system, and the classes with the largest blast are the ones the design has been
+intended effect on an external system, and the classes with the largest blast are the ones the design has been
 silent on. Each is named here so that the answer exists before it is needed rather than being improvised
 under pressure:
 
