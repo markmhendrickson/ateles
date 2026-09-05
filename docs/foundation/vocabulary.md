@@ -9,7 +9,7 @@ cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 opera
 and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional [step](#step), and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14,
 16–18, 23–29: the hold verb, a condition a step holds on, the `dependency_cycle` reason class, the consent
 tolerance on `action_policy`, and an [artifact](#artifact) `PART_OF` its containing artifact), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the `intake rule` entry). Format
-follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for).
+follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives).
 
 ## Purpose
 
@@ -370,8 +370,10 @@ a [batch](#batch) may take, and the [successors](#successor) a closing [sign-off
 
 ### step
 **Definition:** one declared position in a [workflow](#workflow)'s ordered list, carrying a name, a [step owner](#step-owner), a
-`required` flag, an `on_fail` target, its [read dependencies](#read-dependency), and parallel-group and
-join fields, [claimed](#claim) by its step owner on a [batch](#batch) and closed by that owner's
+`required` flag, an `on_fail` target, its [read dependencies](#read-dependency), two intervals
+(`unclaimed_after`, `hold_bound` — `gates_and_workflows.md#declaration-batch-projection`), and
+parallel-group and join fields, [claimed](#claim) by its step owner on a [batch](#batch) and closed by that
+step owner's
 [sign-off](#sign-off).
 Step names are data (`pm`, `ux`, `arch`, `impl`, `pr_review`, `qa`, `legal`, `release`, and any a workflow
 declares).
@@ -637,7 +639,11 @@ auto-execute, in any form, spelled with or without the hyphen.
 creation as the classes of action it expects to produce.
 Values include `build`, `docs`, `publish`, `send_external_comms`, and `operator_only`; a declared but
 unclassified value fails closed.
-**See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers).
+The set of values is `action_policy` data and has no list in the foundation: each [adapter](#adapter)'s
+document tables the classes its [outbound](#outbound) operations carry, every class an adapter can produce is listed in
+the policy (`adapters.md#the-admission-contract`, obligation 6), and the values named here are examples.
+**See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers),
+[`adapters.md#what-an-adapters-document-must-contain`](adapters.md#what-an-adapters-document-must-contain).
 **Never:** —
 **Not for:** "category" or "kind" for the class; inferring it from the handling agent.
 

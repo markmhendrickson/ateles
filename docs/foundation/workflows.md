@@ -8,7 +8,7 @@ and which successors its tasks may enter, and never the state of a checkout. **D
 record for the built workflows (their step lists and fast paths, not their agent names), the agent
 policies governing outreach, payment, and people-data, `CLAUDE.md`'s people-data section, and PR #745
 operator review (2026-09-04), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Which workflows have a declaration on the record, and which are envisioned
-only, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `operator_preview` renamed `consent`; open decision 33). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 39 ruled here — what intake's `link` attaches and what hydration resolves; the payment `consent` row aligned with decision 27).
+only, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `operator_preview` renamed `consent`; open decision 33). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 39 ruled here — what intake's `link` attaches and what hydration resolves; the payment `consent` row aligned with decision 27). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two declared intervals and the planned wait, cited in *How to read a workflow section*, `outreach`, and `operator-only`; a standing constraint on an entity a task names, read at intake).
 
 ## Purpose
 
@@ -48,6 +48,13 @@ from the declarations (below).
   verdict; a failing verdict does not advance the batch, and the workflow declares per step which earlier
   step opens again (`on_fail`), the failing sign-off staying in the record as history; a declared cap on
   such rounds, when reached, escalates the batch's tasks (`failure_posture.md`, reason `rounds_exhausted`).
+  Two intervals are declared on every step and shown in no table: `unclaimed_after`, after which an
+  unclaimed step raises `unclaimed_step`, and `hold_bound`, the most a claimed step may hold on a condition
+  before its declared alternative close or `rounds_exhausted`
+  (`gates_and_workflows.md#declaration-batch-projection`). Where a section's prose names a declared interval
+  — a follow-up interval, the bound on an `await` — it is that step's `hold_bound`; a step whose close
+  condition names an arrival from outside the swarm is a planned wait, held under decision 13 and ended by
+  that bound.
 - **Stages**: named groups of contiguous steps, for reading and for reporting where a batch is.
 - **Artifacts**: the records in external systems the batch produces or references, attached by edge and
   never the subject of a step (`work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject`).
@@ -128,6 +135,24 @@ from the handling agent at the moment the action is taken (`gates_and_workflows.
 Without `link`, the workflow that follows opens a second issue for work that has one. Without `dedupe`,
 two batches carry the same change to two pull requests. Without `prioritize`, the claim order is the creation
 order. Without `route`, a task reaches a workflow by whichever engine noticed it first.
+
+**A standing constraint recorded on an entity the task names is read at intake, and it is a fact on that
+entity, not a rule beside the record.** A person's recorded objection to further processing is the case: it
+outlives any batch and binds every future one about that person, and nothing per batch, per principal, or
+per class carries it — a `task_policy` is the operator's preference, a grant is one principal's capability,
+and an `action_policy` is per class of effect. What carries it is the entity itself: the objection is an
+observation on the `contact`, with provenance naming the message or the meeting that stated it and the time
+it was stated (`data_model.md#record-conventions`), and `link` attaches that contact because the task names
+it (`#what-link-attaches-and-what-it-leaves-to-hydration`). `route` then closes the batch with no successor,
+its sign-off carrying a finding that names the constraint, so that the refusal is a recorded verdict and not
+a silent skip; a step of a later workflow whose `reads_to_enter` names the type reads the same observation
+and holds the same way. The shape is principle 11's: a constraint written once on the thing it constrains
+needs no process to keep it true, where a prohibition list kept beside the record is the second source that
+goes stale in the direction that matters. Its field is the schema's, as every context entity's shape is; the
+design states only where the constraint lives and who reads it, and what the operator is owed on it — that
+the objection was received and honoured — is the observation and the closing finding, read on the record
+like any closed work
+(`gates_and_workflows.md#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-or-cannot-wait`).
 
 **Stages:** triage (`classify`, `link`, `dedupe`); disposition (`prioritize`, `route`).
 
@@ -474,7 +499,10 @@ draft the operator consents to is the draft that is sent: `send` takes the actio
 by its dedup key, and any change after consent is a new `draft`. A staged draft is never modified in place in
 the mail system, because on some systems an update is a send; the design's staging is the draft in the
 record. `follow_up` is a step of the same batch so that an unanswered message has a step owner until
-the batch closes, and so that a follow-up goes through the same gate as the first message.
+the batch closes, and so that a follow-up goes through the same gate as the first message. The follow-up
+interval is `follow_up`'s `hold_bound`: the step holds on the reply under decision 13, and reaching the bound
+is the cue to sign on the step's alternative close rather than a checkpoint
+(`gates_and_workflows.md#declaration-batch-projection`).
 
 **Stages:** composition (`draft`, `review`); consent (`consent`); delivery (`send`, `follow_up`).
 
@@ -639,7 +667,9 @@ an `operator_only` action with reason `gate_hold`; the checkpoint is what this w
 
 The workflow has three steps rather than one so that "presented and awaiting" is a readable state of the
 batch and not a notification's delivery status, and so that a task the operator never answers is
-visible as a batch whose `await` step has been open past its bound.
+visible as a batch whose `await` step has been open past its bound. That bound is `await`'s `hold_bound`, and
+because the step's close condition names no alternative to the operator's decision, reaching it is rule 5's
+ceiling (`gates_and_workflows.md#declaration-batch-projection`).
 
 **Stages:** presentation (`present`); decision (`await`, `record`).
 

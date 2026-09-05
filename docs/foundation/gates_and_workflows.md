@@ -10,7 +10,7 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
 memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram), and the operator's 2026-09-05 12:52 memo (revision 21: the general claim about self-modification, stated in `work_model.md` and cross-referenced from decision 17), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 17 ruled here; the `dependency_cycle` reason class), and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: the next instance is a created task and not a successor), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: `intake_rule` joins the governance list). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding). Revised by the workflow-format pass of 2026-09-06 (revision 34: two declared intervals on every step, `unclaimed_after` and `hold_bound`; a planned wait as a step's own close condition held under decision 13; required coverage as the value of `freshness`; consent over several like actions as one presentation of several checkpoints; the governance class with no policy value named among what resolves to `NEVER`).
 
 ## Purpose
 
@@ -35,8 +35,8 @@ and the adapters that reach them: `adapters.md`.
 `workflow` declares one entity per (project, workflow type): ordered `steps[]` (`phase`, `step_name`,
 `owner_role`, `parallel_group`, `join_step`, `required`, `applies_when` — the condition that decides
 whether an optional step opens at all, below — and `on_fail` — the earlier step a failing sign-off
-opens again — plus `reads_to_enter`, `reads_to_close`, and `freshness`, the read dependencies below), plus
-`fast_paths` and `successors`. `owner_role` holds a **role**, never an agent name: the
+opens again — plus `reads_to_enter`, `reads_to_close`, and `freshness`, the read dependencies below, and
+`unclaimed_after` and `hold_bound`, the two intervals below), plus `fast_paths` and `successors`. `owner_role` holds a **role**, never an agent name: the
 roster resolves it to a principal when the step is claimed (`vocabulary.md#step-owner`), so one
 declaration serves every project and a renamed agent leaves no stale name in it. Step names are data: a workflow may declare steps
 beyond the review sequence (a draft step, a deterministic lint, an operator preview). A contiguous named
@@ -68,7 +68,13 @@ observations, never a stored `last_synced_at` field a process would have to keep
 this half adds a requirement, not a mechanism: what the adapter asked the external system for, against what
 it actually got back, is already readable, and the step states what it needs of it. A read that returned
 successfully but partially — scoped short, truncated, paged and not followed — is neither a failed read nor
-an empty result, and coverage is what tells the three apart.
+an empty result, and coverage is what tells the three apart. So the value of `freshness` is the coverage the
+step requires — the window, or the set, the read must have returned in full, and whether a read that fell
+short of it may satisfy the step at all — and a read whose coverage falls short of what the step declared is
+`unknown` for that step, never a smaller success: the step holds on it as on any read it could not make
+(below). That is what keeps a partial sweep from reading as a complete one — a mailbox window cut short by a
+page not followed, a listing truncated, a long source read in part — because the shortfall is measured
+against the declaration rather than noticed by whoever reads the result.
 
 **The declared reads are resolved in a hydration phase before the step, and never during it.** The
 declaration says what must be readable; hydration is when it is made so. Before a step opens, one phase
@@ -189,6 +195,43 @@ And the negative, restated here because this is where a reader will look for it:
 elapsed time.** A waiver is an operator's deliberate act, not a timer; the answer to a step nobody has
 claimed is a checkpoint against its owner role (`failure_posture.md`), never an automatic clearance. A gate
 that expires into a pass is a gate that fails open on a timer.
+
+**A step declares two intervals, and each is a bound on how long the record may show nothing before a
+checkpoint says so.** `unclaimed_after` is the interval an open step may stay unclaimed before one checkpoint
+is raised against the role declared on it, reason `unclaimed_step`
+(`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`); the rule there says the interval is
+declared and never inferred, and this is the field it is declared in. It is on the step rather than on the
+workflow because the checkpoint is routed against the role the step declares, and the roles differ in what an
+absence means: a lint runner that has not claimed in an hour is absent, and an operator-facing agent that has
+not claimed a `consent` step in an hour is not. `hold_bound` is the interval a claimed step may hold on a
+condition — its step owner renewing the lease with a finding naming what it cannot yet judge
+(`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`, decision 13) — before the bound is
+reached; it is the ceiling rule 5 requires of every deferral (`failure_posture.md#the-rules`), stated per
+step so that a reader, or a test, knows when the checkpoint is due rather than inferring it from a policy the
+step does not name. An undeclared interval is treated as the unclaimed-step rule already treats its own:
+nothing is raised, and the absence is visible in the declaration — a defect caught in the pull request that
+introduced it, never a default supplied at runtime, since a supplied interval would be a default that fails
+open (principle 5). Neither interval closes anything: both end in a checkpoint, and the paragraph above
+holds — no step is closed by elapsed time.
+
+**A wait the workflow knows of when it is declared is a step's own condition, held under decision 13, and
+bounded by `hold_bound`.** Some workflows know at declaration that a step will depend on something arriving
+from outside the swarm — a reply to a message sent, a counterparty's confirmation of a proposed time, a
+recipient's response to a page shared, the operator's own decision on an operator-only task. That is not a
+case for `applies_when`, which is evaluated once when the step would open and would rule the step
+inapplicable for want of a reply that has not yet arrived; and it is not a new field, because decision 13
+already states that a declared condition and a discovered one differ only in when they are recorded
+(`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`). So a planned wait is written where
+every step's condition is written — in the step's close condition, which names the arrival — and the
+step owner that has claimed it holds: lease renewed, a finding naming what is awaited, no sign-off. What
+`hold_bound` adds is the end. Where the close condition declares an alternative close — `outreach`'s
+`follow_up` closes on a reply linked, or on the interval passed and one follow-up sent, or on the operator
+ending it (`workflows.md#outreach`) — reaching the bound is the step owner's cue to sign on that alternative,
+and the hold ends in a sign-off, which is decision 13's first end. Where the close condition declares none —
+the step cannot honestly close without the arrival — reaching the bound is rule 5's ceiling, and the hold
+ends in one checkpoint, reason `rounds_exhausted`, carrying the finding, which is decision 13's third end.
+Which of the two a step has is readable from its declaration, and in neither does the bound itself close the
+step.
 
 **Scope amendment versus scope creep.** A batch carries acceptance criteria, and implementation regularly
 turns up work that was not in view when they were written. A scope boundary is a decision record, not a
@@ -677,7 +720,11 @@ confidence is scored by the proposing agent. The gate decides on confidence and 
 never-set (`operator_only`) wins ahead of both policy sets, so a policy cannot demote it; a declared
 class in neither set logs a warning naming the value and resolves to `NEVER`, never to the policy default;
 an absent class keeps the policy default ("nothing declared" stays distinct from "declared and
-unclassified"). `NEVER` is a third tier: `HIGH` is still taken without a checkpoint once a recurring
+unclassified"); and a governance class with no policy value resolves to `NEVER` by rule and not by the
+accident of absence (decision 18,
+`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`) — "reserved" is
+that resolution and not a fourth tier, so a step whose work is a governance write declares the class and its
+checkpoint is `gate_hold` like any other held action's. `NEVER` is a third tier: `HIGH` is still taken without a checkpoint once a recurring
 series clears its count; `NEVER` short-circuits ahead of the confidence axis and the recurrence path. The
 advisory path (`route_task`) and the enforcing path resolve identically, and a parity test holds the
 duplicated never-set equal across the two modules. An unreachable policy source is a halt
@@ -734,6 +781,22 @@ free-text field, so the queue is read from the record. The raiser and the resolv
 the object; whether the same principal may hold both is `authority_model.md`. One decision queue, one
 resolution protocol: a checkpoint on a task is presented and resolved exactly as a checkpoint on an
 action is (principle 6).
+
+**Consent over several like actions is one presentation of several checkpoints, never one checkpoint over
+several subjects.** A step that produces many actions of one class at once — archiving each thread a sweep
+classified as needing no action, staging one draft per actionable thread — produces one `action` per effect,
+because an action is one intended effect with its own `dedup_key` and its own confirmation read back
+(`#actions-are-entities-only-actions-are-taken`; the mail system's adapter declines the batch operation for
+the same reason, `gmail.md#what-the-design-uses-and-what-the-api-offers-that-it-does-not`), and the gate
+holds each on its own. The operator is shown them together: the queue presents the open checkpoints that
+share a batch, a step, and an action class as one set, and takes one decision over the set. What is recorded
+is one resolution per checkpoint — each attributed, each authorized against its own required approvers
+(`authority_model.md#approval`), each resuming its own action — so that a decision over forty archives is
+forty rows any reader can count, and a refusal of one of them is a refusal of one. The grouping is a
+presentation, declared where the operator's channel is declared
+(`#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-or-cannot-wait`), and
+it adds no subject kind: a checkpoint's subject stays exactly one action or one task, and a set is not a
+subject.
 
 Two subjects entering one queue, and the subject edge deciding what resumes:
 

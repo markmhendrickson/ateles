@@ -8,7 +8,7 @@ and the action gate), `authority_model.md` (credentials bind to principals; appr
 steps whose effects leave the system), PR #745 operator review (2026-09-04, the adapter decision), and the
 operator's 2026-09-05 review (the inbound-delivery question and the adapter-packaging lean, both recorded
 below as open; and revision 18: when an artifact comes into existence, and what holds an effect before
-it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: continual inbound named as the inbound side, and the record's subscriptions as what an intake rule evaluates through). What is built, and where the adapter and the engine are still one process, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: open decision 35). Revised by the memo-gap pass of 2026-09-06 (revision 31: the source is kept, not only named).
+it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: continual inbound named as the inbound side, and the record's subscriptions as what an intake rule evaluates through). What is built, and where the adapter and the engine are still one process, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: open decision 35). Revised by the memo-gap pass of 2026-09-06 (revision 31: the source is kept, not only named). Revised by the workflow-format pass of 2026-09-06 (revision 34: a system whose delivery surface is a local filesystem is admitted through the same contract; open decision 45 — whether the host a daemon runs on is an external system).
 
 ## Purpose
 
@@ -688,6 +688,26 @@ writes are what every downstream step reads as fact; and its identity rule decid
 comment becomes a sign-off. So admission is a **governance decision about what the record will believe**,
 and the build is what follows it.
 
+**A system whose delivery surface is a local filesystem is admitted the same way, and the contract already
+reads for it.** The recording a capture application writes to a directory, the export a person saves from an
+address book or a bank, the transcript a local model leaves beside its source: each is a record of a system
+the swarm does not own, arriving on a surface the adapter polls rather than a socket it is delivered to, and
+a poll is a read the rules already provide for — the page a poll returned is a source the record keeps
+(`#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`). So the capture application, or
+the exporting system, is the external system; the file is the artifact, with `system` naming that application and
+`external_id` its own identifier for the recording, or the path where it has none; and each obligation has
+its failing artefact as it does for every other system. Coverage is the listing — the directory, the window,
+and what the listing returned — so a poll that read half a directory is readable as half (obligation 4). The
+sourced time is the time the file's system states for it, its modification time, and not the poll's. Where
+the system issues no delivery id — most do not — that is the finding obligation 3 requires the document to
+state, and the adapter invents none. And a file still being written is not a special case but two
+observations: the artifact's size, sourced twice across the interval the document declares, and a step whose
+close condition requires the size to be stable reads that from the record
+(`#what-the-adapter-does-with-every-event`), as a `settle` step in a recording workflow would. What such an
+adapter never does is the analogue of every other's host-specific erosion: it never treats the file's
+presence as a completed capture, and it never moves or deletes the file to mark it read — the mark is the
+observation, and the file stays where its system put it.
+
 ### The admission contract
 
 Six obligations. Each names what must be true, and — the part that makes it a control — **what fails when
@@ -941,6 +961,45 @@ distinguishing rule stated here. Or the two types as they stand, undistinguished
 defines, so their shape is the record's, and merging them is a schema change with a migration of its own
 (`migration.md`) rather than a substitution in prose. **What would decide it:** whether any rule ever
 reads the two differently; if none does, they are one type under two names. Opened by the simplification pass of 2026-09-05 without the conformance matrix, which had not landed; the proof above rests on principles 6 and 9 alone and is unverified against the matrix.
+
+### Whether the host a daemon runs on is an external system
+
+**Open decision 45.** Registered in `conformance.md#the-register-of-open-design-decisions`. Two of the
+workflows the declaration format was tested against read state that is neither the record's nor a tabled
+external system's: which checkout a daemon runs from, the environment of its process, the size of its
+log, whether a rendered mirror on disk equals what the record renders. Their remedies write to the same place
+— restart or redeploy a process, update a checkout. `reads_to_enter` names entity types, and the design has
+none for this; the runner's own `agent_session` carries host, checkout, branch, and head
+(`data_model.md#concepts`), but that is the runner's account of itself, and the case that needs the read is
+the one where that account is silent or wrong.
+
+**The options.** The host is an external system: the swarm is the engine, the agents, the adapters, and the
+record (`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`), and the machine the swarm's
+processes run on is none of those and is not owned by the swarm — so it sits on the far side of the one
+boundary, is read only through an adapter, and its processes and checkouts are artifacts with a `system` and
+an `external_id`; restart, redeploy, and checkout update are that adapter's outbound classes, listed in the
+`action_policy` under obligation 6, with a reset that discards commits `operator_only`; and the six
+obligations bind it as they bind every adapter, the read-only one included. Or the host is inside the
+boundary: the `agent_session` is the only record of a runner, a read of the host is diagnostic capture under
+`failure_posture.md#the-rules` rule 1 — written to local disk, asserting nothing about the record — and
+process control is an operator act, out of band, as the first declaration is
+(`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`).
+
+**Where the design leans, and why this is opened rather than settled.** The boundary definition settles the
+first half by its own words: the host is not on the list of what the swarm is, so it is outside, and the only
+component that reads outside is an adapter. What it does not settle is whether the design *wants* an adapter
+here, and that is the operator's. The first option gives a daemon incident a declared read — the host's
+account beside the runner's, a disagreement between them being the finding — and puts process control under
+the gate, which is where an approved redeploy that would have reverted a live guard should have been held.
+Its cost is an adapter for a system with no event API and no credential in the usual sense, a per-host
+binding (`#whether-one-binding-type-or-two-names-an-external-systems-instance`), and a document whose inbound
+table enumerates a poll's differences as the system's events. The second keeps the boundary short and costs
+the record the ability to say which checkout a daemon was on when it signed — the gap the runner's
+self-report leaves whenever the runner is the thing that has stopped. **What would decide it:** whether a
+step's sign-off is ever judged on host state — if a daemon-incident `verify` step must attest that the fixed
+version is what the process itself reports, that read is a declared read, and a declared read of the host is
+an adapter's. Until it is taken, no workflow declares a host read, and a process-control effect is an
+`operator_only` action.
 
 ## Prior art
 

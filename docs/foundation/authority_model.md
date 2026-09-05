@@ -7,7 +7,7 @@ undecided question **open** with its options, never resolving one to make the do
 section as decision; the swarm-spec section as proposal), synthesis `ent_b0ce322f768e4fc676b73139` (PR-20
 to PR-28, PR-34 to PR-38, C8, C9, C10, C13, C14, C17), prior art `ent_08460968e6f49dac21510f4a` (Track 2),
 the P4 brief `ent_683200acfb3ff5f03add966c`, `docs/multi_tenant.md`, and PR #745 operator review
-(2026-09-04). What is built, and where the substrate fails open, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 41 ruled here — write admission per entity type is default-deny, and the grant is the allowlist).
+(2026-09-04). What is built, and where the substrate fails open, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 41 ruled here — write admission per entity type is default-deny, and the grant is the allowlist). Revised by the workflow-format pass of 2026-09-06 (revision 34: a required approver may be named by ownership of an entity the checkpoint's subject concerns).
 
 ## Purpose
 
@@ -219,6 +219,23 @@ writes the status; the queue is scoped to the principals whose decision it await
 attributed. Notification routes to a principal or a role through the roster and channel configuration
 within the tenant, never to one address for the whole swarm. No cross-principal auto-approve. Silence never
 accepts.
+
+**A required approver is a principal, a role the roster resolves, or the principal an `ownership_grant`
+names on an entity the subject concerns.** The third is what lets a workflow name an approver it cannot know
+at declaration: the maintainer of another plan whose field a step would correct, the principal accountable
+for a registered type a step would extend, the principal accountable for the data a shared instance pools. Each is named in
+the declaration as a relation — whoever holds the `ownership_grant` on the entity the task `REFERS_TO`, or on
+the type the write lands in — and resolved when the checkpoint is raised, to the principal the object's `ownership_grant` points at
+(`data_model.md#relationships`: who is asked when the object needs a decision), which is what the `AWAITS`
+edge then names. Nothing is added to the tuple: ownership is the edge the design already has for named
+accountability (above), and this is the one thing that table says it is for. An object with no
+`ownership_grant` resolves to no approver, and a checkpoint that awaits nobody is not raised as one that
+awaits everybody: the raiser holds the step and records the missing ownership as a finding, which is the
+`unknown`-holds shape and never a fallthrough to the operator
+(`gates_and_workflows.md#declaration-batch-projection`); the hold is bounded like every hold, and its bound
+is what reaches the operator. What owning confers beyond being asked — Q7 above — is unchanged: being the
+required approver on a checkpoint about one's object is the narrowest of Q7's options, and the wider ones
+stay open.
 
 Open: whether the raiser of a checkpoint may resolve it (the minimal separation of duties; prior art and
 brief Q2 and Q3 recommend forbidding it, and it applies at one operator between an agent and its human).

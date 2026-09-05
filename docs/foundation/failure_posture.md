@@ -10,7 +10,7 @@ from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-12 to PR-15, C5, C17), prio
 `deferral_must_be_bounded_and_escalate_off_neotoma`, `unknown_must_stay_distinct_from_a_verdict`,
 `nyctea_635_becomes_load_bearing`, PR #745 operator review (2026-09-04), and the operator memos of
 2026-09-05 (the `undetermined_scope` reason class), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: a hold on a discovered condition is a deferral under rule 5; the `dependency_cycle` reason class). What is built is `status.md`;
-how a checkpoint is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: a condition of a batch is raised on one of its tasks, never on the batch).
+how a checkpoint is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: a condition of a batch is raised on one of its tasks, never on the batch). Revised by the workflow-format pass of 2026-09-06 (revision 34: rule 5's ceiling for a holding step, and the unclaimed-step interval, each named as a field on the step).
 
 ## Purpose
 
@@ -84,7 +84,10 @@ refuse-and-requeue-as-fallback, and the hardcoded step-list floor (C5, below).
    on a condition discovered mid-flight that owes nobody a decision
    (`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`) is a deferral under this rule and
    takes its bound: re-evaluation with backoff, a ceiling, and at the ceiling one checkpoint,
-   `rounds_exhausted`, carrying the finding that names what the step was waiting on.
+   `rounds_exhausted`, carrying the finding that names what the step was waiting on. The ceiling is the
+   `hold_bound` the step's declaration carries (`gates_and_workflows.md#declaration-batch-projection`); a
+   step declaring none has no ceiling, and the absence is a declaration defect, as an undeclared
+   unclaimed-step interval is (below).
 
 6. **Every write is read back.** Principle 2 of `principles.md`, restated here because an outage is when a
    write most plausibly reports success without landing: a store can return 200 with a warning and persist
@@ -244,8 +247,9 @@ its reason class is `unclaimed_step`; it names the batch, the step, the `owner_r
 long the step has been open,
 and it awaits the operator. It is routed against the **owner role** rather than the batch because the
 condition is an owner who is absent or does not exist, not work that is unimportant — routing it at the
-role is what makes an absent step owner legible as one. The interval is declared on the workflow, not
-inferred; an undeclared interval raises no checkpoint. And the constraint above holds without exception:
+role is what makes an absent step owner legible as one. The interval is declared on the step, as
+`unclaimed_after` (`gates_and_workflows.md#declaration-batch-projection`), not inferred; an undeclared
+interval raises no checkpoint. And the constraint above holds without exception:
 the checkpoint alerts, and **it never signs**. It changes no verdict, closes no step, and its resolution is
 the operator's decision about the role, not a clearance of the step — a step is closed by its owner's
 sign-off or by the operator's `waived` sign-off, and by nothing else.

@@ -12,7 +12,7 @@ for changing the swarm's own operation), and PR #745 operator review (2026-09-05
 23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default),
 and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: one live instance,
 completion creates the next, `FOLLOWS` task to task), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the task-sources index, the intake rule, and open decision 36). Supersedes `docs/archive/task_execution_loop.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`).
 
 ## Purpose
 
@@ -440,7 +440,11 @@ anything, and a reader finding held steps uses the same read that finds any clai
 queue to consume or to neglect (principle 1). The distinction between a declared condition and a discovered
 one is only **when it is recorded**: `applies_when` is written on the declaration and evaluated when the step
 would open (`gates_and_workflows.md#declaration-batch-projection`); a discovered condition is written on the
-batch by the step owner at the moment it is met. Both are conditions on a step, and neither is a status.
+batch by the step owner at the moment it is met. Both are conditions on a step, and neither is a status. The
+declared case is therefore not a second mechanism: a step whose close condition names an arrival from outside
+the swarm — a reply, a confirmation, the operator's decision — holds exactly as a discovered condition holds,
+and the bound it holds under is the `hold_bound` its declaration carries
+(`gates_and_workflows.md#declaration-batch-projection`).
 
 **A hold is bounded, and it is bounded by mechanisms that already exist.** Three ends, no new one. Where the
 condition **resolves** — the re-quote arrives, the read returns, the task completes — the step owner reads
@@ -681,7 +685,8 @@ why it is stated as a dependency and not assumed.
 Two conditions on that guarantee are worth stating rather than assuming, because each is a place where
 the bound is declared or applied rather than automatic. The `unclaimed_step` checkpoint fires only where
 the workflow **declares** its interval, and an undeclared interval raises nothing; a workflow that
-recurring tasks are routed through therefore declares one, and a recurring task whose workflow does not
+recurring tasks are routed through therefore declares one on each of its steps (`unclaimed_after`,
+`gates_and_workflows.md#declaration-batch-projection`), and a recurring task whose workflow does not
 is a task whose silent stop the design has not closed — a defect in the declaration, visible in the pull
 request that introduced it. And the deferral ceiling bounds a hold only if the hold's re-evaluations are
 counted as deferrals, which is the condition decision 13 itself names as what would reopen it; a step
