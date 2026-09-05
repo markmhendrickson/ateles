@@ -7,7 +7,7 @@ undecided question **open** with its options, never resolving one to make the do
 section as decision; the swarm-spec section as proposal), synthesis `ent_b0ce322f768e4fc676b73139` (PR-20
 to PR-28, PR-34 to PR-38, C8, C9, C10, C13, C14, C17), prior art `ent_08460968e6f49dac21510f4a` (Track 2),
 the P4 brief `ent_683200acfb3ff5f03add966c`, `docs/multi_tenant.md`, and PR #745 operator review
-(2026-09-04). What is built, and where the substrate fails open, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 41 ruled here — write admission per entity type is default-deny, and the grant is the allowlist). Revised by the workflow-format pass of 2026-09-06 (revision 34: a required approver may be named by ownership of an entity the checkpoint's subject concerns).
+(2026-09-04). What is built, and where the substrate fails open, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 41 ruled here — write admission per entity type is default-deny, and the grant is the allowlist). Revised by the workflow-format pass of 2026-09-06 (revision 34: a required approver may be named by ownership of an entity the checkpoint's subject concerns).consistency pass of 2026-09-06 (revision 35: the brief's Q1–Q8 and the raiser question registered as decisions 46 to 54; C13 marked settled by C9 and decision 37).
 
 ## Purpose
 
@@ -85,9 +85,9 @@ reuse (`multi_tenant.md` sections 2 and 3). Open: section 7's five decisions.
 
 **Ownership.** Named accountability for a workflow, domain, queue, or configuration entity, as an edge from
 the object to a principal (`ownership_grant`), never over a routing keyword. A step owner is ownership of
-one step of one workflow; a lease holder is not an owner (`vocabulary.md`). Open (brief Q7): what owning
-confers, sole decision below the domain's blast tier, a required seat above it and on cross-domain
-actions, or both.
+one step of one workflow; a lease holder is not an owner (`vocabulary.md`). **Open (decision 46; the
+brief's Q7).** Registered in `conformance.md#the-register-of-open-design-decisions`. What owning confers: sole decision below the domain's blast
+tier, a required seat above it and on cross-domain actions, or both.
 
 ## Grants
 
@@ -237,10 +237,23 @@ is what reaches the operator. What owning confers beyond being asked — Q7 abov
 required approver on a checkpoint about one's object is the narrowest of Q7's options, and the wider ones
 stay open.
 
-Open: whether the raiser of a checkpoint may resolve it (the minimal separation of duties; prior art and
-brief Q2 and Q3 recommend forbidding it, and it applies at one operator between an agent and its human).
-Open (C13): which entities carry the routing table, `swarm_roster` with `channel_config`
-(`multi_tenant.md`) or `operator` with `team` (#378).
+**Open (decision 47).** Registered in `conformance.md#the-register-of-open-design-decisions`. Whether the raiser of a checkpoint may resolve it
+(the minimal separation of duties; prior art and brief Q2 and Q3 recommend forbidding it, and it applies
+at one operator between an agent and its human — and to the operator approving their own governance
+write, which decision 43 names as bearing on it).
+
+**C13, settled by rulings made since it was opened.** The question was which entities carry the routing
+table: `swarm_roster` with `channel_config` (`multi_tenant.md`), or `operator` with `team` (#378). Two
+rulings answer it without naming it. C9, above, makes the `operator` entity one "carrying identity and
+nothing descriptive", which leaves it nothing to carry a routing table on. Decision 37 (2026-09-06,
+`gates_and_workflows.md#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-or-cannot-wait`)
+rules that "which reason classes and which deliveries a given operator wants carried, and to which chat,
+is data on the binding that names the channel" — the `channel_config` binding — while the roster is the
+governance type that resolves a role to a principal: "`swarm_roster` (which principal fills a role)"
+(`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`). So the
+table is carried by the roster and the channel binding, as the paragraph above already says, and no
+`team` entity exists in the design. What stays open about the binding is its type's name — whether
+`channel_config` and `vendor_binding` are one type or two — and that is decision 35, registered.
 
 ## Structural checks: quorum and separation of duties
 
@@ -248,10 +261,11 @@ Rights scope what a principal may do; structural checks make an outcome depend o
 and both are required (README). Decided: the design is multi-principal in earnest, with real separation of
 duties, real quorum, and real attenuating delegation, and without enterprise-scale machinery (policy
 administration consoles, role mining, certification campaigns, hierarchy-shaped approval routing); the risk
-is scale, not applicability (`prior_art_for_p2_plus_is_governance_and_authorization`). Open, each with the
-brief's options: **Q1** the counting rule (an agent counts as its bound principal for quorum and separation
-of duties, or as itself, or as itself for attribution only); **Q2** whether structural checks are count and
-disjointness over the one approval object above or a second mechanism; **Q3** which checks at a dozen
+is scale, not applicability (`prior_art_for_p2_plus_is_governance_and_authorization`). Open, each
+registered in `conformance.md#the-register-of-open-design-decisions` with the brief's options: **Q1, decision 48** — the counting rule (an agent
+counts as its bound principal for quorum and separation of duties, or as itself, or as itself for
+attribution only); **Q2, decision 49** — whether structural checks are count and disjointness over the
+one approval object above or a second mechanism; **Q3, decision 50** — which checks at a dozen
 principals, and the threshold's home (Safe's shape: on the governed object).
 
 ## Initiative, proposal, reprioritization
@@ -261,10 +275,11 @@ are first-class objects; proposal rights are distinct from execution rights; acc
 records an explicit "what stops?" confirmed by a principal; contribution attribution and credit are in
 scope; approval is risk-tiered, and a sandbox tier carries the rights to investigate and experiment without
 a per-act yes. Order of first moves: the entity-model delta, then the initiative, proposal, and
-reprioritization types with the tiered flow, then one bounded two-principal proving ground. Open (brief):
-**Q4** one approval object or two; **Q5** the unit that stops, who confirms it, who may propose; **Q6**
-budget as a scope term that attenuates or as a blast tier, and over which resources; **Q8** credit as a
-stored object or a read model.
+reprioritization types with the tiered flow, then one bounded two-principal proving ground. Open, each
+registered in `conformance.md#the-register-of-open-design-decisions` with the brief's options: **Q4, decision 51** — one approval object or two;
+**Q5, decision 52** — the unit that stops, who confirms it, who may propose; **Q6, decision 53** — budget
+as a scope term that attenuates or as a blast tier, and over which resources; **Q8, decision 54** —
+credit as a stored object or a read model.
 
 ## Contradictions this document settles
 
@@ -272,7 +287,7 @@ stored object or a read model.
 descriptive and carries no authority edges. **C14** and **C17**: delegation attenuates; `Indeterminate`
 is deny.
 **C8**: attribution is per agent by design; whether a write is traced to a per-agent signature is
-`status.md`. **C13**: open, above. **C19** (#378's step map says implement while the plan says design) is
+`status.md`. **C13**: settled, above, by C9 and decision 37. **C19** (#378's step map says implement while the plan says design) is
 a state of two records, not a design question: `status.md`.
 
 ## Prior art
@@ -287,4 +302,5 @@ dynamic separation of duty are the smallest structural check. Sources: `ent_0846
 ## Beyond the sources
 
 The phase-agnostic statement of the tuple and the "open" markers are this document's; every open question
-is the brief's, with its options as the brief states them.
+is the brief's, with its options as the brief states them, and each is a numbered row of the register
+(decisions 46 to 54).

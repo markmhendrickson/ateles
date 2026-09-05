@@ -10,7 +10,7 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
 memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram), and the operator's 2026-09-05 12:52 memo (revision 21: the general claim about self-modification, stated in `work_model.md` and cross-referenced from decision 17), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 17 ruled here; the `dependency_cycle` reason class), and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: the next instance is a created task and not a successor), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: `intake_rule` joins the governance list). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding). Revised by the workflow-format pass of 2026-09-06 (revision 34: two declared intervals on every step, `unclaimed_after` and `hold_bound`; a planned wait as a step's own close condition held under decision 13; required coverage as the value of `freshness`; consent over several like actions as one presentation of several checkpoints; the governance class with no policy value named among what resolves to `NEVER`).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding). Revised by the workflow-format pass of 2026-09-06 (revision 34: two declared intervals on every step, `unclaimed_after` and `hold_bound`; a planned wait as a step's own close condition held under decision 13; required coverage as the value of `freshness`; consent over several like actions as one presentation of several checkpoints; the governance class with no policy value named among what resolves to `NEVER`).consistency pass of 2026-09-06 (revision 35: when the checkpoint a `consent` step carries is written, and what the gate evaluates at the take; the merge action's class named `merge_pr`).
 
 ## Purpose
 
@@ -644,8 +644,8 @@ steps of which workflows is decided by the workflow's declared step owners toget
 `agent_grant`s in force (`authority_model.md`); the declaration and the grants are that answer, and no
 rule set stands beside them under a name of its own. Which actions may be taken and under what gate is the
 `action_policy` entity, the policy a principal evaluates the action gate against. A step owner's right to
-sign off a step comes from its declared role and its grant; whether the merge that follows may be taken is
-the action policy's. Neither the declaration, the grants, nor the policy governs internal operational
+sign off a step comes from its declared role and its grant; whether the `merge_pr` action that follows may
+be taken is the action policy's. Neither the declaration, the grants, nor the policy governs internal operational
 writes to Neotoma, which are not actions — **except for two named classes, which are.**
 
 **Governance writes are actions, and the governance types are one closed list, stated here and nowhere
@@ -686,8 +686,11 @@ payment, a release), related to the task it serves (`PRODUCES` from the task; `R
 cites the artifact it acts on). Created when the effect becomes known — possibly mid-workflow: a task may
 produce many actions, most unknown at creation. Tasks are executed (claimed, done, completed); actions are
 taken; "take" is never said of a task. The action gate is evaluated per action, at the moment it would be
-taken, so an effect discovered late is gated no differently from one declared at creation. The dedup key
-lives on the action (`work_model.md`).
+taken, so an effect discovered late is gated no differently from one declared at creation; where a
+workflow declares a `consent` step, the gate's hold is obtained there, ahead of the take, and the take is
+evaluated again on the standing resolution
+(`#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`).
+The dedup key lives on the action (`work_model.md`).
 
 **Which boundary "outside" names, stated once here.** There is one boundary in this design, and the record
 is on the inside of it. The swarm is the engine, the agents, the adapters, and the record they all read and
@@ -708,6 +711,71 @@ and its task. The consent gate for outbound non-code work is this gate: a policy
 runner subscribes to the checkpoint, and the task is re-claimed on resolution. Do not build a second
 gate (principle 6). PR-shaped review machinery (`step_status`, review verdicts, the steward's merge
 action) is a separate mechanism layered on GitHub; the PR is an artifact of the batch.
+
+### The checkpoint is written where the gate first holds the action, and the permit is decided at the take
+
+**A workflow that declares a `consent` step obtains the gate's hold ahead of the take, and the gate is
+evaluated once more when the action is taken.** The gate is one decision function, asked whenever a
+principal needs to know whether an action may be taken, and for an action whose workflow places `consent`
+before `send`, `pay`, or `post` it is asked at two moments. The first is when the action becomes known and
+the `consent` step opens — the drafts have passed `review`, or the `verify` sign-off has recorded the
+figures: the gate is evaluated on the action's class, its confidence, the `action_policy`, and the class's
+action series, and where it would hold, **the checkpoint is written then**, reason `gate_hold`. That is the
+checkpoint the step carries to the operator and whose resolution it records (`workflows.md#outreach`,
+`workflows.md#payment`, `workflows.md#social-content`). Where the gate would not hold — the class is low
+blast at threshold, or its action series has graduated — no checkpoint is written and the step carries
+nothing, which is what `workflows.md#payment` means by a graduation changing whether `consent` carries a
+checkpoint and not whether the step exists. The second moment is the take: at `send`, `pay`, or `post`
+the adapter asks the gate again, at the moment the action would be taken, as
+`#actions-are-entities-only-actions-are-taken` says of every action.
+
+**A hold may be decided early; a permit is decided only at the take.** This asymmetry is what makes the two
+evaluations one gate rather than two (principle 6). The first evaluation can only stop the action or write
+nothing: a hold decided before the take is safe, because nothing has been taken on it. It never permits,
+because a permit issued at `consent` would be a decision about a take that has not happened, on parameters
+and under a policy that may differ by the time it does. So the operator's resolution of the checkpoint is
+**not the permit**. It is an input to the take-time evaluation, read from the record at that moment —
+principle 2 at the gate: a resolution a runner has held in memory since `consent` is a report of a write,
+and the write is what is read — and the gate permits the take when four things hold together:
+
+1. the action's checkpoint carries a terminal resolution of `approved`, attributed to a principal the
+   checkpoint awaited (`authority_model.md#approval`);
+2. the parameters the action would be taken on equal those the checkpoint carried, within the class's
+   `consent_tolerance`, zero where absent (decisions 27 and 28:
+   `payments.md#a-payments-approver-is-shown-exactly-what-the-verifier-signed`,
+   `payments.md#tolerance-is-an-action_policy-value-and-its-default-is-zero`);
+3. the `action_policy`, as read at the take, still resolves the class as it did when the hold was written —
+   a class the operator has since reserved resolves to `NEVER` whatever the resolution says, since the
+   never-set wins ahead of any policy (`#confidence-and-three-blast-tiers`) and a standing approval is not
+   a policy;
+4. no confirmation exists for the action's `dedup_key`
+   (`work_model.md#at-least-once-implies-effect-dedup`).
+
+A difference on any of the four is never a stale permit re-used. The first two raise a new checkpoint — the
+parameters case is decision 28's rule, and `consent`'s `on_fail` opens the earlier step on the new figures;
+the third is a `NEVER` at the gate, which holds the action and awaits the operator like any other hold;
+the fourth is an action already taken, which is confirmed by reading the external system back and is not
+taken again.
+
+**What the design does not supply is a clock.** The four inputs are everything that can make a standing
+resolution stale, and none of them is elapsed time: an approval given on one day and taken on another, on
+the same parameters under the same policy, is approval of the same thing, and the interval between
+`consent` and the take is already bounded on the task path — the lease is renewed while the operator
+decides, a lapse makes the step claimable again, and the re-claim takes the same action on the same key. A
+time bound on a resolution would be a number the design invented, and the reasoning that made the tolerance
+a policy value with a zero default (decision 28) applies to it unchanged: the shape is a per-class value on
+the `action_policy`, and the number, where an operator wants one, is the operator's. Absent a value there
+is no clock, because the four inputs already name every way a take can differ from what was consented to.
+
+**Why the checkpoint is written at `consent` and not at the take.** The alternative reading — the gate
+writes the checkpoint only at `send`, and `consent` is a step that shows the operator a draft — leaves
+`consent` with nothing to carry and makes the take the step that waits on a human, which contradicts the
+step tables that name `consent` as the step carrying the checkpoint and `send` as the step taking the
+action (`workflows.md`). It also leaves the operator's decision off the record until the take: a preview
+answered on a channel and acted on at `send` is a second approval surface beside the checkpoint queue,
+which is the second gate principle 6 forbids and the shape `telegram.md#a-chat-message-is-not-an-instruction`
+already refuses. Writing the hold where the step that carries it opens keeps the decision on the record
+from the moment it is asked for, and evaluating again at the take keeps the permit where the action is.
 
 ### Confidence and three blast tiers
 
@@ -825,7 +893,7 @@ halt is the state in which nothing can be (`failure_posture.md#what-a-checkpoint
 **C3.** Four copies of the step set → one home, parity where a copy is unavoidable. **C5.** The gate-state
 plan body argues for a hardcoded step list as a floor the data may add to; its decisions map retracts that
 (`hardcoded_floor_proposal_is_retired`); resolved for the retraction, `failure_posture.md` states why.
-**C6.** Merge is an action whose class the `action_policy` governs, and the stored policy is the source
+**C6.** Merge is an action whose class, `merge_pr`, the `action_policy` governs, and the stored policy is the source
 of truth for whether it is operator-gated; a runtime flag that disagrees is a configuration defect whose
 resolution is the operator's (policy to flag, or flag to policy); live values are `status.md`. **C11.**
 The gate decides on confidence × blast by design; a confidence input that is not produced degrades the

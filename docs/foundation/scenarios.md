@@ -6,7 +6,7 @@ models. Runtime claim/lifecycle/gating paths load the kernel instead (`conforman
 **Kind:** foundation; walks the design through concrete batches so the invariants can be read in motion,
 and never states the state of a checkout. **Derived from:** `work_model.md`, `gates_and_workflows.md`,
 `failure_posture.md`, `authority_model.md`, and PR #745 operator review (2026-09-04). Structure follows
-Neotoma's `docs/subsystems/` flow documents: one paragraph, one diagram, the invariants exercised. Revised by the simplification pass of 2026-09-05 (revision 29: walkthroughs (e)–(j) merged back from `scenarios_extended.md`, whose only reason to exist — a reading-block budget — no longer applied to a document that is not on the reading list).
+Neotoma's `docs/subsystems/` flow documents: one paragraph, one diagram, the invariants exercised. Revised by the simplification pass of 2026-09-05 (revision 29: walkthroughs (e)–(j) merged back from `scenarios_extended.md`, whose only reason to exist — a reading-block budget — no longer applied to a document that is not on the reading list). Revised by the consistency pass of 2026-09-06 (revision 35: scenario (j)'s garbled clause, left when `lens` was retired, repaired).
 
 ## Purpose
 
@@ -327,8 +327,8 @@ invariants 2 and 7.
 ## (j) A task created, routed by intake, and entering its successor
 
 A task is created; that is its publication. It has no intake batch, so it is unrouted by that fact, and
-nothing else records it as such. The task enters intake: a batch record opens for it, and the product
-its step owner claims each step in turn, a lease on the step and a sign-off to close it: `classify` writes the
+nothing else records it as such. The task enters intake: a batch record opens for it, and the `pm` step
+owner claims each step in turn — a lease on the step, and a sign-off to close it: `classify` writes the
 task's `action_type` and, where a named principal is the point, `assigned_to`; `link` attaches the issue
 the task already concerns as an artifact; `dedupe` finds no open duplicate; `prioritize` sets the
 priority from the `priority_rubric` entity; `route`'s sign-off, the closing sign-off of the batch, names

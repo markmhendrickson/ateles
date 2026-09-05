@@ -8,7 +8,7 @@ and which successors its tasks may enter, and never the state of a checkout. **D
 record for the built workflows (their step lists and fast paths, not their agent names), the agent
 policies governing outreach, payment, and people-data, `CLAUDE.md`'s people-data section, and PR #745
 operator review (2026-09-04), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Which workflows have a declaration on the record, and which are envisioned
-only, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `operator_preview` renamed `consent`; open decision 33). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 39 ruled here — what intake's `link` attaches and what hydration resolves; the payment `consent` row aligned with decision 27). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two declared intervals and the planned wait, cited in *How to read a workflow section*, `outreach`, and `operator-only`; a standing constraint on an entity a task names, read at intake).
+only, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `operator_preview` renamed `consent`; open decision 33). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 39 ruled here — what intake's `link` attaches and what hydration resolves; the payment `consent` row aligned with decision 27). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two declared intervals and the planned wait, cited in *How to read a workflow section*, `outreach`, and `operator-only`; a standing constraint on an entity a task names, read at intake).consistency pass of 2026-09-06 (revision 35: the three `consent`-carrying workflows cite when their checkpoint is written and what the take re-evaluates).
 
 ## Purpose
 
@@ -418,7 +418,9 @@ the target platforms, from the `channel_config` entity retrieved by type.
 judgment, not on defects a script can find. `consent` is not a second gate: the `publish` action
 is created when the drafts pass lint, the action gate evaluates it, and the step is where the
 operator-facing agent carries the gate's checkpoint and records the decision
-(`gates_and_workflows.md#the-action-gate-is-pr-independent`, principle 6).
+(`gates_and_workflows.md#the-action-gate-is-pr-independent`, principle 6). The checkpoint is written when
+the step opens and the gate holds the action; `post` asks the gate again at the take, on the standing
+resolution, the parameters, the policy as read then, and the key (`gates_and_workflows.md#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`).
 
 **Stages:** authoring (`draft`, `draft_lint`); consent (`consent`); publication (`post`).
 
@@ -496,7 +498,10 @@ from the record and the mail archive before anything is drafted, never assumed.
 
 `review` precedes `consent` so that the operator sees a draft that has already been checked, and the
 draft the operator consents to is the draft that is sent: `send` takes the action on the reviewed content
-by its dedup key, and any change after consent is a new `draft`. A staged draft is never modified in place in
+by its dedup key, and any change after consent is a new `draft`. The checkpoint `consent` carries is written
+when the step opens and the gate holds the `send_external_comms` action; at `send` the gate is evaluated
+again, on the standing resolution, the parameters, the policy as read then, and the key
+(`gates_and_workflows.md#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`). A staged draft is never modified in place in
 the mail system, because on some systems an update is a send; the design's staging is the draft in the
 record. `follow_up` is a step of the same batch so that an unanswered message has a step owner until
 the batch closes, and so that a follow-up goes through the same gate as the first message. The follow-up
@@ -545,7 +550,10 @@ proposes and confirms a movement of money; this is the smallest separation of du
 names, applied to the workflow where it matters most. `reconcile` exists because a rail's acceptance of a
 transfer is not its settlement; a payment whose reconcile step never signed is visible as a batch missing
 one. The consent step is named `consent`, not `checkpoint`: a checkpoint is the held state of the
-`payment` action, which the step carries to the operator; the step is not the checkpoint.
+`payment` action, which the step carries to the operator; the step is not the checkpoint. The checkpoint is
+written when `consent` opens and the gate holds the action; `pay` asks the gate again at the take, on the
+standing resolution, the figures against the tolerance (decision 28), the policy as read then, and the
+key (`gates_and_workflows.md#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`).
 
 **Stages:** preparation (`prepare`, `verify`); consent (`consent`); settlement (`pay`, `reconcile`).
 

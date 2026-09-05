@@ -136,8 +136,9 @@ a re-claimed task is never replayed (`failure_posture.md`). The dedup key lives 
 
 ### Operator-only tasks are claimed by the operator-facing agent
 
-A task with `operator_only` actions is an ordinary task claimed by the `ateles` agent, which carries it to
-the operator and holds the lease while the operator decides. It is not itself a checkpoint: it raises one
+A task with `operator_only` actions is an ordinary task claimed by the operator-facing agent — the agent
+the roster resolves to that role for the batch's project (`vocabulary.md#operator-facing-agent`) — which
+carries it to the operator and holds the lease while the operator decides. It is not itself a checkpoint: it raises one
 only when an action inside it reaches the action gate, which resolves `operator_only` to `NEVER`
 (`gates_and_workflows.md`). The task path stays pull; only the action waits on a human.
 

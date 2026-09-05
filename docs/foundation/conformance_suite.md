@@ -279,7 +279,7 @@ types *after* the set exists is an action like any other — including the opera
 the half the design has not faced, and ruling 18 sharpens it by saying the operator grants a class "by
 writing the policy themselves": once the gate exists, is the operator's write to `action_policy` gated
 (held for the operator to approve, raising the raiser-resolves question `authority_model.md#approval`
-leaves open) or is "operator act" a standing exemption? Opened as **open decision 43** below.
+leaves open, decision 47) or is "operator act" a standing exemption? Opened as **open decision 43** below.
 
 **The intake batch's opener is derivable, and the wording that hides it is a contradiction.**
 `work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow` states that a batch comes into
@@ -602,10 +602,10 @@ above. **M / R / U / P** is the class.
 | AU-14 | `authority_model.md#attribution` | every write in a full run | `RP` | a write with no agent and no principal | M |
 | AU-15 | `authority_model.md#delegation`: attenuation; A-for-B; the chain derived; the hardest chain reconstructible | A delegates to X (scoped); X assigns; Y claims; Y's action needs B's approval | — | X acts beyond A's scope; a write recorded as B; a stored chain; any hop unreconstructible | M |
 | AU-16 | `authority_model.md#approval`: yes/no/veto by a required principal; authorized against required approvers; timeout terminal; silence never accepts; no cross-principal auto-approve; notification via roster and channel config | a checkpoint awaiting P; Q resolves; nobody resolves past the bound | — | Q's resolution lands; the action is taken with no resolution; the timeout continues; `CH` shows one address for the whole swarm | M |
-| AU-17 | the same: raiser resolves | — | — | P (open) |
+| AU-17 | the same: raiser resolves | — | — | P (open decision 47) |
 | AU-18 | `authority_model.md#structural-checks-quorum-and-separation-of-duties`: payment's disjoint verifier | `T-at(payment, verify)` | the payer signs `verify` | it lands | M |
-| AU-19 | the same: quorum, counting rule | — | — | P (Q1–Q3) |
-| AU-20 | `authority_model.md#initiative-proposal-reprioritization` | — | — | P (Q4–Q8) |
+| AU-19 | the same: quorum, counting rule | — | — | P (Q1–Q3: open decisions 48 to 50) |
+| AU-20 | `authority_model.md#initiative-proposal-reprioritization` | — | — | P (Q4–Q8: open decisions 51 to 54) |
 | AU-21 | `authority_model.md#grants` (ruling 41): write admission per entity type is default-deny; the grant is the allowlist, read at every enforcement point; a capability naming every type is the fail-open shape; attribution is required besides and prevents nothing | an agent whose grant names `contact` and not `payment_profile`; a grant carrying a wildcard over types | write each type; register the wildcard grant | the `payment_profile` write lands; the wildcard grant is read as in force for a human or admits a type the agent's definition does not name; a write admitted on attribution alone | M |
 
 ### `data_model.md`
@@ -1142,7 +1142,7 @@ standing exemption?
 **If the set is enumerated and closed, and the operator's later writes are gated**, every governance write
 after bootstrap has an action, a class, and a checkpoint, and the record of how the swarm was changed is
 complete from the first task onward. The operator approving their own write raises the raiser-resolves
-question `authority_model.md#approval` leaves open, and a solo operator approving their own policy changes
+question `authority_model.md#approval` leaves open (decision 47), and a solo operator approving their own policy changes
 is ceremony with one interest — Clark-Wilson's caveat, already named there. The cost is that ceremony, and
 the risk that the checkpoint queue becomes where the operator approves themselves in bulk.
 

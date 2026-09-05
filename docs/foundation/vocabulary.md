@@ -9,7 +9,7 @@ cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 opera
 and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional [step](#step), and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14,
 16–18, 23–29: the hold verb, a condition a step holds on, the `dependency_cycle` reason class, the consent
 tolerance on `action_policy`, and an [artifact](#artifact) `PART_OF` its containing artifact), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the `intake rule` entry). Format
-follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives).
+follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives).consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by role; `merge` as an action-class name retired for `merge_pr`).
 
 ## Purpose
 
@@ -324,7 +324,8 @@ that word for the socket a delivery lands on.
 rule, or "template" (the rule authors the created task's text; classification is intake's).
 
 ### operator-facing agent
-**Definition:** the [agent](#agent), defined by the `ateles` `agent`, that [claims](#claim) operator-only [tasks](#task),
+**Definition:** the [agent](#agent) the roster resolves to the operator-facing role — bound per project in
+`swarm_roster`, never named in the design — which [claims](#claim) operator-only [tasks](#task),
 carries them and their [checkpoints](#checkpoint) to the [operator](#operator), and records the outcome.
 **See:** [`work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent`](work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent).
 **Never:** —
@@ -637,8 +638,8 @@ auto-execute, in any form, spelled with or without the hyphen.
 ### action_type
 **Definition:** the class an [action](#action) belongs to, on which [blast radius](#blast-radius) keys, and which a [task](#task) declares at
 creation as the classes of action it expects to produce.
-Values include `build`, `docs`, `publish`, `send_external_comms`, and `operator_only`; a declared but
-unclassified value fails closed.
+Values include `build`, `docs`, `publish`, `send_external_comms`, `merge_pr`, and `operator_only`; a
+declared but unclassified value fails closed.
 The set of values is `action_policy` data and has no list in the foundation: each [adapter](#adapter)'s
 document tables the classes its [outbound](#outbound) operations carry, every class an adapter can produce is listed in
 the policy (`adapters.md#the-admission-contract`, obligation 6), and the values named here are examples.
@@ -713,7 +714,7 @@ checkpoint's subject; two subjects on one checkpoint; the subject held as free t
 
 ### steward
 **Definition:** the [pipeline](#pipeline) role that merges a pull request once every required [step](#step) is signed off and
-the [action gate](#action-gate) permits the merge [action](#action).
+the [action gate](#action-gate) permits the `merge_pr` [action](#action).
 **See:** [`gates_and_workflows.md#the-action-gate-is-pr-independent`](gates_and_workflows.md#the-action-gate-is-pr-independent).
 **Never:** "merger".
 **Not for:** "bot" for the steward.
@@ -1219,4 +1220,5 @@ foundation prose only on a line that says it is retired.
 | `workflow policy` | the [step owners](#step-owner) a [workflow](#workflow) declares, with the [grants](#grant) in force | a collective name for two mechanisms that already answer who may claim a step; no entity, field, or rule carried the name |
 | `hot path` | [projection](#projection) | it named the reason a projection exists, and the projection's definition already states it |
 | `operator_preview` (a step name) | `consent` | three step names — `operator_preview`, `consent`, `present` — for the step that carries the gate's checkpoint to the operator; the two whose work is identical now share the name |
+| `merge` (as an action class) | `merge_pr` | the step is `merge` and the action it takes is `merge_pr`, as `github.md` and the code workflows already named it; one word for the step and the class made the class read as the step, and the lint's step rules treat `merge` as a step name |
 | `calendar_routing_config` (a binding type) | `channel_config` | `adapters.md#scope` names the per-instance binding types once; a third name for the same binding was a second home |

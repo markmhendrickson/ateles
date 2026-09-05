@@ -1533,6 +1533,85 @@ was trimmed to fit, on the standing direction that content settles before budget
 
 **Checks**, on this tree. `check_foundation_vocabulary.py`: 98 Never items, 62 Not-for items, 0 Never hits, 569 advisory hits (570 on `3ad9ee6`; the pass added none — every bare `owner` its drafts introduced was rephrased to the specific term before landing, and one pre-existing `owner's` in the `step` entry became `step owner's`). `check_foundation_anchors.py`: 0 broken links. `link_vocabulary_terms.py --check`: clean, after the linker added one link (`outbound`, in the `action_type` entry). `test_foundation.py`: 97 passed, 1 xfailed (the budget marker).
 
+## Revision 35 (2026-09-06): the consistency pass — five defects the scenario walk exposed
+
+Walking the scenarios end-to-end for the illustrated page series turned up five places where the documents
+disagreed with each other or with themselves. This revision corrects them; it rules nothing new, and every
+question it registers was already marked open in the document that argues it. Read on this branch at
+`f50b2df` (revision 34) as the predecessor.
+
+**Open questions outside the register.** `authority_model.md` had carried the brief's Q1–Q8, C13, and the
+raiser-may-resolve question as **open** since its first revision, and none had a row in
+`conformance.md#the-register-of-open-design-decisions`, whose own amendment rule says opening a decision
+registers it in the same change — the document predates the register (revision 25) and was never reconciled
+to it. Disposition, question by question. C13 (which entities carry the routing table) is **settled** by two
+rulings made since: C9 leaves the `operator` entity nothing descriptive to carry a table on, and decision 37
+puts what is carried and to which chat on the `channel_config` binding, with `swarm_roster` the type that
+fills a role; it is marked settled in place with the quotes, and the residual — the binding type's name — is
+open decision 35. The other nine are genuinely open and are **registered**, keeping the brief's labels:
+Q7 (what owning confers) as **46**; the raiser question as **47**, with decision 43 noted as bearing on it;
+Q1–Q3 (the counting rule; count-and-disjointness over the checkpoint or a second mechanism; which checks at a
+dozen principals) as **48–50**; Q4, Q5, Q6, Q8 (one approval object or two; the unit that stops; budget as
+scope term or tier; credit as object or read) as **51–54**. Each register row points at the enclosing
+section, as the open rows of 25–29 once did; none was folded, because no existing open row duplicates one.
+`conformance_suite.md`'s three pending cells (AU-17, AU-19, AU-20) and its two prose pointers now cite the
+numbers. The next free number is 55. Not touched: the tenant questions `authority_model.md#principals`
+defers to `docs/multi_tenant.md` section 7, which are argued outside this directory and were outside this
+pass's list.
+
+**Gate timing.** `consent` precedes `send`, `pay`, and `post`, yet the gate was stated as evaluated "at the
+moment the action would be taken", and nothing said when the checkpoint `consent` carries is written or what
+the gate evaluates at the take. Settled in the gate's home,
+`gates_and_workflows.md#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`,
+from principle 2 and decisions 27 and 28: the checkpoint is written when `consent` opens and the gate first
+holds the action; the resolution is not the permit but an input to a second evaluation at the take, which
+permits only when the resolution is terminal `approved` from an awaited principal, the parameters equal what
+the checkpoint carried within the class's tolerance, the policy as read then still resolves the class the
+same, and no confirmation exists for the key. A hold may be decided early; a permit only at the take. No
+clock is supplied — a time bound is a policy value with the tolerance's shape, and no default is invented.
+`workflows.md`'s three `consent`-carrying workflows cite it. No decision was opened.
+
+**`merge` versus `merge_pr`.** The merge action's class was `merge_pr` in `github.md` and every code
+workflow's action-class line, `merge` in `failure_posture.md`'s recovery table, and unnamed in
+`gates_and_workflows.md`. One name: `merge_pr`, because `merge` is the step and the vocabulary lint's `step`
+rules already treat it as one. The recovery row is renamed, `gates_and_workflows.md` names the class at C6
+and in *Two questions*, `vocabulary.md` adds `merge_pr` to the `action_type` values and the `steward` entry,
+and `merge` as an action-class name joins the retired table, qualified as `operator_preview (a step name)`
+is.
+
+**Scenario (j).** "a batch record opens for it, and the product its step owner claims each step in turn"
+was the residue of two renames over "the product lens claims each step in turn" (revision 19 retired
+`lens`; the intake steps are the `pm` step owner's, `workflows.md#roles-named-in-this-document`). It now
+reads "the `pm` step owner claims each step in turn — a lease on the step, and a sign-off to close it".
+
+**A named agent in generic definitions.** `vocabulary.md#operator-facing-agent` and
+`work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent` named the `ateles` agent inside
+definitions that describe a role. Both now state the role — the agent the roster resolves to the
+operator-facing role, bound per project in `swarm_roster` — per the standing rule that definitions describe
+a role and specifics come from context entities. A grep of the directory found no third instance outside
+`status.md` (the two `execution/mcp/ateles/` cells in `conformance.md` are code paths).
+
+**Renumbered on rebase.** Revision 34 (the workflow-format gaps) landed while this pass was being written and took decision 45 and the revision number; this pass was rebased onto it, its nine rows moved up by one, and the register's two paragraphs were merged so both passes' rows and notes stand.
+
+**Confirmed, not changed.** The two findings of the same walk that revision 31 already fixed hold at this
+head: `failure_posture.md`'s `unclaimed_step` paragraph names one task of the step's batch as the subject,
+and `workflows.md`'s payment `consent` row carries decision 27's figures and refers to the `verify`
+sign-off.
+
+**Size.** Measured 2026-09-06 with `wc -c` against `f50b2df` (revision 34, onto which this pass was rebased). Net
+**+13.0k** across the foundation excluding `status.md` (1,164.7k → 1,177.8k): `gates_and_workflows.md` 75.7k →
+81.8k (+6.1k, the gate-timing section); `conformance.md` 39.1k → 41.8k (+2.7k, nine register rows);
+`authority_model.md` 23.4k → 25.3k (+1.9k, the C13 settlement and the decision numbers); `workflows.md` 52.0k →
+53.2k (+1.2k, three citations); `vocabulary.md` +0.6k; `failure_posture.md`, `scenarios.md`, `work_model.md`,
+`conformance_suite.md` under 0.2k each. The kernel is **188.2k**, up from 182.0k, all of it the gate-timing
+section. Nothing was trimmed to fit, on the standing direction that content settles before budget;
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure.
+
+**Checks**, on the rebased tree. `check_foundation_vocabulary.py`: 98 Never items, 62 Not-for items, 0 Never
+hits, 570 advisory hits. `check_foundation_anchors.py`: 0 broken link(s). `link_vocabulary_terms.py --check`:
+clean, after the linker linked the one new first mention in `vocabulary.md`'s header. `test_foundation.py`:
+97 passed, 1 xfailed (the budget marker).
+
 ## Reading-list budget and keying, as of revision 6 (2026-09-04)
 
 Measured with `wc -c` on this branch; the caps are `foundation.py`'s `MAX_DOC_CHARS = 12_000` and
