@@ -679,7 +679,10 @@ confirmation.
 [adapter](#adapter) translates into one of four outcomes and nothing else.
 **See:** [`adapters.md#no-external-event-advances-a-step-by-itself`](adapters.md#no-external-event-advances-a-step-by-itself).
 **Never:** —
-**Not for:** inbound for a [task](#task) reaching a principal (work is claimed, never delivered).
+**Not for:** inbound for a [task](#task) reaching a principal (work is claimed, never delivered); inbound
+for a subscription over the record's own entity changes (that wakes a consumer on a write the record
+already holds, and reports on no external system —
+[`adapters.md#where-inbound-delivery-comes-from-is-an-open-decision-and-the-records-own-subscriptions-are-not-it`](adapters.md#where-inbound-delivery-comes-from-is-an-open-decision-and-the-records-own-subscriptions-are-not-it)).
 
 ### outbound
 **Definition:** the direction in which the record reaches an external system, as an [action](#action) an

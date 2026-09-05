@@ -5,8 +5,9 @@ notification path, the GitHub pipeline, or this document changes (`conformance.m
 states the design and never the state of a checkout. **Derived from:** `work_model.md` (artifacts, intake,
 the four execution mechanisms), `gates_and_workflows.md` (one engine sequences from the entities; actions
 and the action gate), `authority_model.md` (credentials bind to principals; approval), `workflows.md` (the
-steps whose effects leave the system), and PR #745 operator review (2026-09-04, the adapter decision).
-What is built, and where the adapter and the engine are still one process, is `status.md`.
+steps whose effects leave the system), PR #745 operator review (2026-09-04, the adapter decision), and the
+operator's 2026-09-05 review (the inbound-delivery question and the adapter-packaging lean, both recorded
+below as open). What is built, and where the adapter and the engine are still one process, is `status.md`.
 
 ## Purpose
 
@@ -22,9 +23,11 @@ record. Table the mapping for each system; the code host's, being the largest, i
 
 Every boundary between the record and a system the swarm does not own. In scope: the two invariants at
 the boundary, what an inbound event may become in the record, what an outbound operation is, and the
-identity, linkage, dedup, unknown, and provenance rules every adapter applies. Out of scope: the
-workflows themselves (`workflows.md`), the gate's decision function (`gates_and_workflows.md`), what an
-adapter is granted (`authority_model.md#grants`), the code host's per-event mapping in full
+identity, linkage, dedup, unknown, and provenance rules every adapter applies, and two questions marked
+**open** rather than resolved to make the document complete: where inbound delivery comes from, and whether
+adapters live in a repository of their own. Out of scope: the workflows themselves (`workflows.md`), the
+gate's decision function (`gates_and_workflows.md`), what an adapter is granted
+(`authority_model.md#grants`), the code host's per-event mapping in full
 (`github.md`, which applies these rules to every event GitHub can deliver), and the per-instance binding
 of a system to an operator, which is the `channel_config` and `vendor_binding` context entities, resolved
 at runtime and never named here.
@@ -108,6 +111,34 @@ there why backoff is mandatory at this boundary in particular — the system bei
 else, and an adapter that re-requests on every failure batters it — and that the schedule is per external
 system rather than per waiting step. It is cited rather than restated so one retry classification serves the
 runner and the adapter both (principle 6).
+
+### Where inbound delivery comes from is an open decision, and the record's own subscriptions are not it
+
+Every inbound rule above assumes deliveries arrive somewhere. What builds and runs that somewhere the
+design does not settle, and the thing a reader most often reaches for as the answer is the wrong one, so
+both halves are stated here rather than left to be re-derived.
+
+**The record's subscription machinery watches the record, not external systems.** The record offers
+subscriptions over its own entity changes — a watch on entity types, entity ids, or change kinds, delivered
+by webhook to a URL or by a stream a consumer holds open. What such a subscription can tell a consumer is
+that an entity in the record was created, updated, or corrected. It cannot tell anyone that a message
+arrived at a mail system, that a review was submitted at a code host, or that a transfer settled at a rail,
+because it has no visibility into any of them. So the record's subscriptions are a mechanism for **waking a
+consumer on a write the record already holds** — the shape `gates_and_workflows.md` names when a runner
+subscribes to a checkpoint and re-claims its task on resolution — and they are downstream of an adapter,
+never a substitute for one. Reading them as an inbound receiver inverts the boundary: it would make the
+record the source of events about systems it cannot see.
+
+**Open decision 16: whether the swarm builds its inbound receivers or rides a shared one.** What is
+undecided is where an external system's delivery lands before it becomes a write: a receiver the swarm
+builds per system, one receiver the swarm builds and every adapter shares, or a third-party delivery
+service the swarm consumes. Nothing in this document depends on the answer — the two invariants, the four
+outcomes, and the five rules hold whichever it is, because each is stated about what the adapter does with
+a delivery and not about how the delivery reached it. What the answer does decide is where signature
+verification, redelivery, and the delivery id the dedup rule keys on live, and those are the terms the
+decision should be taken on. Until it is taken, an adapter's receiver is its own, which is the state a
+reader should assume and not the design's ruling. This is a sibling of open decision 15 below: how adapters
+are packaged and where their deliveries land are the same question asked of code and of traffic.
 
 ## What the adapter does with every event
 
@@ -387,6 +418,18 @@ between them is what the adapter wrote and the engine read, with provenance on e
 that lets an event drive a step without a write in between has merged them, and where that is the case
 on a checkout is `status.md`.
 
+**Open decision 15: whether adapters live in a repository of their own.** The roles being separable raises
+the packaging question, and it is not settled here. The options are the two obvious ones — adapters bundled
+inside this system beside the engine, or a shared adapter repository this system consumes as a dependency
+and other consumers could too. The operator's stated lean, recorded as a lean and not as a ruling, is
+**toward separating them**, on the reasoning that a boundary the design already draws between two roles is
+cleaner expressed as two artefacts than as two directories. What would decide it: whether a second consumer
+for these adapters actually exists, and what separating them costs at the seam where an adapter's writes
+must stay conformant to the record's conventions (`data_model.md#record-conventions`) across two release
+cadences. The design is unaffected either way — every rule in this document is about what an adapter does
+and none about where its code lives — which is why the question can stay open without anything downstream
+waiting on it.
+
 ## Prior art
 
 The anti-corruption layer (Evans) is the shape: a translation layer at the boundary, so that the external
@@ -399,4 +442,7 @@ required approvals, are the identity and CI rules above, stated by the host itse
 
 The four-outcome rule, the five adapter rules, and the tables are this document's, consolidating the
 operator's decision on PR #745; the prior art named above is cited from general knowledge, not from the
-prior-art entity the other documents cite.
+prior-art entity the other documents cite. Open decisions 15 and 16, and the statement of what the record's
+own subscriptions can and cannot tell a consumer, are this document's, from the operator's 2026-09-05
+review; the lean recorded under decision 15 is the operator's own and is marked as a lean rather than
+written up as a ruling.
