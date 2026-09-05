@@ -433,6 +433,18 @@ def main_ci_green() -> bool | None:
 # (superseded, published, skipped, failed, …) never blocks prep.
 _BLOCKING_STATUSES = ("prepared", "pending_approval", "approved", "publishing")
 
+# Returned by `existing_release_status` when the in-flight check could not be
+# performed at all (Neotoma unreachable, malformed response). Distinct from
+# None, which means "checked successfully; nothing is in flight". Callers MUST
+# treat this as "unknown — do not act", never as a clear signal: the whole
+# point is that a failed read and a clean read are no longer the same value.
+UNKNOWN_RELEASE_STATUS: tuple[str, str, str, float | None] = (
+    "__unknown__",
+    "",
+    "",
+    None,
+)
+
 
 def is_sentinel_version(version: str | None) -> bool:
     """
@@ -494,6 +506,13 @@ def existing_release_status(
     any — that should block preparing `next_version_hint`, so we don't
     re-prepare on top of a release already in flight for the SAME version.
     `age_days` is None when no usable timestamp was found on the row.
+
+    Three distinct outcomes, and callers MUST tell them apart:
+      - a tuple                    → a release IS in flight; do not prepare.
+      - None                       → checked successfully; nothing in flight.
+      - ``UNKNOWN_RELEASE_STATUS`` → the check could not be performed at all
+                                     (Neotoma unreachable/malformed). NOT a
+                                     clear signal. Defer; do not prepare.
 
     Two modes, chosen by whether a hint is given:
       - next_version_hint set: only a `release_result` whose version equals the
@@ -565,8 +584,24 @@ def existing_release_status(
                 best, best_ts, best_has_ts = candidate, ts, True
         return best
     except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as exc:
-        log.warning(f"could not check existing release_result: {exc}")
-    return None
+        # A failed read is NOT "nothing is in flight". Returning a bare None
+        # here made a transient Neotoma blip indistinguishable from a clean
+        # "no blocking release_result", and this check is the guard the whole
+        # design leans on: the per-commit SHA lock is deliberately left
+        # unstamped on transient deferrals (see `_mark_ran`), so every merge
+        # and every scheduled sweep re-enters this function. During an outage
+        # that spawned one `--dangerously-skip-permissions` prepare agent per
+        # merge, each cutting a fresh RC branch + PR on top of a release
+        # already pending_approval — walking straight into the duplicate-RC
+        # condition `publish.py`'s `find_release` refuses to guess its way out
+        # of, which then hard-blocks the operator at publish time.
+        log.error(
+            f"could not check for an in-flight release_result: {exc} — "
+            "cannot rule out a release already in flight, so NOT preparing "
+            "another. Deferring to the next run."
+        )
+        return UNKNOWN_RELEASE_STATUS
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -804,6 +839,19 @@ def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
     # information supports; sentinel/test entities (ateles#461) are still
     # excluded in that mode by `is_sentinel_version`.
     inflight = existing_release_status()
+    if inflight is UNKNOWN_RELEASE_STATUS:
+        # Could not READ the in-flight state — which is not the same as there
+        # being nothing in flight. Defer with `transient=True` so the lock
+        # stays unstamped and the next merge (or the scheduled sweep) re-checks
+        # once Neotoma is reachable, exactly as the CI-unknown branch below
+        # does. Spawning a prepare agent here is the duplicate-RC failure.
+        log.warning(
+            "in-flight release check UNAVAILABLE — deferring to the next run "
+            "rather than risking a second RC on top of a pending release."
+        )
+        if not dry_run:
+            _mark_ran(on_merge, head, transient=True)
+        return 0
     if inflight:
         status, entity_id, version, age_days = inflight
         log.info(
