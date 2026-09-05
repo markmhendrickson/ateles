@@ -8,7 +8,7 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `unclassified_action_type_fails_closed_and_loudly`, `gate_advisory_and_enforcing_paths_must_agree`,
 `gating_vocabulary_order_is_load_bearing`, throughput plan `ent_18b902cf72822373f9da8ced` decision
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
-memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram). Supersedes
+memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram), and the operator's 2026-09-05 12:52 memo (revision 21: the general claim about self-modification, stated in `work_model.md` and cross-referenced from decision 17). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
 is `status.md`; how each concept is recorded is `data_model.md`.
 
@@ -331,8 +331,12 @@ standing finding's proposed change is filed as a task entering intake on its own
 (`work_model.md#intake-is-every-tasks-first-workflow`), and the batch that raised it closes on its own
 steps; that is the state a reader should assume and not the design's ruling. The wider question the
 operator's position implies — whether workflows are the general mechanism for changing the swarm's own
-operation, and not only for doing its outward work — is answered *yes* by the no-side-door rule already,
-and it is the sequencing, not the principle, that is open.
+operation, and not only for doing its outward work — is answered *yes*, and it is stated as a rule of the
+work model rather than here, because it is true of every change to the swarm and not only of the ones a
+standing finding raises (`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`).
+What that section leaves to the operator is the default posture for a governance write (open decision 18);
+what stays open here is the sequencing between the batch that raised the finding and the task it created,
+which that section does not rule and does not depend on.
 
 ### One step set, defined once, tested for parity
 

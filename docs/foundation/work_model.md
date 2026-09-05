@@ -7,8 +7,9 @@ plan `ent_18b902cf72822373f9da8ced` decisions `pull_model_sequencing_build_the_c
 `non_github_execution_makes_pull_decisive`, `three_execution_mechanisms_not_one`, PR #745 operator
 review (2026-09-04), and the operator's 2026-09-05 review (revision 18: how a batch is formed and what
 chooses its workflow; revision 20: the batch-formation diagram, on the operator's request for visuals
-during review). Supersedes `docs/archive/task_execution_loop.md`. What is built is `status.md`; how
-each concept is recorded is `data_model.md`.
+during review), and the operator's 2026-09-05 12:52 memo (revision 21: workflows as the general mechanism
+for changing the swarm's own operation). Supersedes `docs/archive/task_execution_loop.md`. What is built
+is `status.md`; how each concept is recorded is `data_model.md`.
 
 ## Purpose
 
@@ -16,8 +17,9 @@ State how work is created, taken, executed, and returned: pull-only delivery; as
 claim and lease as one primitive (lease as relationship); liveness derived at read time; no assignment
 log; a task carries only status and edges; intake is every task's first workflow; tasks go through
 workflows in batches, are attached to and detached from them, and nest under parents; a batch is opened
-by a closing sign-off naming a successor and goes through exactly one workflow; artifacts are
-records a batch leaves, never its subject.
+by a closing sign-off naming a successor and goes through exactly one workflow; a change to the swarm's
+own operation is a task like any other, governed by the action gate the governance writes already reach;
+artifacts are records a batch leaves, never its subject.
 
 ## Scope
 
@@ -145,6 +147,115 @@ execute it outside the model. The daemon's own outbound effects are not task exe
 actions, and each passes the action gate on its own (`gates_and_workflows.md`, C2). So the daemon loop
 sits beside the task path rather than around it, and the two meet where a daemon's output becomes a task
 in intake.
+
+### Changing the swarm is work, and it goes through a workflow like any other
+
+A change to the swarm's own operation — a new workflow declaration, a step added to an existing one, a
+step's owner role changed, a workflow retired, an agent's prompt or the `agent_policy` it renders from
+rewritten — is **a task like any other**, and everything above applies to it unchanged. It is created,
+it enters intake, it is classified and prioritized and routed, it is claimed by a principal that judged
+it its own, it is executed inside a batch going through a declared workflow, and the writes it makes
+reach the record through the gate those writes already pass. Nothing in the model has a clause that
+distinguishes work aimed outward from work aimed at the swarm itself, and the reason is that the
+distinction does not survive inspection: a change to a workflow declaration is a change to how every
+future batch of that type is executed, which is a larger blast radius than most outward work carries,
+not a smaller one. Exempting it would exempt the most consequential class of change in the design.
+
+**The rule above already settles this, and it settles it for changes nobody asked for.** The no-side-door
+rule is written about tasks, not about origins: it says there is no path by which *a task* is executed
+outside a workflow, and it names the three shapes an exemption would take — a status meaning "done
+without a workflow", a direct-execution mode for small work, a class of task exempt for being urgent or
+trivial. None of the three is conditioned on who created the task or why. So a change the operator asked
+for and a change the swarm proposed to itself are the same object under this rule, and the swarm's own
+proposal is the case where the rule does the most work, because it is the case with no human in the loop
+by default. A reading under which the rule covers only operator-initiated change would leave
+self-initiated change ungoverned, which inverts the risk.
+
+**A workflow may create a workflow, and a workflow may modify an agent.** Both follow from the two
+sentences above and neither needs a new permission: the work is a task, the task goes through a
+workflow, and the writes the work makes are `agent`, `agent_policy`, and `workflow` writes, which
+`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy` already names **governance
+writes** and already makes actions at the action gate. So a batch may declare a new workflow, add a step,
+change a step's `owner_role`, or retire a declaration, and each such write is an action carrying its
+class, scored for confidence, resolved to a blast tier under the project's `action_policy`, and held as a
+checkpoint where the tier and the confidence say to hold it. The same holds for a change to what an agent
+is. A workflow that changes a workflow is not a special kind of workflow; it is a workflow whose steps
+produce governance writes.
+
+**What prevents an ungoverned self-change is the action gate, and it is not a second mechanism.** Name it
+precisely, because "a self-modifying system with a gate on self-modification" is worth being able to
+point at: the five governance types are a **closed and short list**, so the rule is checkable by
+inspection rather than judged per write; every write to one of them is an action, so it is evaluated at
+the moment it would be taken rather than at the moment it was proposed; `operator_only` resolves to
+`NEVER` ahead of any policy, so a policy cannot demote a change the operator reserved; an unclassified
+action type fails closed and loudly; and a proposed change is a proposal until the gate lets it through
+and is **never a mutation an agent makes to itself on its own finding**
+(`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
+Two more constraints hold without being added here. The principal making the change needs the capability
+for it, read at the enforcement point on every check (`authority_model.md#grants`), so an agent cannot
+widen its own grant by writing one — that write is itself a governance write to `agent_grant`, gated as
+one. And a change proposed by a step owner is judged by a step owner: no principal signs for another, so
+the batch that proposes a change to an agent does not also supply the sign-off that accepts it unless
+the declaration puts both in one role, which is a property of the declaration a reader can see.
+
+**Which class of change the swarm may never make to itself without the operator is a policy value, not a
+new mechanism.** The question "what is off limits" is answered by the `action_policy`: a governance class
+listed as `operator_only` resolves to `NEVER`, ahead of the confidence axis and ahead of the recurrence
+path, and no accumulation of successful precedent graduates it. That is the existing expression of "never
+without a human", and adding a second list of forbidden self-changes beside it would be the second gate
+principle 6 forbids — two places to read before knowing whether a change may be taken, which is how the
+two answers come to disagree. What the design therefore states is the *shape* of the answer and not its
+content: the reservation is per action class, it lives in the policy, and it is the operator's to write.
+Which classes belong there is not a design question this document can settle, because it is a judgement
+about how much autonomy this operator wants, and the design's job is to make the judgement expressible
+and enforceable rather than to make it.
+
+**Open decision 18: whether a governance write is reserved to the operator by default.** A policy is a
+value, and every value has a default for a project that has not written one. The two candidate defaults
+are genuinely different postures and the choice is the operator's. **Reserved by default** — the five
+governance classes carry `operator_only` unless a project's policy says otherwise — makes the swarm
+unable to change itself out of the box, and every loosening a deliberate act with a record; the cost is
+that the mechanism sits unused until someone writes a policy, and an unexercised path is one nobody has
+tested (`failure_posture.md`). **Gated by default** — governance classes take a high blast tier, held at
+a checkpoint but not reserved — makes self-change possible from the start under a per-change decision,
+and the risk is that the checkpoint queue is where held work goes to be approved in bulk, so a tier that
+merely holds can become a tier that merely delays. What would decide it: whether the checkpoint queue is
+actually consumed, which is a measured property and not a design one (`status.md`). Until it is ruled, a
+reader should assume neither default and read the project's `action_policy`; a project with no policy
+value for a governance class is the unclassified case, which fails closed to `NEVER`
+(`gates_and_workflows.md#confidence-and-three-blast-tiers`) — so the *absence* of a decision already
+behaves as the reserved posture, which is the safe direction to be undecided in, and is not the same as
+having ruled.
+
+**The relationship to open decision 17.** Decision 17 asks a narrower question about one path into this
+one: whether institutionalizing a *standing finding* is itself a workflow, and specifically whether the
+batch that raised the finding waits on the institutionalization task it created or closes and leaves that
+task to its own intake (`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
+This section does not answer it and does not depend on it. What this section states is that *a change to
+the swarm goes through a workflow*, whatever produced the change; what 17 leaves open is *sequencing*
+between two batches when one of them produced the other. Both readings of 17 are consistent with this
+section, which is why ruling this one does not rule that one.
+
+**Bootstrapping: the first workflow is not created by a workflow, and this is a stated limitation.** If
+workflows are how workflows change, then the first declaration for a project has no workflow to come
+through, and a workflow broken badly enough that no step of it opens cannot be repaired by a batch going
+through it. The design does not resolve this, and inventing a mechanism for it would be inventing a side
+door — a privileged path that creates or repairs a declaration outside the model is exactly the thing the
+rule above forbids, and it would be available to every change and not only to the two cases that need it. So
+the limitation is stated rather than mechanized, and what the design says about the two cases is what it
+already says elsewhere. **The first declaration is an operator act**, of the same kind as issuing a
+credential or widening a grant: provisioning is operator-only and out of band
+(`authority_model.md#grants`), an agent neither performs it nor is empowered to have it performed by
+raising a checkpoint. **A workflow too broken to open a step is an unreadable workflow**, which is a defined
+state: no step of it is opened or claimed, its batch's tasks are escalated with one checkpoint (reason
+`unreadable_workflow`), and nothing proceeds on an empty sequence
+(`gates_and_workflows.md#an-unreadable-workflow-is-unknown-and-unknown-holds`). The repair then arrives
+the way the first declaration did. Two consequences worth stating plainly. The swarm's ability to change
+itself is bounded below by an operator who can write a declaration, and a swarm whose every workflow were
+simultaneously unreadable could not recover on its own — that is a real limitation and not a gap in the
+writing. And the failure is at least **loud**: an unreadable workflow halts rather than degrades, so the
+condition presents as a checkpoint and an announcement rather than as work quietly not happening
+(`failure_posture.md` rule 2), which is what makes an operator-only recovery viable at all.
 
 ### What goes through a workflow is a batch of tasks
 

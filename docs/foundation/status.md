@@ -621,6 +621,52 @@ the operator's, run last and separately, as it has been since revision 6. Nothin
 `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure that
 records it.
 
+## Revision 21 (2026-09-05): the swarm changing itself is work, and it goes through a workflow
+
+The general half of the operator's 2026-09-05 12:52 memo, which revision 16 folded in only in its narrow
+reading. Revision 16 answered what a *standing finding* obliges and opened decision 17 on the sequencing of
+institutionalizing one; the memo's closing sentence — that workflows are the mechanism for improving or
+modifying the swarm's operations in general, and not only for doing outward work — was never addressed on
+its own terms. It is answered in `work_model.md`, beside the no-side-door rule it follows from, rather than
+in `gates_and_workflows.md` beside the standing-finding rule, because it is true of every change to the
+swarm and not only of the ones a finding raises (principle 9); decision 17's paragraph now points at it.
+Read on this branch by reading the modules named below; nothing on prod or on any deployed checkout was
+inspected.
+
+| Design rule (revision 21) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| a change to the swarm's own operation — a workflow declared, a step added, a step's owner changed, a workflow retired, an agent changed — is a task like any other: it enters intake, is claimed, and is executed inside a batch; the no-side-door rule covers it whoever initiated it | nothing stated generally; revision 16 stated it for a standing finding's proposed change, and decision 17's closing clause asserted the general case in passing without a rule anywhere owning it | **designed and not built**, and the two paths that exist today both bypass it. No `workflow` entity declares a workflow for changing a workflow or an agent, and no such change is filed as a task entering intake. `review_learning.py` emits a `proposed_skill_update` the operator approves out of band (revision 16 row above); `generalizer.py` writes agent-scoped policy entities directly | `execution/daemons/apis/review_learning.py`; `lib/daemon_runtime/generalizer.py`; no `workflow_definition` for a governance change |
+| a workflow may create a workflow and may modify an agent; what governs it is the action gate the governance writes already reach, not a new permission and not a second gate | nothing; the design named governance writes as actions (revision 12) and never said a workflow may be the thing that makes one | **designed and not built**, unchanged from the revision 12 row: no write to `agent_definition`, `agent_grant`, `swarm_roster`, `action_policy`, or the schema registry reaches the action gate on this branch | `lib/daemon_runtime/gating.py`; every governance write path |
+| open decision 18: whether a governance write is reserved to the operator by default, or gated at a high blast tier | nothing; no default was stated either way | not a mechanism, so not buildable as one. What is measurable is that no `action_policy` entity on this branch declares a blast tier for any governance class, so every such class is currently the unclassified case, which `blast_radius_for()` resolves to `NEVER` — the reserved posture by accident of absence rather than by decision | the `action_policy` entities |
+| bootstrapping is a stated limitation, not a mechanism: the first declaration is an operator act, and a workflow too broken to open a step is an unreadable workflow, escalated and repaired the same way | nothing; the recursion was unaddressed | **partially built, on the second half only.** The `unreadable_workflow` reason class is the design's, and `status.md`'s `gates_and_workflows.md` section already records that no engine reads a `workflow` entity to open steps, so there is nothing yet that can find one unreadable. The first-declaration half is an operator act by design and has no built counterpart to lack | `workflow_resolver.py`; `swarm_dispatch.py` |
+
+**Drift worth naming, because it is the hazard this revision describes, running.**
+`lib/daemon_runtime/generalizer.py` on this branch turns clustered `strategy_drift_signal` evidence into
+`agent_policy` entities **without a per-change human gate**, by its own module docstring, writing them
+through plain `/store` and `/correct` calls. It is a self-modification path that reaches no action gate:
+under the design every one of those writes is a governance write and therefore an action, evaluated at the
+gate under the project's `action_policy`. The module carries its own safety apparatus instead — a
+confidence threshold, agent-local scope only, `provisional` status graduating by exposure, a per-agent cap,
+and a refusal to supersede an operator-authored policy — which is a thoughtful set of controls and is not
+the gate. It is a second mechanism answering the question the gate exists to ask (principle 6), it is
+readable only by reading that module rather than by reading a policy (principle 9), and its scope test is a
+heuristic over the policy's own text rather than a declared class. Whether the controls are individually
+adequate is not the point being made here: the design's answer is that this write is an action, and on this
+branch it is not one. The narrower shape of the same divergence is already recorded in the revision 16 rows
+for `review_learning.py`.
+
+**Size.** `work_model.md` grew 10.2k (23.6k → 33.8k) and `gates_and_workflows.md` 0.6k (45.1k → 45.7k),
+measured 2026-09-05 with `wc -c` on this branch against revision 20 as the predecessor. The kernel is
+therefore **93.0k**, up from 82.3k on revision 20, exceeding the 40k reading block by 53.0k. Nothing was
+trimmed: the reading-budget decision below is the operator's, run last and separately, as it has been since
+revision 6, and this revision follows the same instruction every revision since has followed — content
+settles before budget. This is the largest single-revision addition to the kernel to date, and it is worth
+saying why rather than leaving it to the budget pass to discover: the section answers five questions the
+memo raised, three of which needed their own statement (the general rule, what governs it, the
+bootstrapping limitation), and one of which opens a decision that has to carry both its options and their
+costs to be rulable. `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the
+expected failure that records the overrun.
+
 ## `github.md`: the events with no defined response (revision 13, 2026-09-04)
 
 `docs/foundation/github.md` enumerates every event GitHub can deliver, from GitHub's own webhook event and
