@@ -6,7 +6,7 @@ mechanism (built as ateles#744): names documents and paths, never what a checkou
 `binding_is_the_reviewer_reading_a_kernel_not_a_loading_order` and
 `ateles_binding_extends_three_existing_mechanisms`, synthesis `ent_b0ce322f768e4fc676b73139` (PR-29, C7),
 prior art `ent_08460968e6f49dac21510f4a` (OPA: decision decoupled from enforcement), and PR #745 operator
-review (2026-09-04).
+review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`).
 
 ## Purpose
 
@@ -49,12 +49,12 @@ any diff was read.
 | `docs/foundation/work_model.md` | Pull-only delivery; assignment as eligibility; claim=lease (lease as relationship); liveness derived at read; task = status + edges; intake first; tasks go through workflows in batches; artifacts ≠ subjects. |
 | `docs/foundation/gates_and_workflows.md` | `workflow` declares; a batch is the tasks going through it and the record of that; step state from batch + lease + `sign-off`; `step_status` projects; one step set; successors + `FOLLOWS`; actions are entities and are taken through the action gate; the checkpoint. |
 
-A missing kernel document is reported as not yet written; that domain is reviewed on the lens's standing
+A missing kernel document is reported as not yet written; that domain is reviewed on the review step's standing
 criteria only, and a change is never blocked for lacking a citation to a document that does not exist.
 
 ## Read when these paths changed
 
-First cell: regexes matched anywhere in a changed path (same convention as `Lens.diff_patterns`); second:
+First cell: regexes matched anywhere in a changed path; second:
 documents to read. Each document at most once per review, kernel first.
 
 ### Work and workflows
@@ -107,8 +107,8 @@ documents to read. Each document at most once per review, kernel first.
 Every issue and PR states its design basis: the foundation document and section it conforms to, or that no
 design applies.
 
-- Issue: first section of the swarm specification (`issue_spec.py`, section `basis`). The product lens
-  states it at intake's `classify` step (`workflows.md#intake`), from the kernel; the arch lens checks it.
+- Issue: first section of the swarm specification (`issue_spec.py`, section `basis`). The `pm` step owner
+  states it at intake's `classify` step (`workflows.md#intake`), from the kernel; the arch review step checks it.
 - PR body line: `Design basis: docs/foundation/work_model.md#the-claim-and-the-lease-are-one-primitive`,
   or `Design basis: no design applies — <one line why>`.
 

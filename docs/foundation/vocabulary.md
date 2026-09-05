@@ -6,7 +6,7 @@ checkout implements. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` 
 art `ent_08460968e6f49dac21510f4a` (A2A `TaskState`, RFC 8693, Camunda), [task](#task)
 `ent_da60df3beccb675ef8c8c0c5`, the ateles#378 glossary ([operator](#operator) section, and the ux-signed swarm section
 cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 operator review (2026-09-04),
-and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`). Format
+and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional [step](#step), and two terms retired in favour of `review step`). Format
 follows Neotoma's `docs/vocabulary/canonical_terms.md`.
 
 ## Purpose
@@ -676,11 +676,15 @@ the [action gate](#action-gate) permits the merge [action](#action).
 **Never:** "merger".
 **Not for:** "bot" for the steward.
 
-### review panel
-**Definition:** the set of [lenses](#lens) the [pipeline](#pipeline) runs on a pull request, each by its [step owner](#step-owner).
-**See:** [`conformance.md#always-read`](conformance.md#always-read).
-**Never:** —
-**Not for:** "reviewers" for the panel, unqualified; CI for the panel.
+### review step
+**Definition:** a [step](#step) whose work is a judgement of the [batch](#batch)'s change rather than a
+change to it, closed by its [step owner](#step-owner)'s [sign-off](#sign-off) like any other step. `pm`,
+`ux`, `arch`, `pr_review`, `qa`, and `legal` are review steps; nothing distinguishes one from a working
+step but what its owner does, and no separate review concept exists in the design.
+**See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection),
+[`workflows.md`](workflows.md).
+**Never:** "lens", "review panel", "panel".
+**Not for:** "reviewer" for a review step's owner, unqualified; CI for a review step.
 
 ### effect dedup
 **Definition:** the rule that every [outbound](#outbound) effect is idempotent or deduplicated on its own key, so a
@@ -1096,13 +1100,6 @@ Each header says which kind it is.
 **Never:** "optional docs", "secondary docs".
 **Not for:** —
 
-### lens
-**Definition:** one reviewing perspective on the [review panel](#review-panel) (pm, ux, arch, qa, and the rest), run by its
-[step owner](#step-owner).
-**See:** [`conformance.md#always-read`](conformance.md#always-read).
-**Never:** —
-**Not for:** "reviewer" for a lens, unqualified.
-
 ### design basis
 **Definition:** the foundation document and section an [issue](#issue) or PR conforms to, or the statement `no
 design applies` with a reason, checked mechanically and judged by reading.
@@ -1170,5 +1167,7 @@ foundation prose only on a line that says it is retired.
 | `work item`, `work entity` | [task](#task) (subject), [artifact](#artifact) (record) | the subject of a workflow is the task |
 | `dispatch` | [assign](#assign), [claim](#claim), [intake](#intake) | it once named publication, claim, assignment, and execution at once |
 | `recurring series` | [action series](#action-series) | "recurring" restated what a series already is, and named nothing about the members; the series is made of actions of one class, and that is what graduates |
+| `lens` | [review step](#review-step), whose owner is a [step owner](#step-owner) | on owner, sequence, verdict and blocking a lens was identical to a step; a second term for one thing (principle 9) |
+| `review panel` | the [review steps](#review-step) a [workflow](#workflow) declares | the set of steps a workflow declares is the panel; naming it separately implied a second sequencing mechanism beside the declaration |
 | `reaper` | nothing | a lapsed lease already does not count; there is nothing to release |
 | `executing`, `running` (as states) | [active](#active) (derived) | a stored liveness flag fails when the process that would clear it dies |

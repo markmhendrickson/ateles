@@ -3,14 +3,14 @@
 **Kernel document:** read on every review (`conformance.md`). **Kind:** foundation; states the design and
 never the state of a checkout. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` (phase 0 of plan
 `ent_533d4ec2f7bfb60f66fb3fce`), prior art `ent_08460968e6f49dac21510f4a` (phase 3), ateles#727, the
-decision keys cited per invariant, and PR #745 operator review (2026-09-04). Which mechanisms exist on a given checkout, and where nothing fires, is
+decision keys cited per invariant, and PR #745 operator review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Which mechanisms exist on a given checkout, and where nothing fires, is
 measured in `status.md`, not here.
 
 ## Purpose
 
 State the invariants issue-based work in this repository conforms to, and for each the kind of mechanism
 that makes it bind. An invariant with no enforcing mechanism is applied by a reviewer by hand, and the first
-invariant says why that difference must never be papered over. The arch lens and the other review lenses read
+invariant says why that difference must never be papered over. The arch review step and the other review steps read
 this document on every review.
 
 ## Scope
@@ -18,7 +18,7 @@ this document on every review.
 Eleven invariants. The first six are the rules ateles#727 put in `CLAUDE.md` for interactive sessions
 (throughput plan `ent_18b902cf72822373f9da8ced`, decision
 `verification_discipline_principles_and_where_they_bind`), which do not bind agents the swarm runs; this
-is the copy the review lenses read. The last five are consolidated from stored decisions and the operator review of
+is the copy the review steps read. The last five are consolidated from stored decisions and the operator review of
 this foundation. Authority and delegation
 invariants are `authority_model.md`; the posture when the record is unreachable is `failure_posture.md`.
 
@@ -161,9 +161,9 @@ staying alive; the design-basis check names this invariant when such a field is 
 
 **C7, where rules live.** Four homes, chosen for four audiences: `agent_policy` entities (agent behaviour,
 synced to skills), `CLAUDE.md` (re-injected after compaction, so it binds interactive sessions), this
-directory (diffable, PR-reviewed, read by the review lenses), and a warning against a second document on one
+directory (diffable, PR-reviewed, read by the review steps), and a warning against a second document on one
 subject. Resolved: these are different audiences, not copies. The #727 section states in its first line
-that it does not bind agents the swarm runs; this document is what the review lenses read; the derivation is shared and
+that it does not bind agents the swarm runs; this document is what the review steps read; the derivation is shared and
 cited. Direction of truth per class of record is in `conformance.md`. When the two diverge, this document is
 wrong until a PR corrects it, and that PR is the review.
 

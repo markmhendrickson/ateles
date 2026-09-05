@@ -553,6 +553,41 @@ kernel so far, and all of it in `work_model.md`, which had not grown since revis
 trimmed to fit: the reading-budget decision below is the operator's, is now exceeded by 34.3k rather than
 27.9k, and the budget pass that follows is a cut, a split, or an amendment of the caps.
 
+## Revision 19 (2026-09-05): review relevance, and the retirement of `lens`
+
+Two design questions the operator's memos raised and the earlier analysis left unsettled. Read on this
+branch by reading `review_panel.py` and the vocabulary lint; nothing on prod or on any deployed checkout
+was inspected.
+
+| Design rule (revision 19) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| an optional step declares `applies_when`, a condition evaluated against what the batch's tasks are and what their change touches, which decides whether the step opens; three values, and an unevaluable condition **opens** the step | nothing. `required` was a declared field whose false branch had no stated semantics anywhere: every step table carried steps marked `no` and no rule said who skipped one, on what, or where that was recorded | **designed and not built.** No `workflow` declaration carries an `applies_when` field, and nothing evaluates one. What exists instead seats reviewers by a hardcoded registry of path regexes (drift row below) | `execution/daemons/apis/review_panel.py`; the `workflow` entities |
+| a step the condition rules out is recorded **inapplicable** on the batch, and inapplicable never reads as signed | nothing; the design had two step outcomes (signed, waived) and no third | **designed and not built.** `step_status` has no inapplicable value, so a step that never opened and a step that passed are the same absence to every reader | `step_status`; the sign-off writer |
+| `lens` and `review panel` are retired; a **review step** is a step whose owner judges rather than changes, and no separate review concept exists | `lens` defined as "one reviewing perspective on the review panel, run by its step owner" — which on owner, sequence, verdict and blocking named nothing a step does not | **not a built-state question for the design, and a live divergence for the code.** The built panel is a distinct mechanism with its own registry, seating rule, and cap, not a set of declared steps | `review_panel.py` (`Lens`, `LENSES`, `_matches_diff`) |
+
+**Drift, recorded as drift and not as design.** `review_panel.py` seats reviewers by matching **46 path
+regexes** across four `Lens` entries (`arch` 6, `ux` 4, `legal` 6, `security` 30), plus issue-text regexes
+for pre-registration, an `always` flag on two lenses, a `min_changed_files` threshold of 5, and an ordered
+registry that doubles as priority when the panel is capped. Counted 2026-09-05 by reading the module on
+this branch. None of that is declared on a `workflow` entity, so the sequencing the design says is data
+lives in a code literal — the two-blind-engines defect `gates_and_workflows.md` names, and principle 9's
+one-home rule broken at the same point. The design ruling above does **not** ratify it: `applies_when` is
+a condition on a declaration, authored where changing it is a governance write, and a hardcoded regex
+registry is neither. What the drift shows is only that the question is real, not how it should be answered.
+
+**Size.** `gates_and_workflows.md` grew 4.7k (38.8k → 43.5k), `workflows.md` 1.7k (39.5k → 41.2k),
+`vocabulary.md` 0.7k (80.6k → 81.3k), and `principles.md` 0.2k (13.4k → 13.5k), measured 2026-09-05 with
+`wc -c` on this branch, against revision 18 as the predecessor. The kernel is therefore **79.1k**, up from
+74.3k on revision 18. Nothing was trimmed to fit: the reading-budget decision is the operator's and is
+untouched by this revision, and
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure that
+records it.
+
+**What this revision does not rule.** Open decisions 13, 14, 15, 16, and 17 stay unruled. Decision 17
+(whether institutionalizing a standing finding is itself a workflow) is the nearest neighbour and is
+untouched: `applies_when` decides whether a declared step opens, and says nothing about whether a
+workflow may hold on a condition discovered mid-flight, which is the sequencing question 17 leaves open.
+
 ## `github.md`: the events with no defined response (revision 13, 2026-09-04)
 
 `docs/foundation/github.md` enumerates every event GitHub can deliver, from GitHub's own webhook event and

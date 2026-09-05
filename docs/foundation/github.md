@@ -7,7 +7,7 @@ the five adapter rules, which this document applies and does not restate), `work
 intake, the four execution mechanisms), `gates_and_workflows.md` (step state from edges; actions and the
 action gate; the three verdict values), `workflows.md` (the code workflows, release, and security),
 `failure_posture.md` (the halt, the recovery per action class, the checkpoint reason classes), and GitHub's
-own webhook event and payload documentation, read 2026-09-04, and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`). What is built, and which rows have no code
+own webhook event and payload documentation, read 2026-09-04, and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). What is built, and which rows have no code
 path, is `status.md`.
 
 ## Purpose
@@ -80,7 +80,7 @@ with an existing mechanism doing the work instead:
   nothing arrives. Rather than adding an outcome for "a condition changed", the design keeps it where
   conditions already live: an observation on the artifact, written by a **read** the adapter makes, with
   the sourcing and coverage every observation carries. See *Conditions that are not events*.
-- **An event that invalidates a decision already made** — a force-update of the head after a lens signed, a
+- **An event that invalidates a decision already made** — a force-update of the head after a review step signed, a
   review dismissed after a step closed — looks like it needs an outcome that *retracts* something. It does
   not get one. It is an observation, and the retraction is already the record's: a sign-off is pinned to
   the artifact state it judged, so an observation moving the head makes the pinned sign-off readable as
@@ -163,10 +163,10 @@ than a convenience. It is marked unhandled because reading it as blocking is a r
 
 | Event and action | Status | Outcome in the record |
 |---|---|---|
-| `pull_request_review.submitted`, `APPROVE`, by a lens's principal on the review step of the batch linked to this pull request | handled | **that lens's sign-off on its review step**, verdict `signed`. The host's token is a signal the adapter maps to one of the record's three verdict values (`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`) |
-| `pull_request_review.submitted`, `REQUEST_CHANGES`, by a lens's principal | handled | that lens's sign-off with a blocking verdict; the step's `on_fail` names the earlier step that opens again |
+| `pull_request_review.submitted`, `APPROVE`, by a review step's principal on that step of the batch linked to this pull request | handled | **that step owner's sign-off on its review step**, verdict `signed`. The host's token is a signal the adapter maps to one of the record's three verdict values (`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`) |
+| `pull_request_review.submitted`, `REQUEST_CHANGES`, by a review step's principal | handled | that step owner's sign-off with a blocking verdict; the step's `on_fail` names the earlier step that opens again |
 | `pull_request_review.submitted`, `COMMENT`, by anyone | handled | an observation only; no sign-off |
-| `pull_request_review.submitted` by a credential binding to no principal, or to a principal owning no open step | handled | an observation. **An automated account's `APPROVE` never stands in for a lens** |
+| `pull_request_review.submitted` by a credential binding to no principal, or to a principal owning no open step | handled | an observation. **An automated account's `APPROVE` never stands in for a review step's owner** |
 | `pull_request_review.submitted`, `APPROVE`, by the operator's credential while a checkpoint on this batch's merge action awaits the operator | handled | resolution of that checkpoint by the operator principal (`authority_model.md#approval`), recorded and read back; **not** a sign-off |
 | `pull_request_review.dismissed` | **unhandled** | the host retracts a review after a step may already be signed. Until built, an observation — and never an unsigning, because no adapter revises a sign-off. See below |
 | `pull_request_review.edited` | handled | an observation; an edited review body never revises a sign-off already written |
@@ -178,7 +178,7 @@ than a convenience. It is marked unhandled because reading it as blocking is a r
 rather than extends it: a verdict is terminal and never revised in place, and a step owner reaching a
 different judgement writes a **new** sign-off, the latest per step owner per artifact head being the one
 that stands (`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`). So a dismissal
-at the host is an observation, and if the lens genuinely no longer stands behind its verdict, the lens
+at the host is an observation, and if the step owner genuinely no longer stands behind its verdict, that owner
 writes a new sign-off. What is unhandled is the **surfacing**: a dismissal that silently leaves a signed
 step signed is exactly the state a reader should be told about, and the design's answer is that the
 observation is a condition the steward reads before taking the merge. That is a rule with no built path,
@@ -382,12 +382,12 @@ the adapter writes one observation, and the pinning does the rest.
 **A review dismissed after a step was signed.** Above, under *Reviews*: an observation, never an unsigning;
 unhandled in its surfacing.
 
-**An automated account approving where a lens should.** Handled, and it is the identity rule doing the
+**An automated account approving where a review step's owner should.** Handled, and it is the identity rule doing the
 work: a verdict from a credential that binds to no principal, or to a principal who does not own the step,
 is an observation. Nothing in the payload changes that — the same `APPROVE` from the same host, on the
 same pull request, is a sign-off or an observation depending only on whom the login resolves to. This is
 worth restating as its own line because it is the row that fails silently when it fails: an automated
-approval that was read as a lens's verdict produces a batch that looks fully reviewed.
+approval that was read as a review step's verdict produces a batch that looks fully reviewed.
 
 **An issue transferred, or closed as duplicate.** The duplicate half is handled: an observation, and the
 record's dedupe is intake's `dedupe` step. The transfer half is unhandled: the artifact's identity moves,
@@ -428,7 +428,7 @@ host back** — never by the operation's return code.
 
 **What the adapter never does outbound, at this host specifically.** It never enables auto-merge, which
 would grant the host a permit the gate did not issue. It never approves a review under its own credential
-to satisfy a branch rule, which would be an automated account standing in for a lens from the other
+to satisfy a branch rule, which would be an automated account standing in for a review step's owner from the other
 direction. It never force-updates a branch a sign-off has pinned. It never deletes an issue, a pull request,
 or a comment to make the record look clean — a superseded effect stays readable, which is the same rule the
 `publish` recovery states. And it never takes any of these because it judged an earlier effect wrong: a

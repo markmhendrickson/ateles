@@ -8,7 +8,7 @@ and the action gate), `authority_model.md` (credentials bind to principals; appr
 steps whose effects leave the system), PR #745 operator review (2026-09-04, the adapter decision), and the
 operator's 2026-09-05 review (the inbound-delivery question and the adapter-packaging lean, both recorded
 below as open; and revision 18: when an artifact comes into existence, and what holds an effect before
-it has an external id). What is built, and where the adapter and the engine are still one process, is `status.md`.
+it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). What is built, and where the adapter and the engine are still one process, is `status.md`.
 
 ## Purpose
 
@@ -66,7 +66,7 @@ An inbound event is a signal about an artifact. It can yield exactly one of four
 Nothing else. An event never opens, claims, or closes a step, never names a successor, and never advances
 a batch; the sign-off it may yield does that, by the rules the step model already states. A verdict from
 an account that binds to no principal, or to a principal who does not own the step, is an observation on
-the artifact and never a sign-off: an automated account's approval never stands in for a lens. A CI
+the artifact and never a sign-off: an automated account's approval never stands in for a review step's owner. A CI
 result is a condition a step owner reads before signing, never a sign-off. This is
 `work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject` applied to events: the artifact is
 the record an external system holds; what happens to it is information about the batch's tasks, not a
@@ -374,7 +374,7 @@ exists for it is therefore an artifact with no batch, and it yields a task for i
 untracked record. The batch that later addresses that task opens its own steps, from the beginning of its
 workflow, and its `impl` sign-off cites the existing pull request in `artifact_refs[]` — the earlier
 existence of the artifact buys the batch nothing and skips nothing. A companion rule of the same kind: a
-pull request whose shipped change exceeds the scope a lens signed does not inherit that narrower sign-off,
+pull request whose shipped change exceeds the scope a review step signed does not inherit that narrower sign-off,
 because a sign-off is pinned to the artifact state it judged (`data_model.md#record-conventions`).
 
 ## Gmail

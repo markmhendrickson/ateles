@@ -8,7 +8,7 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `unclassified_action_type_fails_closed_and_loudly`, `gate_advisory_and_enforcing_paths_must_agree`,
 `gating_vocabulary_order_is_load_bearing`, throughput plan `ent_18b902cf72822373f9da8ced` decision
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
-memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here). Supersedes
+memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
 is `status.md`; how each concept is recorded is `data_model.md`.
 
@@ -33,7 +33,8 @@ and the adapters that reach them: `adapters.md`.
 ### Declaration, batch, projection
 
 `workflow` declares one entity per (project, workflow type): ordered `steps[]` (`phase`, `step_name`,
-`owner_role`, `parallel_group`, `join_step`, `required`, `on_fail` — the earlier step a failing sign-off
+`owner_role`, `parallel_group`, `join_step`, `required`, `applies_when` — the condition that decides
+whether an optional step opens at all, below — and `on_fail` — the earlier step a failing sign-off
 opens again — plus `reads_to_enter`, `reads_to_close`, and `freshness`, the read dependencies below), plus
 `fast_paths` and `successors`. `owner_role` holds a **role**, never an agent name: the
 roster resolves it to a principal when the step is claimed (`vocabulary.md#step-owner`), so one
@@ -134,6 +135,56 @@ batch-level flag (principle 11), and it makes a waived step queryable as waived:
 and why, rather than a comment on an artifact that no reader reads. A clearance recorded only as prose on
 an artifact is an observation and never a sign-off (`failure_posture.md` rule 4).
 
+**An optional step is relevant or not, and what decides that is a declared condition on the step, not a
+judgement made at the moment.** `required` has a false branch, and until this revision the design named
+the field and stated nothing about it: every step table carries steps marked `no` (`legal` on feature,
+`ux` and `legal` on copy) and no rule said who decides such a step is skipped, on what, or where that
+decision is recorded. That silence is the hole. An optional step whose skip nobody declares is skipped
+by whoever notices, on grounds no reader can name, which is the self-settable clearance the waiver rule
+above exists to remove, restated one level up — at the step's existence rather than at its verdict.
+
+So a step declares `applies_when`: a condition, evaluated against **what the batch's tasks are and what
+their change touches**, that decides whether the step opens at all. It is data on the declaration, judged
+once when the workflow is written and readable by anyone who reads the declaration. Three values, and the
+third is principle 7: the condition holds and the step opens; it does not hold and the step is **declared
+inapplicable**, recorded as such on the batch with the condition that ruled it out; it cannot be evaluated
+— the input needed to judge it could not be read — and the step **opens**, because an unevaluable
+relevance test fails toward review and never toward skipping it (principle 5). A step with no
+`applies_when` always opens, which is what every step marked `required: yes` is.
+
+**A declared-inapplicable step is not a signed one, and the two never read the same.** The batch records
+which steps did not open and why, the same way it records which were waived; a reader asking what judged
+this change gets three answers — signed, waived, inapplicable — and never one that hides the difference.
+"The arch step found nothing wrong" and "no arch step ever opened" are different claims about a change,
+and a projection that renders both as an absent blocking verdict has destroyed the distinction the same
+way an empty result destroys `unknown`.
+
+**A condition may read what the change touches, and this is the one place in the design where it may.**
+Elsewhere a workflow's conditionals key on a property of the task set fixed at intake — `fast_paths` does,
+and keeps doing so (`workflows.md`). `applies_when` is different in kind because the question it answers is
+different: a fast path asks *how much of this workflow this class of task needs*, which intake knows; an
+applicability condition asks *which perspectives this particular change warrants*, which intake cannot know,
+because at intake the change does not exist. The design already accepts that the content of a change
+conditions what a reviewer does: `conformance.md#read-when-these-paths-changed` selects which foundation
+documents a reviewer loads by matching regexes against the changed paths. Conditioning which reviewer
+opens at all is the same mechanism one level out, and refusing it while keeping the reading table would be
+inconsistent rather than conservative.
+
+Two limits keep this from becoming the label-on-an-artifact rule it must not become. First, the condition
+is **declared on the workflow and never written on the artifact**: nothing a pull request's author says
+about itself — a label, a title token, a body line, a checkbox — seats or unseats a reviewer, because that
+is the reviewed party choosing its reviewers. The condition is authored where changing it is itself a
+governance write through a workflow (**A change to what produced a finding**, above). Second, the
+condition is evaluated **once, when the step would open**, against the batch's artifacts at that moment,
+and the result is recorded with the head it was evaluated against; a later head that would have seated a
+step it did not seat is the invalidation case `github.md` already names, and it reopens the question rather
+than being answered by a stale evaluation.
+
+**What an `applies_when` condition may read is declared, like every other read.** It names its inputs
+through the same `reads_to_enter` mechanism as the step it guards, so a condition that reaches for
+something the step never declared is a declaration error caught in the pull request that introduced it,
+and a condition whose inputs are unreadable resolves to the third value above rather than to a skip.
+
 And the negative, restated here because this is where a reader will look for it: **no step is closed by
 elapsed time.** A waiver is an operator's deliberate act, not a timer; the answer to a step nobody has
 claimed is a checkpoint against its owner role (`failure_posture.md`), never an automatic clearance. A gate
@@ -210,7 +261,7 @@ an artifact the step owner then judges; it does not close the step by having don
 produced — the check that was run and what it actually said. A verdict may rest on evidence another
 mechanism executed, a CI run or a deterministic lint, provided the sign off names that mechanism as its
 evidence and the result it read. What a blocking verdict may never do is present unexecuted reasoning as
-an executed finding: a lens that could not run the check files a **non-blocking** finding stating what it
+an executed finding: a step owner that could not run the check files a **non-blocking** finding stating what it
 could not verify, and says so plainly, rather than blocking on a defect it inferred. Reasoning about a
 defect is a reason to look; it is not a reason to block, because a block asserts that the defect is there
 and a principal downstream will act on that assertion without re-deriving it. This is principle 2 at the
@@ -233,7 +284,7 @@ holds — records findings the way any step owner does (`vocabulary.md#finding`)
 and bind the same way. Nothing about the operator's input needs a second intake path, a second queue, or a
 feedback entity beside the finding: the existing primitive already carries a judgement from a principal
 about a batch, with provenance, and extending it is what principle 6 requires. What the operator's input
-does raise more often than a lens's is the standing axis, because the operator is judging output against a
+does raise more often than a review step's is the standing axis, because the operator is judging output against a
 standard the swarm has not been told, and a standard nobody wrote down produces the same defect
 indefinitely.
 
@@ -405,7 +456,7 @@ sign-offs, actions, checkpoints, artifacts), and only an adapter touches the ext
 what it learns there as a signal about an artifact, with provenance. This is "one engine sequences from
 the entities" applied to the boundary. Second, no external event advances a step by itself: an event can
 yield only a sign-off by a named principal, an observation on an artifact, an action confirmation, or a
-new task for intake, and an automated account's approval never stands in for a lens. Outbound, a step's
+new task for intake, and an automated account's approval never stands in for a review step's owner. Outbound, a step's
 effect on an external system is an action through this gate, which the adapter takes on permit and
 confirms by reading the system back.
 

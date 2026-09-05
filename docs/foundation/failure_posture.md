@@ -9,13 +9,13 @@ from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-12 to PR-15, C5, C17), prio
 `reachability_check_belongs_at_dispatch_with_mid_task_writes_failing_closed`,
 `deferral_must_be_bounded_and_escalate_off_neotoma`, `unknown_must_stay_distinct_from_a_verdict`,
 `nyctea_635_becomes_load_bearing`, PR #745 operator review (2026-09-04), and the operator memos of
-2026-09-05 (the `undetermined_scope` reason class), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`). What is built is `status.md`;
+2026-09-05 (the `undetermined_scope` reason class), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). What is built is `status.md`;
 how a checkpoint is recorded is `data_model.md`.
 
 ## Purpose
 
 State the operator's decision that Neotoma is a hard dependency and the eight rules that follow from it, so
-the posture lives where the review lenses read it rather than in a task description; state which
+the posture lives where the review steps read it rather than in a task description; state which
 failures the swarm escalates as checkpoints on a task, and which it does not; and state the halt the
 operator invokes and what undoes an action already taken. `durable_execution_substrate.md`
 records the position on execution engines and replay that this document relies on; it stays.

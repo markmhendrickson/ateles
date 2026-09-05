@@ -181,7 +181,7 @@ invariants 2 and 7.
 
 A task is created; that is its publication. It has no intake batch, so it is unrouted by that fact, and
 nothing else records it as such. The task enters intake: a batch record opens for it, and the product
-lens claims each step in turn, a lease on the step and a sign-off to close it: `classify` writes the
+its step owner claims each step in turn, a lease on the step and a sign-off to close it: `classify` writes the
 task's `action_type` and, where a named principal is the point, `assigned_to`; `link` attaches the issue
 the task already concerns as an artifact; `dedupe` finds no open duplicate; `prioritize` sets the
 priority from the `priority_rubric` entity; `route`'s sign-off, the closing sign-off of the batch, names

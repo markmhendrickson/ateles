@@ -7,7 +7,7 @@ decision, recorded in `status.md`):** binds via the `workflow` entity for each (
 and which successors its tasks may enter, and never the state of a checkout. **Derived from:** `work_model.md`, `gates_and_workflows.md`, the `workflow` declarations on the
 record for the built workflows (their step lists and fast paths, not their agent names), the agent
 policies governing outreach, payment, and people-data, `CLAUDE.md`'s people-data section, and PR #745
-operator review (2026-09-04), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`). Which workflows have a declaration on the record, and which are envisioned
+operator review (2026-09-04), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Which workflows have a declaration on the record, and which are envisioned
 only, is `status.md`.
 
 ## Purpose
@@ -59,8 +59,16 @@ from the declarations (below).
   a bound.
 - **Successors**: the workflows the closing sign-off may name, or none. A batch's tasks enter exactly one
   successor or none.
-- **Fast paths**: the declared skips and the condition that permits each. A condition is a property of the
-  task set at intake, never a label on an artifact.
+- **Fast paths**: the declared skips and the condition that permits each. A fast path's condition is a
+  property of the task set fixed at intake — never a label on an artifact, and never a reading of what the
+  change touches, because a fast path is declared before the change exists.
+- **Applicability**: which steps are optional (`required: no`) and the declared `applies_when` condition
+  that decides whether each opens. Unlike a fast path, an applicability condition **may** read what the
+  batch's change touches, because the question it answers — which perspectives this particular change
+  warrants — is one intake cannot answer. It is still never a label on an artifact: the condition lives on
+  the workflow declaration, and nothing the reviewed change says about itself seats or unseats a reviewer
+  (`gates_and_workflows.md#declaration-batch-projection`). A step the condition rules out is recorded
+  **inapplicable** on the batch, which never reads as signed.
 
 ## Rendering
 
@@ -79,8 +87,8 @@ is declared.
 
 | Role | Claims |
 |---|---|
-| product lens | the `pm` step of every code workflow and every step of intake |
-| ux lens, arch lens, pr-review lens, qa lens, legal lens | the review step of the same name (`vocabulary.md#lens`) |
+| `pm` step owner | the `pm` step of every code workflow and every step of intake |
+| `ux`, `arch`, `pr_review`, `qa`, `legal` step owners | the review step of the same name (`vocabulary.md#review-step`) |
 | implementer | the `impl` step |
 | steward | the `merge` step, whose work is the merge action (`vocabulary.md#steward`) |
 | release steward | every step of the release workflow |
@@ -107,11 +115,11 @@ state (`work_model.md#intake-is-every-tasks-first-workflow`).
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
-| 1 | `classify` | product lens | yes | | the task's `action_type` declares the classes of action it expects to produce, from what the task does; `assigned_to` is written only where a named principal is the point; `PART_OF` to a parent, or children split out, where the work is an aggregate |
-| 2 | `link` | product lens | yes | | every existing external record the task concerns (an issue, a pull request, a thread, a transcript, a page) is attached as an artifact by edge; finding none is a valid close |
-| 3 | `dedupe` | product lens | yes | | the task is compared against tasks that are not terminal; a duplicate closes terminal with an edge to the task it duplicates and this batch closes with no successor |
-| 4 | `prioritize` | product lens | yes | | the task's priority is set from the `priority_rubric` entity, retrieved by type, never from the classifier's own sense of urgency |
-| 5 | `route` | product lens | yes | | the closing sign-off names one successor workflow, or none, or `operator-only` |
+| 1 | `classify` | `pm` step owner | yes | | the task's `action_type` declares the classes of action it expects to produce, from what the task does; `assigned_to` is written only where a named principal is the point; `PART_OF` to a parent, or children split out, where the work is an aggregate |
+| 2 | `link` | `pm` step owner | yes | | every existing external record the task concerns (an issue, a pull request, a thread, a transcript, a page) is attached as an artifact by edge; finding none is a valid close |
+| 3 | `dedupe` | `pm` step owner | yes | | the task is compared against tasks that are not terminal; a duplicate closes terminal with an edge to the task it duplicates and this batch closes with no successor |
+| 4 | `prioritize` | `pm` step owner | yes | | the task's priority is set from the `priority_rubric` entity, retrieved by type, never from the classifier's own sense of urgency |
+| 5 | `route` | `pm` step owner | yes | | the closing sign-off names one successor workflow, or none, or `operator-only` |
 
 <!-- /rendered -->
 
@@ -139,7 +147,7 @@ siblings (`work_model.md#parent-and-child-tasks`).
 ## feature
 
 **Purpose:** carry a change that adds or alters behaviour from scoped intent to merged code, reviewed by
-every lens the change concerns.
+every review step the change concerns.
 
 **Entry condition:** intake closed naming `feature`; the task names a repository, which is the domain the
 step owners' grants are checked against (`authority_model.md#grants`).
@@ -150,19 +158,23 @@ step owners' grants are checked against (`authority_model.md#grants`).
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
-| 1 | `pm` | product lens | yes | | the scope, the acceptance evidence, and the design basis are stated on the task (`conformance.md#design-basis`) |
-| 2 | `ux` | ux lens | yes | group `design`, joins `arch` | the change's user-facing behaviour is judged against the stated scope |
-| 3 | `arch` | arch lens | yes | group `design`, joins `ux` | the design basis is checked and the change conforms to the cited section, or the citation is found false |
+| 1 | `pm` | `pm` step owner | yes | | the scope, the acceptance evidence, and the design basis are stated on the task (`conformance.md#design-basis`) |
+| 2 | `ux` | `ux` step owner | yes | group `design`, joins `arch` | the change's user-facing behaviour is judged against the stated scope |
+| 3 | `arch` | `arch` step owner | yes | group `design`, joins `ux` | the design basis is checked and the change conforms to the cited section, or the citation is found false |
 | 4 | `impl` | implementer | yes | | a pull request exists as an artifact of the batch and its CI is green |
-| 5 | `pr_review` | pr-review lens | yes | | the full diff is read and judged for correctness |
-| 6 | `qa` | qa lens | yes | group `verification`, joins `legal` | the tests can fail on the thing they watch (`principles.md`, invariant 4) |
-| 7 | `legal` | legal lens | no | group `verification`, joins `qa` | licensing, data-handling, and disclosure are judged where the change touches them |
+| 5 | `pr_review` | `pr_review` step owner | yes | | the full diff is read and judged for correctness |
+| 6 | `qa` | `qa` step owner | yes | group `verification`, joins `legal` | the tests can fail on the thing they watch (`principles.md`, invariant 4) |
+| 7 | `legal` | `legal` step owner | no | group `verification`, joins `qa` | licensing, data-handling, and disclosure are judged where the change touches them |
 | 8 | `merge` | steward | yes | | the merge action taken through the action gate and the merged pull request read back; the sign-off names the successor |
 
 <!-- /rendered -->
 
-The two parallel groups exist because their lenses judge independent things and neither needs the
-other's verdict; the join is what makes the batch wait for both. `merge` is a step so that the merge
+The two parallel groups exist because their reviewing step owners judge independent things and neither
+needs the other's verdict; the join is what makes the batch wait for both. `legal` is the one optional
+step, and it carries an `applies_when` condition: it opens where the change touches licensing,
+data-handling, or disclosure, and is recorded inapplicable where it does not, with the condition that
+ruled it out (`gates_and_workflows.md#declaration-batch-projection`). Every other step here is required
+and opens on every batch. `merge` is a step so that the merge
 action has a step owner to claim it, a taking to record, and a sign-off to close the batch with; the
 action itself is governed by action policy, not by the step
 (`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`).
@@ -196,10 +208,10 @@ is wrong, ideally as a failing test.
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
-| 1 | `pm` | product lens | yes | | the defect is reproduced or the reproduction's absence is stated; the acceptance evidence is the test that goes red without the fix |
+| 1 | `pm` | `pm` step owner | yes | | the defect is reproduced or the reproduction's absence is stated; the acceptance evidence is the test that goes red without the fix |
 | 2 | `impl` | implementer | yes | | a pull request exists with the fix and the red-then-green result recorded in its body |
-| 3 | `pr_review` | pr-review lens | yes | | the full diff is read; the fix addresses the cause, not the symptom |
-| 4 | `qa` | qa lens | yes | | the test fails on the reverted fix (`principles.md`, invariant 4) |
+| 3 | `pr_review` | `pr_review` step owner | yes | | the full diff is read; the fix addresses the cause, not the symptom |
+| 4 | `qa` | `qa` step owner | yes | | the test fails on the reverted fix (`principles.md`, invariant 4) |
 | 5 | `merge` | steward | yes | | the merge action taken through the action gate and read back; the sign-off names the successor |
 
 <!-- /rendered -->
@@ -233,9 +245,9 @@ is deployed.
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
-| 1 | `pm` | product lens | yes | | the affected surface and the fix's scope are stated in the record; the public artifacts carry no exploit detail |
+| 1 | `pm` | `pm` step owner | yes | | the affected surface and the fix's scope are stated in the record; the public artifacts carry no exploit detail |
 | 2 | `impl` | implementer | yes | | a pull request exists with the fix; its body describes the change, not the exploit |
-| 3 | `pr_review` | pr-review lens | yes | | the full diff is read and the fix is judged complete for the stated surface |
+| 3 | `pr_review` | `pr_review` step owner | yes | | the full diff is read and the fix is judged complete for the stated surface |
 | 4 | `merge` | steward | yes | | the merge action taken through the action gate and read back; the sign-off names `release` |
 
 <!-- /rendered -->
@@ -269,19 +281,21 @@ repository that holds it.
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
-| 1 | `pm` | product lens | yes | | the surface, the audience, and the intent of the change are stated |
+| 1 | `pm` | `pm` step owner | yes | | the surface, the audience, and the intent of the change are stated |
 | 2 | `copy` | copywriter | yes | | the words are written against the `brand_voice` entity, retrieved by type, and stored on the task |
-| 3 | `ux` | ux lens | no | | layout consequences of the new words are judged; nothing about the words themselves |
+| 3 | `ux` | `ux` step owner | no | | layout consequences of the new words are judged; nothing about the words themselves |
 | 4 | `impl` | implementer | yes | | a pull request carries the words into the surface |
-| 5 | `pr_review` | pr-review lens | yes | | the diff changes only the words the task names |
-| 6 | `legal` | legal lens | no | | claims, comparisons, and regulated wording are judged where the copy makes them |
+| 5 | `pr_review` | `pr_review` step owner | yes | | the diff changes only the words the task names |
+| 6 | `legal` | `legal` step owner | no | | claims, comparisons, and regulated wording are judged where the copy makes them |
 | 7 | `merge` | steward | yes | | the merge action taken through the action gate and read back; the sign-off names the successor |
 
 <!-- /rendered -->
 
 `copy` precedes `impl` because the words are the deliverable and the implementation is their carriage;
 `ux` is optional and scoped to layout so that the copy step's verdict on the words is not re-litigated by
-a second lens. There is no `arch` step: copy changes no behaviour.
+a second reviewing step, and its `applies_when` opens it where the change alters the surface the words sit
+in rather than only the words. `legal` is optional on the same footing as on feature. There is no `arch`
+step: copy changes no behaviour.
 
 **Stages:** scoping (`pm`); authoring (`copy`, `ux`); implementation (`impl`); review (`pr_review`,
 `legal`); integration (`merge`).
@@ -388,7 +402,7 @@ from the record and the mail archive before anything is drafted, never assumed.
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
 | 1 | `draft` | content author | yes | | a draft exists in the record, written against the `brand_voice` entity and the operator's voice guidance, every factual claim in it traced to a source the author read |
-| 2 | `review` | pr-review lens | yes | on fail: `draft` | the draft is judged for facts, voice, scope (it answers what was asked and nothing else), and for what it discloses |
+| 2 | `review` | `pr_review` step owner | yes | on fail: `draft` | the draft is judged for facts, voice, scope (it answers what was asked and nothing else), and for what it discloses |
 | 3 | `consent` | operator-facing agent | yes | on fail: `draft` | the checkpoint on the `send_external_comms` action, carrying the full draft, is resolved by the operator |
 | 4 | `send` | content author | yes | | the `send_external_comms` action taken through the action gate and the sent message read back from the mail system, never inferred from the send call's return |
 | 5 | `follow_up` | content author | no | | a reply is linked as an artifact, or the declared follow-up interval passes and one follow-up was sent through the same gate, or the operator ends the follow-up; the sign-off closes the batch |
@@ -473,7 +487,7 @@ sources permitted; a task that states a conclusion to confirm rather than a ques
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
-| 1 | `brief` | product lens | yes | | the question, the scope, the permitted sources, the audience, and the form of the deliverable are stated on the task |
+| 1 | `brief` | `pm` step owner | yes | | the question, the scope, the permitted sources, the audience, and the form of the deliverable are stated on the task |
 | 2 | `gather` | researcher | yes | | every source read is recorded with its provenance; a source that could not be read is recorded as unread, not omitted |
 | 3 | `synthesize` | researcher | yes | on fail: `gather` | the analysis is written with each claim traced to a gathered source; a claim with no source is marked as the author's |
 | 4 | `persist` | researcher | yes | | an `analysis` entity holds the full body and is read back; the task refers to it |
