@@ -12,6 +12,20 @@ Watches two sources for new audio to process:
 
 Named after Piculet, a small woodpecker genus known for its rapid drumming.
 Runs as a launchd agent — see com.ateles.piculet.plist.
+
+Clarity gate (ateles#747): a voice memo whose transcript fails a measured
+clarity check (lib/transcript_clarity.py) is held rather than processed.
+Operator commands, run once and exit (no args starts the watcher):
+
+    python3 watch.py --list-held              List memos currently held.
+    python3 watch.py --release '<filename>'   Release a held memo for entity
+                                               extraction (exact match, or a
+                                               distinctive substring).
+    python3 watch.py --discard '<filename>'   Drop a held memo without
+                                               processing it.
+
+The exact release command for each held memo is also printed in its hold
+notification over the existing Telegram path.
 """
 
 import json
@@ -76,6 +90,18 @@ LOG_FILE = LOG_DIR / "piculet.log"
 # Local state files — track filenames already processed.
 STATE_FILE = Path(__file__).parent / "seen_files.json"
 MEETING_STATE_FILE = Path(__file__).parent / "seen_meeting_files.json"
+# Memos held by the clarity gate, awaiting operator confirmation.
+# A held memo is NOT in the seen-set, so it is never silently dropped: it stays
+# listed here, and is re-surfaced to the operator on the reminder interval
+# until it is explicitly released or discarded.
+HELD_STATE_FILE = Path(__file__).parent / "held_memos.json"
+
+# Re-surface the held-memo backlog on this interval so an unconfirmed memo
+# cannot fall silently out of view. Matches the operator-alert reminder cadence.
+_HELD_REMINDER_INTERVAL = 6 * 3600  # 6 hours
+
+# The command the operator pastes to release a held memo.
+RELEASE_COMMAND = "python3 execution/daemons/piculet/watch.py --release"
 
 # ---------------------------------------------------------------------------
 # Env bootstrap — runs at import time before anything else
@@ -171,7 +197,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from lib.daemon_runtime.logging_setup import configure_daemon_logging
+from lib.daemon_runtime.logging_setup import configure_daemon_logging  # noqa: E402
+from lib.transcript_clarity import assess_transcript  # noqa: E402
 
 try:
     from lib.notify import Notifier  # noqa: E402
@@ -401,6 +428,33 @@ def find_new_meeting_recordings(seen: set[str]) -> list[Path]:
     )
 
 
+def partition_meeting_recordings(
+    candidates: list[Path], acknowledged: set[str]
+) -> tuple[list[Path], list[Path]]:
+    """
+    Split not-yet-reported recordings into (ready, pending).
+
+    A recording is *ready* once its transcript sidecar exists; only then is
+    there anything to report. Everything else is *pending* — waiting on a
+    transcript that may never arrive.
+
+    This distinction is why the watermark never advanced (ateles#421): the old
+    loop logged every unreported WAV as "new" on every poll, but only ever
+    added the ready ones to the seen-set. The 88 recordings with no transcript
+    were therefore re-found and re-announced once a minute forever. Pending
+    files are still re-examined each poll (a transcript can land later), but
+    they are counted and logged as pending, never as new.
+    """
+    ready: list[Path] = []
+    pending: list[Path] = []
+    for rec in candidates:
+        if (rec.parent / f"{rec.stem}.txt").exists():
+            ready.append(rec)
+        else:
+            pending.append(rec)
+    return ready, pending
+
+
 def report_meeting_recording(recording: Path) -> None:
     """
     Check whether transcription and analysis for a meeting recording are
@@ -589,13 +643,16 @@ def run_import() -> None:
     """Invoke the import script, which handles dedup, transcription, and Neotoma storage."""
     log.info("New Voice Memos detected — running import pipeline...")
     try:
+        # No --analyze/--no-analyze flag here: import_audio_from_desktop.py
+        # analyses by default and only declares --no-analyze as an opt-out.
+        # --analyze was never a declared argument, so passing it made
+        # argparse exit 2 on every run (ateles#747). Do not restore it.
         result = subprocess.run(
             [
                 sys.executable,
                 str(IMPORT_SCRIPT),
                 "--source",
                 str(RECORDINGS_DIR),
-                "--analyze",
             ],
             timeout=7200,  # 2 hours max
             env=os.environ,
@@ -608,6 +665,129 @@ def run_import() -> None:
         log_error("Import pipeline timed out after 2 hours.")
     except Exception as e:
         log_error(f"Import pipeline error: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Clarity gate — process automatically when clear, pause for confirmation
+# when not. See lib/transcript_clarity.py for the checks and their calibration.
+# ---------------------------------------------------------------------------
+
+
+def load_held() -> dict:
+    """Load the held-memo table: memo filename → why it was held."""
+    if HELD_STATE_FILE.exists():
+        try:
+            return json.loads(HELD_STATE_FILE.read_text())
+        except Exception as e:
+            log.warning(f"Could not read held state ({e}) — starting empty.")
+    return {}
+
+
+def save_held(held: dict) -> None:
+    HELD_STATE_FILE.write_text(json.dumps(held, indent=2, sort_keys=True))
+
+
+def _audio_duration_seconds(audio_path: Path) -> float | None:
+    """Best-effort duration via ffprobe. None when it cannot be determined."""
+    import shutil
+
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                ffprobe, "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path),
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
+def find_transcript_for(memo_name: str) -> Path | None:
+    """
+    Locate the transcript sidecar for an imported memo.
+
+    import_audio_from_desktop.py renames files to
+    ``<timestamp>_voicememo_<original name>`` in the imports dir and writes a
+    ``.txt`` beside them, so we match on the original name suffix.
+    """
+    imports_dir = _audio_imports_dir()
+    if not imports_dir.exists():
+        return None
+    stem = Path(memo_name).stem
+    candidates = sorted(
+        p
+        for p in imports_dir.glob("*.txt")
+        if p.stem.endswith(stem) or stem in p.stem
+    )
+    return candidates[-1] if candidates else None
+
+
+def assess_memo(memo: Path) -> tuple[object | None, Path | None]:
+    """
+    Measure a freshly imported memo's transcript.
+
+    Returns (report, transcript_path). A None report means we could not find a
+    transcript to judge — the caller treats that as "hold", never as "clear",
+    because an unmeasured memo has not been shown to be safe to process.
+    """
+    transcript = find_transcript_for(memo.name)
+    if transcript is None:
+        return None, None
+    try:
+        text = transcript.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        log.warning(f"Could not read transcript {transcript.name}: {e}")
+        return None, transcript
+
+    audio = transcript.with_suffix(".wav")
+    if not audio.exists():
+        audio = transcript.with_suffix(".m4a")
+    duration = _audio_duration_seconds(audio) if audio.exists() else None
+    return assess_transcript(text, duration_seconds=duration), transcript
+
+
+def format_hold_notification(memo_name: str, report, transcript: Path | None) -> str:
+    """
+    Build the operator's message for a held memo: which memo, which check
+    failed and why, the flagged span (not the whole transcript), and the exact
+    command to release it.
+    """
+    lines = [
+        f"⏸ Held for your confirmation: {memo_name}",
+        "",
+        "This memo was NOT processed — the transcription may not be reliable.",
+        "",
+    ]
+    for f in report.findings:
+        lines.append(f"• Check {f.check} ({f.name}): {f.reason}")
+        if f.excerpt:
+            lines.append(f"    flagged text: “{f.excerpt.strip()}”")
+    m = report.metrics
+    measured = f"Measured: {m.get('words')} words"
+    if m.get("duration_seconds"):
+        measured += f", {m['duration_seconds']:.0f}s audio"
+    if m.get("words_per_second"):
+        measured += f", {m['words_per_second']} words/sec"
+    lines += ["", measured]
+    if transcript:
+        lines.append(f"Transcript: {transcript}")
+    lines += [
+        "",
+        "To process it anyway (transcript is good enough):",
+        f"  {RELEASE_COMMAND} {memo_name!r}",
+        "",
+        "Or correct the transcript file above, then run the same command.",
+        f"Held memos are re-listed every {int(_HELD_REMINDER_INTERVAL / 3600)}h "
+        "until released or discarded.",
+    ]
+    return "\n".join(lines)
 
 
 def notify(title: str, message: str) -> None:
@@ -793,6 +973,15 @@ def main() -> None:
                 time.sleep(POLL_INTERVAL_SECONDS)
 
     seen_meetings = load_seen_meetings()
+    # Size of the awaiting-transcript backlog as last logged, so the daemon
+    # reports the backlog when it *changes* instead of every poll.
+    pending_backlog_size = -1
+
+    # Memos held by the clarity gate, awaiting operator confirmation.
+    held = load_held()
+    _held_reminded_at = time.monotonic()
+    if held:
+        log.info(f"{len(held)} memo(s) held awaiting confirmation at startup.")
 
     # Track consecutive poll failures to apply the same grace period in the
     # main loop (e.g. after a daemon restart mid-session).
@@ -852,19 +1041,72 @@ def main() -> None:
                 _job = _activity.started(f"importing {n} new voice memo{'s' if n != 1 else ''}") if _activity else None
                 try:
                     run_import()
-                    notify(
-                        "Voice Memos",
-                        f"Transcription complete for {n} memo{'s' if n != 1 else ''}. Extracting entities…",
-                    )
-                    entity_summary = run_entity_extraction(new_files)
-                    done_msg = (
-                        f"Done — {n} memo{'s' if n != 1 else ''} imported & transcribed."
-                    )
-                    if entity_summary and entity_summary != "none":
-                        done_msg += f"\nEntities: {entity_summary}"
-                    notify("Voice Memos", done_msg)
+
+                    # --- Clarity gate ---------------------------------------
+                    # Transcription has run; decide per memo whether the
+                    # transcript is measurably good enough to process without
+                    # the operator. Unclear memos are held, not processed and
+                    # not dropped.
+                    clear_files: list[Path] = []
+                    for memo in new_files:
+                        report, transcript = assess_memo(memo)
+                        if report is None:
+                            held[memo.name] = {
+                                "reason": "no transcript found to assess",
+                                "checks": [],
+                                "held_at": time.time(),
+                                "transcript": str(transcript) if transcript else None,
+                            }
+                            log_warning(
+                                f"Held {memo.name}: no transcript found to assess."
+                            )
+                            continue
+                        if report.clear:
+                            clear_files.append(memo)
+                            continue
+                        held[memo.name] = {
+                            "reason": report.summary,
+                            "checks": [f.check for f in report.findings],
+                            "metrics": report.metrics,
+                            "held_at": time.time(),
+                            "transcript": str(transcript) if transcript else None,
+                        }
+                        log.info(f"Held {memo.name} for confirmation: {report.summary}")
+                        notify(
+                            "Voice Memos",
+                            format_hold_notification(memo.name, report, transcript),
+                        )
+                    if held:
+                        save_held(held)
+
+                    if clear_files:
+                        c = len(clear_files)
+                        notify(
+                            "Voice Memos",
+                            f"Transcription complete for {c} memo{'s' if c != 1 else ''}. Extracting entities…",
+                        )
+                        entity_summary = run_entity_extraction(clear_files)
+                        done_msg = (
+                            f"Done — {c} memo{'s' if c != 1 else ''} imported & transcribed."
+                        )
+                        if entity_summary and entity_summary != "none":
+                            done_msg += f"\nEntities: {entity_summary}"
+                        if held:
+                            done_msg += (
+                                f"\n{len(held)} memo(s) held for your confirmation."
+                            )
+                        notify("Voice Memos", done_msg)
+                    else:
+                        entity_summary = ""
+                        log.info(
+                            "No memos passed the clarity gate this cycle — "
+                            "nothing extracted."
+                        )
                     if _job:
-                        _summary = f"{n} memo{'s' if n != 1 else ''} imported + transcribed"
+                        _summary = (
+                            f"{len(clear_files)} memo(s) processed, "
+                            f"{len(new_files) - len(clear_files)} held"
+                        )
                         if entity_summary and entity_summary != "none":
                             _summary += f"; entities: {entity_summary[:80]}"
                         _job.finished(_summary)
@@ -872,6 +1114,11 @@ def main() -> None:
                     if _job:
                         _job.failed(f"import pipeline error: {type(_exc).__name__}")
                     raise
+                # Mark every memo we handled as seen — including held ones.
+                # A held memo must NOT be re-imported on the next poll (that
+                # was the hot-loop failure), but it is also not lost: it stays
+                # in held_memos.json and is re-surfaced on the reminder
+                # interval until released or discarded.
                 for f in new_files:
                     seen.add(f.name)
                 save_seen(seen)
@@ -879,21 +1126,59 @@ def main() -> None:
                 log.debug("No new Voice Memos.")
 
             # --- Meeting recordings (mic-recorder) ---
-            new_recordings = find_new_meeting_recordings(seen_meetings)
-            if new_recordings:
-                log.info(f"Found {len(new_recordings)} new meeting recording(s).")
+            candidates = find_new_meeting_recordings(seen_meetings)
+            ready, pending = partition_meeting_recordings(candidates, seen_meetings)
+
+            # Report only what is genuinely actionable. "New" means a recording
+            # whose transcript has just appeared — not every file we have never
+            # managed to report, which is what produced "Found 88 new meeting
+            # recording(s)" once a minute indefinitely.
+            if ready:
+                log.info(
+                    f"Found {len(ready)} meeting recording(s) with new transcripts."
+                )
+            if pending:
+                # Pending is a steady-state fact, not an event. Log it at debug
+                # so it stays diagnosable without growing the log every minute,
+                # and summarise the backlog only when it changes size.
+                if pending_backlog_size != len(pending):
+                    log.info(
+                        f"{len(pending)} meeting recording(s) awaiting transcripts "
+                        f"(was {pending_backlog_size}); not re-announcing each poll."
+                    )
+                    pending_backlog_size = len(pending)
+                else:
+                    log.debug(
+                        f"{len(pending)} meeting recording(s) still awaiting transcripts."
+                    )
+            elif pending_backlog_size:
+                log.info("Meeting-recording transcript backlog cleared.")
+                pending_backlog_size = 0
+
             reported = set()
-            for rec in new_recordings:
+            for rec in ready:
                 report_meeting_recording(rec)
-                # report_meeting_recording only marks ready files; track which
-                # we attempted so we don't retry until next poll.
-                stem = rec.stem
-                parent = rec.parent
-                if (parent / f"{stem}.txt").exists():
-                    reported.add(rec.name)
+                reported.add(rec.name)
             if reported:
                 seen_meetings.update(reported)
                 save_seen_meetings(seen_meetings)
+
+            # --- Held-memo backlog reminder ---
+            # An unconfirmed memo must not fade out of view. Re-list the
+            # backlog on the reminder interval, through the same Telegram path
+            # as every other notification.
+            held = load_held()  # re-read: --release may have run externally
+            if held and time.monotonic() - _held_reminded_at >= _HELD_REMINDER_INTERVAL:
+                _held_reminded_at = time.monotonic()
+                lines = [
+                    f"⏸ {len(held)} voice memo(s) still awaiting your confirmation:",
+                    "",
+                ]
+                for name, info in sorted(held.items()):
+                    lines.append(f"• {name} — {info.get('reason', 'unknown')}")
+                lines += ["", f"Release one with:  {RELEASE_COMMAND} '<filename>'"]
+                notify("Voice Memos", "\n".join(lines))
+                log.info(f"Re-surfaced {len(held)} held memo(s) to the operator.")
 
         except NeotomaUnavailableError as exc:
             log_error(f"Neotoma/pipeline unavailable — aborting this cycle: {exc}")
@@ -903,5 +1188,88 @@ def main() -> None:
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
+def release_held(memo_name: str, discard: bool = False) -> int:
+    """
+    Release a held memo so its entities are extracted, or discard it.
+
+    This is the operator's resume path: he pastes the command from the hold
+    notification. Matching is exact-then-substring so he can paste a short
+    distinctive fragment instead of the full filename.
+
+    Returns a process exit code.
+    """
+    held = load_held()
+    if not held:
+        print("No memos are currently held.")
+        return 0
+
+    matches = [k for k in held if k == memo_name] or [
+        k for k in held if memo_name in k
+    ]
+    if not matches:
+        print(f"No held memo matches {memo_name!r}. Currently held:")
+        for name, info in sorted(held.items()):
+            print(f"  {name} — {info.get('reason', 'unknown')}")
+        return 1
+    if len(matches) > 1:
+        print(f"{memo_name!r} matches {len(matches)} held memos — be more specific:")
+        for name in sorted(matches):
+            print(f"  {name}")
+        return 1
+
+    name = matches[0]
+    info = held.pop(name)
+
+    if discard:
+        save_held(held)
+        print(f"Discarded {name} (was held: {info.get('reason', 'unknown')}).")
+        log.info(f"Operator discarded held memo {name}.")
+        notify("Voice Memos", f"🗑 Discarded held memo (operator): {name}")
+        return 0
+
+    print(f"Releasing {name} — running entity extraction…")
+    try:
+        summary = run_entity_extraction([Path(name)])
+    except Exception as exc:
+        # Keep it held: a failed release must not lose the memo.
+        print(f"Entity extraction failed: {exc}\n{name} remains held.")
+        log_error(f"Release of held memo {name} failed: {exc}")
+        return 1
+
+    save_held(held)
+    msg = f"✅ Released by operator and processed: {name}"
+    if summary and summary != "none":
+        msg += f"\nEntities: {summary}"
+    print(msg)
+    log.info(f"Operator released held memo {name}.")
+    notify("Voice Memos", msg)
+    return 0
+
+
+def list_held() -> int:
+    """Print the held-memo backlog."""
+    held = load_held()
+    if not held:
+        print("No memos are currently held.")
+        return 0
+    print(f"{len(held)} memo(s) held awaiting confirmation:\n")
+    for name, info in sorted(held.items()):
+        print(f"  {name}")
+        print(f"    reason: {info.get('reason', 'unknown')}")
+        if info.get("transcript"):
+            print(f"    transcript: {info['transcript']}")
+    print(f"\nRelease with:  {RELEASE_COMMAND} '<filename>'")
+    return 0
+
+
 if __name__ == "__main__":
+    # Operator subcommands run once and exit; no args starts the watcher.
+    if len(sys.argv) > 1 and sys.argv[1] in ("--release", "--discard", "--list-held"):
+        cmd = sys.argv[1]
+        if cmd == "--list-held":
+            sys.exit(list_held())
+        if len(sys.argv) < 3:
+            print(f"usage: watch.py {cmd} '<memo filename>'")
+            sys.exit(2)
+        sys.exit(release_held(sys.argv[2], discard=(cmd == "--discard")))
     main()
