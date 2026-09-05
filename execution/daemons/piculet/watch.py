@@ -12,6 +12,20 @@ Watches two sources for new audio to process:
 
 Named after Piculet, a small woodpecker genus known for its rapid drumming.
 Runs as a launchd agent — see com.ateles.piculet.plist.
+
+Clarity gate (ateles#747): a voice memo whose transcript fails a measured
+clarity check (lib/transcript_clarity.py) is held rather than processed.
+Operator commands, run once and exit (no args starts the watcher):
+
+    python3 watch.py --list-held              List memos currently held.
+    python3 watch.py --release '<filename>'   Release a held memo for entity
+                                               extraction (exact match, or a
+                                               distinctive substring).
+    python3 watch.py --discard '<filename>'   Drop a held memo without
+                                               processing it.
+
+The exact release command for each held memo is also printed in its hold
+notification over the existing Telegram path.
 """
 
 import json
@@ -629,6 +643,10 @@ def run_import() -> None:
     """Invoke the import script, which handles dedup, transcription, and Neotoma storage."""
     log.info("New Voice Memos detected — running import pipeline...")
     try:
+        # No --analyze/--no-analyze flag here: import_audio_from_desktop.py
+        # analyses by default and only declares --no-analyze as an opt-out.
+        # --analyze was never a declared argument, so passing it made
+        # argparse exit 2 on every run (ateles#747). Do not restore it.
         result = subprocess.run(
             [
                 sys.executable,
