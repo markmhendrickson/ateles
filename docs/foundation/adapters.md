@@ -8,7 +8,7 @@ and the action gate), `authority_model.md` (credentials bind to principals; appr
 steps whose effects leave the system), PR #745 operator review (2026-09-04, the adapter decision), and the
 operator's 2026-09-05 review (the inbound-delivery question and the adapter-packaging lean, both recorded
 below as open; and revision 18: when an artifact comes into existence, and what holds an effect before
-it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). What is built, and where the adapter and the engine are still one process, is `status.md`.
+it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams). What is built, and where the adapter and the engine are still one process, is `status.md`.
 
 ## Purpose
 
@@ -72,6 +72,30 @@ result is a condition a step owner reads before signing, never a sign-off. This 
 the record an external system holds; what happens to it is information about the batch's tasks, not a
 step taken on them.
 
+The branch, with the identity question that decides the first outcome and the disposition every other
+delivery reaches:
+
+```mermaid
+flowchart TD
+    E["one inbound delivery"] --> C{"whose credential is the actor, resolved through the binding?"}
+    C -->|"the step owner of a step this batch has open"| O1["1. a sign-off by a named principal"]
+    C -->|"a required approver on an open checkpoint"| O1b["the same outcome in its other form: that approval"]
+    C -->|"a principal in neither role, or no principal"| REST{"what does the delivery concern?"}
+    REST -->|"an artifact the record tracks"| O2["2. an observation on an artifact"]
+    REST -->|"an effect the swarm took, now existing there"| O3["3. an action confirmation"]
+    REST -->|"a new external record the record does not track"| O4["4. a new task for intake, the artifact attached"]
+    REST -->|"unmappable; untracked and not a new record; refused"| D["dropped, carrying the reason that decided it"]
+    D --> DC["counted per window, announced off-record, aggregated"]
+    O1 --> ADV["the step model's own rules advance the step from here"]
+    O1b --> ADV
+    O2 --> N["no step opened, claimed or closed; no successor named; no batch advanced"]
+    O3 --> N
+    O4 --> N
+```
+
+The adapter never invents a binding and never resolves an unrecognized credential to the operator, so the
+left branch is entered only on a binding that already exists.
+
 ### The adapter runs before and after a step, never during it
 
 The two invariants say the engine reads only the record and that no event advances a step. This says when
@@ -91,6 +115,42 @@ mid-execution has a second source of truth for its own inputs, one that can answ
 points in the same step, so what the step decided on stops being reconstructable from the record. Hydrating
 first makes the inputs a fixed, recorded set: what the step read is what the record holds, with provenance,
 at a point a reader can name.
+
+The two moments, and the span between them where the boundary is not crossed at all:
+
+```mermaid
+flowchart TD
+    subgraph BEFORE["before the step: the hydration phase"]
+        R1["resolve every type in reads_to_enter"]
+        R2["what the record holds: read locally"]
+        R3["what an external system holds: imported through its adapter"]
+        R4["written as observations on artifacts, with source, sourced time and coverage"]
+        R1 --> R2
+        R1 --> R3
+        R3 --> R4
+    end
+    R2 --> Q{"every declared read resolved?"}
+    R4 --> Q
+    Q -->|"a read the adapter could not fulfil: unknown"| HOLD["the step does not open; the condition is announced off-record"]
+    HOLD -->|"the hold is bounded, and the bound is reached"| CP["one checkpoint naming the dependency, reason undeclared_dependency"]
+    Q -->|"yes"| STEP
+    subgraph DURING["during the step: no crossing"]
+        STEP["the step works on what hydration resolved"]
+        STEP --> NO["it reaches no external system itself"]
+    end
+    NO --> RC["reads_to_close resolved by the same phase, then the sign-off"]
+    subgraph AFTER["at the step's closing edge"]
+        RC --> A["the actions the step produced"]
+        A --> G{"the action gate, per action"}
+        G -->|"held"| CP2["a checkpoint; the adapter performs nothing"]
+        G -->|"permit"| P["the adapter performs the operation"]
+        P --> RB["it reads the result back and writes taken_at and result_ref"]
+        RB --> ART["the artifact is minted from that confirmation, its external_id already known"]
+    end
+```
+
+An unconfirmed effect leaves an action reading `unknown` and no artifact at all, which is why the last
+step of the outbound path is a read and not a write.
 
 **The declaration is what the adapter is asked for.** The adapter is not told to fetch what it thinks
 useful; the step's declaration states the types and, for adapter-sourced types, the freshness required, and

@@ -89,16 +89,16 @@ sequenceDiagram
     participant A as operator-facing agent
     participant G as action gate
     participant O as operator
-    A->>N: claim task (operator_only declared); read back
+    A->>N: claim task (operator_only declared), read back
     A->>N: create action (class operator_only)
     A->>G: evaluate action
-    G->>N: write checkpoint (subject action, reason gate_hold, NEVER; awaits operator)
+    G->>N: write checkpoint (subject action, reason gate_hold, NEVER, awaits operator)
     A->>O: carry the checkpoint
     loop while awaiting
         A->>N: renew lease
     end
     O->>N: resolve checkpoint (terminal state, resolver recorded)
-    A->>N: record outcome; status completed; read back
+    A->>N: record outcome, status completed, read back
     A->>N: lease returned
 ```
 

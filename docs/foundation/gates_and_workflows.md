@@ -8,7 +8,7 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `unclassified_action_type_fails_closed_and_loudly`, `gate_advisory_and_enforcing_paths_must_agree`,
 `gating_vocabulary_order_is_load_bearing`, throughput plan `ent_18b902cf72822373f9da8ced` decision
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
-memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Supersedes
+memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
 is `status.md`; how each concept is recorded is `data_model.md`.
 
@@ -484,6 +484,28 @@ free-text field, so the queue is read from the record. The raiser and the resolv
 the object; whether the same principal may hold both is `authority_model.md`. One decision queue, one
 resolution protocol: a checkpoint on a task is presented and resolved exactly as a checkpoint on an
 action is (principle 6).
+
+Two subjects entering one queue, and the subject edge deciding what resumes:
+
+```mermaid
+flowchart TD
+    A["an action the gate would not let through"] -->|"reason gate_hold"| CK
+    T["a task the swarm cannot advance"] -->|"repeated_lapse, unreadable_workflow, rounds_exhausted, unspawnable_assignee, unclaimed_step, undeclared_dependency, capability_denied, lossy_record_mutation, undetermined_scope"| CK
+    CK["one checkpoint: the held state of its subject"] --> S["its subject: exactly one entity, named by the CHECKPOINTS edge"]
+    S -.->|"never a subject"| NS["a step, a batch, an artifact"]
+    CK --> F["it records the reason class, the needed input, the options, and whom it awaits"]
+    F --> QUEUE["one decision queue, one resolution protocol, for both subjects"]
+    QUEUE --> DEC{"a required principal decides; silence never accepts"}
+    DEC -->|"a deferral, which is bounded"| QUEUE
+    DEC -->|"yes, no, or veto, authorized against the required approvers"| TERM["a terminal approval; the resolver recorded"]
+    DEC -->|"timeout"| TO["a terminal state that never continues"]
+    TERM --> WHAT{"what resumes is read from the subject edge"}
+    WHAT -->|"the subject is an action"| RA["it is taken, or refused"]
+    WHAT -->|"the subject is a task"| RT["it is re-claimed, or closed"]
+```
+
+The halt is not on this diagram and is not a checkpoint: a checkpoint is written to the record, and the
+halt is the state in which nothing can be (`failure_posture.md#what-a-checkpoint-does-not-absorb`).
 
 ## Contradictions this document settles
 

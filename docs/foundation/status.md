@@ -588,6 +588,39 @@ records it.
 untouched: `applies_when` decides whether a declared step opens, and says nothing about whether a
 workflow may hold on a condition discovered mid-flight, which is the sequencing question 17 leaves open.
 
+## Revision 20 (2026-09-05): four diagrams, and three existing ones that did not render
+
+Diagrams added during review rather than after it, on the operator's request for visuals while the
+concepts are still being read. This revision states **no new design rule**: every diagram depicts prose
+that revisions 12 through 19 already wrote, and each sits beside the prose it illustrates rather than in a
+gallery of its own (principle 9). Nothing was trimmed to make room.
+
+| Diagram (revision 20) | Where | Why it earns a place |
+|---|---|---|
+| how a batch is formed: the one cause, the task set, the fixed workflow, and the four paths that open no batch | `work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow` | revision 18 answered three questions in one section, and the negative half — daemon, adapter, sweeper, external label, none of which opens a batch — is a set a reader otherwise assembles from four scattered sentences |
+| the four outcomes an inbound event can produce, and the fifth disposition, `dropped` | `adapters.md#no-external-event-advances-a-step-by-itself` | a five-way branch whose first arm is decided by a credential resolution two paragraphs away; the awkward case in prose is that one outcome advances a step and four cannot |
+| the adapter at the step boundary: hydration before, nothing during, actions and read-back after | `adapters.md#the-adapter-runs-before-and-after-a-step-never-during-it` | the rule is about *time*, and the empty middle is the point; prose states the absence, a picture shows it |
+| the checkpoint: two subjects, one queue, and the subject edge deciding what resumes | `gates_and_workflows.md#the-checkpoint` | two entry paths converge on one protocol and then diverge again by subject — a converge-and-rediverge structure prose has to state twice |
+
+**Three existing diagrams did not render, and now do.** `scenarios.md` and `scenarios_extended.md` carried
+ten Mermaid blocks before this revision; three of them — scenario (a), scenario (c), and scenario (g) —
+failed to parse and rendered on GitHub as a wall of source rather than as a diagram. The cause is
+mechanical and had nothing to do with their content: in a `sequenceDiagram`, `;` separates statements, so
+a message line reading `read task; claimable?` parses as a message followed by an invalid fragment. Seven
+such lines existed. Each semicolon inside a message was replaced with a comma; no wording, participant, or
+arrow changed. Verified by parsing all fourteen blocks with the `mermaid` package's own parser (v11, the
+major version GitHub renders with): fourteen parse, none fail, where before the change three failed.
+
+**Size.** `work_model.md` grew 1.5k (22.1k → 23.6k), `gates_and_workflows.md` 1.6k (43.5k → 45.1k), and
+`adapters.md` 3.3k (40.7k → 44.0k), measured 2026-09-05 with `wc -c` on this branch against revision 19 as
+the predecessor; `scenarios.md` and `scenarios_extended.md` are unchanged in size, the semicolon fix being
+byte-for-byte neutral. The kernel is therefore **82.3k**, up from 79.1k on revision 19, exceeding the 40k
+reading block by 42.3k. Diagrams are not cheap in characters, and this revision deliberately spends 3.1k of
+a budget already over — the operator asked for visuals during review, and the budget pass that follows is
+the operator's, run last and separately, as it has been since revision 6. Nothing was trimmed to make room.
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure that
+records it.
+
 ## `github.md`: the events with no defined response (revision 13, 2026-09-04)
 
 `docs/foundation/github.md` enumerates every event GitHub can deliver, from GitHub's own webhook event and
@@ -739,13 +772,16 @@ changes with this revision is that the budget decision is no longer deferrable o
 under the block at every earlier revision and is not now, so the pass that follows is a cut, a split, or
 an amendment of the caps rather than a tidying.
 
-**On revision 17 the kernel is 67.9k** (`principles.md` 13.4k, `work_model.md` 16.1k,
-`gates_and_workflows.md` 38.4k), measured 2026-09-05 with `wc -c` on this branch. The whole of the growth
-since revision 12 is `gates_and_workflows.md`, which now also carries the hydration phase (revision 14),
-the standing-finding rule (revision 16), and the boundary statement and the checkpoint's two-part reading
-(revision 17). The budget decision above is unchanged and still the
-operator's; `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected
-failure that records it.
+**On revision 20 the kernel is 82.3k** (`principles.md` 13.5k, `work_model.md` 23.6k,
+`gates_and_workflows.md` 45.1k), measured 2026-09-05 with `wc -c` on this branch. It was 67.9k on
+revision 17, 74.3k on revision 18, and 79.1k on revision 19. The growth since revision 12 is
+`gates_and_workflows.md`, which now also carries the hydration phase (revision 14), the standing-finding
+rule (revision 16), the boundary statement and the checkpoint's two-part reading (revision 17), and the
+`applies_when` condition (revision 19); `work_model.md`, which carries batch formation (revision 18); and
+the four diagrams of revision 20, which add 3.1k across the two kernel documents that carry three of them.
+The budget decision above is unchanged and still the operator's;
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure that
+records it.
 
 The kernel was 39.0k of the 40k block after revision 8, still under it and with less room than before;
 `data_model.md` grew most, carrying the record-usage contract's two tables. Revision 8 wrote content the

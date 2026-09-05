@@ -37,7 +37,7 @@ sequenceDiagram
     participant N as record
     participant A as agent runner
     P->>N: store task (status open, action_type declared)
-    A->>N: read task; claimable?
+    A->>N: read task, claimable?
     A->>N: write lease edge (agent → task, claimed_at, expires_at)
     A->>N: read lease back
     N-->>A: lease holder == my runner id
@@ -103,11 +103,11 @@ sequenceDiagram
     participant X as other agent
     participant Y as named agent
     P->>N: assigned_to = Y (no lease written)
-    X->>N: read task; claimable for X?
+    X->>N: read task, claimable for X?
     N-->>X: no (assigned to Y)
-    Y->>N: read task; claimable for Y?
+    Y->>N: read task, claimable for Y?
     N-->>Y: yes (assigned to Y, no held lease)
-    Y->>N: write lease edge; read back
+    Y->>N: write lease edge, read back
     Note over Y,N: from here, scenario (a)
 ```
 

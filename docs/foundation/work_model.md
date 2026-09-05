@@ -6,7 +6,8 @@ PR-05, C1, C2), prior art `ent_08460968e6f49dac21510f4a`, task `ent_da60df3beccb
 plan `ent_18b902cf72822373f9da8ced` decisions `pull_model_sequencing_build_the_claim_not_the_router`,
 `non_github_execution_makes_pull_decisive`, `three_execution_mechanisms_not_one`, PR #745 operator
 review (2026-09-04), and the operator's 2026-09-05 review (revision 18: how a batch is formed and what
-chooses its workflow). Supersedes `docs/archive/task_execution_loop.md`. What is built is `status.md`; how
+chooses its workflow; revision 20: the batch-formation diagram, on the operator's request for visuals
+during review). Supersedes `docs/archive/task_execution_loop.md`. What is built is `status.md`; how
 each concept is recorded is `data_model.md`.
 
 ## Purpose
@@ -208,6 +209,30 @@ declaration.
 one-at-a-time rule is about simultaneity (above); the chain is the sequence. A task that went through
 intake, then feature, then release has three batches, two closed and one live, and asking "which workflow
 is this task in" is answered by its live batch alone.
+
+The three questions and their one answer each, with the paths the rules above exclude drawn beside them:
+
+```mermaid
+flowchart TD
+    CR["task created"] --> IB["its intake batch opens: the one batch with no predecessor"]
+    IB --> CS["closing sign-off of a batch"]
+    CS --> SEL{"does it name a successor?"}
+    SEL -->|"none"| END["the task's chain ends"]
+    SEL -->|"one, selected from workflow.successors"| OPEN["a batch opens, FOLLOWS the batch that named it"]
+    OPEN --> W["its workflow is fixed at open, and never switched"]
+    OPEN --> TASKS["its tasks are the tasks that sign-off carried"]
+    TASKS --> MID{"a task attached part-way through?"}
+    MID -->|"a step owner's judgement, written into that step's sign-off"| INH["it enters at the current step and inherits the sign-offs already written"]
+    MID -->|"the assertion is not safe"| OWN["it is its own batch, from the first step"]
+    W --> LIFE["one workflow for the batch's whole life; a batch needing another closes and names it"]
+    X1["a daemon noticing eligible tasks"] -.->|"opens no batch"| OPEN
+    X2["an adapter, on an inbound event"] -.->|"opens no batch"| OPEN
+    X3["a sweeper's predicate over the record"] -.->|"opens no batch"| OPEN
+    X4["a label an external system carries"] -.->|"chooses no workflow"| W
+```
+
+Every arrow into a batch is a principal's recorded verdict; every dotted one is a path the rules above
+close.
 
 **What this deliberately does not do is let batch formation key on anything discovered later.** A
 declaration's conditional may turn only on a property of the task set at intake, never on a label an
