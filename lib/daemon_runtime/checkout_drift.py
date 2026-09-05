@@ -31,6 +31,25 @@ stale checkout would cause a larger outage than the drift it prevents. Set
 ``ATELES_ENFORCE_CHECKOUT_FRESHNESS=1`` to make a drifted checkout fatal for
 daemons that would rather refuse than run unknown code.
 
+## Where the report goes
+
+An ERROR line in a daemon log is a write-only channel. Nobody tails eighteen
+log files, so "advisory" in practice meant "silent" — the same failure mode as
+ateles#583, and the reason ateles#573 (Anthus dead for two months) stayed
+invisible: the fix merged and still did not reach the daemon until someone
+pulled the checkout by hand.
+
+So ``warn_on_drift`` ALSO writes an ``escalation`` entity to Neotoma, which
+Anthus already surfaces to the operator. Drift becomes an item in the operator's
+decision queue rather than a line in a file. The write is best-effort and
+fail-open (no token, no network, no ``httpx`` → log and continue): a daemon must
+never fail to start because the escalation could not be filed.
+
+Escalations are deduplicated per (daemon, HEAD, state) via the idempotency key,
+so a daemon restarting every two minutes on a stale checkout files ONE
+escalation, not seven hundred a day. A new HEAD or a changed state files a new
+one, because that is genuinely new information.
+
 Network failure is never drift. If ``git fetch`` cannot reach the remote we
 report ``UNKNOWN`` rather than guessing, so an offline laptop does not look
 identical to a checkout carrying unpushed commits.
@@ -41,6 +60,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -59,6 +79,16 @@ NO_FETCH_ENV = "ATELES_CHECKOUT_DRIFT_NO_FETCH"
 #: CI then inspects the Actions checkout (often no ``@{u}``) and the fixture
 #: drift is invisible. Production leaves this unset.
 CHECKOUT_ROOT_ENV = "ATELES_CHECKOUT_DRIFT_ROOT"
+
+#: Suppress the Neotoma escalation write (keep the log line). For tests and for
+#: hosts where filing an escalation is not wanted. Detection is unaffected.
+NO_ESCALATE_ENV = "ATELES_CHECKOUT_DRIFT_NO_ESCALATE"
+
+#: Where the escalation is filed. Matches the session-integrity proxy defaults
+#: so both audit paths land on the same instance.
+NEOTOMA_BASE_URL_ENV = "NEOTOMA_BASE_URL"
+NEOTOMA_DEFAULT_BASE_URL = "https://neotoma.markmhendrickson.com"
+NEOTOMA_TOKEN_ENV = "NEOTOMA_BEARER_TOKEN"
 
 
 @dataclass(frozen=True)
@@ -214,19 +244,102 @@ def check_checkout_drift(
     )
 
 
+def escalate_drift(daemon_name: str, report: DriftReport) -> bool:
+    """
+    File a drift ``escalation`` in Neotoma so the operator actually sees it.
+
+    Best-effort and fail-open by design: returns True when the write was
+    attempted and accepted, False when it was skipped or failed. A daemon must
+    never fail to start because its escalation could not be filed — the log line
+    in ``warn_on_drift`` remains the backstop.
+
+    Deduplicated on (daemon, HEAD, state): a daemon relaunched every two minutes
+    on the same stale commit files one escalation, not one per start.
+    """
+    if os.environ.get(NO_ESCALATE_ENV) == "1":
+        log.debug(f"[{daemon_name}] drift escalation suppressed by {NO_ESCALATE_ENV}")
+        return False
+
+    token = os.environ.get(NEOTOMA_TOKEN_ENV, "")
+    if not token:
+        log.debug(f"[{daemon_name}] no {NEOTOMA_TOKEN_ENV} — drift escalation not filed")
+        return False
+
+    base_url = os.environ.get(NEOTOMA_BASE_URL_ENV) or NEOTOMA_DEFAULT_BASE_URL
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    detail = (
+        f"Daemon '{daemon_name}' is running a checkout that has drifted from its "
+        f"upstream: {report.summary()} (HEAD={report.head}, upstream={report.upstream}). "
+        "A daemon executes the working tree it was launched from, not origin/main, "
+        "so any fix merged since this HEAD is NOT running here. This daemon may "
+        "report healthy while executing code nobody is reviewing. "
+        "Remedy: fast-forward the deploy checkout and restart the daemon. "
+        "ADVISORY: the daemon was NOT stopped; this is an audit signal."
+    )
+
+    entity = {
+        "entity_type": "escalation",
+        "escalation_type": "checkout_drift",
+        # 'behind' is routine deploy lag; 'diverged'/'ahead' means unpushed,
+        # unreviewed commits live only on this host and are one power-cycle
+        # from being lost — that is materially worse than being stale.
+        "severity": "warning" if report.state == "behind" else "error",
+        "source_agent": daemon_name,
+        "summary": f"{daemon_name}: deploy checkout drifted ({report.state})",
+        "detail": detail,
+        "status": "open",
+        "observed_at": now,
+    }
+
+    # Dedup key deliberately excludes a timestamp: the same daemon on the same
+    # HEAD in the same state is the same finding, however often it restarts.
+    idem = f"escalation-checkout-drift-{daemon_name}-{report.head}-{report.state}"
+
+    try:
+        import httpx  # noqa: PLC0415
+
+        resp = httpx.post(
+            f"{base_url}/store",
+            json={
+                "entities": [entity],
+                "idempotency_key": idem,
+                "observation_source": "workflow_state",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=5,
+        )
+        if resp.status_code >= 400:
+            log.warning(
+                f"[{daemon_name}] drift escalation rejected "
+                f"(HTTP {resp.status_code}); log line stands as the record"
+            )
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[{daemon_name}] drift escalation not filed (non-fatal): {exc}")
+        return False
+
+
 def warn_on_drift(
     daemon_name: str,
     checkout: Path | str | None = None,
     *,
     enforce: bool | None = None,
+    escalate: bool = True,
 ) -> DriftReport:
     """
-    Check the checkout and log the result. Returns the report.
+    Check the checkout, log the result, and file an escalation on drift.
 
-    Advisory by default: logs at ERROR and continues, so a stale checkout is
-    loud in the log and in any log-scraping alert without taking the swarm down.
-    Pass ``enforce=True`` (or set ``ATELES_ENFORCE_CHECKOUT_FRESHNESS=1``) to
-    raise ``CheckoutDriftError`` instead.
+    Advisory by default: logs at ERROR, files a Neotoma ``escalation`` so the
+    drift reaches the operator's decision queue rather than only a log file, and
+    continues. Pass ``enforce=True`` (or set
+    ``ATELES_ENFORCE_CHECKOUT_FRESHNESS=1``) to raise ``CheckoutDriftError``
+    instead. Pass ``escalate=False`` to keep the log line without the write.
+
+    The escalation is filed BEFORE the enforcement check so the operator gets
+    the signal even when the daemon is configured to abort on drift — otherwise
+    the strictest daemons would be the quietest ones.
     """
     report = check_checkout_drift(checkout)
 
@@ -242,6 +355,11 @@ def warn_on_drift(
         f"HEAD={report.head} upstream={report.upstream}. "
         "Code merged to main is NOT running here until this checkout is updated."
     )
+
+    if escalate:
+        # Never let a failed escalation become the reason a daemon dies: this
+        # helper already swallows its own errors and returns a bool.
+        escalate_drift(daemon_name, report)
 
     should_enforce = (
         enforce if enforce is not None else os.environ.get(ENFORCE_ENV) == "1"
