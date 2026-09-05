@@ -178,7 +178,7 @@ the swarm's own records, and the word is not used for them.)
 | The calendar's per-signal mapping and per-step operation, in full | `docs/foundation/calendar.md`, PR-reviewed | the calendar-reading daemons and the one event-write path; `adapters.md` holds the general rules and carries the pointer to it |
 | The chat channel's per-update mapping and per-step operation, in full | `docs/foundation/telegram.md`, PR-reviewed | the chat send helpers and the one inbound poller; `adapters.md` holds the general rules and carries the pointer to it |
 | The payment rails' per-signal mapping and per-step operation, in full | `docs/foundation/payments.md`, PR-reviewed | the payment daemon and its per-rail handlers; `adapters.md` holds the general rules and carries the pointer to it |
-| The carrying of an instance's record into the design's types (each type's disposition, the primitive that carries it, the order, and how the carrying is governed) | `docs/foundation/migration.md`, PR-reviewed | the population plan `ent_0916804d07280d1751106d82`, whose `next_steps` names the leg, and the `record_migration` workflow declaration on an instance, which binds the plan to that instance and never redefines a disposition; the counts and shapes the plan starts from are `status.md` |
+| The carrying of an instance's record into the design's types (each type's disposition, the primitive that carries it, the order, and how the carrying is governed), and of the skills the harnesses hold into agents, declarations, and policies | `docs/foundation/migration.md`, PR-reviewed | the population plan `ent_0916804d07280d1751106d82`, whose `next_steps` names the leg, and the `record_migration` workflow declaration on an instance, which binds the plan to that instance and never redefines a disposition; the counts and shapes the plan starts from are `status.md` |
 
 A rule in two classes is written once in its authoritative home and cited from the other, never copied: a
 comment or a second document claiming to mirror the first is not a mechanism that keeps them matching
@@ -243,7 +243,7 @@ so that they are not reused; see the two notes below.
 | 28 | what tolerance, if any, a payment's consent carries | `payments.md#tolerance-is-an-action_policy-value-and-its-default-is-zero` | — | **ruled** (2026-09-05): a per-class `action_policy` value, zero where absent; any change to what the payee receives or the operator pays is a new checkpoint until the operator sets one |
 | 29 | what depth or state counts as terminal, and where it is declared | `payments.md#terminal-is-declared-in-the-rails-adapter-document-and-the-value-is-bound-per-instance` | — | **ruled** (2026-09-05): the criterion — settled, never sent, on a bank rail; *N* confirmations on a chain — is stated in the rail's adapter document; the value is bound per instance in the `vendor_binding`; a profile may deepen it and never shallow it |
 | 30 | how a recurring task is modelled | `work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next` | — | **ruled** (2026-09-05, on the operator's proposal): one live instance carrying its own `recurrence` rule; its closing sign-off creates the next instance, `FOLLOWS` task to task, with `due_date` computed from the schedule and never from the completion; the reschedule-instead-of-complete pattern is superseded for tasks modelled this way; an action series is a different thing and the two meet only at the gate |
-| 31 | how a registered entity type is renamed on a live record: a merge into a new-typed entity (ids change, edges repoint, the old id redirects), a registry alias (no id changes, a capability the record lacks), or a permanent tolerant reader over both types (nothing written) | `migration.md#the-open-decision-this-document-opens` | the re-typing stages of the migration (`agent`, `workflow`, the held decisions); nothing before them | **open** |
+| 31 | how a registered entity type is renamed on a live record: a merge into a new-typed entity (ids change, edges repoint, the old id redirects), a registry alias (no id changes, a capability the record lacks), or a permanent tolerant reader over both types (nothing written) | `migration.md#open-decision-31-how-a-registered-entity-type-is-renamed-on-a-live-record` | the re-typing stages of the migration (`agent`, `workflow`, the held decisions); nothing before them | **open** |
 | 32 | whether a sign-off's `verdict` is a stored field or a read over its findings and its author | `gates_and_workflows.md#whether-the-verdict-is-a-stored-field-or-a-read-over-the-findings-and-the-author` | — | **open** (simplification pass, 2026-09-05; unverified against the matrix) |
 | 33 | whether a stage, and the `phase` field on a step, names anything a step does not | `workflows.md#whether-a-stage-names-anything-a-step-does-not` | — | **open** (simplification pass, 2026-09-05; unverified against the matrix) |
 | 34 | whether the step path is an execution mechanism of its own, and whether the component that opens steps is `pipeline` or `engine` | `work_model.md#whether-the-step-path-is-a-mechanism-of-its-own-and-what-the-engine-is-called` | — | **open** (simplification pass, 2026-09-05; unverified against the matrix) |
@@ -254,21 +254,22 @@ so that they are not reused; see the two notes below.
 | 39 | whether intake attaches a task's context — internal entities as well as external records — or each step retrieves its own | `workflows.md#what-link-attaches-and-what-it-leaves-to-hydration` | — | **ruled** (2026-09-06, the operator's inclination interrogated as asked): the hybrid — `link` attaches what the task names, internal and external alike, by `REFERS_TO`, and nothing on relevance alone; hydration resolves each step's declared reads from those anchors; context a step discovers is written back as the same edge |
 | 40 | what a step records at close about the session it ran in | `gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read` | — | **ruled** (2026-09-06): what it produced is written as the entities it is; what it read is named on the sign-off and reproduced by an as-of read at `signed_at`, never copied; its reasoning is not written; `agent_session` stays the identity and liveness half |
 | 41 | whether write admission per entity type is default-allow with attribution, or default-deny by grant | `authority_model.md#grants` | — | **ruled** (2026-09-06): default-deny; the `agent_grant` is the allowlist, read at every enforcement point and widened by a governance write; attribution is required besides and prevents nothing; a wildcard over types is the fail-open shape, not an allowlist |
+| 42 | where a skill's harness mechanics live — the tool allowlist, harness preference, model tier, and hook wiring a skill carries: a harness-binding context entity in the record, fields on the `agent`, or the harness's own configuration outside the record | `migration.md#open-decision-42-where-a-skills-harness-mechanics-live` | stage 11's narrowing of what a runner may invoke; nothing before it | **open** (skills leg, 2026-09-05) |
 
 **Every ruled decision now has a heading of its own.** 25 through 29 were opened as bold paragraphs inside
 their documents' *What this document does not decide* sections, and the register's pointers resolved to the
 enclosing heading; the rulings of 2026-09-05 gave each its own section, as 13, 14, 23, and 24 already had, so
 every pointer above lands on the ruling itself. 15 and 30 are argued under headings that name their subject
-rather than their number, as 13 and 14 are. Six rows are open — 31; 36, opened on the operator's 2026-09-05 memos on how tasks come into existence and
-argued in `work_model.md`; and 32 to 35, which the simplification
+rather than their number, as 13 and 14 are. Seven rows are open — 31; 36, opened on the operator's 2026-09-05 memos on how tasks come into existence and
+argued in `work_model.md`; 32 to 35, which the simplification
 pass of 2026-09-05 opened as removals whose guarantee coverage would shift rather than be exactly preserved,
-each argued under a heading naming its subject in the document that owns it; 37 to 41 were opened and ruled
+each argued under a heading naming its subject in the document that owns it; and 42, opened by the skills leg of the migration; 37 to 41 were opened and ruled
 in one revision from the operator's memos of 2026-09-05, each under a heading naming its subject — and the register exists for
 the ruled rows too: a ruled row is where a reviewer learns a question was once open and where its rule now
 lives, and where the next author reads before opening a question that was already taken.
 
-**Decisions 31 and 33 are argued under headings of their own in authored companions** — 31 in
-`migration.md`, where the migration it bears on is designed, and 33 in `workflows.md`, where the Stages
+**Decisions 31, 33, and 42 are argued under headings of their own in authored companions** — 31 and 42 in
+`migration.md`, where the migration they bear on is designed, and 33 in `workflows.md`, where the Stages
 lines it concerns are written; the register rows above point at them.
 
 **19 and 22 were never assigned, and the numbers stay unused.** Neither appears in any revision of any
@@ -276,7 +277,7 @@ foundation document. They are the gaps left by several documents opening decisio
 branch and renumbering around each other, and they are recorded as gaps rather than closed up: renumbering
 would break every cross-reference the documents already carry, and silence would invite the next author to
 reuse the number for something unrelated. **Do not assign 19 or 22 to a new decision.** The next number is
-42.
+43.
 
 **20 and 21 were assigned, then renumbered, and two pointers were left behind.** Both were opened in
 `payments.md` and renumbered to 27 and 28 before that document was committed, to avoid colliding with 23

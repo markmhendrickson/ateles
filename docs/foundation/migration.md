@@ -16,8 +16,10 @@ and contradictions, the rulings of 2026-09-05 (decisions 13–18 and 23–30; in
 entering intake on its own; 18, governance writes reserved by default; and 30, the recurring task as one
 live instance whose completion creates the next), and
 a read-only inventory of the production record taken 2026-09-05 through the Neotoma MCP (recorded in
-`status.md`). The bootstrap sequence this document orders against is the
-conformance suite's (`conformance_suite.md`); where the two disagree, this document says so. Revised by the simplification pass of 2026-09-05 (revision 29: gap G14 closed; `workflow policy` retired). Revised by the memo-gap pass of 2026-09-06 (revision 31: gaps G1 and G12 closed).
+`status.md`), the operator's 2026-09-05 direction that the plan also cover the migration of skills into the swarm, the skill
+inventory at both harness roots read the same day and the recurring-work extraction over it (both in `status.md`,
+revision 32), and the two renderers' stated contracts (`render_agent_docs.py`, `sync_skills.py`). The bootstrap sequence this document orders against is the
+conformance suite's (`conformance_suite.md`); where the two disagree, this document says so. Revised by the simplification pass of 2026-09-05 (revision 29: gap G14 closed; `workflow policy` retired). Revised by the memo-gap pass of 2026-09-06 (revision 31: gaps G1 and G12 closed). Revised 2026-09-06 (revision 32: the skills leg — five classes of skill, the mapping of each to its target, stage 11, gaps G28–G31, and open decision 42).
 
 ## Purpose
 
@@ -34,7 +36,9 @@ listed as a gap for the foundation to close.
 ## Scope
 
 The record: the entity types, fields, relationships, and registry entries on an instance that the four
-models name or that the built swarm wrote in their place. Out of scope: the code that reads and writes
+models name or that the built swarm wrote in their place; and the skills — the files the harnesses load by
+name at the repository and user roots, and the two entity types behind them — because the operator's direction
+places them in the same plan and because they are where the swarm's procedures are written today. Out of scope: the code that reads and writes
 them, which follows the record and is measured in `status.md`; the adapters' redeployment, which
 `adapters.md#admitting-a-new-adapter` governs; and the declarations of the twelve core workflows, which
 the population plan's phases 3 and 4 make and this document only orders against.
@@ -208,6 +212,294 @@ largest lossy mutation in the plan for no reader's benefit), and intake's `link`
 row exists. This is gap G2 in its second form: the tolerant-reader rule is written for field names and the
 design needs it stated for types.
 
+## The skills: source state the harnesses hold, and where each kind goes
+
+A skill is a file a harness loads by path — `SKILL.md` under a repository root or a user root — carrying
+what an agent or a session is to do when it is invoked by that name. The operator's direction of 2026-09-05
+was that the migration plan cover the skills too, and the mapping is the same exercise as the tables above
+applied to a source the four models never name: **the design has no `skill` type.** Nothing in
+`work_model.md`, `gates_and_workflows.md`, `data_model.md`, or `authority_model.md` names one, and the
+direction-of-truth table (`conformance.md#direction-of-truth-per-class-of-record`) already places every
+skill file on the mirror side. A skill is therefore **source state and never a target**: it is where the
+swarm's knowledge of how work gets done is written today, under the harness's shapes, and the question this
+section answers for each is which target the design does have — an `agent`, a `workflow` declaration, a
+`task_policy`, an `agent_policy`, an adapter document — and which disposition carries it there. Where a
+skill has no target, the gap is listed with the others. Which skills exist, in what numbers, of which class,
+and how many carry which shape is measured in `status.md` (revision 32); this section states classes and
+rules and names no count.
+
+The record holds two entity types behind the files, and the two are already on opposite sides of the
+direction of truth. A role's file is rendered from the agent entity's `prompt_markdown` by
+`render_agent_docs.py`, whose header says it is generated and not authored; a procedure's file is rendered
+from a `skill` entity's `content` by `sync_skills.py`, under the same header. Both renderers run with
+`--check`. What neither renderer changes is that the swarm's own runner reads the role's **file** at claim
+time and prepends the entity's prompt to it (`status.md`), so the file is on the swarm's load path, which is
+the one place a mirror must not be.
+
+### Five classes of skill
+
+Every skill takes exactly one class, and the class decides its target. The classification test for each is
+stated so that it can be applied to a skill this section never saw.
+
+**Role skill.** The file mirrors an agent entity: its front matter carries the entity id and the header says
+so. Its body is a prompt — who the agent is, what it judges, how it reports — not a procedure anyone invokes
+by name. Target: the `agent` row of the authority table above; the file's own disposition is below.
+
+**Procedure skill.** The file is invoked by name, by the operator in a session or by a daemon, and its body
+is a sequence — read this, decide that, store this, confirm before that — with the recurring work it owns
+stated or implied by the phrases that invoke it. Target: a `workflow` declaration, or a step of one, or an
+adapter's operation; the mapping is below.
+
+**Mixed.** A role skill carrying a procedure verbatim, or a procedure skill that defines a role. The first
+form is the three duplicated sections the role files carry (below); the second is a procedure that is one
+daemon's whole duty, such as the unattended mail sweep, which is that daemon's `agent` and the mail adapter's
+mapping and nothing besides. Each part takes its own class's target.
+
+**Harness plumbing.** The file tells a harness how to reach the record or a tool: install it, configure
+it, recover its local store, sync secrets into an environment, query it, store into it, read a
+session's own present state. No step owner would claim it and no sign-off would close it, because it does no
+work of the swarm's — it makes a harness able to do work. Target: **none, and that is correct.** A skill
+that only tells a harness how to call the record is not a workflow, and declaring one would put the record's
+own API into a step list. It stays a skill, kept (as every type outside the four models is kept), and its
+`skill` entity is its record.
+
+**Obsolete.** A file that duplicates another at a second root, a near-duplicate pair, a skill for an agent
+loop the roster does not contain, and the probe rows the instance holds under the `skill` type. Target:
+retire — the file removed from the roots at the freeze, the entity frozen and readable; a probe row in the
+production registry is the case `data_model.md#record-conventions` forbids and is closed terminal with a note,
+as the retired test rows are (stage 5).
+
+### Role skill → `agent`, and what the file becomes
+
+The prompt is canonical on the record — `agent.prompt_markdown` after stage 7, the retired type's field
+until then — and the file is its render target. That is already the stated contract and the built state
+(`conformance.md#direction-of-truth-per-class-of-record`, *Agent prompt text*). Two things are decided here
+that the contract does not say.
+
+**The file is retired as a load path and kept as a render target.** The runner that reads the file at claim
+time is reading a mirror as if it were the source, and the two are one until somebody edits the mirror in
+place — which the direction-of-truth section names as the case that destroys work. After stage 7 the runner
+reads `agent.prompt_markdown` alone, and a claim by a runner that cannot read the entity is `unknown` and
+holds (`data_model.md#what-each-actor-reads-and-writes`, the agent claiming a step): it never falls back to
+the file. The file itself is not deleted, for the reason `work_model.md#the-four-execution-mechanisms`
+gives: the interactive session is a named mechanism, its harness loads a skill by exactly this path, and a
+mirror removed from a harness that hard-requires the path is re-created by hand within the week, which is
+the side door. So the mirror stays, rendered and checked, for the harnesses that read it, and nothing that
+claims a step reads it. Verification: after the runner's redeployment, a claim with the mirror absent from
+the runner's checkout produces the same prompt as a claim with it present, and the runner's `agent_session`
+records the entity version it read, never a file path.
+
+**The prompt text is corrected on the entity and re-rendered, never edited in the file.** Almost every role
+prompt names a retired type or field — a step map on an artifact, a per-step status row, a held-decision
+record — in the call shapes it carries (`status.md`). Stage 7 already reads each retired entity's undeclared
+fields out and decides them before the merge; the prompt body is decided in the same pass, as an
+interpretation over the same source, and the mirror changes only when the renderer runs. A re-render that
+changes anything but names is the verification failure stage 7 already lists.
+
+**A role that has never executed is a design review, not a migration.** Roughly half the roles on the
+instance are `planned`: no runner has held a task for them, no daemon writes under their credential, no
+sign-off or observation carries their name (`status.md`). A migration carries a record; for these there is
+no record to carry — a prompt nobody has executed is a proposal about what an agent should be, and
+re-typing it into an `agent` would create a principal on the strength of a document. The rule this document
+takes, refining stage 7's "each agent under the retired name": **stage 7 re-types the roles that have
+executed** — a credential that has written, a task a runner has held, a sign-off or observation carrying the
+name. **A `planned` role is a phase-1 item of the population plan**: phase 1 maps recurring work to roles,
+and a planned role either receives recurring work there — in which case a declaration will name its role as
+a step owner, and creating the `agent` is the governance write that declaration needs, taken at the gate
+under decision 18's reserved default before the declaration is made — or receives none, and is retired in
+place, frozen and readable, its prompt kept as the proposal it was. Until one or the other, the roster's
+role for it resolves to no `agent`, and any declaration naming that role fails at declaration time with
+`unspawnable_assignee` (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`), which is the
+design's own check doing exactly the work a migration rule would otherwise have to. The seven planned roles
+that carry a procedure verbatim and have never executed are the clearest case: their procedure is the same
+one the executed roles carry (below), so nothing in them is unique to the role but the predicate, and the
+predicate is a declaration's `applies_when`, not an agent's.
+
+### Procedure skill → `workflow` declaration, step, or adapter operation
+
+The extraction of 2026-09-05 read every skill file at both roots and produced one recurring-work candidate
+per procedure, with the skill it came from as the frequency evidence (`status.md` names the counts). The
+table maps each procedure's candidate to the target the design has. *Target* is a core workflow of
+`workflows.md`, a step of one, an adapter document's operation, or a gap. Where several skills map to one
+target, they are one row: the collapse is the point, and the count of rows against the count of skills is
+the measure of how much the harness duplicated. A skill named here is named as source state; none of them
+is the design.
+
+| Procedure skills (source) | Target | What carries it, and what is dropped |
+|---|---|---|
+| the session pipeline: the mid-session status read-out, the sweep of sessions, the verification of claims, the reconciliation against the inventory, the readiness grading, the batch archival, the session-end audit, the cross-harness resumption | `workflows.md#session-digestion` | one declaration for what seven skills stage by hand: the read-out and the sweep are `digest`, the claim check is `verify`, the inventory merge is `reconcile`, the filing is `file`. The readiness grading is dropped as a step: grading a filed task for what may execute it is intake's `classify` and `route`, already declared for every task, and a second grading beside intake is the second router principle 6 forbids. The archival of sessions and the resumption of one are harness acts over the digestion's outputs and stay plumbing. The rendered task board is a projection over tasks (`data_model.md#concepts`) and is published as one, not as a step |
+| the meeting family: recording start and stop, the live transcript stream, audio import, transcript analysis, the transcript import | `workflows.md#meeting-processing`; the capture daemon's `agent` | recording and streaming are the capture daemon's self-trigger and produce the `transcription` entity the workflow's entry condition names; they are not steps. Import and ingest are `ingest`; the analysis is `summarize`, `extract`, `persist`; the recap is `deliver`, which creates an outreach task and never sends. The consent disclosure the recording skill carries is the entry condition's `classify` failure, already declared |
+| the analyses: the comparative analysis of a target, the feedback corpus analysis, the category definition and its rollout audit, the portfolio review, the liquidity scorecard | `workflows.md#research-and-analysis` | each is a question answered from sources and persisted as an `analysis` entity: `brief`, `gather`, `synthesize`, `persist`, `deliver`. The rollout audit's per-surface tasks are `deliver`'s successor, a `copy` task per surface. What is dropped: the idempotency each skill implements on its own (a key on the target's identity) is the record's `dedup_key` rule, stated once |
+| the writing family: the general writer, the blog post, the comparative series post, the social share material | `workflows.md#copy`; `workflows.md#social-content` | the words are `copy`'s `copy` step against `brand_voice`; the share drafts are `social_content`'s `draft`, `draft_lint`, `consent`, `post`. The style enforcement each skill carries is the `brand_voice` entity retrieved by type and the lint runner's checks, never a prompt's list |
+| the outreach family: the rendered proposal page, the prospect intake to a preview, the interactive inbox triage's reply drafts | `workflows.md#outreach` | `draft`, `review`, `consent`, `send`, `follow_up`. The triage's storage of every thread is the mail adapter's inbound mapping (`gmail.md`) and not a step; its archive-on-approval is an outbound operation of the same adapter, taken through the gate |
+| the unattended mail sweep | the mail daemon's `agent`; `gmail.md` | mixed class: the procedure is one daemon's whole duty, so it is that daemon's prompt and the adapter's declared mapping of signals to tasks, and no workflow of its own. Its "never send, never archive" is the adapter document's write contract, stated there once |
+| the code family: the feature unit's spec, prototype, and final review, the feature run, the bug fix, the error-report queue and its filing, the cross-repo report | `workflows.md#feature`; `workflows.md#bug` | the spec is `pm`, the prototype and the run are `impl`, the final review is `qa` and the consent the batch's `merge` carries; the bug fix and the error queue are `bug`'s `pm` (reproduce) and `impl`; filing an error report is a task entering intake, which the reporting skill already does under another name |
+| the release family: the release plan, the publish, the personal-site deploy, the deploy verification | `workflows.md#release` | `criteria`, `release`, `verify_deployed`, one declaration per project; the site's deploy is the release workflow of its project with a `release_criteria` entity of its own |
+| the source-control trio: commit, pull, and the branch upload | the `impl` and `merge` steps; `github.md` | step work, not workflows: the operations of the implementer at `impl` and of the steward at `merge`, whose per-step operation the code host's adapter document declares. A commit message convention is a `task_policy` where it is the operator's and an `agent_policy` where it is every agent's |
+| the plan family: the execution plan, the plan reconciliation at close, the task sync from a plan's todos | gap G10 | plans have no home in the target model; the reconciliation is `session_digestion`'s `file` where it files tasks, and nothing where it edits a plan. Held until G10 is closed |
+| the session-start clarification batch | `workflows.md#intake` | a batch of clarifications before work starts is intake's `classify` over the tasks a session creates, and its approval gate is a checkpoint on the first action, not a step |
+| the learning pair: the behaviour miss turned into a rule, the record-instruction gap repaired | the standing finding and its institutionalization task (`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`, decision 17) | each is a standing finding: a defect that will recur until what produced it changes. The design already routes it — a task enters intake and its governance writes reach the gate. What is dropped is the skills' "apply the fix immediately in the harness", which is an agent mutating what produced a finding on its own finding, the side door the ruling names |
+| the record imports: calendar, codebase, contacts, conversations, mail, finances, meetings | the adapters' inbound sourcing (`adapters.md`, `gmail.md`, `calendar.md`) where a document exists; gap G30 where none does | an import is an adapter's inbound operation run by hand, and its result is what the adapter would have produced. Mail and calendar have documents; contacts, conversations, finances, and codebase have none, and a hand-run import of those has no declared mapping to conform to. The calendar skill's outbound half is the calendar document's one event-write path |
+| the record maintenance: the leads-graph grooming; the order extraction from a message; the fitness backfill; the technician-slot search; the interview administration; the feedback triage against a release stage | gap G30 | recurring work the extraction found with no candidate workflow and no adapter document: graph curation is a series of lossy record mutations at the gate with no declared step set; the order extraction is a mail-adapter mapping the document does not carry; the slot search is a calendar read for an operator-only task; the rest are one-off procedures whose recurrence the extraction could not establish. Each stays a skill until a declaration exists, and is listed so that its absence from the declared set is visible rather than assumed |
+| the plumbing: install and connectivity check, memory query, generic store, the session-storage store, database recovery, secret sync, editor rule creation, editor-copy sync, the background-watcher control, disk cleanup, language check, website scaffold, the present-tense orientation | none (harness plumbing, kept) | no step, no owner, no sign-off; each makes a harness able to reach the record or a tool. Kept as files and as `skill` entities |
+| the obsolete: the three files duplicated at two roots, the near-duplicate report pair, the three agent-loop skills, the probe rows under the `skill` type | retire | the duplicates collapse to the root the entity names; the pair to one; the loop skills describe an agent with its own wallet and registration that no roster role names, and are frozen; probe rows are closed terminal (stage 5) |
+
+**What the table shows.** Ten of the declared workflows and three adapter documents absorb the procedures that
+own recurring work; the residue is plumbing that should stay a skill, a plan family held on G10, and one row
+of extraction gaps. No procedure maps to a workflow the design lacks in kind — every gap is an adapter
+document or a declaration not yet written, never a mechanism the design is missing — with one exception
+argued below as G31.
+
+### The format gap: where a skill's harness mechanics go
+
+A skill carries what a declaration does not: the names of tools, the shape of a call to the record, the
+syntax of a command-line client for mail or the code host, file paths, an environment variable. A `workflow`
+declaration carries steps, owner roles, closing conditions, read dependencies, and action classes; an `agent`
+carries a prompt and its context entity types; a grant carries operations over entity types and
+repositories. None of them has a field for a tool name, and the mapping above would silently drop the
+mechanics if it did not say where they go. They go to four places, and the fourth is the operator's.
+
+**What must be read and written goes to the declaration and the write contract.** A skill's "retrieve the
+plan, then correct its `todos`" is a `reads_to_enter` and a closing condition; the record's own primitives
+— a correction, an interpretation, a relationship — are named in the design already, and a step that says
+"the sign-off is written and read back" has said everything the call shape said, minus the harness.
+
+**Which external system, and what operation, goes to the adapter document.** A skill's mail-client syntax
+or code-host command is the per-step operation the adapter document declares for that system
+(`gmail.md`, `github.md`, `calendar.md`); the per-instance binding of the system to this operator is the
+`channel_config` or `vendor_binding` entity, which binds and never redefines the mapping
+(`conformance.md#direction-of-truth-per-class-of-record`). A skill that says which client to use for mail is
+stating a vendor binding's capability slot, not an instruction.
+
+**How a harness reaches the record goes nowhere in the design, and that is right.** The MCP tool names and
+their argument shapes are the record's own interface, harness-neutral and versioned by the record's project,
+and they are documented where the record documents them. A prompt that spells them out is a copy of that
+documentation which rots on the next interface change — the pattern `status.md` measured: the call shapes
+in the role prompts are where the retired field names live. The design's rule is that an agent reaches the
+record through its primitives and reaches an external system only through an adapter
+(`gates_and_workflows.md#external-systems-are-reached-only-through-adapters`); the harness's way of issuing
+those calls is the harness's, and it changes with the harness.
+
+**The residue is the operator's, and it is open decision 42.** After the three moves above, a skill still
+carries mechanics that bind a harness rather than the record: which tools an agent may invoke (the tool
+allowlist that gap G19 already found homeless), which harness a role prefers and which model tier, the
+environment variables the harness router reads, hook wiring. These are not the record's and not an
+external system's; they are properties of the harness that executes an agent. Whether they belong in the
+record at all — as a context entity the design would have to introduce, bound per harness the way a
+`vendor_binding` is bound per system — or stay outside it, in the harness's own configuration, read by no
+principal and governed by no gate, is not a mapping question. It changes what the record knows about how its
+agents execute, and it is argued below.
+
+### Standing rules inside skills go to `task_policy`, by kind, and never by value
+
+Skills at both roots carry standing rules of the operator's: how correspondence is voiced and signed off,
+which timezone a calendar write uses, which client is used for which system, what a payment must never
+carry, which task kinds are never marked complete, how a draft is shown before it is sent. The design's
+home for an operator preference is the `task_policy` entity, and a harness memory file is a cache of one
+and never its home (`conformance.md#direction-of-truth-per-class-of-record`, *Operator preferences*). The
+migration derives one `task_policy` per rule **kind** from wherever the rule is stated today — a prompt, a
+session instruction file, a procedure skill — and the rule's value is written on the entity, read at
+runtime by every agent whose `context_entity_types[]` names the type, and reproduced in no prompt and in no
+foundation document, this one included. The kinds this document names so that the derivation is
+accountable: correspondence voice and sign-off; channel and client routing per external system; scheduling
+defaults; payment constraints; storage and completion discipline per task kind; presentation of drafts to the
+operator. A rule that binds every agent's behaviour rather than one operator's preference — how a
+sign-off is worded, what a finding must carry, that a response code is not evidence — is an `agent_policy`,
+the type the design names as the authoritative home of behavioural rules, and the instance already holds
+those (`status.md`). A rule that binds a harness — a hook that refuses a send without an inline approval —
+is neither and stays a hook. The derivation is reversible (the derived entities are new and the sources
+stay) and the sources are then corrected to cite the type rather than carry the value, which is stage 7's
+prompt correction for a prompt and a re-render for its mirror.
+
+### The duplicated procedure, and what the roles collapse to
+
+The role files carry three procedures near-verbatim, differing only in the agent's name and one predicate
+(`status.md` gives the counts and the names): a **plan-participation** protocol — check the plan against a
+domain predicate, decide whether there is input, file a contribution record with a sign-off or a concern; a
+**consultation** protocol for asking another role a question; and, on the review roles, a **per-step
+sign-off** on the issue entity — correct the artifact's step map, append to its owner history, check the
+join with the parallel step, store a contribution record. The extraction found the same thing from the
+other side: one candidate for the plan-participation pattern cited eight roles as its frequency evidence (the
+file scan finds a dozen),
+and one candidate per review role described the same sign-off with a different judgement in the middle.
+
+That is the evidence the roles collapse. **What differs between the copies is the judgement and the
+predicate; what is identical is the procedure, and the procedure is the design's one review step.** A
+review step is a step whose work is a judgement of the batch's change, closed by its owner's sign-off like
+any other step (`vocabulary.md#review-step`); the sign-off is one entity with one write contract
+(`data_model.md#what-each-actor-reads-and-writes`, the agent claiming a step); the join with a parallel
+step is the declaration's `parallel_group` and `join_step`; the waive is the operator principal's `waived`
+verdict and nobody else's. Each role's copy of the procedure is a hand-written implementation of that one
+step, written before the step existed as data, and every copy writes the retired shapes — the step map on
+the artifact, the owner history, the contribution record — that the gate-model table above retires.
+
+So the migration does three things with the duplication, and none of them is a merge of roles. **The
+procedure is dropped from every prompt** at stage 7: the interpretation that produces the `agent` carries
+the judgement — what the `ux` owner looks for, what the `legal` owner refuses — and not the mechanics of
+signing, which are the step's and are stated once. **The predicate becomes an `applies_when` condition**
+on the optional review step of the declaration that seats it (`workflows.md#how-to-read-a-workflow-section`,
+*Applicability*): whether the `ux` step opens on this batch is a property of the declaration read against
+what the change touches, and it is the same condition the prompt carried, moved to the one place that
+decides which steps open. **The consultation protocol becomes nothing**: a role that cannot judge a step
+without another role's answer raises the condition and does not sign (`data_model.md`, the retrieval
+contract's absence rule), and a question that needs another role's work is a task; no protocol for asking
+is declared because asking is not a step. The roles themselves stay distinct `agent` entities with distinct
+prompts, because the judgement differs, and the roster binds each role to one; what the duplication had
+been standing in for is one declared review step with different owners, and that is what the declarations
+of population phases 3 and 4 write.
+
+**The plan-participation protocol has no target, and this is G31.** A plan is not a batch, a plan is not a
+task, and the design has no workflow whose subject is a plan (G10). A dozen roles subscribing to plan events
+and reviewing plans against their predicates is recurring work the extraction confirmed, with a shape the
+design does not admit: the review of a plan is neither a review step on a batch nor an analysis with a
+question. Until G10 says what a plan is in the target model, this procedure is dropped from the prompts with
+the rest and recorded as undeclared work, not silently re-declared as something it is not.
+
+### Ordering and the cutover, for the skills
+
+The order is the dependency order the rest of this document uses, and it adds one stage.
+
+**An `agent` exists before a declaration names its role as an owner.** Stage 7 re-types the executed
+roles; population phases 3 and 4 then declare, and a declaration whose `owner_role` resolves to no `agent`
+is a declaration-time defect (stage 2's check). So the procedure-to-workflow mapping above cannot land a
+declaration for a role that stage 7 has not carried, which orders phases 3 and 4 after stage 7 for every
+role they name.
+
+**A procedure's workflow exists before its skill is retired, and the two are available together across a
+cutover test.** For each procedure row above: the declaration is made (a governance write at the gate,
+reserved under decision 18); the skill stays invocable at both roots; the workflow is then executed **end
+to end through one real batch** — a task enters intake, is routed to it, every step is claimed by the
+principal the roster resolves, every sign-off is read back, the closing sign-off names its successor or
+none — and only when that batch has closed is the skill retired: its mirror removed from the roots (or
+reduced to a rendered pointer at the one root whose harness hard-requires the path), its `skill` entity
+corrected to name the `workflow` that superseded it, the correction read back. A retirement before the
+cutover batch has closed is the flag day this document forbids: the swarm would hold neither the old path
+nor a proven new one. The cutover batch is the parity test `gates_and_workflows.md#one-step-set-defined-once-tested-for-parity`
+asks for, applied to a procedure instead of a step set, and it is the same test the conformance suite runs
+for any declaration.
+
+**Stage 11 — the skills (workflow; declarations, then retirements).** For each procedure row: declare,
+dual-run, cut over on one closed batch, retire the skill. For each role: the runner reads
+`agent.prompt_markdown` alone after its redeployment, verified as above; the mirror stays rendered. For the
+plumbing: nothing. For the obsolete: retire at the freeze. **Depends on** stage 7 (the agents), population
+phases 3 to 5 (the declarations and the values), and each runner's redeployment. Reversible per skill: the
+mirror is regenerated from the entity, and the entity's correction is corrected back; the declaration, being
+a governance write, is retired by another. The `task_policy` derivation above belongs to this stage too and
+depends on nothing but stage 1.
+
+**Verification for stage 11.** Per procedure: the declaration is retrievable; one batch of its type has
+closed with every required step signed and read back; the skill's entity names the workflow; the file is
+absent from the roots that no longer hold it, and present and unchanged by a re-render at the root that does.
+Per role: the runner's `agent_session` names an entity version and no path; a claim with the mirror absent
+produces the same prompt. For the whole: the count of procedure skills at both roots equals the plumbing
+count plus the held rows, and the `skill` type's count has stopped moving except for corrections.
+
+**What this stage does not do.** It does not merge two roles into one agent, declare a workflow for a
+procedure whose recurrence the extraction could not establish, retire a plumbing skill, or write a
+preference's value anywhere but on a `task_policy`. And it does not touch a user-root skill's file before
+the operator has confirmed which root each duplicated skill is to keep, because the user root is the
+operator's own harness configuration and this document may not write to it.
+
 ## How the migration is governed
 
 The design forbids the side door this document would be if it were executed by hand: every write to a
@@ -379,6 +671,11 @@ presently expose (a schema can lose fields and gain them; it cannot be retired) 
 grants' old type names are narrowed away here, completing stage 3's dual-admit window. **Depends on**
 every daemon's redeployment. Reversible: nothing is deleted.
 
+**Stage 11 — the skills (workflow; declarations, then retirements).** Stated in full in the skills section above:
+per procedure, declare, run both, cut over on one closed batch, retire the skill; per role, the runner reads the
+entity alone and the mirror stays rendered. **Depends on** stage 7, population phases 3 to 5, and each runner's
+redeployment. Reversible per skill.
+
 **Where this order and the conformance suite's bootstrap may differ.** The suite derives the bootstrap
 from the design alone: what must exist for the first step to open. This document adds two things from the
 record: the grant widening (stage 3) must precede the first new-type write by a daemon that still runs its
@@ -444,6 +741,7 @@ pointer is what makes that hold, and the read-back that proves it is an as-of re
 | a merge (stages 4, 5, 7) | partly, and only deliberately | `split_entity` re-points the merged observations back onto the retired id by their source or by their time; the survivor remains. Checked first: every field read back against both sources after the merge (`data_model.md#record-conventions`), and a dry read that lists what the merge will repoint. A merge is a lossy record mutation and is held at the gate before it is taken |
 | the halt (stage 4a) | yes, until 4b begins | restarting the retired engines. After the first declaration merge, restarting them hands merged workflows to a literal (above), so the check before 4b is the halt's read-back |
 | the cutover (stage 4c) | only by repeating the halt | enabling the design's claim predicate is reversed by disabling it under a confirmed halt of the design's engine; there is no state to unwind because the predicate stored nothing |
+| a skill's retirement (stage 11) | yes | the mirror is regenerated from its entity by the renderer; the entity's superseded-by correction is corrected back; the declaration it pointed at is retired by another governance write. Checked first: the cutover batch of that workflow has closed with every required step signed and read back |
 | a bulk terminal correction (stage 5) | yes, per entity | each is a correction; but it is taken once for the population and is held at the gate as a lossy record mutation before it is |
 
 ## Verification
@@ -464,6 +762,7 @@ the `verify` step of the migration's workflow re-reads independently of the `app
 | 8 | `PART_OF` count equals the count of populated `parent_task_id` fields; each derived checkpoint's subject is a non-terminal task; no task's status changed |
 | 9 | the first adapter delivery after cutover produces an observation on an `artifact` keyed by the delivery id, and redelivery produces none |
 | 10 | the count of each retired type is unchanged across a window after the last writer's redeployment; each grant names only the new types |
+| 11 | per procedure, its `workflow` is retrievable, one batch of its type has closed with every required step signed and read back, and its `skill` entity names that workflow; per role, the runner's `agent_session` names an entity version and no file path, and a claim with the mirror absent yields the same prompt; the `skill` type's count has stopped moving except for corrections |
 
 ## Gaps and contradictions the mapping exposed
 
@@ -579,14 +878,36 @@ numbers are separate and only two of these are opened as decisions below.
   is smaller.** The source's fields that named a held task and a step are the lease's; the rest is a
   tolerant-reader case. Listed because the design's row is the one place `LEASE` and `agent_session`
   meet and it does not say which of the two carries `runner_id` authoritatively.
+- **G28 — one file path is named as the mirror of two canonicals, and the record holds a third.** The
+  direction-of-truth table names `.claude/skills/<name>/SKILL.md` as the mirror of `agent_policy` (*Skill bodies*)
+  and of `agent.prompt_markdown` (*Agent prompt text*); on the instance the procedure files at that path are rendered
+  from `skill` entities by a third renderer. A path with three authoritative sides has none, and the runner's reading
+  of the file at claim time is the consequence. The skills section above retires the file as a load path; the table
+  should say which entity renders which file.
+- **G29 — the record holds a `skill` type the design does not name.** The plumbing skills the migration keeps have a
+  canonical entity under a type with no row in `data_model.md` and no place in the four models. Either the design
+  admits the type as the record of a harness's own instructions — outside the four models, kept, like `feedback` — or
+  it says the file is canonical for plumbing and the entity is the mirror, which would be the one class of record
+  whose direction of truth points at a harness. This document keeps the entity and the file and decides neither.
+- **G30 — recurring work the extraction found with neither a declaration nor an adapter document.** The hand-run
+  imports of contacts, conversations, finances, and codebase state; the leads-graph curation; the order extraction
+  from a message; the operator's slot search; the interview administration; the feedback triage. Each is listed in
+  the procedure table as a gap row rather than mapped to the nearest workflow, because a procedure mapped to a
+  workflow that does not describe it would conform to the letter of the declaration and to nothing.
+- **G31 — a dozen roles review plans by predicate, and the design has no workflow whose subject is a plan.** The
+  plan-participation protocol the role files carry is recurring work the extraction confirmed, and it is neither a
+  review step on a batch nor an analysis answering a question. G10 leaves plans outside the target model; until it
+  is closed this work is dropped from the prompts and recorded as undeclared, never re-declared as something else.
 
-## The open decision this document opens
+## The open decisions this document opens
 
 Registered in `conformance.md#the-register-of-open-design-decisions` in the same change, as that
-section requires. One decision is opened; the other question a reader might expect here — which tier the
+section requires. Two decisions are opened — 31 by the record mapping, 42 by the skills leg; the other question a reader might expect here — which tier the
 migration's classes take — is a policy value under decision 18's ruling and is stated as one below.
 
-**Open decision 31: how a registered entity type is renamed on a live record.** Three answers, each with
+### Open decision 31: how a registered entity type is renamed on a live record
+
+Three answers, each with
 a cost the others do not have. **Merge into a new-typed entity** (the form this document assumes): the
 target entity is created as an interpretation of the same source and the retired entity is merged into
 it, so observations, provenance, and every inbound edge move to the survivor and the retired id resolves
@@ -602,6 +923,28 @@ that a rename leaves no stale name is false for the record forever, and that eve
 union. **What would decide it:** whether any reader outside the record holds an entity id it cannot be
 told about; if none does, the merge form's cost is nil and it is the answer, because it is made of
 primitives the record already has. **Until it is taken**, stages 4 and 7 wait, and stages 0 to 3 do not.
+
+### Open decision 42: where a skill's harness mechanics live
+
+After the skills section's three moves — what is read and written to the declaration, which system and operation
+to the adapter document, how the record is called to the record's own interface — a skill still carries what binds
+a **harness** rather than the record or an external system: the tool allowlist an agent runs under (gap G19), the
+harness a role prefers and its model tier, the environment the harness selector reads, hook wiring. Three answers,
+each with a cost. **A harness binding in the record**: a context entity, introduced, bound per harness the way a
+`vendor_binding` is bound per external system, retrieved by the runner at claim time and by the review of any change
+to it; the cost is a new type outside the four models, a per-harness dimension the design has nowhere else, and the
+question of whether a write to it is a governance write — it changes what an agent may invoke, which is what the
+closed governance list was meant to bound. **Fields on the `agent`**: the allowlist and the preferences ride on the
+principal they constrain, as the retired type carried them (G19 lists them as declared-but-unmodelled); the cost is a
+public, generic prompt entity carrying harness-specific and instance-specific values, which the public-prompt
+constraint forbids, and a `data_model.md` row that grows with every harness. **Outside the record**: the harness's own
+configuration, read by no principal and governed by no gate, as it is today; the cost is that the record cannot say
+under what tool bounds an agent executed, so a sign-off's pinned agent version pins the prompt and not the reach, and
+a change to an agent's reach is invisible to the mechanism the design built to see changes to agents. **What would
+decide it:** whether the tool bound is part of what a sign-off attests — if a review of a batch may legitimately ask
+under what allowlist the implementer executed, the bound is in the record; if not, it is the harness's. **Until it is
+taken**, the mechanics are dropped from prompts at stage 7 and held in the harness's configuration, which is the
+third answer by default and not by ruling, and stage 11's runner redeployment does not narrow them.
 
 ## The policy values leg two needs, and the two postures
 
