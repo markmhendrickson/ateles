@@ -8,7 +8,7 @@ and the action gate), `authority_model.md` (credentials bind to principals; appr
 steps whose effects leave the system), PR #745 operator review (2026-09-04, the adapter decision), and the
 operator's 2026-09-05 review (the inbound-delivery question and the adapter-packaging lean, both recorded
 below as open; and revision 18: when an artifact comes into existence, and what holds an effect before
-it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express). What is built, and where the adapter and the engine are still one process, is `status.md`.
+it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express). What is built, and where the adapter and the engine are still one process, is `status.md`.
 
 ## Purpose
 
@@ -17,8 +17,9 @@ connected to the work model: through an adapter that translates in two direction
 Inbound, an external event is a signal about an artifact, never an instruction to a workflow; the adapter
 writes to the record, and the record drives the workflow. Outbound, a step's effect on an external system
 is an action, taken through the action gate, whose result the adapter reads back and confirms on the
-record. Table the mapping for each system; the code host's, being the largest, is its own document
-(`github.md`).
+record. Table the mapping for each system; the three largest — the code host's, the mail system's, and
+the calendar's — are their own documents (`github.md`, `gmail.md`, `calendar.md`), which this document
+points to rather than restates.
 
 ## Scope
 
@@ -29,8 +30,9 @@ demonstrate before the record trusts it and who admits one, and two questions ma
 **open** rather than resolved to make the document complete: where inbound delivery comes from, and whether
 adapters live in a repository of their own. Out of scope: the workflows themselves (`workflows.md`), the
 gate's decision function (`gates_and_workflows.md`), what an adapter is granted
-(`authority_model.md#grants`), the code host's per-event mapping in full
-(`github.md`, which applies these rules to every event GitHub can deliver), and the per-instance binding
+(`authority_model.md#grants`), the per-system mapping in full for the three systems that have their own
+documents (`github.md`, `gmail.md`, `calendar.md`, each applying these rules to its system's whole
+surface), and the per-instance binding
 of a system to an operator, which is the `channel_config` and `vendor_binding` context entities, resolved
 at runtime and never named here.
 
@@ -440,22 +442,26 @@ because a sign-off is pinned to the artifact state it judged (`data_model.md#rec
 
 ## Gmail
 
-The mail system holds artifacts of kind `thread` and `message`. The inbound signal is a message; the
-outbound effect is a send.
+The mail system holds artifacts of kind `thread`, `message`, and `attachment`; a mail-system `draft` is an
+artifact the design deliberately does not depend on, and a `label` is read but is never step state.
 
-| External event | What it is a signal about | Outcome in the record |
-|---|---|---|
-| message received on a thread the record does not track | a new record | a task with the thread as its artifact, entering intake; the mail poller is the daemon mechanism of `work_model.md#the-four-execution-mechanisms`, which produces tasks and never receives one |
-| message received on a thread attached to an open outreach batch | a reply | an observation on the thread artifact; the `follow_up` step owner reads it as the reply the step closes on (`workflows.md#outreach`) |
-| message received from the operator's address, answering a message the operator-facing agent sent for a checkpoint | the operator's decision | resolution of that checkpoint by the operator principal, read back on the checkpoint; from any other address, an observation |
-| message sent from the operator's account, observed in the sent folder | the effect of a send | an action confirmation on the `send_external_comms` action whose `dedup_key` matches; a sent message with no action is an observation and a defect to surface |
-| message labelled, archived, or deleted | the artifact's state | an observation on the artifact |
+**The Gmail adapter is `gmail.md`, in full.** That document enumerates every signal the mail system can
+deliver or that a read can discover — with each row marked handled, deliberately ignored, or unhandled —
+and it tables the outbound operation, action class, `dedup_key`, and confirmation for every step that
+reaches the mail system. It applies the rules above and does not restate them (principle 9, one home).
+Three things it settles that a reader of this section would otherwise look for here: why the mail system's
+notification is a wake-up rather than an event, so that nearly everything the adapter knows comes from a
+**read** whose coverage is what makes it checkable; why a staged draft is never updated in place, the
+update operation being able to send; and why the `send_external_comms` class has **no recovery row at all**
+at this system, a sent message having no undo, no revert, and no supersession — which is why the outreach
+workflow spends three steps before the send and why the class is ordinarily a checkpoint.
 
-| Step | Operation | Action class | What the adapter confirms |
-|---|---|---|---|
-| `send`, `follow_up` | send a message, or a reply on the thread | `send_external_comms` | the sent message read back from the mail system by its message id, never inferred from the send call's return |
-| `draft` | stage a draft in the mail system (optional; the design's staging is the draft in the record, and a staged draft is never updated in place, `workflows.md#outreach`) | `external_api_write` | the draft exists, read back |
-| `persist`, `record` | label or archive a thread | `external_api_write` | the thread's labels, read back |
+Two rules of this section a reader should carry into it, because the mail system erodes them hardest: a
+label is never step state, and a mailbox's labels read as status to a human eye precisely because they are
+the operator's own working vocabulary. And identity resolves an **address**, not an account — so a message
+from the operator's address resolves to the operator principal only where the binding matches and the
+message's authentication carries the sending domain's authorization, an unreadable value there failing
+closed to an observation (principle 5).
 
 ## Telegram
 
@@ -480,17 +486,20 @@ the record (`gates_and_workflows.md#the-checkpoint`).
 
 ## Calendar
 
-The calendar holds artifacts of kind `event`.
+The calendar holds artifacts of kind `event`, and a `calendar` the adapter reads but never writes. A person
+on an event is a `contact` entity in the record, never an artifact of its own.
 
-| External event | What it is a signal about | Outcome in the record |
-|---|---|---|
-| event created, or an invitation received | a new record | an artifact; and a task for intake where the event carries an ask (a meeting to prepare for, a recurring obligation the calendar drives) |
-| event updated, moved, or cancelled | the artifact's state | an observation on the artifact; a task whose due date follows the event reads it at `prioritize` or at claim, never through the event |
-| event ended, with a recording | a transcript to process | a task for meeting processing with the event and the recording as its artifacts (`workflows.md#meeting-processing`) |
-
-| Step | Operation | Action class | What the adapter confirms |
-|---|---|---|---|
-| `deliver`, `record` | create, move, or cancel an event; send an invitation | `external_api_write`; `send_external_comms` where a party outside the swarm is invited | the event read back by id |
+**The calendar adapter is `calendar.md`, in full.** That document enumerates every signal the calendar can
+deliver or that a read can discover, with the same three-way marking, and tables the outbound operation,
+action class, `dedup_key`, and confirmation per step. It applies the rules above and does not restate them.
+Three things it settles: that an event's **beginning and ending are delivered by nothing** and are derived
+from a stored time against a clock, so a step depending on a meeting having happened declares a read with a
+stated freshness rather than trusting a time the record has held for a week; that an operation's action
+class **depends on the attendees** — the same write is `external_api_write` on a solo event and
+`send_external_comms` on one with attendees, because it mails them — and that an unreadable attendee set
+therefore takes the higher class (principle 5); and **open decision 24**, whether a recurring series is one
+artifact or many, which it opens rather than resolves and which should be decided together with
+`gmail.md`'s decision 23, both being the same question about a thing with internal multiplicity.
 
 ## Payments
 

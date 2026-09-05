@@ -6,7 +6,7 @@ mechanism (built as ateles#744): names documents and paths, never what a checkou
 `binding_is_the_reviewer_reading_a_kernel_not_a_loading_order` and
 `ateles_binding_extends_three_existing_mechanisms`, synthesis `ent_b0ce322f768e4fc676b73139` (PR-29, C7),
 prior art `ent_08460968e6f49dac21510f4a` (OPA: decision decoupled from enforcement), and PR #745 operator
-review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`).
+review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and revision 21 (2026-09-05: the `gmail.md` and `calendar.md` keyed rows and their canonical-source entries).
 
 ## Purpose
 
@@ -95,6 +95,8 @@ documents to read. Each document at most once per review, kernel first.
 |---|---|
 | `execution/daemons/apis/github_gateway`, `execution/daemons/apis/swarm_dispatch`, `execution/daemons/apus/`, `execution/daemons/formica/`, `execution/scripts/lanius_sweep`, `execution/mcp/github_harness`, `execution/daemons/turdus/`, `execution/daemons/riparia/`, `lib/daemon_runtime/run_email`, `execution/daemons/monedula/`, `execution/daemons/cotinga/`, `lib/notify`, `execution/lib/telegram`, `docs/foundation/adapters\.md` | `docs/foundation/adapters.md` |
 | `execution/daemons/apis/github_gateway`, `execution/daemons/apis/swarm_dispatch`, `execution/scripts/lanius_sweep`, `\.claude/skills/lanius/`, `docs/agents/lanius\.md`, `\.claude/skills/vanellus/`, `docs/agents/vanellus\.md`, `execution/daemons/apis/review_panel`, `execution/mcp/github_harness`, `docs/foundation/github\.md` | `docs/foundation/github.md` |
+| `execution/daemons/turdus/`, `execution/daemons/riparia/`, `lib/daemon_runtime/run_email`, `lib/approval/email_channel`, `\.claude/hooks/gmail_send_gate`, `docs/foundation/gmail\.md` | `docs/foundation/gmail.md` |
+| `execution/daemons/sylvia/`, `execution/daemons/cotinga/`, `execution/daemons/monedula/`, `docs/foundation/calendar\.md` | `docs/foundation/calendar.md` |
 
 ### The foundation itself
 
@@ -167,6 +169,8 @@ the swarm's own records, and the word is not used for them.)
 | Operator preferences and feedback | `task_policy` and `feedback` entities on the record | none; a harness memory file is a cache of them, never their home, and a preference that exists only in one is unreadable by every agent that is not that harness |
 | External-system mapping (what an event becomes; what a step's operation is) | `docs/foundation/adapters.md`, PR-reviewed | the adapter daemons' code; the per-instance binding of a system to an operator is the `channel_config` and `vendor_binding` entities, which bind and never redefine the mapping |
 | The code host's per-event mapping and per-step operation, in full | `docs/foundation/github.md`, PR-reviewed | the GitHub receiver and the pipeline reading from it; `adapters.md` holds the general rules the document applies and carries the pointer to it |
+| The mail system's per-signal mapping and per-step operation, in full | `docs/foundation/gmail.md`, PR-reviewed | the mail poller and the send path; `adapters.md` holds the general rules and carries the pointer to it |
+| The calendar's per-signal mapping and per-step operation, in full | `docs/foundation/calendar.md`, PR-reviewed | the calendar-reading daemons and the one event-write path; `adapters.md` holds the general rules and carries the pointer to it |
 
 A rule in two classes is written once in its authoritative home and cited from the other, never copied: a
 comment or a second document claiming to mirror the first is not a mechanism that keeps them matching
