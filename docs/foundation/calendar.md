@@ -71,7 +71,8 @@ two calendars shares it.
 ## Open decision 24: whether a recurring series is one artifact or many
 
 The brief that commissioned this document flagged the question; writing the tables confirmed it is real and
-that the design has not answered it. It is opened here rather than resolved.
+that the design has not answered it. It is opened here rather than resolved, and registered in
+`conformance.md#the-register-of-open-design-decisions`.
 
 **The question.** The calendar holds a recurring event as **one** record — a declaration carrying a
 recurrence rule — and computes its occurrences on demand. It also lets any single occurrence be modified or

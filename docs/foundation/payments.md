@@ -114,7 +114,7 @@ strictness is expressed in the policy and the workflow rather than in new machin
 
 **One thing is genuinely missing rather than composed, and it is opened as a decision below**: whether the
 approver who resolves a payment's checkpoint must be shown, and must be shown to have seen, the same payee
-and amount the `verify` step signed on. See open decision 20.
+and amount the `verify` step signed on. See open decision 27.
 
 ## The dedup key, and what it is keyed on
 
@@ -351,7 +351,7 @@ figure and about to submit another.
 within what the checkpoint named is taken; one that does not is **not** taken, and the difference is a new
 decision. Where the boundary between those lies — an exact-match rule, or a tolerance the policy declares —
 is a decision this document opens rather than invents, because inventing a tolerance would be inventing an
-amount nobody approved. See open decision 21.
+amount nobody approved. See open decision 28.
 
 **On a crypto rail there is no quote and no lock.** The fee is chosen at construction against a market that
 moves, and its consequence is not a different amount to the payee but a different *outcome*: too low, and
@@ -601,7 +601,8 @@ and what quorum a payment might require, are `authority_model.md`'s open questio
 Open decisions 15 and 16 (adapter packaging; where inbound delivery lands) are `adapters.md`'s and untouched.
 Which rows have a built path is `status.md`'s.
 
-**Open decision 27: whether a payment's approver must be shown what the verifier signed.** The workflow puts
+**Open decision 27: whether a payment's approver must be shown what the verifier signed.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. The workflow puts
 `verify` before `consent`, so the operator consents to a payee and amount a second principal has already
 checked against the profile. What is undecided is whether the checkpoint the operator resolves must
 **carry** that verification — the verifier's identity and what they matched — and whether resolving it is
@@ -614,7 +615,8 @@ being the second gate principle 6 forbids. What would decide it: whether the exi
 covers the case where the action's parameters change after `verify` signed, or whether a payment is the case
 where that gap has consequences nothing else does.
 
-**Open decision 28: what tolerance, if any, a payment's consent carries.** A bank rail's price is quoted and
+**Open decision 28: what tolerance, if any, a payment's consent carries.** Registered in `conformance.md#the-register-of-open-design-decisions`.
+A bank rail's price is quoted and
 expires, so the amount at submission may differ from the amount the operator approved. Fixing the rule at
 exact match is safe and makes any expiry a new checkpoint, which may make routine payments unresolvable in
 practice. Fixing it at a declared tolerance risks the design inventing an amount nobody approved. What would
@@ -623,7 +625,8 @@ decide it: whether the checkpoint should name a figure or a bound, and where suc
 never widens what was approved, and anything outside it is a new decision. Depends on nothing; blocks
 nothing but a rail whose prices expire.
 
-**Open decision 29: what depth or state counts as terminal, and where it is declared.** A crypto
+**Open decision 29: what depth or state counts as terminal, and where it is declared.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. A crypto
 transaction's settlement is a depth chosen against the amount at risk, and a bank transfer's released
 state is not a credited state. This document requires the terminal condition to be **declared** rather than
 assumed, and does not say where. The candidates are the `payment_profile` governing the obligation, the

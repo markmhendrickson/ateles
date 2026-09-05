@@ -530,7 +530,8 @@ already written and are cited, not repeated.
 
 **Open decisions 13 and 14 are untouched and remain unruled.** Whether a batch may hold on a condition
 discovered mid-flight, and whether a batch may depend on a task it created, are questions about a batch's
-lifetime once it is open; formation and workflow choice are settled whichever way they go, and the new
+lifetime once it is open; revision 25 below writes them up as sections of `work_model.md` and leaves both
+unruled; formation and workflow choice are settled whichever way they go, and the new
 section says so explicitly rather than leaving a reader to wonder whether it pre-empted them. Decisions 15,
 16, and 17 are likewise untouched.
 
@@ -838,6 +839,43 @@ records it. Nothing was trimmed to fit: the operator directed that comprehensive
 first and the condensation pass follows, and both documents carry an explicit
 what-the-design-uses-versus-what-the-API-offers table plus a load-bearing-versus-compressible note in their
 freshness sections for that pass to work from.
+
+## Revision 25 (2026-09-05): the open decisions get a register, and the numbering is reconciled
+
+Before this revision no document listed what was open. The register now lives in
+`conformance.md#the-register-of-open-design-decisions`, and this section records only what is measurable
+about the numbering — the design content is the register's and the arguments are the owning documents'.
+
+**Where the register went, and why not here.** An open decision is a design record, and
+`conformance.md#direction-of-truth-per-class-of-record` puts design in this directory and state in this
+file. This file is out of the reading list by design, is regenerated rather than edited, and carries a
+perishability warning at the top: a register here would be rewritten by the next regeneration and would
+never reach a reviewer. What stays here is what a checkout measurably does, which is the row below.
+
+**The numbering, as counted on this branch 2026-09-05 by grepping every revision of every file in
+`docs/foundation/` for `decisions? (1[0-9]|2[0-9])`:**
+
+| Finding | Measured |
+|---|---|
+| decisions 13 and 14 appeared in no document | named in prose in this file and in `gates_and_workflows.md` and `work_model.md`, with no section stating either. Both now have titled sections in `work_model.md` |
+| decisions 19 and 22 appear in no revision of any file | never assigned. The numbers stay unused and are recorded as gaps in the register so the next author does not reuse them |
+| decisions 20 and 21 appeared only as two prose pointers in `payments.md`, resolving to nothing | assigned, then renumbered to 27 and 28 before that document's commit to avoid colliding with 23 through 26, which other documents opened concurrently. The two pointers now cite 27 and 28 |
+| decisions 25 through 29 have no heading of their own | written as bold paragraphs inside their documents' *What this document does not decide* sections. Register pointers resolve to the enclosing heading, which is the closest anchor that exists |
+
+**What this revision does not rule.** Nothing. Every decision in the register stays open, including the two
+recovered ones: 13 and 14 are written up in full and unruled, and the sections state what a reader should
+assume until each is taken.
+
+**Size.** `conformance.md` grew 7.2k (17.6k → 24.9k) for the register, and `work_model.md` 8.3k
+(33.8k → 42.1k) for the two recovered decisions written up in full. The eleven register pointers add
+between 0.07k and 0.14k each: `adapters.md` 66.0k → 66.2k, `gates_and_workflows.md` 45.7k → 45.8k,
+`gmail.md` 47.2k → 47.3k, `calendar.md` 41.9k → 42.0k, `telegram.md` 73.8k → 74.0k, `payments.md`
+65.1k → 65.3k. Measured 2026-09-05 with `wc -c` on this branch against revision 24 as the predecessor.
+`work_model.md` and `gates_and_workflows.md` are kernel, so the kernel rises to **101.4k** from 93.0k on
+revision 24, against `MAX_BLOCK_CHARS=40,000`; `conformance.md` is keyed. Nothing was trimmed to fit, on
+the standing direction that content settles before budget, and
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure that
+records the overrun.
 
 ## `github.md`: the events with no defined response (revision 13, 2026-09-04)
 

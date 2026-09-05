@@ -210,8 +210,8 @@ Which classes belong there is not a design question this document can settle, be
 about how much autonomy this operator wants, and the design's job is to make the judgement expressible
 and enforceable rather than to make it.
 
-**Open decision 18: whether a governance write is reserved to the operator by default.** A policy is a
-value, and every value has a default for a project that has not written one. The two candidate defaults
+**Open decision 18: whether a governance write is reserved to the operator by default.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. A policy is a value, and every value has a default for a project that has not written one. The two candidate defaults
 are genuinely different postures and the choice is the operator's. **Reserved by default** — the five
 governance classes carry `operator_only` unless a project's policy says otherwise — makes the swarm
 unable to change itself out of the box, and every loosening a deliberate act with a record; the cost is
@@ -357,7 +357,113 @@ Two questions about a batch's **lifetime** remain open and are not settled by an
 batch may hold on a condition discovered mid-flight, and whether a batch may depend on a task it created
 (`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
 Both are downstream of this section rather than blocked by it — formation and workflow choice are settled
-whichever way they go, because both concern what a batch may wait on once it is already open.
+whichever way they go, because both concern what a batch may wait on once it is already open. They are
+opened in full as decisions 13 and 14 below. Every open decision the foundation carries is indexed in
+`conformance.md#the-register-of-open-design-decisions`.
+
+### Open decision 13: whether a batch may hold on a condition discovered mid-flight
+
+The formation rules above settle what a batch is opened by and what it carries; they say nothing about
+what may suspend one that is already open. The question is opened here rather than resolved, in the idiom
+decisions 17 and 18 were opened in.
+
+**The question.** A condition declared at intake is already expressible: `applies_when` decides whether an
+optional step opens, and it is evaluated against what the batch's tasks are and what their change touches
+(`gates_and_workflows.md`). What is undecided is the other case — a step owner, part-way through a batch,
+learns something that was not knowable when the batch was formed, and the right response is neither to sign
+nor to fail but to **wait**: a rail's quote has expired and a re-quote is pending, an external system is
+returning `unknown` rather than an answer, a second batch is producing the artifact this one's next step
+reads. Whether the design admits a batch state that is open, unclosed, and deliberately not progressing,
+and whether a step owner may put a batch into it, is what is not settled.
+
+**If a batch may hold**, the condition is a first-class thing: it is declared somewhere, it is evaluated
+by something, and something ends the hold. That means a held batch is readable as held rather than as
+quiet, which is the property principle 11 asks for — state that needs a watchdog belongs in a relationship
+rather than in a field — and it means the ten-day stall has a name instead of being invisible. The cost is
+that a hold is a second waiting mechanism beside the checkpoint, which already suspends work pending a
+principal's decision, and building it separately is the parallel-mechanism defect principle 6 forbids: two
+places a batch can be waiting, two resolution protocols, and two queues, of which the second is the one
+nobody consumes (principle 1).
+
+**If a batch may not hold**, there is exactly one way to wait, and it is the checkpoint: a step owner who
+cannot sign raises one, a principal resolves it, and the batch's suspension is the existing protocol with
+an existing consumer. The cost is that a checkpoint asserts a **decision** is owed to a principal, and
+most of the conditions above owe nobody a decision — a quote that will re-quote in ninety seconds does not
+need the operator, and raising a checkpoint for it makes the queue a place where machine-resolvable
+conditions are parked in front of a human. The alternative under this answer is that the step owner does
+not wait at all: it signs a verdict of `unknown`, the batch closes, and the work re-enters through a new
+batch when the condition has changed — which is honest, and which multiplies batches for what is
+conceptually one piece of work, so the chain stops reading as the history of a task and starts reading as
+the history of a retry.
+
+**What would decide it:** whether any condition the design already names is genuinely machine-resolvable
+and owes no principal a decision. If every real case turns out to owe someone a decision, the checkpoint
+already covers it and no second mechanism is warranted. If some do not — and the payment rails'
+expiring quote and the unconfirmed-effect `unknown` are the two candidates the documents already carry
+(`payments.md`, `work_model.md#at-least-once-implies-effect-dedup`) — then a hold is a distinct thing and
+the question is where its condition is declared, which is the same question `applies_when` answers for a
+step and should be answered the same way.
+
+**Until it is taken**, a batch has no held state: a step owner who cannot sign raises a checkpoint or signs
+`unknown`, and there is no third option. That is the state a reader should assume and not the design's
+ruling.
+
+**Blocks:** decision 17's sequencing half, which cannot be ruled without it
+(`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`),
+and decision 14 below, which is the specific case of this general question where the condition is a task
+the batch itself created.
+
+### Open decision 14: whether a batch may depend on a task it created
+
+The narrower of the two, and the one with a named case already in the documents. Opened here rather than
+resolved.
+
+**The question.** A batch, part-way through, creates a task: a standing finding's proposed change to the
+swarm's own operation (`gates_and_workflows.md`), an adapter admission the arch review step calls for
+(`adapters.md`), a follow-up the implementer files rather than doing. That task enters intake and gets a
+batch of its own, as every task does. What is undecided is whether the **creating** batch may make its own
+progress conditional on the created task completing — whether a batch may say "I cannot close until the
+task I created is done".
+
+**If a batch may depend on a task it created**, the swarm can express the case where the work genuinely is
+not finished: a review step that found the workflow itself wrong, and whose sign-off would be a lie if the
+workflow went unchanged. The dependency is readable, and a reader asking why a batch has not closed gets
+an answer that names the blocking task. The cost is a cycle risk that is not hypothetical: the created
+task's batch may in turn create a task, and nothing in the rules above prevents its descendant depending
+back. Cycle detection is then a mechanism the design owes, and a mechanism nothing currently owns. It also
+makes a batch's lifetime unbounded by anything its own declaration states, which is exactly the property
+that makes a batch's chain readable today.
+
+**If a batch may not depend on a task it created**, every batch closes on its own steps, the chain stays a
+sequence rather than a graph, and the created task is a peer entering intake on its own — which is the
+behaviour `gates_and_workflows.md` already tells a reader to assume. The cost is that the creating batch's
+closing sign-off asserts its steps are satisfied while its own owner believes something material is
+outstanding, and the link between the two pieces of work survives only as provenance on the created task
+rather than as anything that holds the first one open. Whether that is a defect or the correct division of
+labour is precisely what is undecided: the design's usual answer is that provenance plus a separately
+prioritized task is enough, and the standing-finding case is the one where it may not be.
+
+**A third answer the design should consider and this section does not adopt:** the dependency exists but
+runs the other way — the created task carries a `FOLLOWS`-like edge to the batch that created it, and
+nothing holds, so the relationship is readable without any batch's lifetime changing. That would give the
+readability without the cycle risk, and it is not adopted here because whether a readable-but-unenforced
+link is a control at all is the question principle 1 asks of every mechanism, and answering it is the
+decision rather than a step around it.
+
+**What would decide it:** whether any step's sign-off is genuinely unsafe to write while the task it
+created is outstanding. If a step owner can always honestly sign for the batch's own scope and leave the
+created task to its own intake, no dependency is needed and the peer answer is right. The standing-finding
+case is the test: a review step that judged a workflow wrong is being asked to sign that the workflow's
+step was satisfied, and whether those are the same claim is the crux.
+
+**Until it is taken**, a batch closes on its own steps and a task it created enters intake on its own, with
+provenance back to the batch that created it and no hold on that batch
+(`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
+That is the state a reader should assume and not the design's ruling.
+
+**Blocks:** decision 17's sequencing half, together with decision 13. **Depends on** decision 13: if a
+batch has no held state at all, this question has no mechanism to be answered with, so 13 is the more
+general and should be taken first.
 
 ### Artifacts are records a batch leaves, never its subject
 

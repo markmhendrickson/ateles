@@ -193,8 +193,8 @@ subscribes to a checkpoint and re-claims its task on resolution — and they are
 never a substitute for one. Reading them as an inbound receiver inverts the boundary: it would make the
 record the source of events about systems it cannot see.
 
-**Open decision 16: whether the swarm builds its inbound receivers or rides a shared one.** What is
-undecided is where an external system's delivery lands before it becomes a write: a receiver the swarm
+**Open decision 16: whether the swarm builds its inbound receivers or rides a shared one.** Registered
+in `conformance.md#the-register-of-open-design-decisions`. What is undecided is where an external system's delivery lands before it becomes a write: a receiver the swarm
 builds per system, one receiver the swarm builds and every adapter shares, or a third-party delivery
 service the swarm consumes. Nothing in this document depends on the answer — the two invariants, the four
 outcomes, and the five rules hold whichever it is, because each is stated about what the adapter does with
@@ -753,8 +753,8 @@ between them is what the adapter wrote and the engine read, with provenance on e
 that lets an event drive a step without a write in between has merged them, and where that is the case
 on a checkout is `status.md`.
 
-**Open decision 15: whether adapters live in a repository of their own.** The roles being separable raises
-the packaging question, and it is not settled here. The options are the two obvious ones — adapters bundled
+**Open decision 15: whether adapters live in a repository of their own.** Registered in `conformance.md#the-register-of-open-design-decisions`.
+The roles being separable raises the packaging question, and it is not settled here. The options are the two obvious ones — adapters bundled
 inside this system beside the engine, or a shared adapter repository this system consumes as a dependency
 and other consumers could too. The operator's stated lean, recorded as a lean and not as a ruling, is
 **toward separating them**, on the reasoning that a boundary the design already draws between two roles is

@@ -316,7 +316,8 @@ principal is, or what a workflow requires, is the question the gate exists to as
 however good the reason. So a standing finding produces a **proposed** change with provenance back to the
 finding that raised it, and a principal with the authority to make that change takes it as an action.
 
-**Open decision 17: whether institutionalizing a standing finding is itself a workflow.** The operator's
+**Open decision 17: whether institutionalizing a standing finding is itself a workflow.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. The operator's
 stated position is that it should be — that a standing finding produces tasks, that those tasks are
 institutionalization tasks, and that they go through a workflow built for them, so that the swarm's changes
 to itself are governed by the same machinery as its outward work. That reading is consistent with

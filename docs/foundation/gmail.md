@@ -191,7 +191,8 @@ promoting a bounce to an automatic retraction of the action's confirmation would
 ## Open decision 23: whether a thread is one artifact or a container of artifacts
 
 Writing the tables above surfaced a question the design has not settled, and it is opened here rather than
-resolved, in the idiom decisions 16 and 17 were opened in.
+resolved, in the idiom decisions 16 and 17 were opened in. It is registered in
+`conformance.md#the-register-of-open-design-decisions`, with every other open decision.
 
 **The question.** The tables treat `thread` and `message` as two artifact kinds, and both appear: intake
 attaches a thread, a send's confirmation mints a message, and `follow_up` watches a thread. What is

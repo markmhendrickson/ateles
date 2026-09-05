@@ -655,8 +655,8 @@ are `workflows.md`'s; the gate's decision function and the checkpoint's protocol
 `authority_model.md`'s open questions. Which rows have a built path is `status.md`'s — and every row marked
 **unhandled** above has one there.
 
-**Open decision 25: whether a chat reaction may ever carry a decision.** Recorded as a decision rather than
-ruled, because the argument on each side is real and the design does not need the answer yet. Against: a
+**Open decision 25: whether a chat reaction may ever carry a decision.** Registered in `conformance.md#the-register-of-open-design-decisions`.
+Recorded as a decision rather than ruled, because the argument on each side is real and the design does not need the answer yet. Against: a
 reaction carries no statement of what was decided, so reading one as an approval means the adapter supplies
 the meaning, which is the intent parse this document refuses. For: a reaction on the swarm's own
 presentation message is correlated as precisely as a reply-to is, it comes from a credential like any other
@@ -666,7 +666,8 @@ update reliably identifies the reacting credential in every chat kind the bindin
 mapping can be made as unambiguous as a callback payload without becoming a vocabulary the operator has to
 remember. Until it is taken, a reaction is an observation and never a resolution, which is the row above.
 
-**Open decision 26: whether the swarm answers a read on this channel without the record.** A command
+**Open decision 26: whether the swarm answers a read on this channel without the record.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. A command
 asking what awaits a principal is a read that writes nothing, which makes it the one inbound path that
 could in principle be served during a halt — and the operator asking "what is happening" is most likely
 exactly then. Against: the answer would be read from the record, which is what is unreachable, so there is
