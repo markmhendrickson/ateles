@@ -10,7 +10,7 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
 memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram), and the operator's 2026-09-05 12:52 memo (revision 21: the general claim about self-modification, stated in `work_model.md` and cross-referenced from decision 17), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 17 ruled here; the `dependency_cycle` reason class), and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: the next instance is a created task and not a successor), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: `intake_rule` joins the governance list). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding).
 
 ## Purpose
 
@@ -211,6 +211,59 @@ transition event type; history is the record's observations (`no_gate_transition
 opens steps from the entities and reads the sign-offs; a second engine that sequences from a code literal
 and cannot see the first is the defect this model removes (`real_defect_is_two_blind_engines`).
 
+### What a step leaves at close: what it produced, and a reference to what it read
+
+**Ruled (decision 40, 2026-09-06): a step's close records what the step produced and names what it read;
+it copies nothing it read and stores no account of its own reasoning.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. The operator asked that the session a step ran in,
+and everything that session saw, be stored when the step completes, so that later work — a later step of
+the same batch, or any other work — can use it. The design agrees with the aim and states precisely what is
+stored, because the three things a session "saw" have three different fates.
+
+**What it produced is written, as the entities it is.** The sign-off with its findings; the observations its
+work made; the entities its work created — an analysis, a draft, a `meeting_analysis`, a task for intake;
+and the `REFERS_TO` edges from the task to the record entities the step discovered the task concerns
+(`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`). These are the write contract's rows
+(`data_model.md#what-each-actor-reads-and-writes`), and each is read back. They are what a later step reads
+first — the sign-offs already on the batch are in every step's retrieval — and they are how context found
+part-way through a batch reaches the next step without the next step finding it again.
+
+**What it read is named, not copied.** The sign-off refers to what the step judged on: every artifact, with
+the `head` it was observed at (`artifact_refs[]`), and every record entity it read, by reference
+(`REFERS_TO` sign-off → entity; `data_model.md#relationships`). The state of each at the moment of the
+verdict is not stored a second time, because the record already holds it and can return it: an as-of read
+along ingestion time at the sign-off's `signed_at` returns what was readable then and excludes what arrived
+later (`adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`), and the
+hydration phase wrote every external read as observations with provenance before the step began
+(`#declaration-batch-projection`). So "what did this step see" is a read: the references on the sign-off,
+resolved as of its time. A copy would be the parallel log the record conventions forbid, and a copy that is
+also read is a second source of truth for what the step knew — the two answers diverge the first time an
+observation is corrected. **This is the check the ruling rests on:** reads are reproducible only if every
+read was either an observation in the record before the step ran or is named on the sign-off with a time,
+and both halves are already rules. Where a step read something it neither hydrated nor named, its reads are
+not reproducible, and that is a declaration error of the kind an undeclared read already is.
+
+**Its reasoning is not written to the record.** The turns of the session, the drafts it discarded, the paths
+it considered are not an entity the design has, and the retrieval contract states the consequence from the
+reader's side: another step owner's in-progress reasoning is not read, because there is none in the record
+— only sign-offs (`data_model.md#what-each-actor-reads-and-writes`). That is deliberate. A step is judged by
+its sign-off and findings, which are the claims a principal stands behind, pinned to what they judged;
+reasoning stored beside them would be read as a further kind of evidence with no author standing behind it,
+and a later step that read it would be reasoning from another principal's unfinished reasoning rather than
+from the record. What of a session **is** an entity is the `agent_session`: the identity half a runner's
+observations lack — host, checkout, branch, head — and its liveness, related to the task
+(`data_model.md#concepts`). It stays that and gains no transcript field. Where a session's transcript is
+itself the input to work, it is the source a task refers to, as session digestion already treats it
+(`workflows.md#session-digestion`), and not a property of the step whose session it was.
+
+**The cost accepted** is that a step owner cannot read how a previous step owner arrived at a verdict, only
+the verdict, the findings, and what they were made on. That is the cost the retrieval contract already
+chose, and the design's own view is that it is not one: a verdict whose grounds are not in its findings is a
+verdict that named too little evidence, and the remedy is a finding, not a transcript. **What would reopen
+it:** a reader in practice that needs a step's intermediate products — a draft rejected, a source read and
+set aside — and finds them in no entity; the remedy would be an entity for that product with an author,
+written by the step that made it, not a store of the session.
+
 ### Findings, verdicts, and what a blocking finding obliges
 
 A step owner judging a batch records **findings** (`vocabulary.md#finding`): one defect or objection each,
@@ -317,7 +370,13 @@ indefinitely.
 **Where a standing finding lands is decided by the specificity of the finding, not by who filed it.** A
 finding whose defect would recur in every batch an agent handles is standing **on the agent**, and the
 change is to that agent's `agent` prompt or the `agent_policy` it renders from
-(`conformance.md#direction-of-truth-per-class-of-record`). A finding whose defect is a property of a
+(`conformance.md#direction-of-truth-per-class-of-record`) — unless what the finding names is
+operator-specific. A prompt and an `agent_policy` are public and generic, describing a role and never an
+operator, so a standing finding whose content is a preference, a name, a figure, a locale, or anything else
+particular to this operator lands in a `task_policy` entity, the home that table names for operator
+preferences, which the agent reads by type through its `context_entity_types`; the prompt gains at most the
+instruction to read the type, and the write to the `task_policy` is an internal operational write, not a
+governance one. A finding whose defect is a property of a
 workflow — a step's condition too weak, a step missing, a `reads_to_enter` unstated — is standing **on the
 workflow**, and the change is to the `workflow` declaration for that (project, workflow type). A finding
 whose defect belongs to one step of one workflow is standing **on that step**, and the change is scoped to
@@ -326,16 +385,28 @@ prompt, where it would bind that agent across every workflow it handles and ther
 finding supports. Widening the scope of a lesson is the same failure as narrowing it — one produces a rule
 that fires where it does not belong, the other a rule that does not fire where it does.
 
-**Where the scope is uncertain, the swarm asks rather than choosing.** A finding whose right scope is not
-determinable from the finding itself is neither guessed nor silently dropped: the ambiguity is put to the
-operator as a checkpoint, reason `undetermined_scope`, naming the finding, the candidate scopes, and what
-each would bind. This is principle 7 at the classification — "we cannot tell which scope" is a third value
-beside "agent" and "workflow", and coercing it to either is the failure. It is also why the standing axis
-does not become an inference engine: the swarm proposes a scope it can defend and escalates the rest.
+**Where the classification is uncertain — on either axis — the swarm asks rather than choosing.** The
+scopes a finding can land on are ordered narrowest-first, and the narrowest is **this batch**: a one-off
+finding is a finding whose scope is the batch it was recorded on, and the standing scopes — step, workflow,
+agent — widen from there. So "does this generalize at all" and "to which scope" are one question with four
+candidate answers, and the classifier has a fifth value, `unknown`, for the case it cannot decide. That
+value is never coerced to the narrowest scope: a finding classified one-off by default is a lesson silently
+dropped, which is the permissive default principle 7 forbids and the one no reader can see, because a
+one-off finding is discharged with the batch and raises nothing afterwards. A finding whose scope is not
+determinable from the finding itself — whether between one-off and standing, or among the standing scopes
+— is neither guessed nor silently dropped: it is put to the operator as a checkpoint, reason
+`undetermined_scope`, naming the finding, the candidate scopes including the batch alone, and what each
+would bind. This is principle 7 at the classification — "we cannot tell" is a value beside the four scopes,
+and coercing it to any of them is the failure. It is also why the standing axis does not become an
+inference engine: the swarm proposes a scope it can defend and escalates the rest. One reason class serves
+both axes because they are one question; a second class for "one-off or standing" would be a second name
+for the same escalation (principle 9).
 
 **A change to what produced a finding is a change like any other, and reaches the record the same way.**
-Writes to `agent`, to `agent_policy`, and to a `workflow` declaration are governance writes, which are
-actions evaluated at the action gate (**Two policies**, below); a proposed change is a proposal until the
+A write to an `agent`, to an `agent_policy`, or to a `workflow` declaration is a governance write — the
+closed list of governance types is stated once, in
+`#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`, and not restated here — which is
+an action evaluated at the action gate; a proposed change is a proposal until the
 gate lets it through, and never a mutation an agent makes to itself on its own finding. That is not extra
 ceremony for this case, it is the rule those two classes already carry: a write that changes what a
 principal is, or what a workflow requires, is the question the gate exists to ask, whoever proposed it and
@@ -394,6 +465,107 @@ a workflow whose entry condition or `applies_when` reads an open institutionaliz
 type and holds the entry or seats the step; that is a change to a declaration and would be argued where
 declarations are (`workflows.md`).
 
+### Work is reviewed on the record, and a channel carries only what awaits the operator or cannot wait
+
+**Ruled (decision 37, 2026-09-06): the operator's view of work is a read of the record, and a channel
+carries a declared subset of it.** Registered in `conformance.md#the-register-of-open-design-decisions`. An
+operator wanting to see the results of all work — what is open, what is held, what closed and with which
+verdicts — reads the record: the batches and their chains, the sign-offs and the findings they carry, the
+checkpoints and who resolved them, the artifacts by edge. A dashboard is that read rendered for a
+principal, and it is nothing more than that read: it is made under the operator's credential and grant like
+every other read (`authority_model.md#grants`); it crosses no boundary, because the record is on the inside
+of the one boundary this design has (`#actions-are-entities-only-actions-are-taken`), so it is not an
+adapter and needs none; and it has no write contract of its own, because whatever the operator writes
+through it is one of the writes the design already attributes to the operator principal — a checkpoint's
+resolution, a finding on a batch (above), a `waived` sign-off, a task. The read is the review surface, not
+a copy of it: a client that kept a picture of the queue beside the record would be a second source of truth
+for the operator's decisions, and stale in the direction that matters (principle 11).
+
+**What a channel carries is the exception, and it is declared, not judged per message.** Three things
+reach a chat, a mailbox, or any other channel the `channel_config` binding names, and nothing else does by
+default. A **checkpoint awaiting the operator** is carried, because a decision nobody has seen is work
+stopped, and a queue nothing consumes is a report (principle 1); the operator-facing agent carries it
+(`workflows.md#operator-only`, `telegram.md#outbound-the-operations-a-step-takes-on-the-channel`). The
+**announcement path** carries what cannot wait for a read and may have no record to be read from — a halt
+entering and leaving, the window's aggregated drops and blocked claims (`failure_posture.md#the-rules`,
+rule 2). And a **delivery a workflow declared** — a `deliver` step whose brief named a channel
+(`workflows.md#research-and-analysis`) — carries the one thing its brief asked to be carried. Completed
+work is not on that list: a batch closing, a step signing, a finding filed, a task created reach no
+channel, because each is readable on the record the moment it is written, and the operator reads it there.
+Which reason classes and which deliveries a given operator wants carried, and to which chat, is data on the
+binding that names the channel, so the selectivity is the operator's to set and never the carrier's to
+infer — the carrier reads what the binding declares, and a message it cannot map to a declared class is
+not sent.
+
+**Reason.** The two surfaces answer different questions, and the design should not make one imitate the
+other. The record answers "what is the state of the work", which is a read over everything and is wrong the
+moment it is a copy; a channel answers "what needs me now", which is a small set the operator must not have
+to look for. Carrying everything to a channel makes the channel the review surface, and a channel is the
+wrong shape for it: it holds a message, not a chain; the message is a copy that is not corrected when the
+record is; and a channel that carries every completion is a channel the operator mutes, at which point the
+checkpoints it also carries are muted with it — the muted-announcement failure `telegram.md` names, arrived
+at from the other direction. Carrying nothing makes the decision queue a report. The declared subset is the
+shape that keeps the queue a control and the record the truth.
+
+**What this does not change.** The one decision queue is still read from the record, not from the channel:
+a checkpoint is open until resolved on the record whatever its delivery status, and a reply on a channel
+resolves one only by correlation to a checkpoint the record holds
+(`telegram.md#a-chat-message-is-not-an-instruction`). The operator's input on work they read, held or
+closed, is a finding and takes the standing axis (above; the next section for closed work). And nothing
+here adds an actor: the dashboard is the operator reading, and the operator is already a principal with a
+grant.
+
+**The cost accepted** is that a completion the operator would have wanted to hear of is not carried unless
+a workflow declares its delivery or the binding lists it, so an operator who does not read the record does
+not learn of closed work. Accepted: the alternative — a channel that carries completions by default — is the
+muted channel above, and an operator who wants a completion carried has two declared ways to say so. **What
+would reopen it:** a class of completion in practice that the operator needs carried and cannot declare
+through either — a delivery step or the binding — which would be a gap in what the binding can name, not in
+the rule.
+
+### Closed work is reviewed on the record and redone through intake, never reopened
+
+**Ruled (decision 38, 2026-09-06): a closed batch is never reopened; the operator's input on it is a
+finding, and the redo it calls for is a new task entering intake, referring to the closed batch's
+artifacts.** Registered in `conformance.md#the-register-of-open-design-decisions`. The operator may review
+any work the record holds, including work that closed without ever awaiting them, and record findings on it
+as on a held batch (above). What differs on a closed batch is only where the one-off half of a finding
+lands. On an open batch the correction is owed to the batch and made in it. On a closed batch there is no
+step to make it in: its sign-offs are written, its chain has ended, and its tasks are terminal. So the
+correction is a **task** — created with provenance back to the finding, referring by `REFERS_TO` to the
+artifacts the closed batch left and to the entities it produced, and entering intake like every created
+task (`work_model.md#intake-is-every-tasks-first-workflow`). Intake routes it to whichever workflow the redo
+needs, which may not be the workflow the original went through: a merged change is redone through a code
+workflow as a further change, a sent message through outreach as a follow-up, a published page through the
+copy workflow as a superseding version. The standing half of the finding is unchanged by the batch being
+closed: it produces an institutionalization task as decision 17 already rules.
+
+**Why not reopen.** Three rules the design already keeps decide it, and each would be broken by a reopen.
+*There is no task lifecycle* (`work_model.md#there-is-no-task-lifecycle-there-are-batches`): a terminal
+task returning to open is a status mutation a process would have to perform, and the `task` row already
+lists a reopened status among the things that are deliberately not a field (`data_model.md#concepts`).
+*Sequencing is data* (`#sequencing-is-data-successors-and-the-chain`): a batch is opened only by a closing
+sign-off naming a successor, or at intake for a created task, and a closed batch has no sign-off left to
+write, so reopening one would open a batch by a mechanism formation does not have. *A sign-off is terminal
+and pinned* (`data_model.md#record-conventions`): the closed batch's verdicts were made against the artifact
+heads they name and stay true as the account of what was judged then; a redo that wrote new sign-offs into
+the old batch would put verdicts on one batch that judged two different states of the work. The new task's
+batch is judged on its own, against the redone artifact's head, and the two accounts stand side by side,
+which is what an append-only record is for.
+
+**What the operator sees.** The chain of the redo begins at the new task's intake batch, and its relation
+to the closed work is read from edges rather than from a shared batch: the new task refers to the same
+artifacts; the finding that raised it names the batch it was recorded on; and the redone artifact carries
+its own history in the external system, which the adapter writes as observations. Nothing in the closed
+batch changes, and nothing needs to — "this was redone" is a read over the finding and the task, not a flag
+on the batch (principle 11). The code host's own reopen event already takes this path: `issues.reopened`
+is an observation, and further work is a new task through intake (`github.md#issues`).
+
+**The cost accepted** is a second batch, with its own intake, for work the operator sees as one thing.
+Accepted, because the batches are two: one judged the work as it was, the other judges it as redone, and a
+reader asking what was judged when gets both answers. **What would reopen it:** nothing about closed work
+in particular; it would reopen only if the design admitted a task lifecycle, which is C1 and is closed.
+
 ### One step set, defined once, tested for parity
 
 The step sequence has one home. Unavoidable copies are derived at import or held equal by a parity test;
@@ -433,14 +605,24 @@ sign off a step comes from its declared role and its grant; whether the merge th
 the action policy's. Neither the declaration, the grants, nor the policy governs internal operational
 writes to Neotoma, which are not actions — **except for two named classes, which are.**
 
-**Governance writes are actions.** A write to `agent`, `action_policy`, `agent_grant`, `swarm_roster`, the
-schema registry, or an `intake_rule` is an action, evaluated at the action gate under the project's
-`action_policy`. These six types define what the swarm may do and how work reaches it: a write to a grant
-changes which capabilities a principal holds, a write to an agent changes what a principal is, and a write
-to an intake rule changes which changes in the record become work
-(`work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`). That is the same question the gate exists to ask,
-arriving through a door the gate cannot see while the rule is "where the write goes". The list is closed
-and short, so the rule is checkable by inspection rather than judged per write.
+**Governance writes are actions, and the governance types are one closed list, stated here and nowhere
+else.** A write to any of these eight is an action, evaluated at the action gate under the project's
+`action_policy`: `agent` (what a principal is), `agent_policy` (the behavioural rule an agent's prompt
+renders from), a `workflow` declaration (how every future batch of its type is executed), `action_policy`
+(which actions may be taken, and under what gate), `agent_grant` (which capabilities a principal holds),
+`swarm_roster` (which principal fills a role), the schema registry (what the record can hold), and an
+`intake_rule` (which changes in the record become work —
+`work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`). The test
+that admits a type is what a write to it changes: each of the eight defines what the swarm may do, what a
+principal is, or how work reaches the swarm, so a write to one asks the question the gate exists to ask,
+arriving through a door the gate cannot see while the rule is "where the write goes". A type a step reads as
+an input — a `task_policy`, a `channel_config`, a `priority_rubric` — is not on the list: a write to it
+changes what the swarm knows, not what it may do, and reaches the gate only where it is lossy (below). The
+list is closed and short, so the rule is checkable by inspection rather than judged per write, and it has one
+home: every other document cites this section and none restates the members. It was found stated three ways
+with two memberships — the types named here, and three in the work model and in the standing-finding section
+— and a closed list in three places is not closed (principle 9); the eight above are the union, each admitted
+by the test.
 
 **Lossy record mutations are actions.** A write that can destroy what the record already holds is an
 action: merging entities, splitting one into several, migrating a field, and **any write whose blast
@@ -532,7 +714,9 @@ A `checkpoint` is the held state of its **subject** awaiting a principal's decis
 entity the checkpoint holds, named by its `CHECKPOINTS` edge (`data_model.md`), and it is one of exactly
 two things: an action the gate would not let through (reason `gate_hold`), or a task the swarm cannot
 advance (`failure_posture.md`). Nothing else is ever a subject — not a step, not a batch, not an artifact —
-because those are the only two kinds of thing the swarm can be stopped in the middle of doing.
+because those are the only two kinds of thing the swarm can be stopped in the middle of doing. A condition
+that stops a whole batch is raised on one of its tasks, never on the batch
+(`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`).
 
 **Why one term covers both, rather than two terms.** A held action and a held task are the same thing at
 the level this document defines: work that has stopped short of a decision only a principal can make, and

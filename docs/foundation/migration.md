@@ -17,7 +17,7 @@ entering intake on its own; 18, governance writes reserved by default; and 30, t
 live instance whose completion creates the next), and
 a read-only inventory of the production record taken 2026-09-05 through the Neotoma MCP (recorded in
 `status.md`). The bootstrap sequence this document orders against is the
-conformance suite's (`conformance_suite.md`); where the two disagree, this document says so. Revised by the simplification pass of 2026-09-05 (revision 29: gap G14 closed; `workflow policy` retired).
+conformance suite's (`conformance_suite.md`); where the two disagree, this document says so. Revised by the simplification pass of 2026-09-05 (revision 29: gap G14 closed; `workflow policy` retired). Revised by the memo-gap pass of 2026-09-06 (revision 31: gaps G1 and G12 closed).
 
 ## Purpose
 
@@ -179,7 +179,7 @@ accountable for what it drops. Count classes and populated-field measurements pe
 | Source type or field (retired names marked) | Disposition | Target | Where the information goes, and why the disposition is safe |
 |---|---|---|---|
 | `agent_definition` (retired name) | re-type | `agent` | the design's fields — `name`, `prompt_markdown`, `context_entity_types[]`, version — carry over. The credential field becomes the credential's binding to the `agent` (gap G17: no edge type for a credential binding is named). A status of planned on the source is a declaration-time fact the design already checks: a role the roster resolves to an agent with no runner raises `unspawnable_assignee` at declaration (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`). The tool allowlist, the write-set field, the tier, the harness preferences, and the model tier have no design field (gap G19) and ride in the interpretation as declared-but-unmodelled, never in `raw_fragments`. The coarse grant label is retired: the real grant is the `agent_grant` entity. Undeclared fields already sitting in the source's `raw_fragments` are read out per entity and either declared or dropped with a note before the merge, because a merge carries them nowhere (`data_model.md#record-conventions`) |
-| the swarm's roster | keep; correct | the roster the design names as the role resolver | one of the six governance types; its role-to-agent map is what inverts the retired declarations' agent names into roles (stage 4) and what every `owner_role` resolves through at claim time. Every role must resolve to an `agent` with a credential before any workflow is declared against it; roles that resolve to a planned agent are named in the read-back (stage 3). The design gives it no row in `data_model.md` (gap G21) and says it binds per project where the instance's is global (gap G20) |
+| the swarm's roster | keep; correct | the roster the design names as the role resolver | one of the governance types (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`); its role-to-agent map is what inverts the retired declarations' agent names into roles (stage 4) and what every `owner_role` resolves through at claim time. Every role must resolve to an `agent` with a credential before any workflow is declared against it; roles that resolve to a planned agent are named in the read-back (stage 3). The design gives it no row in `data_model.md` (gap G21) and says it binds per project where the instance's is global (gap G20) |
 | `agent_grant` | keep; correct | `agent_grant` | the design's fields (`sub`, `iss`, `capabilities[]`, `param_constraints`, `expires_at`) and the source's (`match_sub`, `match_iss`, and a linked host login on the grant) are a tolerant-reader case. Two corrections are governance writes: every capability naming a retired type is widened to name the new type **alongside** the old, before the holder's first write of the new type, and narrowed to the new type only after the holder is redeployed — the staged, dual-admit form `authority_model.md#grants` requires of a rotation, applied to a type name (gap G23: the design never says a type rename re-keys the grants that name it). And the human-device grants that carry wildcards are the fail-open shape the design forbids for a human; narrowing them is the operator's own act. The host login recorded on a grant is a credential binding living on the wrong entity (G17) |
 | `agent_policy` | keep | `agent_policy` | the design names it as the authoritative home of skill bodies and agent behavioural rules, and as one target of a standing finding. Prompts and skills rendered from it still carry retired words; the correction is to the entities, then a re-render (`conformance.md#direction-of-truth-per-class-of-record`) |
 | `agent_strategy` | keep | — | outside the four models. Each names an agent by credential rather than by role, which population's phase 1 will want to read; not migrated |
@@ -210,9 +210,10 @@ design needs it stated for types.
 
 ## How the migration is governed
 
-The design forbids the side door this document would be if it were executed by hand: every write to
-`agent`, `action_policy`, `agent_grant`, the roster, or the schema registry is a governance write and an
-action at the gate; every merge, split, and bulk correction is a lossy record mutation and an action at
+The design forbids the side door this document would be if it were executed by hand: every write to a
+governance type — the closed list is
+`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`'s — is a
+governance write and an action at the gate; every merge, split, and bulk correction is a lossy record mutation and an action at
 the gate (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`). A migration that
 registered the types, re-typed the agents, and rewrote the grants from a script with a bearer token would
 be exactly the ungoverned self-change the design exists to prevent, executed once at the largest blast
@@ -477,7 +478,12 @@ numbers are separate and only two of these are opened as decisions below.
   names". `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`
   names `agent`, `agent_policy`, and a `workflow` declaration. A closed list checkable by inspection must
   be one list; a `workflow` declaration and an `agent_policy` are either governance writes or they are
-  not, and the migration's stage 4 and stage 7 need to know which.
+  not, and the migration's stage 4 and stage 7 need to know which. Closed by the memo-gap pass of
+  2026-09-05: the list is stated once, in the first of those sections, as eight types — the six (with revision
+  30's `intake_rule`), plus `agent_policy` and the `workflow` declaration, each admitted by the test that
+  section states — and the
+  other two cite it; stage 4's re-typing of the declarations and stage 7's policy writes are governance
+  writes.
 - **G2 — the design renames types and the record cannot rename a type.** Three types are renamed and the
   record's primitives change fields, identity rules, and observations' owners, never an entity's type.
   The tolerant-reader rule (`data_model.md#record-conventions`) is written for field names; nothing says
@@ -518,7 +524,9 @@ numbers are separate and only two of these are opened as decisions below.
   design's own test.
 - **G12 — no edge from a task to an entity in the record it concerns.** `REFERS_TO` in the design is task
   to artifact. A task that concerns a transcription, a contact, or a payment configuration — the shape
-  every self-triggering daemon produces — has no named edge.
+  every self-triggering daemon produces — has no named edge. Closed by the memo-gap pass of 2026-09-06:
+  `REFERS_TO` task → entity is the edge, written by intake's `link` for what the task names and by a step
+  for what it discovers (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`).
 - **G13 — retiring `daemon_report` removes the only signal that distinguishes an idle daemon from a
   halted one.** The write contract retires it; the failure posture says a silently halted swarm is
   indistinguishable from an idle one. What carries a successful empty poll is unstated.
@@ -543,7 +551,7 @@ numbers are separate and only two of these are opened as decisions below.
   with a wildcard tool allowlist; the `agent` row has no such field and the grant models operations,
   entity types, and repositories, not harness tools.
 - **G20 — the roster binds per project in `workflows.md` and is one global map on the instance.**
-- **G21 — the roster has no row in `data_model.md`.** It is one of the six governance types and the
+- **G21 — the roster has no row in `data_model.md`.** It is one of the governance types and the
   resolver every `owner_role` depends on, and its fields and edges are stated nowhere.
 - **G22 — incremental migration versus one engine.** The design says migration is incremental and that
   two blind engines are the defect; an incremental engine cutover is two blind engines. This document

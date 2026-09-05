@@ -8,7 +8,7 @@ and which successors its tasks may enter, and never the state of a checkout. **D
 record for the built workflows (their step lists and fast paths, not their agent names), the agent
 policies governing outreach, payment, and people-data, `CLAUDE.md`'s people-data section, and PR #745
 operator review (2026-09-04), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Which workflows have a declaration on the record, and which are envisioned
-only, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `operator_preview` renamed `consent`; open decision 33).
+only, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `operator_preview` renamed `consent`; open decision 33). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 39 ruled here — what intake's `link` attaches and what hydration resolves; the payment `consent` row aligned with decision 27).
 
 ## Purpose
 
@@ -116,7 +116,7 @@ state (`work_model.md#intake-is-every-tasks-first-workflow`).
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
 | 1 | `classify` | `pm` step owner | yes | | the task's `action_type` declares the classes of action it expects to produce, from what the task does; `assigned_to` is written only where a named principal is the point; `PART_OF` to a parent, or children split out, where the work is an aggregate |
-| 2 | `link` | `pm` step owner | yes | | every existing external record the task concerns (an issue, a pull request, a thread, a transcript, a page) is attached as an artifact by edge; finding none is a valid close |
+| 2 | `link` | `pm` step owner | yes | | every existing record the task **names** is attached by edge: an external record (an issue, a pull request, a thread, a page) as an artifact, and a record already in the record (a transcription, an obligation, a profile, a plan, a contact) by `REFERS_TO` from the task; nothing is attached on relevance alone (`#what-link-attaches-and-what-it-leaves-to-hydration`); finding none is a valid close |
 | 3 | `dedupe` | `pm` step owner | yes | | the task is compared against tasks that are not terminal; a duplicate closes terminal with an edge to the task it duplicates and this batch closes with no successor |
 | 4 | `prioritize` | `pm` step owner | yes | | the task's priority is set from the `priority_rubric` entity, retrieved by type, never from the classifier's own sense of urgency |
 | 5 | `route` | `pm` step owner | yes | | the closing sign-off names one successor workflow, or none, or `operator-only` |
@@ -143,6 +143,66 @@ workflow like the others and is named the same way.
 `dedupe` are skipped and `classify` may copy the parent's declaration, since the parent's intake did that
 work; `prioritize` and `route` are never skipped, because a child may need a different workflow from its
 siblings (`work_model.md#parent-and-child-tasks`).
+
+### What `link` attaches, and what it leaves to hydration
+
+**Ruled (decision 39, 2026-09-06): intake attaches what the task names, records in the record and external
+records alike, and attaches nothing on relevance alone; what a step needs beyond that is resolved by
+hydration, per step, from those anchors.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. The question was whether a task should enter the
+record already related to everything in it that bears on the task — the entities in scope of a finance
+task, the people and threads around a meeting — so that context travels with the task instead of being
+found again at each step; or whether each step should retrieve its own context as it opens; or a hybrid of
+the two. The operator proposed the first and asked that the inclination be interrogated rather than taken.
+This section is that interrogation, and the answer is the hybrid, with a precise line between its halves.
+
+**What `link` attaches.** Every record the task **names** — by identifier, by reference in its
+description, or by the external record an adapter created it for — is attached by edge at intake: an
+external record as an artifact, `REFERS_TO` task → artifact; a record the record already holds as
+`REFERS_TO` task → entity (`data_model.md#relationships`). Names are what make the attachment bounded:
+`link` resolves each to the one entity that exists for it, by the bounded retrieval the record conventions
+require before any edge is written (`data_model.md#record-conventions`), and where a name resolves to
+nothing, nothing is created and nothing is guessed. A task that names nothing leaves `link` with no edges,
+which is a valid close.
+
+**What `link` does not attach: anything the task does not name.** A general pull — "everything
+contextually related" — fails three tests the design already applies. It has no stopping rule: relatedness
+is a judgement with no boundary, and an edge written on a judgement of relevance is read later, by every
+step and every reader, as a fact that the task concerns that entity, with the judgement gone. It goes
+stale: a link is a claim about relevance at intake time, and the step that reads it may run after the
+context has changed — which is the reason the design resolves a step's reads at the step and never before
+it (`gates_and_workflows.md#declaration-batch-projection`, hydration). And it is purpose-blind: attaching a
+task to every person entity that might bear on it is the profile-building the people-data rule forbids,
+where attaching the contact the task names is the relationship the rule exists for. The intake-wide pull is
+the pattern principle 11 warns of, applied to edges — a set of relations some process would have to keep
+true as relevance moves, or that quietly stays wrong.
+
+**What hydration resolves, and from where.** A step declares the entity types it must read
+(`reads_to_enter`, `reads_to_close`), the agent's definition bounds the types it may read at all
+(`data_model.md#what-each-actor-reads-and-writes`), and the hydration phase resolves the instances before
+the step opens. The instances are found from the task's anchors — its `REFERS_TO` edges and the edges those
+entities carry — by the same bounded retrieval, so that a payment step reads the profile the task names
+and not every profile, and a meeting step reads the contacts the transcript names and not the address
+book. This is the per-step arm of the hybrid, and it is where "which context" is decided, because the step
+is the one component that knows what it is about to judge. Context a step discovers the task concerns is
+written back onto the task as the same `REFERS_TO` edge `link` writes
+(`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`),
+so the anchors grow as the batch proceeds, and a later step, or a later batch on the same task, starts from
+more than intake had.
+
+**Reason.** The two arms answer different questions. `link` answers "what is this task about", which is
+knowable at intake and is a property of the task; hydration answers "what does this step need", which is
+knowable only at the step and is a property of the declaration. Giving intake the second question makes it
+guess; giving the step the first makes every step re-derive what the task already said. The anchors are
+the interface between them, and typed edges are what "well organized" means here: a reader walks from the
+task to what it concerns and from there to what a step read, and no free-text field holds any of it.
+
+**The cost accepted** is that a step whose declared type is not reachable from the task's anchors — a
+research step whose sources the task did not name — finds them by search, which is the ordinary retrieval
+an agent makes within its context types, and writes back what it found. **What would reopen it:** a class
+of task in practice whose steps repeatedly retrieve the same unnamed context, batch after batch — which
+would argue for naming it in the task at creation, or for a declaration that names it as a read, and not
+for a general pull at intake.
 
 ## feature
 
@@ -446,7 +506,7 @@ profile, fails `classify` at intake.
 |---|---|---|---|---|---|
 | 1 | `prepare` | payer | yes | | the payee, amount, currency, rail, and reference are assembled from the profile and the obligation and stored on the task; the profile's constraints (no memo, attendance gate, cadence) are applied |
 | 2 | `verify` | verifier | yes | on fail: `prepare` | payee and amount match the profile and the obligation; the verifier is a principal disjoint from the payer (`authority_model.md#structural-checks-quorum-and-separation-of-duties`) |
-| 3 | `consent` | operator-facing agent | yes | on fail: `prepare` | the checkpoint on the `payment` action, carrying payee, amount, and reference, is resolved by the operator |
+| 3 | `consent` | operator-facing agent | yes | on fail: `prepare` | the checkpoint on the `payment` action is resolved by the operator; it carries the payee, amount, currency, period, and rail exactly as the `verify` sign-off recorded them, and refers to that sign-off (`payments.md#a-payments-approver-is-shown-exactly-what-the-verifier-signed`, decision 27) |
 | 4 | `pay` | payer | yes | | the `payment` action taken through the action gate, keyed on its dedup key so a re-claim never pays twice (`work_model.md#at-least-once-implies-effect-dedup`) |
 | 5 | `reconcile` | verifier | yes | on fail: `pay` | the transfer is read back from the rail at its terminal status, matched to the obligation, and recorded as a `transaction` entity; the sign-off closes the batch |
 

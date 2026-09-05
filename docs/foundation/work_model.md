@@ -12,7 +12,7 @@ for changing the swarm's own operation), and PR #745 operator review (2026-09-05
 23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default),
 and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: one live instance,
 completion creates the next, `FOLLOWS` task to task), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the task-sources index, the intake rule, and open decision 36). Supersedes `docs/archive/task_execution_loop.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings).
 
 ## Purpose
 
@@ -98,13 +98,19 @@ A task carries status and edges only. Other state is a batch, lease, sign-off, o
 task is never routed, executing, verified, or in review as a status; the batch it is in and that batch's
 `FOLLOWS` chain say which of those is true (`gates_and_workflows.md`). This is C1: the states of the
 archived loop document were facts about a batch, a lease, or a sign-off written onto the task, where a
-process then had to keep them true (principle 11).
+process then had to keep them true (principle 11). The same rule holds at the end: a closed batch is never
+reopened and a terminal task never returns to open; the operator's input on closed work is a finding, and
+the redo it calls for is a new task through intake
+(`gates_and_workflows.md#closed-work-is-reviewed-on-the-record-and-redone-through-intake-never-reopened`).
 
 ### Intake is every task's first workflow
 
 Every task enters intake before any other workflow (`workflows.md#intake`): `classify`, `link`,
 `dedupe`, `prioritize`, `route` (closing sign-off names one successor, none, or operator-only). An
-unrouted task is a task with no intake batch — no separate unrouted state. Tasks a batch creates
+unrouted task is a task with no intake batch — no separate unrouted state. `link` attaches what the task
+names, a record in the record and an external one alike, and nothing on relevance alone; what a step needs
+beyond that is hydration's, per step (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`).
+Tasks a batch creates
 (children, detached tasks, tasks extracted from a meeting) enter intake themselves; a child may take
 intake's declared fast path and never skips intake.
 
@@ -180,9 +186,10 @@ self-initiated change ungoverned, which inverts the risk.
 
 **A workflow may create a workflow, and a workflow may modify an agent.** Both follow from the two
 sentences above and neither needs a new permission: the work is a task, the task goes through a
-workflow, and the writes the work makes are `agent`, `agent_policy`, and `workflow` writes, which
-`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken` already names **governance
-writes** and already makes actions at the action gate. So a batch may declare a new workflow, add a step,
+workflow, and the writes the work makes — to an `agent`, an `agent_policy`, a `workflow` declaration — are
+**governance writes**, on the closed list
+`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken` states once,
+and already actions at the action gate. So a batch may declare a new workflow, add a step,
 change a step's `owner_role`, or retire a declaration, and each such write is an action carrying its
 class, scored for confidence, resolved to a blast tier under the project's `action_policy`, and held as a
 checkpoint where the tier and the confidence say to hold it. The same holds for a change to what an agent
@@ -191,7 +198,8 @@ produce governance writes.
 
 **What prevents an ungoverned self-change is the action gate, and it is not a second mechanism.** Name it
 precisely, because "a self-modifying system with a gate on self-modification" is worth being able to
-point at: the six governance types are a **closed and short list**, so the rule is checkable by
+point at: the governance types are a **closed and short list**, stated once
+(`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`), so the rule is checkable by
 inspection rather than judged per write; every write to one of them is an action, so it is evaluated at
 the moment it would be taken rather than at the moment it was proposed; `operator_only` resolves to
 `NEVER` ahead of any policy, so a policy cannot demote a change the operator reserved; an unclassified
@@ -218,7 +226,8 @@ about how much autonomy this operator wants, and the design's job is to make the
 and enforceable rather than to make it.
 
 **Ruled (decision 18, 2026-09-05): a governance write is reserved to the operator by default.** Registered
-in `conformance.md#the-register-of-open-design-decisions`. Each of the six governance classes resolves to
+in `conformance.md#the-register-of-open-design-decisions`. Each governance class (the closed list in
+`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`) resolves to
 `NEVER` until the operator has written a policy value for it: a class with no value in the project's
 `action_policy` is not the policy default and not a high tier, it is `operator_only`, and no confidence and
 no action series clears it. That is what the unclassified case already did — a declared class in neither set
@@ -241,7 +250,7 @@ measurement matters, and it decides something else: whether to **grant** a given
 operator has watched the queue and trusts it. It cannot decide the default, because a default is what a
 project has before anyone has measured anything, and the safe direction to be unmeasured in is the reserved
 one. The recursion is worth naming, because it is where the default does its work: `action_policy` is itself
-one of the six classes, so the write that grants any class is a governance write, and the class covering it
+one of the governance classes, so the write that grants any class is a governance write, and the class covering it
 is reserved like the others. An operator therefore grants classes by writing the policy themselves, and the
 class that would let the swarm write its own policy is the one to grant last, if ever — under this default
 it is granted by no one's forgetting.

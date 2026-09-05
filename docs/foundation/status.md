@@ -1170,6 +1170,90 @@ words in their permitted senses, plus this revision's own uses of "fire" of a ru
 for an action). `check_foundation_anchors.py`: 0 broken links. `link_vocabulary_terms.py --check`: every
 linkable first mention linked. `test_foundation.py`: 51 passed, 1 xfailed (the budget marker), unchanged
 from the predecessor.
+## Revision 31 (2026-09-06): the memo gaps — five rulings, two rule extensions, four corrections
+
+The operator's voice memos of 2026-09-05 were audited against the branch at head `f485439` (revision 29),
+topic by topic. Seven design gaps remained, and the simplification pass had noticed three consistency
+defects and left them as corrections. This revision closes them. Nothing here was removed; every ruling is
+argued under a heading naming its subject in the document that owns it, and the register carries a row per
+decision. Numbers 37 to 41 were free at `f485439` and are taken here; the next is 42.
+
+**Rulings.** Decision 36 (`gates_and_workflows.md`): the operator's view of work is a read of the record —
+a dashboard is that read rendered for a principal, under the operator's grant; not an adapter, not an actor
+with a write contract — and a channel carries a declared subset: a checkpoint awaiting the operator, the
+announcement path, and a `deliver` step whose brief named a channel; completed work is read, never carried
+by default, and which classes are carried is data on the `channel_config` binding. Decision 37
+(`gates_and_workflows.md`): a closed batch is never reopened; the operator's input on it is a finding, and
+the redo is a new task through intake referring to the closed batch's artifacts, argued from *no task
+lifecycle*, *sequencing is data*, and the pinned sign-off. Decision 38 (`workflows.md`, the intake section):
+the operator's inclination — a task linked at intake to everything it is contextually related to — was
+interrogated as he asked, and the answer is the hybrid: `link` attaches what the task **names**, records in
+the record and external records alike, by `REFERS_TO` (closing `migration.md` gap G12), and nothing on
+relevance alone, because a general pull has no stopping rule, goes stale before the step that reads it, and
+is purpose-blind under the people-data rule; hydration resolves each step's declared reads from those
+anchors, and context a step discovers is written back as the same edge. Decision 39
+(`gates_and_workflows.md`): a step's close writes what it produced as the entities it is, names what it read
+on the sign-off (`REFERS_TO` sign-off → entity), and copies nothing — an as-of read along ingestion time at
+`signed_at` reproduces the read set, which was verified against the two rules it rests on (hydration writes
+every external read before the step; the sign-off names the rest with a time); reasoning is not written,
+and `agent_session` stays the identity-and-liveness half. Decision 40 (`authority_model.md#grants`): write
+admission per entity type is default-deny; the `agent_grant` is the allowlist, read at every enforcement
+point and widened by a governance write; attribution is required besides and prevents nothing.
+
+**Rule extensions.** The finding's one-off/standing classification has an `unknown` value that raises
+`undetermined_scope` and is never coerced to one-off: the scopes are ordered narrowest-first with the batch
+(one-off) as the narrowest, so "does this generalize" and "to which scope" are one question and one reason
+class serves both (`gates_and_workflows.md`, the standing-finding section; `vocabulary.md#finding`). And the
+source is kept, not only named: the raw thing an adapter read is stored as itself, so an observation can be
+re-interpreted, a write audited to what was returned, and an as-of state traced to the raw things read at
+the time (`adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`;
+`data_model.md#record-conventions`).
+
+**Corrections.** The governance-type list is one list in one home,
+`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`: eight types —
+the six it named after revision 30 added `intake_rule`, plus `agent_policy` and the `workflow` declaration, which
+`work_model.md` and the standing-finding section already treated as governance writes — each admitted by the stated test; every
+other mention now cites the section without counting (`work_model.md` ×4, `migration.md` ×3, the
+standing-finding section), and `migration.md` gap G1 records the closure. A condition of a batch is raised on
+one of its tasks, never on the batch (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`): the
+`unclaimed_step` paragraph named the batch as the subject against the two-subject rule, and now names one
+task, with one checkpoint per stopped batch and a refusal of a second with the same reason. The
+standing-finding ruling names `task_policy` as the home for an operator-specific standing finding, since a
+prompt and an `agent_policy` are public and generic (`conformance.md`'s direction-of-truth row updated to
+match). And `workflows.md`'s payment `consent` row now carries what decision 27 rules — payee, amount,
+currency, period, and rail as the `verify` sign-off recorded them, referring to that sign-off — where it
+read "payee, amount, and reference".
+
+**Already covered, found by grep before writing.** Provenance's link from an observation to its source and
+interpretation (`adapters.md`, revision 14) and the two as-of axes were in place; only the keeping of the
+source was missing. `issues.reopened` → a new task through intake (`github.md`, revision 13) already
+instantiated decision 38 for one system, and the `task` row's "a reopened status" under *deliberately not a
+field* already implied it. The retrieval contract's "another step owner's in-progress reasoning (there is
+none in the record — only sign-offs)" already stated decision 40's third part from the reader's side.
+
+**Drift, read on this branch 2026-09-06.**
+
+| Design rule (revision 31) | Built state | Where the gap lives |
+|---|---|---|
+| a finding whose classification cannot be determined is `unknown` and raises `undetermined_scope`; it is never coerced to one-off | **`classify_finding` returns `one_off` for anything its two heuristics do not match** (a cited rule, or a category recurrence at the threshold), which is the coercion the rule forbids; nothing it returns is a third value and nothing raises a checkpoint | `execution/daemons/apis/review_learning.py` (`classify_finding`) |
+| a closed batch is never reopened; a redo is a new task through intake | the batch entity is unbuilt (the schemas table above), so nothing on this branch reopens or refuses to reopen one; the reset-and-move-`due_date` pattern revision 27 records is the nearest built analogue of a reopen, and is superseded there | the unbuilt `batch` type; `execution/daemons/sylvia/sylvia.py` |
+| `REFERS_TO` task → record entity; sign-off → record entity | no relationship type but `DEPENDS_ON`, `PART_OF`, `REFERS_TO`, and `DUPLICATE_OF` can be written on the instance (`migration.md` G25); `REFERS_TO` exists, so the task → entity edge is writable today, and the sign-off → entity edge waits on the `sign_off` type | the schema registry; the unbuilt `sign_off` type |
+| write admission per entity type is default-deny by grant | 3 active grants on the instance carry a wildcard capability, 2 of them human-device grants (the record inventory, revision 28); the grant checker's fail-closed posture is `status.md`'s authority-model section | `agent_grant` rows on the instance; `lib/daemon_runtime/grant_checker` |
+| the operator's view of work is a read of the record; a channel carries a declared subset | not measured here: the built console lives on `origin/main`, not on this branch, and which classes the notifier carries was not re-read for this revision; `telegram.md`'s drift table (revision 24) records four independent chat clients, which is the shape the rule would consolidate | `telegram.md#drift-what-the-built-path-does-that-this-design-does-not-say` |
+
+**Size.** Measured 2026-09-06 with `wc -c` on this branch against head `a2d11b0` (revision 30, which landed
+while this pass was being written and was rebased onto; the two passes' edits to the governance list were merged
+into one list of eight) as the predecessor. The pass is **net +35.4k** across the foundation excluding
+`status.md` (865.7k → 901.1k). Per document: `gates_and_workflows.md` 52.3k → 69.2k (+17.0k); `workflows.md` 43.1k → 48.9k (+5.7k); `authority_model.md` 18.7k → 21.6k (+2.9k); `conformance.md` 32.8k → 35.6k (+2.8k); `adapters.md` 81.6k → 83.5k (+1.8k); `failure_posture.md` 23.6k → 24.9k (+1.4k); `data_model.md` 35.3k → 36.6k (+1.3k); `work_model.md` 91.1k → 92.1k (+1.0k); `migration.md` 71.3k → 72.2k (+0.9k); `vocabulary.md` 87.5k → 88.2k (+0.7k). The kernel is
+**174.9k**, up from 156.9k, almost all of it `gates_and_workflows.md`; three of the five rulings are argued in a
+kernel document because the checkpoint queue, the sign-off, and the standing finding are its subjects. Nothing
+was trimmed to fit, on the standing direction that content settles before budget, and
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure.
+
+**Checks**, on the rebased tree. `check_foundation_vocabulary.py`: 98 Never items, 62 Not-for items, 0 Never
+hits, 474 advisory hits. `check_foundation_anchors.py`: 0 broken links. `link_vocabulary_terms.py --check`:
+clean. `test_foundation.py`: 97 passed, 1 xfailed (the budget marker) — the count rose from 51 with the
+checker tests revision 30's companion commit added, not with this pass.
 
 ## `github.md`: the events with no defined response (revision 13, 2026-09-04)
 

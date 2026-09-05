@@ -7,7 +7,7 @@ undecided question **open** with its options, never resolving one to make the do
 section as decision; the swarm-spec section as proposal), synthesis `ent_b0ce322f768e4fc676b73139` (PR-20
 to PR-28, PR-34 to PR-38, C8, C9, C10, C13, C14, C17), prior art `ent_08460968e6f49dac21510f4a` (Track 2),
 the P4 brief `ent_683200acfb3ff5f03add966c`, `docs/multi_tenant.md`, and PR #745 operator review
-(2026-09-04). What is built, and where the substrate fails open, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder).
+(2026-09-04). What is built, and where the substrate fails open, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 41 ruled here — write admission per entity type is default-deny, and the grant is the allowlist).
 
 ## Purpose
 
@@ -104,6 +104,34 @@ above is the case, and it is not a posture choice: a failed read that yields a w
 inverts the direction of authority, granting *more* than the successful read would have. Principle 5 —
 fail closed on the field that carries the safety meaning — forbids it outright, whatever the posture for
 that read otherwise is.
+
+**Write admission per entity type is default-deny, and the grant is the allowlist (ruled, decision 41,
+2026-09-06).** Registered in `conformance.md#the-register-of-open-design-decisions`. The question was
+whether every principal may write every entity type, with attribution as the control that catches a wrong
+write, or whether a principal writes a type only where a grant names it. The second. It is already what the
+tuple says — a capability is operation × entity types × repositories, and zero grants is deny — stated here
+as the rule for the write side of the record, because the two answers are not symmetric in the direction
+they fail. Attribution makes a wrong write recoverable and is required of every write (`#attribution`); it
+prevents nothing, and a control that only records is a report (principle 1). A denied write costs a grant;
+an admitted wrong write to a `payment_profile`, a `workflow`, or a `contact` costs a recovery through the
+gate, or a fact about a person that should not have been written, and the safe direction to be unmeasured
+in is the closed one (principle 5). The maintenance an allowlist costs is an author, not a process: a grant
+is a declaration, not derived state, and principle 11's objection is to state that needs a watchdog to stay
+true — a grant stays true until someone changes it, a stale grant fails closed by denying, and a stale
+default-allow fails open by admitting. The governance types add a second control above admission — a
+granted write to one of them is still an action at the gate
+(`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`) — and
+every other type is admitted by grant alone. The allowlist is not a second mechanism: it is the
+`agent_grant` that already exists, read at every enforcement point (below), widened by a governance write
+that decision 18 reserves to the operator by default, so the cost is the one that ruling already accepted —
+a role that needs a new type waits on a grant — and not a new one. A capability naming every type is not an
+allowlist but the default-allow this rule rejects, written as a grant; it is the fail-open shape the stub
+paragraph above names, and the migration counts the instance's wildcard grants as a hazard for the same
+reason. The read side has the same shape, stated where reads are: an agent reads only the types its
+definition names, within what its grant admits (`data_model.md#what-each-actor-reads-and-writes`). **What
+would reopen it:** a project whose grants prove to be ceremony — every role granted every type on its first
+day — which is the finding decision 18 names for its own default, and would argue for coarser capabilities,
+not for default-allow.
 
 **The grant is read at every enforcement point.** Not from a cache: a checker answering from state it can
 no longer confirm is enforcing a snapshot, and a revocation then waits for however long the cache holds,

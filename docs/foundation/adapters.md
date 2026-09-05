@@ -8,7 +8,7 @@ and the action gate), `authority_model.md` (credentials bind to principals; appr
 steps whose effects leave the system), PR #745 operator review (2026-09-04, the adapter decision), and the
 operator's 2026-09-05 review (the inbound-delivery question and the adapter-packaging lean, both recorded
 below as open; and revision 18: when an artifact comes into existence, and what holds an effect before
-it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: continual inbound named as the inbound side, and the record's subscriptions as what an intake rule evaluates through). What is built, and where the adapter and the engine are still one process, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: open decision 35).
+it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: continual inbound named as the inbound side, and the record's subscriptions as what an intake rule evaluates through). What is built, and where the adapter and the engine are still one process, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: open decision 35). Revised by the memo-gap pass of 2026-09-06 (revision 31: the source is kept, not only named).
 
 ## Purpose
 
@@ -463,6 +463,24 @@ only a stamp naming a writer; it links an observation to a **source** — the ra
 where the value was extracted rather than transcribed, to the **interpretation** that produced it from that
 source. That is the chain sourcing and coverage ride on, and it is what makes an adapter's write auditable
 back to what the external system actually returned rather than only to the adapter's summary of it.
+
+**The source is kept, not only named, and the raw thing is what is kept.** A source in the record is the
+raw thing an adapter read — the delivery payload, the page a poll returned, the file a transcript came from
+— stored as itself, identified by the delivery id or by the read's coverage, with the observations
+interpreted from it linking back to it. Three things follow, and each is a reason an adapter never keeps a
+payload cache or a raw table of its own. An observation can be **re-interpreted**: a mapping corrected
+after the fact is applied to the source already held, producing new observations whose event time is the
+source's and whose ingestion time is now, so the correction is readable as a correction and the original
+reading stays; without the source, a wrong mapping is unrecoverable except by asking the external system
+again, which may no longer hold what it returned. A write is **auditable to what was returned**, not to the
+adapter's summary of it (principle 2): a reader who doubts an observation reads the source it names, which
+is the read-back the record can still give after the external system has moved on. And the source is what
+**as-of** reconstruction (below) bottoms out on: an entity's state at time T along ingestion time is the
+observations readable then, each linking to the source read then, so a past state is traceable to the raw
+things the swarm had actually read at that moment, and a step's sign-off, judged on those, is traceable
+through them to the external system's own words. What the source is not is a second copy of the external
+record's current state: it is the record of one read, at one time, with the coverage that read had, and the
+artifact's current state is the observations over all of them.
 
 **Reconstruction as of a time, in two senses that must not be conflated.** The record reconstructs an
 entity's state as it stood at a past moment, and it does so along two distinct time axes. One is **event

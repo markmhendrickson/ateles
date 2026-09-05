@@ -9,7 +9,7 @@ cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 opera
 and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional [step](#step), and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14,
 16–18, 23–29: the hold verb, a condition a step holds on, the `dependency_cycle` reason class, the consent
 tolerance on `action_policy`, and an [artifact](#artifact) `PART_OF` its containing artifact), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the `intake rule` entry). Format
-follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table).
+follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for).
 
 ## Purpose
 
@@ -237,9 +237,10 @@ runner id the persisted lease names.
 ### agent_session
 **Definition:** the identity half of a [runner](#runner)'s work that [observations](#observation) lack, such as host, checkout,
 branch, and head, related to the [task](#task) it executes.
-**See:** [`work_model.md#no-assignment-log-history-is-the-tasks-own-observations`](work_model.md#no-assignment-log-history-is-the-tasks-own-observations).
+**See:** [`work_model.md#no-assignment-log-history-is-the-tasks-own-observations`](work_model.md#no-assignment-log-history-is-the-tasks-own-observations),
+[`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`](gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read).
 **Never:** "run history", "dispatch record".
-**Not for:** —
+**Not for:** the session's transcript or reasoning as a field on it; a copy of what the step read (the sign-off names it, and an as-of read returns it).
 
 ### observation
 **Definition:** one append-only, timestamped, provenance-bearing write to an entity in the record, from
@@ -459,7 +460,9 @@ recorded; it is non-blocking, because it asserts no defect, and no sign-off is w
 discharged when the [batch](#batch)'s work is corrected; a **standing** finding names a defect that will
 recur, and correcting the work alone does not discharge it — a change to the [agent](#agent), the
 [workflow](#workflow), or the [step](#step) that produced it is owed besides. An [operator](#operator)'s
-input on reviewed work is a finding and is judged on both axes.
+input on reviewed work is a finding and is judged on both axes. The scope a finding lands on is one of
+four, narrowest first — the batch (one-off), the step, the workflow, the agent — or `unknown`, which raises
+a [checkpoint](#checkpoint) (reason `undetermined_scope`) and is never coerced to one-off.
 **See:** [`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges),
 [`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`](gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it).
 **Never:** —

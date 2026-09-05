@@ -10,7 +10,7 @@ from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-12 to PR-15, C5, C17), prio
 `deferral_must_be_bounded_and_escalate_off_neotoma`, `unknown_must_stay_distinct_from_a_verdict`,
 `nyctea_635_becomes_load_bearing`, PR #745 operator review (2026-09-04), and the operator memos of
 2026-09-05 (the `undetermined_scope` reason class), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: a hold on a discovered condition is a deferral under rule 5; the `dependency_cycle` reason class). What is built is `status.md`;
-how a checkpoint is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder).
+how a checkpoint is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: a condition of a batch is raised on one of its tasks, never on the batch).
 
 ## Purpose
 
@@ -214,6 +214,19 @@ through the one decision queue, by the one resolution protocol, that checkpoints
 build a second gate, a second queue, or a second notification path for task-level failure (principle 6):
 a queue nobody consumes is a report, not a control (principle 1).
 
+**A condition of a batch is raised on one of its tasks, never on the batch.** A checkpoint has exactly one
+subject, an action or a task (`gates_and_workflows.md#the-checkpoint`), and a batch is neither. Where the
+condition stops a whole batch — no step of its workflow opened (`unreadable_workflow`), a step nobody has
+claimed (`unclaimed_step`), a loop of dependencies (`dependency_cycle`) — one checkpoint is raised, its
+subject is one task of the batch, and it names the batch and the step in its `needed_input`. One suffices:
+the batch's other tasks are read as held through their `ADDRESSED_BY` edge to the batch the subject is
+attached to, so the queue carries one row per stopped batch rather than one per task, and a second
+checkpoint with the same reason on any task of a batch that already has one open is not raised — the raiser
+reads the open checkpoints on the batch's tasks first, which is the bounded retrieval every write that
+creates an entity already makes (`data_model.md#record-conventions`). Which of the batch's tasks is the
+subject carries no meaning, and nothing reads it as one. "The batch's tasks are escalated with one
+checkpoint", wherever the documents say it, means this.
+
 **Escalation reorders; it never signs.** A checkpoint raised on a step nobody has claimed, or on a task
 the swarm cannot advance, changes the order in which claimable work is offered and what a principal
 attends to first. It changes no verdict and closes no step. A step blocked on a step owner who never
@@ -226,8 +239,9 @@ been open, and stops there.
 
 **An open step nobody has claimed raises a checkpoint after a declared interval, against its owner role.**
 Nothing else bounds it: no lease exists on an unclaimed step, so nothing lapses, and pending is a
-legitimate state, so no reader errors. The checkpoint's subject is the step's batch and its reason class is
-`unclaimed_step`; it names the step, the `owner_role` declared for it, and how long the step has been open,
+legitimate state, so no reader errors. The checkpoint's subject is one task of the step's batch (above) and
+its reason class is `unclaimed_step`; it names the batch, the step, the `owner_role` declared for it, and how
+long the step has been open,
 and it awaits the operator. It is routed against the **owner role** rather than the batch because the
 condition is an owner who is absent or does not exist, not work that is unimportant — routing it at the
 role is what makes an absent step owner legible as one. The interval is declared on the workflow, not
