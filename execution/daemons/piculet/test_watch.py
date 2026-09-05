@@ -215,3 +215,146 @@ def test_log_warning_notify_lib_priority_and_args_unchanged(monkeypatch):
     watch.log_warning("hmm")
 
     assert captured == {"message": "piculet warning: hmm", "priority": "info"}
+
+
+# ── Watermark / meeting-recording partitioning (ateles#421) ─────────────────
+#
+# The daemon logged "Found 88 new meeting recording(s)" once a minute forever:
+# recordings with no transcript were never added to the seen-set, so they were
+# re-found and re-announced on every poll. partition_meeting_recordings draws
+# the line the old loop was missing.
+
+
+def _touch(path: Path, text: str = "x") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def test_partition_splits_ready_from_pending(tmp_path):
+    ready = _touch(tmp_path / "a.wav")
+    _touch(tmp_path / "a.txt")  # transcript present → ready
+    pending = _touch(tmp_path / "b.wav")  # no transcript → pending
+
+    got_ready, got_pending = watch.partition_meeting_recordings(
+        [ready, pending], set()
+    )
+    assert [p.name for p in got_ready] == ["a.wav"]
+    assert [p.name for p in got_pending] == ["b.wav"]
+
+
+def test_partition_reports_nothing_when_all_pending(tmp_path):
+    """The 88-file case: no transcripts means nothing is 'new' to announce."""
+    recs = [_touch(tmp_path / f"r{i}.wav") for i in range(88)]
+    ready, pending = watch.partition_meeting_recordings(recs, set())
+    assert ready == []
+    assert len(pending) == 88
+
+
+def test_pending_file_becomes_ready_once_transcript_lands(tmp_path):
+    """A pending recording is re-examined, not abandoned."""
+    rec = _touch(tmp_path / "late.wav")
+    ready, pending = watch.partition_meeting_recordings([rec], set())
+    assert ready == [] and pending == [rec]
+
+    _touch(tmp_path / "late.txt")
+    ready, pending = watch.partition_meeting_recordings([rec], set())
+    assert ready == [rec] and pending == []
+
+
+def test_find_new_meeting_recordings_excludes_seen(tmp_path, monkeypatch):
+    _touch(tmp_path / "seen.wav")
+    _touch(tmp_path / "fresh.wav")
+    monkeypatch.setattr(watch, "_audio_imports_dir", lambda: tmp_path)
+    found = watch.find_new_meeting_recordings({"seen.wav"})
+    assert [p.name for p in found] == ["fresh.wav"]
+
+
+# ── Clarity gate: held-memo bookkeeping ─────────────────────────────────────
+
+
+def test_held_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(watch, "HELD_STATE_FILE", tmp_path / "held.json")
+    assert watch.load_held() == {}
+    watch.save_held({"memo.m4a": {"reason": "check 1", "checks": [1]}})
+    assert watch.load_held()["memo.m4a"]["checks"] == [1]
+
+
+def test_load_held_tolerates_corrupt_state(tmp_path, monkeypatch):
+    bad = tmp_path / "held.json"
+    bad.write_text("{not json")
+    monkeypatch.setattr(watch, "HELD_STATE_FILE", bad)
+    assert watch.load_held() == {}
+
+
+def test_hold_notification_names_check_and_shows_flagged_span():
+    from lib.transcript_clarity import assess_transcript
+
+    text = "A real sentence about the pipeline. " + ("Maybe there's a way to avoid this. " * 20)
+    report = assess_transcript(text, duration_seconds=500.0)
+    msg = watch.format_hold_notification("memo.m4a", report, None)
+
+    assert "memo.m4a" in msg
+    assert "NOT processed" in msg
+    assert "Check 1" in msg
+    assert "avoid this" in msg
+    assert watch.RELEASE_COMMAND in msg
+    # The operator gets the flagged span, not the whole transcript: the quoted
+    # excerpt is bounded regardless of how long the memo was.
+    assert all(len(f.excerpt) <= 200 for f in report.findings)
+    assert text.strip() not in msg
+
+
+def test_hold_notification_includes_transcript_path(tmp_path):
+    from lib.transcript_clarity import assess_transcript
+
+    report = assess_transcript("too short.", duration_seconds=60.0)
+    p = tmp_path / "t.txt"
+    msg = watch.format_hold_notification("memo.m4a", report, p)
+    assert str(p) in msg
+
+
+def test_release_unknown_memo_is_an_error(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(watch, "HELD_STATE_FILE", tmp_path / "held.json")
+    watch.save_held({"real.m4a": {"reason": "check 2"}})
+    assert watch.release_held("nonexistent.m4a") == 1
+    assert "real.m4a" in capsys.readouterr().out
+
+
+def test_discard_removes_from_held(tmp_path, monkeypatch):
+    monkeypatch.setattr(watch, "HELD_STATE_FILE", tmp_path / "held.json")
+    monkeypatch.setattr(watch, "notify", lambda *a, **k: None)
+    watch.save_held({"memo.m4a": {"reason": "check 2"}})
+    assert watch.release_held("memo.m4a", discard=True) == 0
+    assert watch.load_held() == {}
+
+
+def test_release_keeps_memo_held_when_extraction_fails(tmp_path, monkeypatch):
+    """A failed release must not lose the memo."""
+    monkeypatch.setattr(watch, "HELD_STATE_FILE", tmp_path / "held.json")
+    monkeypatch.setattr(watch, "notify", lambda *a, **k: None)
+    monkeypatch.setattr(watch, "log_error", lambda *a, **k: None)
+
+    def boom(_files):
+        raise RuntimeError("claude CLI missing")
+
+    monkeypatch.setattr(watch, "run_entity_extraction", boom)
+    watch.save_held({"memo.m4a": {"reason": "check 1"}})
+    assert watch.release_held("memo.m4a") == 1
+    assert "memo.m4a" in watch.load_held()
+
+
+def test_release_substring_match_works(tmp_path, monkeypatch):
+    monkeypatch.setattr(watch, "HELD_STATE_FILE", tmp_path / "held.json")
+    monkeypatch.setattr(watch, "notify", lambda *a, **k: None)
+    monkeypatch.setattr(watch, "run_entity_extraction", lambda _f: "none")
+    watch.save_held({"20260905 093900-7C37CAC3.m4a": {"reason": "check 2"}})
+    assert watch.release_held("7C37CAC3") == 0
+    assert watch.load_held() == {}
+
+
+def test_release_ambiguous_substring_refuses(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(watch, "HELD_STATE_FILE", tmp_path / "held.json")
+    watch.save_held({"memo_a.m4a": {"reason": "x"}, "memo_b.m4a": {"reason": "y"}})
+    assert watch.release_held("memo") == 1
+    assert "be more specific" in capsys.readouterr().out
