@@ -70,8 +70,17 @@ def _audio_imports_dir() -> Path:
     )
 
 
+# Formats Voice Memos and the import path actually produce in
+# RECORDINGS_DIR (ateles#748: .qta was silently skipped everywhere this set
+# wasn't consulted — the imports scan, the clarity-gate duration lookup in
+# assess_memo, etc.). Single source of truth: every audio-file enumeration or
+# suffix check in this module must consult this constant, never repeat the
+# literal, so the two cannot diverge again.
 AUDIO_EXTENSIONS = {".m4a", ".qta"}
-# Meeting recordings from mic-recorder are WAV files.
+# Meeting recordings from mic-recorder are WAV files, written to a different
+# directory (imports/audio/) that also holds archived .m4a/.qta copies of
+# already-processed Voice Memos — MEETING_AUDIO_EXTENSIONS stays WAV-only so
+# those archived copies are never misreported as meeting recordings.
 MEETING_AUDIO_EXTENSIONS = {".wav"}
 
 POLL_INTERVAL_SECONDS = 60  # check every minute; launchd keeps it alive
@@ -746,10 +755,19 @@ def assess_memo(memo: Path) -> tuple[object | None, Path | None]:
         log.warning(f"Could not read transcript {transcript.name}: {e}")
         return None, transcript
 
-    audio = transcript.with_suffix(".wav")
-    if not audio.exists():
-        audio = transcript.with_suffix(".m4a")
-    duration = _audio_duration_seconds(audio) if audio.exists() else None
+    # The transcript sidecar shares a stem with its source audio file, but the
+    # extension can be any format Voice Memos or the import path produces
+    # (ateles#748 missed .qta here even after AUDIO_EXTENSIONS gained it,
+    # because this lookup carried its own hardcoded ".m4a" fallback instead of
+    # using the shared constant — duration silently came back None for every
+    # .qta memo, degrading the clarity gate's measurement without an error).
+    audio = None
+    for ext in (".wav", *sorted(AUDIO_EXTENSIONS)):
+        candidate = transcript.with_suffix(ext)
+        if candidate.exists():
+            audio = candidate
+            break
+    duration = _audio_duration_seconds(audio) if audio is not None else None
     return assess_transcript(text, duration_seconds=duration), transcript
 
 
