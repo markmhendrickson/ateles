@@ -7,7 +7,8 @@ PR-20, PR-21, C3 to C6, C11), prior art `ent_08460968e6f49dac21510f4a`, gate-sta
 decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `unclassified_action_type_fails_closed_and_loudly`, `gate_advisory_and_enforcing_paths_must_agree`,
 `gating_vocabulary_order_is_load_bearing`, throughput plan `ent_18b902cf72822373f9da8ced` decision
-`gate_machinery_is_already_pr_independent`, and PR #745 operator review (2026-09-04). Supersedes
+`gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
+memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
 is `status.md`; how each concept is recorded is `data_model.md`.
 
@@ -214,6 +215,73 @@ could not verify, and says so plainly, rather than blocking on a defect it infer
 defect is a reason to look; it is not a reason to block, because a block asserts that the defect is there
 and a principal downstream will act on that assertion without re-deriving it. This is principle 2 at the
 verdict: a claim that was never read back is not evidence.
+
+### A finding is one-off or standing, and a standing one obliges a change to what produced it
+
+The rules above decide what a finding obliges **of this batch**. A second question is asked of the same
+finding and answered separately: whether the defect it names is particular to the work in front of it, or
+is a property of how that work gets made. A **one-off** finding is discharged when the batch's work is
+corrected. A **standing** finding is not: the same defect will be produced again by the next batch of the
+same kind, because nothing about the producing agent, workflow, or step changed. **Correcting the work a
+standing finding names, and stopping there, is not discharging it** — the correction is owed to the batch,
+and a change to what produced it is owed besides. A swarm that only ever repairs its output re-learns every
+lesson once per batch, which is the shape principle 1 names: nothing binds, so nothing stops recurring.
+
+**The operator's input on reviewed work is a finding, and it is judged on both axes.** An operator
+reviewing a batch — at `operator_preview`, at `consent`, at `present`, or on any work the record already
+holds — records findings the way any step owner does (`vocabulary.md#finding`), and they carry severity
+and bind the same way. Nothing about the operator's input needs a second intake path, a second queue, or a
+feedback entity beside the finding: the existing primitive already carries a judgement from a principal
+about a batch, with provenance, and extending it is what principle 6 requires. What the operator's input
+does raise more often than a lens's is the standing axis, because the operator is judging output against a
+standard the swarm has not been told, and a standard nobody wrote down produces the same defect
+indefinitely.
+
+**Where a standing finding lands is decided by the specificity of the finding, not by who filed it.** A
+finding whose defect would recur in every batch an agent handles is standing **on the agent**, and the
+change is to that agent's `agent` prompt or the `agent_policy` it renders from
+(`conformance.md#direction-of-truth-per-class-of-record`). A finding whose defect is a property of a
+workflow — a step's condition too weak, a step missing, a `reads_to_enter` unstated — is standing **on the
+workflow**, and the change is to the `workflow` declaration for that (project, workflow type). A finding
+whose defect belongs to one step of one workflow is standing **on that step**, and the change is scoped to
+it. The three are ordered narrowest-first: a defect statable about a step is not written into an agent's
+prompt, where it would bind that agent across every workflow it handles and thereby assert more than the
+finding supports. Widening the scope of a lesson is the same failure as narrowing it — one produces a rule
+that fires where it does not belong, the other a rule that does not fire where it does.
+
+**Where the scope is uncertain, the swarm asks rather than choosing.** A finding whose right scope is not
+determinable from the finding itself is neither guessed nor silently dropped: the ambiguity is put to the
+operator as a checkpoint, reason `undetermined_scope`, naming the finding, the candidate scopes, and what
+each would bind. This is principle 7 at the classification — "we cannot tell which scope" is a third value
+beside "agent" and "workflow", and coercing it to either is the failure. It is also why the standing axis
+does not become an inference engine: the swarm proposes a scope it can defend and escalates the rest.
+
+**A change to what produced a finding is a change like any other, and reaches the record the same way.**
+Writes to `agent`, to `agent_policy`, and to a `workflow` declaration are governance writes, which are
+actions evaluated at the action gate (**Two policies**, below); a proposed change is a proposal until the
+gate lets it through, and never a mutation an agent makes to itself on its own finding. That is not extra
+ceremony for this case, it is the rule those two classes already carry: a write that changes what a
+principal is, or what a workflow requires, is the question the gate exists to ask, whoever proposed it and
+however good the reason. So a standing finding produces a **proposed** change with provenance back to the
+finding that raised it, and a principal with the authority to make that change takes it as an action.
+
+**Open decision 17: whether institutionalizing a standing finding is itself a workflow.** The operator's
+stated position is that it should be — that a standing finding produces tasks, that those tasks are
+institutionalization tasks, and that they go through a workflow built for them, so that the swarm's changes
+to itself are governed by the same machinery as its outward work. That reading is consistent with
+everything above and with `work_model.md#a-task-is-executed-only-through-a-workflow`, which admits no side
+door: a task that changes an agent or a workflow is executed through a workflow like any other, and its
+governance writes reach the gate at their step. What is **not** settled, and is not settled here, is the
+sequencing: whether the batch that raised the standing finding waits on the institutionalization task it
+created, or closes and leaves that task to its own intake. Deciding that requires ruling whether a
+workflow may hold on a condition discovered mid-flight, and whether a batch may depend on a task it
+created — both of which are open and neither of which this revision rules. Until they are ruled, a
+standing finding's proposed change is filed as a task entering intake on its own
+(`work_model.md#intake-is-every-tasks-first-workflow`), and the batch that raised it closes on its own
+steps; that is the state a reader should assume and not the design's ruling. The wider question the
+operator's position implies — whether workflows are the general mechanism for changing the swarm's own
+operation, and not only for doing its outward work — is answered *yes* by the no-side-door rule already,
+and it is the sequencing, not the principle, that is open.
 
 ### One step set, defined once, tested for parity
 

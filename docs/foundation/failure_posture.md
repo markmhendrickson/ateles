@@ -8,7 +8,8 @@ from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-12 to PR-15, C5, C17), prio
 `halt_work_but_never_stop_observing`, `the_halt_must_announce_itself_off_neotoma`,
 `reachability_check_belongs_at_dispatch_with_mid_task_writes_failing_closed`,
 `deferral_must_be_bounded_and_escalate_off_neotoma`, `unknown_must_stay_distinct_from_a_verdict`,
-`nyctea_635_becomes_load_bearing`, and PR #745 operator review (2026-09-04). What is built is `status.md`;
+`nyctea_635_becomes_load_bearing`, PR #745 operator review (2026-09-04), and the operator memos of
+2026-09-05 (the `undetermined_scope` reason class). What is built is `status.md`;
 how a checkpoint is recorded is `data_model.md`.
 
 ## Purpose
@@ -195,7 +196,11 @@ nobody), `unclaimed_step` (above), `undeclared_dependency` (a step could not rea
 the hold reached its bound — `gates_and_workflows.md#declaration-batch-projection`), `capability_denied`
 (a principal was denied a capability its step needed — `authority_model.md#grants`), and
 `lossy_record_mutation` (a write to the record whose blast exceeds the declared count —
-`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`); a policy may declare more. A checkpoint on a task
+`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`), and `undetermined_scope` (a
+standing finding whose right scope — the agent, the workflow, or one step — cannot be determined from the
+finding, so it is put to the operator rather than guessed —
+`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`);
+a policy may declare more. A checkpoint on a task
 carries the reason, the needed input, the options, and whom it awaits, and is presented and resolved
 through the one decision queue, by the one resolution protocol, that checkpoints on actions use. Do not
 build a second gate, a second queue, or a second notification path for task-level failure (principle 6):

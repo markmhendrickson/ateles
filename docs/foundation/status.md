@@ -459,6 +459,23 @@ named on this branch; nothing on prod or on any deployed checkout was inspected.
 | an adapter's failed read of an external system is retried with backoff, or deferred to the reset time the system states; the schedule is per external system, not per waiting step | nothing; rule 8 classified the runner's failure to start, and no rule covered an adapter's read | **designed and not built** at the boundary. Backoff exists on this branch only for task re-dispatch (`task_watchdog.py`, exponential, capped), which is rule 5's path and not this one. No adapter read path applies backoff, none reads a stated reset time, and `github_gateway.py`'s only sleep is a fixed hourly loop — so a failing external read is re-requested on the next tick at a constant rate | the adapter read paths; `github_gateway.py`; the mail poller |
 | the as-of read along two axes — event time and ingestion time — as the derivation behind freshness, what a sign-off judged, and the reconstruction of a past drop or hold | nothing; the foundation derived freshness from provenance and never named the reconstruction that derivation needs | **designed and not built.** The record supplies the capability (`at` for event time, `at_ingested` for ingestion time), and nothing in this checkout calls it: neither token appears on this branch. Every reader that asks what was known at a past moment reads current state instead, so a backfilled observation is indistinguishable from one that was available at the time | every freshness read; the sign-off review path; forensic capture |
 
+## Revision 16 (2026-09-05): the standing finding and where a lesson lands
+
+One rule from the operator's 2026-09-05 12:48 and 12:52 voice memos, written into
+`gates_and_workflows.md` and `vocabulary.md`, with one reason class added in `failure_posture.md` and
+`data_model.md`. Read on this branch by reading the module named below; nothing on prod or on any deployed
+checkout was inspected. The *review* half of those memos — that the operator sees the swarm's work,
+reviews it, and that input reopens the work — was already stated across `gates_and_workflows.md#the-checkpoint`,
+`workflows.md` (`operator_preview`, `consent`, `present`/`await`/`record`, and `on_fail`), and
+`adapters.md#telegram` (a notification is an action; its delivery is never the checkpoint's resolution), so
+nothing was added for it (principle 9).
+
+| Design rule (revision 16) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| a finding is one-off or standing on a second axis; a standing one is not discharged by correcting the work alone; an operator's input on reviewed work is a finding judged on both axes | nothing; a finding carried severity and the routability kind, and no document said that a defect which will recur obliges a change to what produced it | **partially built, on a narrower source and a narrower scope.** `review_learning.py` already classifies a PR-review finding as `systemic` or `one_off` and turns a systemic one into an operator-gated `proposed_skill_update` with provenance — the same loop this rule names, arrived at from ateles#82. It diverges on three counts: its only source is a panelist's review text parsed for `[BLOCKING]` headers, so an operator's input on reviewed work never enters it; its classifier is a citation heuristic over five regexes rather than a judgement recorded on the finding; and its only landing scope is an agent (`owning_agent`, defaulted by lens to one of two hardcoded names), so the workflow and step scopes have no counterpart at all | `execution/daemons/apis/review_learning.py` (`classify_finding`, `SYSTEMIC_CITATION_PATTERNS`, `propose_skill_updates`, `OWNER_BY_LENS`, `DEFAULT_OWNER`); `swarm_dispatch.py`'s call of it |
+| a standing finding whose scope cannot be determined raises a checkpoint, reason `undetermined_scope` | nothing | **designed and not built.** The token `undetermined_scope` appears nowhere on this branch. `classify_finding` returns `one_off` for anything its heuristic does not match, which coerces "cannot tell" to "not standing" — the collapse principle 7 forbids | `review_learning.py:classify_finding` |
+| open decision 17: whether institutionalizing a standing finding is itself a workflow | nothing | not a mechanism, so not buildable as one. What is measurable is that no `workflow` entity declares anything of the kind, and the built loop's output is a `proposed_skill_update` payload the operator approves out of band rather than a task entering intake | no `workflow_definition` for it |
+
 ## `github.md`: the events with no defined response (revision 13, 2026-09-04)
 
 `docs/foundation/github.md` enumerates every event GitHub can deliver, from GitHub's own webhook event and
@@ -609,6 +626,13 @@ content settles before budget, and the budget pass is the operator's, run last a
 changes with this revision is that the budget decision is no longer deferrable on the kernel: it was
 under the block at every earlier revision and is not now, so the pass that follows is a cut, a split, or
 an amendment of the caps rather than a tidying.
+
+**On revision 16 the kernel is 65.7k** (`principles.md` 13.4k, `work_model.md` 16.1k,
+`gates_and_workflows.md` 36.2k), measured 2026-09-05 with `wc -c` on this branch. The whole of the growth
+since revision 12 is `gates_and_workflows.md`, which now also carries the hydration phase (revision 14)
+and the standing-finding rule (revision 16). The budget decision above is unchanged and still the
+operator's; `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected
+failure that records it.
 
 The kernel was 39.0k of the 40k block after revision 8, still under it and with less room than before;
 `data_model.md` grew most, carrying the record-usage contract's two tables. Revision 8 wrote content the

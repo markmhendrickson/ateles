@@ -5,7 +5,8 @@
 checkout implements. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-03, PR-08, C10), prior
 art `ent_08460968e6f49dac21510f4a` (A2A `TaskState`, RFC 8693, Camunda), [task](#task)
 `ent_da60df3beccb675ef8c8c0c5`, the ateles#378 glossary ([operator](#operator) section, and the ux-signed swarm section
-cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, and PR #745 operator review (2026-09-04). Format
+cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 operator review (2026-09-04),
+and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)). Format
 follows Neotoma's `docs/vocabulary/canonical_terms.md`.
 
 ## Purpose
@@ -413,11 +414,18 @@ routed to an implementer, though the step owner still holds the terminal sign-of
 attestation**, needing a judgement only a [principal](#principal) can make, which is not routable at all. A blocking
 finding cites an executed command and its output; one reasoned about but not reproduced is filed as
 non-blocking, stating what could not be verified.
-**See:** [`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges).
+**One-off or standing:** a second axis, judged separately from severity. A **one-off** finding is
+discharged when the [batch](#batch)'s work is corrected; a **standing** finding names a defect that will
+recur, and correcting the work alone does not discharge it — a change to the [agent](#agent), the
+[workflow](#workflow), or the [step](#step) that produced it is owed besides. An [operator](#operator)'s
+input on reviewed work is a finding and is judged on both axes.
+**See:** [`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges),
+[`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`](gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it).
 **Never:** —
 **Not for:** a finding as the thing that closes a step (the [sign-off](#sign-off) closes it); a comment on
 an [artifact](#artifact) as a finding (a remark carries no severity and reaches no step); a blocking
-finding that names no executed check.
+finding that names no executed check; a standing finding discharged by correcting only the work it was
+filed against.
 
 ### verdict
 **Definition:** the summary a [sign-off](#sign-off) carries, stating whether the [step](#step)'s
