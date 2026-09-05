@@ -667,6 +667,58 @@ bootstrapping limitation), and one of which opens a decision that has to carry b
 costs to be rulable. `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the
 expected failure that records the overrun.
 
+## Revision 22 (2026-09-05): admitting a new adapter
+
+The operator asked whether the foundation anticipates the swarm's addition of adapters. It did not: across
+all fourteen documents, "new adapter", "adding an adapter", "onboard", and "admission" returned nothing on
+this branch, and `conformance.md`'s Adapters rows are a *reading* table — which document to read when an
+adapter path changes — which presumes the adapter and its document already exist. The material landed as
+`adapters.md#admitting-a-new-adapter` rather than as a new keyed document: it governs adapters, which is
+that document's subject and the one `conformance.md` already keys to every adapter path, and a new keyed
+document would add to a reading budget already over its block (principle 9, one home).
+
+This revision states **no new rule and no new mechanism**. What it adds is the statement, which did not
+exist, of what a new adapter must demonstrate and how each item fails rather than being asserted.
+
+| Design statement (revision 21) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| the **admission contract**: six obligations, each naming what fails when it is not met — coverage by the drop counter, identity by a negative test that must go red, dedup by a redelivery read back, no maintained freshness state by the absence of a sync log or cursor table, read-back-before-acknowledge exercised against an unreachable record, and outbound classes by the gate resolving an unlisted class to `NEVER` | nothing. The five rules were stated as what an adapter *does*, which an author conforms to by assertion | **designed and not built.** Whether any adapter's drop disposition is counted and announced per window is the adapter row below; nothing today checks an adapter against the six obligations at admission, because admission was not a reviewed event | the adapter daemons; the arch review step |
+| the **adapter document contract**: eight required parts (scope and enumeration boundary, inbound table, identity, linkage, outbound table with what confirms it landed, recoveries, what this adapter never does at this system, what the document does not decide), derived from `github.md`'s structure and from the obligations | nothing. `github.md` was the only example, so a sixth adapter's document would have been artisanal | **not a built-state question**; it governs documents, and `github.md` satisfies it | — |
+| **who admits an adapter**: three existing mechanisms, none new — the admission task enters intake and goes through a workflow (no side door), its credential is an `agent_grant` whose write is a governance write evaluated at the action gate, and its outbound classes are `action_policy` data. The one addition is that the arch review step checks the six obligations before the grant's governance write is permitted, which is the existing design-basis check applied to a class of change that had no section to cite | nothing stated. The question had no answer in any document | **designed and not built.** Governance writes reaching the action gate is itself designed and unbuilt (revision 12), so the mechanism this leans on is not yet a control | the action gate; `action_policy` |
+| **degrees of trust** are already expressed and nothing is added: what an adapter may reach is its `agent_grant`, what it may do outward is the action class under the `action_policy`, resolved to a blast tier per action rather than per adapter. All six obligations bind every adapter including a read-only one; what scales with risk is the review's scrutiny and the gate's tier | nothing. A reader could have concluded the design treated every adapter alike | **designed and not built** on the grant side for adapters specifically; the grant machinery exists and its per-adapter scoping is `status.md`'s grants row | `agent_grant` |
+| **when an adapter is wrong**: four properties bound the blast radius — three of the four outcomes are informational so a mis-map is a wrong fact rather than a false verdict; every write is attributed so a false sign-off is findable; a sign-off is pinned to the artifact state it judged so the damage does not grow; and outward effects meet the action gate independently. Recovery is the ordinary one, and withdrawal is revocation with the reach `authority_model.md` already states | nothing; the failure mode was named nowhere | **designed and not built** in the same places the properties themselves are: attribution per agent is `status.md`'s C8 row | the signer; the gate |
+
+**What it builds on.** Revision 21 landed while this was being written and settles the general case: a
+change to the swarm's own operation is a task that goes through a workflow, and the governance writes it
+makes reach the action gate. Adapter admission is a specific instance and inherits that answer rather than
+restating it; the "who may admit" section cites
+`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other` and carries only
+the two consequences an adapter reader will look for. **Open decision 18** (whether a governance write is
+reserved to the operator by default) is noted and not needed: with no policy value the class is
+unclassified and fails closed to `NEVER`, so no adapter is granted its credential by default under either
+candidate default.
+
+**What this revision does not rule.** Open decisions 13, 14, 15, 16, 17, and 18 stay unruled. **Decision 15**
+is the nearest neighbour and the section is explicit about the boundary: 15 asks where an adapter's *code*
+lives, this asks what an adapter must satisfy and who admits it. The contract is unaffected either way —
+no obligation mentions a repository — but the section records one consequence for 15's ledger without
+ruling it: a bundled adapter's document is reviewed under this repository's design-basis check, while a
+shared repository's adapter is reviewed under that repository's own review across two release cadences.
+**Decision 17** is the other neighbour: adapter admission is a specific case of the general question of
+whether workflows govern the swarm's changes to itself, which `gates_and_workflows.md` already answers yes
+by the no-side-door rule. The section inherits that answer and does not wait on 17, because what 17 leaves
+open is the sequencing of an institutionalization task a batch created mid-flight, and an adapter admission
+task is not created that way. No new decision was opened; the highest in use is 18, opened by revision 21.
+
+**Size.** `adapters.md` grew 20.9k (44.0k → 64.9k), measured 2026-09-05 with `wc -c` on this branch against
+revision 20 as the predecessor. The **kernel is unchanged at 82.3k**: `adapters.md` is keyed, not kernel,
+so the reading block is neither improved nor worsened by this revision. `adapters.md` is now the largest
+keyed document, over `MAX_DOC_CHARS` as it already was, and it is a candidate the operator's budget pass
+should consider splitting — the admission material is a self-contained subject with its own audience,
+which is the natural seam. Nothing was trimmed to make room; content settles before budget, as it has since
+revision 6, and `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected
+failure that records the decision.
+
 ## `github.md`: the events with no defined response (revision 13, 2026-09-04)
 
 `docs/foundation/github.md` enumerates every event GitHub can deliver, from GitHub's own webhook event and

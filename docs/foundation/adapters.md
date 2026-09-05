@@ -8,7 +8,7 @@ and the action gate), `authority_model.md` (credentials bind to principals; appr
 steps whose effects leave the system), PR #745 operator review (2026-09-04, the adapter decision), and the
 operator's 2026-09-05 review (the inbound-delivery question and the adapter-packaging lean, both recorded
 below as open; and revision 18: when an artifact comes into existence, and what holds an effect before
-it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams). What is built, and where the adapter and the engine are still one process, is `status.md`.
+it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express). What is built, and where the adapter and the engine are still one process, is `status.md`.
 
 ## Purpose
 
@@ -24,7 +24,8 @@ record. Table the mapping for each system; the code host's, being the largest, i
 
 Every boundary between the record and a system the swarm does not own. In scope: the two invariants at
 the boundary, what an inbound event may become in the record, what an outbound operation is, and the
-identity, linkage, dedup, unknown, and provenance rules every adapter applies, and two questions marked
+identity, linkage, dedup, unknown, and provenance rules every adapter applies, what a new adapter must
+demonstrate before the record trusts it and who admits one, and two questions marked
 **open** rather than resolved to make the document complete: where inbound delivery comes from, and whether
 adapters live in a repository of their own. Out of scope: the workflows themselves (`workflows.md`), the
 gate's decision function (`gates_and_workflows.md`), what an adapter is granted
@@ -518,6 +519,211 @@ principal. It never holds step state of its own: an adapter that keeps a per-art
 are satisfied has become a second engine (`gates_and_workflows.md#declaration-batch-projection`). And it
 never performs an operation and reports success without reading the external system back.
 
+## Admitting a new adapter
+
+Every rule above is written for an adapter that already exists. This section is the other direction: what
+a sixth adapter must satisfy before the record trusts what it writes, who admits it, and what admission
+is a decision *about*. The rules are the same rules; what is stated here is how each becomes a thing that
+**fails** rather than a thing an author claims (principle 1), because a checklist nobody verifies is
+precisely the reporting-without-binding defect this foundation exists to name.
+
+The framing matters, because the obvious one is wrong. Admitting an adapter looks like a build task — write
+the mapping, get the credential, deploy the daemon — and treating it that way is what makes it dangerous.
+An adapter is the only component that touches a system the swarm does not own; it holds a credential; its
+writes are what every downstream step reads as fact; and its identity rule decides whether a stranger's
+comment becomes a sign-off. So admission is a **governance decision about what the record will believe**,
+and the build is what follows it.
+
+### The admission contract
+
+Six obligations. Each names what must be true, and — the part that makes it a control — **what fails when
+it is not**. An obligation with no failing artefact is not on this list, and two candidates were removed
+for exactly that reason (below).
+
+| # | What the adapter must demonstrate | What checks it, rather than the author asserting it |
+|---|---|---|
+| 1 | **Every delivery it can receive resolves to one of the four outcomes or to `dropped` with a reason.** Its document enumerates the external system's own event list, not the subset the swarm subscribes to, each row marked handled, deliberately ignored, or unhandled | The disposition rule itself, which is a **counter**, not a promise: an event outside the mapping resolves to `dropped` with reason `unmapped`, is counted per window and announced off-record. Coverage is therefore a number that should be zero and rises on its own when the enumeration is wrong (`github.md#the-property-that-makes-this-a-control-and-not-a-list`). An adapter whose drop counter is not wired has not satisfied this obligation, because nothing then distinguishes it from an adapter with nothing to do |
+| 2 | **Its identity rule resolves actors through the credential binding and nowhere else**, and it can produce, for its system, the enumeration of which credential kind binds to a principal | A negative test the adapter must fail on: a verdict-shaped delivery from a credential that binds to no principal, and one from a principal who does not own the open step, each yield an **observation** and never a sign-off (`authority_model.md#principals`). The check is that the test exists and goes red when the fallthrough is reintroduced — principle 4's revert test, applied to the one rule whose failure fabricates authority |
+| 3 | **Its dedup key is the external system's own delivery id inbound, and the action's `dedup_key` outbound** | A redelivery of one captured delivery produces exactly one write, asserted by reading the record back; and an outbound action whose key is already confirmed is refused. Both are read-backs of the record, not of the adapter's return codes (principle 2). Where the system issues no stable delivery id, that is a finding stated in the document, not a key the adapter invents |
+| 4 | **Every observation it writes carries source, sourced time, and coverage**, and it maintains no freshness field of its own | The absence check runs in the other direction and is the sharper one: the adapter holds **no** sync log, no last-seen cursor table, no local artifact cache (**What the record supplies**, above). A schema or a table that would need a process to stay true is the failure, caught in the pull request that introduces it, because principle 11 makes it reviewable by inspection rather than by intuition |
+| 5 | **Every write carrying a decision is read back before the delivery is acknowledged**, and during a halt it writes nothing, acknowledges nothing, and lets the system redeliver | Exercised against an unreachable record: the adapter must leave the delivery unacknowledged rather than acknowledge and drop it (`failure_posture.md`, rules 1 and 4). An adapter that acknowledges what it could not write turns an outage into silent data loss, which is the one failure the redelivery mechanism exists to prevent and the one this test catches |
+| 6 | **Its outbound operations name their action class, and every class it can produce is listed in an `action_policy`** | The gate: a class in neither policy set resolves to `NEVER` (`gates_and_workflows.md#confidence-and-three-blast-tiers`). This is checked by the gate at the moment the action would be taken and needs nothing added — an unlisted class does not fail at admission review, it fails at the first attempt to act, which is the stronger place for it to fail |
+
+Two things this list deliberately does **not** contain, named so their absence reads as a decision rather
+than an oversight. There is no "the adapter is tested against the live system" obligation: what would fail
+is nothing the record can read, and an integration test's passing says nothing about the next delivery.
+And there is no sign-off by an adapter review board; the checks above are the review, and a second
+approving body would be the second gate principle 6 forbids.
+
+### The obligations are the five rules, restated as failures
+
+The contract adds no rule. Obligations 1 through 5 are the five rules — identity, linkage, dedup, unknown
+and disposition, provenance and read-back — each with its failing artefact named, and obligation 6 is the
+outbound path's existing gate. The reason for restating them in this form is that the five rules are
+written as **what an adapter does**, which a new adapter's author reads as a description to conform to,
+and conformance to a description is asserted. Written as **what fails**, the same five rules are checked.
+Linkage is the one that does not get its own row, because its failure is obligation 1's counter: an
+adapter that cannot resolve an artifact drops the delivery with that reason, and the drop is counted.
+
+### What an adapter's document must contain
+
+`github.md` is the one full example, and the structure below is derived from it and from the six obligations
+rather than from what it happens to contain. Every adapter's document — the ones being written for the
+mail, chat, calendar, and payment systems, and the sixth that follows them — carries these, and an
+adapter whose system is small enough to sit as a section of this document carries them as a section.
+
+| Required part | What it states | Which obligation it discharges |
+|---|---|---|
+| **Scope, and the enumeration's boundary** | which of the system's surfaces the document covers, and which are named as one class with one disposition rather than omitted | 1 — an omission that is not written down cannot be told from a gap |
+| **The inbound table** | every event and action the system can deliver, with its status (handled, deliberately ignored, unhandled) and its outcome or its drop reason | 1 |
+| **The identity section** | which credential kinds this system presents, which bind to principals, and what a verdict from an unbound credential becomes | 2 |
+| **The linkage section** | what `system` and `external_id` are for this system's artifact kinds, and what happens when an identifier moves | 1, 3 |
+| **The outbound table** | per step, the operation, the action class, and **what confirms it landed**, read back from the system and never from a return code | 6, 5 |
+| **Recoveries** | per action class, what undoes an effect already taken, or that the class is forward-only | 6 — a recovery is an outbound operation like any other |
+| **What this adapter never does, at this system specifically** | the host-specific erosions: the operation that would grant the system a permit the gate did not issue | 2, 6 |
+| **What the document does not decide** | the general rules it cites rather than restates, and the rows whose built state is `status.md`'s | principle 9 |
+
+Two structural rules govern the set. **The general rules stay here and are cited, never restated** — a
+per-system document that re-explains the identity rule creates a second home for it, and the two drift
+(principle 9). And **a row marked unhandled is a named gap, not a silence**: it costs something readable,
+because until it is built those deliveries resolve to `dropped` and are counted.
+
+### Who may admit an adapter, and through what
+
+An adapter reaches an external system with a credential and can take irreversible outward effects, so
+admitting one is a governance change and not a deployment. The question this section must answer, under
+principle 6, is whether a mechanism already covers it. **Three do, and no new one is needed** — but they
+cover it only once one thing is stated, and stating it is this section's whole contribution.
+
+**It is a task, and it goes through a workflow, because there is no other way.** The general rule is
+`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`: a change to the
+swarm's own operation is a task like any other, it enters intake, and it is executed inside a batch going
+through a declared workflow, because the no-side-door rule is written about tasks and is conditioned on
+neither the origin of the work nor its being infrastructural. Adding an adapter is such a change, so it
+inherits that answer entire and this section adds nothing to it. Two of that section's consequences are
+worth carrying here because a reader arriving at adapters will look for them: an adapter admission task
+proposed by the swarm and one the operator asked for are the same object under the rule, and the
+capability an adapter is to be granted cannot be written by the principal that would use it, because that
+write is itself a governance write to `agent_grant`. Adapter admission also does not wait on open decision
+17, whose open question is the sequencing between a batch and an institutionalization task it created
+mid-flight; an adapter admission task is not created that way.
+
+**Its credential is a grant, which is where authority actually attaches.** The adapter acts as a principal
+and its capabilities are an `agent_grant`, scoped and time-bounded, matched on the credential
+(`authority_model.md#grants`). So "who may add an adapter" resolves to "who may write that grant", and
+that is already answered: a write to `agent_grant` is a **governance write**, which is an action evaluated
+at the action gate (`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`). The operator
+resolves the checkpoint the gate raises. Nothing here needs a new approver class, and adding one would be
+the second gate. Whether that governance class is *reserved* to the operator by default or merely held at
+a high tier is **open decision 18**
+(`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`), and adapter
+admission does not need it ruled: a project with no policy value for the class is the unclassified case,
+which fails closed to `NEVER`, so an adapter cannot be granted its credential by default under either
+candidate. The decision changes how a project that has written a policy admits its second adapter, not
+whether the first one is held.
+
+**Its outbound classes are `action_policy` data, and that write is governance too.** An adapter that can
+send mail or move money produces actions of classes the policy must list, and a class in neither set
+resolves to `NEVER`. So an adapter admitted without its policy write is not a dangerous adapter; it is an
+**inert** one, which is the correct failure direction (principle 5). Fitting the pieces together: the
+grant says what the adapter may reach, the policy says what it may do there, and the gate holds each
+outward class until a principal permits it.
+
+**What is genuinely missing is smaller than it looks, and it is a declaration.** The three mechanisms
+above govern the adapter's *authority*; none of them governs whether its *mapping* is fit to be believed.
+A grant can be written, a policy listed, and a gate satisfied by an adapter whose identity rule is wrong —
+and the six obligations are what stand between that adapter and a fabricated sign-off. What closes the gap
+is not a fourth mechanism but making the obligations reviewable at the moment the grant is written: the
+admission task's specification states its design basis against this section, and the arch review step
+checks the six obligations against the adapter's document before the grant's governance write is permitted
+(`conformance.md#design-basis`). That is the existing design-basis check, applied to a class of change that
+had no section to cite; the reason it was uncheckable before is that this section did not exist.
+
+### Degrees of trust: the design distinguishes, and grants already express it
+
+Not every adapter carries the same risk. One that only ever writes observations about a calendar and one
+that can move money are different propositions, and a design that trusted them equally would be either
+too slow for the first or too loose for the second. So the design distinguishes — and the distinction is
+**already expressed**, twice over, which is why nothing is added here:
+
+- **What an adapter may reach** is its `agent_grant`: capabilities as operation × entity types ×
+  repositories, with parameter constraints and an expiry (`authority_model.md#grants`). A read-only
+  adapter is one whose grant confers reads. This is scope, and it is per adapter.
+- **What an adapter may do outward** is the action class under the `action_policy`, resolved to a blast
+  tier at the moment the action would be taken. `send_external_comms`, `payment`, and `publish` sit high;
+  `notify_operator` is a class of its own so a policy may keep it low. This is risk, and it is per action
+  rather than per adapter — which is the finer instrument, because one adapter commonly produces effects
+  of several classes and a per-adapter trust level would have to be set at its most dangerous one.
+
+Together those two are the degrees of trust, and they are better than a trust *level* would be: a level is
+a field on the adapter that some process must keep true as the adapter's capabilities change (principle
+11), where a grant and a policy are read at the moment they are enforced.
+
+**What differs by degree is not the contract but the review.** All six obligations bind every adapter,
+including a read-only one — an adapter that only writes observations can still mis-resolve identity, and
+obligation 2 is precisely the one that matters most for it. What scales with risk is the scrutiny the arch
+review step applies and the blast tier the gate resolves, both of which are graduated already. So the
+answer to "is every adapter equally trusted" is: equally **obliged**, and unequally **granted**.
+
+### When an adapter is wrong
+
+An adapter that mis-resolves identity could turn a stranger's comment into a sign-off. That is the worst
+case and it is worth stating plainly, because what limits it is not one guard but the structure the design
+already has. `failure_posture.md` covers the case where the adapter *cannot* write; this is the case where
+it writes something wrong, and the two are different failures.
+
+Four properties bound the blast radius, and each is stated elsewhere:
+
+- **The adapter's reach is four outcomes, and one of them is the only dangerous one.** An adapter cannot
+  open, claim, or close a step, name a successor, or advance a batch. Three of the four outcomes are
+  informational; only a sign-off carries a decision, and only where identity resolved to the step owner of
+  an open step. So a mis-mapped delivery is overwhelmingly a wrong observation, which is a bad fact, not a
+  false verdict.
+- **A wrong verdict is attributed, and attribution is what makes it recoverable.** Every write names the
+  adapter, the system, and the delivery id; a sign-off names the principal it is attributed to. So a
+  sign-off no principal actually made is *findable* — by reading the provenance of the writes an adapter
+  made in a window — rather than indistinguishable from a real one. An unattributed record could not be
+  audited at all, which is why attribution is an authority-model requirement and not a convenience.
+- **A sign-off is pinned to the artifact state it judged.** A false sign-off does not silently cover later
+  work: the head moves and the pinned sign-off reads as stale by a derived read
+  (`data_model.md#record-conventions`). The damage does not grow after the fact.
+- **The outward effects are gated separately.** A false sign-off closes a step; it does not take an action.
+  Every effect that leaves the swarm passes the action gate on its own class at the moment it would be
+  taken, so the worst inbound failure still meets the outbound gate before anything irreversible happens.
+  This is why the gate is per action and evaluated late rather than per task and evaluated early.
+
+**And the recovery is the ordinary one.** A sign-off written on a false identity is corrected the way any
+wrong write is: it is not deleted to make the record look clean. A verdict is terminal and a new judgement
+is a new sign-off (`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`), and an
+effect already taken is undone by a recovery action of its own class through the same gate
+(`failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`). Both the wrong
+verdict and its correction stay readable, which is the property that lets the adapter's defect be diagnosed
+rather than only its symptom repaired.
+
+**Withdrawal is revocation, and its reach is already stated.** An adapter found to be wrong is stopped by
+withdrawing its credential, which withdraws every capability every grant conferred on it, across every
+entity type and repository those grants named (`authority_model.md#grants`). It takes effect where the
+grant is read, which is at every enforcement point rather than from a cache. Nothing new is needed to turn
+an adapter off, and the reach of doing so is a reason to keep an adapter's grant narrow at admission —
+which is obligation 6's other half, read from the far end.
+
+### The relationship to open decision 15, which this section does not resolve
+
+Open decision 15 asks **where an adapter's code lives** — bundled beside the engine, or a shared adapter
+repository this system consumes. This section asks **what an adapter must satisfy to be trusted, and who
+admits it**. They are adjacent and they are not the same question, and the distinction is worth being
+precise about because a reader can easily take one for an answer to the other.
+
+The contract above is unaffected by 15 either way: the six obligations are about what an adapter does with
+a delivery and what fails when it does it wrong, and none of them mentions a repository. What decision 15
+*would* change is where the obligations are checked — a bundled adapter's document is reviewed in the pull
+request that adds it, under this repository's design-basis check, while a shared repository's adapter is
+reviewed under whatever that repository's own review is, across two release cadences. That is a real cost
+of separating, and it belongs on decision 15's ledger beside the ones already recorded there; it is not a
+reason to rule 15 here, and this section rules nothing about it. The same holds for open decision 16
+(where inbound delivery lands): the obligations hold whichever receiver an adapter's deliveries arrive
+through.
+
 ## The adapter and the engine are two roles
 
 Whether one process hosts both is an implementation choice; the design's requirement is that they meet
@@ -556,3 +762,13 @@ prior-art entity the other documents cite. Open decisions 15 and 16, and the sta
 own subscriptions can and cannot tell a consumer, are this document's, from the operator's 2026-09-05
 review; the lean recorded under decision 15 is the operator's own and is marked as a lean rather than
 written up as a ruling.
+
+**Admitting a new adapter** is this document's, from the operator's 2026-09-05 question of whether the
+foundation anticipates the swarm's addition of adapters. It states no new rule: the six obligations are
+the five rules and the outbound gate with their failing artefacts named, the document contract is derived
+from `github.md`'s structure and from the obligations, and the admission mechanism is the three that
+already exist — intake and a workflow, the `agent_grant` governance write, and the `action_policy` class —
+identified rather than invented (principle 6). The one addition is that the arch review step checks the six
+obligations before the grant's governance write is permitted, which is the existing design-basis check
+applied to a class of change that previously had no section to cite. The degrees-of-trust answer is a
+reading of `authority_model.md#grants` and the action classes, not a new axis.
