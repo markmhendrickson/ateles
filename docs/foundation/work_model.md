@@ -4,8 +4,9 @@
 never the state of a checkout. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-01 to PR-03,
 PR-05, C1, C2), prior art `ent_08460968e6f49dac21510f4a`, task `ent_da60df3beccb675ef8c8c0c5`, throughput
 plan `ent_18b902cf72822373f9da8ced` decisions `pull_model_sequencing_build_the_claim_not_the_router`,
-`non_github_execution_makes_pull_decisive`, `three_execution_mechanisms_not_one`, and PR #745 operator
-review (2026-09-04). Supersedes `docs/archive/task_execution_loop.md`. What is built is `status.md`; how
+`non_github_execution_makes_pull_decisive`, `three_execution_mechanisms_not_one`, PR #745 operator
+review (2026-09-04), and the operator's 2026-09-05 review (revision 18: how a batch is formed and what
+chooses its workflow). Supersedes `docs/archive/task_execution_loop.md`. What is built is `status.md`; how
 each concept is recorded is `data_model.md`.
 
 ## Purpose
@@ -13,7 +14,8 @@ each concept is recorded is `data_model.md`.
 State how work is created, taken, executed, and returned: pull-only delivery; assignment as eligibility;
 claim and lease as one primitive (lease as relationship); liveness derived at read time; no assignment
 log; a task carries only status and edges; intake is every task's first workflow; tasks go through
-workflows in batches, are attached to and detached from them, and nest under parents; artifacts are
+workflows in batches, are attached to and detached from them, and nest under parents; a batch is opened
+by a closing sign-off naming a successor and goes through exactly one workflow; artifacts are
 records a batch leaves, never its subject.
 
 ## Scope
@@ -150,6 +152,76 @@ is a batch of one; there is no separate single-task path. When tasks enter a wor
 opened if none exists, and each task is attached by an `ADDRESSED_BY` edge. Detaching a task ends its
 edge; to split a task is to detach it and open a new batch for it, from the first step, while the original
 batch continues with the tasks still attached. Attach and detach are edges, never fields (principle 11).
+
+### How a batch is formed, and what chooses its workflow
+
+The rule above says tasks go through a workflow in a batch and that a batch record is opened if none
+exists. That leaves three questions a reader has to answer before they can build anything: what causes a
+batch to come into existence, which tasks are in it, and which workflow it goes through. Each is answered
+by a mechanism the model already has, and stating them together is what stops the answer being re-derived
+differently at each call site.
+
+**A batch comes into existence when a closing sign-off names a successor, and at no other moment.** There
+is one cause, not several. Intake's `route` step closes on a sign-off naming one successor workflow, none,
+or operator-only; every later batch closes the same way (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`).
+Where a successor is named, the batch for it opens and carries a `FOLLOWS` edge back to the batch that
+named it. Where none is named, the task's chain ends. Nothing else opens a batch: no daemon opens one
+because it noticed eligible tasks, no adapter opens one on an inbound event, and no scheduler sweeps for
+work to group. The one batch with no predecessor is a task's intake batch, opened on the task's creation,
+which is the universal entry (`#intake-is-every-tasks-first-workflow`, above) and the reason every chain
+has a first link.
+
+The consequence worth naming: a batch is always opened **by a principal's recorded verdict**, never by a
+process acting on its own reading of the record. The sign-off names the successor, so the decision has an
+author, a timestamp, and a reason, and a reader asking why these tasks are in this workflow is answered by
+a verdict rather than by inferring what some sweeper's predicate must have matched.
+
+**A batch's tasks are the tasks the closing sign-off carried, and grouping beyond that is a step's
+judgement, recorded as one.** The default is the simple one: the tasks attached to the closing batch move
+together into the successor, and a batch of one stays a batch of one. Two operations change a task set,
+both already defined and both edges (principle 11): **detach**, which ends a task's `ADDRESSED_BY` edge and
+opens a new batch for it from the first step of its workflow, and **attach**, which writes that edge. What
+this section adds is who may do them and on what basis. Attaching a task to a batch that is already open,
+part-way through its steps, is a step owner's judgement written into that step's sign-off, never an
+adapter's guess and never a matcher's inference — the adapter rule already forbids the first
+(`adapters.md#what-the-adapter-does-with-every-event`), and the second is the routing fallthrough the pull
+rule forbids. A task attached part-way through enters at the batch's current step and inherits the
+sign-offs already written on it, which is exactly why the judgement is a recorded one: those sign-offs were made
+against a task set that did not include it, and a step owner who attaches is asserting that they still
+hold. Where that assertion is not safe, the task is its own batch.
+
+**The workflow is chosen once, by the sign-off that names the successor, from the declared list.** The
+choice is not open-ended: `workflow.successors` names the workflows a closing batch's tasks may enter, and
+the closing sign-off selects exactly one from that list or none. So the workflow for a batch is fixed
+before the batch opens, by a named principal, bounded by a declaration that was reviewed when it was
+written. There is no run-time selection inside the batch, no re-selection, and no workflow chosen by
+matching a property of the tasks after the fact.
+
+**A batch goes through exactly one workflow, for its whole life.** The workflow is a field of the batch
+record (`data_model.md#concepts`), fixed at open. A batch that needed a different workflow does not switch:
+it closes, and its closing sign-off names the one the tasks go to, which opens a new batch. This is what
+makes the chain readable — each link is one workflow, entered by one verdict — and a batch that changed
+workflow mid-flight would leave its earlier sign-offs pinned to steps that no longer exist in its
+declaration.
+
+**And a task is in one batch at a time but many over its life, which is the distinction to hold.** The
+one-at-a-time rule is about simultaneity (above); the chain is the sequence. A task that went through
+intake, then feature, then release has three batches, two closed and one live, and asking "which workflow
+is this task in" is answered by its live batch alone.
+
+**What this deliberately does not do is let batch formation key on anything discovered later.** A
+declaration's conditional may turn only on a property of the task set at intake, never on a label an
+external system carries (`workflows.md`), and the rules above are the same constraint stated for
+formation: the successor is named by a verdict at a close, from a list fixed in the declaration, on tasks
+whose properties intake established. A formation rule that grouped tasks by a label an adapter wrote, or
+that chose a workflow from an artifact's state, would put the choice back into an external system's hands
+through the side door the boundary rules close.
+
+Two questions about a batch's **lifetime** remain open and are not settled by any of the above: whether a
+batch may hold on a condition discovered mid-flight, and whether a batch may depend on a task it created
+(`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
+Both are downstream of this section rather than blocked by it — formation and workflow choice are settled
+whichever way they go, because both concern what a batch may wait on once it is already open.
 
 ### Artifacts are records a batch leaves, never its subject
 

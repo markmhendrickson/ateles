@@ -8,7 +8,7 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `unclassified_action_type_fails_closed_and_loudly`, `gate_advisory_and_enforcing_paths_must_agree`,
 `gating_vocabulary_order_is_load_bearing`, throughput plan `ent_18b902cf72822373f9da8ced` decision
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
-memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`). Supersedes
+memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
 is `status.md`; how each concept is recorded is `data_model.md`.
 
@@ -303,6 +303,10 @@ names one or none, and work that needs two workflows at once is split into child
 (`work_model.md#a-task-is-in-at-most-one-batch-at-a-time`). Intake is the universal entry
 (`work_model.md#intake-is-every-tasks-first-workflow`), so every chain begins with an intake batch, and a
 `successors` list that names intake is a declaration error. Core designs: `workflows.md`.
+What this sequencing means for a batch's formation — that a closing sign-off naming a successor is the
+only thing that opens a batch, which tasks it carries, and that the workflow is fixed at open and never
+switched — is `work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow`, stated once there
+(principle 9).
 
 ### Two policies: workflow policy and action policy
 

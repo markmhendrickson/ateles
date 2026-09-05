@@ -120,8 +120,13 @@ record is an **entity**, not an artifact: a [sign-off](#sign-off), a [checkpoint
 analysis, a draft, a page rendered into the record. The test is where the thing lives and how it is
 reached — an external system through an adapter, or a retrieval from the record — never how
 output-shaped it feels.
+**An artifact comes into existence with its `external_id` already known**, minted by the adapter from
+the [read-back](#read-back) that confirms the effect landed. There is no artifact with a null or pending id: what
+holds a composed-but-unsent thing is an entity, and what spans the interval between an effect's
+submission and its confirmation is the [action](#action) and its `dedup_key`.
 **See:** [`work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject`](work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject),
 [`adapters.md#the-two-invariants`](adapters.md#the-two-invariants),
+[`adapters.md#an-artifact-exists-only-once-its-external-record-does-and-the-interval-before-that-belongs-to-the-action`](adapters.md#an-artifact-exists-only-once-its-external-record-does-and-the-interval-before-that-belongs-to-the-action),
 [`data_model.md#concepts`](data_model.md#concepts).
 **Never:** —
 **Not for:** "deliverable" for the record; task for the artifact; artifact for anything the swarm wrote
@@ -260,11 +265,14 @@ its cap, holding no [authority](#authority) over any [lease](#lease).
 ### batch
 **Definition:** one or more [tasks](#task) going through a [workflow](#workflow) together, and the record of that.
 A single task is a batch of one; only batches go through workflows, so there is no separate single-task
-path. Tasks are attached to and detached from a batch; batches chain along `FOLLOWS`.
+path. Tasks are attached to and detached from a batch; batches chain along `FOLLOWS`. A batch is opened by a
+closing [sign-off](#sign-off) naming a [successor](#successor), carries the tasks that sign-off carried, and goes through
+exactly one [workflow](#workflow) for its whole life.
 Reads: "the tasks entered the feature workflow", "the batch is at `qa`", "the batch advances to `impl`",
 "a task attached to the batch", "a task detached from the batch", "the batch records who signed off
 `qa`", "the tasks leave the workflow when `merge` is signed off".
 **See:** [`work_model.md#what-goes-through-a-workflow-is-a-batch-of-tasks`](work_model.md#what-goes-through-a-workflow-is-a-batch-of-tasks),
+[`work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow`](work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow),
 [`data_model.md#concepts`](data_model.md#concepts).
 **Never:** "passage", "workflow_run", "aggregation"; split as a noun, and split-out in any form
 (aggregation and split are retired as nouns; the verbs are attach and detach).

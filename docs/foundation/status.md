@@ -501,6 +501,58 @@ measured 2026-09-05 with `wc -c` on this branch. `vocabulary.md` is keyed, not k
 therefore **67.9k**, up from 65.7k on revision 16. Nothing was trimmed to fit: the reading-budget decision
 below is the operator's and is untouched by this revision.
 
+## Revision 18 (2026-09-05): artifacts with no external id, and how a batch is formed
+
+Two foundational questions the operator raised on PR #745. Both were genuine gaps rather than wording:
+the first was settleable from the definitions already written and is settled here; the second was a
+central concept with one clause standing in for three answers. Read on this branch by reading the modules
+named below; nothing on prod or on any deployed checkout was inspected.
+
+| Design rule (revision 18) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| a thing with no `external_id` is not an artifact but an entity; an artifact is minted by the adapter from the confirmation read-back, with its id already known, and there is never an artifact with a null or pending id | nothing stated either way. `work_model.md` and `data_model.md` both said an artifact is identified by `system` + `external_id` and that a draft is an entity, but no document said when the artifact comes into existence, so a reader reaching the unsent-draft case had to guess between a nulled-id row and a rule they could not find | **designed and not built,** and the built shape is the one this rule forbids on at least one path — see the drift finding below | the senders' own id handling; there is no `artifact` entity type on this branch to carry the rule (revision 8 rows) |
+| the interval between an effect's submission and its confirmation is held by the `action` and its `dedup_key`, never by a provisional artifact; an unconfirmed effect reads as `unknown` | nothing; the dedup rule already placed `dedup_key` on the action, but no document said that this placement is what makes the unconfirmed-effect case answerable | **designed and not built.** No `action` entity type exists on this branch, so the dedup key still lives as ad-hoc idempotency keys in the senders (revision 8 rows), and no path distinguishes an unconfirmed effect from a failed one | the senders; `gating.py` |
+| a batch is opened by exactly one cause — a closing sign-off naming a successor — and by nothing else: no daemon, adapter, scheduler, or sweeper opens one | one clause, "a batch record is opened if none exists", which named no cause and no author | **designed and not built.** No `batch` entity type exists on this branch, so nothing opens a batch at all; the built dispatch path moves work by writing task fields | `swarm_dispatch.py`; no `batch` entity type |
+| a batch carries the tasks its closing sign-off carried; attaching a task to an already-open batch is a step owner's judgement recorded in that step's sign-off, never an adapter's or a matcher's inference | nothing; attach and detach were defined as edges with no statement of who may write them or on what basis | **designed and not built,** same reason | same |
+| the workflow is chosen once, by the closing sign-off, from the declared `successors` list; a batch goes through exactly one workflow for its whole life and never switches | nothing said a batch's workflow is fixed at open, though `workflow_type` was already a batch field and `successors` already bounded the choice | **designed and not built,** same reason | same |
+
+**What was already settled, and was therefore not written again.** The workflow-selection half of the
+operator's second question was largely answered by
+`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`, which already stated that the closing
+sign-off selects exactly one successor from the declared list or none, that parallel successors are
+forbidden, and that the chain is derived along `FOLLOWS`. What that section did not say is that the
+selection is also the *cause* of the batch and that the choice is not revisited, so revision 18 states
+formation in `work_model.md` and cross-references it from the sequencing section rather than restating
+either half twice (principle 9). Likewise the one-batch-at-a-time rule and parent/child grouping were
+already written and are cited, not repeated.
+
+**Open decisions 13 and 14 are untouched and remain unruled.** Whether a batch may hold on a condition
+discovered mid-flight, and whether a batch may depend on a task it created, are questions about a batch's
+lifetime once it is open; formation and workflow choice are settled whichever way they go, and the new
+section says so explicitly rather than leaving a reader to wonder whether it pre-empted them. Decisions 15,
+16, and 17 are likewise untouched.
+
+**Drift, not design justification: the built send path never learns the external id at all.**
+Noted here because it is measurable and because the rules above bear on it, not because it argues for
+anything. The design says the artifact is minted from the read-back that confirms the effect, which is
+where the `external_id` comes from. On this branch `lib/approval/email_channel.py:send_request` shells out
+to the mail CLI's send helper and returns `True` on exit code 0, capturing no message id and reading
+nothing back — so there is no id to mint an artifact from, and no confirmation distinguishable from a
+submission, which is the "a response code is not evidence" shape principle 2 names. `reply_in_thread` in
+the same module is the same shape. Read 2026-09-05 by grepping for `send_external_comms|def send_` under
+`execution/` and `lib/` (five modules) and reading the module; no `artifact` entity type exists anywhere
+on the branch. The migration cost is the one the revision 8 rows already carry — no `artifact` and no
+`action` entity type — so these rules add no new cost of their own; they name which behaviour has to
+change when those types are built.
+
+**Size.** `work_model.md` grew 6.0k (16.1k → 22.1k), `adapters.md` 4.3k (36.2k → 40.5k),
+`gates_and_workflows.md` 0.4k (38.4k → 38.8k), and `vocabulary.md` 1.0k (79.6k → 80.6k), measured
+2026-09-05 with `wc -c` on this branch. `adapters.md` and `vocabulary.md` are keyed, not kernel. The
+kernel is therefore **74.3k**, up from 67.9k on revision 17 — the largest single-revision growth of the
+kernel so far, and all of it in `work_model.md`, which had not grown since revision 12. Nothing was
+trimmed to fit: the reading-budget decision below is the operator's, is now exceeded by 34.3k rather than
+27.9k, and the budget pass that follows is a cut, a split, or an amendment of the caps.
+
 ## `github.md`: the events with no defined response (revision 13, 2026-09-04)
 
 `docs/foundation/github.md` enumerates every event GitHub can deliver, from GitHub's own webhook event and

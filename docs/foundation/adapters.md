@@ -7,7 +7,8 @@ the four execution mechanisms), `gates_and_workflows.md` (one engine sequences f
 and the action gate), `authority_model.md` (credentials bind to principals; approval), `workflows.md` (the
 steps whose effects leave the system), PR #745 operator review (2026-09-04, the adapter decision), and the
 operator's 2026-09-05 review (the inbound-delivery question and the adapter-packaging lean, both recorded
-below as open). What is built, and where the adapter and the engine are still one process, is `status.md`.
+below as open; and revision 18: when an artifact comes into existence, and what holds an effect before
+it has an external id). What is built, and where the adapter and the engine are still one process, is `status.md`.
 
 ## Purpose
 
@@ -213,6 +214,55 @@ and whether any interval was ever completely read — is then **derived** by rea
 artifact's observations, never a `last_synced_at` field the adapter maintains: a maintained field needs a
 process to keep it true, which is what principle 11 forbids, and it fails in the worst direction, going
 stale into a confident-looking value at exactly the moment the adapter stops reading the system.
+
+### An artifact exists only once its external record does, and the interval before that belongs to the action
+
+The linkage rule keys every artifact on `system` and `external_id`, which raises the obvious question of
+what holds a thing the swarm has composed but not yet put into an external system — a drafted message
+before the send, a release before the tag, a payment before the submission. The answer follows from the
+definition rather than qualifying it, and it is stated here because a reader who does not work it through
+reaches for the wrong one: an artifact with a null `external_id`, minted early and filled in later.
+
+**A thing with no external id is not an artifact; it is an entity, and the design already has somewhere to
+put it.** An artifact is a record living in an external system, and before the send there is no such
+record — not an incomplete one, none. What exists is the swarm's own composition, which lives in the
+record and is read by retrieval, and by the test `work_model.md` already states that makes it an entity of
+its own type. The drafted message is a draft in the record, which is what
+`workflows.md#outreach` means by "the design's staging is the draft in the record": the `draft` step
+closes on a draft existing here, `review` judges that, and `consent` carries that. None of the three
+touches an external system, and none of them needs an artifact, so nothing in the workflow is waiting on
+an id that does not exist yet.
+
+**What spans the interval is the action, not a proto-artifact.** The moment that matters is not
+composition but the attempt: the effect is submitted and, until the adapter reads the system back, nobody
+knows whether an external record now exists. That interval is exactly what the `action` entity is for. The
+action is created when the effect becomes known, carries its own `dedup_key`, and carries `taken_at` and
+`result_ref` once confirmed (`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`). The
+artifact is minted by the adapter from the confirmation — the send read back by its message id, the
+transfer read back at its terminal status — and it is minted with its `external_id` already known, because
+the read-back is where that id comes from. So the artifact is never in a state of having no id; it comes
+into existence with one.
+
+**This is why dedup does not depend on the artifact, and would break if it did.** `dedup_key` lives on the
+action and is keyed on the intended effect, never on the record the effect leaves
+(`work_model.md#at-least-once-implies-effect-dedup`). That placement is load-bearing precisely here: the
+question dedup must answer is "did this effect already land", asked at the moment a re-claimed task is
+about to take the action again — which is the moment when, by construction, the external id may not be
+known. A dedup rule keyed on the artifact could not answer it, because the case it exists to catch is the
+one where the effect landed and the confirmation did not come back. Keyed on the action, the answer is a
+read of the record the swarm holds: the adapter refuses an action whose key it has already confirmed, and
+where the key is present but unconfirmed the adapter reconciles by reading the external system for that
+key before submitting again. Which is `failure_posture.md` rule 6's shape — a refusal on an existing key
+is stronger evidence of a prior commit than a success response is of the present one — applied at the
+boundary.
+
+**So nothing in the linkage rule needs weakening, and an unconfirmed effect is `unknown`, never a
+provisional artifact.** An adapter that submitted an effect and could not read the result back has an
+action with no confirmation, and that reads as `unknown` (principle 7): distinct from confirmed, distinct
+from failed, and holding whatever step declared the read (above). It does not mint a placeholder artifact
+to stand where the real one will go. A placeholder would be maintained state of the worst kind — a row
+whose correctness depends on a later process arriving to fill it in (principle 11) — and it would be
+indistinguishable, to every reader downstream, from an artifact for a record that genuinely exists.
 
 ## What the record supplies, and what an adapter therefore never builds
 
