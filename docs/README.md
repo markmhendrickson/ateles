@@ -22,13 +22,71 @@ stale, misplaced, or operator-personal files, see the [documentation plan](docum
 
 ## P0 · Foundation
 
-*What the swarm's work conforms to.*
+*What the swarm's work conforms to.* Foundation documents in [`docs/foundation/`](foundation/), each
+phase-agnostic and evergreen: they define the design whole, mark undecided questions open, and carry no
+implementation state. The arch gate and the review lenses read the **kernel** (Principles, Work model,
+Gates and workflows) on every review and the **keyed** documents by changed path (`conformance.md`).
+What is built, and where the code still contradicts the design, is measured in
+[`foundation/status.md`](foundation/status.md), dated and regenerated rather than maintained.
 
-- [**Conformance**](foundation/conformance.md) — how issue-based work binds to the design foundation: the
-  always-read kernel, the path-keyed reading list the arch gate and review lenses load at review time, and
-  the design-basis statement every issue and PR carries. The remaining foundation documents (principles,
-  work model, gates and workflows, failure posture, vocabulary, authority model) land in
-  [`docs/foundation/`](foundation/) as they are written; each is read by the gates the day it lands.
+Kernel (always read):
+
+- [**Principles**](foundation/principles.md) — the eleven invariants, each with the class of mechanism that
+  makes it bind.
+- [**Work model**](foundation/work_model.md) — pull as the only delivery; assignment constrains
+  eligibility; claim and lease as one primitive (lease as relationship); liveness derived at read time;
+  no assignment log; task status + lease `held` / `lapsed` / `returned`; tasks go through workflows in
+  batches; artifacts are records a batch leaves.
+- [**Gates and workflows**](foundation/gates_and_workflows.md) — `workflow` declares steps; a batch is
+  the tasks going through them and the record of that; step state from batch + lease + `sign-off`;
+  `step_status` projects; one step set; actions are entities and are taken through the PR-independent
+  action gate on confidence and three blast tiers; the checkpoint.
+
+Keyed (read when matching paths change — see `conformance.md`):
+
+- [**Failure posture**](foundation/failure_posture.md) — Neotoma as a hard dependency: halt work, never stop
+  observing, announce off-Neotoma, read back every write, refuse resume-by-replay.
+- [**Vocabulary**](foundation/vocabulary.md) — canonical terms, each with a definition, its related
+  terms, the words it bans outright (**Never**) and the senses it bans (**Not for**), grouped by the
+  document that owns each; linted by `execution/scripts/check_foundation_vocabulary.py`.
+- [**Data model**](foundation/data_model.md) — how each concept is recorded: entity type, key fields,
+  edges, derived reads, projections, and what is deliberately not a field; the relationships table; the
+  record conventions (observations, corrections, idempotency keys, schema versions, `raw_fragments`).
+- [**Adapters**](foundation/adapters.md) — how external systems reach the work model and how it reaches
+  them: inbound events are signals about artifacts (a sign-off by a named principal, an observation, an
+  action confirmation, or a task for intake, never a workflow instruction); outbound operations are
+  actions through the action gate; Gmail, Telegram, calendar, and payments tabled, and the code host in
+  its own document below.
+- [**GitHub**](foundation/github.md) — the code host's full event surface: every event GitHub can deliver
+  across issues, pull requests, reviews, releases, security advisories, checks, and repository-level
+  operations, each marked handled, deliberately ignored, or unhandled, and each resolving to one of the
+  four adapter outcomes or to a counted drop; the outbound operation, action class, and confirmation for
+  every step that reaches the host; and what the adapter withholds from a security advisory.
+- [**Conformance**](foundation/conformance.md) — how issue-based work binds to the foundation: the
+  always-read kernel, the path-keyed reading list, the design-basis statement, the direction of truth per
+  record class, and the rule that keeps state out of the foundation.
+- [**Authority model**](foundation/authority_model.md) — the tuple `principal + domain + scope + action +
+  conditions + time` defined whole: principals, tenancy, ownership, grants, attribution, delegation,
+  approval, quorum and separation of duties, and the initiative objects, with the identity decision
+  (C9) settled on an `operator` entity and the P4 brief's questions marked open.
+
+Authored companions (design prose; **not** inlined into review prompts):
+
+- [**Scenarios**](foundation/scenarios.md) — walkthroughs of the work model and gate model in motion
+  (claim/lease/lapse, assignment, several tasks going through a workflow as one batch); further
+  scenarios in [`scenarios_extended.md`](foundation/scenarios_extended.md).
+- [**Workflows**](foundation/workflows.md) — designs of the core workflows (intake and successors);
+  purpose, steps, fast paths — binds via `workflow` entities and `render_workflow_docs.py --check`.
+- [**Migration**](foundation/migration.md) — the population plan's second leg: how the record an instance
+  already holds is carried into the design's types — each type's disposition (keep, re-type, derive,
+  retire, introduce), the record primitive that carries it, the order and its dependencies, what is
+  reversible, how the carrying is itself governed, and the gaps the mapping exposed in the foundation.
+
+Companion report (not a foundation design document; not in the review reading list):
+
+- [**Status**](foundation/status.md) — dated, perishable measurement of the gap between the foundation and
+  a checkout; regenerated, never maintained. Foundation docs may name it as the state home only; they must
+  not embed its figures as design evidence.
 
 ## P0 · Decide & orient
 
@@ -64,12 +122,14 @@ stale, misplaced, or operator-personal files, see the [documentation plan](docum
 
 *Run it daily; add agents and workflows.*
 
-- [**Swarm orchestration**](swarm_orchestration.md) — `workflow_definition`, gate semantics, and the
-  artifact-header dispatch contract.
+- [**Gates and workflows**](foundation/gates_and_workflows.md) — `workflow` / batch / `sign-off` /
+  `step_status`, and the PR-independent action gate (the former
+  [`swarm_orchestration.md`](archive/swarm_orchestration.md) and
+  [`swarm_hitl_checkpoints_design.md`](archive/swarm_hitl_checkpoints_design.md) are archived with pointers).
 - [**Agent execution runbook**](agent_execution_runbook.md) ·
-  [**Task execution loop**](task_execution_loop.md) ·
-  [**Agent execution architecture**](agent_execution_architecture.md) — how a dispatch runs end-to-end.
-- [**HITL checkpoints**](swarm_hitl_checkpoints_design.md) — confidence × blast-radius gating and approval.
+  [**Agent execution architecture**](agent_execution_architecture.md) — how a dispatch runs end-to-end; the
+  work model itself is [`foundation/work_model.md`](foundation/work_model.md) (the former
+  [`task_execution_loop.md`](archive/task_execution_loop.md) described the retired push model and is archived).
 - [**PR review routing**](pr_review_routing.md) · [**Swarm trigger layer**](swarm-trigger-layer.md) ·
   [**GitHub interaction design**](swarm_github_interaction_design.md) — issue/PR triage and webhook flow.
 - [**A2A gateway**](a2a.md) — the inbound agent-to-agent task receiver.

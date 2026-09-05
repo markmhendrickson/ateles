@@ -1,82 +1,106 @@
 # Conformance: how work binds to the foundation
 
+**Keyed document:** read when `docs/foundation/` changes. **Kind:** foundation; describes the binding
+mechanism (built as ateles#744): names documents and paths, never what a checkout implements.
+**Derived from:** plan `ent_533d4ec2f7bfb60f66fb3fce` decisions
+`binding_is_the_reviewer_reading_a_kernel_not_a_loading_order` and
+`ateles_binding_extends_three_existing_mechanisms`, synthesis `ent_b0ce322f768e4fc676b73139` (PR-29, C7),
+prior art `ent_08460968e6f49dac21510f4a` (OPA: decision decoupled from enforcement), and PR #745 operator
+review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and revision 21 (2026-09-05: the `gmail.md` and `calendar.md` keyed rows and their canonical-source entries), and revision 24 (2026-09-05: the `telegram.md` and `payments.md` keyed rows and their canonical-source entries), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: twelve register rows moved from open to ruled), and the operator's 2026-09-05 rulings of decision 15 and decision 30 (revision 27: the last open row moved to ruled, and the recurring task registered as ruled on the operator's proposal), and revision 28 (2026-09-05: `migration.md` registered as an authored companion, and decision 31 opened).
+
 ## Purpose
 
-State how issue-based swarm work is checked against the design documents in
-`docs/foundation/`: which documents a reviewer reads on every change, which it
-reads when particular paths change, what a design-basis statement is, and what
-happens to an issue that conforms to nothing.
-
-This is the reading list. It is consumed by code, not only by people: the arch
-gate and the review lenses load it at review time
-(`execution/daemons/apis/foundation.py`), every dispatched agent's system prompt
-names it (`skill_runner.SWARM_FOUNDATION_CONTRACT`), and the issue spec's
-design-basis section is checked against it. Neotoma's equivalent is
-`docs/developer/pr_review_reading_list.md`.
+State how issue-based swarm work is checked against `docs/foundation/`: which documents a reviewer reads
+on every change, which it reads when particular paths change, what a design-basis statement is, what
+happens to an issue that conforms to nothing, which mechanical checks hold this directory to its own
+rules, and which design questions the foundation has left open. Consumed by `execution/daemons/apis/foundation.py`, `skill_runner.SWARM_FOUNDATION_CONTRACT`, and
+the issue-spec design-basis check. Neotoma's equivalent is `docs/developer/pr_review_reading_list.md`.
 
 ## Scope
 
-The `docs/foundation/` directory of this repository. Direction of truth for
-these documents is the repository: they are authored here and reviewed in PRs,
-not rendered from a Neotoma plan. Plan `decisions` maps remain the event log of
-when a decision was taken; a foundation document is the consolidated, reviewed
-statement. When they disagree, the document is wrong until a PR corrects it, and
-the PR is the review.
+The `docs/foundation/` directory. Direction of truth is the repository: these documents are authored here
+and reviewed in PRs, not rendered from a plan. Plan `decisions` maps remain the event log of when a
+decision was taken; when they disagree, the document is wrong until a PR corrects it, and the PR is the
+review.
 
-`docs/architecture.md`, `docs/taxonomy.md`, and `docs/phases.md` are outside
-this scope: they are render targets of the architecture plan and are corrected
-through it.
+Out of scope: `docs/architecture.md`, `docs/taxonomy.md`, `docs/phases.md` (architecture-plan render
+targets, corrected through the plan).
+
+`docs/foundation/status.md` is colocated and deliberately **not** in the reading list: dated, perishable
+measurement, regenerated. Foundation docs may name it as the state home only; they must not embed its
+figures as design evidence. The parser reads only the tables below, so it is never inlined; a reviewer
+who needs state reads it by hand and checks its as-of date first.
+
+`docs/foundation/workflows.md`, `docs/foundation/scenarios.md`,
+`docs/foundation/scenarios_extended.md`, and `docs/foundation/migration.md` are authored companions: they
+bind via `workflow` entities + `render_workflow_docs.py --check` (workflows), as walkthroughs of the kernel
+(scenarios), or as the design of the population plan's second leg, whose stages are tasks going through the
+`record_migration` workflow it declares (migration), and are currently **not** inlined into review prompts.
+Whether the first three are keyed is a budget decision recorded in `status.md`, not a design fact;
+`migration.md` is never keyed, because it governs no code path and its figures live in `status.md`.
 
 ## Always read
 
-The kernel: at most three documents, loaded on every review regardless of what
-changed. Three is a budget, not a count of what matters. Neotoma's reading list
-records that a six-document always-read set consumed the reviewer's turns before
-any diff was read; every other document is keyed to a path below.
+The kernel: at most three documents, every review. Three is a budget, not a count of what matters:
+Neotoma's reading list records that a six-document always-read set consumed the reviewer's turn before
+any diff was read.
 
 | Doc | What it states |
 |-----|----------------|
-| `docs/foundation/principles.md` | The invariants: a mechanism that does not bind is not a control; a write that reports success has not necessarily happened; a test that cannot fail on the thing it watches is decoration; fail closed on the field that carries the safety meaning; unknown stays distinct from a verdict. |
-| `docs/foundation/work_model.md` | How work moves: pull over push; the claim and the lease are one primitive; liveness derived at read time; the transition vocabulary. |
-| `docs/foundation/gates_and_workflows.md` | The gate model: `workflow_definition` declares, `participation_record` instantiates, `gate_status` projects; one gate-set constant; advisory and enforcing paths agree. |
+| `docs/foundation/principles.md` | Invariants: a mechanism that does not bind is not a control; a write that reports success has not necessarily happened; a test that cannot fail on the thing it watches is decoration; fail closed on the safety field; unknown stays distinct from a verdict. |
+| `docs/foundation/work_model.md` | Pull-only delivery; assignment as eligibility; claim=lease (lease as relationship); liveness derived at read; task = status + edges; intake first; tasks go through workflows in batches; artifacts ≠ subjects. |
+| `docs/foundation/gates_and_workflows.md` | `workflow` declares; a batch is the tasks going through it and the record of that; step state from batch + lease + `sign-off`; `step_status` projects; one step set; successors + `FOLLOWS`; actions are entities and are taken through the action gate; the checkpoint. |
 
-A kernel document that is not yet written is reported to the reviewer as such.
-It states nothing; that domain is reviewed on the lens's standing criteria, and
-a change is never blocked for lacking a citation to a document that does not
-exist.
+A missing kernel document is reported as not yet written; that domain is reviewed on the review step's standing
+criteria only, and a change is never blocked for lacking a citation to a document that does not exist.
 
 ## Read when these paths changed
 
-The first cell holds regular expressions matched anywhere in a changed path
-(the same convention as `Lens.diff_patterns` in `review_panel.py`); the second
-names the documents to read. A document is read at most once per review, kernel
-first.
+First cell: regexes matched anywhere in a changed path; second:
+documents to read. Each document at most once per review, kernel first.
 
-### Work and dispatch
+### Work and workflows
 
 | Changed path | Read |
 |---|---|
 | `lib/daemon_runtime/task_claim`, `lib/daemon_runtime/task_lifecycle`, `execution/daemons/apis/apis\.py`, `execution/daemons/apis/task_watchdog`, `execution/daemons/apis/routing` | `docs/foundation/work_model.md` |
-| `execution/daemons/apis/swarm_dispatch`, `execution/daemons/apis/review_panel`, `execution/daemons/apis/issue_spec`, `lib/daemon_runtime/workflow_resolver`, `lib/issue_labels`, `lib/daemon_runtime/checkpoint` | `docs/foundation/gates_and_workflows.md` |
+| `execution/daemons/apis/swarm_dispatch`, `execution/daemons/apis/review_panel`, `execution/daemons/apis/issue_spec`, `lib/daemon_runtime/workflow_resolver`, `lib/issue_labels`, `lib/daemon_runtime/checkpoint`, `lib/daemon_runtime/gating`, `execution/daemons/anthus/`, `execution/mcp/ateles/` | `docs/foundation/gates_and_workflows.md` |
 | `execution/daemons/apis/skill_runner`, `execution/daemons/apis/harness_router` | `docs/foundation/work_model.md`, `docs/foundation/gates_and_workflows.md` |
 
 ### Failure posture
 
 | Changed path | Read |
 |---|---|
-| `lib/daemon_runtime/neotoma_reachability`, `lib/daemon_runtime/checkout_drift`, `lib/neotoma`, `lib/daemon_runtime/readiness` | `docs/foundation/failure_posture.md` |
+| `lib/daemon_runtime/neotoma_reachability`, `lib/daemon_runtime/checkout_drift`, `lib/neotoma`, `lib/daemon_runtime/readiness`, `lib/neotoma_forensics` | `docs/foundation/failure_posture.md` |
 
 ### Authority
 
 | Changed path | Read |
 |---|---|
-| `lib/daemon_runtime/agent_loader`, `grant_checker`, `lib/approval`, `lib/daemon_runtime/checkpoint_posture`, `execution/mcp/ateles/` | `docs/foundation/authority_model.md` |
+| `lib/daemon_runtime/agent_loader`, `grant_checker`, `aauth_signer`, `lib/approval`, `lib/notify`, `lib/daemon_runtime/checkpoint_posture`, `execution/mcp/ateles/`, `execution/mcp/mcp_tool_grant_proxy`, `execution/daemons/apis/a2a_` | `docs/foundation/authority_model.md` |
 
 ### Vocabulary and agent instructions
 
 | Changed path | Read |
 |---|---|
 | `\.claude/skills/.*/SKILL\.md$`, `docs/agents/`, `execution/scripts/render_agent_docs` | `docs/foundation/vocabulary.md` |
+
+### The data model
+
+| Changed path | Read |
+|---|---|
+| `lib/neotoma`, `execution/scripts/.*schema`, `execution/scripts/render_data_model`, `docs/foundation/data_model\.md` | `docs/foundation/data_model.md` |
+
+### Adapters
+
+| Changed path | Read |
+|---|---|
+| `execution/daemons/apis/github_gateway`, `execution/daemons/apis/swarm_dispatch`, `execution/daemons/apus/`, `execution/daemons/formica/`, `execution/scripts/lanius_sweep`, `execution/mcp/github_harness`, `execution/daemons/turdus/`, `execution/daemons/riparia/`, `lib/daemon_runtime/run_email`, `execution/daemons/monedula/`, `execution/daemons/cotinga/`, `lib/notify`, `execution/lib/telegram`, `docs/foundation/adapters\.md` | `docs/foundation/adapters.md` |
+| `execution/daemons/apis/github_gateway`, `execution/daemons/apis/swarm_dispatch`, `execution/scripts/lanius_sweep`, `\.claude/skills/lanius/`, `docs/agents/lanius\.md`, `\.claude/skills/vanellus/`, `docs/agents/vanellus\.md`, `execution/daemons/apis/review_panel`, `execution/mcp/github_harness`, `docs/foundation/github\.md` | `docs/foundation/github.md` |
+| `execution/daemons/turdus/`, `execution/daemons/riparia/`, `lib/daemon_runtime/run_email`, `lib/approval/email_channel`, `\.claude/hooks/gmail_send_gate`, `docs/foundation/gmail\.md` | `docs/foundation/gmail.md` |
+| `execution/daemons/sylvia/`, `execution/daemons/cotinga/`, `execution/daemons/monedula/`, `docs/foundation/calendar\.md` | `docs/foundation/calendar.md` |
+| `execution/lib/telegram`, `lib/notify`, `execution/daemons/cyphorhinus/`, `lib/activity`, `docs/foundation/telegram\.md` | `docs/foundation/telegram.md` |
+| `execution/daemons/monedula/`, `docs/foundation/payments\.md` | `docs/foundation/payments.md` |
 
 ### The foundation itself
 
@@ -86,51 +110,191 @@ first.
 
 ## Design basis
 
-Every issue and every PR states its design basis: the foundation document and
-section it conforms to, or the explicit statement that no design applies.
+Every issue and PR states its design basis: the foundation document and section it conforms to, or that no
+design applies.
 
-- On an issue, the design basis is the first section of the swarm
-  specification (`issue_spec.py`, section `basis`). The pm gate states it at
-  intake, from the kernel; the arch gate checks it.
-- On a PR, the design basis is one line in the body:
-  `Design basis: docs/foundation/work_model.md#claim-and-lease`, or
-  `Design basis: no design applies — <one line why>`.
+- Issue: first section of the swarm specification (`issue_spec.py`, section `basis`). The `pm` step owner
+  states it at intake's `classify` step (`workflows.md#intake`), from the kernel; the arch review step checks it.
+- PR body line: `Design basis: docs/foundation/work_model.md#the-claim-and-the-lease-are-one-primitive`,
+  or `Design basis: no design applies — <one line why>`.
 
-What the gates check, in order:
+Checks, in order:
 
-1. Mechanically, before judgement (`foundation.check_design_basis`): the
-   statement exists; every `docs/foundation/` path it cites is on the checkout;
-   or it declares `no design applies`. A missing or invalid basis is a
-   `[BLOCKING] design-basis` finding.
-2. By reading: the gate opens the cited section and judges whether the change
-   conforms to it. A citation is not conformance. A change that contradicts the
-   cited document is blocked citing the document by path.
-3. A declaration that no design applies is judged too: if a kernel or keyed
-   document does govern the change, the declaration is false and blocking.
+1. Mechanical (`foundation.check_design_basis`): statement exists; every cited `docs/foundation/` path is
+   on the checkout; or `no design applies`. Missing/invalid → `[BLOCKING] design-basis`. Recovery: replace
+   the PR body line with `Design basis: docs/foundation/<doc>.md#<section>` or
+   `Design basis: no design applies — <reason>`, then re-request review.
+2. By reading: the step owner opens the cited section and judges whether the change conforms to it. A
+   citation is not conformance; a change that contradicts the cited document is blocked citing the
+   document by path.
+3. `no design applies` is judged too: if a kernel or keyed document governs the change, the declaration is
+   false and blocking.
 
 ## An issue that conforms to nothing
 
-An issue whose design basis cannot name a document, and for which no design
-applies, is visible at intake rather than at audit. It is not closed by the
-gate; it is one of five dispositions the audit applies in batch with operator
-approval: conforms, align (the ask is right, the framing names no basis),
-close (conforms to nothing), supersede (already a step in a sibling plan), or
-premature (work for a later vision phase, marked with that phase and kept
-open).
+Visible at intake, not only at audit. Not closed at the pm step; one of five dispositions the audit applies
+together under operator approval: conforms, align (the ask is right, the framing names no basis), close
+(conforms to nothing), supersede (already a step in a sibling plan), or premature (work for a later
+vision phase, marked with that phase and kept open).
+
+## Mechanical checks on this directory
+
+Each check is a control only while something fails on it (principle 1); the wiring that makes each fail
+is `status.md`.
+
+| Check | Runs | What fails |
+|---|---|---|
+| Reading-list budget | `execution/daemons/apis/test_foundation.py` (`TestRealDocumentBudget`) | a kernel or keyed document over `MAX_DOC_CHARS`, or a reading block over `MAX_BLOCK_CHARS`; the caps are `foundation.py`'s |
+| Anchors | `execution/scripts/check_foundation_anchors.py` | any link or backticked citation of a document and section in this directory that names a file or heading that does not exist |
+| Vocabulary | `execution/scripts/check_foundation_vocabulary.py`; asserted zero in `test_foundation.py` | any **Never** item from `vocabulary.md` in the prose of any document here but `status.md`; **Not for** items are printed as advisory and never fail |
+| Term links | `execution/scripts/link_vocabulary_terms.py --check`; asserted in `test_foundation.py` | a first mention of a defined term, in an entry or section of `vocabulary.md`, that carries no link to its definition; run the script without `--check` to link them |
+| Workflow tables | `execution/scripts/render_workflow_docs.py --check` (contract; `status.md` says whether it exists) | a step table in `workflows.md` that differs from its `workflow` entity |
+| Data-model tables | `execution/scripts/render_data_model.py --check` (contract; `status.md` says whether it exists) | a concept or relationship table in `data_model.md` that differs from the schema registry |
+
+## Direction of truth per class of record
+
+Rules and decisions have four homes, chosen for four audiences (synthesis C7). Each class has one
+authoritative side; the others are mirrors or restatements that are wrong until corrected. (An
+`artifact` in `vocabulary.md` is a record in an external system that a batch leaves; the classes below are
+the swarm's own records, and the word is not used for them.)
+
+| Class of record | Authoritative side | Mirror or restatement |
+|---|---|---|
+| Implementation state | `docs/foundation/status.md` (as of its date) | none; a foundation doc that states state is wrong |
+| Design invariants / work / steps / failure / authority | this directory, PR-reviewed | plan `decisions` event log; `CLAUDE.md` session restatement of six principles, which says it does not bind agents the swarm runs |
+| Agent behavioural rule | `agent_policy` entities | rendered `.claude/skills/` and `docs/agents/` |
+| System composition / roster / roadmap | plan `ent_99ace4dd6673aa36ed08b1fe` | `docs/architecture.md`, `taxonomy.md`, `phases.md` |
+| Session standing instruction | `CLAUDE.md` | none |
+| Core workflow step lists / fast paths / successors | the `workflow` entity for (project, type) | `docs/foundation/workflows.md` tables via `render_workflow_docs.py --check` (prose authored in the file) |
+| Entity types, fields, and edge types the design names | the schema registry on the record | `docs/foundation/data_model.md` tables via `render_data_model.py --check` (prose authored in the file) |
+| Walkthroughs of the work/gate model | the kernel documents | `docs/foundation/scenarios.md` (+ `scenarios_extended.md`) |
+| Skill bodies (what a skill instructs) | the `agent_policy` entity the skill renders from | `.claude/skills/<name>/SKILL.md` on disk |
+| Agent prompt text | `agent.prompt_markdown` | `docs/agents/` and the rendered skill mirrors, via `render_agent_docs.py --check`, which also prunes a mirror whose definition is gone |
+| Operator preferences and feedback | `task_policy` and `feedback` entities on the record | none; a harness memory file is a cache of them, never their home, and a preference that exists only in one is unreadable by every agent that is not that harness |
+| External-system mapping (what an event becomes; what a step's operation is) | `docs/foundation/adapters.md`, PR-reviewed | the adapter daemons' code; the per-instance binding of a system to an operator is the `channel_config` and `vendor_binding` entities, which bind and never redefine the mapping |
+| The code host's per-event mapping and per-step operation, in full | `docs/foundation/github.md`, PR-reviewed | the GitHub receiver and the pipeline reading from it; `adapters.md` holds the general rules the document applies and carries the pointer to it |
+| The mail system's per-signal mapping and per-step operation, in full | `docs/foundation/gmail.md`, PR-reviewed | the mail poller and the send path; `adapters.md` holds the general rules and carries the pointer to it |
+| The calendar's per-signal mapping and per-step operation, in full | `docs/foundation/calendar.md`, PR-reviewed | the calendar-reading daemons and the one event-write path; `adapters.md` holds the general rules and carries the pointer to it |
+| The chat channel's per-update mapping and per-step operation, in full | `docs/foundation/telegram.md`, PR-reviewed | the chat send helpers and the one inbound poller; `adapters.md` holds the general rules and carries the pointer to it |
+| The payment rails' per-signal mapping and per-step operation, in full | `docs/foundation/payments.md`, PR-reviewed | the payment daemon and its per-rail handlers; `adapters.md` holds the general rules and carries the pointer to it |
+| The carrying of an instance's record into the design's types (each type's disposition, the primitive that carries it, the order, and how the carrying is governed) | `docs/foundation/migration.md`, PR-reviewed | the population plan `ent_0916804d07280d1751106d82`, whose `next_steps` names the leg, and the `record_migration` workflow declaration on an instance, which binds the plan to that instance and never redefines a disposition; the counts and shapes the plan starts from are `status.md` |
+
+A rule in two classes is written once in its authoritative home and cited from the other, never copied: a
+comment or a second document claiming to mirror the first is not a mechanism that keeps them matching
+(principle 9).
+
+**When the mirror holds more than the canonical side.** "Wrong until corrected" describes the mirror's
+*authority*, not its *content*: a mirror that has been edited in place can carry material the
+authoritative side never received, and regenerating over it destroys work rather than fixing a defect.
+The direction never flips — the mirror does not become canonical because it is currently richer, and no
+item is exempt. What the richer mirror is, is a **draft of a correction to the authoritative side**: its
+content is read, merged upward as a correction to the canonical entity or document, read back there, and
+only then is the mirror re-rendered from it. So the sequence is merge upward, then render downward, and a
+regeneration that has not been preceded by the merge is the destructive step. Two consequences worth
+stating. Editing a mirror is not forbidden, but it is drafting, and a draft that is never merged upward
+is lost at the next render — the merge is the author's obligation, not the renderer's. And a `--check`
+failure means only that the two sides differ; it does not say which one is ahead, so the correct response
+is to read both before regenerating, never to regenerate reflexively because the check went red.
+
+## The register of open design decisions
+
+Every question the foundation marks **open** is listed here once, with a pointer to where it is argued.
+This is an index and not an argument: each row states the question in one line and names the section that
+holds it, and no row restates the reasoning, the options, or what would decide it — those live in the
+document that owns the subject, and reading the row is never a substitute for reading the section
+(principle 9). A decision that is argued in two places is a defect in one of them.
+
+**Why the register is here and not in `status.md`.** An open decision is a **design** record, and the
+direction-of-truth table above puts design in this directory. `status.md` is the state home: dated,
+perishable, regenerated by repeating its measurements, and deliberately out of the reading list, so a
+register there would be rewritten by the next regeneration and never reach a reviewer. The register's
+readers are the reviewer deciding whether a change is premature (see *Phases and implementation state*
+below) and the author deciding whether a question is already open, and both of them read this document.
+What `status.md` continues to hold, and what this register therefore never carries, is whether a checkout
+has taken an answer the design has not — the de facto answers it records against decisions 24 and 29 are
+measurements, and they belong there.
+
+**Status values.** **open** — argued in a document, unruled; every open decision has an argued home, and
+a row that could not name one would be recording a defect rather than a decision. **ruled** — settled and
+written into the design; a ruled row keeps its date, the ruling in one line, and the pointer to the rule it
+became, and nothing more — the reasoning, the cost, and what would reopen it are the home document's. The
+twelve of revision 12 predate the register and keep their one summary row. **withdrawn** and **not a decision** — numbers that carry no question, kept in the table
+so that they are not reused; see the two notes below.
+
+| # | The question | Argued in | Blocks | Status |
+|---|---|---|---|---|
+| 1–12 | the twelve questions of revision 12 | ruled and written into the documents they concern | — | **ruled** (2026-09-04) |
+| 13 | whether a batch may hold on a condition discovered mid-flight | `work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight` | — | **ruled** (2026-09-05): yes; the step owner records a finding naming the condition, writes no sign-off, and renews the lease; no held state, no field; bounded by sign-off, checkpoint, or lapse |
+| 14 | whether a batch may depend on a task it created | `work_model.md#a-batch-may-depend-on-a-task-it-created` | — | **ruled** (2026-09-05): yes, as a case of 13; a `DEPENDS_ON` edge from the batch to the task, never a field; the sign-off is refused while it is unended; a cycle is refused at write and at attach, and one found later escalates every batch in it as `dependency_cycle` |
+| 15 | whether adapters live in a repository of their own | `adapters.md#the-adapter-and-the-engine-are-two-roles` | — | **ruled** (2026-09-05): bundled in this repository, for now; the six admission obligations are checked by mechanisms here, and separating would split their review across two release cadences before a second consumer exists; separation is the intended end state, revisited when a second consumer of the adapters exists, not in anticipation of one |
+| 16 | whether the swarm builds its inbound receivers or rides a shared one | `adapters.md#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it` | — | **ruled** (2026-09-05): the adapter owns signature verification, delivery-id extraction, and acknowledgement; the transport listener may be shared plumbing that verifies, deduplicates, acknowledges, and parses nothing |
+| 17 | whether institutionalizing a standing finding is itself a workflow, and how the two batches sequence | `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it` | — | **ruled** (2026-09-05): it is a workflow, by the work model's general rule; the raising batch does not wait, and the institutionalization task enters intake independently |
+| 18 | whether a governance write is reserved to the operator by default, or gated at a high blast tier | `work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other` | — | **ruled** (2026-09-05): reserved; each governance class resolves to `NEVER` until the operator grants it a policy value, class by class |
+| 19 | — | never assigned; see the gap note below | — | **not a decision** |
+| 20 | — | never assigned as a distinct question; the two prose pointers that cited it named what is now 27 | — | **withdrawn** |
+| 21 | — | never assigned as a distinct question; the prose pointer that cited it named what is now 28 | — | **withdrawn** |
+| 22 | — | never assigned; see the gap note below | — | **not a decision** |
+| 23 | whether a mail thread is one artifact or a container of artifacts | `gmail.md#a-thread-and-its-messages-are-each-artifacts-related-by-part_of` | — | **ruled** (2026-09-05, with 24): both levels are artifacts, the message `PART_OF` its thread; an event links to the unit whose id it carries, an action to the unit its operation needs, a task to the unit it names |
+| 24 | whether a recurring calendar series is one artifact or many | `calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of` | — | **ruled** (2026-09-05, with 23): both levels are artifacts, the occurrence `PART_OF` its series; the same rule, stated once under linkage in `adapters.md` |
+| 25 | whether a chat reaction may ever carry a decision | `telegram.md#a-reaction-never-carries-a-decision` | — | **ruled** (2026-09-05): never; a reaction is an observation — it can be silently removed and its meaning is the channel's, not the swarm's |
+| 26 | whether the swarm answers a read on the chat channel without the record | `telegram.md#during-a-halt-a-read-on-the-channel-is-answered-with-the-halt-and-never-with-data` | — | **ruled** (2026-09-05): it answers with the halt itself — since when, and why — on the announcement path, in the chat that path already reaches, and with no data |
+| 27 | whether a payment's approver must be shown what the verifier signed | `payments.md#a-payments-approver-is-shown-exactly-what-the-verifier-signed` | — | **ruled** (2026-09-05): yes; the checkpoint carries payee, amount, currency, period, and rail as the `verify` sign-off recorded them, and `pay` is taken only on those parameters |
+| 28 | what tolerance, if any, a payment's consent carries | `payments.md#tolerance-is-an-action_policy-value-and-its-default-is-zero` | — | **ruled** (2026-09-05): a per-class `action_policy` value, zero where absent; any change to what the payee receives or the operator pays is a new checkpoint until the operator sets one |
+| 29 | what depth or state counts as terminal, and where it is declared | `payments.md#terminal-is-declared-in-the-rails-adapter-document-and-the-value-is-bound-per-instance` | — | **ruled** (2026-09-05): the criterion — settled, never sent, on a bank rail; *N* confirmations on a chain — is stated in the rail's adapter document; the value is bound per instance in the `vendor_binding`; a profile may deepen it and never shallow it |
+| 30 | how a recurring task is modelled | `work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next` | — | **ruled** (2026-09-05, on the operator's proposal): one live instance carrying its own `recurrence` rule; its closing sign-off creates the next instance, `FOLLOWS` task to task, with `due_date` computed from the schedule and never from the completion; the reschedule-instead-of-complete pattern is superseded for tasks modelled this way; an action series is a different thing and the two meet only at the gate |
+| 31 | how a registered entity type is renamed on a live record: a merge into a new-typed entity (ids change, edges repoint, the old id redirects), a registry alias (no id changes, a capability the record lacks), or a permanent tolerant reader over both types (nothing written) | `migration.md#the-open-decision-this-document-opens` | the re-typing stages of the migration (`agent`, `workflow`, the held decisions); nothing before them | **open** |
+
+**Every ruled decision now has a heading of its own.** 25 through 29 were opened as bold paragraphs inside
+their documents' *What this document does not decide* sections, and the register's pointers resolved to the
+enclosing heading; the rulings of 2026-09-05 gave each its own section, as 13, 14, 23, and 24 already had, so
+every pointer above lands on the ruling itself. 15 and 30 are argued under headings that name their subject
+rather than their number, as 13 and 14 are. One row is open, 31, and the register exists for the ruled rows
+too: a ruled row is where a reviewer learns a question was once open and where its rule now lives, and
+where the next author reads before opening a question that was already taken.
+
+**Decision 31 is argued under a heading of its own in `migration.md`**, an authored companion, which is
+where the migration it bears on is designed; the register row above points at it.
+
+**19 and 22 were never assigned, and the numbers stay unused.** Neither appears in any revision of any
+foundation document. They are the gaps left by several documents opening decisions concurrently on this
+branch and renumbering around each other, and they are recorded as gaps rather than closed up: renumbering
+would break every cross-reference the documents already carry, and silence would invite the next author to
+reuse the number for something unrelated. **Do not assign 19 or 22 to a new decision.** The next number is
+32.
+
+**20 and 21 were assigned, then renumbered, and two pointers were left behind.** Both were opened in
+`payments.md` and renumbered to 27 and 28 before that document was committed, to avoid colliding with 23
+through 26, which were opened concurrently in other documents. Two prose pointers kept the old numbers and
+resolved to nothing; they now cite 27 and 28. No question was lost — the register records the numbers as
+withdrawn so that they are not reused either, and 27 and 28 carry the questions in full.
 
 ## Amending a foundation document
 
-A foundation document changes through a PR that cites the plan decision it
-consolidates (plan entity id and decision key), so the event log and the
-reviewed statement stay traceable to each other. That PR is reviewed like any
-other; the keyed entry above ensures this document is read when it is.
+Change through a PR that cites the plan decision it consolidates (entity id + decision key), so the event
+log and the reviewed statement stay traceable to each other. The keyed entry above ensures this document
+is read when the foundation changes, and the checks above run on the change.
 
-## Vision phase
+**A decision opened in a document is registered in the same change.** A question marked open in a
+foundation document and absent from the register above is unfindable — the reporting-without-binding
+defect principle 1 names — so the PR that opens a decision adds its row, and the PR that rules one moves
+it to **ruled**. The register is the index; the document is the argument.
 
-Each foundation document carries in its header the vision phase it belongs to
-(P1 governed execution for one principal, P2 multi-operator identity and
-ownership, P3 delegation and approval, P4 distributed authority, P5
-organizational operating system). Implementation items cite the vision-phase
-document they implement; an item with no citable document is either P1, in
-which case it cites the foundation, or premature, in which case it is marked
-with its phase and waits.
+## Phases and implementation state
+
+The foundation is phase-agnostic. Each document defines its part of the design whole, marks undecided
+questions **open** with their options, and says nothing about what a checkout implements. README vision
+phases (P1–P5) are a roadmap over that one design; `status.md` records, as of its date, which sections are
+built, which are designed and unbuilt, and which are open. Implementation phases (`docs/phases.md`) are a
+separate axis and are never merged with the roadmap: an implementation item cites the foundation document
+and section it implements, not a vision phase.
+
+An implementation item whose section is marked open in the foundation is premature: it waits on the
+decision, marked with the roadmap phase that decision belongs to, and stays open. Which sections are open
+is the register above; a reviewer deciding whether an item is premature reads it rather than searching the
+documents. An item with no citable
+section is either covered by the design as written, in which case it cites the foundation, or conforms to
+nothing (above).
+
+Two rules: a foundation document never carries "today", "on main", a commit hash, a count, or an
+open-issue reference as evidence a defect is live; an issue/PR is cited only as the record of a decision,
+never as state. A PR that adds either is blocked on this section.

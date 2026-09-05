@@ -1,3 +1,5 @@
+> **Archived 2026-09-02. Superseded by [`docs/foundation/gates_and_workflows.md`](../../docs/foundation/gates_and_workflows.md).** It proposes operator-configurable per-boundary checkpoints on the confidence × blast-radius gate; the superseding document states the three blast tiers as implemented and what is true today about the approval substrate. Kept for history; not part of the active doc set, and nothing reads it at review time.
+
 # Swarm HITL Checkpoints — Design
 
 **Status:** design (2026-06-19) · **Scope:** GitHub flows now, architected to extend to all swarm processes.
