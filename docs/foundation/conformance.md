@@ -6,7 +6,7 @@ mechanism (built as ateles#744): names documents and paths, never what a checkou
 `binding_is_the_reviewer_reading_a_kernel_not_a_loading_order` and
 `ateles_binding_extends_three_existing_mechanisms`, synthesis `ent_b0ce322f768e4fc676b73139` (PR-29, C7),
 prior art `ent_08460968e6f49dac21510f4a` (OPA: decision decoupled from enforcement), and PR #745 operator
-review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and revision 21 (2026-09-05: the `gmail.md` and `calendar.md` keyed rows and their canonical-source entries), and revision 24 (2026-09-05: the `telegram.md` and `payments.md` keyed rows and their canonical-source entries), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: twelve register rows moved from open to ruled), and the operator's 2026-09-05 rulings of decision 15 and decision 30 (revision 27: the last open row moved to ruled, and the recurring task registered as ruled on the operator's proposal), and revision 28 (2026-09-05: `migration.md` registered as an authored companion, and decision 31 opened).
+review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and revision 21 (2026-09-05: the `gmail.md` and `calendar.md` keyed rows and their canonical-source entries), and revision 24 (2026-09-05: the `telegram.md` and `payments.md` keyed rows and their canonical-source entries), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: twelve register rows moved from open to ruled), and the operator's 2026-09-05 rulings of decision 15 and decision 30 (revision 27: the last open row moved to ruled, and the recurring task registered as ruled on the operator's proposal), and revision 28 (2026-09-05: `migration.md` registered as an authored companion, and decision 31 opened). Revised by the simplification pass of 2026-09-05 (revision 29: the `feedback` entity removed from the direction-of-truth table in favour of the finding; `scenarios_extended.md` merged into `scenarios.md`; decisions 32 to 35 opened).
 
 ## Purpose
 
@@ -31,12 +31,12 @@ measurement, regenerated. Foundation docs may name it as the state home only; th
 figures as design evidence. The parser reads only the tables below, so it is never inlined; a reviewer
 who needs state reads it by hand and checks its as-of date first.
 
-`docs/foundation/workflows.md`, `docs/foundation/scenarios.md`,
-`docs/foundation/scenarios_extended.md`, and `docs/foundation/migration.md` are authored companions: they
+`docs/foundation/workflows.md`, `docs/foundation/scenarios.md`, and `docs/foundation/migration.md` are
+authored companions: they
 bind via `workflow` entities + `render_workflow_docs.py --check` (workflows), as walkthroughs of the kernel
 (scenarios), or as the design of the population plan's second leg, whose stages are tasks going through the
 `record_migration` workflow it declares (migration), and are currently **not** inlined into review prompts.
-Whether the first three are keyed is a budget decision recorded in `status.md`, not a design fact;
+Whether the first two are keyed is a budget decision recorded in `status.md`, not a design fact;
 `migration.md` is never keyed, because it governs no code path and its figures live in `status.md`.
 
 ## Always read
@@ -167,10 +167,10 @@ the swarm's own records, and the word is not used for them.)
 | Session standing instruction | `CLAUDE.md` | none |
 | Core workflow step lists / fast paths / successors | the `workflow` entity for (project, type) | `docs/foundation/workflows.md` tables via `render_workflow_docs.py --check` (prose authored in the file) |
 | Entity types, fields, and edge types the design names | the schema registry on the record | `docs/foundation/data_model.md` tables via `render_data_model.py --check` (prose authored in the file) |
-| Walkthroughs of the work/gate model | the kernel documents | `docs/foundation/scenarios.md` (+ `scenarios_extended.md`) |
+| Walkthroughs of the work/gate model | the kernel documents | `docs/foundation/scenarios.md` |
 | Skill bodies (what a skill instructs) | the `agent_policy` entity the skill renders from | `.claude/skills/<name>/SKILL.md` on disk |
 | Agent prompt text | `agent.prompt_markdown` | `docs/agents/` and the rendered skill mirrors, via `render_agent_docs.py --check`, which also prunes a mirror whose definition is gone |
-| Operator preferences and feedback | `task_policy` and `feedback` entities on the record | none; a harness memory file is a cache of them, never their home, and a preference that exists only in one is unreadable by every agent that is not that harness |
+| Operator preferences | `task_policy` entities on the record | none; a harness memory file is a cache of them, never their home, and a preference that exists only in one is unreadable by every agent that is not that harness. The operator's input on reviewed work is not a preference and has no entity of its own: it is a finding on the batch (`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`) |
 | External-system mapping (what an event becomes; what a step's operation is) | `docs/foundation/adapters.md`, PR-reviewed | the adapter daemons' code; the per-instance binding of a system to an operator is the `channel_config` and `vendor_binding` entities, which bind and never redefine the mapping |
 | The code host's per-event mapping and per-step operation, in full | `docs/foundation/github.md`, PR-reviewed | the GitHub receiver and the pipeline reading from it; `adapters.md` holds the general rules the document applies and carries the pointer to it |
 | The mail system's per-signal mapping and per-step operation, in full | `docs/foundation/gmail.md`, PR-reviewed | the mail poller and the send path; `adapters.md` holds the general rules and carries the pointer to it |
@@ -243,24 +243,31 @@ so that they are not reused; see the two notes below.
 | 29 | what depth or state counts as terminal, and where it is declared | `payments.md#terminal-is-declared-in-the-rails-adapter-document-and-the-value-is-bound-per-instance` | — | **ruled** (2026-09-05): the criterion — settled, never sent, on a bank rail; *N* confirmations on a chain — is stated in the rail's adapter document; the value is bound per instance in the `vendor_binding`; a profile may deepen it and never shallow it |
 | 30 | how a recurring task is modelled | `work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next` | — | **ruled** (2026-09-05, on the operator's proposal): one live instance carrying its own `recurrence` rule; its closing sign-off creates the next instance, `FOLLOWS` task to task, with `due_date` computed from the schedule and never from the completion; the reschedule-instead-of-complete pattern is superseded for tasks modelled this way; an action series is a different thing and the two meet only at the gate |
 | 31 | how a registered entity type is renamed on a live record: a merge into a new-typed entity (ids change, edges repoint, the old id redirects), a registry alias (no id changes, a capability the record lacks), or a permanent tolerant reader over both types (nothing written) | `migration.md#the-open-decision-this-document-opens` | the re-typing stages of the migration (`agent`, `workflow`, the held decisions); nothing before them | **open** |
+| 32 | whether a sign-off's `verdict` is a stored field or a read over its findings and its author | `gates_and_workflows.md#whether-the-verdict-is-a-stored-field-or-a-read-over-the-findings-and-the-author` | — | **open** (simplification pass, 2026-09-05; unverified against the matrix) |
+| 33 | whether a stage, and the `phase` field on a step, names anything a step does not | `workflows.md#whether-a-stage-names-anything-a-step-does-not` | — | **open** (simplification pass, 2026-09-05; unverified against the matrix) |
+| 34 | whether the step path is an execution mechanism of its own, and whether the component that opens steps is `pipeline` or `engine` | `work_model.md#whether-the-step-path-is-a-mechanism-of-its-own-and-what-the-engine-is-called` | — | **open** (simplification pass, 2026-09-05; unverified against the matrix) |
+| 35 | whether one binding type or two (`channel_config`, `vendor_binding`) names an external system's per-instance binding | `adapters.md#whether-one-binding-type-or-two-names-an-external-systems-instance` | — | **open** (simplification pass, 2026-09-05; unverified against the matrix) |
 
 **Every ruled decision now has a heading of its own.** 25 through 29 were opened as bold paragraphs inside
 their documents' *What this document does not decide* sections, and the register's pointers resolved to the
 enclosing heading; the rulings of 2026-09-05 gave each its own section, as 13, 14, 23, and 24 already had, so
 every pointer above lands on the ruling itself. 15 and 30 are argued under headings that name their subject
-rather than their number, as 13 and 14 are. One row is open, 31, and the register exists for the ruled rows
-too: a ruled row is where a reviewer learns a question was once open and where its rule now lives, and
-where the next author reads before opening a question that was already taken.
+rather than their number, as 13 and 14 are. Five rows are open — 31, and 32 to 35, which the simplification
+pass of 2026-09-05 opened as removals whose guarantee coverage would shift rather than be exactly preserved,
+each argued under a heading naming its subject in the document that owns it — and the register exists for
+the ruled rows too: a ruled row is where a reviewer learns a question was once open and where its rule now
+lives, and where the next author reads before opening a question that was already taken.
 
-**Decision 31 is argued under a heading of its own in `migration.md`**, an authored companion, which is
-where the migration it bears on is designed; the register row above points at it.
+**Decisions 31 and 33 are argued under headings of their own in authored companions** — 31 in
+`migration.md`, where the migration it bears on is designed, and 33 in `workflows.md`, where the Stages
+lines it concerns are written; the register rows above point at them.
 
 **19 and 22 were never assigned, and the numbers stay unused.** Neither appears in any revision of any
 foundation document. They are the gaps left by several documents opening decisions concurrently on this
 branch and renumbering around each other, and they are recorded as gaps rather than closed up: renumbering
 would break every cross-reference the documents already carry, and silence would invite the next author to
 reuse the number for something unrelated. **Do not assign 19 or 22 to a new decision.** The next number is
-32.
+36.
 
 **20 and 21 were assigned, then renumbered, and two pointers were left behind.** Both were opened in
 `payments.md` and renumbered to 27 and 28 before that document was committed, to avoid colliding with 23

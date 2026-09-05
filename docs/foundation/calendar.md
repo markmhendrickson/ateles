@@ -9,7 +9,7 @@ actions and the action gate), `workflows.md` (meeting processing, outreach, oper
 `failure_posture.md` (the halt, the recovery per action class), `gmail.md` (the sibling system, whose
 identity and minimization rules this document shares), and the Google Calendar REST API v3 surface as
 exposed by the `gws` CLI, read 2026-09-05, and PR #745 operator review (2026-09-05, rulings 13–14, 16–18,
-23–29: decision 24 ruled here). What is built, and which rows have no code path, is `status.md`.
+23–29: decision 24 ruled here). What is built, and which rows have no code path, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `calendar_routing_config` replaced by `channel_config`, the binding type `adapters.md` names).
 
 ## Purpose
 
@@ -48,7 +48,8 @@ state change, the outbound operation per step, the recurrence question, and the 
 general adapter rules (`adapters.md`), the workflows whose steps take these operations (`workflows.md`),
 the gate's decision function (`gates_and_workflows.md`), what the adapter is granted
 (`authority_model.md#grants`), and the per-instance binding of a calendar to an operator, which is a
-`calendar_routing_config` context entity resolved at runtime and never named here.
+`channel_config` context entity resolved at runtime and never named here — the same binding type the mail
+system and the chat channel use (`adapters.md#scope`).
 
 ## What artifacts this system holds
 
@@ -158,7 +159,7 @@ Rows are marked **handled**, **deliberately ignored**, or **unhandled** — the 
 | an event's attachments changed | handled | an observation naming the attachment and its location; the adapter does not fetch the file unless a step declares the read |
 | a reminder or notification override changed on an event | deliberately ignored | `dropped`, reason `presentation_only`: a reminder is the calendar's own alerting for a human reader and says nothing about the work. **The swarm's own timing comes from the record**, never from a calendar reminder — a reminder that fires is not a trigger |
 | an event's colour, visibility, or transparency changed | deliberately ignored | `dropped`, reason `presentation_only` |
-| an event on a calendar the routing config does not name | handled | `dropped`, reason `untracked_calendar` |
+| an event on a calendar the `channel_config` does not name | handled | `dropped`, reason `untracked_calendar` |
 | an event created by the swarm's own credential | handled | an action confirmation on the batch's `external_api_write`- or `send_external_comms`-class action whose `dedup_key` matches; the event is `PRODUCES` from the batch. **An event created by the swarm's credential matching no action is an observation and a defect to surface** |
 
 ### Calendars, sharing, and settings
@@ -329,7 +330,7 @@ an adapter's to infer. The adapter observes such changes and announces them.
 of `gmail.md`'s label refusal: a swarm that writes a "blocked" event onto a calendar has built a second
 place step state lives, editable by anyone with write access and backed by no sign-off.
 
-**7. It never reads a calendar the routing config does not name.** The operator's calendar list may include
+**7. It never reads a calendar the `channel_config` does not name.** The operator's calendar list may include
 calendars belonging to other people and organizations; being able to read one is not authority to.
 
 **8. It never treats a calendar reminder as a trigger.** The swarm's timing comes from the record. A

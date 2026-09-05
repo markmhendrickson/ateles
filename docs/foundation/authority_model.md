@@ -7,7 +7,7 @@ undecided question **open** with its options, never resolving one to make the do
 section as decision; the swarm-spec section as proposal), synthesis `ent_b0ce322f768e4fc676b73139` (PR-20
 to PR-28, PR-34 to PR-38, C8, C9, C10, C13, C14, C17), prior art `ent_08460968e6f49dac21510f4a` (Track 2),
 the P4 brief `ent_683200acfb3ff5f03add966c`, `docs/multi_tenant.md`, and PR #745 operator review
-(2026-09-04). What is built, and where the substrate fails open, is `status.md`.
+(2026-09-04). What is built, and where the substrate fails open, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder).
 
 ## Purpose
 
@@ -85,7 +85,7 @@ reuse (`multi_tenant.md` sections 2 and 3). Open: section 7's five decisions.
 
 **Ownership.** Named accountability for a workflow, domain, queue, or configuration entity, as an edge from
 the object to a principal (`ownership_grant`), never over a routing keyword. A step owner is ownership of
-one step of one workflow; a claimant is not an owner (`vocabulary.md`). Open (brief Q7): what owning
+one step of one workflow; a lease holder is not an owner (`vocabulary.md`). Open (brief Q7): what owning
 confers, sole decision below the domain's blast tier, a required seat above it and on cross-domain
 actions, or both.
 

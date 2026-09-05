@@ -9,7 +9,7 @@ cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 opera
 and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional [step](#step), and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14,
 16–18, 23–29: the hold verb, a condition a step holds on, the `dependency_cycle` reason class, the consent
 tolerance on `action_policy`, and an [artifact](#artifact) `PART_OF` its containing artifact). Format
-follows Neotoma's `docs/vocabulary/canonical_terms.md`.
+follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table).
 
 ## Purpose
 
@@ -141,22 +141,13 @@ into the record (that is an entity of its own type).
 
 ### claim
 **Definition:** the act by which an [agent](#agent) takes the [lease](#lease) on a [task](#task), or on a [step](#step) of a [batch](#batch), itself,
-atomic among concurrent [claimants](#claimant) and keyed on the task or the step.
+atomic among concurrent claims and keyed on the task or the step.
 **Use:** "Corvus claims a task that is eligible for it: `assigned_to` is unset or names Corvus, and no
-lease is held. The claim, not the assignment, makes Corvus the claimant."
+lease is held. The claim, not the assignment, makes Corvus the lease holder."
 **See:** [`work_model.md#the-claim-and-the-lease-are-one-primitive`](work_model.md#the-claim-and-the-lease-are-one-primitive).
 **Never:** dispatch, pick up, hand off, push, and spawn, in any of their forms — a runner is started; work
 is claimed.
 **Not for:** assign for a claim (an eligibility constraint, which creates no lease).
-
-### claimant
-**Definition:** the [principal](#principal) that holds the [lease](#lease) on a [task](#task), [read back](#read-back) from the persisted lease and never
-from a task field.
-**See:** [`work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields`](work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields).
-**Never:** "assignee" (say: the principal the assignment names, who has not necessarily claimed).
-**Not for:** owner standing alone, for the claimant or for anything else — the word carries five meanings
-and always takes its qualifier (step owner, plan owner, grant owner, business owner, current owner, routed
-owner); holder without the lease in front of it.
 
 ### assign
 **Definition:** the act by which a [principal](#principal) restricts a [task](#task)'s eligibility to one named principal by
@@ -164,7 +155,7 @@ writing `assigned_to`, a field write like any other, creating no [lease](#lease)
 An assignment is the resulting state; it is not delivery, and the named principal still [claims](#claim). Pull is the
 only delivery.
 **See:** [`work_model.md#assignment-restricts-eligibility-it-never-creates-a-lease`](work_model.md#assignment-restricts-eligibility-it-never-creates-a-lease).
-**Never:** —
+**Never:** "assignee" (say: the principal the assignment names, who has not necessarily claimed).
 **Not for:** delivery for an assignment; `setAssignee` (Camunda's, which installs a holder without a
 claim).
 
@@ -172,10 +163,14 @@ claim).
 **Definition:** a relationship between a [principal](#principal) and a [task](#task), or between a [step owner](#step-owner) and a [step](#step) on a
 [batch](#batch), carrying `claimed_at` and `expires_at`, that lapses without cooperation from its holder.
 The [claim](#claim) and the lease are one primitive; renewal is the heartbeat; the task carries no lease fields.
+Its **lease holder** is the principal the persisted lease names, [read back](#read-back) from the lease and never
+from a task field; it is the only role the lease has, and it needs no term of its own.
 **See:** [`work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields`](work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields).
-**Never:** —
+**Never:** "claimant" (retired: say lease holder).
 **Not for:** "claim fields" for the lease (the task carries none); "lock" for a lease (a lock outlives its holder); "heartbeat" for the lease (the heartbeat
-renews the lease; it is not the lease).
+renews the lease; it is not the lease); owner standing alone, for the lease holder or for anything else — the word carries five meanings
+and always takes its qualifier (step owner, plan owner, grant owner, business owner, current owner, routed
+owner); holder without the lease in front of it.
 
 ### held
 **Definition:** the [lease](#lease) state, derived at read time, in which `expires_at` is in the future.
@@ -185,7 +180,7 @@ renews the lease; it is not the lease).
 it is read back, never stored on the task).
 
 ### lapsed
-**Definition:** the [lease](#lease) state, derived at read time, in which `expires_at` has passed and the [claimant](#claimant)
+**Definition:** the [lease](#lease) state, derived at read time, in which `expires_at` has passed and the lease holder
 has not [returned](#returned) the lease.
 A lapsed lease does not count for claimability, so the [task](#task) is [claimable](#claimable) again without any process acting
 on the lease.
@@ -194,7 +189,7 @@ on the lease.
 **Not for:** —
 
 ### returned
-**Definition:** the [lease](#lease) state in which the [claimant](#claimant) ended the lease explicitly, on completion or on
+**Definition:** the [lease](#lease) state in which the lease holder ended the lease explicitly, on completion or on
 failure.
 **See:** [`work_model.md#the-transition-vocabulary`](work_model.md#the-transition-vocabulary).
 **Never:** released, of a lease, in either voice — a lease is returned, because release collides with the
@@ -220,7 +215,7 @@ The task's own transition vocabulary is `created` plus its status; [lease](#leas
 
 ### claimable
 **Definition:** the derived property of a [task](#task) whose status is neither terminal nor `blocked`, whose
-`assigned_to` is unset or names the would-be [claimant](#claimant), and on which no [lease](#lease) is held.
+`assigned_to` is unset or names the [principal](#principal) about to [claim](#claim), and on which no [lease](#lease) is held.
 **See:** [`work_model.md#what-a-claim-predicate-treats-as-claimable`](work_model.md#what-a-claim-predicate-treats-as-claimable).
 **Never:** —
 **Not for:** "available" for claimable; open for claimable, whether as an open task, an open pool, or a
@@ -253,14 +248,6 @@ which the entity's history is read.
 [`data_model.md#record-conventions`](data_model.md#record-conventions).
 **Never:** "log line".
 **Not for:** event for a stored change.
-
-### hot path
-**Definition:** a read path on which a decision must be taken from one entity read, for which a [projection](#projection)
-such as `step_status` exists.
-**See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
-**Never:** —
-**Not for:** fast path for a hot path (a fast path is a declared skip of steps); cache for a
-projection.
 
 ### watchdog
 **Definition:** the observer that counts lapses on a [task](#task) and raises a [checkpoint](#checkpoint) when the count reaches
@@ -407,7 +394,7 @@ project, and a step whose role resolves to no principal raises a [checkpoint](#c
 `unspawnable_assignee`) rather than falling through to any available agent.
 **Field:** `workflow.steps[].owner_role` (the design's name; the field is `owner_agent` in the built
 declarations and holds a role there too — `status.md`).
-**See:** [`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`](gates_and_workflows.md#two-policies-workflow-policy-and-action-policy).
+**See:** [`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`](gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken).
 **Never:** —
 **Not for:** owner alone.
 
@@ -512,7 +499,7 @@ other the projection of it).
 
 ### step_status
 **Definition:** the map on the [task](#task) projecting each [step](#step)'s
-[step state](#step-state) on its [batch](#batch) for the [hot path](#hot-path), derived from the
+[step state](#step-state) on its [batch](#batch) so that it is read in one retrieval, derived from the
 [sign-offs](#sign-off) and proved equal to them by a reconciler.
 Written as the field the record names, in code font, because that is what a reader queries; the state it
 projects is the spaced concept step state.
@@ -525,7 +512,7 @@ concept.
 **Definition:** a declared skip of [steps](#step) that a [workflow](#workflow) permits for a named class of [tasks](#task).
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
 **Never:** "shortcut".
-**Not for:** hot path for a fast path.
+**Not for:** a [projection](#projection) for a fast path (one is a stored read, the other a declared skip).
 
 ### successor
 **Definition:** a [workflow](#workflow) that a `workflow` declares in `successors` as one a [batch](#batch) of it may enter on
@@ -571,16 +558,12 @@ repository.
 always-checkpoint boundaries, the permission scope, and the consent tolerance per action class — the change
 to an action's consented figures that may be taken without a new [checkpoint](#checkpoint), zero where the
 policy declares none (`payments.md#tolerance-is-an-action_policy-value-and-its-default-is-zero`).
-**See:** [`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`](gates_and_workflows.md#two-policies-workflow-policy-and-action-policy).
-**Never:** "execution_policy", "execution policy".
-**Not for:** "config" or "settings" for the policy; workflow policy for the action policy.
-
-### workflow policy
-**Definition:** the rule set stating which [principals](#principal) may [claim](#claim) which [steps](#step) of which [workflows](#workflow), composed
-of the workflow's [step owners](#step-owner) and the `agent_grant`s in force.
-**See:** [`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`](gates_and_workflows.md#two-policies-workflow-policy-and-action-policy).
-**Never:** —
-**Not for:** action policy for the workflow policy; permissions for the workflow policy.
+**See:** [`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`](gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken).
+**Never:** "execution_policy", "execution policy", "workflow policy" (retired: the step owners a workflow
+declares together with the grants in force decide who may claim a step, and nothing stands beside them
+under a name of its own).
+**Not for:** "config" or "settings" for the policy; the policy for who may claim a step (that is the
+declaration and the grants).
 
 ### action
 **Definition:** one intended effect on an [external system](#external-system) — one the swarm does not own — such as a send, a
@@ -674,16 +657,10 @@ cannot advance — awaiting a [principal](#principal)'s decision.
 Two cases, one term, because both are work stopped short of a decision only a principal can make; what
 resumes differs and is read from the subject [edge](#edge), not from a second term. Recorded as an entity linked to
 its subject, carrying a reason class, the needed input, the options, whom it awaits, and who resolved it,
-and ending in a terminal approval. To checkpoint a subject is to write one and hold. The reason classes are `gate_hold`, `repeated_lapse`, `unreadable_workflow`, `rounds_exhausted`,
-`unspawnable_assignee`, `unclaimed_step` (an open [step](#step) no [step owner](#step-owner) has [claimed](#claim) after the
-interval its [workflow](#workflow) declares, routed against the owner role — it alerts and never signs),
-`undeclared_dependency` (a step could not read a type it declared, and the bounded hold reached its bound),
-`capability_denied` (a [principal](#principal) was denied a capability its step needed; the checkpoint is a
-request, never a [grant](#grant)), `lossy_record_mutation` (a write to the record whose blast exceeds the
-count the [action_policy](#action_policy) declares), `undetermined_scope` (a standing [finding](#finding) whose right
-scope cannot be determined from the finding), `dependency_cycle` (two or more [batches](#batch) each holding on a task
-attached to another, found after the write — `work_model.md#a-batch-may-depend-on-a-task-it-created`), and
-any a policy declares. "Brief" described its content, not its identity, and is
+and ending in a terminal approval. To checkpoint a subject is to write one and hold. The reason classes
+— `gate_hold` for a held action, and the classes a task is [escalated](#escalate) under — are enumerated once, each
+with what raises it, in `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`; a policy may
+declare more. "Brief" described its content, not its identity, and is
 retired from the name for the same reason as `_record` and `_definition`.
 **See:** [`gates_and_workflows.md#the-checkpoint`](gates_and_workflows.md#the-checkpoint),
 [`failure_posture.md#what-a-checkpoint-does-not-absorb`](failure_posture.md#what-a-checkpoint-does-not-absorb),
@@ -1116,11 +1093,12 @@ a [step state](#step-state), the chain, or a parent's completion.
 **Not for:** cached for a derived read; flag for a derived read.
 
 ### projection
-**Definition:** a stored copy of a [derived read](#derived-read), kept for a [hot path](#hot-path) and proved equal to its source by a
-reconciler, such as `step_status`.
+**Definition:** a stored copy of a [derived read](#derived-read), kept where a decision must be taken from one entity read and
+proved equal to its source by a reconciler, such as `step_status`.
 **See:** [`data_model.md#concepts`](data_model.md#concepts).
-**Never:** —
-**Not for:** source of truth for a projection; history for a projection.
+**Never:** "hot path" (retired: the path had no property the projection kept for it does not state).
+**Not for:** source of truth for a projection; history for a projection; cache for a projection; a
+projection for a [fast path](#fast-path) (a declared skip of steps).
 
 ## Conformance (`conformance.md`)
 
@@ -1181,12 +1159,12 @@ they appear in a document, a schema, a prompt, or an error message.
 |---|---|---|
 | the role the roster resolves to the principal whose sign-off closes a step | **step owner** | `workflow.steps[].owner_role` |
 | the step a batch is at | **current step** | derived from the batch's step states; projected as `current_owner` |
-| the agent a finding is routed to | **routed agent** | `proposed_skill_update.owning_agent` |
+| the implementer a blocking finding's remedy is routed to | **routed agent** | none; the remedy is a task entering intake, and the step owner keeps the sign-off (`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`) |
 | the operator with the book of business for a customer | **book-of-business owner** | `multi_tenant.md` section 5 |
 | named accountability for a workflow, domain, or queue | **ownership** (above) | `ownership_grant` |
 
-The [principal](#principal) holding a [task](#task)'s [lease](#lease) is its [claimant](#claimant), never its owner; the principal an
-assignment names is not yet its claimant.
+The [principal](#principal) holding a [task](#task)'s [lease](#lease) is its lease holder, never its owner; the principal an
+assignment names holds no lease until it [claims](#claim).
 
 ## Retired names
 
@@ -1209,3 +1187,8 @@ foundation prose only on a line that says it is retired.
 | `review panel` | the [review steps](#review-step) a [workflow](#workflow) declares | the set of steps a workflow declares is the panel; naming it separately implied a second sequencing mechanism beside the declaration |
 | `reaper` | nothing | a lapsed lease already does not count; there is nothing to release |
 | `executing`, `running` (as states) | [active](#active) (derived) | a stored liveness flag fails when the process that would clear it dies |
+| `claimant` | lease holder ([lease](#lease)) | the claim and the lease are one primitive, so the principal that claimed is the principal the lease names; a second noun for the same principal (principle 9) |
+| `workflow policy` | the [step owners](#step-owner) a [workflow](#workflow) declares, with the [grants](#grant) in force | a collective name for two mechanisms that already answer who may claim a step; no entity, field, or rule carried the name |
+| `hot path` | [projection](#projection) | it named the reason a projection exists, and the projection's definition already states it |
+| `operator_preview` (a step name) | `consent` | three step names — `operator_preview`, `consent`, `present` — for the step that carries the gate's checkpoint to the operator; the two whose work is identical now share the name |
+| `calendar_routing_config` (a binding type) | `channel_config` | `adapters.md#scope` names the per-instance binding types once; a third name for the same binding was a second home |

@@ -8,7 +8,7 @@ and the action gate), `authority_model.md` (credentials bind to principals; appr
 steps whose effects leave the system), PR #745 operator review (2026-09-04, the adapter decision), and the
 operator's 2026-09-05 review (the inbound-delivery question and the adapter-packaging lean, both recorded
 below as open; and revision 18: when an artifact comes into existence, and what holds an effect before
-it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists). What is built, and where the adapter and the engine are still one process, is `status.md`.
+it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists). What is built, and where the adapter and the engine are still one process, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: open decision 35).
 
 ## Purpose
 
@@ -690,7 +690,7 @@ adapter admission task is not created that way.
 and its capabilities are an `agent_grant`, scoped and time-bounded, matched on the credential
 (`authority_model.md#grants`). So "who may add an adapter" resolves to "who may write that grant", and
 that is already answered: a write to `agent_grant` is a **governance write**, which is an action evaluated
-at the action gate (`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`). The operator
+at the action gate (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`). The operator
 resolves the checkpoint the gate raises. Nothing here needs a new approver class, and adding one would be
 the second gate. That governance class is *reserved* to the operator by default (**decision 18**, ruled:
 `work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`): a project with no
@@ -845,6 +845,26 @@ an adapter with no binding receives nothing and writes nothing, and the action g
 anything it could take — but it is weight, and it is the price of the review staying in one place until
 a second consumer makes the separation pay for itself. The design is otherwise unaffected either way: every
 rule in this document is about what an adapter does and none about where its code lives.
+
+### Whether one binding type or two names an external system's instance
+
+**Open decision 35.** Registered in `conformance.md#the-register-of-open-design-decisions`. The per-instance binding of a system to an operator is named in
+this document's scope as two context entity types, `channel_config` and `vendor_binding`, and the
+per-system documents use them by system: the mail system, the chat channel, and the calendar bind through
+`channel_config`; the code host and the rails through `vendor_binding`. Nothing in the foundation states
+what separates a channel from a vendor, and the documents lean on the division for one thing: routing — which
+chat receives which class of message — which the chat document reads from `channel_config`
+(`telegram.md#chats-groups-and-who-can-see-what`). Two types for one role — which instance of an external
+system is this operator's, and under what settings — is the two-names signature (principle 9) unless the
+division carries a rule.
+
+**The options.** One binding type per external system, with routing as a field of it. Or two, with the
+distinguishing rule stated here. Or the two types as they stand, undistinguished.
+
+**Why proposed rather than applied.** Both are context entities the design retrieves by type and never
+defines, so their shape is the record's, and merging them is a schema change with a migration of its own
+(`migration.md`) rather than a substitution in prose. **What would decide it:** whether any rule ever
+reads the two differently; if none does, they are one type under two names. Opened by the simplification pass of 2026-09-05 without the conformance matrix, which had not landed; the proof above rests on principles 6 and 9 alone and is unverified against the matrix.
 
 ## Prior art
 

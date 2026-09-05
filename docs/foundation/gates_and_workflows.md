@@ -10,7 +10,7 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
 memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram), and the operator's 2026-09-05 12:52 memo (revision 21: the general claim about self-modification, stated in `work_model.md` and cross-referenced from decision 17), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 17 ruled here; the `dependency_cycle` reason class), and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: the next instance is a created task and not a successor). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`.
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32).
 
 ## Purpose
 
@@ -204,7 +204,7 @@ large amendment the owner ruled on is legitimate. Scope moving silently is the f
 shipped change exceeds what any principal judged carries sign offs pinned to an artifact state that no
 longer describes it (`data_model.md#record-conventions`).
 
-`step_status` on the task is the hot-path projection of the batch's sign-offs, so "all required steps
+`step_status` on the task is the projection of the batch's sign-offs, so "all required steps
 signed?" fails closed in one read. A reconciler proves it agrees with the sign-offs; neither is deleted,
 neither is a second source of truth (`gate_status_map_should_remain`, under its former name). No
 transition event type; history is the record's observations (`no_gate_transition_event_type`). One engine
@@ -267,6 +267,32 @@ defect is a reason to look; it is not a reason to block, because a block asserts
 and a principal downstream will act on that assertion without re-deriving it. This is principle 2 at the
 verdict: a claim that was never read back is not evidence.
 
+### Whether the verdict is a stored field or a read over the findings and the author
+
+**Open decision 32.** Registered in `conformance.md#the-register-of-open-design-decisions`. A sign-off stores a `verdict` — `signed`, a blocking value, or
+`waived` — and the rules above make it agree with what else the sign-off carries: the findings bind, a
+verdict contradicting them is refused at submission, and `waived` is the one value only the operator
+principal may write, on a step it does not own. Everything the field states is therefore derivable from
+the sign-off's other contents: a sign-off carrying a blocking finding blocks; one carrying none is
+`signed`; one written by the operator principal on a step whose owner it is not is `waived`, carrying its
+reason. A stored value held equal to a derivation by a check at the write is the shape
+`data_model.md#concepts` names a projection, and principle 11 asks of every stored state whether a process
+is needed to keep it true — here the refusal at submission is that process.
+
+**The options.** Keep the field as the record's own projection, on the ground that "is this step signed"
+is the one-read question `step_status` exists for and the verdict is what `step_status` is built from. Or
+retire it: a sign-off carries its findings and its author, the three values become derived reads, and the
+refusal-at-submission rule disappears because the contradiction it refuses can no longer be written.
+
+**What shifts, and why this is proposed rather than applied.** The guarantee that a verdict agrees with
+its findings is kept either way, but by construction instead of by a refusal, which is a shift in what
+covers it and not an exact preservation; the adapters' inbound mapping of a host's review tokens onto the
+three values (`github.md#reviews-review-comments-and-threads`) would map onto a sign-off with or without
+a blocking finding instead; and the design's finding has no row in `data_model.md` (`migration.md`, gap
+G15), so a derived verdict would rest on a type the record does not yet carry. **What would decide it:**
+whether any reader needs the three values faster than a read over the findings gives them — if
+`step_status` already serves that reader, the field is a second projection of one source. Opened by the simplification pass of 2026-09-05 without the conformance matrix, which had not landed; the proof above rests on principles 6 and 9 alone and is unverified against the matrix.
+
 ### A finding is one-off or standing, and a standing one obliges a change to what produced it
 
 The rules above decide what a finding obliges **of this batch**. A second question is asked of the same
@@ -279,7 +305,7 @@ and a change to what produced it is owed besides. A swarm that only ever repairs
 lesson once per batch, which is the shape principle 1 names: nothing binds, so nothing stops recurring.
 
 **The operator's input on reviewed work is a finding, and it is judged on both axes.** An operator
-reviewing a batch — at `operator_preview`, at `consent`, at `present`, or on any work the record already
+reviewing a batch — at `consent`, at `present`, or on any work the record already
 holds — records findings the way any step owner does (`vocabulary.md#finding`), and they carry severity
 and bind the same way. Nothing about the operator's input needs a second intake path, a second queue, or a
 feedback entity beside the finding: the existing primitive already carries a judgement from a principal
@@ -396,15 +422,16 @@ only thing that opens a batch, which tasks it carries, and that the workflow is 
 switched — is `work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow`, stated once there
 (principle 9).
 
-### Two policies: workflow policy and action policy
+### Two questions: who may claim a step, and whether an action may be taken
 
-Two questions, two policies. Workflow policy answers which principals may claim which steps of which
-workflows: the workflow's declared step owners together with the `agent_grant`s in force
-(`authority_model.md`). Action policy answers which actions may be taken and under what gate: the
+Two questions, two answers, and only the second has a policy entity. Which principals may claim which
+steps of which workflows is decided by the workflow's declared step owners together with the
+`agent_grant`s in force (`authority_model.md`); the declaration and the grants are that answer, and no
+rule set stands beside them under a name of its own. Which actions may be taken and under what gate is the
 `action_policy` entity, the policy a principal evaluates the action gate against. A step owner's right to
-sign off a step is workflow policy; whether the merge that follows may be taken is action policy. Neither
-policy governs internal operational writes to Neotoma, which are not actions — **except for two named
-classes, which are.**
+sign off a step comes from its declared role and its grant; whether the merge that follows may be taken is
+the action policy's. Neither the declaration, the grants, nor the policy governs internal operational
+writes to Neotoma, which are not actions — **except for two named classes, which are.**
 
 **Governance writes are actions.** A write to `agent`, `action_policy`, `agent_grant`, `swarm_roster`, or
 the schema registry is an action, evaluated at the action gate under the project's `action_policy`. These
@@ -527,7 +554,7 @@ Two subjects entering one queue, and the subject edge deciding what resumes:
 ```mermaid
 flowchart TD
     A["an action the gate would not let through"] -->|"reason gate_hold"| CK
-    T["a task the swarm cannot advance"] -->|"repeated_lapse, unreadable_workflow, rounds_exhausted, unspawnable_assignee, unclaimed_step, undeclared_dependency, capability_denied, lossy_record_mutation, undetermined_scope, dependency_cycle"| CK
+    T["a task the swarm cannot advance"] -->|"one of the task reason classes, enumerated once in failure_posture.md"| CK
     CK["one checkpoint: the held state of its subject"] --> S["its subject: exactly one entity, named by the CHECKPOINTS edge"]
     S -.->|"never a subject"| NS["a step, a batch, an artifact"]
     CK --> F["it records the reason class, the needed input, the options, and whom it awaits"]
@@ -576,4 +603,4 @@ Ateles shares the declarative definition and pre-step approval, not per-environm
 rule, since blast radius selects the gate. Cedar's rule (zero permits is deny; any forbid wins) is the
 semantics the advisory and enforcing paths share. A2A's `input-required` and `auth-required` are the
 interrupted states a checkpoint is; Ateles does not share A2A's agent-asserted `working`, which has no
-claimant and no expiry. Sources: `ent_08460968e6f49dac21510f4a`.
+lease holder and no expiry. Sources: `ent_08460968e6f49dac21510f4a`.

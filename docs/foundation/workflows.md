@@ -8,7 +8,7 @@ and which successors its tasks may enter, and never the state of a checkout. **D
 record for the built workflows (their step lists and fast paths, not their agent names), the agent
 policies governing outreach, payment, and people-data, `CLAUDE.md`'s people-data section, and PR #745
 operator review (2026-09-04), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Which workflows have a declaration on the record, and which are envisioned
-only, is `status.md`.
+only, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `operator_preview` renamed `consent`; open decision 33).
 
 ## Purpose
 
@@ -134,7 +134,7 @@ order. Without `route`, a task reaches a workflow by whichever engine noticed it
 **Artifacts:** none produced. Existing artifacts are attached.
 
 **Typical action classes:** none. Every write intake makes is an internal operational write to the record,
-which is not an action (`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`).
+which is not an action (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`).
 
 **Successors:** any workflow in this document except intake; or none; or operator-only, which is a
 workflow like the others and is named the same way.
@@ -177,7 +177,7 @@ ruled it out (`gates_and_workflows.md#declaration-batch-projection`). Every othe
 and opens on every batch. `merge` is a step so that the merge
 action has a step owner to claim it, a taking to record, and a sign-off to close the batch with; the
 action itself is governed by action policy, not by the step
-(`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`).
+(`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`).
 
 **Stages:** scoping (`pm`); design (`ux`, `arch`); implementation (`impl`); review (`pr_review`, `qa`,
 `legal`); integration (`merge`).
@@ -324,18 +324,18 @@ the target platforms, from the `channel_config` entity retrieved by type.
 |---|---|---|---|---|---|
 | 1 | `draft` | content author | yes | | complete drafts exist for every targeted platform, stored in the record, against the `brand_voice` entity |
 | 2 | `draft_lint` | lint runner | yes | on fail: `draft` | the deterministic checks pass: no relative-time anchors, a substance floor per platform, no near-duplicate text across platforms, every targeted platform present |
-| 3 | `operator_preview` | operator-facing agent | yes | on fail: `draft` | the checkpoint on the `publish` action, carrying the drafts inline, is resolved by the operator; feedback reopens `draft` |
+| 3 | `consent` | operator-facing agent | yes | on fail: `draft` | the checkpoint on the `publish` action, carrying the drafts inline, is resolved by the operator; feedback reopens `draft` |
 | 4 | `post` | content author | yes | | the `publish` action taken through the action gate on each platform and the posts read back; the sign-off closes the batch |
 
 <!-- /rendered -->
 
 `draft_lint` sits before the operator sees anything so that the operator's attention is spent on
-judgment, not on defects a script can find. `operator_preview` is not a second gate: the `publish` action
+judgment, not on defects a script can find. `consent` is not a second gate: the `publish` action
 is created when the drafts pass lint, the action gate evaluates it, and the step is where the
 operator-facing agent carries the gate's checkpoint and records the decision
 (`gates_and_workflows.md#the-action-gate-is-pr-independent`, principle 6).
 
-**Stages:** authoring (`draft`, `draft_lint`); consent (`operator_preview`); publication (`post`).
+**Stages:** authoring (`draft`, `draft_lint`); consent (`consent`); publication (`post`).
 
 **Artifacts:** the posts on each platform, each attached by edge with its platform identifier.
 
@@ -343,7 +343,7 @@ operator-facing agent carries the gate's checkpoint and records the decision
 
 **Successors:** none.
 
-**Fast paths:** `approved` skips `operator_preview`, permitted only when the action gate would not
+**Fast paths:** `approved` skips `consent`, permitted only when the action gate would not
 checkpoint the `publish` action: an action series for the class has graduated under the
 `action_policy`, or the operator's standing approval for the content is already recorded on the task.
 The fast path never bypasses the gate; it skips the step that would have carried a checkpoint the gate
@@ -559,7 +559,7 @@ operator decides or acts, and record the outcome, so that operator-only work is 
 visible rather than a notification nobody owns.
 
 **Entry condition:** intake closed naming `operator-only`, or the task's declared action classes include
-`operator_only`. The operator-facing agent is the only eligible claimant
+`operator_only`. The operator-facing agent is the only principal eligible to claim it
 (`work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent`). The task is an ordinary
 task, not a checkpoint: it raises one only when an action inside it reaches the action gate, which holds
 an `operator_only` action with reason `gate_hold`; the checkpoint is what this workflow carries
@@ -636,6 +636,28 @@ the workflow that owns it.
 **Successors:** none. Each filed task enters intake on its own.
 
 **Fast paths:** none.
+
+## Whether a stage names anything a step does not
+
+**Open decision 33.** Registered in `conformance.md#the-register-of-open-design-decisions`. Every workflow section above carries a **Stages** line, and
+`gates_and_workflows.md#declaration-batch-projection` defines a stage as a contiguous named group of steps
+and gives each declared step a `phase` field. No rule reads either: no gate, verdict, fast path,
+`applies_when`, successor, or checkpoint keys on a stage, and where a batch is is already its current step
+(`vocabulary.md#owner-five-meanings-one-word-forbidden-alone`). So the grouping is stated in two homes —
+the prose line and the declaration's field — with no mechanism behind either, which is the shape
+principle 9 names.
+
+**The options.** Retire `stage` and the `phase` field, and report where a batch is by its current step.
+Or keep the Stages line as authored prose and drop the field, so the grouping has one home and the
+declaration carries nothing no rule reads. Or keep both as they stand.
+
+**Why proposed rather than applied.** The Stages lines cannot be replaced by an existing term, only
+deleted, and deleting them loses a reporting grain — "the batch is in review" against "the batch is at
+`qa`" — which is a convenience rather than a guarantee but is still information a reader has today. And
+`migration.md` uses the word in another sense, for its own ordered stages, so a retirement would ban a
+word a companion relies on, or force that companion to rename. **What would decide it:** whether any
+reader reports on a batch at the stage grain; if none does, the field is decoration by principle 4's own
+test. Opened by the simplification pass of 2026-09-05 without the conformance matrix, which had not landed; the proof above rests on principles 6 and 9 alone and is unverified against the matrix.
 
 ## What no workflow in this document does
 

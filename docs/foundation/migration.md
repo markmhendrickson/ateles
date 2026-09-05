@@ -17,7 +17,7 @@ entering intake on its own; 18, governance writes reserved by default; and 30, t
 live instance whose completion creates the next), and
 a read-only inventory of the production record taken 2026-09-05 through the Neotoma MCP (recorded in
 `status.md`). The bootstrap sequence this document orders against is the
-conformance suite's (`conformance_suite.md`); where the two disagree, this document says so.
+conformance suite's (`conformance_suite.md`); where the two disagree, this document says so. Revised by the simplification pass of 2026-09-05 (revision 29: gap G14 closed; `workflow policy` retired).
 
 ## Purpose
 
@@ -67,7 +67,7 @@ join.
 | 1, the gap map | recurring work by role, declared or not | nothing; the gap map is population's |
 | 2, reconcile the eight existing declarations | the corrected content of each declaration: step names, roles for agent names, the three divergences, `successors` and `on_fail` | the **mechanism** by which a declaration under the retired name becomes a `workflow` entity (stage 4 below), which population assumed was a correction and which the record's primitives do not support as one (gap G2); population supplies the content, this document the carrying |
 | 3 and 4, declare the workflows | the `workflow` entities the foundation settles, then the rest | the ordering constraint: none may be declared before the registry holds the type (stage 1), and the `intake` and the migration's own workflow are declared first because every later stage goes through them (stage 2) |
-| 5, the governance the declarations require | `action_policy` per project; workflow policy; matching grants | the derivation of the first `action_policy` from the two retired policies that already carry blast lists (stage 6), the widening of every grant that names a retired type **before** its holder writes the new one (stage 3), and the classes the migration's own writes carry, which that policy must list before any agent may take them |
+| 5, the governance the declarations require | `action_policy` per project; the step-owner roles each declaration names; matching grants | the derivation of the first `action_policy` from the two retired policies that already carry blast lists (stage 6), the widening of every grant that names a retired type **before** its holder writes the new one (stage 3), and the classes the migration's own writes carry, which that policy must list before any agent may take them |
 
 What population does not have and migration needs, and therefore adds: the bootstrap act (stage 1 and
 2), the engine halt and cutover (stage 4), the re-typing of the retired instance types — the held
@@ -169,7 +169,7 @@ accountable for what it drops. Count classes and populated-field measurements pe
 | `escalation` (retired type), written by a test process into the shared instance | correct to terminal | the entity itself, dismissed | test rows in the production registry are the case `data_model.md#record-conventions` forbids; they are closed terminal with a note, never deleted, and the finding goes to the test suite (`conformance_suite.md`). Bulk, therefore gated (stage 5) |
 | `execution_policy` (retired name) | derive one per project from the declarations that carry blast lists; retire the rest | `action_policy` per project | the fields that are the design's — `low_blast_action_types[]`, `high_blast_action_types[]`, `confidence_threshold`, the recurrence count — are carried into one policy per project. The named checkpoints a plan-scoped policy declared become `always_checkpoint_boundaries[]` where they name a class boundary. The fields with no target — a plan reference, an operator autonomy level, quality criteria, an agent list, a fallback instruction — are gap G5; the plan-scoped policies stay readable and are not re-typed, because the design's policy is per project and theirs were per plan |
 | `finding` | keep | — | the source type records the attribution of a code defect to the change that introduced it — a different concept from the design's finding, which a step owner records against a batch with a severity. The design's finding has no row in `data_model.md` at all (gap G15), so there is nothing to migrate into; the source type is outside the four models and stays |
-| `feedback`, `task_policy` | keep | `feedback`, `task_policy` (`conformance.md#direction-of-truth-per-class-of-record`) | named by the design as the home of operator preferences and feedback. The `feedback` type on the instance holds third-party product feedback, which is a different sense of the word from the operator's input on reviewed work — which the design says is a finding, not a feedback entity (`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`); gap G14 |
+| `feedback`, `task_policy` | keep | `task_policy` (`conformance.md#direction-of-truth-per-class-of-record`); `feedback` outside the four models | `task_policy` is named by the design as the home of operator preferences. The `feedback` type on the instance holds third-party product feedback, which the design does not name at all: the operator's input on reviewed work is a finding, not a feedback entity (`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`), and the direction-of-truth row that once named `feedback` beside `task_policy` was removed for that reason (gap G14, closed) |
 | `proposed_skill_update`, `strategy_drift_signal`, `agent_improvement_proposal` | keep; derive a task from each open one | a `task` entering intake, proposing a change to what produced a finding | each is a standing finding's proposed change under the retired engine's names. The design makes the proposal an institutionalization task entering intake on its own, with no batch waiting on it (`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`, decision 17). The source entity stays as the proposal's record and the task refers to it |
 | `batch`, `sign_off`, `action`, `artifact`, `checkpoint`, and the edges `ADDRESSED_BY`, `FOLLOWS`, `LEASE`, `CLOSES`, `SIGNED_BY`, `PRODUCES`, `CHECKPOINTS`, `AWAITS`, `RESOLVED_BY`, `RAISED_BY` | introduce | themselves | none exists on any instance. The derivations above populate `checkpoint`, `action`, and `artifact` for the open held decisions only; everything else is written by the design's own writers from the cutover. A batch is never opened by the migration: a batch comes into existence only when a closing sign-off names a successor (`work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow`), and every pre-existing task has no intake batch and so meets intake's entry condition exactly as a new task does (`workflows.md#intake`). That is how work part-way through a retired passage is carried: it re-enters intake, is routed, and the steps already judged under the retired engine are either judged again or waived per step by the operator with the legacy record as the reason (stage 4) |
 
@@ -212,7 +212,7 @@ design needs it stated for types.
 The design forbids the side door this document would be if it were executed by hand: every write to
 `agent`, `action_policy`, `agent_grant`, the roster, or the schema registry is a governance write and an
 action at the gate; every merge, split, and bulk correction is a lossy record mutation and an action at
-the gate (`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`). A migration that
+the gate (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`). A migration that
 registered the types, re-typed the agents, and rewrote the grants from a script with a bearer token would
 be exactly the ungoverned self-change the design exists to prevent, executed once at the largest blast
 radius the swarm will ever see.
@@ -455,7 +455,7 @@ the `verify` step of the migration's workflow re-reads independently of the `app
 | 1 | the registry describes each type with the fields and version written; a relationship of each new edge type can be written and read back on two test-owned entities that are then ended, never on production entities; each type's `ownership_grant` resolves to the `operator` |
 | 2 | both declarations are retrievable, every `owner_role` in them resolves through the roster to an `agent` with a credential, and the `action_policy` resolves every migration class to a tier that is not the unclassified default; the conformance suite's bootstrap read-backs hold |
 | 3 | every grant that named a retired type now names both; a read of each grant lists the new type; the roster's unresolved roles are listed, and the list is what the operator expects |
-| 4 | (a) no task's retired liveness value changes and no step record is written over the window; (b) each `workflow` resolves by its new id, each retired id resolves with a merge pointer to it, and an as-of read on the retired id at a time before the merge returns the pre-merge content; the count of `workflow` equals the count of retired declarations less the retired smoke-test one; (c) the first claim under the design writes a `LEASE` edge whose `runner_id` the claimant reads back as its own |
+| 4 | (a) no task's retired liveness value changes and no step record is written over the window; (b) each `workflow` resolves by its new id, each retired id resolves with a merge pointer to it, and an as-of read on the retired id at a time before the merge returns the pre-merge content; the count of `workflow` equals the count of retired declarations less the retired smoke-test one; (c) the first claim under the design writes a `LEASE` edge whose `runner_id` the lease holder reads back as its own |
 | 5 | every open held decision with a subject has exactly one `checkpoint` whose `CHECKPOINTS` edge names an action or a task and whose `AWAITS` names the operator; the retired open count is zero for those with a subject and terminal for those without; the operator's queue lists them once, not twice |
 | 6 | the project's `action_policy` lists a tier for every class the two retired policies listed, and the retired policies' content is unchanged |
 | 7 | each `agent` resolves by its new id and by the retired id through the merge pointer; every roster role resolves to an `agent`; every `agent` has a `principal_binding` to the `operator`; a re-render of the mirrors changes nothing but the names |
@@ -469,7 +469,7 @@ Each is a place the foundation does not say what a migration needs it to say, or
 are numbered for reference from the register and from the population plan; the register's decision
 numbers are separate and only two of these are opened as decisions below.
 
-- **G1 — the governance list is stated three ways.** `gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`
+- **G1 — the governance list is stated three ways.** `gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`
   names five governance types: `agent`, `action_policy`, `agent_grant`, the roster, and the schema
   registry, and calls the list closed. `work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`
   names `agent`, `agent_policy`, and `workflow` writes as the governance writes that section "already
@@ -522,8 +522,9 @@ numbers are separate and only two of these are opened as decisions below.
   halted one.** The write contract retires it; the failure posture says a silently halted swarm is
   indistinguishable from an idle one. What carries a successful empty poll is unstated.
 - **G14 — `feedback` names two things.** The direction-of-truth table's operator feedback and the
-  instance's third-party product feedback share a type name; the operator's input on reviewed work is,
-  by `gates_and_workflows.md`, a finding and not a feedback entity at all.
+  instance's third-party product feedback shared a type name; the operator's input on reviewed work is,
+  by `gates_and_workflows.md`, a finding and not a feedback entity at all. Closed by the simplification
+  pass: the table now names `task_policy` alone and points the operator's input at the finding.
 - **G15 — the design's finding has no row.** Findings bind, carry severity, and are what a verdict may
   not contradict, and `data_model.md#concepts` gives the sign-off no `findings[]` field and names no
   `finding` entity. The type of that name on the instance records something else.

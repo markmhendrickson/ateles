@@ -76,11 +76,11 @@ PATTERNS: dict[str, dict[str, list[tuple[str, str]]]] = {
             (r"\bspawn\w*\b", ""),
         ],
     },
-    "claimant": {
+    "lease": {
         "not_for": [
             (
                 r"(?<!step )(?<!plan )(?<!grant )(?<!business )(?<!current )(?<!routed )\bowners?\b",
-                "owner alone, for the claimant or anything else",
+                "owner alone, for the lease holder or anything else",
             ),
             (r"(?<!lease )\bholders?\b", "holder without the lease"),
         ],

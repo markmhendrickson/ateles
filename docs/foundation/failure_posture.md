@@ -10,7 +10,7 @@ from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-12 to PR-15, C5, C17), prio
 `deferral_must_be_bounded_and_escalate_off_neotoma`, `unknown_must_stay_distinct_from_a_verdict`,
 `nyctea_635_becomes_load_bearing`, PR #745 operator review (2026-09-04), and the operator memos of
 2026-09-05 (the `undetermined_scope` reason class), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: a hold on a discovered condition is a deferral under rule 5; the `dependency_cycle` reason class). What is built is `status.md`;
-how a checkpoint is recorded is `data_model.md`.
+how a checkpoint is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder).
 
 ## Purpose
 
@@ -181,9 +181,9 @@ detector's report.
 A lease that lapses is not returned by anything; the task is simply claimable again (`work_model.md`).
 The rule that survives the retired reaper is about repetition: the watchdog counts lapses per task,
 with bounded backoff between re-claims, and when one task's count reaches the cap it escalates the task:
-one checkpoint, subject the task, reason `repeated_lapse`, carrying the count and the last claimants,
+one checkpoint, subject the task, reason `repeated_lapse`, carrying the count and the last lease holders,
 rather than letting the task be re-claimed forever. The watchdog observes and escalates; it holds no
-authority over any lease and never chooses the next claimant. During a halt the count still accrues,
+authority over any lease and never chooses the next lease holder. During a halt the count still accrues,
 because a lapse during an outage is still a lapse; the checkpoint is written when the record returns, and
 until then the condition is announced on the off-Neotoma path (rule 2). This is OTP's supervisor rule
 (prior art, below) applied to a lease.
@@ -200,7 +200,7 @@ nobody), `unclaimed_step` (above), `undeclared_dependency` (a step could not rea
 the hold reached its bound — `gates_and_workflows.md#declaration-batch-projection`), `capability_denied`
 (a principal was denied a capability its step needed — `authority_model.md#grants`), and
 `lossy_record_mutation` (a write to the record whose blast exceeds the declared count —
-`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`), and `undetermined_scope` (a
+`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`), and `undetermined_scope` (a
 standing finding whose right scope — the agent, the workflow, or one step — cannot be determined from the
 finding, so it is put to the operator rather than guessed —
 `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`),

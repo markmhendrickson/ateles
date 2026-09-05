@@ -1026,6 +1026,89 @@ no primitive retires or aliases a type (gaps G2 and G26).
 measured 2026-09-05 with `wc -c` on this branch it is 70.1k, and the kernel is unchanged by it at 129.6k.
 `conformance.md` gained the register row for decision 31 and the companion entry.
 
+## Revision 29 (2026-09-05): the simplification pass — redundant terms and mechanisms removed, four removals proposed
+
+The operator asked whether the foundation could be simplified further without losing capabilities or
+guarantees, by removing redundant mechanisms or terms. This revision is that pass: it removes, it does not
+shorten; the condensation pass is separate and follows. Two tests were used, both mechanical. A **term** is
+redundant if every use can be replaced by an existing term without a sentence changing meaning (the `lens`
+retirement of revision 19 is the model). A **mechanism** is redundant if removing it changes no row's failing
+artefact in the conformance matrix. **The matrix was not available**: `conformance_suite.md` had not landed
+on this branch when the pass's 150-minute wait for a stable head expired (the head was stable from 19:21 UTC
+for 139 minutes; the suite never appeared), so the mechanism test fell back to principles 6 and 9 alone, and
+**every removal below is marked unverified against the matrix.** The pass ran from head `70d0d14`.
+
+**Applied**, each passing the substitution test with zero loss, or stating one rule in one home where it had
+two or more:
+
+| Removed | Replaced by | Uses replaced | Test |
+|---|---|---|---|
+| `claimant` (term and vocabulary entry) | lease holder, under `lease`; its bans moved to `lease` and `assign`, and the checker's `PATTERNS` key with them | 27 uses across 10 documents; two sentences rewritten where the lease did not yet exist ("concurrent claims"; "the principal about to claim") | substitution: the claim and the lease are one primitive, so the principal that claimed is the principal the lease names — one referent, two nouns (principle 9) |
+| `workflow policy` (term and entry) | the step owners a workflow declares, with the grants in force | 8 uses; the `gates_and_workflows.md` section renamed from *Two policies* to *Two questions: who may claim a step, and whether an action may be taken*, and its 10 anchors updated | substitution: no entity, field, or rule carried the name; it was a collective noun for two mechanisms that already answer the question |
+| `hot path` (term and entry) | `projection`, whose definition now states the one-read purpose itself | 9 uses | substitution: the term named the reason a projection exists and nothing the projection does not |
+| the checkpoint reason-class list, stated in four places | one enumeration, in `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`; `vocabulary.md`, `data_model.md`, and the `gates_and_workflows.md` diagram cite it | three copies removed; the `data_model.md` copy had drifted (it lacked `unclaimed_step`, `capability_denied`, `lossy_record_mutation`, `dependency_cycle`) | principle 9: one home; the drift was the signature |
+| the `feedback` entity as a home in the direction-of-truth table | the finding (`gates_and_workflows.md`, the standing-finding section) for the operator's input on reviewed work; `task_policy` alone for preferences | 1 row; `migration.md`'s row and its gap G14 updated to record the closure | the standing-finding ruling of revision 16 already said no feedback entity stands beside the finding; the table row was the second home |
+| `operator_preview` (a step name) | `consent` | 5 uses in `workflows.md` and `gates_and_workflows.md` | substitution: identical owner, `on_fail`, and work to the `consent` step of outreach and payment — three step names for one step kind, now two (`consent`, and `present`, whose work differs) |
+| `calendar_routing_config` (a binding type name) | `channel_config`, the binding type `adapters.md#scope` names | 3 uses in `calendar.md` | principle 9: `adapters.md` names the per-instance binding types once |
+| `scenarios_extended.md` (a document) | merged back into `scenarios.md`, which now carries walkthroughs (a)–(j) | the file deleted; `conformance.md`'s companion list and direction-of-truth row updated | the split's only stated reason was the reading-block budget, and neither file is on the reading list (`test_real_keyed_rows_match_conformance_contracts` asserts it), so the reason was void |
+| `proposed_skill_update.owning_agent` in the Owner table | the routed remedy as a task entering intake, with the step owner keeping the sign-off | 1 row | a checkout's field name in a design table, superseded by the standing-finding ruling |
+
+**Proposed, not applied**, as open decisions 32–35 in `conformance.md#the-register-of-open-design-decisions`,
+each argued under a heading naming its subject: **32**, whether the sign-off's `verdict` is a stored field or a
+read over its findings and its author (`gates_and_workflows.md`) — the field is held equal to a derivation by a
+refusal at the write, which is a projection's shape, but retiring it moves the guarantee from a refusal to a
+construction and rests on a finding type `data_model.md` has no row for (`migration.md` G15); **33**, whether a
+stage and the step's `phase` field name anything a step does not (`workflows.md`) — no rule reads either, but
+the Stages lines can only be deleted, not substituted, and `migration.md` uses the word in another sense;
+**34**, whether the step path is an execution mechanism of its own and whether the component that opens steps
+is `pipeline` or `engine` (`work_model.md`) — "the same pull, over steps" is the design's own phrase, and
+`engine` is used across three documents and defined nowhere, but the count of four is load-bearing here and
+cited from a recorded decision; **35**, whether one binding type or two names an external system's instance
+(`adapters.md`) — nothing states what separates `channel_config` from `vendor_binding`, but both are context
+entities whose shape is the record's.
+
+**Examined and kept**, with what keeps each: `hydration` (the only name for the moment declared reads are
+resolved; `gates_and_workflows.md#declaration-batch-projection` needs a noun to say nothing crosses the boundary
+*during* a step); `condition`, `applies_when`, the hold, and the checkpoint (three outcomes — inapplicable and
+never opened, open and waiting on nobody, held awaiting a principal — not one mechanism with three triggers;
+decision 13 already argues the hold is not a second waiting mechanism); `intake` (the one batch with no
+predecessor, which is what gives every chain a first link and replaces the router); `action series` against the
+recurring task (decision 30 states the distinction once); `agent_policy` against `agent` (a behavioural rule
+binding several agents cannot live in one prompt without copies — though the foundation nowhere states this,
+and the direction-of-truth table names the rendered skill as the mirror of both, which is a gap and not a
+redundancy); `task_policy` (the operator-specific home a public, generic prompt cannot be; `work_model.md`'s
+recurring-task ruling now leans on it); `sign-off` against `verdict` (whole against part; see 32);
+`execution_policy` and `checkpoint_brief` (already retired in revision 6, superseded by `action_policy` and
+`checkpoint`); `sourcing` (its substitute, provenance, is not a defined term); `step_status` (a ruled projection);
+`conformance.md`'s three roles (one subject — how work binds — with the register an index whose duplication is
+bounded by its own rule); the `workflows.md` / `gates_and_workflows.md` name overlap (a naming matter for the
+condensation pass; the one content overlap is `workflows.md`'s applicability bullet restating the
+`applies_when` argument, which is prose to shorten, not a mechanism to remove).
+
+**Defects noticed and not fixed here**, because they are corrections rather than removals: the governance list
+is stated three ways (`migration.md` G1); `failure_posture.md`'s `unclaimed_step` paragraph names the batch as the
+checkpoint's subject where `gates_and_workflows.md#the-checkpoint` admits only an action or a task; the
+standing-finding ruling routes an operator-specific preference to an agent's prompt, which the public-prompt
+constraint forbids, leaving `task_policy` as the home the ruling does not name.
+
+**Size.** Measured 2026-09-05 with `wc -c` on this branch against head `70d0d14` as the predecessor. The pass
+is **net +11.1k** across the foundation excluding `status.md` (822.1k → 833.2k), of which
+the four argued proposals and their register rows are +9.2k, the bookkeeping that records the removals — the
+`Derived from` notes on twelve documents and the five retired-table rows — is +2.9k, and the removals
+themselves are -1.0k. Per document: `adapters.md` 74.4k → 76.3k (+1.9k); `authority_model.md` 18.6k → 18.7k (+0.1k); `calendar.md` 43.6k → 43.9k (+0.2k); `conformance.md` 29.8k → 31.7k (+1.8k); `data_model.md` 33.7k → 33.9k (+0.2k); `failure_posture.md` 23.4k → 23.6k (+0.1k); `gates_and_workflows.md` 49.2k → 51.9k (+2.7k); `migration.md` 70.4k → 70.8k (+0.4k); `scenarios.md` 10.4k → 21.4k (+11.0k); `vocabulary.md` 85.3k → 85.4k (+0.2k); `work_model.md` 67.3k → 69.5k (+2.2k); `workflows.md` 41.1k → 43.1k (+2.0k); `scenarios_extended.md` 11.8k → 0.0k (-11.8k). The kernel is
+**134.9k**, up from 130.0k, all of it the two proposals argued in kernel documents (32 in
+`gates_and_workflows.md`, 34 in `work_model.md`); a ruling on either removes its argument to a register line.
+Nothing was trimmed to fit, on the standing direction that content settles before budget, and
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure.
+
+**Checks.** `check_foundation_vocabulary.py`: 98 Never items (95 before; `claimant`, `workflow policy`, and
+`hot path` added as retired names), 59 Not-for items, 0 Never hits, 431 advisory hits (432 before).
+`check_foundation_anchors.py`: 0 broken links after the section rename and the file merge.
+`link_vocabulary_terms.py --check`: clean, after relinking 5 first mentions in 4 blocks. `test_foundation.py`:
+51 passed, 1 xfailed (the budget marker), unchanged from the predecessor. The `PATTERNS` key `claimant` moved to
+`lease`, and `test_every_pattern_key_still_names_an_entry` holds. This revision's own row and the rows above
+that still name `scenarios_extended.md` are history: the file is gone, and the next regeneration re-measures.
+
 ## `github.md`: the events with no defined response (revision 13, 2026-09-04)
 
 `docs/foundation/github.md` enumerates every event GitHub can deliver, from GitHub's own webhook event and

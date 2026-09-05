@@ -12,7 +12,7 @@ for changing the swarm's own operation), and PR #745 operator review (2026-09-05
 23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default),
 and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: one live instance,
 completion creates the next, `FOLLOWS` task to task). Supersedes `docs/archive/task_execution_loop.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`.
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34).
 
 ## Purpose
 
@@ -37,11 +37,11 @@ below; steps and gates are `gates_and_workflows.md`; core workflows (including i
 
 ### Pull is the only delivery; assignment constrains eligibility
 
-Work reaches an agent only by claim. No router chooses claimants; no principal delivers a task; a workflow
+Work reaches an agent only by claim. No router chooses lease holders; no principal delivers a task; a workflow
 step is claimed by its step owner the same way (`gates_and_workflows.md`). Reason: the actor that judges fit
 must be the actor that acts and answers for the outcome. A router's inference sits in an actor that
 neither acts nor answers for a misroute, so a wrong guess reaches an executor with nobody accountable for
-the choice. A claim is a 1:1 judgment, "is this mine", bounded by the claimant's own `agent`,
+the choice. A claim is a 1:1 judgment, "is this mine", bounded by the `agent` of the principal making it,
 which no central table encodes; routing is a 1:N choice with fallthrough, and fallthrough is where an
 unknown principal is quietly resolved to somebody. A claim cannot fall through: the predicate reads
 `assigned_to` directly, and an `assigned_to` naming a principal nobody can run raises a checkpoint
@@ -52,7 +52,7 @@ their own definition needs none. Subscriptions wake an agent; they never deliver
 ### Assignment restricts eligibility; it never creates a lease
 
 `assigned_to` is eligibility: who may claim. It is not the holder. The principal the assignment names
-still pulls by claiming; the lease holder is always the claimant. A task whose named principal never claims
+still pulls by claiming; only a claim makes a lease holder. A task whose named principal never claims
 is assigned-and-unclaimed, a fact about that principal, not a lease left hanging. Camunda's
 `setAssignee()` (installs a holder with no check) is the operation this design does not have.
 
@@ -67,7 +67,7 @@ last-writer-wins snapshot and a name-collision policy that de-duplicates into on
 
 The lease is an edge (principal ↔ task) with `claimed_at` and `expires_at`; renewal moves `expires_at`.
 The task carries no lease fields. Derived at read: `held` while `expires_at` is future; `lapsed` once
-past without an explicit end; `returned` when the claimant ended it. Nothing transitions a lease to
+past without an explicit end; `returned` when the lease holder ended it. Nothing transitions a lease to
 `lapsed` — the clock does (principle 11).
 
 ### Liveness is derived from activity at read time, never declared
@@ -87,7 +87,7 @@ history cannot: who holds this right now. `agent_session` carries the identity h
 
 The task's vocabulary is `created` plus its status (`open` / `blocked` / terminal). The lease carries
 `held` / `lapsed` / `returned`. `active` is a derived read, never a state. Each word names one thing: a
-task whose claimant died is a task with a lapsed lease, and a task its named principal has not taken is
+task whose lease holder died is a task with a lapsed lease, and a task its named principal has not taken is
 assigned-and-unclaimed. Definitions: `vocabulary.md`.
 
 ### There is no task lifecycle; there are batches
@@ -118,7 +118,7 @@ terminal one makes finished work claimable. Live status distribution: `status.md
 
 No process returns a lapsed lease — it already does not count. The reaper is retired. The watchdog
 observes lapses and, past a per-task cap, escalates: it raises one checkpoint on the task with reason
-`repeated_lapse` (`failure_posture.md`); it never chooses a new claimant.
+`repeated_lapse` (`failure_posture.md`); it never chooses a new lease holder.
 
 ### At-least-once implies effect dedup
 
@@ -179,7 +179,7 @@ self-initiated change ungoverned, which inverts the risk.
 **A workflow may create a workflow, and a workflow may modify an agent.** Both follow from the two
 sentences above and neither needs a new permission: the work is a task, the task goes through a
 workflow, and the writes the work makes are `agent`, `agent_policy`, and `workflow` writes, which
-`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy` already names **governance
+`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken` already names **governance
 writes** and already makes actions at the action gate. So a batch may declare a new workflow, add a step,
 change a step's `owner_role`, or retire a declaration, and each such write is an action carrying its
 class, scored for confidence, resolved to a blast tier under the project's `action_policy`, and held as a
@@ -784,6 +784,28 @@ what it left — and that is stated as the design, not as a habit: the recovery 
 and its absence would be visible. Requiring a session to claim a lease like the other three would close the
 gap in theory and be bypassed in practice, and a rule that is bypassed is not a control (principle 1);
 naming the mechanism honestly and designing its recovery is what the model can actually hold.
+
+### Whether the step path is a mechanism of its own, and what the engine is called
+
+**Open decision 34.** Registered in `conformance.md#the-register-of-open-design-decisions`. The list above counts four mechanisms, and its own words undercut
+the third: the pipeline "is the same pull, over steps" — a step opening publishes claimable step work, and
+the step owner claims it with the lease primitive a task is claimed with. What the third adds to the first
+is not a way work reaches a principal but *who publishes it*: a task is published by its creation, a step
+by the engine that opens it from the declaration. Two names also stand for that publisher: `pipeline`,
+defined in `vocabulary.md#pipeline` as the GitHub-hosted mechanism that opens steps, and "the engine",
+used throughout `gates_and_workflows.md`, `adapters.md`, and `data_model.md` for the component that opens
+steps from the entities and reads the sign-offs, and defined nowhere.
+
+**The options.** Count three mechanisms — pull, over tasks and steps alike; the self-triggering daemons;
+and the interactive session — and define `engine` as the component that publishes step work, retiring
+`pipeline`, whose "GitHub-hosted" is a fact about a checkout and not a design property. Or keep four and
+define `engine` beside `pipeline`, stating what separates them. Or leave the text as it stands.
+
+**Why proposed rather than applied.** The count is load-bearing beyond this section — "a roster role
+reachable by none of these cannot receive work; the count is `status.md`" — and the four are cited from a
+recorded decision (`three_execution_mechanisms_not_one`), so a recount changes what a reader checks
+against, not only a name. **What would decide it:** whether any guarantee differs between step work and
+task work once both are claimed; if none does, the two are one mechanism. Opened by the simplification pass of 2026-09-05 without the conformance matrix, which had not landed; the proof above rests on principles 6 and 9 alone and is unverified against the matrix.
 
 ## Contradictions this document settles
 
