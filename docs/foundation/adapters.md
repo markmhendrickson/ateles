@@ -8,7 +8,7 @@ and the action gate), `authority_model.md` (credentials bind to principals; appr
 steps whose effects leave the system), PR #745 operator review (2026-09-04, the adapter decision), and the
 operator's 2026-09-05 review (the inbound-delivery question and the adapter-packaging lean, both recorded
 below as open; and revision 18: when an artifact comes into existence, and what holds an effect before
-it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists). What is built, and where the adapter and the engine are still one process, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: open decision 35).
+it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: continual inbound named as the inbound side, and the record's subscriptions as what an intake rule evaluates through). What is built, and where the adapter and the engine are still one process, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: open decision 35).
 
 ## Purpose
 
@@ -252,6 +252,64 @@ adapter's own obligation, and not a receiver that verifies for them.
 **This is a sibling of decision 15 below**, how adapters are packaged, and it was ruled without ruling
 that one: the adapter's verification code lives wherever the adapter's code lives — in this repository, under
 decision 15's ruling — and a shared listener is plumbing wherever it lives.
+
+### Continual inbound is the inbound side, and an intake rule evaluates downstream of it
+
+The operator's 2026-09-05 22:02 memo asked whether adapters should bring artifacts into the record
+continually — by webhook, by subscription, by polling — in addition to the hydration a step declares, so
+that artifacts are on hand when a step needs them and so that their arrival can be motive for work: to keep
+the record an up-to-date system of record for the swarm's operations even when what changes is in an
+external system. Three things are stated here, and the first is that the design already has this under
+another name.
+
+**Continual inbound is what the inbound side is.** An adapter self-triggers on the external system's events
+and receives no task (`#the-adapter-and-the-engine-are-two-roles`); every delivery it receives resolves to
+one of the four outcomes or to `dropped` (`#no-external-event-advances-a-step-by-itself`), and obligation 1
+makes that a counter (`#the-admission-contract`). So a tracked artifact is kept current by every event the
+system delivers about it — outcome 2 — whether or not any step is waiting, and a new record the swarm does
+not track reaches intake — outcome 4 — whether or not anyone asked. That is the continual side. Hydration is
+the other one, and the vocabulary already keeps them apart: hydration resolves what a step **declared**,
+before the step, and is not for an adapter's own scheduled polling, which produces signals and answers to
+no step's declaration (`vocabulary.md#hydration`). The two meet in the record: where inbound has already
+written what a step declares, hydration is a local read that finds it fresh enough; where it has not,
+hydration asks the adapter. Nothing is added for the memo's first half, because both halves of it exist and
+are already distinguished (principle 6).
+
+**What is kept current, and at what cadence, is the inbound table intersected with the binding — and
+freshness is never a policy.** Which kinds of record an adapter keeps current is the per-system inbound
+table, every row marked handled, which is design, PR-reviewed, in the adapter's document. Which
+**instances** it keeps current — which mailboxes, repositories, calendars, chats, accounts — is the
+per-instance binding the direction-of-truth table names
+(`conformance.md#direction-of-truth-per-class-of-record`): a message to a mailbox the binding does not name
+is `dropped`, reason `untracked_mailbox` (`gmail.md#every-inbound-signal-and-what-it-becomes`), and that is
+the scope rule for every system. The cadence is the external system's where it delivers — a webhook, a
+watch — and, where a system must be asked, the interval is a value of the binding, per instance, never a
+constant of the design; which binding type carries it is decision 35
+(`#whether-one-binding-type-or-two-names-an-external-systems-instance`). And there is no freshness policy
+beside these: how current the record's picture is remains a derived read over sourcing and coverage
+(`#what-the-adapter-does-with-every-event`), and the only place a **requirement** on freshness is stated is
+a step's declaration (`gates_and_workflows.md#declaration-batch-projection`). An adapter that read a system
+on a schedule to satisfy a freshness target no step declared would be maintaining state principle 11
+forbids, to answer a question nobody asked.
+
+**The record's subscriptions are what the memo's second half evaluates through, and this is the positive
+form of a negative already stated.** The section above found that the record's subscriptions watch the
+record and cannot receive an external system's events. The same fact answers the operator's 22:10 memo —
+that a listener should fire on changes to entities in general, the swarm's own included, and not only on
+artifacts. A subscription over the record's entity changes is precisely a watch that does not care whether
+the changed entity is an artifact an adapter wrote or an entity a batch wrote; it cares that the record
+changed. So the mechanism the memo asks for sits **downstream of the adapter**, fed by the record: the
+adapter writes the observation (outcome 2) or mints the artifact (outcome 4), the record's subscription
+wakes the evaluator, and the evaluator applies the intake rules. The rule itself — what it may key on, what
+it produces, who writes it, and how it is bounded — is
+`work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`, stated
+once there. Two consequences at this boundary are worth carrying. The adapter's contract is unchanged: it
+still decides the four outcomes by identity, linkage, and the artifact, reads no rule, and is never told
+that a change it wrote was work — a rule that reached into the adapter would put "what this change means
+for work" into the component the design keeps out of that question (`#what-an-adapter-never-does`). And
+outcome 4 is not a rule and is not configurable by one: an untracked new record reaches intake by the
+adapter's mapping, and a rule adds routes above that floor, for changes to entities the record already
+holds.
 
 ## What the adapter does with every event
 

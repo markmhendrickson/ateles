@@ -6,7 +6,7 @@ mechanism (built as ateles#744): names documents and paths, never what a checkou
 `binding_is_the_reviewer_reading_a_kernel_not_a_loading_order` and
 `ateles_binding_extends_three_existing_mechanisms`, synthesis `ent_b0ce322f768e4fc676b73139` (PR-29, C7),
 prior art `ent_08460968e6f49dac21510f4a` (OPA: decision decoupled from enforcement), and PR #745 operator
-review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and revision 21 (2026-09-05: the `gmail.md` and `calendar.md` keyed rows and their canonical-source entries), and revision 24 (2026-09-05: the `telegram.md` and `payments.md` keyed rows and their canonical-source entries), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: twelve register rows moved from open to ruled), and the operator's 2026-09-05 rulings of decision 15 and decision 30 (revision 27: the last open row moved to ruled, and the recurring task registered as ruled on the operator's proposal), and revision 28 (2026-09-05: `migration.md` registered as an authored companion, and decision 31 opened). Revised by the simplification pass of 2026-09-05 (revision 29: the `feedback` entity removed from the direction-of-truth table in favour of the finding; `scenarios_extended.md` merged into `scenarios.md`; decisions 32 to 35 opened).
+review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and revision 21 (2026-09-05: the `gmail.md` and `calendar.md` keyed rows and their canonical-source entries), and revision 24 (2026-09-05: the `telegram.md` and `payments.md` keyed rows and their canonical-source entries), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: twelve register rows moved from open to ruled), and the operator's 2026-09-05 rulings of decision 15 and decision 30 (revision 27: the last open row moved to ruled, and the recurring task registered as ruled on the operator's proposal), and revision 28 (2026-09-05: `migration.md` registered as an authored companion, and decision 31 opened). Revised by the simplification pass of 2026-09-05 (revision 29: the `feedback` entity removed from the direction-of-truth table in favour of the finding; `scenarios_extended.md` merged into `scenarios.md`; decisions 32 to 35 opened). Revised for the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: `intake_rule` registered in the direction-of-truth table, and decision 36 opened).
 
 ## Purpose
 
@@ -170,6 +170,7 @@ the swarm's own records, and the word is not used for them.)
 | Walkthroughs of the work/gate model | the kernel documents | `docs/foundation/scenarios.md` |
 | Skill bodies (what a skill instructs) | the `agent_policy` entity the skill renders from | `.claude/skills/<name>/SKILL.md` on disk |
 | Agent prompt text | `agent.prompt_markdown` | `docs/agents/` and the rendered skill mirrors, via `render_agent_docs.py --check`, which also prunes a mirror whose definition is gone |
+| Which changes in the record are work (intake rules) | the `intake_rule` entities on the record, each written through the gate as a governance write | none; a predicate in a daemon's code that creates a task on an entity change is a rule with no home, and is drift (`work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`) |
 | Operator preferences | `task_policy` entities on the record | none; a harness memory file is a cache of them, never their home, and a preference that exists only in one is unreadable by every agent that is not that harness. The operator's input on reviewed work is not a preference and has no entity of its own: it is a finding on the batch (`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`) |
 | External-system mapping (what an event becomes; what a step's operation is) | `docs/foundation/adapters.md`, PR-reviewed | the adapter daemons' code; the per-instance binding of a system to an operator is the `channel_config` and `vendor_binding` entities, which bind and never redefine the mapping |
 | The code host's per-event mapping and per-step operation, in full | `docs/foundation/github.md`, PR-reviewed | the GitHub receiver and the pipeline reading from it; `adapters.md` holds the general rules the document applies and carries the pointer to it |
@@ -247,12 +248,14 @@ so that they are not reused; see the two notes below.
 | 33 | whether a stage, and the `phase` field on a step, names anything a step does not | `workflows.md#whether-a-stage-names-anything-a-step-does-not` | — | **open** (simplification pass, 2026-09-05; unverified against the matrix) |
 | 34 | whether the step path is an execution mechanism of its own, and whether the component that opens steps is `pipeline` or `engine` | `work_model.md#whether-the-step-path-is-a-mechanism-of-its-own-and-what-the-engine-is-called` | — | **open** (simplification pass, 2026-09-05; unverified against the matrix) |
 | 35 | whether one binding type or two (`channel_config`, `vendor_binding`) names an external system's per-instance binding | `adapters.md#whether-one-binding-type-or-two-names-an-external-systems-instance` | — | **open** (simplification pass, 2026-09-05; unverified against the matrix) |
+| 36 | whether an intake rule may key on the work model's own records (task, batch, lease, sign-off, action, checkpoint, agent session), or only on artifacts and the swarm's other entities | `work_model.md#whether-an-intake-rule-may-key-on-the-work-models-own-records` | the evaluator's subject set; a rule on any other type is unaffected | **open** (2026-09-06, on the operator's 2026-09-05 memos; the operator's lean is toward every type, the document proposes the exclusion) |
 
 **Every ruled decision now has a heading of its own.** 25 through 29 were opened as bold paragraphs inside
 their documents' *What this document does not decide* sections, and the register's pointers resolved to the
 enclosing heading; the rulings of 2026-09-05 gave each its own section, as 13, 14, 23, and 24 already had, so
 every pointer above lands on the ruling itself. 15 and 30 are argued under headings that name their subject
-rather than their number, as 13 and 14 are. Five rows are open — 31, and 32 to 35, which the simplification
+rather than their number, as 13 and 14 are. Six rows are open — 31; 36, opened on the operator's 2026-09-05 memos on how tasks come into existence and
+argued in `work_model.md`; and 32 to 35, which the simplification
 pass of 2026-09-05 opened as removals whose guarantee coverage would shift rather than be exactly preserved,
 each argued under a heading naming its subject in the document that owns it — and the register exists for
 the ruled rows too: a ruled row is where a reviewer learns a question was once open and where its rule now
@@ -267,7 +270,7 @@ foundation document. They are the gaps left by several documents opening decisio
 branch and renumbering around each other, and they are recorded as gaps rather than closed up: renumbering
 would break every cross-reference the documents already carry, and silence would invite the next author to
 reuse the number for something unrelated. **Do not assign 19 or 22 to a new decision.** The next number is
-36.
+37.
 
 **20 and 21 were assigned, then renumbered, and two pointers were left behind.** Both were opened in
 `payments.md` and renumbered to 27 and 28 before that document was committed, to avoid colliding with 23

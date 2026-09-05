@@ -8,7 +8,7 @@ art `ent_08460968e6f49dac21510f4a` (A2A `TaskState`, RFC 8693, Camunda), [task](
 cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 operator review (2026-09-04),
 and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional [step](#step), and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14,
 16–18, 23–29: the hold verb, a condition a step holds on, the `dependency_cycle` reason class, the consent
-tolerance on `action_policy`, and an [artifact](#artifact) `PART_OF` its containing artifact). Format
+tolerance on `action_policy`, and an [artifact](#artifact) `PART_OF` its containing artifact), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the `intake rule` entry). Format
 follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table).
 
 ## Purpose
@@ -302,6 +302,25 @@ graduation never changes whether the task recurs.
 **Not for:** template for the rule's home (the live instance carries it); series id or occurrence count as
 a field; reschedule for completion (a live instance may be postponed by correcting its `due_date`; an
 occurrence that passed closes its instance and creates the next).
+
+### intake rule
+**Definition:** data on the record stating that a described change — to an entity of a named type, of a
+named change kind, matching a predicate over its fields and over its provenance — is work: the rule's
+evaluator, a [daemon](#daemon), writes one [task](#task) per matching change, entering [intake](#intake),
+with provenance naming the rule and the change, and nothing else.
+A rule keys on no record of the work model (open decision 36), opens no [batch](#batch), names no
+[workflow](#workflow), and takes no [action](#action); writing one is a governance write, reserved to the
+[operator](#operator) by default (decision 18). The operator's word for it was *listener*; the design keeps
+that word for the socket a delivery lands on.
+**See:** [`work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`](work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else),
+[`work_model.md#where-tasks-come-from-every-source-indexed`](work_model.md#where-tasks-come-from-every-source-indexed),
+[`adapters.md#continual-inbound-is-the-inbound-side-and-an-intake-rule-evaluates-downstream-of-it`](adapters.md#continual-inbound-is-the-inbound-side-and-an-intake-rule-evaluates-downstream-of-it).
+**Field:** `intake_rule`.
+**Never:** —
+**Not for:** "listener" for an intake rule (the transport listener is the shared socket a delivery lands on —
+[`adapters.md#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it`](adapters.md#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it));
+"trigger" for an intake rule (a rule creates a task; nothing but a sign-off opens a step); "task type" for a
+rule, or "template" (the rule authors the created task's text; classification is intake's).
 
 ### operator-facing agent
 **Definition:** the [agent](#agent), defined by the `ateles` `agent`, that [claims](#claim) operator-only [tasks](#task),

@@ -11,7 +11,7 @@ during review), and the operator's 2026-09-05 12:52 memo (revision 21: workflows
 for changing the swarm's own operation), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18,
 23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default),
 and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: one live instance,
-completion creates the next, `FOLLOWS` task to task). Supersedes `docs/archive/task_execution_loop.md`. What is built
+completion creates the next, `FOLLOWS` task to task), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the task-sources index, the intake rule, and open decision 36). Supersedes `docs/archive/task_execution_loop.md`. What is built
 is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34).
 
 ## Purpose
@@ -24,7 +24,9 @@ by a closing sign-off naming a successor and goes through exactly one workflow; 
 condition discovered mid-flight, and may depend on a task it created, under its held lease and with no held
 state; a change to the swarm's own operation is a task like any other, governed by the action gate the
 governance writes already reach, and reserved to the operator by default; artifacts are records a batch
-leaves, never its subject.
+leaves, never its subject; every source of tasks is indexed once, and an intake rule — a described change
+in the record that is work — is the one source that turns a change into a task inside the record, bounded,
+written through the gate, and never keyed on the work model's own records.
 
 ## Scope
 
@@ -189,7 +191,7 @@ produce governance writes.
 
 **What prevents an ungoverned self-change is the action gate, and it is not a second mechanism.** Name it
 precisely, because "a self-modifying system with a gate on self-modification" is worth being able to
-point at: the five governance types are a **closed and short list**, so the rule is checkable by
+point at: the six governance types are a **closed and short list**, so the rule is checkable by
 inspection rather than judged per write; every write to one of them is an action, so it is evaluated at
 the moment it would be taken rather than at the moment it was proposed; `operator_only` resolves to
 `NEVER` ahead of any policy, so a policy cannot demote a change the operator reserved; an unclassified
@@ -216,7 +218,7 @@ about how much autonomy this operator wants, and the design's job is to make the
 and enforceable rather than to make it.
 
 **Ruled (decision 18, 2026-09-05): a governance write is reserved to the operator by default.** Registered
-in `conformance.md#the-register-of-open-design-decisions`. Each of the five governance classes resolves to
+in `conformance.md#the-register-of-open-design-decisions`. Each of the six governance classes resolves to
 `NEVER` until the operator has written a policy value for it: a class with no value in the project's
 `action_policy` is not the policy default and not a high tier, it is `operator_only`, and no confidence and
 no action series clears it. That is what the unclassified case already did — a declared class in neither set
@@ -239,7 +241,7 @@ measurement matters, and it decides something else: whether to **grant** a given
 operator has watched the queue and trusts it. It cannot decide the default, because a default is what a
 project has before anyone has measured anything, and the safe direction to be unmeasured in is the reserved
 one. The recursion is worth naming, because it is where the default does its work: `action_policy` is itself
-one of the five classes, so the write that grants any class is a governance write, and the class covering it
+one of the six classes, so the write that grants any class is a governance write, and the class covering it
 is reserved like the others. An operator therefore grants classes by writing the policy themselves, and the
 class that would let the swarm write its own policy is the one to grant last, if ever — under this default
 it is granted by no one's forgetting.
@@ -760,6 +762,228 @@ with occurrences of its own (decision 24, `calendar.md#a-series-and-its-occurren
 a task whose `due_date` tracks one reads it at `prioritize` or at claim and never through the event
 (`calendar.md#every-inbound-signal-and-what-it-becomes`), and how a recurring task shows on a calendar, if
 it does, is an outbound action of the calendar adapter's and never the home of the rule.
+
+### Where tasks come from: every source, indexed
+
+The rules above say what happens to a task once it exists — it enters intake, it is claimed, it goes
+through workflows in batches — and each way a task comes to exist is stated where the mechanism that
+creates it is argued. That leaves a reader who asks "in how many ways can work enter this swarm" reading
+eight documents. This section is the index, in the register's style
+(`conformance.md#the-register-of-open-design-decisions`): one line per source, pointing at the home that
+argues it, and restating nothing (principle 9). It is complete in one sense by construction — every source
+below ends in the same place, a task with no intake batch, which is the universal entry
+(`#intake-is-every-tasks-first-workflow`) — and a source that does not end there is not a source of tasks
+but a side door, which the model does not have (`#a-task-is-executed-only-through-a-workflow`).
+
+| # | Source | What creates the task | Home |
+|---|---|---|---|
+| 1 | the operator, through the operator-facing agent or an interactive session | the operator asks; a session's output becomes tasks, and what an interrupted session left is filed by digestion | `#the-four-execution-mechanisms` (4); `workflows.md#session-digestion` |
+| 2 | a message on a channel that reads as an ask, from a bound principal | the adapter's fourth outcome applied to a chat: an ask is a task, never an instruction | `telegram.md#a-chat-message-is-not-an-instruction` |
+| 3 | a new external record the swarm does not track | the adapter's fourth outcome, with the artifact attached; per system, the rows of the adapter's document | `adapters.md#no-external-event-advances-a-step-by-itself`; `github.md`, `gmail.md`, `calendar.md`, `telegram.md`, `payments.md` |
+| 4 | a self-triggering daemon's own loop | the daemon writes the tasks its poll produces, each entering intake, and holds no privilege over them | `#the-four-execution-mechanisms` (2); `data_model.md#write-contract` |
+| 5 | a step of a batch | a child split from a parent; a task detached; a task extracted from a meeting; a reply that needs other work; a confirmation owed to a payee; a recap owed to a participant; an item digestion found unfiled; the routed remedy for an implementation-only blocking finding | `#intake-is-every-tasks-first-workflow`; `#parent-and-child-tasks`; `workflows.md#meeting-processing`, `workflows.md#outreach`, `workflows.md#payment`, `workflows.md#session-digestion`; `gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges` |
+| 6 | a batch that cannot honestly sign until a task it created is done | a case of 5 whose creating batch holds on the task by a `DEPENDS_ON` edge | `#a-batch-may-depend-on-a-task-it-created` (decision 14) |
+| 7 | a standing finding | the institutionalization task, entering intake independently of the batch that raised the finding | `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it` (decision 17) |
+| 8 | the completion of a recurring task | the closing sign-off of the live instance's last batch creates the next instance, dated from the schedule | `#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next` (decision 30) |
+| 9 | a change in the record that an intake rule describes | the rule's evaluator writes one task per matching change, with provenance naming the rule and the change | `#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else` |
+
+Two things the index makes visible that the sources stated apart did not. Sources 4 through 8 are the
+swarm creating work for itself, and one rule governs all of them: the creating principal holds no privilege
+over the task it created (`#a-task-is-executed-only-through-a-workflow`), most created tasks are peers left
+to their own intake (6 is the exception, by a recorded edge), and no created task is executed outside a
+workflow. And sources 2, 3, and 9 are the three that turn a **change** into work rather than a
+**decision** — the adapter's fourth outcome at the external boundary, and the intake rule inside the
+record — which is why the section below states where the two differ and why the second does not replace
+the first.
+
+### An intake rule turns a described change in the record into a task, and nothing else
+
+The operator's 2026-09-05 memos asked for "pre-configured listeners": a way to state once, as data, that a
+change of a described kind — an artifact of some kind arriving from some system, an entity of some type
+gaining some property, a write with some provenance — is work, so that the swarm does not depend on a
+person or an agent noticing the change and filing a task by hand each time, and so that the record stays
+the up-to-date account of the swarm's operations even when what changes is in an external system. Every
+other source in the index above already existed in the design; this is the one that did not, and this
+section states it. The name is **intake rule** rather than the operator's *listener*, because
+`adapters.md#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it`
+already uses *listener* for the shared socket a delivery lands on, and one word names one thing (principle
+9); the name chosen says what a rule produces and where it goes.
+
+**An intake rule is data on the record: a subject, a predicate, and the text of the task it creates.** It
+names the entity types it applies to; the change kinds it fires on — created, updated, corrected, the kinds
+the record's own subscriptions distinguish; a predicate over the entity's fields as they stand after the
+change; a predicate over the change's provenance — the external system and the instance within it, the
+adapter or agent that wrote it — so that a rule can be scoped to one system, one host, or one writer, or to
+none of them; the title and description the created task will carry, naming the entity that fired it; and
+a ceiling, the number of times the rule may fire in a window. That is the whole of it. A rule holds no
+instruction to a workflow, no successor, no step, no action class, and no assignment, because those are
+intake's to decide, and the next two paragraphs say why.
+
+**It produces exactly one thing: a task entering intake, with provenance naming the rule and the change.**
+One task per rule per change, never more. The created task refers to the entity that fired it — by
+`REFERS_TO` where that entity is an artifact, and by the edge `migration.md` records as missing where it is
+an entity in the record (gap G12, which this section makes load-bearing and does not close) — and its
+provenance names the rule and the identifier of the change, which is the idempotency key of the write
+(`data_model.md#record-conventions`), so a change delivered twice fires a rule once. The task's intake
+batch opens on its creation as every task's does (`#how-a-batch-is-formed-and-what-chooses-its-workflow`),
+and that is the only sense in which a rule opens anything. A rule never opens a batch of its own, never
+attaches a task to an open batch, never names a workflow, and never takes an action: the first two are the
+sweeper's predicate that section closes, the third is routing by a matcher, and the fourth is an effect no
+principal permitted. And the created task is judged at intake like any other — classified, linked,
+deduplicated against every non-terminal task, prioritized, and routed or closed with no successor
+(`workflows.md#intake`) — so a rule that fires wrongly costs one task closed at `dedupe` or at `route`, with
+the rule's name on it.
+
+**Task types collapse into what intake already sets, and the residue lives on the rule.** The operator's
+22:05 memo asked whether the swarm should reach for task types — templates — rather than composing each
+task, while doubting what a type would hold, since the workflow that processes a task carries the
+instructions for processing it. The doubt is correct, and the design already says so in pieces. The
+"type" of a task is two things intake writes: the classes of action it expects to produce, declared at
+`classify` from what the task does (`gates_and_workflows.md#confidence-and-three-blast-tiers`), and the
+successor workflow `route` names, whose steps, owners, declared reads, and `Closes on` conditions are the
+instructions (`workflows.md`). A fast path is a workflow saying how much of itself this class of task
+needs, judged on a property intake fixed (`gates_and_workflows.md#declaration-batch-projection`). Nothing
+is left for a type entity to hold — and the recurring task has already refused a template beside its
+instances for the same reason, that it would be a second thing supplying nothing the instance does not
+(`#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next`). What the operator sensed as
+the residue — words that belong to neither the workflow nor a step — is the created task's own title and
+description, and for a rule-created task the rule authors them. So the rule is where a would-be template
+lives, on the model of the recurring task carrying its own rule, and no `task_type` is introduced.
+
+**Rules, not inference, and the reason is where the judgement then lives.** The operator asked whether the
+mechanism is rules, or inference used to classify. The design has answered for two neighbours of this
+question and the same answer holds here. A router's inference sits in an actor that neither acts nor
+answers for a misroute (`#pull-is-the-only-delivery-assignment-constrains-eligibility`); an intent parse at
+the chat boundary is a judgement by a component whose job is translation and which answers for nothing,
+made on text a third party can put in front of it (`telegram.md#a-chat-message-is-not-an-instruction`);
+and the standing axis on a finding does not become an inference engine, because the swarm proposes a scope
+it can defend and escalates the rest
+(`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
+The component that evaluates intake rules is exactly such an actor: it creates and never claims
+(`data_model.md#write-contract`), so a judgement made there is a judgement nobody answers for. A rule is a
+**declared** predicate — whether a change matched it is checkable by anyone who reads the rule and the
+change, and a match asserts nothing about what the change means, only that it is of the described kind.
+Meaning is supplied where the design already puts every judgement about a task: at intake's `classify`
+step, by a step owner, in a sign-off. So the division is **rules fire; intake judges.** Inference has one
+legitimate place in this arrangement, and it is upstream of the rule rather than inside it: an agent that
+notices the swarm hand-filing the same kind of task after the same kind of change has a standing finding,
+and its institutionalization task proposes a rule (decision 17). Inference proposes rules, through a
+workflow, to a gate; rules fire.
+
+**A predicate that cannot be evaluated does not fire, and it is not silent.** A rule whose predicate reads
+a field the changed entity does not carry, or whose provenance test needs a value the write did not
+record, is `unknown` on that change (principle 7). It does not fire — an unevaluable rule that fired would
+flood intake on every change of its subject type — and it does not pass silently either: the change
+resolves to `dropped` with reason `unevaluable`, counted per window and surfaced on the off-record
+announcement path, aggregated, which is the disposition rule adapters already apply
+(`adapters.md#what-the-adapter-does-with-every-event`). Every change a rule evaluates therefore resolves to
+one of three things — fired, unmatched, or dropped with a reason — and a rule whose drop count rises is a
+rule whose predicate names a field its subject type does not have, readable without reading the rule.
+
+**A rule is written through the gate, because it changes how work originates.** A write to an intake rule
+is a governance write
+(`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`): the list
+names `intake_rule` beside `agent`, `action_policy`, `agent_grant`, `swarm_roster`, and the schema
+registry, for the reason a `workflow` declaration is a governance write in
+`#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other` — a rule decides, for every
+future change of the described kind, that it is work, and a rule ended decides that it is not, silently,
+which is the shape `failure_posture.md` rule 2 names. Under decision 18 the class is reserved to the
+operator by default: the operator writes the first rules by hand, and an agent writes one only through a
+workflow whose governance write the gate permits, after the operator has granted the class. That is the
+design's answer to the operator's "set up directly by me, or by my agents": both, in that order, and the
+second by a grant the operator writes. A rule is corrected the way every governance object is — a change
+to its predicate or its text is a new governance write, read back — and it is ended by a correction that
+ends it, never by deletion, so that the tasks it created keep a rule to point at.
+
+**What bounds a rule that fires wrongly or too often.** Four things, none new. Dedup on the change's
+identifier: one task per rule per change, so a redelivered change and a re-evaluated window produce
+nothing twice. Intake: every created task is deduplicated against every non-terminal task and may be
+closed with no successor, so a rule's mistakes are absorbed where the design absorbs every mistaken task,
+with provenance naming the rule so the pattern is findable. The ceiling: a rule that reaches its declared
+fires-per-window stops firing for that window, and the changes it would have fired on resolve to
+`dropped`, reason `ceiling`, counted and announced like every other drop — the supervisor's rule
+`failure_posture.md` cites for repeated failure, applied to a rule rather than a lease. And provenance:
+every task a rule created names the rule and the change, so the consequence of a wrong rule is a set of
+tasks a reader can enumerate, and a rule that repeatedly reaches its ceiling, or whose tasks are
+repeatedly closed at intake, is a standing finding on the rule, whose institutionalization task corrects it
+through the gate.
+
+**A rule may fire on the swarm's own writes, and the tight loop is closed by what a rule may not key on.**
+The operator's 22:10 memo asked that the mechanism not be confined to artifacts, because the swarm's
+internal activity can create or update an entity that is itself motive for a task. It is not confined: a
+rule's subject is any entity type — an artifact an adapter wrote, or an entity a batch wrote: an analysis
+persisted, a contact stored, a transcription ingested — and the record's subscriptions deliver both kinds
+of change alike. The hazard is the loop: a task the rule created is itself a created entity, and a rule on
+`task` would fire on its own output. What closes it is the exclusion argued in the open decision below: a
+rule keys on no record of the work model — not `task`, `batch`, `lease`, `sign_off`, `action`,
+`checkpoint`, or `agent_session` — so a rule's output is never a rule's input. Chains through workflows
+remain possible and are not forbidden: a rule-created task whose batch writes an entity another rule
+describes fires that rule, and the second task enters intake like the first. That is any workflow creating
+work, priced at intake and signed at every step by a principal; it is readable end to end through
+provenance; and its rate is bounded by the ceiling. A chain that runs through principals' recorded verdicts
+is not a runaway, and one that would be is stopped at the ceiling and announced.
+
+**How a rule is evaluated, and what the evaluator is.** The record's own subscriptions wake a consumer on
+a write the record already holds; revision 14 found them unable to receive an external system's events,
+and the same fact makes them exactly the mechanism for this
+(`adapters.md#continual-inbound-is-the-inbound-side-and-an-intake-rule-evaluates-downstream-of-it`): the
+evaluator subscribes to the record's changes over the rules' subject types and evaluates each change
+against every rule that names its type. The evaluator is a daemon in the sense of
+`#the-four-execution-mechanisms` — it self-triggers on the record's changes, writes the tasks its
+evaluation produces, and receives no task — and the write contract for a self-triggering daemon is its
+contract entire (`data_model.md#write-contract`): tasks entering intake and observations carrying its
+provenance, each task read back, and never step state, a claim on what it created, or a routing decision.
+During a halt it writes nothing and observes (`failure_posture.md#the-rules`); on the record's return it
+evaluates the changes it did not see from the record's own change log along ingestion time
+(`adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`), never from a cursor of
+its own. What carries a window in which it evaluated and nothing matched is the question `migration.md`
+records as gap G13 for every self-triggering daemon, and this section does not answer it separately.
+
+**What this section does not decide.** How a predicate is spelled — the grammar of the field and
+provenance tests, and the registered shape of the `intake_rule` type — is the schema's
+(`data_model.md#concepts`). The window the ceiling counts over is a value on the rule. Whether a
+rule-created task may take a declared fast path through intake is the intake declaration's, judged on a
+property the task carries at intake — provenance from a named rule is such a property — and never the
+rule's, as the recurring task's section states for a created instance. And the adapter's fourth outcome
+is not a rule and a rule does not replace it: a new external record the swarm does not track reaches
+intake by the adapter's own mapping, argued per system in the adapter's document with its drop reasons and
+counted by obligation 1 (`adapters.md#the-admission-contract`), and no rule suppresses it — a rule that
+could would be a silent filter over deliveries, which `gmail.md` refuses for the one exclusion it makes.
+Rules add routes from changes to entities the record already holds; the adapter's outcome is the floor
+beneath them.
+
+### Whether an intake rule may key on the work model's own records
+
+**Open decision 36.** Registered in `conformance.md#the-register-of-open-design-decisions`. The section
+above excludes the work model's own record types from a rule's subjects. The operator's stated lean runs
+the other way: the 22:10 memo asked for "a more general sort of listener", on entities in general, and a
+task, a batch, or a checkpoint changing is an entity changing.
+
+**The options.** Exclude them, as above: a rule keys on artifacts and on the swarm's other entities, and
+never on `task`, `batch`, `lease`, `sign_off`, `action`, `checkpoint`, or `agent_session`. Or admit every
+type, with the ceiling and the dedup as the only bounds on the loop.
+
+**The case for excluding, which is why the section above is written that way.** Every change to a
+work-model record already has a mechanism that answers it, and a rule there is a second one (principle 6).
+A step nobody claimed raises `unclaimed_step`; a lease that keeps lapsing raises `repeated_lapse`; a batch
+that closes names its successor or none, and what follows is `workflow.successors`; a blocking sign-off
+opens the step `on_fail` names, and its remedy is a routed task; a checkpoint nobody answers reaches its
+terminal timeout, and it awaits whom it awaits; a task that should produce another does so from a step, by
+a principal's verdict (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`;
+`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`). A rule reading "when a task of one
+kind is created, create a task of another" is sequencing by a matcher, which
+`#how-a-batch-is-formed-and-what-chooses-its-workflow` closes; one reading "when a checkpoint has been open
+some days, create a task" is a second decision queue beside the one the design has. And the exclusion is
+what closes the tight loop by construction rather than by a counter: a rule's output is a `task` write, so
+with `task` excluded no rule is its own input in one hop.
+
+**The case for admitting, which is the operator's.** Generality is simpler to state, and there may be a
+motive on a work-model record that none of the existing mechanisms carries — a class of task that, once
+created, always owes a companion task, say — for which a rule is cheaper than a step. **What would decide
+it:** a motive on a work-model record that no existing mechanism — successor, `on_fail`, the checkpoint
+queue, a step creating a task — can carry. If one is named, the exclusion is wrong for that type, and the
+remedy is to admit the type with the ceiling and the dedup as its bounds; if none is, the exclusion stands
+and the loop stays closed by construction.
 
 ## The four execution mechanisms
 
