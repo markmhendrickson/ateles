@@ -101,8 +101,9 @@ docs from this sediment.
 Architecture/operating docs that match the audited reality:
 
 `architecture.md`, `taxonomy.md`, `phases.md`, `data_types.md`, `neotoma_vs_alternatives.md`,
-`foundation/*` (18 documents: a 3-document always-read kernel; 11 path-keyed documents, five of them one
-per external system — `github.md`, `gmail.md`, `calendar.md`, `telegram.md`, `payments.md`; and 4
+`foundation/*` (19 documents: a 3-document always-read kernel; 12 path-keyed documents, five of them one
+per external system — `github.md`, `gmail.md`, `calendar.md`, `telegram.md`, `payments.md`, and one the
+acceptance suite's design, `conformance_suite.md`; and 4
 companions — `scenarios.md`, `workflows.md`, `migration.md`, and `foundation/status.md`, the dated
 implementation-gap measurement), `swarm_smoke_test_plan.md`, `smoke_test_runbook.md`,
 `agent_execution_runbook.md`, `agent_execution_architecture.md`, `a2a.md`, `pr_review_routing.md`,

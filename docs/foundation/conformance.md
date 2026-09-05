@@ -6,7 +6,7 @@ mechanism (built as ateles#744): names documents and paths, never what a checkou
 `binding_is_the_reviewer_reading_a_kernel_not_a_loading_order` and
 `ateles_binding_extends_three_existing_mechanisms`, synthesis `ent_b0ce322f768e4fc676b73139` (PR-29, C7),
 prior art `ent_08460968e6f49dac21510f4a` (OPA: decision decoupled from enforcement), and PR #745 operator
-review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and revision 21 (2026-09-05: the `gmail.md` and `calendar.md` keyed rows and their canonical-source entries), and revision 24 (2026-09-05: the `telegram.md` and `payments.md` keyed rows and their canonical-source entries), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: twelve register rows moved from open to ruled), and the operator's 2026-09-05 rulings of decision 15 and decision 30 (revision 27: the last open row moved to ruled, and the recurring task registered as ruled on the operator's proposal), and revision 28 (2026-09-05: `migration.md` registered as an authored companion, and decision 31 opened). Revised by the simplification pass of 2026-09-05 (revision 29: the `feedback` entity removed from the direction-of-truth table in favour of the finding; `scenarios_extended.md` merged into `scenarios.md`; decisions 32 to 35 opened). Revised for the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: `intake_rule` registered in the direction-of-truth table, and decision 36 opened). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37 to 41 registered as ruled).
+review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and revision 21 (2026-09-05: the `gmail.md` and `calendar.md` keyed rows and their canonical-source entries), and revision 24 (2026-09-05: the `telegram.md` and `payments.md` keyed rows and their canonical-source entries), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: twelve register rows moved from open to ruled), and the operator's 2026-09-05 rulings of decision 15 and decision 30 (revision 27: the last open row moved to ruled, and the recurring task registered as ruled on the operator's proposal), and revision 28 (2026-09-05: `migration.md` registered as an authored companion, and decision 31 opened). Revised by the simplification pass of 2026-09-05 (revision 29: the `feedback` entity removed from the direction-of-truth table in favour of the finding; `scenarios_extended.md` merged into `scenarios.md`; decisions 32 to 35 opened). Revised for the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: `intake_rule` registered in the direction-of-truth table, and decision 36 opened). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37 to 41 registered as ruled). Revised by revision 33 (2026-09-06: the conformance-suite design — `conformance_suite.md`, its keyed row, the rule-coverage check named as a contract, its direction-of-truth row, and decisions 43 and 44 opened).
 
 ## Purpose
 
@@ -108,6 +108,11 @@ documents to read. Each document at most once per review, kernel first.
 |---|---|
 | `docs/foundation/` | `docs/foundation/conformance.md` |
 
+### The conformance suite
+
+| Changed path | Read |
+|---|---|
+| `docs/foundation/conformance_suite\.md`, `execution/conformance/`, `execution/scripts/check_foundation_rule_coverage` | `docs/foundation/conformance_suite.md` |
 ## Design basis
 
 Every issue and PR states its design basis: the foundation document and section it conforms to, or that no
@@ -150,6 +155,7 @@ is `status.md`.
 | Term links | `execution/scripts/link_vocabulary_terms.py --check`; asserted in `test_foundation.py` | a first mention of a defined term, in an entry or section of `vocabulary.md`, that carries no link to its definition; run the script without `--check` to link them |
 | Workflow tables | `execution/scripts/render_workflow_docs.py --check` (contract; `status.md` says whether it exists) | a step table in `workflows.md` that differs from its `workflow` entity |
 | Data-model tables | `execution/scripts/render_data_model.py --check` (contract; `status.md` says whether it exists) | a concept or relationship table in `data_model.md` that differs from the schema registry |
+| Rule coverage | `execution/scripts/check_foundation_rule_coverage.py` (contract; `status.md` says whether it exists) | a rule-bearing heading in a kernel or keyed document (`conformance_suite.md#what-the-rule-coverage-check-reads` says which headings those are) with no row in `conformance_suite.md` whose pointer resolves to it; a row whose pointer resolves to nothing; or a decision opened in a document and absent from the register below |
 
 ## Direction of truth per class of record
 
@@ -168,6 +174,7 @@ the swarm's own records, and the word is not used for them.)
 | Core workflow step lists / fast paths / successors | the `workflow` entity for (project, type) | `docs/foundation/workflows.md` tables via `render_workflow_docs.py --check` (prose authored in the file) |
 | Entity types, fields, and edge types the design names | the schema registry on the record | `docs/foundation/data_model.md` tables via `render_data_model.py --check` (prose authored in the file) |
 | Walkthroughs of the work/gate model | the kernel documents | `docs/foundation/scenarios.md` |
+| The suite's design: what each test sets up, does, and observes, per rule | `docs/foundation/conformance_suite.md`, PR-reviewed | the suite's code, judged against the design and never the reverse; a row the code cannot pass is drift in the code or a proposed change to the foundation through a PR, never an edit to the row |
 | Skill bodies (what a skill instructs) | the `agent_policy` entity the skill renders from | `.claude/skills/<name>/SKILL.md` on disk |
 | Agent prompt text | `agent.prompt_markdown` | `docs/agents/` and the rendered skill mirrors, via `render_agent_docs.py --check`, which also prunes a mirror whose definition is gone |
 | Which changes in the record are work (intake rules) | the `intake_rule` entities on the record, each written through the gate as a governance write | none; a predicate in a daemon's code that creates a task on an entity change is a rule with no home, and is drift (`work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`) |
@@ -255,15 +262,17 @@ so that they are not reused; see the two notes below.
 | 40 | what a step records at close about the session it ran in | `gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read` | — | **ruled** (2026-09-06): what it produced is written as the entities it is; what it read is named on the sign-off and reproduced by an as-of read at `signed_at`, never copied; its reasoning is not written; `agent_session` stays the identity and liveness half |
 | 41 | whether write admission per entity type is default-allow with attribution, or default-deny by grant | `authority_model.md#grants` | — | **ruled** (2026-09-06): default-deny; the `agent_grant` is the allowlist, read at every enforcement point and widened by a governance write; attribution is required besides and prevents nothing; a wildcard over types is the fail-open shape, not an allowlist |
 | 42 | where a skill's harness mechanics live — the tool allowlist, harness preference, model tier, and hook wiring a skill carries: a harness-binding context entity in the record, fields on the `agent`, or the harness's own configuration outside the record | `migration.md#open-decision-42-where-a-skills-harness-mechanics-live` | stage 11's narrowing of what a runner may invoke; nothing before it | **open** (skills leg, 2026-09-05) |
+| 43 | what the bootstrap set is — the closed list of records an operator writes before the gate can hold — and whether the operator's own governance writes after bootstrap are gated or exempt | `conformance_suite.md#open-decision-43-what-the-bootstrap-set-is-and-whether-the-operators-later-governance-writes-are-gated` | the from-zero suite's first writes; the audit shape of the operator's own governance writes; `migration.md`'s leg one, which enumerates the same set for a populated instance | **open** (conformance-suite design, 2026-09-06) |
+| 44 | whether a sign-off from a step owner whose lease has lapsed closes the step | `conformance_suite.md#open-decision-44-whether-a-sign-off-from-a-step-owner-whose-lease-has-lapsed-closes-the-step` | the lease × step axis of the suite | **open** (conformance-suite design, 2026-09-06) |
 
 **Every ruled decision now has a heading of its own.** 25 through 29 were opened as bold paragraphs inside
 their documents' *What this document does not decide* sections, and the register's pointers resolved to the
 enclosing heading; the rulings of 2026-09-05 gave each its own section, as 13, 14, 23, and 24 already had, so
 every pointer above lands on the ruling itself. 15 and 30 are argued under headings that name their subject
-rather than their number, as 13 and 14 are. Seven rows are open — 31; 36, opened on the operator's 2026-09-05 memos on how tasks come into existence and
+rather than their number, as 13 and 14 are. Nine rows are open — 31; 36, opened on the operator's 2026-09-05 memos on how tasks come into existence and
 argued in `work_model.md`; 32 to 35, which the simplification
 pass of 2026-09-05 opened as removals whose guarantee coverage would shift rather than be exactly preserved,
-each argued under a heading naming its subject in the document that owns it; and 42, opened by the skills leg of the migration; 37 to 41 were opened and ruled
+each argued under a heading naming its subject in the document that owns it; and 42, opened by the skills leg of the migration; and 43 and 44, which the conformance-suite design opened from the two places a from-zero run found no rule to test; 37 to 41 were opened and ruled
 in one revision from the operator's memos of 2026-09-05, each under a heading naming its subject — and the register exists for
 the ruled rows too: a ruled row is where a reviewer learns a question was once open and where its rule now
 lives, and where the next author reads before opening a question that was already taken.
@@ -277,7 +286,7 @@ foundation document. They are the gaps left by several documents opening decisio
 branch and renumbering around each other, and they are recorded as gaps rather than closed up: renumbering
 would break every cross-reference the documents already carry, and silence would invite the next author to
 reuse the number for something unrelated. **Do not assign 19 or 22 to a new decision.** The next number is
-43.
+45.
 
 **20 and 21 were assigned, then renumbered, and two pointers were left behind.** Both were opened in
 `payments.md` and renumbered to 27 and 28 before that document was committed, to avoid colliding with 23

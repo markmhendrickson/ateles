@@ -78,6 +78,12 @@ Keyed (read when matching paths change — see `conformance.md`):
 - [**Conformance**](foundation/conformance.md) — how issue-based work binds to the foundation: the
   always-read kernel, the path-keyed reading list, the design-basis statement, the direction of truth per
   record class, and the rule that keeps state out of the foundation.
+- [**Conformance suite**](foundation/conformance_suite.md) — the acceptance suite the foundation is judged by,
+  designed and not built: one row per rule with the from-zero setup, the action, the observable that goes red,
+  and whether it is mechanical or review-only; the rules with no failing artefact and what each would need to
+  say; the pairs of rules whose observables contradict; the bootstrap sequence a from-zero run needs; the
+  permutation axes and which cross-products are load-bearing; and the disposable-instance isolation that
+  makes touching the production record impossible rather than unlikely.
 - [**Authority model**](foundation/authority_model.md) — the tuple `principal + domain + scope + action +
   conditions + time` defined whole: principals, tenancy, ownership, grants, attribution, delegation,
   approval, quorum and separation of duties, and the initiative objects, with the identity decision

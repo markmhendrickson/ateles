@@ -11,7 +11,7 @@ life end to end, with the governance substrate (identity, capability, gating, au
 against the vision.
 
 Ateles is a design and a working example of it. The design is
-[`docs/foundation/`](docs/foundation/): eighteen documents that state how work is created, taken,
+[`docs/foundation/`](docs/foundation/): nineteen documents that state how work is created, taken,
 executed, and approved, and what the swarm does when it cannot reach its own record. The example is what
 runs against that design — background daemons and skills that already automate code review, releases,
 issue triage, email, calendar, recurring payments (fiat + Bitcoin), meeting capture and recap, health
@@ -79,7 +79,9 @@ for that tool; a policy check that raises is deny. Every write carries the agent
 principal it acted for — a shared bearer that never identifies its caller is not attribution.
 
 The design of record is [`docs/foundation/`](docs/foundation/); what a given checkout actually implements,
-with its as-of date and instrument, is [`status.md`](docs/foundation/status.md). This README describes the
+with its as-of date and instrument, is [`status.md`](docs/foundation/status.md); what a checkout would have
+to pass, from zero, is [`conformance_suite.md`](docs/foundation/conformance_suite.md), the acceptance suite
+designed before it is built. This README describes the
 design. Where the two differ, `status.md` is the honest side.
 
 ## Vision and execution status
