@@ -9,7 +9,7 @@ from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-12 to PR-15, C5, C17), prio
 `reachability_check_belongs_at_dispatch_with_mid_task_writes_failing_closed`,
 `deferral_must_be_bounded_and_escalate_off_neotoma`, `unknown_must_stay_distinct_from_a_verdict`,
 `nyctea_635_becomes_load_bearing`, PR #745 operator review (2026-09-04), and the operator memos of
-2026-09-05 (the `undetermined_scope` reason class), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). What is built is `status.md`;
+2026-09-05 (the `undetermined_scope` reason class), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: a hold on a discovered condition is a deferral under rule 5; the `dependency_cycle` reason class). What is built is `status.md`;
 how a checkpoint is recorded is `data_model.md`.
 
 ## Purpose
@@ -80,7 +80,11 @@ refuse-and-requeue-as-fallback, and the hardcoded step-list floor (C5, below).
    the ceiling is reached and the record is reachable, the task is escalated: one checkpoint with reason
    `rounds_exhausted` (below). When the record is not reachable, nothing can be written, and the exhaustion
    is announced on the path that survives the outage (rule 2). The drain is the lapse rule below (backoff,
-   lapse cap, checkpoint on exhaustion), connected to the gating path rather than rebuilt.
+   lapse cap, checkpoint on exhaustion), connected to the gating path rather than rebuilt. A step **holding**
+   on a condition discovered mid-flight that owes nobody a decision
+   (`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`) is a deferral under this rule and
+   takes its bound: re-evaluation with backoff, a ceiling, and at the ceiling one checkpoint,
+   `rounds_exhausted`, carrying the finding that names what the step was waiting on.
 
 6. **Every write is read back.** Principle 2 of `principles.md`, restated here because an outage is when a
    write most plausibly reports success without landing: a store can return 200 with a warning and persist
@@ -199,7 +203,11 @@ the hold reached its bound — `gates_and_workflows.md#declaration-batch-project
 `gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`), and `undetermined_scope` (a
 standing finding whose right scope — the agent, the workflow, or one step — cannot be determined from the
 finding, so it is put to the operator rather than guessed —
-`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`);
+`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`),
+and `dependency_cycle` (two or more batches each holding on a task attached to another, found after the
+writes were made; each batch's tasks are escalated with one, naming the batches and edges in the loop, and
+every step owner in it holds until a principal breaks it —
+`work_model.md#a-batch-may-depend-on-a-task-it-created`);
 a policy may declare more. A checkpoint on a task
 carries the reason, the needed input, the options, and whom it awaits, and is presented and resolved
 through the one decision queue, by the one resolution protocol, that checkpoints on actions use. Do not

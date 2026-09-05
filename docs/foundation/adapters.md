@@ -8,7 +8,7 @@ and the action gate), `authority_model.md` (credentials bind to principals; appr
 steps whose effects leave the system), PR #745 operator review (2026-09-04, the adapter decision), and the
 operator's 2026-09-05 review (the inbound-delivery question and the adapter-packaging lean, both recorded
 below as open; and revision 18: when an artifact comes into existence, and what holds an effect before
-it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers). What is built, and where the adapter and the engine are still one process, is `status.md`.
+it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage). What is built, and where the adapter and the engine are still one process, is `status.md`.
 
 ## Purpose
 
@@ -26,9 +26,9 @@ points to rather than restates.
 Every boundary between the record and a system the swarm does not own. In scope: the two invariants at
 the boundary, what an inbound event may become in the record, what an outbound operation is, and the
 identity, linkage, dedup, unknown, and provenance rules every adapter applies, what a new adapter must
-demonstrate before the record trusts it and who admits one, and two questions marked
-**open** rather than resolved to make the document complete: where inbound delivery comes from, and whether
-adapters live in a repository of their own. Out of scope: the workflows themselves (`workflows.md`), the
+demonstrate before the record trusts it and who admits one, where inbound delivery lands and which part of
+receiving it is the adapter's, and one question marked **open** rather than resolved to make the document
+complete: whether adapters live in a repository of their own. Out of scope: the workflows themselves (`workflows.md`), the
 gate's decision function (`gates_and_workflows.md`), what an adapter is granted
 (`authority_model.md#grants`), the per-system mapping in full for the three systems that have their own
 documents (`github.md`, `gmail.md`, `calendar.md`, each applying these rules to its system's whole
@@ -176,11 +176,11 @@ else, and an adapter that re-requests on every failure batters it — and that t
 system rather than per waiting step. It is cited rather than restated so one retry classification serves the
 runner and the adapter both (principle 6).
 
-### Where inbound delivery comes from is an open decision, and the record's own subscriptions are not it
+### Where inbound delivery lands: the adapter verifies and identifies it, and the record's own subscriptions are not it
 
-Every inbound rule above assumes deliveries arrive somewhere. What builds and runs that somewhere the
-design does not settle, and the thing a reader most often reaches for as the answer is the wrong one, so
-both halves are stated here rather than left to be re-derived.
+Every inbound rule above assumes deliveries arrive somewhere. Two things are stated here: what that
+somewhere may and may not do, which is ruled, and what the thing a reader most often reaches for as the answer
+actually is, which is the wrong one.
 
 **The record's subscription machinery watches the record, not external systems.** The record offers
 subscriptions over its own entity changes — a watch on entity types, entity ids, or change kinds, delivered
@@ -193,16 +193,65 @@ subscribes to a checkpoint and re-claims its task on resolution — and they are
 never a substitute for one. Reading them as an inbound receiver inverts the boundary: it would make the
 record the source of events about systems it cannot see.
 
-**Open decision 16: whether the swarm builds its inbound receivers or rides a shared one.** Registered
-in `conformance.md#the-register-of-open-design-decisions`. What is undecided is where an external system's delivery lands before it becomes a write: a receiver the swarm
-builds per system, one receiver the swarm builds and every adapter shares, or a third-party delivery
-service the swarm consumes. Nothing in this document depends on the answer — the two invariants, the four
-outcomes, and the five rules hold whichever it is, because each is stated about what the adapter does with
-a delivery and not about how the delivery reached it. What the answer does decide is where signature
-verification, redelivery, and the delivery id the dedup rule keys on live, and those are the terms the
-decision should be taken on. Until it is taken, an adapter's receiver is its own, which is the state a
-reader should assume and not the design's ruling. This is a sibling of open decision 15 below: how adapters
-are packaged and where their deliveries land are the same question asked of code and of traffic.
+**Ruled (decision 16, 2026-09-05): the adapter owns signature verification and delivery-id extraction; the
+transport listener may be shared plumbing.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. The question was where an external system's delivery
+lands before it becomes a write — a receiver per system, one receiver every adapter shares, or a third
+party's delivery service — and it was to be taken on where signature verification, redelivery, and the
+delivery id the dedup rule keys on live. Those three are the adapter's, per system, without exception. The
+listening socket, the process that holds it open, the endpoint the external system is pointed at, and the
+long-poll loop that asks a system for its updates carry no per-system semantics and **may be one process for
+every adapter**, built by the swarm or consumed from a third party. What it hands the adapter is the delivery
+as the external system sent it — headers and body intact, unparsed, unverified, unacknowledged — and what it
+does with it after that is what the adapter tells it to do.
+
+**Reason.** Verification and the delivery id are per-system by nature, and a generic receiver would do them
+generically wrong. One code host signs the body with a keyed hash over a shared secret and names the delivery
+in a header; a chat platform offers no signature at all, only a secret token the swarm set and the platform
+returns in a header, and names the delivery by an update identifier that is sequential but not permanently
+monotonic (`telegram.md#delivery-webhooks-long-polling-and-what-the-dedup-rule-keys-on`); a mail system
+delivers a mailbox history marker through a publish-subscribe topic whose envelope is the thing to verify and
+whose payload carries no event at all (`gmail.md#what-arrives-and-what-must-be-asked-for`); a bank rail signs
+against a published key under a scheme that varies between rails (`payments.md`); a chain has no delivery and
+no signature, only a source the swarm chose to trust. A receiver that verified generically would either
+accept what it could not check — the fail-open shape principle 5 forbids at the one field, authenticity, that
+decides whether a delivery is the external system's at all — or refuse every system whose scheme it did not
+know, which is the same receiver with the failure moved. And the delivery id is the idempotency key of the
+write the delivery produces (dedup, below), so extracting it wrongly is a dedup rule keyed on the wrong thing:
+one adapter's key is a per-delivery identifier, another's a position in a log, another's a transaction
+identifier with a height, and this document can state the rule once only because each adapter applies it to
+its own system. The listener, by contrast, has nothing per-system in it: a socket is a socket, and two
+processes each holding one open is a cost with no benefit.
+
+**What the listener therefore may not do, stated because a shared component drifts toward doing it.** It may
+not verify on the adapter's behalf, because then the adapter's identity rule rests on a check it cannot read.
+It may not deduplicate, because it does not know the key. It may not **acknowledge** on the adapter's behalf:
+the acknowledgement to the external system — the success status a webhook returns, the later offset a long
+poll asks from — follows the adapter's confirmed write and never precedes it (provenance and read-back,
+below; `telegram.md`), so a listener that acknowledges on receipt and queues the delivery for the adapter has
+turned every outage into silent loss, which is obligation 5 of the admission contract failing
+(`#the-admission-contract`). The listener answers the external system with what the adapter decided, and
+during a halt that is nothing. And it may not parse: a listener that turns the body into an event the adapter
+then reads has become the adapter's first half, and its parse is where a payload missing the field the
+mapping keys on becomes a wrong outcome instead of `unknown`. What it may do is what a socket does — receive
+bytes, hand them on, and return the answer it is given. **Redelivery is the adapter's too**, because
+redelivery is a property of the acknowledgement, and the acknowledgement is the adapter's: what the external
+system re-sends is what was not acknowledged, and the adapter is the only component that knows which
+deliveries were not written.
+
+**The cost accepted** is that each adapter carries its own verification code — five schemes today, a sixth
+with the sixth adapter — and that a defect in one is fixed in one, where a shared verifier would be fixed
+once. Accepted, because the once would be a fix to a component that has to know every scheme, which is five
+adapters' worth of knowledge in a sixth place (principle 9). The admission contract already asks a new
+adapter to demonstrate its identity rule and its dedup key against its own system (obligations 2 and 3), so
+the per-adapter code is reviewed where it is written. **What would reopen it:** two adapters' verification
+logic converging to the point that sharing it would not be a generic abstraction — two hosts adopting one
+signature scheme, say — at which point the shared piece is a library both adapters call, still under each
+adapter's own obligation, and not a receiver that verifies for them.
+
+**This is a sibling of open decision 15 below**, how adapters are packaged, and it is ruled without ruling
+that one: the adapter's verification code lives wherever the adapter's code lives, bundled or in a repository
+of its own, and a shared listener is plumbing wherever it lives.
 
 ## What the adapter does with every event
 
@@ -224,7 +273,17 @@ and the adapter carries the verdict in.
 is by definition a record in an external system reached through an adapter, and never a thing the swarm
 produced into the record (`work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject`). An
 adapter therefore never mints an artifact for something the record already holds: what the swarm writes
-for itself is an entity, and only what the external system holds gets a `system` and an `external_id`. An artifact with no batch and no task is one the record does
+for itself is an entity, and only what the external system holds gets a `system` and an `external_id`. **Where the
+external system gives ids to two levels of one thing** — a thread and the messages in it, a recurring series
+and its occurrences, a pull request and its review threads — **each level is an artifact**, because each has a
+`system` and an `external_id`, and the contained one is `PART_OF` the containing one
+(`data_model.md#relationships`). An inbound event links to the artifact whose id it carries, and the
+containing artifact is reachable by the edge; an outbound action refers to the unit whose id its operation
+needs; a task refers to whichever unit it names. A system that gives an id to only one level has only that
+level as an artifact, which the rule already implies. The mail system's and the calendar's forms of this are
+ruled where those systems are tabled (decisions 23 and 24;
+`gmail.md#a-thread-and-its-messages-are-each-artifacts-related-by-part_of`,
+`calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of`). An artifact with no batch and no task is one the record does
 not track: a new-record event on such a record (an issue opened, a message received) yields a task for
 intake with the artifact attached; any other event on it is dropped with that reason, counted and
 surfaced under the disposition rule below. The adapter never attaches an
@@ -499,9 +558,9 @@ from a stored time against a clock, so a step depending on a meeting having happ
 stated freshness rather than trusting a time the record has held for a week; that an operation's action
 class **depends on the attendees** — the same write is `external_api_write` on a solo event and
 `send_external_comms` on one with attendees, because it mails them — and that an unreadable attendee set
-therefore takes the higher class (principle 5); and **open decision 24**, whether a recurring series is one
-artifact or many, which it opens rather than resolves and which should be decided together with
-`gmail.md`'s decision 23, both being the same question about a thing with internal multiplicity.
+therefore takes the higher class (principle 5); and **decision 24**, ruled with `gmail.md`'s decision 23: a
+recurring series and each occurrence the record holds are each artifacts, the occurrence `PART_OF` the
+series, which is the two-level rule under linkage above applied to a thing with internal multiplicity.
 
 ## Payments
 
@@ -623,9 +682,9 @@ inherits that answer entire and this section adds nothing to it. Two of that sec
 worth carrying here because a reader arriving at adapters will look for them: an adapter admission task
 proposed by the swarm and one the operator asked for are the same object under the rule, and the
 capability an adapter is to be granted cannot be written by the principal that would use it, because that
-write is itself a governance write to `agent_grant`. Adapter admission also does not wait on open decision
-17, whose open question is the sequencing between a batch and an institutionalization task it created
-mid-flight; an adapter admission task is not created that way.
+write is itself a governance write to `agent_grant`. Adapter admission also does not turn on decision
+17, which ruled the sequencing between a batch and an institutionalization task it created mid-flight; an
+adapter admission task is not created that way.
 
 **Its credential is a grant, which is where authority actually attaches.** The adapter acts as a principal
 and its capabilities are an `agent_grant`, scoped and time-bounded, matched on the credential
@@ -633,13 +692,11 @@ and its capabilities are an `agent_grant`, scoped and time-bounded, matched on t
 that is already answered: a write to `agent_grant` is a **governance write**, which is an action evaluated
 at the action gate (`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`). The operator
 resolves the checkpoint the gate raises. Nothing here needs a new approver class, and adding one would be
-the second gate. Whether that governance class is *reserved* to the operator by default or merely held at
-a high tier is **open decision 18**
-(`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`), and adapter
-admission does not need it ruled: a project with no policy value for the class is the unclassified case,
-which fails closed to `NEVER`, so an adapter cannot be granted its credential by default under either
-candidate. The decision changes how a project that has written a policy admits its second adapter, not
-whether the first one is held.
+the second gate. That governance class is *reserved* to the operator by default (**decision 18**, ruled:
+`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`): a project with no
+policy value for the class resolves it to `NEVER`, so an adapter is never granted its credential by default,
+and a project that wants the swarm to admit its second adapter under a checkpoint grants the class explicitly
+first. The first adapter's grant is the operator's own write in every case.
 
 **Its outbound classes are `action_policy` data, and that write is governance too.** An adapter that can
 send mail or move money produces actions of classes the policy must list, and a class in neither set
@@ -739,9 +796,9 @@ a delivery and what fails when it does it wrong, and none of them mentions a rep
 request that adds it, under this repository's design-basis check, while a shared repository's adapter is
 reviewed under whatever that repository's own review is, across two release cadences. That is a real cost
 of separating, and it belongs on decision 15's ledger beside the ones already recorded there; it is not a
-reason to rule 15 here, and this section rules nothing about it. The same holds for open decision 16
-(where inbound delivery lands): the obligations hold whichever receiver an adapter's deliveries arrive
-through.
+reason to rule 15 here, and this section rules nothing about it. The same holds for decision 16
+(where inbound delivery lands, ruled above): the obligations hold whichever listener an adapter's deliveries
+arrive through, because verification and the delivery id are the adapter's wherever the socket is.
 
 ## The adapter and the engine are two roles
 
@@ -777,10 +834,11 @@ required approvals, are the identity and CI rules above, stated by the host itse
 
 The four-outcome rule, the five adapter rules, and the tables are this document's, consolidating the
 operator's decision on PR #745; the prior art named above is cited from general knowledge, not from the
-prior-art entity the other documents cite. Open decisions 15 and 16, and the statement of what the record's
+prior-art entity the other documents cite. Open decision 15, the ruling of decision 16, and the statement of what the record's
 own subscriptions can and cannot tell a consumer, are this document's, from the operator's 2026-09-05
 review; the lean recorded under decision 15 is the operator's own and is marked as a lean rather than
-written up as a ruling.
+written up as a ruling. The two-level artifact rule under linkage is this document's, consolidating the
+rulings of decisions 23 and 24 into the one place the linkage rule is stated.
 
 **Admitting a new adapter** is this document's, from the operator's 2026-09-05 question of whether the
 foundation anticipates the swarm's addition of adapters. It states no new rule: the six obligations are

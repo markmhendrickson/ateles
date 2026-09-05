@@ -8,7 +8,9 @@ plan `ent_18b902cf72822373f9da8ced` decisions `pull_model_sequencing_build_the_c
 review (2026-09-04), and the operator's 2026-09-05 review (revision 18: how a batch is formed and what
 chooses its workflow; revision 20: the batch-formation diagram, on the operator's request for visuals
 during review), and the operator's 2026-09-05 12:52 memo (revision 21: workflows as the general mechanism
-for changing the swarm's own operation). Supersedes `docs/archive/task_execution_loop.md`. What is built
+for changing the swarm's own operation), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18,
+23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default).
+Supersedes `docs/archive/task_execution_loop.md`. What is built
 is `status.md`; how each concept is recorded is `data_model.md`.
 
 ## Purpose
@@ -17,9 +19,11 @@ State how work is created, taken, executed, and returned: pull-only delivery; as
 claim and lease as one primitive (lease as relationship); liveness derived at read time; no assignment
 log; a task carries only status and edges; intake is every task's first workflow; tasks go through
 workflows in batches, are attached to and detached from them, and nest under parents; a batch is opened
-by a closing sign-off naming a successor and goes through exactly one workflow; a change to the swarm's
-own operation is a task like any other, governed by the action gate the governance writes already reach;
-artifacts are records a batch leaves, never its subject.
+by a closing sign-off naming a successor and goes through exactly one workflow; a batch may hold on a
+condition discovered mid-flight, and may depend on a task it created, under its held lease and with no held
+state; a change to the swarm's own operation is a task like any other, governed by the action gate the
+governance writes already reach, and reserved to the operator by default; artifacts are records a batch
+leaves, never its subject.
 
 ## Scope
 
@@ -210,31 +214,61 @@ Which classes belong there is not a design question this document can settle, be
 about how much autonomy this operator wants, and the design's job is to make the judgement expressible
 and enforceable rather than to make it.
 
-**Open decision 18: whether a governance write is reserved to the operator by default.** Registered in
-`conformance.md#the-register-of-open-design-decisions`. A policy is a value, and every value has a default for a project that has not written one. The two candidate defaults
-are genuinely different postures and the choice is the operator's. **Reserved by default** — the five
-governance classes carry `operator_only` unless a project's policy says otherwise — makes the swarm
-unable to change itself out of the box, and every loosening a deliberate act with a record; the cost is
-that the mechanism sits unused until someone writes a policy, and an unexercised path is one nobody has
-tested (`failure_posture.md`). **Gated by default** — governance classes take a high blast tier, held at
-a checkpoint but not reserved — makes self-change possible from the start under a per-change decision,
-and the risk is that the checkpoint queue is where held work goes to be approved in bulk, so a tier that
-merely holds can become a tier that merely delays. What would decide it: whether the checkpoint queue is
-actually consumed, which is a measured property and not a design one (`status.md`). Until it is ruled, a
-reader should assume neither default and read the project's `action_policy`; a project with no policy
-value for a governance class is the unclassified case, which fails closed to `NEVER`
-(`gates_and_workflows.md#confidence-and-three-blast-tiers`) — so the *absence* of a decision already
-behaves as the reserved posture, which is the safe direction to be undecided in, and is not the same as
-having ruled.
+**Ruled (decision 18, 2026-09-05): a governance write is reserved to the operator by default.** Registered
+in `conformance.md#the-register-of-open-design-decisions`. Each of the five governance classes resolves to
+`NEVER` until the operator has written a policy value for it: a class with no value in the project's
+`action_policy` is not the policy default and not a high tier, it is `operator_only`, and no confidence and
+no action series clears it. That is what the unclassified case already did — a declared class in neither set
+resolves to `NEVER` (`gates_and_workflows.md#confidence-and-three-blast-tiers`) — promoted from the accident
+of an absent value to the rule for this class of write, so that a reader no longer infers the posture from
+the fail-closed default, and a project no longer behaves as reserved only until someone writes a policy that
+forgets a class. The loosening is a **grant**, class by class: the operator lists the class in the policy
+with the tier they want, and from then on the gate resolves it as any other class. The operator reserves it
+again by removing the value.
 
-**The relationship to open decision 17.** Decision 17 asks a narrower question about one path into this
-one: whether institutionalizing a *standing finding* is itself a workflow, and specifically whether the
-batch that raised the finding waits on the institutionalization task it created or closes and leaves that
-task to its own intake (`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
-This section does not answer it and does not depend on it. What this section states is that *a change to
-the swarm goes through a workflow*, whatever produced the change; what 17 leaves open is *sequencing*
-between two batches when one of them produced the other. Both readings of 17 are consistent with this
-section, which is why ruling this one does not rule that one.
+**Reason.** Fail-closed is the posture everywhere else in this design (principle 5), and the two candidate
+defaults are not symmetric in what they cost to undo. Reserved-then-loosened is reversible one class at a
+time, each loosening a deliberate write with an author and a date, and each undone by deleting what was
+written. Gated-then-reserved is not: a governance class held at a high tier is a class the swarm may change
+once a checkpoint is approved, and by the time a project decides the tier should have been a reservation the
+swarm may already have changed itself under it — a rewritten agent, a widened grant, a workflow with a step
+removed — and undoing *those* is a set of recoveries through the gate, not a policy edit. The open question
+proposed to decide this on whether the checkpoint queue is actually consumed, a measured property. That
+measurement matters, and it decides something else: whether to **grant** a given class, for a project whose
+operator has watched the queue and trusts it. It cannot decide the default, because a default is what a
+project has before anyone has measured anything, and the safe direction to be unmeasured in is the reserved
+one. The recursion is worth naming, because it is where the default does its work: `action_policy` is itself
+one of the five classes, so the write that grants any class is a governance write, and the class covering it
+is reserved like the others. An operator therefore grants classes by writing the policy themselves, and the
+class that would let the swarm write its own policy is the one to grant last, if ever — under this default
+it is granted by no one's forgetting.
+
+**The cost accepted** is friction, and it is the cost the open question named: the self-modification
+machinery sits unused until the operator grants a class, and an unexercised path is one nobody has tested
+(`failure_posture.md`). Accepted, because the alternative exercises the path by letting the swarm change
+itself before anyone decided it should, and a path tested that way is tested on the operator's swarm. What
+follows for a project that wants the swarm to institutionalize its own findings (decision 17,
+`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`)
+is one explicit grant per governance class the institutionalization writes reach, before the first such
+batch can take its action — which is the price of knowing, by reading the policy, exactly which classes of
+self-change this operator has permitted. Until a class is granted, a batch whose step produces a write of
+that class is a batch with an `operator_only` action: it is claimed by the operator-facing agent and the
+operator makes the change by hand (`#operator-only-tasks-are-claimed-by-the-operator-facing-agent`).
+
+**What would reopen it:** an operator finding that the grant friction on a specific class exceeds the value
+of reserving it — and the remedy is a grant on that class, which the ruling already provides, not a change of
+the default. The default itself would reopen only if the grants proved to be ceremony: if every project
+wrote the same five grants on its first day, a default that everyone overrides identically is the wrong
+default.
+
+**The relationship to decision 17.** Decision 17 asked a narrower question about one path into this one:
+whether institutionalizing a *standing finding* is itself a workflow, and whether the batch that raised the
+finding waits on the institutionalization task it created. It is ruled in
+`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`:
+it is a workflow, by this section's general rule, and the raising batch does not wait. This section states
+that *a change to the swarm goes through a workflow*, whatever produced the change; that ruling states the
+sequencing between two batches when one of them produced the other. Neither depends on the other, and ruling
+both leaves the general rule here unchanged.
 
 **Bootstrapping: the first workflow is not created by a workflow, and this is a stated limitation.** If
 workflows are how workflows change, then the first declaration for a project has no workflow to come
@@ -353,117 +387,175 @@ whose properties intake established. A formation rule that grouped tasks by a la
 that chose a workflow from an artifact's state, would put the choice back into an external system's hands
 through the side door the boundary rules close.
 
-Two questions about a batch's **lifetime** remain open and are not settled by any of the above: whether a
-batch may hold on a condition discovered mid-flight, and whether a batch may depend on a task it created
-(`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
-Both are downstream of this section rather than blocked by it — formation and workflow choice are settled
-whichever way they go, because both concern what a batch may wait on once it is already open. They are
-opened in full as decisions 13 and 14 below. Every open decision the foundation carries is indexed in
+Two questions about a batch's **lifetime** are downstream of this section rather than blocked by it —
+formation and workflow choice are settled whichever way they go, because both concern what a batch may wait
+on once it is already open: whether a batch may hold on a condition discovered mid-flight, and whether a
+batch may depend on a task it created. Both are ruled below (decisions 13 and 14, 2026-09-05). Every
+decision the foundation has opened or ruled is indexed in
 `conformance.md#the-register-of-open-design-decisions`.
 
-### Open decision 13: whether a batch may hold on a condition discovered mid-flight
+### A batch may hold on a condition discovered mid-flight
 
-The formation rules above settle what a batch is opened by and what it carries; they say nothing about
-what may suspend one that is already open. The question is opened here rather than resolved, in the idiom
-decisions 17 and 18 were opened in.
+**Ruled (decision 13, 2026-09-05): yes — and the hold is not a state.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. A step owner who, part-way through a batch, meets a
+condition that was not knowable when the batch was formed and that the step must satisfy before its verdict
+can be written — a rail's quote has expired and a re-quote is pending, an external system is returning
+`unknown` rather than an answer, a second batch is producing the artifact this one's next step reads —
+neither signs nor fails. It **holds**: it records a finding naming the condition, it writes no sign-off, and
+it keeps renewing its lease. Nothing else is written. The step stays open, the batch stays at that step, and
+the lease's `expires_at` keeps moving, which is what every claimed step already does between its claim and
+its sign-off.
 
-**The question.** A condition declared at intake is already expressible: `applies_when` decides whether an
-optional step opens, and it is evaluated against what the batch's tasks are and what their change touches
-(`gates_and_workflows.md`). What is undecided is the other case — a step owner, part-way through a batch,
-learns something that was not knowable when the batch was formed, and the right response is neither to sign
-nor to fail but to **wait**: a rail's quote has expired and a re-quote is pending, an external system is
-returning `unknown` rather than an answer, a second batch is producing the artifact this one's next step
-reads. Whether the design admits a batch state that is open, unclosed, and deliberately not progressing,
-and whether a step owner may put a batch into it, is what is not settled.
+**What the finding carries, and what it does not.** The finding names the condition (what the step is
+waiting on), what would resolve it (a re-quote arriving, a read returning a value, a named task reaching a
+terminal status), and when it was recorded; each renewal of the hold is a further observation on the same
+finding, so the duration of a hold is readable from the record rather than reconstructed. It is a
+**non-blocking** finding, because it asserts no defect in the work — a block says a defect is present, and a
+hold says only that the step's condition cannot yet be judged
+(`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`). It carries no verdict, and
+no verdict is written until the condition resolves; the rule that a verdict is unconditional
+(`vocabulary.md#condition`) is untouched, because a hold is the absence of a verdict, not a verdict with a
+clause.
 
-**If a batch may hold**, the condition is a first-class thing: it is declared somewhere, it is evaluated
-by something, and something ends the hold. That means a held batch is readable as held rather than as
-quiet, which is the property principle 11 asks for — state that needs a watchdog belongs in a relationship
-rather than in a field — and it means the ten-day stall has a name instead of being invisible. The cost is
-that a hold is a second waiting mechanism beside the checkpoint, which already suspends work pending a
-principal's decision, and building it separately is the parallel-mechanism defect principle 6 forbids: two
-places a batch can be waiting, two resolution protocols, and two queues, of which the second is the one
-nobody consumes (principle 1).
+**There is no held state, no waiting value, and no field on the batch or the task.** A held step is read
+from the record as every other claimed step is: a held lease on the step, a finding on it naming an unmet
+condition, and no sign-off. That derivation is what principle 11 asks for — a stored hold would need a
+process to clear it, and a step owner that died would leave it asserting a hold nobody holds, where the lease
+lapses on its own and the step is claimable again with no process acting. It is also why a hold is not a
+second waiting mechanism beside the checkpoint (principle 6), which was the cost the open question weighed:
+the checkpoint is still the only mechanism by which a principal is asked for a decision, a hold asks nobody
+anything, and a reader finding held steps uses the same read that finds any claimed step — there is no hold
+queue to consume or to neglect (principle 1). The distinction between a declared condition and a discovered
+one is only **when it is recorded**: `applies_when` is written on the declaration and evaluated when the step
+would open (`gates_and_workflows.md#declaration-batch-projection`); a discovered condition is written on the
+batch by the step owner at the moment it is met. Both are conditions on a step, and neither is a status.
 
-**If a batch may not hold**, there is exactly one way to wait, and it is the checkpoint: a step owner who
-cannot sign raises one, a principal resolves it, and the batch's suspension is the existing protocol with
-an existing consumer. The cost is that a checkpoint asserts a **decision** is owed to a principal, and
-most of the conditions above owe nobody a decision — a quote that will re-quote in ninety seconds does not
-need the operator, and raising a checkpoint for it makes the queue a place where machine-resolvable
-conditions are parked in front of a human. The alternative under this answer is that the step owner does
-not wait at all: it signs a verdict of `unknown`, the batch closes, and the work re-enters through a new
-batch when the condition has changed — which is honest, and which multiplies batches for what is
-conceptually one piece of work, so the chain stops reading as the history of a task and starts reading as
-the history of a retry.
+**A hold is bounded, and it is bounded by mechanisms that already exist.** Three ends, no new one. Where the
+condition **resolves** — the re-quote arrives, the read returns, the task completes — the step owner reads
+that from the record and signs or blocks on its own judgement; the hold ends because the sign-off is written.
+Where the condition **owes a principal a decision** — the re-quote is outside what was consented to, the
+second batch's owner must be asked — the step owner raises a checkpoint on the task, which is the existing
+protocol and already ends in a terminal approval or a terminal timeout
+(`gates_and_workflows.md#the-checkpoint`), so no hold that needs a human is unbounded. And where the
+condition **owes nobody a decision and does not resolve**, the hold is a deferral, and `failure_posture.md`
+rule 5 already bounds every deferral: backoff between re-evaluations, a ceiling, and at the ceiling one
+checkpoint on the task with reason `rounds_exhausted`, carrying the finding so the operator is told what the
+step was waiting on rather than asked to diagnose it. A step owner that stops renewing lets the lease lapse,
+the step is claimable again, and repeated lapse raises `repeated_lapse` — so a hold whose holder has died is
+not a hold, it is a lapsed lease, and the design already knows what to do with one. **No hold ends by elapsed
+time into a pass**: the ends above are a sign-off, a checkpoint, or a lapse, never a clearance
+(`failure_posture.md#repeated-lapse-raises-a-checkpoint`).
 
-**What would decide it:** whether any condition the design already names is genuinely machine-resolvable
-and owes no principal a decision. If every real case turns out to owe someone a decision, the checkpoint
-already covers it and no second mechanism is warranted. If some do not — and the payment rails'
-expiring quote and the unconfirmed-effect `unknown` are the two candidates the documents already carry
-(`payments.md`, `work_model.md#at-least-once-implies-effect-dedup`) — then a hold is a distinct thing and
-the question is where its condition is declared, which is the same question `applies_when` answers for a
-step and should be answered the same way.
+**Why not the alternative.** The other answer was that a step owner who cannot sign either raises a
+checkpoint or fails, the batch closes, and the work re-enters through a new batch when the condition has
+changed. It discards what the batch already holds: every sign-off written on the earlier steps was made
+against these tasks, and a new batch starts from the first step and asks every step owner to judge again
+what they already judged. It contradicts a rule the design already keeps — *unknown holds the step*
+(`gates_and_workflows.md#an-unreadable-workflow-is-unknown-and-unknown-holds`), stated for a declared read
+and for an unreadable workflow, under which a step that cannot judge its condition stays open rather than
+closing on a value it does not have. And the design already held, in three places, without naming it: a
+declared read returning `unknown` holds the step, bounded, then escalates
+(`gates_and_workflows.md#declaration-batch-projection`); a submitted transfer whose confirmation never
+returned holds `reconcile` open, bounded, then escalates
+(`payments.md#the-unknown-case-a-transfer-submitted-whose-confirmation-never-returned`); and the
+operator-only workflow's `await` step holds the batch with the lease renewed throughout while the operator
+decides (`workflows.md#operator-only`). Each of those is a hold on a condition discovered mid-flight. This
+ruling names the general case they are instances of and adds no mechanism to them (principle 6). The
+alternative's own interim reading also named a verdict the design does not have — a sign-off of `unknown` —
+where the verdict values are `signed`, a blocking value, and `waived` (`vocabulary.md#verdict`); `unknown`
+is what a read returns, and what a step does with a read that returns it is hold.
 
-**Until it is taken**, a batch has no held state: a step owner who cannot sign raises a checkpoint or signs
-`unknown`, and there is no third option. That is the state a reader should assume and not the design's
+**The cost accepted** is a held lease: a step that holds is a claimed step for as long as it holds, its step
+owner is occupied renewing it, and the batch's chain does not advance. That is the right cost, because the
+alternative's saving is illusory — a batch that failed and re-entered has freed nothing; it has multiplied
+batches for one piece of work and made the chain read as the history of a retry rather than of a task.
+**What would reopen it:** holds in practice showing leases held for long periods with no progress and without
+the bound clearing them — a step owner renewing indefinitely on a condition that never resolves and never
+reaches the rule 5 ceiling. That would mean the ceiling is not being applied to holds, or that the finding's
+renewal is being written without the deferral being counted, and the remedy is to the bound, not to the
 ruling.
 
-**Blocks:** decision 17's sequencing half, which cannot be ruled without it
-(`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`),
-and decision 14 below, which is the specific case of this general question where the condition is a task
-the batch itself created.
-
-### Open decision 14: whether a batch may depend on a task it created
-
-The narrower of the two, and the one with a named case already in the documents. Opened here rather than
-resolved.
-
-**The question.** A batch, part-way through, creates a task: a standing finding's proposed change to the
-swarm's own operation (`gates_and_workflows.md`), an adapter admission the arch review step calls for
-(`adapters.md`), a follow-up the implementer files rather than doing. That task enters intake and gets a
-batch of its own, as every task does. What is undecided is whether the **creating** batch may make its own
-progress conditional on the created task completing — whether a batch may say "I cannot close until the
-task I created is done".
-
-**If a batch may depend on a task it created**, the swarm can express the case where the work genuinely is
-not finished: a review step that found the workflow itself wrong, and whose sign-off would be a lie if the
-workflow went unchanged. The dependency is readable, and a reader asking why a batch has not closed gets
-an answer that names the blocking task. The cost is a cycle risk that is not hypothetical: the created
-task's batch may in turn create a task, and nothing in the rules above prevents its descendant depending
-back. Cycle detection is then a mechanism the design owes, and a mechanism nothing currently owns. It also
-makes a batch's lifetime unbounded by anything its own declaration states, which is exactly the property
-that makes a batch's chain readable today.
-
-**If a batch may not depend on a task it created**, every batch closes on its own steps, the chain stays a
-sequence rather than a graph, and the created task is a peer entering intake on its own — which is the
-behaviour `gates_and_workflows.md` already tells a reader to assume. The cost is that the creating batch's
-closing sign-off asserts its steps are satisfied while its own owner believes something material is
-outstanding, and the link between the two pieces of work survives only as provenance on the created task
-rather than as anything that holds the first one open. Whether that is a defect or the correct division of
-labour is precisely what is undecided: the design's usual answer is that provenance plus a separately
-prioritized task is enough, and the standing-finding case is the one where it may not be.
-
-**A third answer the design should consider and this section does not adopt:** the dependency exists but
-runs the other way — the created task carries a `FOLLOWS`-like edge to the batch that created it, and
-nothing holds, so the relationship is readable without any batch's lifetime changing. That would give the
-readability without the cycle risk, and it is not adopted here because whether a readable-but-unenforced
-link is a control at all is the question principle 1 asks of every mechanism, and answering it is the
-decision rather than a step around it.
-
-**What would decide it:** whether any step's sign-off is genuinely unsafe to write while the task it
-created is outstanding. If a step owner can always honestly sign for the batch's own scope and leave the
-created task to its own intake, no dependency is needed and the peer answer is right. The standing-finding
-case is the test: a review step that judged a workflow wrong is being asked to sign that the workflow's
-step was satisfied, and whether those are the same claim is the crux.
-
-**Until it is taken**, a batch closes on its own steps and a task it created enters intake on its own, with
-provenance back to the batch that created it and no hold on that batch
+**Decides:** decision 14 below, which is the case of this rule where the condition is a task the batch
+itself created; and, with it, the sequencing half of decision 17
 (`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
-That is the state a reader should assume and not the design's ruling.
 
-**Blocks:** decision 17's sequencing half, together with decision 13. **Depends on** decision 13: if a
-batch has no held state at all, this question has no mechanism to be answered with, so 13 is the more
-general and should be taken first.
+### A batch may depend on a task it created
+
+**Ruled (decision 14, 2026-09-05): yes, as a case of the rule above — and the dependency is an edge, never a
+field.** Registered in `conformance.md#the-register-of-open-design-decisions`. A batch that, part-way
+through, creates a task and whose step owner judges that the step cannot honestly be signed until that task
+is done, holds on it: the created task's completion is a condition read from the record, and the hold is the
+one the rule above defines — a finding naming the condition, no sign-off, the lease renewed. What this
+section adds is how the condition is recorded, because a dependency between two pieces of work is the one
+condition whose shape the record should be able to see without reading prose.
+
+**The dependency is a `DEPENDS_ON` edge from the batch to the task it waits on.** `DEPENDS_ON` is one of the
+record's own relationship types — it exists for ordering work, beside `PART_OF` and `REFERS_TO`
+(`data_model.md#relationships`) — so nothing is invented (principle 6). The edge is written by the step owner
+when the hold begins, carries its `created_at`, and is ended explicitly (`ended_at`) when the step owner no
+longer depends on the task — because the task reached a terminal status, or because the step owner withdrew
+the dependency, which is a recorded act and not a silent one. The finding the hold records cites the edge. **A
+field would not do**: a `blocked_by` on the batch, or a list of what it waits on, is exactly the maintained
+state principle 11 forbids — it asserts a dependency that some process must clear when the task completes,
+and it is invisible to a reader walking the record's edges — where a `DEPENDS_ON` edge is read from either
+end: the batch's open dependencies, and every batch a task is holding up.
+
+**What binds.** The sign-off on the step that recorded the dependency is refused at submission while any
+`DEPENDS_ON` edge from the batch to a non-terminal task is unended — the same shape as a verdict
+contradicting its own findings, which is refused rather than swallowed
+(`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`). That is what makes the edge
+a control rather than a report (principle 1): a step owner that recorded a dependency cannot sign around it
+without first ending it, and ending it is written. When the task is terminal, the hold ends the way every
+hold does — the step owner reads the outcome and signs on its own judgement, which may be a blocking verdict
+if the task ended without doing what the batch needed.
+
+**A cycle fails closed, at the write and after it.** The record refuses a `DEPENDS_ON` write that would
+close a cycle — its hierarchical relationship types, `PART_OF` and `DEPENDS_ON`, are cycle-checked at write,
+which is a property of the record the design relies on rather than rebuilds
+(`adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`) — so an edge from batch
+A to a task whose own batch already depends, directly or through further edges, on a task attached to A is
+not written, and the step owner is told why. The walk is a read the writer makes before it writes — from the
+target task to its live batch along `ADDRESSED_BY`, from that batch along its `DEPENDS_ON` edges, and on —
+which is the bounded retrieval the record conventions already require before a write that creates a
+relationship (`data_model.md#record-conventions`). A cycle can also arise **after** the writes, with no edge
+refused: a task attached to a batch part-way through
+(`#how-a-batch-is-formed-and-what-chooses-its-workflow`) can join two dependency chains into a loop, so the
+same walk runs at attach, and an attach that would close a cycle is refused too. Where a cycle is nonetheless
+found — by a reader, by the watchdog, by a step owner about to hold — each batch in it has its tasks
+escalated with one checkpoint, reason `dependency_cycle`, naming the batches and edges in the loop, and every
+step owner in the loop holds until a principal breaks it: by ending an edge, detaching a task, or closing a
+batch on a blocking verdict. Nothing in the swarm chooses which; a cycle is two step owners each waiting on
+the other, and which of them was wrong is a judgement only a principal can make.
+
+**Why an edge, and not the readable-but-unenforced link.** The open question weighed a third answer: a link
+from the created task back to the batch that created it, with nothing holding, so the relationship is
+readable and no batch's lifetime changes. That link already exists — every task a batch creates carries
+provenance back to the batch — and the question principle 1 asks of it is answered by the rule above: a link
+nothing fails on is a report. The `DEPENDS_ON` edge is the same readability with one thing that fails, the
+sign-off. And it is why the cycle risk the open question named is acceptable now where it was not before:
+**with an edge, a deadlock is detectable by inspection** — a walk over `DEPENDS_ON` and `ADDRESSED_BY` finds
+it, the record's write-time check prevents most of it, and the checkpoint names the rest — where with a field
+it would be two batches quietly not advancing, indistinguishable from two batches that are slow.
+
+**What this does not change.** The chain stays a sequence. `FOLLOWS` is the only edge the chain is read along
+(`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`), `DEPENDS_ON` is not on it, and a
+batch that held on a task it created still has one predecessor and one successor. The created task enters
+intake on its own, goes through its own workflow, and is prioritized on its own — the dependency does not
+lift its priority, and a batch that depends on a low-priority task is a batch whose step owner chose to wait
+on one. A task is still in at most one batch at a time. And the default is unchanged: **most tasks a batch
+creates are peers**, filed with provenance and left to their own intake, and a step owner records a
+dependency only where its sign-off would be a lie without it. The standing finding's institutionalization
+task is the named case where the design rules that the batch does **not** depend on it (decision 17,
+`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
+
+**The cost accepted** is the one the rule above names, for longer: the raising batch's lease is held for the
+created task's whole duration, through that task's intake and its workflow, and the step owner renews
+throughout. **What would reopen it:** dependency chains in practice reaching a depth that lapse and
+checkpoint timeout do not clear — batches holding on batches holding on batches, each within its bound, the
+whole outlasting every bound. That would mean depth needs its own bound, which is a number for the policy and
+not a change to the edge.
+
+**Decides**, with decision 13, the sequencing half of decision 17.
 
 ### Artifacts are records a batch leaves, never its subject
 

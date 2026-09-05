@@ -9,7 +9,8 @@ external record does), `work_model.md` (artifacts; at-least-once implies effect 
 checkpoint), `authority_model.md` (credential custody by revocability; separation of duties; approval),
 `workflows.md` (the payment workflow's five steps and its two disjoint roles), `failure_posture.md`
 (recovery per action class; the rules on read-back, unknown, and bounded deferral), and the published API
-surfaces of bank-transfer and crypto rails, read 2026-09-05. What is built is `status.md`.
+surfaces of bank-transfer and crypto rails, read 2026-09-05, and PR #745 operator review (2026-09-05,
+rulings 13–14, 16–18, 23–29: decisions 27, 28, and 29 ruled here). What is built is `status.md`.
 
 ## Purpose
 
@@ -112,9 +113,10 @@ second queue with its own resolution protocol and its own notification path, and
 that a second queue is one nobody consumes (principle 1). So: no second gate, and a payment's extra
 strictness is expressed in the policy and the workflow rather than in new machinery.
 
-**One thing is genuinely missing rather than composed, and it is opened as a decision below**: whether the
-approver who resolves a payment's checkpoint must be shown, and must be shown to have seen, the same payee
-and amount the `verify` step signed on. See open decision 27.
+**One thing was missing rather than composed, and it is ruled below (decision 27)**: the approver who
+resolves a payment's checkpoint is shown exactly what the `verify` step signed — payee, amount, currency,
+period — and the consent is bound to those figures, so that the checkpoint carries the verification as a fact
+the approval rests on rather than as a step that happened.
 
 ## The dedup key, and what it is keyed on
 
@@ -255,8 +257,9 @@ finality event to wait for, only a depth at which reversal becomes implausible �
 a policy decision about the amount, not a fact about the chain.
 
 **Two consequences for this design.** The depth (or the rail state) that counts as terminal is **declared**,
-not assumed, and it is declared where the obligation is — an adapter that hardcodes a depth has made a risk
-decision that belongs to a policy. And a later inbound signal reporting that a terminal state was undone is
+not assumed: the criterion is stated in this document per rail class, and the value is bound per rail
+instance in the `vendor_binding` (decision 29, below) — an adapter that hardcodes a depth has made a risk
+decision that was never its own to make. And a later inbound signal reporting that a terminal state was undone is
 an **observation and a defect to surface**, never a silent correction of the record: the confirmation
 stands, because it was true when it was read, and the reversal is recorded beside it so both are readable.
 What follows from a reversal is a new decision, taken as its own action through the gate, and never the
@@ -347,11 +350,11 @@ the amount, and the reference (`workflows.md#payment`), and the operator resolve
 amount was derived from has expired by the time the action is taken, the adapter is holding a permit for one
 figure and about to submit another.
 
-**The design's position: the adapter never widens what was approved.** A re-quote that leaves the effect
-within what the checkpoint named is taken; one that does not is **not** taken, and the difference is a new
-decision. Where the boundary between those lies — an exact-match rule, or a tolerance the policy declares —
-is a decision this document opens rather than invents, because inventing a tolerance would be inventing an
-amount nobody approved. See open decision 28.
+**The rule: the adapter never widens what was approved, and the boundary is a policy value whose default is
+zero.** A re-quote that leaves the effect within what the checkpoint named is taken; one that does not is
+**not** taken, and the difference is a new decision. Where the boundary lies is the `action_policy`'s
+consent tolerance for the class, and where the policy declares none it is zero — an exact match — because a
+tolerance this document invented would be an amount nobody approved (decision 28, below).
 
 **On a crypto rail there is no quote and no lock.** The fee is chosen at construction against a market that
 moves, and its consequence is not a different amount to the payee but a different *outcome*: too low, and
@@ -598,42 +601,131 @@ The general adapter rules are `adapters.md`'s and are cited here, not restated. 
 list, its two disjoint roles, and its stages are `workflows.md#payment`'s. The gate's decision function and
 the checkpoint's protocol are `gates_and_workflows.md`'s. Whether the raiser of a checkpoint may resolve it,
 and what quorum a payment might require, are `authority_model.md`'s open questions and bear directly here.
-Open decisions 15 and 16 (adapter packaging; where inbound delivery lands) are `adapters.md`'s and untouched.
-Which rows have a built path is `status.md`'s.
+Open decision 15 (adapter packaging) is `adapters.md`'s and untouched; decision 16 (where inbound delivery
+lands) is ruled there, and for this system it means the process that receives a rail's notification may be
+shared plumbing while verifying the rail's signature against its published key, and extracting the
+per-delivery identifier, are this adapter's. Which rows have a built path is `status.md`'s. Three decisions
+this document opened are ruled in the three sections that follow.
 
-**Open decision 27: whether a payment's approver must be shown what the verifier signed.** Registered in
-`conformance.md#the-register-of-open-design-decisions`. The workflow puts
-`verify` before `consent`, so the operator consents to a payee and amount a second principal has already
-checked against the profile. What is undecided is whether the checkpoint the operator resolves must
-**carry** that verification — the verifier's identity and what they matched — and whether resolving it is
-bound to the verified figures such that a change between the sign-off and the submission invalidates the
-consent. For: without it, the operator approves the payer's presentation, and the verification is a step
-that happened rather than a fact the approval rests on; the two could disagree and nothing would detect it.
-Against: it may already be covered, since a sign-off is pinned to what it judged and a checkpoint's subject
-is one action, so a derived read may answer it without a new rule — and adding a binding rule here risks
-being the second gate principle 6 forbids. What would decide it: whether the existing pinning genuinely
-covers the case where the action's parameters change after `verify` signed, or whether a payment is the case
-where that gap has consequences nothing else does.
+## A payment's approver is shown exactly what the verifier signed
 
-**Open decision 28: what tolerance, if any, a payment's consent carries.** Registered in `conformance.md#the-register-of-open-design-decisions`.
-A bank rail's price is quoted and
-expires, so the amount at submission may differ from the amount the operator approved. Fixing the rule at
-exact match is safe and makes any expiry a new checkpoint, which may make routine payments unresolvable in
-practice. Fixing it at a declared tolerance risks the design inventing an amount nobody approved. What would
-decide it: whether the checkpoint should name a figure or a bound, and where such a bound would be declared
-— the profile, the policy, or the checkpoint itself. Until it is taken, the rule above holds: the adapter
-never widens what was approved, and anything outside it is a new decision. Depends on nothing; blocks
-nothing but a rail whose prices expire.
+**Ruled (decision 27, 2026-09-05): yes.** Registered in `conformance.md#the-register-of-open-design-decisions`.
+The checkpoint the `consent` step carries to the operator carries the obligation **as the `verify` sign-off
+recorded it** — the payee as the profile names it, the amount, the currency, the period or instance being
+settled, and the rail — together with the verifier's identity and the fact that these are the figures it
+matched against the profile. Not a summary, not the payer's restatement, not a rounded figure: the values the
+verifier signed, carried verbatim from that sign-off into the checkpoint's `needed_input`, with the checkpoint
+referring to the sign-off it carries them from. And the consent is **bound** to them: the `pay` action is
+taken only on parameters equal to what the checkpoint carried, and a difference between the two — a re-quote,
+a corrected payee, a changed period — is a new decision, which is decision 28's rule with its tolerance at
+zero by default.
 
-**Open decision 29: what depth or state counts as terminal, and where it is declared.** Registered in
-`conformance.md#the-register-of-open-design-decisions`. A crypto
-transaction's settlement is a depth chosen against the amount at risk, and a bank transfer's released
-state is not a credited state. This document requires the terminal condition to be **declared** rather than
-assumed, and does not say where. The candidates are the `payment_profile` governing the obligation, the
-action policy that classes the action, or a rail-level binding. What would decide it: whether the right
-granularity is per obligation (an amount-sensitive risk decision) or per rail (a property of the system),
-and these may both be true, in which case the question is which one governs. Until it is taken, an adapter
-that hardcodes a depth has made a risk decision that is not its own to make, which is the failure to avoid.
+**Reason.** Consent is to a specific obligation. An approval given on a presentation that differs from what
+will be taken is approval of a different thing, and the action then goes out on authority nobody gave —
+fabricated authority, on the least reversible action in the system, at the one boundary where the design has
+said the gate is the only control (`#recovery-what-undoes-a-payment`). Principle 2 is the shape: an approver
+reading a summary is reading a write's report of itself, and a report is not evidence; what the approver must
+read is the thing that was checked, which is the sign-off. `authority_model.md#approval` says an approval is
+authorized against the required approvers and attributed; this adds that it is authorized *on* a stated
+subject, and states the subject. The open question asked whether the existing pinning rule already covered
+this, since a sign-off is pinned to the artifact state it judged. It does not, and the reason is worth being
+precise about: at `consent` there is no artifact — the transfer does not exist until `pay` is confirmed
+(`#what-the-rails-hold-and-what-an-artifact-is-here`) — so the pinning rule has nothing to pin the verifier's
+judgement to. What `verify` judged is the **action's parameters**, and this ruling pins those: the checkpoint
+carries them as signed, and `pay` is refused on anything else. It is not a second gate (principle 6): it is
+the content of the one checkpoint the gate already writes, and the one comparison the adapter already makes
+before taking an action on its `dedup_key` — the key is derived from the obligation, so parameters that
+differ from what was consented to are a different key, and the adapter's refusal to take an action under a key
+the checkpoint did not cover is the same refusal it makes for every action.
+
+**The cost accepted** is longer checkpoint messages on the chat channel: every payment checkpoint states the
+payee, the amount, the currency, the period, the rail, and who verified them, where a shorter message would
+say "pay the invoice". Accepted without reservation; the channel's message limits are far above this, and the
+length is the operator reading what they are approving. **What would reopen it:** nothing about payments. It
+is the general rule for consent stated at the boundary where getting it wrong is paid in money, and if it
+were found wanting here it would be found wanting everywhere.
+
+## Tolerance is an `action_policy` value, and its default is zero
+
+**Ruled (decision 28, 2026-09-05): the boundary is a policy value, per action class, and absent a value it is
+zero.** Registered in `conformance.md#the-register-of-open-design-decisions`. Any rail-side change to what the
+payee receives or to what the operator pays, relative to the figures the checkpoint carried (decision 27),
+requires a new checkpoint. A re-quote that moves either figure by any amount is outside a zero tolerance and
+is not taken; the adapter records the re-quote as an observation, `consent`'s `on_fail` opens `verify` again
+on the new figures, and the operator decides again on what the verifier signed the second time. The operator
+may later set a non-zero tolerance for a class of action in the project's `action_policy`, and from then on a
+change within it is taken and one outside it is a new checkpoint. What the number is, per class, is policy
+data; that the shape is a per-class tolerance whose absence reads as zero is the design
+(`data_model.md#concepts`, the `action_policy` row).
+
+**Reason.** Fail-closed is the default posture on the field that carries the safety meaning (principle 5),
+and the field here is the difference between what was consented to and what will be taken. A tolerance the
+design invented — a percentage, a rounding — would be an amount nobody approved, written by whoever wrote the
+document rather than by the principal whose money moves. A tolerance the operator writes is the operator's,
+per class, with a record of having written it, and reversible by deleting it. The design owns the shape and
+the operator owns the number, which is the same division `work_model.md` draws for the governance classes
+(decision 18) and `gates_and_workflows.md` draws for the bulk-mutation count. The open question feared that
+exact match makes routine payments unresolvable on a rail whose prices expire. It does not make them
+unresolvable; it makes each expiry a decision, and a project for which that is too many decisions writes a
+tolerance, once, and has recorded that it did.
+
+**Where the value lives, and why not the other two candidates.** On the `action_policy`, keyed by action
+class — not on the checkpoint, where it would be a number the payer proposes to the approver each time and
+the approver has to check; and not on the `payment_profile`, where it would be per payee and therefore a
+disclosure judgement mixed with a risk one. A profile may still constrain more tightly than the policy — a
+profile that says exact for one obligation is honoured — and a profile may not widen what the policy allows,
+because the direction of composition is the fail-closed one.
+
+**The cost accepted** is that, under the default, a rail whose quote expired between `consent` and `pay`
+returns the batch to `verify` and asks the operator again. **What would reopen it:** nothing but a rail whose
+prices expire, and for that rail the remedy is a value, not a change of shape.
+
+## Terminal is declared in the rail's adapter document, and the value is bound per instance
+
+**Ruled (decision 29, 2026-09-05): the criterion is stated here, per rail class; the value is bound per rail
+instance in the `vendor_binding`.** Registered in `conformance.md#the-register-of-open-design-decisions`.
+Terminal means **the state after which the rail itself treats the transfer as irreversible** — the point
+past which the rail's own model offers no cancel and no unwind, and changes the transfer's state on its own
+initiative only by a return that arrives as a new event. On a bank rail that is *settled* — the funds
+credited at the receiving institution, as the rail reports it — and never *sent*, *released*, or
+*processing*, each of which is the rail's report that it did something and none of which is the effect the
+action intended. On a chain it is a confirmation depth *N*, with *N* per rail, because a reorganization's
+reach differs per chain and the depth at which reversal becomes implausible is a property of that chain and
+not of the swarm. Which state name a given bank rail uses for *settled*, and what *N* is for a given chain,
+is bound per instance in the `vendor_binding` entity that binds that rail to this operator, resolved at
+runtime and never named in this document — where every per-instance property of an external system already
+lives (`#scope`; `adapters.md#scope`). The `reconcile` step's read is a read of the rail at that state, and
+`pay`'s confirmation is minted from it.
+
+**Reason.** *Sent* is a response code, and a response code is not evidence (principle 2): a rail reporting
+that it released funds is reporting its own operation, not the effect, and the design's confirmation is the
+effect read back. Stating the criterion in the adapter document rather than in a policy puts it where the
+rail class's own behaviour is described — this document already states, for each class, when the external id
+first exists and why terminal is not permanent, and the terminal criterion is the third fact of the same kind
+about the same systems. Binding the value per instance puts the number where every other per-instance fact
+about a rail is, and keeps this document free of any rail's name. The open question offered the
+`payment_profile` and the action policy as the other candidates. The profile would make terminality per
+obligation, which is the wrong grain for a property of the rail — two obligations on one chain do not
+experience different reorganization risk — and the policy would make it a class property, which is the wrong
+grain the other way, because one class of action reaches several rails. **The amount-sensitivity the open
+question rightly raised is preserved without splitting the criterion:** a `payment_profile` may declare a
+deeper depth for its obligation than the binding's, and the deeper governs; it may not declare a shallower
+one. So the binding is the floor the design reads as terminal, and an obligation whose amount warrants more
+waits longer, by its own declaration.
+
+**What follows for the rules above.** The unknown case resolves against this criterion: *present but not yet
+confirmed* means below the bound depth, and *reached its declared terminal state* means at or past it.
+Terminal is still not permanent (`#terminal-is-not-permanent-and-the-design-must-not-assume-it-is`) — a
+return after settlement and a reorganization past *N* are observations and defects to surface, and the
+criterion is the point at which the confirmation is written, not a promise that nothing follows. An adapter
+that hardcodes a depth, or reads a released state as settled, has made a risk decision that was never its own
+to make, and the drift table below records that the built path does both.
+
+**The cost accepted** is one more value in every rail's `vendor_binding`, and a `reconcile` step that waits
+— hours on a bank rail, minutes to hours on a chain — where a read of the submission's return would have
+closed it at once. **What would reopen it:** a rail class for which irreversible has no state the rail itself
+names — a settlement layer with only probabilistic finality and no depth convention — which would need its
+own criterion stated here, per the freshness note's list of what a new rail class must answer.
 
 ## Freshness
 
@@ -743,4 +835,5 @@ per-class resolution of the unknown case, the ruling that a balance is an observ
 artifact rather than an artifact of its own, the composition argument against a second gate, the
 metadata-suppression refusal and its three properties, and the extension of the separation of duties to the
 adapter are this document's, applying `adapters.md`'s rules to the rail classes the design contemplates.
-Open decisions 27, 28, and 29 are opened here rather than resolved.
+Decisions 27, 28, and 29 were opened here and are ruled here; the reconciliation of decision 29's
+amount-sensitivity with a per-rail criterion — the profile may deepen and never shallow — is this document's.

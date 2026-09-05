@@ -6,7 +6,9 @@ checkout implements. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` 
 art `ent_08460968e6f49dac21510f4a` (A2A `TaskState`, RFC 8693, Camunda), [task](#task)
 `ent_da60df3beccb675ef8c8c0c5`, the ateles#378 glossary ([operator](#operator) section, and the ux-signed swarm section
 cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 operator review (2026-09-04),
-and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional [step](#step), and two terms retired in favour of `review step`). Format
+and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional [step](#step), and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14,
+16–18, 23–29: the hold verb, a condition a step holds on, the `dependency_cycle` reason class, the consent
+tolerance on `action_policy`, and an [artifact](#artifact) `PART_OF` its containing artifact). Format
 follows Neotoma's `docs/vocabulary/canonical_terms.md`.
 
 ## Purpose
@@ -120,6 +122,11 @@ record is an **entity**, not an artifact: a [sign-off](#sign-off), a [checkpoint
 analysis, a draft, a page rendered into the record. The test is where the thing lives and how it is
 reached — an external system through an adapter, or a retrieval from the record — never how
 output-shaped it feels.
+**Where the external system gives ids to two levels of one thing** — a thread and its messages, a recurring
+series and its occurrences — each level is an artifact and the contained one is `PART_OF` the containing one;
+an event links to the artifact whose id it carries, an action refers to the unit its operation needs, and a
+task refers to whichever unit it names
+(`adapters.md#what-the-adapter-does-with-every-event`).
 **An artifact comes into existence with its `external_id` already known**, minted by the adapter from
 the [read-back](#read-back) that confirms the effect landed. There is no artifact with a null or pending id: what
 holds a composed-but-unsent thing is an entity, and what spans the interval between an effect's
@@ -422,7 +429,10 @@ blocking finding is either **implementation-only** — a named defect with a det
 routed to an implementer, though the step owner still holds the terminal sign-off — or **decision or
 attestation**, needing a judgement only a [principal](#principal) can make, which is not routable at all. A blocking
 finding cites an executed command and its output; one reasoned about but not reproduced is filed as
-non-blocking, stating what could not be verified.
+non-blocking, stating what could not be verified. A finding may also record a **hold**: it names a
+[condition](#condition) the step must satisfy and cannot yet judge, what would resolve it, and when it was
+recorded; it is non-blocking, because it asserts no defect, and no sign-off is written while it stands
+(`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`).
 **One-off or standing:** a second axis, judged separately from severity. A **one-off** finding is
 discharged when the [batch](#batch)'s work is corrected; a **standing** finding names a defect that will
 recur, and correcting the work alone does not discharge it — a change to the [agent](#agent), the
@@ -457,12 +467,18 @@ sign-off, and the latest per step owner per [artifact](#artifact) head stands.
 [checkpoint](#checkpoint) (that is an [approval](#approval)).
 
 ### condition
-**Definition:** a stated requirement that a later [step](#step) must satisfy.
-A [verdict](#verdict) may **not** carry one. A [sign-off](#sign-off) that closed its step while binding
+**Definition:** a stated requirement that a [step](#step) must satisfy — its own, which its [verdict](#verdict)
+states is met or not, or a later step's, which a verdict may not impose.
+A verdict may **not** carry one. A [sign-off](#sign-off) that closed its step while binding
 what follows would hand its own judgement to the party it was binding, and the guarantee that a closed step
 was judged unconditionally is what makes a signed step readable. A requirement that must hold later is a
-[task](#task) or an acceptance criterion of the [batch](#batch).
-**See:** [`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges).
+[task](#task) or an acceptance criterion of the [batch](#batch). A step's own condition may be **discovered
+mid-flight** — a re-quote pending, a read returning `unknown`, a task the batch created still open — and
+then the step **holds**: its owner records a [finding](#finding) naming the condition, writes no sign-off, and
+renews its [lease](#lease); a hold is not a state and needs no field
+(`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`).
+**See:** [`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges),
+[`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`](work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight).
 **Never:** —
 **Not for:** condition for a [gate](#gate)'s inputs (those are the action's class, blast radius, and
 confidence); "requirement" for an acceptance criterion of a [batch](#batch).
@@ -536,7 +552,9 @@ repository.
 ### action_policy
 **Definition:** the policy a [principal](#principal) evaluates the [action gate](#action-gate) against, listing the low- and high-blast
 [action](#action) classes, the [confidence](#confidence) threshold, the recurrence count that graduates a series, the
-always-checkpoint boundaries, and the permission scope.
+always-checkpoint boundaries, the permission scope, and the consent tolerance per action class — the change
+to an action's consented figures that may be taken without a new [checkpoint](#checkpoint), zero where the
+policy declares none (`payments.md#tolerance-is-an-action_policy-value-and-its-default-is-zero`).
 **See:** [`gates_and_workflows.md#two-policies-workflow-policy-and-action-policy`](gates_and_workflows.md#two-policies-workflow-policy-and-action-policy).
 **Never:** "execution_policy", "execution policy".
 **Not for:** "config" or "settings" for the policy; workflow policy for the action policy.
@@ -646,7 +664,10 @@ interval its [workflow](#workflow) declares, routed against the owner role — i
 `undeclared_dependency` (a step could not read a type it declared, and the bounded hold reached its bound),
 `capability_denied` (a [principal](#principal) was denied a capability its step needed; the checkpoint is a
 request, never a [grant](#grant)), `lossy_record_mutation` (a write to the record whose blast exceeds the
-count the [action_policy](#action_policy) declares), and any a policy declares. "Brief" described its content, not its identity, and is
+count the [action_policy](#action_policy) declares), `undetermined_scope` (a standing [finding](#finding) whose right
+scope cannot be determined from the finding), `dependency_cycle` (two or more [batches](#batch) each holding on a task
+attached to another, found after the write — `work_model.md#a-batch-may-depend-on-a-task-it-created`), and
+any a policy declares. "Brief" described its content, not its identity, and is
 retired from the name for the same reason as `_record` and `_definition`.
 **See:** [`gates_and_workflows.md#the-checkpoint`](gates_and_workflows.md#the-checkpoint),
 [`failure_posture.md#what-a-checkpoint-does-not-absorb`](failure_posture.md#what-a-checkpoint-does-not-absorb),
@@ -746,7 +767,7 @@ confirmation.
 **Not for:** inbound for a [task](#task) reaching a principal (work is claimed, never delivered); inbound
 for a subscription over the record's own entity changes (that wakes a consumer on a write the record
 already holds, and reports on no external system —
-[`adapters.md#where-inbound-delivery-comes-from-is-an-open-decision-and-the-records-own-subscriptions-are-not-it`](adapters.md#where-inbound-delivery-comes-from-is-an-open-decision-and-the-records-own-subscriptions-are-not-it)).
+[`adapters.md#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it`](adapters.md#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it)).
 
 ### outbound
 **Definition:** the direction in which the record reaches an [external system](#external-system), as an [action](#action) an
@@ -1133,6 +1154,7 @@ they appear in a document, a schema, a prompt, or an error message.
 | a task | is **executed** (plain: done, worked on) | "run", "processed" |
 | an action | is **taken** | "fired", "run", "performed" |
 | a subject that must wait | is **checkpointed**; a task the swarm cannot advance is **escalated** | "paused", "parked", "paged" |
+| a step, on a condition its owner cannot yet judge | **holds**, under a held lease, with a finding naming the condition; the hold **ends** by sign-off, checkpoint, or lapse | "is paused", "is waiting", "is blocked" (blocked is a task status) |
 | a batch, on closing | its tasks **enter** one successor, or the batch closes with none | "flows into", "triggers" the next workflow |
 
 ## Owner: five meanings, one word forbidden alone

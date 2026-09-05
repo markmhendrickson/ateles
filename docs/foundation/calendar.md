@@ -8,8 +8,8 @@ outcomes, and the five adapter rules, which this document applies and does not r
 actions and the action gate), `workflows.md` (meeting processing, outreach, operator-only),
 `failure_posture.md` (the halt, the recovery per action class), `gmail.md` (the sibling system, whose
 identity and minimization rules this document shares), and the Google Calendar REST API v3 surface as
-exposed by the `gws` CLI, read 2026-09-05. What is built, and which rows have no code path, is
-`status.md`.
+exposed by the `gws` CLI, read 2026-09-05, and PR #745 operator review (2026-09-05, rulings 13–14, 16–18,
+23–29: decision 24 ruled here). What is built, and which rows have no code path, is `status.md`.
 
 ## Purpose
 
@@ -36,9 +36,8 @@ matter most to the workflows here are in *Conditions that are not delivered*, an
 rather than the exception.
 
 **A recurring event is one declaration and many occurrences, and the API lets you address either.** This is
-the question the operator's brief flags and this document opens as a numbered decision rather than
-resolving, because it is genuinely undecided and both answers cost something. It is **open decision 24**
-below. It is not the same thing as an `action series`, which is a term about graduated autonomy over
+the question the operator's brief flagged, and it is ruled below (decision 24), together with the mail
+system's decision 23: both levels are artifacts, the occurrence `PART_OF` the series. It is not the same thing as an `action series`, which is a term about graduated autonomy over
 repeated actions and has no relation to a repeating calendar entry; the two are kept apart deliberately.
 
 ## Scope
@@ -56,7 +55,7 @@ the gate's decision function (`gates_and_workflows.md`), what the adapter is gra
 | Kind | Identified by | What it is | Notes |
 |---|---|---|---|
 | `event` | `system` = the calendar system, `external_id` = the pair (calendar id, event id) | one entry on one calendar | the pair is the identity, not the event id alone: the same event on two calendars has two ids, and moving it between calendars changes it. See *Identity* |
-| `event`, an occurrence of a recurring series | `system`, `external_id` = the pair above plus the occurrence's start instant | one dated instance of a repeating declaration | whether this is an artifact at all is **open decision 24** |
+| `event`, an occurrence of a recurring series | `system`, `external_id` = the pair above plus the occurrence's start instant | one dated instance of a repeating declaration | an artifact of its own, `PART_OF` its series (decision 24, below) |
 | `calendar` | `system`, `external_id` = the calendar id | the container events live on | an artifact only in that the adapter reads its metadata; the design writes none |
 | `attendee` | **not an artifact.** A person on an event is a `contact` entity in the record, referenced from the event's observations | — | an attendee has no independent existence at the calendar; the design does not mint an artifact per invitee, which would be a per-person record built from someone else's meeting |
 
@@ -68,60 +67,66 @@ observation, and it is what lets the same meeting on the operator's calendar and
 recognized as one meeting. It is never the identity, because it is not unique per calendar: an event on
 two calendars shares it.
 
-## Open decision 24: whether a recurring series is one artifact or many
+## A series and its occurrences are each artifacts, related by `PART_OF`
 
-The brief that commissioned this document flagged the question; writing the tables confirmed it is real and
-that the design has not answered it. It is opened here rather than resolved, and registered in
-`conformance.md#the-register-of-open-design-decisions`.
+**Ruled (decision 24, 2026-09-05, together with decision 23): both levels are artifacts.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. A recurring series is an `event` artifact, and each
+occurrence of it that the record holds is an `event` artifact of its own, `PART_OF` the series
+(`data_model.md#relationships`). The calendar gives an id to both levels — the series has its event id, and
+an occurrence has the series' id together with its original start instant, which is what the calendar itself
+returns as that occurrence's identity when it is instanced or edited independently — and the design
+identifies an artifact by `system` and `external_id` (`adapters.md#what-the-adapter-does-with-every-event`,
+linkage), so each qualifies. This is the third answer the open question set out and did not adopt, adopted
+with the objection to it answered below. The general rule — where an external system gives ids to two levels
+of one thing, each is an artifact and the contained one is `PART_OF` the containing one — is stated once,
+under linkage in `adapters.md`; this section applies it to the calendar.
 
-**The question.** The calendar holds a recurring event as **one** record — a declaration carrying a
-recurrence rule — and computes its occurrences on demand. It also lets any single occurrence be modified or
-cancelled independently, at which point that occurrence becomes a real stored record of its own, with its
-own id, pointing back at the series. So the system itself holds a series as one-record-until-someone-edits-an-instance,
-at which point it is one-plus-N. The design must say what an artifact is here, and the two answers are:
+**Linkage, per direction.** Inbound, a signal links to the artifact whose id it carries: a change to the
+series — its rule, its title, its attendees — lands on the series artifact; an occurrence modified or
+cancelled independently lands on that occurrence's artifact, minted `PART_OF` the series where the record
+does not yet hold it; an occurrence read from an instances query over a window is minted the same way, with
+the window as coverage. Outbound, an action refers to the unit whose id its operation needs: editing one
+occurrence refers to the occurrence, editing the series refers to the series, and the attendee-dependent
+class rule under *Outbound* applies to either — the attendee set is read on the unit being written. A task
+refers to whichever unit it names: a task to prepare for *this Thursday's* meeting refers to the occurrence,
+and meeting processing links a transcript to the occurrence it is a transcript of
+(`workflows.md#meeting-processing`); a task about the standing obligation refers to the series. Either
+reaches the other along the edge.
 
-**The series is the artifact.** One `event` artifact per declaration; occurrences are derived by reading the
-recurrence rule, and are not artifacts. This matches the calendar's own primary representation, keeps one
-row for a standing weekly obligation rather than an unbounded stream of them, and means a change to the
-series is one observation rather than a hundred. The cost is that nothing a batch does can be pinned to a
-particular occurrence: a task created because *this Thursday's* meeting needs preparing refers to an
-artifact whose state is "every Thursday", and a sign-off on it pins a declaration rather than a dated fact.
-It also makes the meeting-processing workflow awkward, since a transcript belongs to one occurrence and the
-artifact it links to would cover all of them.
+**The objection, answered.** The open question declined this answer because one external record would map
+to two artifact kinds depending on history, and because which occurrences exist in the record would depend
+on the swarm's attention rather than the calendar's contents. Neither holds under the rule as stated. The
+kinds do not depend on history: a series is always the series artifact, an occurrence is always an occurrence
+artifact, and an occurrence the calendar has never stored independently is still an occurrence with an id
+the calendar will answer for. And every artifact in this design exists in the record once an adapter has read
+it and not before — the record never holds every record an external system holds; it holds the ones read,
+and coverage says which (`adapters.md#what-the-adapter-does-with-every-event`). A daily series has
+occurrences the record does not hold exactly as a mailbox has messages the record does not hold, and an
+instances read over a window states the window. Occurrence artifacts being unbounded is therefore not a
+departure from how artifacts come to exist; it is the ordinary condition of every artifact kind, made visible
+by a system that manufactures records on demand.
 
-**Each occurrence is the artifact.** One `event` artifact per dated instance the swarm actually touches,
-with the series as a relationship among them. Every artifact then pins something concrete, which is the
-property `data_model.md#record-conventions` relies on, and meeting processing links a transcript to the
-meeting it is a transcript of. The cost is that occurrences are unbounded — a daily standing event has no
-last occurrence — so the adapter must decide *which* occurrences become artifacts, and the honest answer is
-"the ones a batch addresses", which makes artifact existence depend on the swarm's own attention rather
-than on the external system's contents. That is a genuine departure from how every other artifact in this
-design comes to exist.
+**What a sign-off pins.** A sign-off on an occurrence pins a dated fact; a sign-off on the series pins the
+declaration as read — its rule and the fields the read returned. A task created against one occurrence keeps
+referring to that occurrence when the series' rule changes; whether the occurrence still exists under the new
+rule is what the re-read the hydration phase makes will say, and until it is re-read its stored time is a
+time the record has held since the last read, which the clock rule under *Conditions that are not delivered*
+already refuses to trust for a step that depends on it.
 
-**A third answer the design should consider and this document does not adopt:** the series is the artifact
-*and* an occurrence the swarm touches is minted as its own artifact `PART_OF` the series, so the common
-case costs one row and the touched case pins a date. It is not adopted here because it means one external
-record maps to two artifact kinds depending on history, and whether that is a clean modelling of the
-calendar's own one-plus-N behaviour or an unnecessary complication is exactly what should be decided rather
-than assumed.
+**Why both.** The series alone pinned nothing dated and made meeting processing link a transcript to "every
+Thursday"; the occurrence alone lost the standing obligation as a thing the record holds and left a rule
+change with no artifact to land on. Both, related by `PART_OF`, is the same rule the mail system takes for a
+thread and its messages, so a reader of the record carries one rule for a thing with internal multiplicity
+rather than one per system. **The cost accepted** is two shapes of `event` artifact — distinguished by the
+edge and by the id's form — where a flatter model would hold one row per obligation. **What would reopen
+it:** a calendar system that gives an id to only one level, for which only that level is an artifact, as the
+rule already implies.
 
-**What would decide it:** whether any step needs to pin an occurrence, which meeting processing appears to
-need and nothing else clearly does; and whether a standing obligation is better read as one artifact the
-record holds or as a rule the record evaluates. Nothing else in this document depends on the resolution —
-every row below states which of the two it writes to where the distinction arises, and the tables stand
-either way.
-
-**This is the calendar's form of the question `gmail.md` opens as decision 23** about a thread and its
-messages. Both ask whether a thing with internal multiplicity is one artifact or many. They should be
-decided together: a different answer in each would be a distinction every reader of the record has to carry
-with no reason behind it.
-
-**Drift bearing on the decision, recorded as drift and not as an argument.** Every calendar read on the
-branch passes the flag that expands a series into its occurrences server-side, so the built path never sees
-a recurrence rule at all and has effectively taken the second answer without stating it. The count and the
-citations are in *Drift* below. That a built path chose one does not rule the question — the operator's
-standing instruction is that the code is not established design guidance — but it does mean the decision has
-a de facto answer in force today, which is worth knowing when it is taken.
+**Drift bearing on the ruling, recorded as drift and not as an argument.** Every calendar read on the branch
+passes the flag that expands a series into its occurrences server-side, so the built path sees occurrences and
+never a series or its rule — consistent with the occurrence half of this ruling and blind to the series half.
+The count and the citations are in *Drift* below. The built path chose nothing; it read what one flag
+returns, and the operator's standing instruction is that the code is not established design guidance.
 
 ## Every inbound signal, and what it becomes
 
@@ -144,8 +149,8 @@ Rows are marked **handled**, **deliberately ignored**, or **unhandled** — the 
 | an event moved in time | handled | an observation on the artifact's start and end. **A task whose due date follows the event reads it at `prioritize` or at claim, never through the event** — no event rewrites a task's priority, which is the `priority_rubric` entity's (`workflows.md#intake`) |
 | an event cancelled | handled | an observation (`state: cancelled`). It closes no step and completes no task: a batch's steps close on sign-offs, and a meeting that will not happen is a fact its step owner reads |
 | an event deleted outright | handled | an observation (`state: deleted`). The record keeps the artifact and its observations |
-| an occurrence of a recurring series modified or cancelled independently | **unhandled** | this is the case that turns one record into one-plus-N, and what the record should hold depends on **open decision 24**. Until decided, an observation on the series artifact naming the affected instant, and never a new artifact. See above |
-| a recurrence rule changed on a series | **unhandled** | every future occurrence moved at once, with no signal per occurrence. Until decision 24 is taken, an observation on the series artifact. The practical hazard is that a task created against one occurrence now refers to a time that no longer exists |
+| an occurrence of a recurring series modified or cancelled independently | handled | an observation on that occurrence's artifact, minted `PART_OF` the series where the record does not yet hold it (decision 24, above). The series artifact is unchanged by it: an occurrence edited independently is the calendar's own one-plus-N, and the record mirrors it with an edge rather than folding it into the series |
+| a recurrence rule changed on a series | handled | an observation on the series artifact. Every future occurrence moved at once with no signal per occurrence, so each occurrence artifact the record holds is re-read against the new rule before any step depends on its time — a declared read with a stated freshness, as the clock rule below requires — and an occurrence the new rule no longer produces reads as cancelled by that read. A task created against one occurrence keeps referring to it; what changed is what a read of it returns |
 | an event moved to another calendar | **unhandled** | the `external_id` pair is (calendar id, event id) and the calendar half just changed, so the record's pair stops resolving — the identity-moved case `github.md` names for a transferred issue. Until built, `dropped` with reason `identity_moved` |
 | an attendee's response changed (accepted, declined, tentative) | handled | an observation on the artifact's attendee set. **It closes no step**: whether a meeting is on is a condition its step owner reads, and a declined invitation is information, not a cancellation |
 | an attendee added or removed | handled | an observation. Where the attendee is a person the record holds a `contact` for, the observation references it; the adapter does not create a `contact` for every invitee it sees — see refusal 1 |
@@ -257,7 +262,8 @@ a non-organizer copy is an observation about that copy and says so.
 
 **Linkage.** An inbound signal names a calendar id and an event id; the adapter finds the artifact by
 `system` and that pair. Two system-specific wrinkles. A recurring occurrence names the series through a
-parent id and its own original start instant, and how that resolves is **open decision 24**. And a meeting
+parent id and its own original start instant, and it resolves to an occurrence artifact `PART_OF` the
+series artifact (decision 24, above). And a meeting
 recording is linked to an event by **matching times**, not by any id the two systems share — which makes it
 a heuristic link whose observation carries the match's basis and its uncertainty, never a bare edge. The
 adapter never attaches an event to a batch on its own guess: intake's `link` step does that
@@ -343,7 +349,7 @@ capabilities that exist and that this design has no step reaching for.
 | update or move an event in time; cancel one | **used**, same classing |
 | read an event's attendees and their responses | **used**, and it is what decides the action class |
 | **respond** to an invitation | **used**, gated; refusal 3 |
-| read occurrences of a recurring series over a window | **used**, and its coverage must state the window. What the occurrences *are* in the record is open decision 24 |
+| read occurrences of a recurring series over a window | **used**, and its coverage must state the window. Each occurrence read is an artifact `PART_OF` its series (decision 24) |
 | free/busy query | **used** as a read; never an action |
 | read calendar metadata and the calendar list | **used, read-only**, because a timezone or a list change alters what every other read means |
 | read access rules | **used, read-only**; refusal 5 |
@@ -380,7 +386,7 @@ mail-on-write behaviour for events with attendees are the API's documented behav
 or to the parameter governing it — this is the premise the entire action-class rule rests on, and it is the
 one row that should be re-verified rather than assumed. A new method on `events`, which is where the design
 concentrates. A change to sync-token invalidation, which changes how large a gap an invalidated token
-implies. A change to recurring-event representation, which would bear directly on open decision 24. And a
+implies. A change to recurring-event representation, which would bear directly on the ruling of decision 24. And a
 change to whether a client-supplied event id is honoured, which is the outbound dedup rule's mechanism.
 
 **A stale table reports without binding.** The dispositions are only as good as the enumeration behind
@@ -398,7 +404,7 @@ must accommodate it. Read 2026-09-05 on this branch by enumerating every `gws ca
 |---|---|---|
 | the calendar is reached for reads and for gated writes | **six read sites and one write site, out of the whole surface.** The reads are all event lists; the single write is one event creation. Nothing else exists — no event read by id, no update, no move, no cancel, no delete, no occurrence read, no free/busy, no calendar-list or access-rule read | `sylvia.py`, `monedula.py`, `cotinga.py`, two `monedula/handlers/` modules |
 | an event write is confirmed by reading the event back by its identity pair | **the one write site returns success on the subprocess exit code and captures no event id.** The same "a response code is not evidence" shape as the mail system's send path (principle 2) | `execution/daemons/sylvia/sylvia.py` |
-| whether a series is one artifact or many is **open decision 24** | **every read passes the flag that expands a series into occurrences server-side**, at three sites, so no code path ever sees a recurrence rule. Zero occurrences repo-wide of the recurring-event id, of the iCal rule, or of the occurrence-listing method. The built path has taken the per-occurrence answer without stating it | `sylvia.py`, `monedula.py`, `cotinga.py` |
+| a series and each occurrence the record holds are each artifacts, the occurrence `PART_OF` the series (decision 24) | **every read passes the flag that expands a series into occurrences server-side**, at three sites, so no code path ever sees a recurrence rule. Zero occurrences repo-wide of the recurring-event id, of the iCal rule, or of the occurrence-listing method. The built path sees the occurrence half of the ruling and never the series half | `sylvia.py`, `monedula.py`, `cotinga.py` |
 | recurrence, where the record drives it, is the record's | one daemon carries a recurrence field on its **task entity** and states in its own header that the record is authoritative for recurrence and the calendar is an output surface only. That is consistent with this document; it is noted because the term collides with the calendar's own recurrence and the two are different things | `sylvia.py` |
 | an artifact is found by its identity pair | **event matching is by title and date proximity** — same title, case-insensitively, within a day — rather than by any id. A heuristic link where the design specifies an identity | `sylvia.py` |
 | an attendee's response is read, and responses the swarm sends are gated | **attendees are read at one site and no response is ever written.** Zero occurrences of the response-status field and of the parameter that controls attendee notification — which means the built path has never had to face the action-class question the design's central outbound rule is about | `cotinga.py` |
@@ -406,18 +412,19 @@ must accommodate it. Read 2026-09-05 on this branch by enumerating every `gws ca
 
 The design's refusals are, as in `gmail.md`, **largely true by absence** here — no calendar deletion, no
 access-rule write, no ownership transfer, no quick-add, no import — because the built surface is seven call
-sites. The substantive drift is the unstated per-occurrence answer to decision 24, the identity-by-title
+sites. The substantive drift is the series half of decision 24 having no read at all, the identity-by-title
 matching, and the unconfirmed write.
 
 ## What this document does not decide
 
 The general adapter rules are `adapters.md`'s and are cited here, not restated. The step lists that take
-these operations are `workflows.md`'s. The gate's decision function is `gates_and_workflows.md`'s. Whether
-a recurring series is one artifact or many is **open decision 24** above, and it should be decided with
-`gmail.md`'s decision 23. The identity rules for email addresses are `gmail.md`'s, shared by both systems
-and written once there. Open decisions 15 and 16 (`adapters.md`) apply to this adapter as to every other,
-and nothing above depends on their resolution. Which rows have a built path is `status.md`'s — and every
-row marked **unhandled** above has one there.
+these operations are `workflows.md`'s. The gate's decision function is `gates_and_workflows.md`'s. The
+identity rules for email addresses are `gmail.md`'s, shared by both systems and written once there. Open
+decision 15 (`adapters.md`) applies to this adapter as to every other, and nothing above depends on its
+resolution; decision 16 is ruled there, and for this system it means the process receiving the calendar
+watch's notification may be shared plumbing while verifying it and reading the sync token from it are this
+adapter's. Which rows have a built path is `status.md`'s — and every row marked **unhandled** above has one
+there.
 
 ## Prior art
 
@@ -425,7 +432,8 @@ The Google Calendar API's own resource and method reference is the source of the
 2026-09-05 through the `gws` CLI; the resource names and their methods are the vendor's, and the status and
 disposition columns are this document's. The iCalendar specification's separation of a recurring
 declaration from its occurrences, and its provision for an occurrence that overrides its series, is the
-structure open decision 24 is about, and it is the vendor's inheritance rather than its invention. The
+structure the ruling of decision 24 mirrors with an edge, and it is the vendor's inheritance rather than its
+invention. The
 anti-corruption layer (Evans) is the shape of the whole: the calendar's model — an entry as a reminder, an
 invitation as a task, a colour as a category — never becomes the domain's.
 
@@ -434,6 +442,6 @@ invitation as a task, a colour as a category — never becomes the domain's.
 The per-signal mapping, the handled / deliberately ignored / unhandled marking, the eight refusals, the
 attendee-dependent action class and its fail-closed default, the treatment of a meeting's beginning and
 ending as derivations rather than events, the use of the client-supplied event id as the outbound dedup
-key's identity, and open decision 24 are this document's, applying `adapters.md`'s rules to the calendar's
-full surface. The observation that an event with attendees is simultaneously a record and a message is the
+key's identity, and the ruling of decision 24 are this document's, applying `adapters.md`'s rules to the
+calendar's full surface. The observation that an event with attendees is simultaneously a record and a message is the
 vendor's behaviour; making it decide the action class is this document's.

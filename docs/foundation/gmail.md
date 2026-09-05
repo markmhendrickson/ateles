@@ -7,7 +7,8 @@ the five adapter rules, which this document applies and does not restate), `work
 intake, the four execution mechanisms), `gates_and_workflows.md` (step state from edges; actions and the
 action gate; the three verdict values), `workflows.md` (outreach, intake, operator-only),
 `failure_posture.md` (the halt, the recovery per action class, the checkpoint reason classes), and the
-Gmail REST API v1 surface as exposed by the `gws` CLI, read 2026-09-05. What is built, and which rows have
+Gmail REST API v1 surface as exposed by the `gws` CLI, read 2026-09-05, and PR #745 operator review
+(2026-09-05, rulings 13–14, 16–18, 23–29: decision 23 ruled here). What is built, and which rows have
 no code path, is `status.md`.
 
 ## Purpose
@@ -54,7 +55,7 @@ which is a `channel_config` context entity resolved at runtime and never named h
 | Kind | Identified by | What it is | Notes |
 |---|---|---|---|
 | `thread` | `system` = the mail system, `external_id` = the thread id | the conversation a batch attaches to | the unit intake links, and the unit `follow_up` watches |
-| `message` | `system`, `external_id` = the immutable message id | one message within a thread | the unit a send's confirmation mints |
+| `message` | `system`, `external_id` = the immutable message id | one message within a thread, `PART_OF` it | the unit a send's confirmation mints; both levels are artifacts (decision 23, below) |
 | `draft` | `system`, `external_id` = the draft id | a composition staged **in the mail system** | **the design does not use this artifact.** The draft that matters is the entity in the record (`workflows.md#outreach`); a mail-system draft is an optional convenience and never what a step closes on. See *The draft hazard* |
 | `attachment` | `system`, `external_id` = the attachment id, which is scoped to its message | a file carried by a message | not independently addressable: the id is meaningful only with its message id, which is the identity wrinkle below |
 | `label` | `system`, `external_id` = the label id | a mailbox-level classification | an artifact only in the sense that the adapter reads it; **never step state**, and the design writes at most a small closed set of them |
@@ -119,7 +120,7 @@ and not a silent omission here.
 
 | Signal | Status | Outcome in the record |
 |---|---|---|
-| a message added, on a thread the record does not track | handled | a task with the thread as its artifact, entering intake. The mail poller is the daemon mechanism of `work_model.md#the-four-execution-mechanisms`, which produces tasks and never receives one |
+| a message added, on a thread the record does not track | handled | a task with the thread as its artifact, entering intake; the message is minted `PART_OF` the thread. The mail poller is the daemon mechanism of `work_model.md#the-four-execution-mechanisms`, which produces tasks and never receives one |
 | a message added, on a thread attached to an open outreach batch, from the party the batch addresses | handled | an observation on the thread artifact; the `follow_up` step owner reads it as the reply the step closes on (`workflows.md#outreach`). **It closes no step by itself** — the step owner reads it and signs |
 | a message added, on a thread attached to an open batch, from a third party the batch does not address | handled | an observation on the thread artifact. A thread gaining a participant is a fact about the thread, and it is one the `follow_up` step owner reads before signing, because a reply from someone else is not the reply the step waits for |
 | a message added, from the operator's own address, answering a checkpoint the operator-facing agent carried by mail | handled | resolution of that checkpoint by the operator principal (`authority_model.md#approval`), read back on the checkpoint. From any other address, an observation — the identity rule, and the adapter never resolves an unrecognized address to the operator |
@@ -188,39 +189,55 @@ bounce is noticed — by its owner, reading an observation, and signing. The des
 promoting a bounce to an automatic retraction of the action's confirmation would assert a fact
 ("this was not delivered") that the adapter cannot establish and that a mailer's report only suggests.
 
-## Open decision 23: whether a thread is one artifact or a container of artifacts
+## A thread and its messages are each artifacts, related by `PART_OF`
 
-Writing the tables above surfaced a question the design has not settled, and it is opened here rather than
-resolved, in the idiom decisions 16 and 17 were opened in. It is registered in
-`conformance.md#the-register-of-open-design-decisions`, with every other open decision.
+**Ruled (decision 23, 2026-09-05, together with decision 24): both levels are artifacts.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. A `thread` is an artifact and each `message` in it is
+an artifact, and a message is `PART_OF` its thread (`data_model.md#relationships`). The question as it was
+opened — which of the two is *the* unit a batch addresses — was a false dichotomy: the mail system gives an
+id to both levels, the design already identifies an artifact by `system` and `external_id`
+(`adapters.md#what-the-adapter-does-with-every-event`, linkage), so each qualifies, and the tables above were
+already writing to both. What was undecided was only how the two relate and which one a given read, write, or
+task points at, and that is what is ruled. The general rule — where an external system gives ids to two
+levels of one thing, each level is an artifact and the contained one is `PART_OF` the containing one — is
+stated once, under linkage in `adapters.md`; this section applies it to the mail system.
 
-**The question.** The tables treat `thread` and `message` as two artifact kinds, and both appear: intake
-attaches a thread, a send's confirmation mints a message, and `follow_up` watches a thread. What is
-undecided is which of the two is the **unit a batch addresses**, and the two answers differ in what they
-make readable.
+**Linkage, per direction.** Inbound, a signal links to the artifact whose id it carries: a history entry
+naming a message id lands as an observation on that message, minted `PART_OF` its thread where the record
+does not yet hold it, and the thread is reachable from it by the edge; a signal about the thread as a whole
+— a label applied to it, its archival — lands on the thread. Outbound, an action refers to the unit whose id
+its operation needs: `send` creates a message, and the confirmation mints that message `PART_OF` the thread
+the send began or joined; `follow_up` replies on the thread, and its confirmation mints the reply the same
+way; a label or an archive operates on the thread. A task refers to whichever unit it names — intake's `link`
+step attaches the thread for a correspondence, and a task about one message attaches that message — and a
+step owner reading either reaches the other along the edge. So `follow_up`'s closing condition, "a reply is
+linked as an artifact" (`workflows.md#outreach`), names exactly what the record holds: a message artifact,
+from the party the batch addresses, `PART_OF` the thread the batch attached.
 
-If the **thread** is the artifact, a batch has one stable subject across a correspondence, `follow_up` has
-something to watch that does not multiply, and the record holds one row per conversation. The cost is that
-observations accumulate on a growing container whose membership changes without notice, so "what did this
-sign-off judge" resolves to a thread state that may have gained messages since — and the pinning rule that
-makes a sign-off's staleness readable is doing much weaker work, because a thread's state is a set rather
-than a head.
+**What a sign-off pins.** The pinning rule (`data_model.md#record-conventions`) relies on each unit pinning
+what it is. A message is immutable, and a sign-off that judged one pins it outright. A thread's state is its
+membership, and a sign-off that judged a thread pins the message set the read returned, with the coverage of
+that read — so "what did this sign-off judge" resolves to a named set of messages, and a thread that has
+since gained one reads as changed by the same derived comparison a moved head does. The weakness the open
+question feared — a container whose membership changes without notice — is real, and it is answered by
+coverage rather than by choosing the message as the only artifact: the record states which messages the
+thread held when it was read, and a thread read at a truncated page is distinguishable from a thread with
+nothing further.
 
-If the **message** is the artifact, every sign-off pins something immutable, which is exactly the property
-`data_model.md#record-conventions` relies on. The cost is that a correspondence becomes many artifacts with
-no single one a batch can be said to be about, and `follow_up`'s closing condition — "a reply is linked as
-an artifact" — has to name a relationship between artifacts rather than a state of one.
+**The id caveat, resolved by the edge.** A message the system regroups into another thread changes which
+thread contains it without any event (above). Under this ruling that is not a re-identification: the message
+keeps its `external_id`, its `PART_OF` edge to the old thread is ended, a new one is written to the thread
+the read found it in, and both stay readable — an observation about containment, never a change of identity.
 
-**What would decide it:** whether any step in any workflow needs to pin a *conversation* state, as opposed
-to citing a set of messages. If none does, the message is the artifact and the thread is a relationship
-among messages, which is the cheaper answer. Nothing in this document depends on the resolution: every row
-above states which of the two it writes to, so the tables stand either way, and the decision changes which
-of the two is `PART_OF` the other rather than whether both exist.
-
-**This is the mail system's form of the same question `calendar.md` opens as decision 24** about a
-recurring series. Both ask whether a thing with internal multiplicity is one artifact or many, and it is
-worth deciding them together rather than separately, because a different answer in each would be a
-distinction the record's readers have to carry with no reason behind it.
+**Why both, rather than one.** The message alone would have made a correspondence many artifacts with no
+single one a batch is about, and `follow_up` watching a relationship among messages rather than a thing; the
+thread alone would have made every sign-off pin a set and every send's confirmation mint nothing with an id
+of its own. Each answer was right about the level it chose and wrong to exclude the other, and the same rule
+serves every future system with nesting — a pull request and its review threads, a channel and the messages
+in it — so the record's readers carry one rule rather than one per system. **The cost accepted** is two
+artifacts where a flatter model would hold one, and an edge the system's own regrouping can move. **What
+would reopen it:** an external system that gives an id to only one level — then only that level is an
+artifact, which the rule already implies, and nothing reopens.
 
 ## Outbound: the operations the workflows take on the mail system
 
@@ -472,12 +489,12 @@ to change when the `artifact` and `action` entity types are built.
 The general adapter rules are `adapters.md`'s and are cited here, not restated: the four outcomes, the five
 rules that decide among them, the sourcing and coverage contract, and the rule that a recovery is an
 outbound operation like any other. The step lists that take these operations are `workflows.md`'s. The
-gate's decision function is `gates_and_workflows.md`'s. Whether a thread or a message is the unit a batch
-addresses is **open decision 23** above. Whether adapters live in a repository of their own, and where
-inbound deliveries land before becoming writes, are open decisions 15 and 16 (`adapters.md`), and this
-document's dependence on 16 is real but shallow: the mailbox watch is one of the deliveries whose landing
-place that decision names, and nothing above changes whichever way it goes. Which rows have a built path is
-`status.md`'s.
+gate's decision function is `gates_and_workflows.md`'s. Whether adapters live in a repository of their own is
+open decision 15 (`adapters.md`). Where inbound deliveries land is ruled (decision 16,
+`adapters.md#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it`),
+and for this system it means: the process that receives the mailbox watch's notification may be shared
+plumbing, and verifying its envelope and extracting the history marker from it are this adapter's. Which
+rows have a built path is `status.md`'s.
 
 ## Prior art
 
@@ -494,7 +511,7 @@ domain's.
 The per-signal mapping, the handled / deliberately ignored / unhandled marking, the seven refusals, the
 capture-minimization rule stated as an adapter constraint rather than a workflow one, the treatment of a
 bounce as an ordinary inbound message rather than a status on the original action, the empty recovery row
-and its justification, and open decision 23 are this document's, applying `adapters.md`'s rules to the mail
-system's full surface. The draft-update hazard is the vendor's documented behaviour; reading it as an
+and its justification, and the ruling of decision 23 are this document's, applying `adapters.md`'s rules to
+the mail system's full surface. The draft-update hazard is the vendor's documented behaviour; reading it as an
 action whose class cannot be determined at the gate, and refusing the operation rather than gating it more
 carefully, is this document's.

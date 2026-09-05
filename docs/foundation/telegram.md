@@ -9,7 +9,8 @@ gate; the checkpoint, its subject, and its one resolution protocol), `authority_
 to principals; approval is authorized against the required approvers), `workflows.md` (the operator-only
 workflow, and the consent step of every workflow that has one), `failure_posture.md` (the halt; the
 off-record announcement path; retry classification), and Telegram's own chat-platform API documentation, read
-2026-09-05. What is built is `status.md`.
+2026-09-05, and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decisions 25 and 26 ruled
+here). What is built is `status.md`.
 
 ## Purpose
 
@@ -271,7 +272,7 @@ window and surfaced on the off-record announcement path.
 | `edited_message`, on any message | handled | an observation on the artifact, recording that the message was edited and when. **An edit never revises a resolution already written**: a resolution is terminal, and a principal reaching a different decision needs a new checkpoint, not an edited message |
 | `edited_message` the channel raised for a field nobody changed | handled | the channel documents that it may deliver an edit for changes to fields the swarm does not use — a link preview resolving, for instance. An edit is therefore **not evidence that a person edited anything**, and the adapter compares against what the record already holds before writing an observation that says a person did. Where the content is unchanged, the disposition is `dropped`, reason `no_change` |
 | `edited_message`, on a message the adapter read as a checkpoint resolution | handled | an observation, and **a defect to surface**: the record holds a resolution attributed to this principal from text that no longer says what it said. The resolution stands, because it was read back when it was written, and the edit is recorded beside it so both are readable |
-| `message_reaction` | **unhandled** | a reaction is the cheapest possible gesture in the channel and therefore the most tempting to read as an approval, which it is not. Until decided, an observation on the artifact and **never a resolution**. It also arrives only where the swarm holds an administrator role in the chat and has named the kind explicitly, which is a coverage fact and not a design one. See *What this document refuses* and `status.md` |
+| `message_reaction` | handled | an observation on the artifact, and **never a resolution** (decision 25, ruled: `#a-reaction-never-carries-a-decision`). A reaction is the cheapest possible gesture in the channel and therefore the most tempting to read as an approval, which it is not. It arrives only where the swarm holds an administrator role in the chat and has named the kind explicitly, which is a coverage fact and not a design one |
 | `message_reaction_count` | deliberately ignored | `dropped`, reason `presentation_only`: an anonymous aggregate attributes to no credential, so it cannot reach the identity rule at all, and the channel delivers it with a delay of minutes |
 | a message deleted by a person | **unhandled** at the channel, and unhandleable | the chat API delivers no update when a user deletes a message in an ordinary chat, so the record cannot observe it at all. What follows is stated under *Conditions that are not updates* |
 
@@ -316,8 +317,8 @@ the action passes the action gate on its own like every other.
 
 | Command class | Status | Outcome in the record |
 |---|---|---|
-| a command asking what is awaiting this principal | handled | **no write to the record at all**: the adapter reads the principal's open checkpoints and answers on the channel. It is a read, so it is not an action, and it produces no task. What it may show is bounded by what that principal may see |
-| a command asking the state of a batch or task the principal may see | handled | the same: a read, answered on the channel, writing nothing |
+| a command asking what is awaiting this principal | handled | **no write to the record at all**: the adapter reads the principal's open checkpoints and answers on the channel. It is a read, so it is not an action, and it produces no task. What it may show is bounded by what that principal may see. **During a halt the answer is the halt itself and never data** (decision 26, ruled: `#during-a-halt-a-read-on-the-channel-is-answered-with-the-halt-and-never-with-data`) |
+| a command asking the state of a batch or task the principal may see | handled | the same: a read, answered on the channel, writing nothing; during a halt, answered with the halt |
 | every other command | handled | a task with the message as its artifact, entering intake |
 
 **The halt is not a command, and this is the sharpest case.** An operator may halt the swarm on their own
@@ -375,9 +376,12 @@ than a narrowed write over a wide read.
 
 ## Delivery: webhooks, long polling, and what the dedup rule keys on
 
-`adapters.md` leaves where inbound delivery comes from as **open decision 16**, and nothing here settles it.
-What this section states is what the two mechanisms this channel offers give the dedup rule, because that
-is the term the decision should be taken on and it is specific to this system.
+Where inbound delivery lands is ruled in `adapters.md` (decision 16,
+`adapters.md#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it`):
+the listener may be shared plumbing, and verifying a delivery and extracting its identifier are this adapter's.
+What this section states is what the two mechanisms this channel offers give that rule — the secret this
+adapter checks, the identifier it keys on, and the acknowledgement it owns — because each is specific to this
+system.
 
 **Both mechanisms deliver the same updates, each carrying the channel's own update identifier.** That
 identifier is what `adapters.md`'s dedup rule keys on: every inbound event carries the external system's
@@ -594,8 +598,9 @@ component that answers for nothing, on input a third party controls.
 **It refuses to treat a gesture as a decision.** A reaction, a read receipt (which does not exist), a
 message viewed, a poll vote, a member joining — none is an approval. Reason: an approval is attributed to a
 principal and authorized against the required approvers, and a gesture carries neither the attribution the
-record needs nor a statement of what was decided. The reaction row above is marked unhandled rather than
-ignored precisely because it is the one a future reader will want to make an exception for.
+record needs nor a statement of what was decided. The reaction row above is handled as an observation, and
+decision 25 rules that it stays one; it is the row a future reader will most want to make an exception for,
+and the ruling below records why not.
 
 **It refuses to let the presence of a person in a chat stand in for a binding.** Group membership is not a
 credential binding; a display name is not an identity; a forwarded message's original author is not its
@@ -603,7 +608,9 @@ sender. Reason: the fallthrough that resolves an unknown actor to somebody is th
 removes everywhere, and here the somebody would be the operator.
 
 **It refuses to act on a message during a halt.** It writes nothing, acknowledges nothing, and lets the
-channel redeliver. Reason: a signal the record cannot hold is not a signal the engine may act on.
+channel redeliver. Reason: a signal the record cannot hold is not a signal the engine may act on. The one
+carve-out is the read command answered with the halt itself (decision 26, below), which writes nothing,
+decides nothing, and rides the announcement path that already runs without the record.
 
 **It refuses to build chat-shaped state beside the record.** No conversation store, no per-chat map of
 which checkpoints are outstanding, no cursor table standing in for coverage, no cache of what a message
@@ -647,37 +654,94 @@ is in the check.
 
 The general adapter rules are `adapters.md`'s and are cited here, not restated: the four outcomes, the five
 rules, the sourcing and coverage contract, and the rule that a recovery is an outbound operation like any
-other. Where inbound delivery comes from is **open decision 16** there, and this document does not settle
-it — it states only what this channel's two mechanisms give the dedup rule. Whether adapters live in a
-repository of their own is **open decision 15**, likewise untouched. The steps that take these operations
-are `workflows.md`'s; the gate's decision function and the checkpoint's protocol are
-`gates_and_workflows.md`'s; whom a checkpoint may await, and whether its raiser may resolve it, are
-`authority_model.md`'s open questions. Which rows have a built path is `status.md`'s — and every row marked
-**unhandled** above has one there.
+other. Where inbound delivery lands is ruled there (decision 16), and *Delivery* above states what this
+channel's two mechanisms give that ruling. Whether adapters live in a repository of their own is **open
+decision 15**, untouched. The steps that take these operations are `workflows.md`'s; the gate's decision
+function and the checkpoint's protocol are `gates_and_workflows.md`'s; whom a checkpoint may await, and
+whether its raiser may resolve it, are `authority_model.md`'s open questions. Which rows have a built path is
+`status.md`'s — and every row marked **unhandled** above has one there. Two decisions this document opened
+are ruled in the two sections that follow.
 
-**Open decision 25: whether a chat reaction may ever carry a decision.** Registered in `conformance.md#the-register-of-open-design-decisions`.
-Recorded as a decision rather than ruled, because the argument on each side is real and the design does not need the answer yet. Against: a
-reaction carries no statement of what was decided, so reading one as an approval means the adapter supplies
-the meaning, which is the intent parse this document refuses. For: a reaction on the swarm's own
-presentation message is correlated as precisely as a reply-to is, it comes from a credential like any other
-delivery, and a fixed reaction-to-option mapping the swarm publishes with the presentation would be minted
-by the swarm in the same sense a callback payload is. What would decide it: whether the channel's reaction
-update reliably identifies the reacting credential in every chat kind the binding may name, and whether the
-mapping can be made as unambiguous as a callback payload without becoming a vocabulary the operator has to
-remember. Until it is taken, a reaction is an observation and never a resolution, which is the row above.
+## A reaction never carries a decision
 
-**Open decision 26: whether the swarm answers a read on this channel without the record.** Registered in
-`conformance.md#the-register-of-open-design-decisions`. A command
-asking what awaits a principal is a read that writes nothing, which makes it the one inbound path that
-could in principle be served during a halt — and the operator asking "what is happening" is most likely
-exactly then. Against: the answer would be read from the record, which is what is unreachable, so there is
-nothing to answer from; and an adapter that answered from a cache would be holding the state
-`adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds` forbids. For: the
-off-record announcement path already reaches this channel during a halt, and the difference between
-announcing a halt and answering a question about it is one of direction rather than of capability. What
-would decide it: whether anything useful can be said about the swarm's state without reading the record,
-which is largely a question about what the announcement path already carries. Until it is taken, a read
-command during a halt is answered with the fact of the halt and nothing else.
+**Ruled (decision 25, 2026-09-05): no.** Registered in `conformance.md#the-register-of-open-design-decisions`.
+A reaction on any message, the swarm's own presentation included, is an observation on the artifact and never
+a resolution, an approval, or any other decision. The row above is handled as such, and the refusal above — a
+gesture is not a decision — holds without the exception this question asked about.
+
+**Reason, in two parts, conceding a third.** The case for allowing it rested on correlation: a reaction on
+the swarm's presentation message is correlated to that checkpoint as precisely as a reply-to is, and it
+arrives from a credential like any other delivery. That is conceded — correlation is what a reaction *can*
+do. It fails on the other two properties a decision must have, and either would suffice. First, **a reaction
+can be silently removed.** Removing one is not destroying evidence of a statement, the way deleting a message
+is; it is the reaction's ordinary use — the channel treats a reaction as a toggled state and delivers its
+removal as a new state, not as an event about a decision. A resolution taken from one would be a resolution
+whose evidence the approver can withdraw as a matter of routine, with no record of having decided and no
+record of having reversed, and an approval that can be retracted without a record is not a verdict
+(`authority_model.md#approval`: an approval is explicit and terminal). The design's answer to a *deleted*
+resolving message — the resolution stands, the observation is the durable half — does not carry over,
+because it depends on the message having been a statement the principal made; a reaction is a state the
+principal set. Second, **a reaction's meaning is not the swarm's.** The emoji set is the channel's, fixed and
+small; a thumbs-up reads as approve, as acknowledge, as seen, and as agreement with the previous message, and
+the reader who decides which is the adapter — which is the intent parse this document refuses, made on the
+cheapest gesture the channel offers. A callback payload avoids that because the swarm minted its meaning at
+composition (`#the-callback-payload-is-the-swarms-own-text-and-free-text-is-not`); a published
+reaction-to-option mapping would try to give a reaction the same property and cannot, because the token is
+the channel's and not the swarm's, and the mapping becomes a vocabulary the operator has to remember and the
+adapter has to hope they did. A decision must be **explicit** — a yes, a no, or a veto, stated
+(`authority_model.md#approval`) — and correlated to one checkpoint by reply-to or by a callback token; a
+reaction can do the second and not the first.
+
+**The cost accepted** is that the operator must reply or press a button rather than react, on every
+checkpoint, the routine ones included. That is the cost of a decision being a thing the operator did rather
+than a thing the transport inferred, which is the position the read-receipt row already takes for the same
+reason. **What would reopen it:** nothing about the channel's reaction update, which is not where the ruling
+rests. It would reopen only if a decision were redefined to admit retractable, unstated approvals, which is an
+authority-model change and not a chat one.
+
+## During a halt, a read on the channel is answered with the halt, and never with data
+
+**Ruled (decision 26, 2026-09-05): the swarm answers with its own state, and nothing else.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. A command asking what awaits a principal, or the
+state of a batch or task, arriving during a halt, is answered on the channel with the one fact the swarm
+holds without the record: that it is halted, since when, and why — *halted since T, because X* — and no
+more. Not a cached queue, not the last state it read, not a guess about what has changed. When the record
+returns, the redelivered command is answered from the record like any other read.
+
+**Reason.** The two halves of the open question were each half right, and the ruling takes the half of each
+that survives. Against answering at all: the answer to "what awaits me" is read from the record, which is
+what is unreachable, so there is nothing to answer *from*, and an adapter answering from a cache would be
+holding the state `adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds` forbids
+— a picture of the queue that may be wrong, offered with the confidence of an answer, which is reporting
+without binding at the moment the operator most needs to trust what they are told. For answering: refusing
+entirely makes a halted swarm indistinguishable from a dead process, which is `failure_posture.md` rule 2's
+signature failure turned toward the one person asking. The halt's own state is the one fact the adapter holds
+without the record — it is what the off-record announcement path already carries (rule 2), and the difference
+between announcing it and answering with it is direction, not capability. So the swarm says what it can say
+truthfully and nothing it cannot.
+
+**How the answer is bounded, and why it is not a second path.** The answer travels the off-record
+announcement path (`#outbound-the-operations-a-step-takes-on-the-channel`, the announcement row), which
+already exists, already runs without the record, and already carries exactly this content; it is addressed
+to the asker rather than broadcast, and that is the whole of the difference. It is sent **only in a chat the
+announcement path already reaches** — the binding the adapter holds from its configuration, read at start
+and not from the record — because the adapter cannot resolve a credential during a halt, and answering an
+unknown asker anywhere else would disclose the swarm's state to whoever asked. In that chat, the answer
+discloses nothing the announcement did not. It carries no decision, no options, and no keyboard, for the
+reason the announcement path carries none: a decision taken against an unreachable record cannot be recorded
+(`adapters.md#what-the-adapter-does-with-every-event`). And the command's delivery is **not acknowledged**:
+the adapter writes nothing during a halt and lets the channel redeliver, so when the record returns the same
+command arrives again and is answered properly; a read command has no write to deduplicate, so the
+redelivery costs nothing. The refusal above — the adapter does not act on a message during a halt — has this
+one carve-out, and it is the same carve-out the announcement path already is: the only messages sent without
+the record are those that ask for nothing and decide nothing.
+
+**The cost accepted** is that the operator cannot query state during a halt. That is correct rather than
+regrettable: there is no trustworthy state to query, and a design that offered some would be offering the
+operator a figure to act on that the swarm itself could not stand behind. **What would reopen it:** the swarm
+coming to hold, without the record, some second fact about itself that is true by construction — as its halt
+state is — rather than read. None is known; a candidate would have to be defended as such, and the last thing
+the record said is not one.
 
 ## Freshness
 
@@ -776,4 +840,4 @@ The per-update mapping, the handled / deliberately ignored / unhandled marking, 
 chat-message-is-not-an-instruction rule at length, the callback-payload trust distinction and both halves
 of what it licenses, the correlation rules, the two narrowings on what the adapter writes, and the
 treatment of the conditions the channel does not report are this document's, applying `adapters.md`'s rules
-to the channel's full update list. Open decisions 25 and 26 are opened here rather than resolved.
+to the channel's full update list. Decisions 25 and 26 were opened here and are ruled here.

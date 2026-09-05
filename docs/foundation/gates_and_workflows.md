@@ -8,7 +8,7 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `unclassified_action_type_fails_closed_and_loudly`, `gate_advisory_and_enforcing_paths_must_agree`,
 `gating_vocabulary_order_is_load_bearing`, throughput plan `ent_18b902cf72822373f9da8ced` decision
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
-memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram), and the operator's 2026-09-05 12:52 memo (revision 21: the general claim about self-modification, stated in `work_model.md` and cross-referenced from decision 17). Supersedes
+memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram), and the operator's 2026-09-05 12:52 memo (revision 21: the general claim about self-modification, stated in `work_model.md` and cross-referenced from decision 17), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 17 ruled here; the `dependency_cycle` reason class). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
 is `status.md`; how each concept is recorded is `data_model.md`.
 
@@ -316,28 +316,57 @@ principal is, or what a workflow requires, is the question the gate exists to as
 however good the reason. So a standing finding produces a **proposed** change with provenance back to the
 finding that raised it, and a principal with the authority to make that change takes it as an action.
 
-**Open decision 17: whether institutionalizing a standing finding is itself a workflow.** Registered in
-`conformance.md#the-register-of-open-design-decisions`. The operator's
-stated position is that it should be — that a standing finding produces tasks, that those tasks are
-institutionalization tasks, and that they go through a workflow built for them, so that the swarm's changes
-to itself are governed by the same machinery as its outward work. That reading is consistent with
-everything above and with `work_model.md#a-task-is-executed-only-through-a-workflow`, which admits no side
-door: a task that changes an agent or a workflow is executed through a workflow like any other, and its
-governance writes reach the gate at their step. What is **not** settled, and is not settled here, is the
-sequencing: whether the batch that raised the standing finding waits on the institutionalization task it
-created, or closes and leaves that task to its own intake. Deciding that requires ruling whether a
-workflow may hold on a condition discovered mid-flight, and whether a batch may depend on a task it
-created — both of which are open and neither of which this revision rules. Until they are ruled, a
-standing finding's proposed change is filed as a task entering intake on its own
-(`work_model.md#intake-is-every-tasks-first-workflow`), and the batch that raised it closes on its own
-steps; that is the state a reader should assume and not the design's ruling. The wider question the
-operator's position implies — whether workflows are the general mechanism for changing the swarm's own
-operation, and not only for doing its outward work — is answered *yes*, and it is stated as a rule of the
-work model rather than here, because it is true of every change to the swarm and not only of the ones a
-standing finding raises (`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`).
-What that section leaves to the operator is the default posture for a governance write (open decision 18);
-what stays open here is the sequencing between the batch that raised the finding and the task it created,
-which that section does not rule and does not depend on.
+**Ruled (decision 17, 2026-09-05): institutionalizing a standing finding is a workflow, and the batch that
+raised the finding does not wait for it.** Registered in `conformance.md#the-register-of-open-design-decisions`.
+Both halves. The first was the operator's stated position and follows from the work model's general rule: a
+standing finding produces a task, the task is an institutionalization task — one whose work is a change to
+the agent, the workflow, or the step that produced the finding — and it is executed like every other task,
+entering intake and going through the workflow intake names for it, with its governance writes reaching the
+action gate at their step (`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`).
+There is no side door for the swarm's changes to itself, and this is the case where the rule does the most
+work. The second half is the sequencing: **the raising batch closes on its own steps, and the
+institutionalization task enters intake independently.** The batch records no dependency on it —
+`work_model.md#a-batch-may-depend-on-a-task-it-created` permits one, and this ruling declines it for this
+class of task — and the link between the two is the provenance the task already carries back to the finding
+that raised it. What this revision's predecessor stated as the interim reading is now the rule.
+
+**Reason.** The operator's own framing of a finding separated two purposes — apply the input to the work in
+front of the swarm, *and* improve the swarm — and the standing axis exists to keep them separately recorded:
+the correction is owed to the batch, the change to what produced it is owed besides, and neither discharges
+the other. Coupling them at the sequencing would undo that separation. Every batch that produced a learning
+would hold, lease renewed, until the swarm had finished learning — until the institutionalization task had
+gone through intake, been prioritized against everything else, gone through its workflow, and had its
+governance writes permitted at the gate, which under the reserved default
+(`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`, decision 18) is
+a change the operator makes by hand. Outward work whose review surfaced a lesson would be the slowest work in
+the swarm, and the more the swarm learned the less it would ship — an inversion of priority that buys nothing,
+because the correction the finding owes the batch is made in the batch, and the change to the agent or the
+workflow cannot reach *this* batch anyway: it changes how the next batch of the kind is executed. The crux the
+open question named — whether a review step that judged a workflow wrong can honestly sign that the
+workflow's step was satisfied — resolves the same way. They are two claims, and the design records them as
+two: the verdict states whether the step's condition is met for this batch's work, and the finding's standing
+axis states that what produced the work will produce the defect again. A step owner that corrected the work
+and filed the finding as standing has signed nothing false; a step owner that signed without filing it has,
+and that is the failure the standing axis catches, not one that sequencing would.
+
+**What decision 14 permits and this ruling declines.** A batch may hold on a task it created where its
+sign-off would be a lie without it. An institutionalization task is not such a case, by the reasoning above,
+so a step owner does not record a `DEPENDS_ON` edge to one, and a batch whose step owner believes its work
+cannot close until the swarm has changed has misclassified the finding — the defect in the work is one-off
+and is corrected in the batch; the defect in the producer is standing and is the task's. Where a step owner
+genuinely cannot tell, the question goes to the operator as `undetermined_scope` (above), and the batch holds
+on that checkpoint, not on the task.
+
+**The cost accepted** is that the raising batch closes while its lesson is still a proposal, and the next
+batch of the same kind may be produced by the unchanged agent or workflow before the institutionalization
+task lands. That is the state the swarm is in for every lesson it has not yet institutionalized, and it is
+bounded by the task's own priority — a standing finding whose recurrence is costly is prioritized accordingly
+at its own intake. **What would reopen it:** a class of standing finding for which even one recurrence is
+not tolerable — where the producer must change *before* any further batch of the kind is executed. The
+remedy there is not to hold the raising batch, which changes nothing about the next one, but a declaration:
+a workflow whose entry condition or `applies_when` reads an open institutionalization task against its own
+type and holds the entry or seats the step; that is a change to a declaration and would be argued where
+declarations are (`workflows.md`).
 
 ### One step set, defined once, tested for parity
 
@@ -495,7 +524,7 @@ Two subjects entering one queue, and the subject edge deciding what resumes:
 ```mermaid
 flowchart TD
     A["an action the gate would not let through"] -->|"reason gate_hold"| CK
-    T["a task the swarm cannot advance"] -->|"repeated_lapse, unreadable_workflow, rounds_exhausted, unspawnable_assignee, unclaimed_step, undeclared_dependency, capability_denied, lossy_record_mutation, undetermined_scope"| CK
+    T["a task the swarm cannot advance"] -->|"repeated_lapse, unreadable_workflow, rounds_exhausted, unspawnable_assignee, unclaimed_step, undeclared_dependency, capability_denied, lossy_record_mutation, undetermined_scope, dependency_cycle"| CK
     CK["one checkpoint: the held state of its subject"] --> S["its subject: exactly one entity, named by the CHECKPOINTS edge"]
     S -.->|"never a subject"| NS["a step, a batch, an artifact"]
     CK --> F["it records the reason class, the needed input, the options, and whom it awaits"]

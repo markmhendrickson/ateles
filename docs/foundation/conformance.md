@@ -6,7 +6,7 @@ mechanism (built as ateles#744): names documents and paths, never what a checkou
 `binding_is_the_reviewer_reading_a_kernel_not_a_loading_order` and
 `ateles_binding_extends_three_existing_mechanisms`, synthesis `ent_b0ce322f768e4fc676b73139` (PR-29, C7),
 prior art `ent_08460968e6f49dac21510f4a` (OPA: decision decoupled from enforcement), and PR #745 operator
-review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and revision 21 (2026-09-05: the `gmail.md` and `calendar.md` keyed rows and their canonical-source entries), and revision 24 (2026-09-05: the `telegram.md` and `payments.md` keyed rows and their canonical-source entries).
+review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and revision 21 (2026-09-05: the `gmail.md` and `calendar.md` keyed rows and their canonical-source entries), and revision 24 (2026-09-05: the `telegram.md` and `payments.md` keyed rows and their canonical-source entries), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: twelve register rows moved from open to ruled).
 
 ## Purpose
 
@@ -213,36 +213,37 @@ measurements, and they belong there.
 
 **Status values.** **open** — argued in a document, unruled; every open decision has an argued home, and
 a row that could not name one would be recording a defect rather than a decision. **ruled** — settled and
-written into the design; ruled decisions are not listed individually here, because a ruling's home is the
-rule it became. **withdrawn** and **not a decision** — numbers that carry no question, kept in the table
+written into the design; a ruled row keeps its date, the ruling in one line, and the pointer to the rule it
+became, and nothing more — the reasoning, the cost, and what would reopen it are the home document's. The
+twelve of revision 12 predate the register and keep their one summary row. **withdrawn** and **not a decision** — numbers that carry no question, kept in the table
 so that they are not reused; see the two notes below.
 
 | # | The question | Argued in | Blocks | Status |
 |---|---|---|---|---|
 | 1–12 | the twelve questions of revision 12 | ruled and written into the documents they concern | — | **ruled** (2026-09-04) |
-| 13 | whether a batch may hold on a condition discovered mid-flight | `work_model.md#open-decision-13-whether-a-batch-may-hold-on-a-condition-discovered-mid-flight` | 14; the sequencing half of 17 | **open** |
-| 14 | whether a batch may depend on a task it created | `work_model.md#open-decision-14-whether-a-batch-may-depend-on-a-task-it-created` | the sequencing half of 17; depends on 13 | **open** |
+| 13 | whether a batch may hold on a condition discovered mid-flight | `work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight` | — | **ruled** (2026-09-05): yes; the step owner records a finding naming the condition, writes no sign-off, and renews the lease; no held state, no field; bounded by sign-off, checkpoint, or lapse |
+| 14 | whether a batch may depend on a task it created | `work_model.md#a-batch-may-depend-on-a-task-it-created` | — | **ruled** (2026-09-05): yes, as a case of 13; a `DEPENDS_ON` edge from the batch to the task, never a field; the sign-off is refused while it is unended; a cycle is refused at write and at attach, and one found later escalates every batch in it as `dependency_cycle` |
 | 15 | whether adapters live in a repository of their own | `adapters.md#the-adapter-and-the-engine-are-two-roles` | nothing; the section records the operator's lean as a lean and not as a ruling | **open** |
-| 16 | whether the swarm builds its inbound receivers or rides a shared one | `adapters.md#where-inbound-delivery-comes-from-is-an-open-decision-and-the-records-own-subscriptions-are-not-it` | where signature verification, redelivery, and the delivery id live | **open** |
-| 17 | whether institutionalizing a standing finding is itself a workflow, and how the two batches sequence | `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it` | nothing; blocked by 13 and 14 | **open** |
-| 18 | whether a governance write is reserved to the operator by default, or gated at a high blast tier | `work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other` | the default posture a project with no policy inherits | **open** |
+| 16 | whether the swarm builds its inbound receivers or rides a shared one | `adapters.md#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it` | — | **ruled** (2026-09-05): the adapter owns signature verification, delivery-id extraction, and acknowledgement; the transport listener may be shared plumbing that verifies, deduplicates, acknowledges, and parses nothing |
+| 17 | whether institutionalizing a standing finding is itself a workflow, and how the two batches sequence | `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it` | — | **ruled** (2026-09-05): it is a workflow, by the work model's general rule; the raising batch does not wait, and the institutionalization task enters intake independently |
+| 18 | whether a governance write is reserved to the operator by default, or gated at a high blast tier | `work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other` | — | **ruled** (2026-09-05): reserved; each governance class resolves to `NEVER` until the operator grants it a policy value, class by class |
 | 19 | — | never assigned; see the gap note below | — | **not a decision** |
 | 20 | — | never assigned as a distinct question; the two prose pointers that cited it named what is now 27 | — | **withdrawn** |
 | 21 | — | never assigned as a distinct question; the prose pointer that cited it named what is now 28 | — | **withdrawn** |
 | 22 | — | never assigned; see the gap note below | — | **not a decision** |
-| 23 | whether a mail thread is one artifact or a container of artifacts | `gmail.md#open-decision-23-whether-a-thread-is-one-artifact-or-a-container-of-artifacts` | nothing; should be taken with 24 | **open** |
-| 24 | whether a recurring calendar series is one artifact or many | `calendar.md#open-decision-24-whether-a-recurring-series-is-one-artifact-or-many` | what a task created against one occurrence refers to; should be taken with 23 | **open** |
-| 25 | whether a chat reaction may ever carry a decision | `telegram.md#what-this-document-does-not-decide` | nothing; a reaction is an observation until it is taken | **open** |
-| 26 | whether the swarm answers a read on the chat channel without the record | `telegram.md#what-this-document-does-not-decide` | nothing; a read during a halt is answered with the fact of the halt until it is taken | **open** |
-| 27 | whether a payment's approver must be shown what the verifier signed | `payments.md#what-this-document-does-not-decide` | nothing; may already be covered by the pinning rule, which is what would decide it | **open** |
-| 28 | what tolerance, if any, a payment's consent carries | `payments.md#what-this-document-does-not-decide` | nothing but a rail whose prices expire | **open** |
-| 29 | what depth or state counts as terminal, and where it is declared | `payments.md#what-this-document-does-not-decide` | an adapter that hardcodes a depth has made a risk decision that is not its own | **open** |
+| 23 | whether a mail thread is one artifact or a container of artifacts | `gmail.md#a-thread-and-its-messages-are-each-artifacts-related-by-part_of` | — | **ruled** (2026-09-05, with 24): both levels are artifacts, the message `PART_OF` its thread; an event links to the unit whose id it carries, an action to the unit its operation needs, a task to the unit it names |
+| 24 | whether a recurring calendar series is one artifact or many | `calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of` | — | **ruled** (2026-09-05, with 23): both levels are artifacts, the occurrence `PART_OF` its series; the same rule, stated once under linkage in `adapters.md` |
+| 25 | whether a chat reaction may ever carry a decision | `telegram.md#a-reaction-never-carries-a-decision` | — | **ruled** (2026-09-05): never; a reaction is an observation — it can be silently removed and its meaning is the channel's, not the swarm's |
+| 26 | whether the swarm answers a read on the chat channel without the record | `telegram.md#during-a-halt-a-read-on-the-channel-is-answered-with-the-halt-and-never-with-data` | — | **ruled** (2026-09-05): it answers with the halt itself — since when, and why — on the announcement path, in the chat that path already reaches, and with no data |
+| 27 | whether a payment's approver must be shown what the verifier signed | `payments.md#a-payments-approver-is-shown-exactly-what-the-verifier-signed` | — | **ruled** (2026-09-05): yes; the checkpoint carries payee, amount, currency, period, and rail as the `verify` sign-off recorded them, and `pay` is taken only on those parameters |
+| 28 | what tolerance, if any, a payment's consent carries | `payments.md#tolerance-is-an-action_policy-value-and-its-default-is-zero` | — | **ruled** (2026-09-05): a per-class `action_policy` value, zero where absent; any change to what the payee receives or the operator pays is a new checkpoint until the operator sets one |
+| 29 | what depth or state counts as terminal, and where it is declared | `payments.md#terminal-is-declared-in-the-rails-adapter-document-and-the-value-is-bound-per-instance` | — | **ruled** (2026-09-05): the criterion — settled, never sent, on a bank rail; *N* confirmations on a chain — is stated in the rail's adapter document; the value is bound per instance in the `vendor_binding`; a profile may deepen it and never shallow it |
 
-**Five decisions are argued under a section heading that does not name them**, because 25 through 29 are
-written as bold paragraphs inside their documents' *What this document does not decide* sections rather
-than as sections of their own. The pointers above resolve to the enclosing heading, which is the closest
-anchor that exists. Giving each its own heading, as 13, 14, 23, and 24 have, would make every pointer
-land on the decision itself; that is a change to those documents and is not made here.
+**Every ruled decision now has a heading of its own.** 25 through 29 were opened as bold paragraphs inside
+their documents' *What this document does not decide* sections, and the register's pointers resolved to the
+enclosing heading; the rulings of 2026-09-05 gave each its own section, as 13, 14, 23, and 24 already had, so
+every pointer above lands on the ruling itself. The one open decision, 15, is argued under the heading of the
+section that holds it, which names its subject rather than its number.
 
 **19 and 22 were never assigned, and the numbers stay unused.** Neither appears in any revision of any
 foundation document. They are the gaps left by several documents opening decisions concurrently on this
