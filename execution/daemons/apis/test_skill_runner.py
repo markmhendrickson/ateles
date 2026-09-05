@@ -2865,3 +2865,81 @@ class TestRequestedModelFromArgv:
 
     def test_handles_trailing_flag_without_value(self) -> None:
         assert skill_runner._requested_model("cursor", ["cursor-agent", "--model"]) is None
+# ── Prior-art contract (check existing context before building) ───────────────
+#
+# The contract exists because dispatched agents rebuilt work that already
+# existed (provider load balancing already in harness_router.py; an issue filed
+# against a clone 139 commits behind main). It rides the same injection path as
+# SWARM_GITHUB_CONTRACT deliberately — no separate flag, because a second flag
+# would just relocate the forgetting it exists to prevent.
+
+
+class TestPriorArtContract:
+    def test_absent_by_default(self) -> None:
+        """Default path must not carry the contract — the non-GitHub/SSE task
+        path stays byte-identical to before."""
+        prompt, degraded = skill_runner.build_system_prompt(
+            _make_def(prompt_markdown="Agent identity."), "Do the task."
+        )
+        assert not degraded
+        assert skill_runner.SWARM_PRIOR_ART_CONTRACT not in prompt
+
+    def test_present_when_contract_flag_true(self) -> None:
+        """Rides the SAME flag as the GitHub contract: one flag, both contracts.
+
+        This is the load-bearing assertion of the whole change. If someone later
+        gives the prior-art contract its own opt-in flag, this test fails — and
+        it should, because an opt-in prior-art check is one a brief author can
+        forget to request, which is the exact failure being fixed.
+        """
+        prompt, degraded = skill_runner.build_system_prompt(
+            _make_def(prompt_markdown="Agent identity."),
+            "Do the task.",
+            include_github_contract=True,
+        )
+        assert not degraded
+        assert skill_runner.SWARM_PRIOR_ART_CONTRACT in prompt
+        assert skill_runner.SWARM_GITHUB_CONTRACT in prompt
+        assert "Agent identity." in prompt
+        assert "Do the task." in prompt
+
+    def test_order_definition_then_contracts_then_skill(self) -> None:
+        """Order: definition → github contract → prior-art contract → skill_md."""
+        prompt, _ = skill_runner.build_system_prompt(
+            _make_def(prompt_markdown="DEFINITION_ANCHOR"),
+            "SKILL_ANCHOR",
+            include_github_contract=True,
+        )
+        assert (
+            prompt.index("DEFINITION_ANCHOR")
+            < prompt.index(skill_runner.SWARM_GITHUB_CONTRACT)
+            < prompt.index(skill_runner.SWARM_PRIOR_ART_CONTRACT)
+            < prompt.index("SKILL_ANCHOR")
+        )
+
+    def test_present_when_degraded(self) -> None:
+        """Degraded (no definition loaded) still gets the contract: checking for
+        existing work is useful regardless of which definition loaded."""
+        prompt, degraded = skill_runner.build_system_prompt(
+            _stub_def(), "Fallback instructions.", include_github_contract=True
+        )
+        assert degraded
+        assert skill_runner.SWARM_PRIOR_ART_CONTRACT in prompt
+        assert "Fallback instructions." in prompt
+
+    def test_names_all_three_checks_and_asks_for_a_report(self) -> None:
+        """Content assertions on the three checks that each caught a wasted run.
+
+        Asserted by substance rather than by exact wording so the prose can be
+        edited, but the checks themselves cannot be silently dropped.
+        """
+        contract = skill_runner.SWARM_PRIOR_ART_CONTRACT.lower()
+        assert "gh issue list" in contract and "gh pr list" in contract
+        assert "grep" in contract
+        assert "task" in contract and "plan" in contract
+        # The reporting requirement is what makes a skipped check visible in the
+        # transcript, and is what the measurement task samples for.
+        assert "report what you found" in contract
+        # Correcting a wrong brief must read as success, or an agent told to
+        # build something will build the duplicate anyway.
+        assert "premise is wrong" in contract
