@@ -103,6 +103,21 @@ refuse-and-requeue-as-fallback, and the hardcoded step-list floor (C5, below).
    providers exist, and in what order they are tried, is a `vendor_binding` and not a foundation concern —
    the classification is what outlives the vendors.
 
+   **The same classification governs an adapter's read of an external system.** A failed read during
+   hydration (`adapters.md#the-adapter-runs-before-and-after-a-step-never-during-it`) left no effect
+   either, so it is the same kind of failure and takes the same rule rather than a retry policy of its
+   own: retried with backoff, or deferred to the retry time the system stated, and never re-requested
+   immediately or on a fixed interval. Backoff is not optional here for a reason this rule's other cases
+   do not have: the thing being retried is **someone else's system**, and an adapter that re-requests on
+   every failure turns one unreachable dependency into sustained load on a system the swarm does not own
+   and may be rate-limited or blocked for. Where the system states its own reset — as a rate limit
+   commonly does — that stated time governs, being better information than any interval the adapter would
+   guess. Retries are per system rather than per step, so many steps waiting on one unreachable system
+   produce one backoff and not one each. What exhaustion does is not this rule's to say: an adapter read
+   is a step's declared read, so it holds the step, bounded, and the bound raises the checkpoint that
+   names the dependency (`gates_and_workflows.md#declaration-batch-projection`) — the retry schedule lives
+   here and the escalation lives there, one mechanism each.
+
 ## The operator-invoked halt, and what undoes an action already taken
 
 The halt of *The decision* above is automatic and has one cause: the record is unreachable. This section

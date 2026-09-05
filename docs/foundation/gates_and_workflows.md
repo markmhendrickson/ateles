@@ -68,6 +68,24 @@ it actually got back, is already readable, and the step states what it needs of 
 successfully but partially — scoped short, truncated, paged and not followed — is neither a failed read nor
 an empty result, and coverage is what tells the three apart.
 
+**The declared reads are resolved in a hydration phase before the step, and never during it.** The
+declaration says what must be readable; hydration is when it is made so. Before a step opens, one phase
+resolves every type in `reads_to_enter`: what the record already holds is read locally, and what an
+external system holds is imported through that system's adapter, which writes it to the record as
+observations on artifacts (`adapters.md#the-adapter-runs-before-and-after-a-step-never-during-it`). Both
+halves resolve against the same declaration, and the step does not begin until they do. The same phase runs
+again for `reads_to_close` before the sign-off is written. Nothing hydrates *during* a step: a step that
+reaches an external system mid-execution reintroduces the second source of truth the boundary rules exist
+to remove, and its inputs stop being a fixed set any reader can name. So a step's inputs are resolved,
+recorded, and readable before it runs, and what the step then works on is the record.
+
+**A hydration failure is the step's failure, and it takes the path a failed read already takes.** An
+adapter that cannot fulfil a read it was asked for does not return an empty result: the read is `unknown`,
+and the phase does not proceed to the step. That is the rule below, not a second one — the hold is bounded,
+the condition is announced off-record, and the bound raises one checkpoint naming the dependency. The point
+of routing it here rather than into a hydration-specific error path is that a step blocked on an external
+import and a step blocked on an unreadable local type are the same condition to every reader of the record.
+
 **A required read that returns `unknown` holds the step, bounded, then escalates.** The step does not open,
 or does not close, and the condition is announced on the off-record path (`failure_posture.md` rule 2)
 along with every other blocked claim in the window — cheap and correct while the cause is transient. The

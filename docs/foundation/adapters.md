@@ -68,6 +68,47 @@ result is a condition a step owner reads before signing, never a sign-off. This 
 the record an external system holds; what happens to it is information about the batch's tasks, not a
 step taken on them.
 
+### The adapter runs before and after a step, never during it
+
+The two invariants say the engine reads only the record and that no event advances a step. This says when
+the adapter runs relative to a step, which is the other half of the same boundary.
+
+An adapter reaches an external system at two moments in a step's lifecycle, and at no moment in between.
+**Before** a step, in the hydration phase the step's declared reads drive
+(`gates_and_workflows.md#declaration-batch-projection`): the phase resolves every type in `reads_to_enter`,
+reading from the record what the record holds and importing through the adapter what an external system
+holds — creating or updating the artifact for the external record, as observations with sourcing and
+coverage. **After** a step, or rather at its closing edge, taking the actions the step produced and writing
+their confirmations back (below). **During** a step, nothing: the step works on what hydration resolved, and
+reaches no external system itself.
+
+The reason is the first invariant applied in time rather than in structure. A step that calls out
+mid-execution has a second source of truth for its own inputs, one that can answer differently at two
+points in the same step, so what the step decided on stops being reconstructable from the record. Hydrating
+first makes the inputs a fixed, recorded set: what the step read is what the record holds, with provenance,
+at a point a reader can name.
+
+**The declaration is what the adapter is asked for.** The adapter is not told to fetch what it thinks
+useful; the step's declaration states the types and, for adapter-sourced types, the freshness required, and
+the hydration phase asks the adapter for exactly that. An import that satisfies no declared read is not
+part of hydration.
+
+**A read the adapter cannot fulfil fails the phase, and therefore the step.** The adapter does not return an
+empty result standing in for a system it could not reach — that is the permissive synthesis
+`gates_and_workflows.md#declaration-batch-projection` forbids. It returns `unknown`, the hydration phase
+does not proceed, and the step does not open (or, for `reads_to_close`, the sign-off is not written). What
+happens next is the rule that section already states — **hold, bounded, then escalate**: the condition is
+announced off-record while it may be transient, and the bound raises one checkpoint naming the dependency
+the step could not read. No separate failure path is defined here, because a step held on an unreachable
+external system and one held on an unreadable local type are one condition.
+
+**Retrying the read is `failure_posture.md` rule 8, which covers it.** A failed read left no effect, so it
+is retried with backoff, or deferred to the reset time the system stated where it states one. Rule 8 states
+there why backoff is mandatory at this boundary in particular — the system being retried belongs to someone
+else, and an adapter that re-requests on every failure batters it — and that the schedule is per external
+system rather than per waiting step. It is cited rather than restated so one retry classification serves the
+runner and the adapter both (principle 6).
+
 ## What the adapter does with every event
 
 The four outcomes above are the adapter's whole vocabulary. Five rules decide among them.
@@ -141,6 +182,54 @@ and whether any interval was ever completely read — is then **derived** by rea
 artifact's observations, never a `last_synced_at` field the adapter maintains: a maintained field needs a
 process to keep it true, which is what principle 11 forbids, and it fails in the worst direction, going
 stale into a confident-looking value at exactly the moment the adapter stops reading the system.
+
+## What the record supplies, and what an adapter therefore never builds
+
+The rules above lean on the record having certain capabilities. They are named here abstractly — what the
+capability is and what it is for — because an adapter author's most common error is rebuilding one of them
+beside the record, and a rebuilt one is the maintained state principle 11 forbids. Which calls express them
+is the client's business and not the design's.
+
+**An entity carries the external system and host it came from.** An artifact is identified by `system` and
+`external_id`, and every observation on it carries the source that produced it: the external system, the
+host or instance within it where several exist, and the adapter that read it. So "which system does this
+record live in, and which instance of it" is a property of the record, not a configuration file the adapter
+consults — which is what lets two instances of one system be told apart in the record rather than only in
+whatever process happened to read them.
+
+**Provenance links an observation to the source it was interpreted from.** The record's provenance is not
+only a stamp naming a writer; it links an observation to a **source** — the raw thing that was read — and,
+where the value was extracted rather than transcribed, to the **interpretation** that produced it from that
+source. That is the chain sourcing and coverage ride on, and it is what makes an adapter's write auditable
+back to what the external system actually returned rather than only to the adapter's summary of it.
+
+**Reconstruction as of a time, in two senses that must not be conflated.** The record reconstructs an
+entity's state as it stood at a past moment, and it does so along two distinct time axes. One is **event
+time**: the state implied by what had *happened* by time T, ordered by the time each source states for its
+own observation. The other is **ingestion time**: the state the swarm could actually *have read* at time T,
+ordered by when each observation arrived in the record — which excludes observations that describe an
+earlier moment but landed later. The two differ exactly where a backfill or a late delivery exists, and the
+second is the one that answers "what did this step know when it signed", because reading an entity's
+history along event time alone lets a fact that arrived afterwards appear to have been available.
+
+Three things in this design need that, and none of them can be answered by reading current state:
+
+- **Freshness.** Whether an interval was ever completely read is a question about observations over time,
+  and it is asked against ingestion time. This is why freshness is derived and never stored: the derivation
+  has a real answer, where a stored field has only its last value.
+- **What a sign-off judged.** A sign-off is pinned to the artifact state it judged
+  (`data_model.md#record-conventions`), and reconstructing that state means reconstructing what the record
+  held when the verdict was written — as it was readable then, not as it reads now. A verdict reviewed
+  later, against a state that includes observations that arrived after it, is judged on information its
+  step owner never had.
+- **A drop or a hold, reconstructed after the fact.** An adapter that dropped a delivery, or a step that
+  held on a read, is diagnosed by asking what the record held at that moment. Current state cannot answer
+  it, because the condition has usually resolved by the time anyone asks.
+
+**So an adapter never keeps history of its own.** No sync log, no last-seen cursor table standing in for
+coverage, no local cache of what an artifact looked like at some earlier point. Each is a second copy of
+something the record already reconstructs, needing a process to keep it true, and diverging silently the
+moment that process stops.
 
 ## Outbound: steps produce actions, adapters take them
 

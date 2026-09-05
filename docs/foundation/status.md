@@ -447,6 +447,18 @@ normalizes events into one shape and hands them on in-process, so writing that s
 observation on an artifact, and having the pipeline read it from there, is the design's cut applied to
 the code that exists.
 
+## Revision 14 (2026-09-05): hydration, the adapter's read retry, and the as-of read
+
+Three rules from the operator's 2026-09-05 voice memos, written into `gates_and_workflows.md`,
+`adapters.md`, and `failure_posture.md`. Each is **designed and not built**. Read by grepping the tokens
+named on this branch; nothing on prod or on any deployed checkout was inspected.
+
+| Design rule (revision 14) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| hydration: a phase before a step resolves its declared reads, local reads and adapter imports together, and the step does not begin until they do; nothing hydrates during a step | nothing; revision 12 declared *what* a step must read and said nothing about when or how it is resolved | **designed and not built.** `reads_to_enter` and `reads_to_close` appear nowhere on this branch, so there is no declaration for a phase to resolve. The one built token that reads similarly is unrelated: `hydrate_snapshot` in `lib/daemon_runtime/sse_client.py` re-fetches an entity snapshot the SSE stream omits, per event, for daemon routing — it answers to no step and to no declaration. Steps still read whatever they read, whenever they read it | the step-execution path; `workflow_definition.gates[]` |
+| an adapter's failed read of an external system is retried with backoff, or deferred to the reset time the system states; the schedule is per external system, not per waiting step | nothing; rule 8 classified the runner's failure to start, and no rule covered an adapter's read | **designed and not built** at the boundary. Backoff exists on this branch only for task re-dispatch (`task_watchdog.py`, exponential, capped), which is rule 5's path and not this one. No adapter read path applies backoff, none reads a stated reset time, and `github_gateway.py`'s only sleep is a fixed hourly loop — so a failing external read is re-requested on the next tick at a constant rate | the adapter read paths; `github_gateway.py`; the mail poller |
+| the as-of read along two axes — event time and ingestion time — as the derivation behind freshness, what a sign-off judged, and the reconstruction of a past drop or hold | nothing; the foundation derived freshness from provenance and never named the reconstruction that derivation needs | **designed and not built.** The record supplies the capability (`at` for event time, `at_ingested` for ingestion time), and nothing in this checkout calls it: neither token appears on this branch. Every reader that asks what was known at a past moment reads current state instead, so a backfilled observation is indistinguishable from one that was available at the time | every freshness read; the sign-off review path; forensic capture |
+
 ## `github.md`: the events with no defined response (revision 13, 2026-09-04)
 
 `docs/foundation/github.md` enumerates every event GitHub can deliver, from GitHub's own webhook event and

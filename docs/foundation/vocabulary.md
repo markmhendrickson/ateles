@@ -755,6 +755,36 @@ confident-looking value at the moment that process stops.
 to forbid them); freshness of a [sign-off](#sign-off) against an artifact's head (that is its own derived
 read); a stored freshness flag.
 
+### hydration
+**Definition:** the phase that resolves a [step](#step)'s declared [read dependencies](#read-dependency)
+before the step runs — reading from the record what the record holds, and importing through an
+[adapter](#adapter) what an external system holds, as [observations](#observation) on
+[artifacts](#artifact) — so that the step begins only once every declared type is readable.
+It runs before a step opens against `reads_to_enter`, and again before a [sign-off](#sign-off) is written
+against `reads_to_close`; nothing is imported during the step itself. A read hydration cannot fulfil is
+`unknown`, and the step holds, bounded, then [escalates](#escalate).
+**See:** [`adapters.md#the-adapter-runs-before-and-after-a-step-never-during-it`](adapters.md#the-adapter-runs-before-and-after-a-step-never-during-it),
+[`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
+**Never:** —
+**Not for:** hydration for an [adapter](#adapter)'s own scheduled polling (that produces
+[signals](#signal), and answers to no step's declaration); hydration for a read a step performs mid-execution
+(the design has none); "prefetch" or "warm-up" for hydration.
+
+### as-of read
+**Definition:** a read that reconstructs what the record held at a past moment rather than now, along
+either of two axes: **event time**, the state implied by what had happened by that moment, or **ingestion
+time**, the state that was actually readable then — which excludes [observations](#observation) describing
+an earlier moment that arrived later.
+Ingestion time is the axis that answers what a [step](#step) knew when it signed; event time answers what
+was true. [Freshness](#freshness), the state a [sign-off](#sign-off) judged, and the reconstruction of a
+past [drop](#dropped) or hold are all derived through it, which is why none of them is stored.
+**See:** [`adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`](adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds).
+**Never:** —
+**Not for:** an as-of read for replay of execution (reading history back is not re-running work —
+[`failure_posture.md#refuse-resume-by-replay-where-actions-are-consent-gated`](failure_posture.md#refuse-resume-by-replay-where-actions-are-consent-gated));
+an as-of read along event time for what was known (that is the look-ahead the ingestion axis exists to
+prevent).
+
 ## Authority model (`authority_model.md`)
 
 ### authority
