@@ -223,7 +223,9 @@ stored object or a read model.
 
 ## Contradictions this document settles
 
-**C9**: open, deliberately, above. **C14** and **C17**: delegation attenuates; `Indeterminate` is deny.
+**C9**: settled, above — the human principal is an `operator` entity; `operator_profile` stays
+descriptive and carries no authority edges. **C14** and **C17**: delegation attenuates; `Indeterminate`
+is deny.
 **C8**: attribution is per agent by design; whether a write is traced to a per-agent signature is
 `status.md`. **C13**: open, above. **C19** (#378's step map says implement while the plan says design) is
 a state of two records, not a design question: `status.md`.

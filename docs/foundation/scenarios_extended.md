@@ -3,6 +3,18 @@
 **Not on the review reading list.** Companion to [`scenarios.md`](scenarios.md). Walkthroughs (a)–(d)
 stay in that file; these (e)–(j) are human reference so the reading block stays under budget.
 
+## Purpose
+
+Carry the walkthroughs that do not fit [`scenarios.md`](scenarios.md)'s reading-block budget, in the
+same form: one situation, the invariants it exercises, and what the record shows afterwards. Like its
+companion, it walks the design through concrete cases and never states the state of a checkout.
+
+## Scope
+
+Scenarios (e)–(j) only. The design these walk is stated in `work_model.md`,
+`gates_and_workflows.md`, `failure_posture.md`, and `authority_model.md`; where a walkthrough and one
+of those disagree, the owning document governs. Nothing here is normative on its own.
+
 ## (e) A task detached from a batch
 
 Review finds that one of the three tasks does not belong in the change. The task is split out: its

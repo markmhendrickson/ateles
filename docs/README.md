@@ -67,8 +67,8 @@ Keyed (read when matching paths change — see `conformance.md`):
   record class, and the rule that keeps state out of the foundation.
 - [**Authority model**](foundation/authority_model.md) — the tuple `principal + domain + scope + action +
   conditions + time` defined whole: principals, tenancy, ownership, grants, attribution, delegation,
-  approval, quorum and separation of duties, and the initiative objects, with the one identity decision
-  (C9) and the P4 brief's questions marked open.
+  approval, quorum and separation of duties, and the initiative objects, with the identity decision
+  (C9) settled on an `operator` entity and the P4 brief's questions marked open.
 
 Authored companions (design prose; **not** inlined into review prompts):
 

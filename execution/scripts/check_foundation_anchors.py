@@ -51,9 +51,28 @@ def headings(path: Path) -> set[str]:
     return out
 
 
+class MissingCorpus(Exception):
+    """The directory this check inspects is absent or empty.
+
+    Exiting 0 on a missing corpus reports a pass for a check that never ran — the "reports without
+    binding" defect the foundation documents name. The check fails closed instead, naming the root it
+    inspected so a wrong ``--root`` is distinguishable from a genuinely missing directory.
+    """
+
+
 def check(root: Path) -> list[str]:
     fdir = root / FOUNDATION_DIR
+    if not fdir.is_dir():
+        raise MissingCorpus(
+            f"no {fdir} (looked under --root {root}); nothing was checked. "
+            f"Run from the repo checkout, or pass --root pointing at one."
+        )
     files = sorted(fdir.glob("*.md"))
+    if not files:
+        raise MissingCorpus(
+            f"{fdir} contains no .md files (looked under --root {root}); nothing was checked. "
+            f"Run from the repo checkout, or pass --root pointing at one."
+        )
     table = {p.name: headings(p) for p in files}
     broken: list[str] = []
     for path in files:
@@ -81,7 +100,11 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
     args = ap.parse_args(argv)
-    broken = check(args.root)
+    try:
+        broken = check(args.root)
+    except MissingCorpus as exc:
+        print(f"anchor check: {exc}")
+        return 1
     for b in broken:
         print(b)
     print(f"anchor check: {len(broken)} broken link(s)")

@@ -367,10 +367,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--top", type=int, default=5, help="most common advisory terms to list")
     args = ap.parse_args(argv)
 
-    vocab_path = args.root / FOUNDATION_DIR / VOCABULARY
+    fdir = args.root / FOUNDATION_DIR
+    vocab_path = fdir / VOCABULARY
+    # Fail closed on a missing corpus. Exiting 0 here reported a pass for a check that never ran —
+    # the "reports without binding" defect these documents name. Name the root so a wrong --root is
+    # distinguishable from a genuinely absent directory.
+    if not fdir.is_dir():
+        print(
+            f"vocabulary check: no {fdir} (looked under --root {args.root}); nothing was checked. "
+            f"Run from the repo checkout, or pass --root pointing at one."
+        )
+        return 1
     if not vocab_path.is_file():
-        print(f"no {vocab_path}; nothing to check")
-        return 0
+        print(
+            f"vocabulary check: no {vocab_path} (looked under --root {args.root}); nothing was "
+            f"checked. Run from the repo checkout, or pass --root pointing at one."
+        )
+        return 1
     vocab_text = vocab_path.read_text(encoding="utf-8")
     for key in missing_pattern_entries(vocab_text):
         print(f"PATTERNS key {key!r} names no ### entry in {VOCABULARY}; its regex bans are not applied")

@@ -101,7 +101,9 @@ docs from this sediment.
 Architecture/operating docs that match the audited reality:
 
 `architecture.md`, `taxonomy.md`, `phases.md`, `data_types.md`, `neotoma_vs_alternatives.md`,
-`foundation/*` (the seven foundation documents, plus `foundation/status.md`, the dated implementation-gap measurement), `swarm_smoke_test_plan.md`, `smoke_test_runbook.md`,
+`foundation/*` (14 documents: a 3-document always-read kernel, 7 path-keyed documents, and 4 authored
+companions — `scenarios.md`, `scenarios_extended.md`, `workflows.md`, and `foundation/status.md`, the
+dated implementation-gap measurement), `swarm_smoke_test_plan.md`, `smoke_test_runbook.md`,
 `agent_execution_runbook.md`, `agent_execution_architecture.md`, `a2a.md`, `pr_review_routing.md`,
 `swarm-trigger-layer.md`, `swarm_github_interaction_design.md`,
 `swarm_qa_evals_design.md`, `swarm_qa_evals_qe3_design.md`, `durable_execution_substrate.md`, `aauth.md`,

@@ -354,12 +354,21 @@ class TestRealDocumentBudget:
     review prompts carry the contract they are supposed to enforce.
     """
 
+    # strict=True on purpose. The over-cap state is a known, measured fact, not a flaky one: if this
+    # test ever passes, the budget pass has landed and the marker is stale, which should fail loudly
+    # rather than sit here reporting an xpass nobody reads. Removing the marker is the operator's
+    # budget-pass commit, not a test edit.
     @pytest.mark.xfail(
-        strict=False,
+        strict=True,
         reason=(
-            "PR #745 revision 6: the operator directed that content settles before budget; the "
-            "kernel and vocabulary.md are over the caps until the operator's budget pass "
-            "(docs/foundation/status.md, 'Reading-list budget and keying')."
+            "PR #745: the operator directed that content settles before budget, and the rule is "
+            "cut and split, never raise the cap. Measured at head a2f9d71: the three-document "
+            "kernel is 59,390 chars against MAX_BLOCK_CHARS=40,000 (principles.md 13,352; "
+            "work_model.md 16,106; gates_and_workflows.md 29,932), and every kernel and keyed "
+            "document exceeds MAX_DOC_CHARS=12,000 — vocabulary.md (73,842) and github.md (45,714) "
+            "by the widest margins. Cutting ~19.4k of prose to close the block gap is a content "
+            "decision the operator owns; this marker stays until that budget pass lands. "
+            "See docs/foundation/status.md, 'Reading-list budget and keying'."
         ),
     )
     def test_real_documents_fit_reading_block_budget(self) -> None:
@@ -580,3 +589,161 @@ class TestVocabularyLint:
         assert all(h.file.endswith("work_model.md") for h in never_hits)  # status.md skipped
         assert [h.ban.term for h in advisory] == ["ticket"]
         assert mod.main(["--root", str(tmp_path), "--quiet-advisory"]) == 1
+
+
+class TestGitHubKeyedReadings:
+    """github.md is keyed to the GitHub gateway, harness, and Vanellus paths.
+
+    conformance.md's keyed table names those paths; a keyed row is a control only if
+    ``select_readings()`` actually returns the document for a change touching them. A row that
+    matched nothing would read as coverage while no review prompt ever carried the document.
+    """
+
+    GATEWAY_PATHS = [
+        "execution/daemons/apis/github_gateway.py",
+        "execution/daemons/apis/swarm_dispatch.py",
+        "execution/daemons/apis/review_panel.py",
+    ]
+    HARNESS_PATHS = ["execution/mcp/github_harness/index.js"]
+    VANELLUS_PATHS = [".claude/skills/vanellus/SKILL.md", "docs/agents/vanellus.md"]
+    LANIUS_PATHS = [
+        "execution/scripts/lanius_sweep.py",
+        ".claude/skills/lanius/SKILL.md",
+        "docs/agents/lanius.md",
+    ]
+
+    def test_github_md_is_a_reading_list_member(self) -> None:
+        """The document is keyed at all — not merely present on disk."""
+        rl = load_reading_list(_REPO_ROOT)
+        assert rl is not None
+        members = list(
+            dict.fromkeys([*rl.kernel, *(d for e in rl.keyed for d in e.docs)])
+        )
+        assert "docs/foundation/github.md" in members
+
+    @pytest.mark.parametrize(
+        "path",
+        GATEWAY_PATHS + HARNESS_PATHS + VANELLUS_PATHS + LANIUS_PATHS,
+    )
+    def test_each_keyed_path_selects_github_md(self, path: str) -> None:
+        """Every path conformance.md keys to github.md selects it."""
+        rl = load_reading_list(_REPO_ROOT)
+        assert rl is not None
+        selected = [r.doc for r in select_readings(rl, [path], _REPO_ROOT)]
+        assert "docs/foundation/github.md" in selected, path
+
+    def test_github_md_is_not_selected_for_unrelated_paths(self) -> None:
+        """The key is scoped: a change nowhere near the code host does not carry it.
+
+        Without this, a row matching everything would satisfy the positive tests above while
+        making the keying meaningless.
+        """
+        rl = load_reading_list(_REPO_ROOT)
+        assert rl is not None
+        for path in (
+            "lib/daemon_runtime/task_claim.py",
+            "lib/daemon_runtime/gating.py",
+            "execution/daemons/apis/task_watchdog.py",
+        ):
+            selected = [r.doc for r in select_readings(rl, [path], _REPO_ROOT)]
+            assert "docs/foundation/github.md" not in selected, path
+
+    def test_editing_github_md_selects_itself(self) -> None:
+        """Changing the document carries the document, so its own edits are reviewed against it."""
+        rl = load_reading_list(_REPO_ROOT)
+        assert rl is not None
+        selected = [
+            r.doc for r in select_readings(rl, ["docs/foundation/github.md"], _REPO_ROOT)
+        ]
+        assert "docs/foundation/github.md" in selected
+
+
+class TestAnchorCheck:
+    """check_foundation_anchors.py is registered in conformance.md#mechanical-checks-on-this-directory.
+
+    A check registered in a document but run by no test is exactly the "reports without binding"
+    defect the foundation names: it would rot silently. This runs it against the real documents and
+    proves it fails on a planted break and on a missing corpus.
+    """
+
+    def _anchors(self):
+        import importlib.util
+
+        script = _REPO_ROOT / "execution" / "scripts" / "check_foundation_anchors.py"
+        spec = importlib.util.spec_from_file_location("check_foundation_anchors", script)
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_real_documents_have_no_broken_anchors(self) -> None:
+        mod = self._anchors()
+        broken = mod.check(_REPO_ROOT)
+        assert broken == [], broken
+        assert mod.main(["--root", str(_REPO_ROOT)]) == 0
+
+    def test_a_planted_broken_anchor_is_reported(self, tmp_path: Path) -> None:
+        """Revert-the-fix check: a link to a heading that does not exist fails the check."""
+        mod = self._anchors()
+        fdir = tmp_path / "docs" / "foundation"
+        fdir.mkdir(parents=True)
+        (fdir / "a.md").write_text(
+            "# A\n\n## Real Section\n\nSee [ok](b.md#present) and [bad](b.md#absent).\n"
+        )
+        (fdir / "b.md").write_text("# B\n\n## Present\n\nText.\n")
+        broken = mod.check(tmp_path)
+        assert len(broken) == 1, broken
+        assert "missing anchor #absent" in broken[0]
+        assert mod.main(["--root", str(tmp_path)]) == 1
+
+    def test_a_planted_missing_file_is_reported(self, tmp_path: Path) -> None:
+        mod = self._anchors()
+        fdir = tmp_path / "docs" / "foundation"
+        fdir.mkdir(parents=True)
+        (fdir / "a.md").write_text("# A\n\nSee [gone](nosuch.md#x).\n")
+        broken = mod.check(tmp_path)
+        assert len(broken) == 1, broken
+        assert "missing file nosuch.md" in broken[0]
+
+    def test_missing_corpus_fails_closed(self, tmp_path: Path) -> None:
+        """An absent docs/foundation/ must not report a pass for a check that never ran."""
+        mod = self._anchors()
+        with pytest.raises(mod.MissingCorpus) as exc:
+            mod.check(tmp_path)
+        assert str(tmp_path) in str(exc.value)  # the hint names the root it inspected
+        assert mod.main(["--root", str(tmp_path)]) == 1
+
+    def test_empty_corpus_fails_closed(self, tmp_path: Path) -> None:
+        """A directory with no .md files is a missing corpus too, not a clean pass."""
+        mod = self._anchors()
+        (tmp_path / "docs" / "foundation").mkdir(parents=True)
+        with pytest.raises(mod.MissingCorpus):
+            mod.check(tmp_path)
+        assert mod.main(["--root", str(tmp_path)]) == 1
+
+
+class TestVocabularyCheckEmptyState:
+    """The vocabulary check fails closed on a missing corpus, same defect class as the anchors check."""
+
+    def _lint(self):
+        import importlib.util
+
+        script = _REPO_ROOT / "execution" / "scripts" / "check_foundation_vocabulary.py"
+        spec = importlib.util.spec_from_file_location("check_foundation_vocabulary", script)
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_missing_foundation_dir_fails_closed(self, tmp_path: Path, capsys) -> None:
+        mod = self._lint()
+        assert mod.main(["--root", str(tmp_path), "--quiet-advisory"]) == 1
+        assert str(tmp_path) in capsys.readouterr().out  # names the root it inspected
+
+    def test_missing_vocabulary_file_fails_closed(self, tmp_path: Path, capsys) -> None:
+        mod = self._lint()
+        (tmp_path / "docs" / "foundation").mkdir(parents=True)
+        assert mod.main(["--root", str(tmp_path), "--quiet-advisory"]) == 1
+        assert "vocabulary.md" in capsys.readouterr().out
