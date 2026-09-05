@@ -6,7 +6,7 @@ mechanism (built as ateles#744): names documents and paths, never what a checkou
 `binding_is_the_reviewer_reading_a_kernel_not_a_loading_order` and
 `ateles_binding_extends_three_existing_mechanisms`, synthesis `ent_b0ce322f768e4fc676b73139` (PR-29, C7),
 prior art `ent_08460968e6f49dac21510f4a` (OPA: decision decoupled from enforcement), and PR #745 operator
-review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and revision 21 (2026-09-05: the `gmail.md` and `calendar.md` keyed rows and their canonical-source entries), and revision 24 (2026-09-05: the `telegram.md` and `payments.md` keyed rows and their canonical-source entries), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: twelve register rows moved from open to ruled).
+review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and revision 21 (2026-09-05: the `gmail.md` and `calendar.md` keyed rows and their canonical-source entries), and revision 24 (2026-09-05: the `telegram.md` and `payments.md` keyed rows and their canonical-source entries), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: twelve register rows moved from open to ruled), and the operator's 2026-09-05 rulings of decision 15 and decision 30 (revision 27: the last open row moved to ruled, and the recurring task registered as ruled on the operator's proposal).
 
 ## Purpose
 
@@ -223,7 +223,7 @@ so that they are not reused; see the two notes below.
 | 1–12 | the twelve questions of revision 12 | ruled and written into the documents they concern | — | **ruled** (2026-09-04) |
 | 13 | whether a batch may hold on a condition discovered mid-flight | `work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight` | — | **ruled** (2026-09-05): yes; the step owner records a finding naming the condition, writes no sign-off, and renews the lease; no held state, no field; bounded by sign-off, checkpoint, or lapse |
 | 14 | whether a batch may depend on a task it created | `work_model.md#a-batch-may-depend-on-a-task-it-created` | — | **ruled** (2026-09-05): yes, as a case of 13; a `DEPENDS_ON` edge from the batch to the task, never a field; the sign-off is refused while it is unended; a cycle is refused at write and at attach, and one found later escalates every batch in it as `dependency_cycle` |
-| 15 | whether adapters live in a repository of their own | `adapters.md#the-adapter-and-the-engine-are-two-roles` | nothing; the section records the operator's lean as a lean and not as a ruling | **open** |
+| 15 | whether adapters live in a repository of their own | `adapters.md#the-adapter-and-the-engine-are-two-roles` | — | **ruled** (2026-09-05): bundled in this repository, for now; the six admission obligations are checked by mechanisms here, and separating would split their review across two release cadences before a second consumer exists; separation is the intended end state, revisited when a second consumer of the adapters exists, not in anticipation of one |
 | 16 | whether the swarm builds its inbound receivers or rides a shared one | `adapters.md#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it` | — | **ruled** (2026-09-05): the adapter owns signature verification, delivery-id extraction, and acknowledgement; the transport listener may be shared plumbing that verifies, deduplicates, acknowledges, and parses nothing |
 | 17 | whether institutionalizing a standing finding is itself a workflow, and how the two batches sequence | `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it` | — | **ruled** (2026-09-05): it is a workflow, by the work model's general rule; the raising batch does not wait, and the institutionalization task enters intake independently |
 | 18 | whether a governance write is reserved to the operator by default, or gated at a high blast tier | `work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other` | — | **ruled** (2026-09-05): reserved; each governance class resolves to `NEVER` until the operator grants it a policy value, class by class |
@@ -238,19 +238,22 @@ so that they are not reused; see the two notes below.
 | 27 | whether a payment's approver must be shown what the verifier signed | `payments.md#a-payments-approver-is-shown-exactly-what-the-verifier-signed` | — | **ruled** (2026-09-05): yes; the checkpoint carries payee, amount, currency, period, and rail as the `verify` sign-off recorded them, and `pay` is taken only on those parameters |
 | 28 | what tolerance, if any, a payment's consent carries | `payments.md#tolerance-is-an-action_policy-value-and-its-default-is-zero` | — | **ruled** (2026-09-05): a per-class `action_policy` value, zero where absent; any change to what the payee receives or the operator pays is a new checkpoint until the operator sets one |
 | 29 | what depth or state counts as terminal, and where it is declared | `payments.md#terminal-is-declared-in-the-rails-adapter-document-and-the-value-is-bound-per-instance` | — | **ruled** (2026-09-05): the criterion — settled, never sent, on a bank rail; *N* confirmations on a chain — is stated in the rail's adapter document; the value is bound per instance in the `vendor_binding`; a profile may deepen it and never shallow it |
+| 30 | how a recurring task is modelled | `work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next` | — | **ruled** (2026-09-05, on the operator's proposal): one live instance carrying its own `recurrence` rule; its closing sign-off creates the next instance, `FOLLOWS` task to task, with `due_date` computed from the schedule and never from the completion; the reschedule-instead-of-complete pattern is superseded for tasks modelled this way; an action series is a different thing and the two meet only at the gate |
 
 **Every ruled decision now has a heading of its own.** 25 through 29 were opened as bold paragraphs inside
 their documents' *What this document does not decide* sections, and the register's pointers resolved to the
 enclosing heading; the rulings of 2026-09-05 gave each its own section, as 13, 14, 23, and 24 already had, so
-every pointer above lands on the ruling itself. The one open decision, 15, is argued under the heading of the
-section that holds it, which names its subject rather than its number.
+every pointer above lands on the ruling itself. 15 and 30 are argued under headings that name their subject
+rather than their number, as 13 and 14 are. No row is open: the register still exists because a ruled row is
+where a reviewer learns a question was once open and where its rule now lives, and because the next author
+reads it before opening a question that was already taken.
 
 **19 and 22 were never assigned, and the numbers stay unused.** Neither appears in any revision of any
 foundation document. They are the gaps left by several documents opening decisions concurrently on this
 branch and renumbering around each other, and they are recorded as gaps rather than closed up: renumbering
 would break every cross-reference the documents already carry, and silence would invite the next author to
 reuse the number for something unrelated. **Do not assign 19 or 22 to a new decision.** The next number is
-30.
+31.
 
 **20 and 21 were assigned, then renumbered, and two pointers were left behind.** Both were opened in
 `payments.md` and renumbered to 27 and 28 before that document was committed, to avoid colliding with 23

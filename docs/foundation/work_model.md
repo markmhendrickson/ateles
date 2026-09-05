@@ -9,8 +9,9 @@ review (2026-09-04), and the operator's 2026-09-05 review (revision 18: how a ba
 chooses its workflow; revision 20: the batch-formation diagram, on the operator's request for visuals
 during review), and the operator's 2026-09-05 12:52 memo (revision 21: workflows as the general mechanism
 for changing the swarm's own operation), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18,
-23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default).
-Supersedes `docs/archive/task_execution_loop.md`. What is built
+23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default),
+and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: one live instance,
+completion creates the next, `FOLLOWS` task to task). Supersedes `docs/archive/task_execution_loop.md`. What is built
 is `status.md`; how each concept is recorded is `data_model.md`.
 
 ## Purpose
@@ -587,6 +588,178 @@ a live one. Work needing two workflows at once is split into child tasks, one pe
 Children `PART_OF` a parent (at most one parent). Parent completion is derived from children's terminal
 states. Children go through workflows independently. A parent never enters a workflow — it is a
 grouping, and a batch carries tasks that are executed, which a parent never is.
+
+### A recurring task is one live instance, and its completion creates the next
+
+Some work is owed on a schedule rather than once: a report each period, a check each week, a payment
+each month. The rules above have no clause for it, and the obvious way to add one — a task that is
+completed, then reset to `open` with its `due_date` moved forward — is the mutate-a-field pattern this
+document argues against everywhere else: a process has to perform the reset, the completed occurrence
+leaves no record of itself once the fields are overwritten, and a series whose process stops looks
+identical to a series that is up to date. This section states the design's answer.
+
+**Ruled (decision 30, 2026-09-05): a recurring task is one task at a time, carrying its own recurrence
+rule, and completing it creates the next one.** Registered in
+`conformance.md#the-register-of-open-design-decisions`. The ruling is the operator's proposal — one
+entity for each recurring obligation at a time, carrying the instruction to be duplicated when its
+workflow completes — tested against the model above and taken as written; what follows is what the model
+already says about it and the three hazards it has to survive.
+
+**One live instance, never zero and never two.** A recurring task is an ordinary `task` that carries a
+`recurrence` rule and a `due_date`. At any moment exactly one instance of it is non-terminal. When the
+live instance's chain ends — its last batch closes with a closing sign-off naming no successor — the
+step owner who writes that sign-off also creates the next instance: a new task, copying the completed
+one's rule and description, entering intake as every created task does
+(`#intake-is-every-tasks-first-workflow`). The completed instance is never reopened and never edited
+into the next; it stays in the record as the immutable account of that occurrence, with its own batches,
+sign-offs, and terminal status. So a recurring task has no more state than a task does
+(`#there-is-no-task-lifecycle-there-are-batches`): each occurrence is a task, each task has a chain, and
+the recurrence is a relationship between tasks rather than a state either of them holds.
+
+**The instances are linked by `FOLLOWS`, task to task.** The next instance carries a `FOLLOWS` edge to
+the one whose completion created it, and the history of the recurring task — every occurrence, its
+lateness, and its outcome — is read along those edges from the live instance backwards, the way a task's
+chain is read along `FOLLOWS` from its live batch back to intake
+(`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`). The edge type is the one the data
+model already has for succession, extended from batch → batch to task → task with the parallel meaning
+(`data_model.md#relationships`): a batch follows the batch whose close opened it, and an instance follows
+the instance whose close created it. The two other edges between tasks were considered and are not it:
+`PART_OF` would make the instances children of something, and there is nothing above them (below); and
+`DEPENDS_ON` records a hold (`#a-batch-may-depend-on-a-task-it-created`), where the completed instance
+waits on nothing — its chain has ended, and the next instance is a peer, not a dependency. No series
+entity sits above the instances, no instance carries a count or a series id, and nothing stores which
+instance is live: the live one is the one that is not terminal, and there is only ever one (principle 11).
+
+**Sequencing is unchanged, because the next instance is a created task and not a successor.** The
+successor rule says a closing sign-off names one workflow from `workflow.successors` or none, and that a
+list naming intake is a declaration error (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`).
+A recurring task's closing sign-off names **none** — the completed instance's chain ends — and creates a
+task, which is a thing a batch may already do (`#intake-is-every-tasks-first-workflow`: children, detached
+tasks, tasks extracted from a meeting all enter intake themselves). The created instance's intake batch
+opens on its creation, as the one batch with no predecessor
+(`#how-a-batch-is-formed-and-what-chooses-its-workflow`), and nothing about formation changes: the batch
+is still opened by a principal's recorded verdict, since the creation is written by the sign-off that
+closed the previous instance. The one sentence this adds to the model is that a closing sign-off on a
+recurring task's last batch **creates the next instance as part of its close**, and that the creation is
+an internal write to the record like every other write a step makes about tasks, not an action. Nor is
+this the case decision 14 rules on: the creating batch does not hold on the task it created; it closes,
+and the created instance is a peer with its own intake.
+
+**Silent stop is the failure the design must survive, and it survives it by never being empty.** If
+recurrence rides on completion, a series whose instance never completes never produces the next one, and
+the question is whether that is loud. Two properties make it loud, and neither is a timer of this
+section's own. The first is the one-live-instance rule itself: a stopped series is never *absent* from
+the record, because the instance that did not complete is still there, non-terminal, with a `due_date`
+in the past — a recurring task that has stopped presents as one overdue task, which every reader of the record can
+see, and never as a gap where a task used to be. That is the difference from the reset pattern, whose
+stopped process leaves a task whose `due_date` was last moved by a daemon and nothing that says the
+daemon is gone. The second is that the instance's batch cannot quietly stop advancing, because every way a
+batch can stop advancing already ends in the one decision queue. An open step nobody has claimed raises a
+checkpoint after the interval the workflow declares (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`,
+reason `unclaimed_step`). A claimed step whose owner keeps dying raises one on repeated lapse. And a step
+that **holds** on a condition discovered mid-flight — which decision 13 permits
+(`#a-batch-may-hold-on-a-condition-discovered-mid-flight`) — is bounded by mechanisms that already exist
+and by nothing new: the hold ends in a sign-off when the condition resolves, in a checkpoint when the
+condition owes a principal a decision, or, when it owes nobody a decision and does not resolve, in the
+rule-5 deferral ceiling and one checkpoint with reason `rounds_exhausted` carrying the finding; a holder
+that stops renewing is a lapsed lease, and repeated lapse raises its own. There is no held state that a
+batch can rest in unobserved. So recurrence is safe *because* a batch that has stopped advancing reaches the checkpoint queue
+rather than a state nobody consumes, and this section depends on decision 13's bound holding — which is
+why it is stated as a dependency and not assumed.
+
+Two conditions on that guarantee are worth stating rather than assuming, because each is a place where
+the bound is declared or applied rather than automatic. The `unclaimed_step` checkpoint fires only where
+the workflow **declares** its interval, and an undeclared interval raises nothing; a workflow that
+recurring tasks are routed through therefore declares one, and a recurring task whose workflow does not
+is a task whose silent stop the design has not closed — a defect in the declaration, visible in the pull
+request that introduced it. And the deferral ceiling bounds a hold only if the hold's re-evaluations are
+counted as deferrals, which is the condition decision 13 itself names as what would reopen it; a step
+owner renewing a lease indefinitely on a condition that never resolves, without the count advancing, is
+the one shape in which a recurring task's instance could sit overdue with nothing raised, and the remedy
+is to the bound, as that ruling says, not to this one.
+
+**Drift is prevented by dating the next instance from the schedule, never from the completion.** A
+weekly task whose batch took two weeks would, if the next instance were dated from its completion, slip
+a week for every slow occurrence and stop being weekly without anyone deciding that. So the next
+instance is *created* at completion but its `due_date` is *computed from the rule*: the first point on
+the schedule after the completed instance's `due_date`. The schedule is a fixed grid the rule defines,
+and completion time is never an input to it. Three consequences follow, each of them the visible one. A
+late instance is visibly late, because its `due_date` stayed where the schedule put it while its closing
+sign-off's `signed_at` did not. There is never overlap and never a gap, because exactly one instance is
+live and its date is the next owed point. And where an instance completes so late that the next point on
+the grid has already passed, the next instance is created already late, because that occurrence was owed
+and the record does not smooth over a missed one; a rule under which a missed occurrence is *not* owed —
+a check that is pointless once its moment has gone — says so in the rule, and then the first grid point
+after the close is taken instead. Both are points on the schedule; neither is the close plus an interval.
+
+**The rule lives on the instance, not on a second entity.** The alternative to the instance carrying its
+own recurrence is a declaration that stands apart from the instances and produces them — which in this
+model is not a new type but the parent task, since a parent is exactly a task that never enters a
+workflow and groups the tasks that do (`#parent-and-child-tasks`). It is not forbidden by principle 11:
+a declaration is not derived state and needs no process to keep it true. It is rejected because it is a
+second thing that supplies nothing the instance does not. Grouping, the parent's purpose, is already the
+`FOLLOWS` history. The parent's one derived read, completion when every child is terminal, is meaningless
+for a series that ends only by a decision. And propagation, the reason one usually wants a template — a
+change to the rule reaching every future occurrence — is what duplication already does: the next
+instance copies the live instance's rule, so correcting the rule on the live instance *is* the change to
+every instance after it, and the completed ones keep the rule they were created under, which is the
+history a reader wants. There are never two live copies to keep in sync (principle 9): the past
+instances' copies are records of what the rule was, and only the live instance's copy is read as the rule.
+Ending a series is the same edit — correct the live instance's rule to end, and its completion creates
+nothing.
+
+**The reschedule pattern is superseded for any task modelled this way.** A standing practice exists for
+one class of recurring task: it is never completed, only rescheduled, by moving its `due_date` forward
+when its occurrence has passed. That is the mutate-a-field pattern, adopted where completing the one
+entity would have ended the series, and under this section it has nothing left to protect: completion no
+longer ends anything, so an occurrence that happened closes the instance with a terminal status that says
+so, an occurrence that definitively did not happen closes it with a terminal status that says *that*, and
+either way the next instance is created and dated from the schedule. What remains legitimate is narrower
+and is not the same thing: **postponing** a live instance by correcting its `due_date` is a correction to
+a field on a task that has not completed, it creates no instance, and it is the ordinary way to say the
+occurrence is expected later. Moving `due_date` *instead of* completing is what is retired. Which
+occurrences close as done, which close as not done, and when a postponement is the right call for a given
+class of task are operator preferences, and they are `task_policy` values
+(`conformance.md#direction-of-truth-per-class-of-record`), not foundation rules: the foundation states
+that an occurrence is an instance and an instance completes; what its terminal value should be is the
+operator's to say.
+
+**A recurring task and an action series are different things, and they meet only at the gate.** An
+action series is a series of successfully taken actions of one *class* that graduates the class from
+checkpointing (`gates_and_workflows.md#confidence-and-three-blast-tiers`); its members are actions,
+whatever produced them. A recurring task is a series of *tasks*, each going through a workflow. The
+relation is one-directional and simple: each instance's batch produces actions, each action carries its
+class, and each successful one is a member of that class's series — so a recurring task feeds an action
+series, but so does a daemon's self-triggered action of the same class, and the series counts the class
+without regard to which task or daemon produced the member. Graduation changes exactly one thing, and it
+is at the gate: whether the next action of that class is held at a checkpoint. It never changes whether
+the task recurs, which workflow its instance enters, or which steps that workflow has — `workflows.md#payment`
+states this for the case where it matters most, a recurring payment's `consent` step existing whether or
+not its action class has graduated. The converse also holds: the recurrence of a *task* is never an
+input to graduation, because a series is made of taken actions and an instance that completed without
+taking one added nothing to any series. Nothing about this pair is open; the documents already implied
+it, and this paragraph states it once.
+
+**The cost accepted** is one task per occurrence: a recurring task that has run for years is hundreds of
+task entities, each with an intake batch and a chain, where the reset pattern kept one. That is the right
+cost, because the entities are the history — the alternative kept one entity by discarding every
+occurrence but the current one — and because a read of the live instance costs the same whatever the
+history's length; the history is read only when someone asks for it. **What would reopen it:** recurring
+tasks in practice whose occurrences carry no information beyond having happened, at a cadence where the
+per-occurrence intake batch is most of the work done — a daily check whose chain is intake and nothing
+else. That would argue for a declared fast path through intake for a created instance, on the model of
+the `inherits` path for a child (`workflows.md#intake`), and not for a return to the reset.
+
+**What this section does not decide.** How a recurrence rule is spelled — the calendar grammar, the
+field's registered shape, and the terminal values an occurrence may close with — is the schema's and the
+`task_policy`'s, and is read from the registry and the policy rather than fixed here
+(`data_model.md#record-conventions`). Whether a created instance may take a fast path through intake is
+the workflow's declaration, judged like any other fast path on a property of the task at intake. And a
+recurring task is the record's recurrence, not the calendar's: a recurring calendar event is an artifact
+with occurrences of its own (decision 24, `calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of`),
+a task whose `due_date` tracks one reads it at `prioritize` or at claim and never through the event
+(`calendar.md#every-inbound-signal-and-what-it-becomes`), and how a recurring task shows on a calendar, if
+it does, is an outbound action of the calendar adapter's and never the home of the rule.
 
 ## The four execution mechanisms
 

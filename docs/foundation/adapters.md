@@ -8,7 +8,7 @@ and the action gate), `authority_model.md` (credentials bind to principals; appr
 steps whose effects leave the system), PR #745 operator review (2026-09-04, the adapter decision), and the
 operator's 2026-09-05 review (the inbound-delivery question and the adapter-packaging lean, both recorded
 below as open; and revision 18: when an artifact comes into existence, and what holds an effect before
-it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage). What is built, and where the adapter and the engine are still one process, is `status.md`.
+it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists). What is built, and where the adapter and the engine are still one process, is `status.md`.
 
 ## Purpose
 
@@ -249,9 +249,9 @@ logic converging to the point that sharing it would not be a generic abstraction
 signature scheme, say — at which point the shared piece is a library both adapters call, still under each
 adapter's own obligation, and not a receiver that verifies for them.
 
-**This is a sibling of open decision 15 below**, how adapters are packaged, and it is ruled without ruling
-that one: the adapter's verification code lives wherever the adapter's code lives, bundled or in a repository
-of its own, and a shared listener is plumbing wherever it lives.
+**This is a sibling of decision 15 below**, how adapters are packaged, and it was ruled without ruling
+that one: the adapter's verification code lives wherever the adapter's code lives — in this repository, under
+decision 15's ruling — and a shared listener is plumbing wherever it lives.
 
 ## What the adapter does with every event
 
@@ -783,22 +783,23 @@ grant is read, which is at every enforcement point rather than from a cache. Not
 an adapter off, and the reach of doing so is a reason to keep an adapter's grant narrow at admission —
 which is obligation 6's other half, read from the far end.
 
-### The relationship to open decision 15, which this section does not resolve
+### The relationship to decision 15, which this section did not resolve
 
-Open decision 15 asks **where an adapter's code lives** — bundled beside the engine, or a shared adapter
+Decision 15 asked **where an adapter's code lives** — bundled beside the engine, or a shared adapter
 repository this system consumes. This section asks **what an adapter must satisfy to be trusted, and who
 admits it**. They are adjacent and they are not the same question, and the distinction is worth being
 precise about because a reader can easily take one for an answer to the other.
 
 The contract above is unaffected by 15 either way: the six obligations are about what an adapter does with
 a delivery and what fails when it does it wrong, and none of them mentions a repository. What decision 15
-*would* change is where the obligations are checked — a bundled adapter's document is reviewed in the pull
+*does* change is where the obligations are checked — a bundled adapter's document is reviewed in the pull
 request that adds it, under this repository's design-basis check, while a shared repository's adapter is
-reviewed under whatever that repository's own review is, across two release cadences. That is a real cost
-of separating, and it belongs on decision 15's ledger beside the ones already recorded there; it is not a
-reason to rule 15 here, and this section rules nothing about it. The same holds for decision 16
-(where inbound delivery lands, ruled above): the obligations hold whichever listener an adapter's deliveries
-arrive through, because verification and the delivery id are the adapter's wherever the socket is.
+reviewed under whatever that repository's own review is, across two release cadences. That cost is the
+one the ruling below turns on: it is stated here because this is where the obligations are, and the
+ruling cites it from `#the-adapter-and-the-engine-are-two-roles` rather than restating it (principle 9).
+The same holds for decision 16 (where inbound delivery lands, ruled above): the obligations hold
+whichever listener an adapter's deliveries arrive through, because verification and the delivery id are the
+adapter's wherever the socket is.
 
 ## The adapter and the engine are two roles
 
@@ -810,17 +811,40 @@ between them is what the adapter wrote and the engine read, with provenance on e
 that lets an event drive a step without a write in between has merged them, and where that is the case
 on a checkout is `status.md`.
 
-**Open decision 15: whether adapters live in a repository of their own.** Registered in `conformance.md#the-register-of-open-design-decisions`.
-The roles being separable raises the packaging question, and it is not settled here. The options are the two obvious ones — adapters bundled
-inside this system beside the engine, or a shared adapter repository this system consumes as a dependency
-and other consumers could too. The operator's stated lean, recorded as a lean and not as a ruling, is
-**toward separating them**, on the reasoning that a boundary the design already draws between two roles is
-cleaner expressed as two artefacts than as two directories. What would decide it: whether a second consumer
-for these adapters actually exists, and what separating them costs at the seam where an adapter's writes
-must stay conformant to the record's conventions (`data_model.md#record-conventions`) across two release
-cadences. The design is unaffected either way — every rule in this document is about what an adapter does
-and none about where its code lives — which is why the question can stay open without anything downstream
-waiting on it.
+**Decision 15, ruled: adapters live in this repository, and separation is deferred until a second
+consumer of them exists.** Registered as ruled in `conformance.md#the-register-of-open-design-decisions`
+(2026-09-05). The roles being separable raised the packaging question, and the two options were the
+obvious ones — adapters bundled inside this system beside the engine, or a shared adapter repository this
+system consumes as a dependency and other consumers could too. The ruling is the first, for now, and the
+reason is where the admission contract is checked. The six obligations an adapter must satisfy
+(`#the-admission-contract`) are each checked by a mechanism that lives in this repository: the drop
+counter that makes coverage a number, the negative test that fails when the identity fallthrough is
+reintroduced, the read-back of a redelivery, the absence check on sync state, the unacknowledged delivery
+under an unreachable record, and the action gate that resolves an unlisted class to `NEVER`. Separating
+the adapters would split the review of those obligations across two release cadences — the adapter's
+document in one repository's pull request, the mechanism that checks it in another's — before there is a
+second consumer to justify carrying that cost. A boundary the design draws between two roles is real
+whether or not it is expressed as two artefacts; what is not real yet is anyone on the other side of it.
+
+**The lean toward separating is recorded as the intended end state, not discarded.** The operator's
+earlier lean was toward two artefacts, on the reasoning that a boundary the design already draws is
+cleaner expressed as two repositories than as two directories, and that reasoning still holds as a
+description of where this should end up. What the ruling settles is the trigger: separation is revisited
+when a **second consumer of the adapters exists**, not in anticipation of one. Anticipation is the wrong
+trigger because it moves the review split forward to a moment when nothing is gained by it, and because
+a second consumer, when it appears, will have its own conventions at the seam — the writes an adapter
+makes must stay conformant to the record's conventions (`data_model.md#record-conventions`) across both
+consumers — and those conventions cannot be designed for a consumer that does not yet exist.
+
+**The cost of the ruling is stated so it reads as accepted rather than overlooked.** A fork of the swarm
+carries the adapters whether it uses them or not: an operator who forks this repository to run the engine
+against their own systems ships the mail, chat, calendar, code-host, and payment adapters in their
+checkout, and the adapters' daemons, tests, and documents are in their tree even where their
+`channel_config` and `vendor_binding` entities bind none of them. That is dead weight and not a hazard —
+an adapter with no binding receives nothing and writes nothing, and the action gate stands in front of
+anything it could take — but it is weight, and it is the price of the review staying in one place until
+a second consumer makes the separation pay for itself. The design is otherwise unaffected either way: every
+rule in this document is about what an adapter does and none about where its code lives.
 
 ## Prior art
 
@@ -834,10 +858,11 @@ required approvals, are the identity and CI rules above, stated by the host itse
 
 The four-outcome rule, the five adapter rules, and the tables are this document's, consolidating the
 operator's decision on PR #745; the prior art named above is cited from general knowledge, not from the
-prior-art entity the other documents cite. Open decision 15, the ruling of decision 16, and the statement of what the record's
-own subscriptions can and cannot tell a consumer, are this document's, from the operator's 2026-09-05
-review; the lean recorded under decision 15 is the operator's own and is marked as a lean rather than
-written up as a ruling. The two-level artifact rule under linkage is this document's, consolidating the
+prior-art entity the other documents cite. The ruling of decision 16 and the statement of what the record's
+own subscriptions can and cannot tell a consumer are this document's, from the operator's 2026-09-05
+review. The ruling of decision 15 is the operator's own, given the same day in that review's follow-up; the
+lean toward separating that this document had recorded before it is kept as the intended end state, and
+naming a second consumer as the trigger for revisiting is the ruling's, not this document's. The two-level artifact rule under linkage is this document's, consolidating the
 rulings of decisions 23 and 24 into the one place the linkage rule is stated.
 
 **Admitting a new adapter** is this document's, from the operator's 2026-09-05 question of whether the

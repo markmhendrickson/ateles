@@ -8,7 +8,7 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `unclassified_action_type_fails_closed_and_loudly`, `gate_advisory_and_enforcing_paths_must_agree`,
 `gating_vocabulary_order_is_load_bearing`, throughput plan `ent_18b902cf72822373f9da8ced` decision
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
-memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram), and the operator's 2026-09-05 12:52 memo (revision 21: the general claim about self-modification, stated in `work_model.md` and cross-referenced from decision 17), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 17 ruled here; the `dependency_cycle` reason class). Supersedes
+memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram), and the operator's 2026-09-05 12:52 memo (revision 21: the general claim about self-modification, stated in `work_model.md` and cross-referenced from decision 17), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 17 ruled here; the `dependency_cycle` reason class), and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: the next instance is a created task and not a successor). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
 is `status.md`; how each concept is recorded is `data_model.md`.
 
@@ -387,7 +387,10 @@ process to keep it true against the batches (principle 11). Parallel successors 
 names one or none, and work that needs two workflows at once is split into child tasks
 (`work_model.md#a-task-is-in-at-most-one-batch-at-a-time`). Intake is the universal entry
 (`work_model.md#intake-is-every-tasks-first-workflow`), so every chain begins with an intake batch, and a
-`successors` list that names intake is a declaration error. Core designs: `workflows.md`.
+`successors` list that names intake is a declaration error. A recurring task's closing sign-off names none
+and **creates** the next instance — a new task whose own intake batch opens on its creation — which is a
+task creation and not a successor; the instances are linked `FOLLOWS` task to task, and the rule is stated
+once in `work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next`. Core designs: `workflows.md`.
 What this sequencing means for a batch's formation — that a closing sign-off naming a successor is the
 only thing that opens a batch, which tasks it carries, and that the workflow is fixed at open and never
 switched — is `work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow`, stated once there

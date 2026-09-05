@@ -925,6 +925,38 @@ complete rulings come first and the condensation pass follows, and
 `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure that
 records the overrun.
 
+## Revision 27 (2026-09-05): decision 15 ruled, and the recurring task
+
+Two follow-ups to the operator's review of PR #745, both design: the adapter-packaging question is ruled
+(bundled, for now), and recurring work gets a section of `work_model.md`, a vocabulary entry, a task-level
+meaning for `FOLLOWS`, and a ruled entry in the register as decision 30. This section records what is
+measurable about each against this branch; the arguments are the owning documents'.
+
+**Decision 15.** Ruled as bundled with a named trigger for revisiting (a second consumer of the adapters).
+Built state is unchanged by the ruling and already matches it: every adapter daemon on this branch lives
+under `execution/daemons/` in this repository, and no adapter is consumed from, or published to, any other
+repository. The register row moved from open to ruled; `adapters.md#the-adapter-and-the-engine-are-two-roles`
+holds the ruling, and the admission section's pointer now cites it rather than declining to rule.
+
+**Decision 30, the recurring task.** Read 2026-09-05 on this branch by enumerating every module under
+`execution/` and `lib/` that names a recurrence rule, a due date, or a reschedule, and reading each hit.
+
+| Design rule (revision 27) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| a recurring task is one live instance; completion creates the next, linked task-to-task by `FOLLOWS` | a completed task reset to open with its `due_date` moved | **the reset pattern is built and running.** One daemon scans tasks carrying a `recurrence` field and, for each one whose status is done and whose `due_date` has passed, corrects `due_date` forward by one interval and corrects `status` back to pending on the **same entity**. No new task is created; the completed occurrence survives only as superseded observations of two fields | `execution/daemons/sylvia/sylvia.py` (`process_recurring_tasks`, `_roll_due_date`) |
+| the next instance's `due_date` is computed from the schedule, never from the completion time | — | **consistent on this one point**: the roll computes the next date from the prior `due_date` and the rule, not from the completion time, so the built path does not drift. It does lose the occurrence (row above) | `_roll_due_date` |
+| `FOLLOWS` task → task is a registered edge meaning | `FOLLOWS` batch → batch only | **no task-to-task `FOLLOWS` edge exists in the record**, and neither the schema registry nor any writer on this branch produces one. Nor does a batch → batch one: the batch entity itself is unbuilt (the schemas table below), so both meanings are declared and neither is written | the schema registry; `data_model.md#relationships` |
+| a recurring task's silent stop is loud because one overdue instance is always present and a stuck batch reaches the checkpoint queue | a daemon that runs daily and, if it stops, leaves nothing that says so | **the reset daemon's stopping is silent.** It runs on a daily calendar trigger, holds no lease, raises no checkpoint, and its absence is not distinguishable from a series that is up to date; the `unclaimed_step` interval the design conditions the guarantee on cannot be declared because no workflow declaration exists to declare it on | `sylvia.py`; the unbuilt `workflow` entity |
+| moving `due_date` instead of completing is retired; postponing a live instance by correcting `due_date` is not | a standing rule that one class of recurring task is never completed, only rescheduled | **the standing rule is in force** as a session instruction and a `task_policy`, and the built daemon depends on the opposite behaviour for other tasks (it acts only on tasks marked done). Neither side is the design's: the rule is superseded for tasks modelled as recurring tasks, and the daemon's roll is the reset the design replaces | `CLAUDE.md` standing constraints; `task_policy` entities; `sylvia.py` |
+| an action series and a recurring task meet only at the gate | — | the gate reads `successful_recurrences` from the policy snapshot and graduates a class on it; no code path relates that count to any task's recurrence, which is consistent with the design | `execution/daemons/apis/apis.py` (`_successful_recurrences`) |
+
+**What this revision does not rule.** Nothing beyond 15 and 30. Decision 30 is recorded as ruled on the
+operator's proposal as its basis; the spelling of a recurrence rule, the terminal values an occurrence may
+close with, and which class of task keeps a postponement practice are `task_policy` and schema matters
+the section names as outside it.
+
+**Size.** Measured 2026-09-05 with `wc -c` on this branch against revision 26 as the predecessor: `work_model.md` 51.4k → 67.3k (+15.9k, the recurring-task section written in full), `gates_and_workflows.md` 48.7k → 49.2k (+0.5k, the one-sentence extension of the successor rule), `adapters.md` 72.0k → 74.3k (+2.4k, the ruling of 15 replacing the lean), `data_model.md` 32.8k → 33.7k (+0.9k, the task row and the `FOLLOWS` row), `vocabulary.md` 83.8k → 85.3k (+1.5k, the `recurring task` entry), `conformance.md` 27.1k → 28.3k (+1.2k, two register rows); `principles.md` is unchanged at 13.5k. The kernel is therefore **130.0k**, up from 113.6k on revision 26, against `MAX_BLOCK_CHARS=40,000`. Nothing was trimmed to fit, on the standing direction that content settles before budget, and `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure that records the overrun. Checks on this revision: the vocabulary check reports 0 Never hits (95 Never items, three of them new with the `recurring task` entry), the anchor check 0 broken links, and `test_foundation.py` 51 passed and 1 expected failure.
+
 ## `github.md`: the events with no defined response (revision 13, 2026-09-04)
 
 `docs/foundation/github.md` enumerates every event GitHub can deliver, from GitHub's own webhook event and

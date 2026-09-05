@@ -300,6 +300,22 @@ of its siblings.
 **Never:** "story".
 **Not for:** a child with two parents.
 
+### recurring task
+**Definition:** a [task](#task) carrying a recurrence rule, of which exactly one instance is non-terminal at a time, and whose
+closing [sign-off](#sign-off) creates the next instance — a new task copying the rule, entering [intake](#intake), and linked
+`FOLLOWS` to the instance whose completion created it.
+Each instance is an ordinary task with its own [chain](#chain) and [terminal](#terminal) status; the next instance's `due_date` is
+computed from the rule's schedule, never from the completion time; the history of the recurring task is
+read along the task-to-task `FOLLOWS` [edges](#edge) and is never stored. Distinct from an [action series](#action-series), which is
+made of [actions](#action) of one class and graduates at the [action gate](#action-gate): an instance's actions feed a series, and
+graduation never changes whether the task recurs.
+**See:** [`work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next`](work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next),
+[`data_model.md#relationships`](data_model.md#relationships).
+**Never:** "task reset", "reset to open", "rolled forward" of a task.
+**Not for:** template for the rule's home (the live instance carries it); series id or occurrence count as
+a field; reschedule for completion (a live instance may be postponed by correcting its `due_date`; an
+occurrence that passed closes its instance and creates the next).
+
 ### operator-facing agent
 **Definition:** the [agent](#agent), defined by the `ateles` `agent`, that [claims](#claim) operator-only [tasks](#task),
 carries them and their [checkpoints](#checkpoint) to the [operator](#operator), and records the outcome.
