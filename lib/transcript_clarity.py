@@ -23,7 +23,14 @@ Calibration
 The thresholds were first chosen against the three memos recorded 2026-09-05,
 whose measurements are recorded in ``test_transcript_clarity.py`` alongside
 the fixtures. Running this module against all 883 stored transcriptions then
-found two of the four checks measurably wrong, and both are fixed here:
+found two of the four checks measurably wrong, and both are fixed here.
+
+A third defect surfaced verifying that fix: of the 33 transcripts still
+flagging on language after the fixes below, 28 contain no lexical words at
+all — they are Whisper's bracketed non-speech descriptors (``[silence]``,
+``[pause]``, ``[outro jingle]``, ``[background noise]``, channel tags like
+``[Mic]``/``[System]``, ...) with a confident-looking language code attached
+to nothing linguistic. See ``is_bracket_only()`` and CHECK 4 below.
 
 * **Check 4 (language)** fired 234 times and was wrong all 234 times. The
   transcriber does not return clean ISO-639-1 codes; it returns ISO-639-2
@@ -119,6 +126,42 @@ MAX_SECONDS_PER_SENTENCE = 120.0
 # CHECK 3 — empty transcript.
 # Distinct from truncation so the operator message can say which happened.
 
+# CHECK 4 (bracket-only exemption) — non-linguistic capture.
+# Whisper emits bracketed descriptors — [silence], [pause], [breathing],
+# [outro jingle], channel tags like [Mic]/[System] — on audio with nothing
+# spoken in it, and still attaches a confident language code. A transcript
+# that is ENTIRELY such tags, with no lexical text outside them, is not a
+# language problem: there is no language to have gotten wrong, so CHECK 4
+# below skips it regardless of the label Whisper assigned.
+#
+# Measured over the 33 language flags remaining after the CHECK 4 normalize
+# fix, 28 are bracket-only. The other 5 are NOT: two contain real words
+# alongside or instead of tags ("Say things [babbling]", "Bonito. Bonito. I
+# want to look my"), one is a single filler character with no brackets ('嗯'),
+# one is a hallucinated nonsense-syllable loop with no brackets ("Saramiiku,
+# Saramiiku, ..."), and one is a genuine three-word Cyrillic greeting. Only
+# the 28 true bracket-only cases are exempt; the other 5 keep going through
+# CHECK 4 like any other transcript, because they carry something that could
+# be a real word — that is deliberate: the Cyrillic greeting stays flagged.
+#
+# Exempting bracket-only text from CHECK 4 is not the same as calling it
+# "clear" — that would silently swallow a genuine capture failure. It isn't:
+# 24 of the 28 corpus cases run under 31 seconds and are the audio
+# equivalent of an accidental button press — [silence] on a third-of-a-second
+# clip tells the operator nothing they need to act on, and correctly reads as
+# clean once CHECK 4 stops misreading its language tag. The other 4 sit at
+# 23s, 31s, 52s and 1268s (21 minutes) — long enough that CHECK 2's
+# duration-gated word-count and words-per-second floors already fire on
+# their own (a handful of bracket tokens is nowhere near MIN_WORDS once
+# duration crosses TRUNCATION_DURATION_SECONDS), independent of this fix.
+# Nothing here is swallowed: CHECK 2 is untouched and keeps flagging all
+# four as likely dropped captures — so no new mechanism is needed to
+# surface them, and no duration threshold is invented for this exemption:
+# bracket-only text is
+# exempt from CHECK 4 regardless of duration, and whether the transcript is
+# otherwise clean is left entirely to the checks that already measure that
+# (chiefly CHECK 2, which is duration-aware by design).
+
 # CHECK 4 — language mismatch.
 # The operator speaks English, Spanish and Catalan. Anything else is worth a
 # pause rather than a guess. An absent/auto language is not a mismatch — we
@@ -195,6 +238,15 @@ _REGION_SUFFIX_RE = re.compile(r"\b([A-Za-z]{2,3})-(?:[A-Z]{2}|[0-9]{3})\b")
 _COMPOUND_NOISE = frozenset({"mixed", "mix", "and", "with", "plus", "or"})
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+# A Whisper non-speech descriptor: square brackets around anything. Matches
+# '[silence]', '[heavy breathing]', '[Mic]', '[música suave]' alike — the
+# content inside is never checked against a fixed vocabulary, because an
+# incomplete list of descriptor names would be the same mistake as the
+# original EXPECTED_LANGUAGES check: confidently wrong on the tags it didn't
+# anticipate. What matters is only that everything OUTSIDE the brackets is
+# empty.
+_BRACKET_TAG_RE = re.compile(r"\[[^\[\]]*\]")
 
 
 @dataclass
@@ -303,6 +355,28 @@ def classify_language(label: str | None) -> tuple[str, list[str]]:
     if any(code in EXPECTED_LANGUAGES for code in codes):
         return "expected", codes
     return "unexpected", codes
+
+
+def is_bracket_only(text: str) -> bool:
+    """
+    True when a transcript is entirely Whisper non-speech descriptors.
+
+    Strips every ``[...]`` tag and checks whether any word survives. A
+    transcript with real words alongside a tag — ``"Say things [babbling]"``
+    — is NOT bracket-only: it has lexical content and stays subject to the
+    language check like any other transcript. Only a transcript with nothing
+    but tags (and surrounding whitespace) counts.
+
+    An already-empty transcript returns False here on purpose: check 3
+    (empty) is the one that reports "the transcriber returned no text at
+    all", and callers should not run this check for text that never reaches
+    it — see the early return in ``assess_transcript``.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    remainder = _BRACKET_TAG_RE.sub("", stripped)
+    return not remainder.split()
 
 
 def assess_transcript(
@@ -489,7 +563,18 @@ def assess_transcript(
     # --- CHECK 4: language mismatch ---------------------------------------
     # Only "unexpected" flags. "none" and "unparseable" are recorded and pass:
     # a label we cannot read is missing evidence, not adverse evidence.
-    language_verdict, language_codes = classify_language(language)
+    #
+    # A bracket-only transcript is exempt regardless of the label: see the
+    # CHECK 4 (bracket-only exemption) comment above for why this is not the
+    # same as calling the transcript clear, and why no duration gate belongs
+    # here — CHECK 2 already independently measures whether a bracket-only
+    # transcript's duration makes it a genuine capture failure.
+    bracket_only = is_bracket_only(stripped)
+    metrics["bracket_only"] = bracket_only
+    if bracket_only:
+        language_verdict, language_codes = "non_linguistic", []
+    else:
+        language_verdict, language_codes = classify_language(language)
     metrics["language_verdict"] = language_verdict
     metrics["language_codes"] = language_codes
     if language_verdict == "unexpected":

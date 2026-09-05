@@ -38,6 +38,7 @@ from lib.transcript_clarity import (  # noqa: E402
     TRUNCATION_DURATION_SECONDS,
     assess_transcript,
     classify_language,
+    is_bracket_only,
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "transcripts"
@@ -416,3 +417,146 @@ def test_missing_duration_still_catches_the_text_only_checks():
     assert not assess_transcript("").clear
     assert not assess_transcript(_fixture("repetition_loop_long.txt")).clear
     assert not assess_transcript("Bom dia.", language="por").clear
+
+
+# ── Bracket-only transcripts (non-linguistic capture) ───────────────────────
+#
+# Whisper attaches a confident language code even to audio with nothing
+# spoken in it, describing what it heard with a bracketed tag instead:
+# [silence], [pause], [breathing], [outro jingle], channel markers like
+# [Mic]/[System]. Verified against the 33 language flags remaining after the
+# CHECK 4 normalize fix: 28 of 33 are entirely such tags, with no lexical
+# word anywhere in the transcript. None of the strings below are real
+# transcript content — they are synthesized to match the corpus's observed
+# tag vocabulary and shape.
+
+
+def test_single_bracket_tag_is_bracket_only():
+    assert is_bracket_only("[silence]")
+    assert is_bracket_only("[pause]")
+
+
+def test_multiple_bracket_tags_are_bracket_only():
+    assert is_bracket_only("[Mic]\n[typing]\n\n[System]\n[outro jingle]")
+    assert is_bracket_only("[breathing][clicking]")
+
+
+def test_non_english_bracket_tag_is_bracket_only():
+    """The tag itself can be in any language — only the OUTSIDE text counts."""
+    assert is_bracket_only("[pausa]")
+    assert is_bracket_only("[música suave]")
+
+
+def test_bracket_tag_with_real_words_is_not_bracket_only():
+    """A tag alongside real words is linguistic content, not a pure capture."""
+    assert not is_bracket_only("Say things [babbling]")
+    assert not is_bracket_only("[Mic] Actually, let's start with the budget.")
+
+
+def test_channel_tags_alone_are_bracket_only():
+    assert is_bracket_only("[Mic]")
+    assert is_bracket_only("[System]\n[Mic]")
+
+
+def test_empty_string_is_not_bracket_only():
+    """Empty text is check 3's business — this predicate must not double-claim it."""
+    assert not is_bracket_only("")
+    assert not is_bracket_only("   ")
+
+
+def test_bracket_only_transcript_does_not_flag_language():
+    """
+    The core fix: a bracket-only transcript is not a language failure,
+    regardless of the label Whisper assigned it.
+    """
+    for label in ("sh", "por", "ita", "fin", "jpn", "eng/cat", "ca-es-mixed"):
+        report = assess_transcript("[silence]", duration_seconds=0.4, language=label)
+        assert report.metrics["language_verdict"] == "non_linguistic"
+        assert 4 not in {f.check for f in report.findings}, (
+            f"label {label!r} incorrectly flagged check 4: {report.summary}"
+        )
+
+
+def test_bracket_only_short_clip_is_clean():
+    """
+    A brief bracket-only clip is clean, not held — the same outcome a real
+    short memo gets. [silence] on a third-of-a-second recording is an
+    accidental capture, not a defect to surface.
+    """
+    report = assess_transcript("[silence]", duration_seconds=0.4, language="sh")
+    assert report.clear, report.summary
+    assert report.metrics["bracket_only"] is True
+
+
+def test_bracket_only_with_real_words_still_language_checked():
+    """
+    Mixed bracket-and-text content is linguistic and stays fully subject to
+    the language check — the exemption must not overreach.
+    """
+    report = assess_transcript(
+        "Say things [babbling]", duration_seconds=5.0, language="ita"
+    )
+    assert not report.metrics["bracket_only"]
+    assert report.metrics["language_verdict"] == "unexpected"
+    assert 4 in {f.check for f in report.findings}
+
+
+def test_channel_tag_style_transcript_on_a_short_clip_is_clean():
+    """
+    [Mic]/[System]-only transcripts are the channel-tag variant of the tag
+    corpus. On a short clip (under TRUNCATION_DURATION_SECONDS) the result is
+    fully clean, same as the single-tag case.
+    """
+    report = assess_transcript(
+        "[Mic]\n[typing]\n\n[System]\n[outro jingle]",
+        duration_seconds=8.0,
+        language="por",
+    )
+    assert report.metrics["bracket_only"] is True
+    assert 4 not in {f.check for f in report.findings}
+    assert report.clear, report.summary
+
+
+def test_moderate_duration_bracket_only_flags_via_truncation_not_language():
+    """
+    Not every bracket-only transcript reads as clean: 4 of the 28 corpus
+    cases sit at 23-1268 seconds, long enough that CHECK 2's duration-gated
+    word-count floor already fires on a handful of bracket tokens,
+    independent of the language exemption. The exemption changes WHICH check
+    catches these (2, not 4) — not whether they get caught.
+    """
+    text = "[Mic]\n[typing]\n\n[System]\n[outro jingle]"
+    report = assess_transcript(text, duration_seconds=45.0, language="por")
+    assert report.metrics["bracket_only"] is True
+    assert 4 not in {f.check for f in report.findings}
+    assert not report.clear, "a 45-second recording with only tags must still flag"
+    assert 2 in {f.check for f in report.findings}
+
+
+def test_long_bracket_only_recording_still_flags_via_truncation():
+    """
+    The 21-minute corpus case: a long recording that produced nothing but
+    ambient/UI tags is a genuine capture failure, and stays flagged — just
+    not on check 4. Check 2 (truncation) already measures "far too little
+    text for this much audio" and continues to catch it once check 4 stops
+    misreading the tag's language label.
+    """
+    text = "[Mic]\n[typing]\n\n[System]\n[outro jingle]\n\n[Mic]\n[typing][tapping]\n\n[System]\n[singing]"
+    report = assess_transcript(text, duration_seconds=1268.31, language="por")
+    assert report.metrics["bracket_only"] is True
+    assert 4 not in {f.check for f in report.findings}
+    assert not report.clear, "a 21-minute capture with no speech must still flag"
+    assert 2 in {f.check for f in report.findings}
+
+
+def test_bracket_only_genuine_greeting_is_unaffected():
+    """
+    The one unresolved language flag in the corpus — a real three-word
+    Cyrillic greeting — has no brackets at all and must keep flagging.
+    Greeting words are a known ASR hallucination pattern, so this case is
+    deliberately NOT special-cased here.
+    """
+    report = assess_transcript("Привет. А? Привет", language="rus")
+    assert not is_bracket_only("Привет. А? Привет")
+    assert report.metrics["language_verdict"] == "unexpected"
+    assert 4 in {f.check for f in report.findings}
