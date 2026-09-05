@@ -778,6 +778,67 @@ records it. Nothing was trimmed to fit: the operator directed that comprehensive
 comes first and the condensation pass follows, which is why both documents carry an explicit
 what-the-design-uses-versus-what-the-API-offers table for that pass to work from.
 
+## Revision 24 (2026-09-05): the Telegram and Payments adapters, in full
+
+The last two per-system adapter documents in the manner of `github.md`, and the corresponding sections of
+`adapters.md` cut to pointers (principle 9, one home). Written from first principles: the codebase and the
+vendor APIs were consulted to establish **what capabilities exist** and to notice drift, never as design
+guidance. Read on this branch, against Telegram's published chat-platform API and against the published
+surfaces of bank-transfer and crypto rails, 2026-09-05. These are the two highest-sensitivity systems in the
+design, and neither document names a chat, a payee, an account, an address, an amount, or an obligation.
+
+| Design rule (revision 24) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| `telegram.md`: every kind of update the channel can deliver, mapped to one of the four outcomes or to `dropped` with a reason; every outbound operation with its class and confirmation | `adapters.md`'s four-row inbound table and two-row outbound table | **designed and not built.** No `artifact` or `action` entity type exists on the branch, so no row has a record to land in | the drift table in `telegram.md` |
+| **a chat message is not an instruction**, stated at length: a reply resolves a checkpoint only through a credential resolved to a principal who is a required approver, and a reply resolving to neither is an observation; an ask is a task for intake and nothing else | `adapters.md`'s general rule, which this applies at the boundary where it is under the most pressure | **not built, and the branch has no mechanism to build it on**: inbound authorization is literal equality against a configured chat identifier, with no credential binding and no principal lookup anywhere | the two inbound pollers |
+| an inline-keyboard callback carries a payload the swarm authored, which removes the interpretation problem and **licenses nothing about who pressed it** | nothing; the distinction was not drawn | **not built, and never faced**: zero occurrences repo-wide of an inline keyboard, a callback payload, or a callback acknowledgement. Every interaction is free text | as above |
+| the channel offers **no read receipt**, and the design would decline one if it existed: acknowledgement is always something a principal did | nothing | not a built-state question; it is a statement about the external system and about what the design consumes | — |
+| inbound dedup is a **membership test over a window of update identifiers**, never a high-water-mark comparison, the channel's identifier being sequential but not permanently monotonic | nothing; `adapters.md` said only that the delivery id is the key | **not built**; both pollers persist a single offset cursor, which is the high-water-mark shape | the two inbound pollers |
+| `payments.md`: every signal the rail classes can produce, mapped the same way; every outbound operation with its class and confirmation | `adapters.md`'s four-row inbound table and one-row outbound table | **designed and not built**, on the same missing entity types | the drift table in `payments.md` |
+| **the unknown case**: a timeout is neither failure nor success. The adapter reads the rail for the action's key before submitting anything again — by the transaction it holds on a crypto rail, by the key or a window on a bank rail — adopts what it finds rather than re-issuing, and where the read cannot resolve it raises one checkpoint reporting what is known | nothing. This was the design's largest unstated gap at this boundary | **not built, and the branch's default on a mid-flow failure is the outcome the design names as most dangerous**: an exception after the transfer was instructed becomes advice to the operator to pay by hand | `handlers/wise_transfer.py` |
+| `dedup_key` is derived from the **obligation** and written before the first attempt — not from the artifact, not per attempt, not from the rail's own mechanism alone, not from the reference field | `work_model.md`'s general placement of the key on the action, now given its content at this boundary | **not built**: the rail is given a freshly generated identifier per attempt, which protects one retried call and not a second attempt at the same obligation | as above |
+| a payment needs **no second gate**: the never-set, the checkpoint, the disjoint verifier, and the workflow's ordering already compose into something stronger, and no series of successful payments graduates into an unattended one | nothing was stated either way | **not built**: the payment path does not reach the action gate at all, and the consent is a chat exchange with no checkpoint entity | `monedula.py` |
+| a **balance is not an artifact**; it is an observation on the account's artifact, carrying the point it was read at and confirmed-versus-pending separately | `adapters.md`'s one row, which left its kind unstated | **not built, and nothing reads a balance at all** | the two rail handlers |
+| **terminal is not permanent** on either class, so the terminal condition is declared rather than assumed, and a later reversal is an observation and a defect to surface | nothing | **not built**: no depth or terminal state is declared anywhere, and two non-terminal rail states are folded into "sent" | as above |
+| a policy must be able to **suppress a payment's metadata entirely** — omission, never a neutral placeholder — and the suppression is a property of what the adapter submits, verified on read-back | the operator's standing rule for one payee, generalized to its principle with no payee, purpose, or detail named | **not built to that standard**: on one rail the suppression is an instruction in a prompt to a subprocess and nothing validates what was submitted; on the other there is no suppression and two fixed strings are attached to every transfer | the two rail handlers |
+| `payment`'s recovery is **forward-only or absent**: a genuine cancel exists only before funding, a dispatched bank transfer's recall is a request the receiving side may refuse, and a confirmed crypto transfer has no recovery at all | `failure_posture.md` names a recovery per class; this is the row for `payment`, and it is the class whose recovery mostly does not exist | not a built-state question; it is a statement about the external systems | — |
+| **open decisions 25 and 26** (whether a chat reaction may carry a decision; whether a read command is answered during a halt) | nothing | not built-state questions | — |
+| **open decisions 27, 28, and 29** (whether a payment's approver must be shown what the verifier signed; what tolerance a consent carries; where the terminal condition is declared) | nothing | 29 has a de facto answer by absence: nothing declares one, so nothing can be assumed | `handlers/btc_transfer.py` |
+
+**Drift, recorded as drift and not as design justification.** Both documents carry a drift table; the counts
+there are actual, taken 2026-09-05 by enumerating every chat call site under `execution/` and `lib/` and by
+reading the payment daemon and its two rail handlers. The findings that bear hardest: **twelve chat send
+sites and one captured message identifier**, with no read-back anywhere; **four independent chat clients**
+that do not share a credential, the channel admitting one polling consumer per credential — a conflict the
+code records having hit; **no dedup key on a payment**, a per-attempt identifier standing in for one, with
+the last protection against paying an invoice twice being the operator noticing, which the code says in as
+many words; **no read-back of a transfer's status on either rail**, so a pending transfer is reported
+complete and a returned one is recorded as sent permanently; **submitter and reconciler in one process under
+one identity**, so the separation of duties the payment workflow declares is collapsed not by anyone
+deciding to collapse it but by the boundary having one component in it; and **a mid-flow failure advising a
+manual payment** against a transfer that may still be moving. Separately, an argument-name mismatch means
+two chat callers' thread routing is silently dropped, and the shared send helper injects every key it finds
+in several hard-coded sibling paths into its process environment. None of this argues for changing a ruling.
+
+**What this revision does not rule.** Open decisions 13, 14, 15, 16, and 17 stay unruled. Decision 16 (where
+inbound delivery lands) is the nearest neighbour and is untouched: `telegram.md` states what the channel's
+two delivery mechanisms give the dedup rule, which are the terms that decision should be taken on, and
+settles nothing. Decisions 23 and 24 are the previous revision's and are untouched. Decisions 25 through 29
+are **new and open**.
+
+**Size.** `telegram.md` is **73.8k** new and `payments.md` **65.1k** new; `adapters.md` grew 0.6k (65.4k →
+66.0k) — the two new pointer sections are longer than the tables they replace, the Telegram section rising
+1,735 → 1,792 chars and the Payments section 1,511 → 1,946, both carrying the two-rules-to-take-with-you
+paragraph the Gmail pointer established — and `conformance.md` 0.8k (16.8k → 17.6k) for four registration
+rows. Measured 2026-09-05 with `wc -c` on this branch against revision 23 as the predecessor. Both new
+documents are **keyed, not kernel**, so the kernel is unchanged and this revision adds nothing to the
+reading block's overrun; both exceed `MAX_DOC_CHARS=12,000` as every kernel and keyed document already does,
+and `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure that
+records it. Nothing was trimmed to fit: the operator directed that comprehensive foundational material comes
+first and the condensation pass follows, and both documents carry an explicit
+what-the-design-uses-versus-what-the-API-offers table plus a load-bearing-versus-compressible note in their
+freshness sections for that pass to work from.
+
 ## `github.md`: the events with no defined response (revision 13, 2026-09-04)
 
 `docs/foundation/github.md` enumerates every event GitHub can deliver, from GitHub's own webhook event and

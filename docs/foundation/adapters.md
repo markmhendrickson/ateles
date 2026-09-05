@@ -8,7 +8,7 @@ and the action gate), `authority_model.md` (credentials bind to principals; appr
 steps whose effects leave the system), PR #745 operator review (2026-09-04, the adapter decision), and the
 operator's 2026-09-05 review (the inbound-delivery question and the adapter-packaging lean, both recorded
 below as open; and revision 18: when an artifact comes into existence, and what holds an effect before
-it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express). What is built, and where the adapter and the engine are still one process, is `status.md`.
+it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers). What is built, and where the adapter and the engine are still one process, is `status.md`.
 
 ## Purpose
 
@@ -465,24 +465,26 @@ closed to an observation (principle 5).
 
 ## Telegram
 
-The chat channel holds artifacts of kind `message`. It is a channel the operator-facing agent carries
-checkpoints and operator-only tasks through, where the `channel_config` entity names it.
+The chat channel holds artifacts of kind `message`, identified by the chat's identifier together with the
+message's identifier within it. It is the channel the operator-facing agent carries checkpoints and
+operator-only tasks through, where the `channel_config` entity names it.
 
-| External event | What it is a signal about | Outcome in the record |
-|---|---|---|
-| message from a chat id bound to the operator principal, answering nothing the record awaits | a new ask | a task with the message as its artifact, entering intake |
-| message from that chat id, answering a checkpoint the operator-facing agent carried | the operator's decision | resolution of that checkpoint by the operator principal (`authority_model.md#approval`), read back on the checkpoint |
-| message from that chat id, reporting an operator-only action taken | the outcome of `await` | an observation on the task's artifact that the `record` step owner reads and signs on (`workflows.md#operator-only`) |
-| message from a chat id bound to no principal | noise | dropped, or an observation where a tracked artifact is named; never a task, never a resolution |
+**The Telegram adapter is `telegram.md`, in full.** That document enumerates every kind of update the
+channel can deliver — with each row marked handled, deliberately ignored, or unhandled — and it tables the
+outbound operation, action class, and confirmation for every step that reaches the channel. It applies the
+rules above and does not restate them (principle 9, one home). Three things it settles that a reader of
+this section would otherwise look for here: how an operator's chat reply becomes an approval on a
+checkpoint and how it never becomes anything else; why an inline-keyboard callback carries a materially
+different trust posture from free text, and the narrow thing that difference licenses; and why the channel
+offering no read receipt is a property the design would decline to use even if it existed.
 
-| Step | Operation | Action class | What the adapter confirms |
-|---|---|---|---|
-| `present`, `operator_preview`, `consent` | send the checkpoint or the task to the operator's chat | `notify_operator` | the message id, read back; the checkpoint stays open until resolved on the record, whatever the delivery status |
-| `deliver` | send a digest or a result | `notify_operator` | the message id, read back |
-
-A notification is an action with a class of its own so that a policy may keep it low-blast. Its delivery
-is never the checkpoint's resolution, and a checkpoint nobody answers times out into its terminal state on
-the record (`gates_and_workflows.md#the-checkpoint`).
+Two rules of this section a reader should carry into it, because a chat erodes them hardest. **A chat
+message is not an instruction** — the general rule that an inbound event is a signal about an artifact is
+under more pressure here than anywhere else, because a human typing into a chat is using a medium built for
+telling someone what to do, and the design's answer is that an ask becomes a task for intake like any
+other. And identity resolves a **chat id**, not a person — so a reply resolves a checkpoint only where the
+credential binds to a principal who is a required approver on that checkpoint, and a reply that resolves to
+neither is an observation, whatever it says.
 
 ## Calendar
 
@@ -503,20 +505,28 @@ artifact or many, which it opens rather than resolves and which should be decide
 
 ## Payments
 
-The rail holds artifacts of kind `transfer` and `receipt`. The separation of duties the payment workflow
-names applies to the adapter as to any principal: the adapter that takes a `pay` action never writes the
-`reconcile` sign-off (`workflows.md#payment`).
+The rails hold artifacts of kind `transfer`, and a `receipt` where the rail issues one. A balance is **not**
+an artifact; it is an observation on the account's artifact, carrying the point it was read at. The
+separation of duties the payment workflow names applies to the adapter as to any principal: the adapter that
+takes a `pay` action never writes the `reconcile` sign-off (`workflows.md#payment`).
 
-| External event | What it is a signal about | Outcome in the record |
-|---|---|---|
-| transfer reaches a terminal state at the rail | the effect of the `pay` action | an action confirmation on the `payment`-class action whose `dedup_key` matches; the transfer record is an artifact `PRODUCES` from the batch; the `reconcile` step owner reads it and signs, and the `transaction` entity is that step's write, not the adapter's |
-| transfer fails, or is returned by the rail | the same | an action confirmation with the failing result; `reconcile`'s `on_fail` opens `pay` again through the gate, never a second submission by the adapter |
-| incoming payment received | money that arrived | an observation on the artifact for the obligation it settles, where one is tracked; otherwise a task for intake with the transfer as its artifact |
-| balance or rate changed | the rail's state | an observation, where a tracked artifact depends on it; otherwise dropped |
+**The payment adapter is `payments.md`, in full.** That document maps every signal the rail classes can
+produce, tables the outbound operations with their action classes and confirmations, and answers at length
+the question this boundary turns on. It applies the rules above and does not restate them (principle 9, one
+home). Three things it settles that a reader of this section would otherwise look for here: what
+`dedup_key` is keyed on and **what the design does when a submitted transfer's confirmation never returns**,
+which is the hardest dedup case in the design because the effect may or may not have landed; why a payment
+needs no second gate, the action gate's never-set composing with the checkpoint and the workflow's disjoint
+verifier into something already stronger than any one of them; and why a policy must be able to suppress a
+payment's metadata entirely, that metadata being visible to third parties and, on one rail class,
+permanently public.
 
-| Step | Operation | Action class | What the adapter confirms |
-|---|---|---|---|
-| `pay` | submit the transfer | `payment`, or `transfer` where the policy distinguishes them | the transfer read back from the rail by its id at its terminal status, never the submission's return |
+Two rules of this section a reader should carry into it. **A payment is the least reversible action in the
+system**, and it is the one class whose recovery is a request the receiving side may refuse or does not
+exist at all — so the design's weight sits before the boundary rather than after it. And the terminal state
+a confirmation is read at is **declared, not assumed**: a rail's own released state is not a credited
+state, and a confirmation can later be undone, which makes a reversal an observation and a defect to
+surface rather than a silent correction.
 
 ## What an adapter never does
 
