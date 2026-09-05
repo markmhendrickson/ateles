@@ -358,3 +358,129 @@ def test_release_ambiguous_substring_refuses(tmp_path, monkeypatch, capsys):
     watch.save_held({"memo_a.m4a": {"reason": "x"}, "memo_b.m4a": {"reason": "y"}})
     assert watch.release_held("memo") == 1
     assert "be more specific" in capsys.readouterr().out
+
+
+# ── .qta discovery (ateles#748) ──────────────────────────────────────────
+#
+# Voice Memos writes some recordings as .qta (QuickTime/MOV-family container)
+# instead of .m4a. ffmpeg/whisper read it fine, but the watcher globbed for
+# .m4a only in some places, so .qta recordings were silently skipped: never
+# transcribed, never stored, no error. Every audio-enumeration point must
+# consult the shared AUDIO_EXTENSIONS constant, not a repeated literal.
+
+
+def test_qta_discovered_by_imports_scan(tmp_path, monkeypatch):
+    """The main Recordings-dir scan (find_new_files) must pick up .qta."""
+    monkeypatch.setattr(watch, "RECORDINGS_DIR", tmp_path)
+    _touch(tmp_path / "20260905 124858-1E9512FC.qta", text="")
+    _touch(tmp_path / "20260905 125230-84387BC3.qta", text="")
+
+    found = watch.find_new_files(set())
+
+    assert {p.name for p in found} == {
+        "20260905 124858-1E9512FC.qta",
+        "20260905 125230-84387BC3.qta",
+    }
+
+
+def test_qta_excluded_once_seen(tmp_path, monkeypatch):
+    monkeypatch.setattr(watch, "RECORDINGS_DIR", tmp_path)
+    _touch(tmp_path / "seen.qta", text="")
+    _touch(tmp_path / "fresh.qta", text="")
+
+    found = watch.find_new_files({"seen.qta"})
+
+    assert [p.name for p in found] == ["fresh.qta"]
+
+
+def test_qta_through_partition_meeting_recordings(tmp_path):
+    """
+    partition_meeting_recordings operates on whatever candidate list it is
+    given — a .qta file with a ready transcript sidecar must partition as
+    ready exactly like any other extension, since a caller could hand it
+    .qta candidates directly.
+    """
+    ready = _touch(tmp_path / "a.qta")
+    _touch(tmp_path / "a.txt")  # transcript present -> ready
+    pending = _touch(tmp_path / "b.qta")  # no transcript -> pending
+
+    got_ready, got_pending = watch.partition_meeting_recordings(
+        [ready, pending], set()
+    )
+    assert [p.name for p in got_ready] == ["a.qta"]
+    assert [p.name for p in got_pending] == ["b.qta"]
+
+
+def test_qta_through_release_path(tmp_path, monkeypatch):
+    """A held .qta memo releases through the same path as any other extension."""
+    monkeypatch.setattr(watch, "HELD_STATE_FILE", tmp_path / "held.json")
+    monkeypatch.setattr(watch, "notify", lambda *a, **k: None)
+    monkeypatch.setattr(watch, "run_entity_extraction", lambda _f: "none")
+    watch.save_held(
+        {"20260905 124858-1E9512FC.qta": {"reason": "check 2"}}
+    )
+    assert watch.release_held("1E9512FC") == 0
+    assert watch.load_held() == {}
+
+
+def test_find_new_files_mixed_extension_directory(tmp_path, monkeypatch):
+    """A directory with both .m4a and .qta files returns both, and ignores
+    non-audio sidecars Voice Memos writes alongside recordings."""
+    monkeypatch.setattr(watch, "RECORDINGS_DIR", tmp_path)
+    _touch(tmp_path / "one.m4a", text="")
+    _touch(tmp_path / "two.qta", text="")
+    _touch(tmp_path / "two.waveform", text="")
+    _touch(tmp_path / "two.composition", text="")
+
+    found = {p.name for p in watch.find_new_files(set())}
+
+    assert found == {"one.m4a", "two.qta"}
+
+
+def test_find_new_files_uppercase_extension(tmp_path, monkeypatch):
+    """Some sources produce uppercase extensions (e.g. .M4A) — suffix
+    matching must be case-insensitive."""
+    monkeypatch.setattr(watch, "RECORDINGS_DIR", tmp_path)
+    _touch(tmp_path / "20260905 130000-AAAAAAAA.M4A", text="")
+
+    found = watch.find_new_files(set())
+
+    assert [p.name for p in found] == ["20260905 130000-AAAAAAAA.M4A"]
+
+
+def test_find_new_files_ignores_non_audio_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(watch, "RECORDINGS_DIR", tmp_path)
+    _touch(tmp_path / "CloudRecordings.db", text="")
+    _touch(tmp_path / "real.qta", text="")
+
+    found = watch.find_new_files(set())
+
+    assert [p.name for p in found] == ["real.qta"]
+
+
+def test_assess_memo_finds_duration_for_qta_audio(tmp_path, monkeypatch):
+    """
+    assess_memo's duration lookup used to hardcode a .m4a fallback after
+    trying .wav, so a .qta memo's duration silently came back None even when
+    the audio file existed right next to the transcript — degrading the
+    clarity gate's measurement without ever raising an error.
+    """
+    monkeypatch.setattr(watch, "_audio_imports_dir", lambda: tmp_path)
+
+    transcript = _touch(
+        tmp_path / "20260905_124858_voicememo_20260905 124858-1E9512FC.txt",
+        text="A perfectly ordinary transcript about the roadmap.",
+    )
+    audio = _touch(
+        tmp_path / "20260905_124858_voicememo_20260905 124858-1E9512FC.qta",
+        text="not real audio, just needs to exist",
+    )
+
+    monkeypatch.setattr(watch, "_audio_duration_seconds", lambda p: 200.0 if p == audio else None)
+
+    memo = Path("20260905 124858-1E9512FC.qta")
+    report, found_transcript = watch.assess_memo(memo)
+
+    assert found_transcript == transcript
+    assert report is not None
+    assert report.metrics.get("duration_seconds") == 200.0
