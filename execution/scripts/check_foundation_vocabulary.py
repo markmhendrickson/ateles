@@ -31,7 +31,8 @@ banned words on purpose); fenced code blocks are scanned (mermaid labels are pro
 Usage:
     check_foundation_vocabulary.py [--root DIR] [--quiet-advisory] [--top N]
 
-Exit 1 on any Never hit; 0 otherwise. Stdlib only; ``conformance.md#mechanical-checks-on-this-directory``.
+Exit 1 on any Never hit, on a ``PATTERNS`` key that names no entry (an incomplete check is not a pass),
+or on a missing corpus; 0 otherwise. Stdlib only; ``conformance.md#mechanical-checks-on-this-directory``.
 """
 
 from __future__ import annotations
@@ -385,7 +386,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     vocab_text = vocab_path.read_text(encoding="utf-8")
-    for key in missing_pattern_entries(vocab_text):
+    # A stale key means a term's regex bans are silently not applied: the check is incomplete, and an
+    # incomplete check is not a pass. Report every stale key, run the rest so the author sees the whole
+    # picture, and fail below regardless of what the prose scan finds.
+    stale = missing_pattern_entries(vocab_text)
+    for key in stale:
         print(f"PATTERNS key {key!r} names no ### entry in {VOCABULARY}; its regex bans are not applied")
     never, not_for = parse_bans(vocab_text)
     if not never:
@@ -405,7 +410,11 @@ def main(argv: list[str] | None = None) -> int:
         f"{len(never_hits)} Never hit(s); {len(advisory)} Not-for advisory hit(s)"
         + (f"; most common: {top}" if top else "")
     )
-    return 1 if never_hits else 0
+    if stale:
+        print(
+            f"vocabulary check: {len(stale)} stale PATTERNS key(s); the check is incomplete and does not pass"
+        )
+    return 1 if never_hits or stale else 0
 
 
 if __name__ == "__main__":

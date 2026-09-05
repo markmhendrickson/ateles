@@ -362,12 +362,16 @@ class TestRealDocumentBudget:
         strict=True,
         reason=(
             "PR #745: the operator directed that content settles before budget, and the rule is "
-            "cut and split, never raise the cap. Measured at head a2f9d71: the three-document "
-            "kernel is 59,390 chars against MAX_BLOCK_CHARS=40,000 (principles.md 13,352; "
-            "work_model.md 16,106; gates_and_workflows.md 29,932), and every kernel and keyed "
-            "document exceeds MAX_DOC_CHARS=12,000 — vocabulary.md (73,842) and github.md (45,714) "
-            "by the widest margins. Cutting ~19.4k of prose to close the block gap is a content "
-            "decision the operator owns; this marker stays until that budget pass lands. "
+            "cut and split, never raise the cap. Measured at revision 30 (2026-09-06, len() of each "
+            "file): the three-document kernel is 134,509 chars against MAX_BLOCK_CHARS=40,000 "
+            "(principles.md 13,527; work_model.md 69,249; "
+            "gates_and_workflows.md 51,733), and every kernel and keyed "
+            "document exceeds MAX_DOC_CHARS=12,000 — vocabulary.md (85,185), "
+            "telegram.md (79,546), adapters.md (76,077), and "
+            "payments.md (73,658) by the widest margins; the smallest keyed document, "
+            "authority_model.md, is 18,701. Closing the block gap means "
+            "cutting or splitting ~95k of kernel prose, a content decision the operator owns; "
+            "this marker stays until that budget pass lands. "
             "See docs/foundation/status.md, 'Reading-list budget and keying'."
         ),
     )
@@ -747,3 +751,229 @@ class TestVocabularyCheckEmptyState:
         (tmp_path / "docs" / "foundation").mkdir(parents=True)
         assert mod.main(["--root", str(tmp_path), "--quiet-advisory"]) == 1
         assert "vocabulary.md" in capsys.readouterr().out
+
+
+class TestVocabularyCheckStaleKeyState:
+    """A stale ``PATTERNS`` key fails the vocabulary command; it is not a warning.
+
+    ``missing_pattern_entries`` finds a key whose ``###`` entry is gone. Before revision 30 ``main``
+    printed each one and then exited 0, so a renamed term silently dropped its regex bans while the
+    command reported a pass — the reports-without-binding defect the foundation names, and a claim the
+    helper's docstring made that the exit path contradicted. The direct assertion in
+    ``TestVocabularyLint`` covers the healthy document; this covers the command's failure state.
+    """
+
+    def _lint(self):
+        import importlib.util
+
+        script = _REPO_ROOT / "execution" / "scripts" / "check_foundation_vocabulary.py"
+        spec = importlib.util.spec_from_file_location("check_foundation_vocabulary", script)
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    @staticmethod
+    def _clean_corpus(tmp_path: Path) -> None:
+        fdir = tmp_path / "docs" / "foundation"
+        fdir.mkdir(parents=True)
+        (fdir / "vocabulary.md").write_text(
+            '# V\n\n### task\n**Definition:** x.\n**Never:** "work item".\n'
+        )
+        (fdir / "work_model.md").write_text("# W\n\nClean prose about a task.\n")
+
+    def test_a_clean_corpus_with_current_keys_passes(self, tmp_path: Path, monkeypatch) -> None:
+        """Control for the planted case: the same corpus passes when every key names an entry."""
+        mod = self._lint()
+        self._clean_corpus(tmp_path)
+        monkeypatch.setattr(mod, "PATTERNS", {"task": {"never": [(r"\bchip\b", "")]}})
+        assert mod.main(["--root", str(tmp_path), "--quiet-advisory"]) == 0
+
+    def test_a_planted_stale_key_fails_the_command(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """Revert-the-fix check: one key naming no ``###`` entry makes the command exit 1."""
+        mod = self._lint()
+        self._clean_corpus(tmp_path)
+        monkeypatch.setattr(
+            mod,
+            "PATTERNS",
+            {
+                "task": {"never": [(r"\bchip\b", "")]},
+                "passage": {"never": [(r"\bpassages?\b", "")]},  # the entry was renamed away
+            },
+        )
+        vocab = (tmp_path / "docs" / "foundation" / "vocabulary.md").read_text()
+        assert mod.missing_pattern_entries(vocab) == ["passage"]
+        assert mod.main(["--root", str(tmp_path), "--quiet-advisory"]) == 1
+        out = capsys.readouterr().out
+        assert "PATTERNS key 'passage'" in out
+        assert "0 Never hit(s)" in out  # the failure is the stale key, not a prose hit
+
+
+class TestTermLinkCheckEmptyState:
+    """``link_vocabulary_terms.py`` fails closed on a missing vocabulary, in both modes.
+
+    Same defect class ``TestAnchorCheck`` and ``TestVocabularyCheckEmptyState`` cover for the other two
+    registered checks: before revision 30 a missing ``vocabulary.md`` printed "nothing to link" and
+    exited 0, so a wrong ``--root`` or a partial checkout passed the Term-links control without running it.
+    """
+
+    def _linker(self):
+        import importlib.util
+
+        script = _REPO_ROOT / "execution" / "scripts" / "link_vocabulary_terms.py"
+        spec = importlib.util.spec_from_file_location("link_vocabulary_terms", script)
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_the_real_vocabulary_passes_check(self) -> None:
+        """Control: the committed document satisfies ``--check`` through the command path."""
+        assert self._linker().main(["--root", str(_REPO_ROOT), "--check"]) == 0
+
+    def test_missing_foundation_dir_fails_closed(self, tmp_path: Path, capsys) -> None:
+        mod = self._linker()
+        assert mod.main(["--root", str(tmp_path), "--check"]) == 1
+        assert str(tmp_path) in capsys.readouterr().out  # names the root it inspected
+
+    def test_missing_vocabulary_file_fails_closed_in_write_mode_too(self, tmp_path: Path, capsys) -> None:
+        """Without ``--check`` the script writes; on a missing file it must write nothing and still fail."""
+        mod = self._linker()
+        fdir = tmp_path / "docs" / "foundation"
+        fdir.mkdir(parents=True)
+        assert mod.main(["--root", str(tmp_path)]) == 1
+        assert "vocabulary.md" in capsys.readouterr().out
+        assert list(fdir.iterdir()) == []
+
+
+class TestAdapterKeyedReadings:
+    """Each per-system adapter document, and ``adapters.md``, is keyed to the paths conformance.md names.
+
+    The contract ``TestGitHubKeyedReadings`` states, applied to the other five adapter rows: a keyed row
+    binds only if ``select_readings()`` returns the document for a change on its paths, withholds it for
+    a change elsewhere, and returns it for an edit to the document itself.
+    """
+
+    # doc -> (paths conformance.md keys to it, paths that must not select it)
+    CASES: dict[str, tuple[list[str], list[str]]] = {
+        "docs/foundation/adapters.md": (
+            [
+                "execution/daemons/apus/apus.py",
+                "execution/daemons/formica/formica.py",
+                "execution/daemons/monedula/monedula.py",
+                "lib/notify/telegram.py",
+                "execution/lib/telegram.py",
+            ],
+            ["lib/daemon_runtime/task_claim.py", "lib/daemon_runtime/gating.py"],
+        ),
+        "docs/foundation/gmail.md": (
+            [
+                "execution/daemons/turdus/turdus.py",
+                "execution/daemons/riparia/riparia.py",
+                "lib/daemon_runtime/run_email.py",
+                "lib/approval/email_channel.py",
+                ".claude/hooks/gmail_send_gate.py",
+            ],
+            ["execution/daemons/sylvia/sylvia.py", "lib/daemon_runtime/task_claim.py"],
+        ),
+        "docs/foundation/calendar.md": (
+            [
+                "execution/daemons/sylvia/sylvia.py",
+                "execution/daemons/cotinga/cotinga.py",
+                "execution/daemons/monedula/monedula.py",
+            ],
+            ["execution/daemons/turdus/turdus.py", "lib/daemon_runtime/task_claim.py"],
+        ),
+        "docs/foundation/telegram.md": (
+            [
+                "execution/lib/telegram.py",
+                "lib/notify/telegram.py",
+                "execution/daemons/cyphorhinus/cyphorhinus.py",
+                "lib/activity/feed.py",
+            ],
+            ["execution/daemons/turdus/turdus.py", "lib/daemon_runtime/task_claim.py"],
+        ),
+        "docs/foundation/payments.md": (
+            ["execution/daemons/monedula/monedula.py"],
+            ["execution/daemons/turdus/turdus.py", "lib/daemon_runtime/task_claim.py"],
+        ),
+    }
+
+    @staticmethod
+    def _selected(paths: list[str]) -> list[str]:
+        rl = load_reading_list(_REPO_ROOT)
+        assert rl is not None
+        return [r.doc for r in select_readings(rl, paths, _REPO_ROOT)]
+
+    @pytest.mark.parametrize("doc", sorted(CASES))
+    def test_each_adapter_doc_is_a_reading_list_member(self, doc: str) -> None:
+        rl = load_reading_list(_REPO_ROOT)
+        assert rl is not None
+        assert doc in {d for e in rl.keyed for d in e.docs}
+
+    @pytest.mark.parametrize(
+        "doc,path",
+        [(doc, path) for doc, (positives, _negatives) in sorted(CASES.items()) for path in positives],
+    )
+    def test_each_keyed_path_selects_its_document(self, doc: str, path: str) -> None:
+        assert doc in self._selected([path]), (doc, path)
+
+    @pytest.mark.parametrize(
+        "doc,path",
+        [(doc, path) for doc, (_positives, negatives) in sorted(CASES.items()) for path in negatives],
+    )
+    def test_the_key_is_scoped(self, doc: str, path: str) -> None:
+        """A change nowhere near the system does not carry its document."""
+        assert doc not in self._selected([path]), (doc, path)
+
+    @pytest.mark.parametrize("doc", sorted(CASES))
+    def test_editing_the_document_selects_itself(self, doc: str) -> None:
+        assert doc in self._selected([doc])
+
+
+class TestDocsIndexMatchesInventory:
+    """``docs/README.md`` and the root README name every foundation document, and nothing that is gone.
+
+    The index is where a contributor learns a keyed document exists; one the index omits is never opened
+    (ux finding on PR #745, revisions 24–29: four keyed adapter documents absent, a merged-away file still
+    linked, a count of thirteen against eighteen files). Pinning both indexes to the directory listing
+    makes the next drift fail a test instead of a review.
+    """
+
+    _NUMBER_WORDS = {
+        "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+        "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+        "twenty-one": 21, "twenty-two": 22, "twenty-three": 23, "twenty-four": 24, "twenty-five": 25,
+    }
+
+    @staticmethod
+    def _inventory() -> set[str]:
+        return {p.name for p in (_REPO_ROOT / "docs" / "foundation").glob("*.md")}
+
+    def test_docs_index_links_every_document_and_no_ghost(self) -> None:
+        import re
+
+        text = (_REPO_ROOT / "docs" / "README.md").read_text(encoding="utf-8")
+        linked = set(re.findall(r"\]\(foundation/([\w.-]+\.md)", text))
+        inventory = self._inventory()
+        assert inventory - linked == set(), sorted(inventory - linked)  # unlisted document
+        assert linked - inventory == set(), sorted(linked - inventory)  # link to a file that is gone
+
+    def test_root_readme_count_matches_the_directory(self) -> None:
+        import re
+
+        text = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        m = re.search(r"\]\(docs/foundation/\): ([a-z-]+) documents", text)
+        assert m, "the root README no longer states the foundation's document count beside its link"
+        assert self._NUMBER_WORDS[m.group(1)] == len(self._inventory()), m.group(1)
+
+    def test_root_readme_links_every_document_and_no_ghost(self) -> None:
+        import re
+
+        text = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        linked = set(re.findall(r"\]\(docs/foundation/([\w.-]+\.md)", text))
+        inventory = self._inventory()
+        assert inventory - linked == set(), sorted(inventory - linked)
+        assert linked - inventory == set(), sorted(linked - inventory)

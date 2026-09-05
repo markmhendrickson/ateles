@@ -11,7 +11,7 @@ life end to end, with the governance substrate (identity, capability, gating, au
 against the vision.
 
 Ateles is a design and a working example of it. The design is
-[`docs/foundation/`](docs/foundation/): thirteen documents that state how work is created, taken,
+[`docs/foundation/`](docs/foundation/): eighteen documents that state how work is created, taken,
 executed, and approved, and what the swarm does when it cannot reach its own record. The example is what
 runs against that design — background daemons and skills that already automate code review, releases,
 issue triage, email, calendar, recurring payments (fiat + Bitcoin), meeting capture and recap, health
@@ -691,10 +691,13 @@ Full documentation lives in `docs/` — index at [docs/README.md](docs/README.md
 [Principles](docs/foundation/principles.md) · [Work model](docs/foundation/work_model.md) ·
 [Gates and workflows](docs/foundation/gates_and_workflows.md) ·
 [Failure posture](docs/foundation/failure_posture.md) ·
-[Authority model](docs/foundation/authority_model.md) · [Adapters](docs/foundation/adapters.md) ·
-[Data model](docs/foundation/data_model.md) · [Vocabulary](docs/foundation/vocabulary.md) ·
-[Workflows](docs/foundation/workflows.md) · [Scenarios](docs/foundation/scenarios.md) ·
-[Conformance](docs/foundation/conformance.md) · [Status](docs/foundation/status.md)
+[Authority model](docs/foundation/authority_model.md) · [Data model](docs/foundation/data_model.md) ·
+[Vocabulary](docs/foundation/vocabulary.md) · [Adapters](docs/foundation/adapters.md) ·
+[GitHub](docs/foundation/github.md) · [Gmail](docs/foundation/gmail.md) ·
+[Calendar](docs/foundation/calendar.md) · [Telegram](docs/foundation/telegram.md) ·
+[Payments](docs/foundation/payments.md) · [Conformance](docs/foundation/conformance.md) ·
+[Scenarios](docs/foundation/scenarios.md) · [Workflows](docs/foundation/workflows.md) ·
+[Migration](docs/foundation/migration.md) · [Status](docs/foundation/status.md)
 
 **Orientation:** [Who it's for (ICP)](docs/icp.md) · [Architecture](docs/architecture.md) ·
 [Taxonomy](docs/taxonomy.md) · [Phases](docs/phases.md) ·

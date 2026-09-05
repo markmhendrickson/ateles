@@ -36,7 +36,8 @@ Usage:
     link_vocabulary_terms.py [--root DIR] [--check] [--report]
 
 ``--check`` writes nothing and exits 1 if any linkable first mention is unlinked (this is what CI runs).
-``--report`` prints the per-block detail. Stdlib only.
+Both modes exit 1, writing nothing, when ``vocabulary.md`` is absent under ``--root``: a check that did
+not run is not a pass. ``--report`` prints the per-block detail. Stdlib only.
 """
 
 from __future__ import annotations
@@ -250,9 +251,16 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     path = args.root / FOUNDATION_DIR / VOCABULARY
+    # Fail closed on a missing corpus, in both modes. Exiting 0 here reported "nothing to link" as a
+    # pass for a control that never ran — the reports-without-binding defect the foundation names — so a
+    # wrong --root, a partial checkout, or a pre-document invocation was indistinguishable from a linked
+    # document. Name the root inspected so the two are.
     if not path.is_file():
-        print(f"no {path}; nothing to link")
-        return 0
+        print(
+            f"link check: no {path} (looked under --root {args.root}); nothing was checked. "
+            f"Run from the repo checkout, or pass --root pointing at one."
+        )
+        return 1
     text = path.read_text(encoding="utf-8")
     out, linked = link(text)
 

@@ -1271,6 +1271,39 @@ The budget decision above is unchanged and still the operator's;
 `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure that
 records it.
 
+**On revision 30 the kernel is 134.5k** (`principles.md` 13.5k, `work_model.md` 69.2k,
+`gates_and_workflows.md` 51.7k), measured 2026-09-06 on this branch as the character count of each file
+(`len()` of the decoded text, which is what `foundation.py`'s caps count; `wc -c` counts bytes and reads
+higher on these documents by the multi-byte characters they carry). Every kernel and keyed document is
+over the per-document cap, and the block gap is 94.5k. Revisions 21 to 29 added the four per-system
+adapter documents (`gmail.md`, `calendar.md`, `telegram.md`, `payments.md`), the register of open
+decisions in `conformance.md`, and `migration.md`; revision 29 merged `scenarios_extended.md` back into
+`scenarios.md`, which is unkeyed, so that merge moved no budget. The full table on revision 30:
+
+| Document | Characters | Reading-list role on revision 30 | Over the per-document cap |
+|---|---|---|---|
+| `principles.md` | 13.5k | kernel | yes |
+| `work_model.md` | 69.2k | kernel | yes |
+| `gates_and_workflows.md` | 51.7k | kernel | yes |
+| `authority_model.md` | 18.7k | keyed | yes |
+| `failure_posture.md` | 23.5k | keyed | yes |
+| `data_model.md` | 33.7k | keyed | yes |
+| `vocabulary.md` | 85.2k | keyed | yes |
+| `conformance.md` | 31.6k | keyed (itself) | yes |
+| `adapters.md` | 76.1k | keyed (also keyed to itself) | yes |
+| `github.md` | 46.2k | keyed (also keyed to itself) | yes |
+| `gmail.md` | 49.4k | keyed (also keyed to itself) | yes |
+| `calendar.md` | 43.8k | keyed (also keyed to itself) | yes |
+| `telegram.md` | 79.5k | keyed (also keyed to itself) | yes |
+| `payments.md` | 73.7k | keyed (also keyed to itself) | yes |
+| `scenarios.md` | 21.4k | companion, **unkeyed** | — |
+| `workflows.md` | 43.1k | companion, **unkeyed** | — |
+| `migration.md` | 70.6k | companion, **unkeyed** | — |
+
+The budget decision is unchanged and still the operator's;
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure
+that records it, `strict=True`, with these figures in its reason.
+
 The kernel was 39.0k of the 40k block after revision 8, still under it and with less room than before;
 `data_model.md` grew most, carrying the record-usage contract's two tables. Revision 8 wrote content the
 mining showed was settled and deliberately did not trim, on the same instruction that governed revisions 6

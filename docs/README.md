@@ -55,13 +55,26 @@ Keyed (read when matching paths change — see `conformance.md`):
 - [**Adapters**](foundation/adapters.md) — how external systems reach the work model and how it reaches
   them: inbound events are signals about artifacts (a sign-off by a named principal, an observation, an
   action confirmation, or a task for intake, never a workflow instruction); outbound operations are
-  actions through the action gate; Gmail, Telegram, calendar, and payments tabled, and the code host in
-  its own document below.
+  actions through the action gate; the two invariants, the four outcomes, and the five rules every
+  system applies, and what a new adapter must satisfy before the record trusts it. Each system's full
+  surface is in its own keyed document below.
 - [**GitHub**](foundation/github.md) — the code host's full event surface: every event GitHub can deliver
   across issues, pull requests, reviews, releases, security advisories, checks, and repository-level
   operations, each marked handled, deliberately ignored, or unhandled, and each resolving to one of the
   four adapter outcomes or to a counted drop; the outbound operation, action class, and confirmation for
   every step that reaches the host; and what the adapter withholds from a security advisory.
+- [**Gmail**](foundation/gmail.md) — the mail system's full surface: every inbound signal and what it
+  becomes, the conditions the system never delivers, a thread and its messages each artifacts related by
+  `PART_OF`, the outbound operations the workflows take on mail, and what the adapter refuses.
+- [**Calendar**](foundation/calendar.md) — the calendar's full surface: a series and its occurrences each
+  artifacts related by `PART_OF`, every inbound signal and what it becomes, the one event-write path, and
+  what the design uses of the API against what it offers.
+- [**Telegram**](foundation/telegram.md) — the operator's chat channel, and why a message in it is not an
+  instruction: the callback payload is the swarm's own text and free text is not; a reaction never carries
+  a decision; a read during a halt is answered with the halt and never with data.
+- [**Payments**](foundation/payments.md) — the least reversible boundary: the dedup key, the transfer whose
+  confirmation never returned, the approver shown exactly what the verifier signed, tolerance as an
+  `action_policy` value defaulting to zero, and terminal declared per rail and bound per instance.
 - [**Conformance**](foundation/conformance.md) — how issue-based work binds to the foundation: the
   always-read kernel, the path-keyed reading list, the design-basis statement, the direction of truth per
   record class, and the rule that keeps state out of the foundation.
@@ -72,9 +85,10 @@ Keyed (read when matching paths change — see `conformance.md`):
 
 Authored companions (design prose; **not** inlined into review prompts):
 
-- [**Scenarios**](foundation/scenarios.md) — walkthroughs of the work model and gate model in motion
-  (claim/lease/lapse, assignment, several tasks going through a workflow as one batch); further
-  scenarios in [`scenarios_extended.md`](foundation/scenarios_extended.md).
+- [**Scenarios**](foundation/scenarios.md) — ten walkthroughs of the work model and gate model in motion:
+  claim/lease/lapse, assignment, several tasks going through a workflow as one batch, a task detached
+  from a batch, a parent with children in independent batches, an operator-only task, an action
+  discovered mid-workflow at each blast tier, the halt, and intake into a successor.
 - [**Workflows**](foundation/workflows.md) — designs of the core workflows (intake and successors);
   purpose, steps, fast paths — binds via `workflow` entities and `render_workflow_docs.py --check`.
 - [**Migration**](foundation/migration.md) — the population plan's second leg: how the record an instance
