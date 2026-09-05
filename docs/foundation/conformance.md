@@ -6,7 +6,7 @@ mechanism (built as ateles#744): names documents and paths, never what a checkou
 `binding_is_the_reviewer_reading_a_kernel_not_a_loading_order` and
 `ateles_binding_extends_three_existing_mechanisms`, synthesis `ent_b0ce322f768e4fc676b73139` (PR-29, C7),
 prior art `ent_08460968e6f49dac21510f4a` (OPA: decision decoupled from enforcement), and PR #745 operator
-review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and revision 21 (2026-09-05: the `gmail.md` and `calendar.md` keyed rows and their canonical-source entries), and revision 24 (2026-09-05: the `telegram.md` and `payments.md` keyed rows and their canonical-source entries), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: twelve register rows moved from open to ruled), and the operator's 2026-09-05 rulings of decision 15 and decision 30 (revision 27: the last open row moved to ruled, and the recurring task registered as ruled on the operator's proposal).
+review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and revision 21 (2026-09-05: the `gmail.md` and `calendar.md` keyed rows and their canonical-source entries), and revision 24 (2026-09-05: the `telegram.md` and `payments.md` keyed rows and their canonical-source entries), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: twelve register rows moved from open to ruled), and the operator's 2026-09-05 rulings of decision 15 and decision 30 (revision 27: the last open row moved to ruled, and the recurring task registered as ruled on the operator's proposal), and revision 28 (2026-09-05: `migration.md` registered as an authored companion, and decision 31 opened).
 
 ## Purpose
 
@@ -31,11 +31,13 @@ measurement, regenerated. Foundation docs may name it as the state home only; th
 figures as design evidence. The parser reads only the tables below, so it is never inlined; a reviewer
 who needs state reads it by hand and checks its as-of date first.
 
-`docs/foundation/workflows.md`, `docs/foundation/scenarios.md`, and
-`docs/foundation/scenarios_extended.md` are authored companions: they bind via `workflow` entities +
-`render_workflow_docs.py --check` (workflows) or as walkthroughs of the kernel (scenarios), and are
-currently **not** inlined into review prompts. Whether they are keyed is a budget decision recorded in
-`status.md`, not a design fact.
+`docs/foundation/workflows.md`, `docs/foundation/scenarios.md`,
+`docs/foundation/scenarios_extended.md`, and `docs/foundation/migration.md` are authored companions: they
+bind via `workflow` entities + `render_workflow_docs.py --check` (workflows), as walkthroughs of the kernel
+(scenarios), or as the design of the population plan's second leg, whose stages are tasks going through the
+`record_migration` workflow it declares (migration), and are currently **not** inlined into review prompts.
+Whether the first three are keyed is a budget decision recorded in `status.md`, not a design fact;
+`migration.md` is never keyed, because it governs no code path and its figures live in `status.md`.
 
 ## Always read
 
@@ -175,6 +177,7 @@ the swarm's own records, and the word is not used for them.)
 | The calendar's per-signal mapping and per-step operation, in full | `docs/foundation/calendar.md`, PR-reviewed | the calendar-reading daemons and the one event-write path; `adapters.md` holds the general rules and carries the pointer to it |
 | The chat channel's per-update mapping and per-step operation, in full | `docs/foundation/telegram.md`, PR-reviewed | the chat send helpers and the one inbound poller; `adapters.md` holds the general rules and carries the pointer to it |
 | The payment rails' per-signal mapping and per-step operation, in full | `docs/foundation/payments.md`, PR-reviewed | the payment daemon and its per-rail handlers; `adapters.md` holds the general rules and carries the pointer to it |
+| The carrying of an instance's record into the design's types (each type's disposition, the primitive that carries it, the order, and how the carrying is governed) | `docs/foundation/migration.md`, PR-reviewed | the population plan `ent_0916804d07280d1751106d82`, whose `next_steps` names the leg, and the `record_migration` workflow declaration on an instance, which binds the plan to that instance and never redefines a disposition; the counts and shapes the plan starts from are `status.md` |
 
 A rule in two classes is written once in its authoritative home and cited from the other, never copied: a
 comment or a second document claiming to mirror the first is not a mechanism that keeps them matching
@@ -239,21 +242,25 @@ so that they are not reused; see the two notes below.
 | 28 | what tolerance, if any, a payment's consent carries | `payments.md#tolerance-is-an-action_policy-value-and-its-default-is-zero` | — | **ruled** (2026-09-05): a per-class `action_policy` value, zero where absent; any change to what the payee receives or the operator pays is a new checkpoint until the operator sets one |
 | 29 | what depth or state counts as terminal, and where it is declared | `payments.md#terminal-is-declared-in-the-rails-adapter-document-and-the-value-is-bound-per-instance` | — | **ruled** (2026-09-05): the criterion — settled, never sent, on a bank rail; *N* confirmations on a chain — is stated in the rail's adapter document; the value is bound per instance in the `vendor_binding`; a profile may deepen it and never shallow it |
 | 30 | how a recurring task is modelled | `work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next` | — | **ruled** (2026-09-05, on the operator's proposal): one live instance carrying its own `recurrence` rule; its closing sign-off creates the next instance, `FOLLOWS` task to task, with `due_date` computed from the schedule and never from the completion; the reschedule-instead-of-complete pattern is superseded for tasks modelled this way; an action series is a different thing and the two meet only at the gate |
+| 31 | how a registered entity type is renamed on a live record: a merge into a new-typed entity (ids change, edges repoint, the old id redirects), a registry alias (no id changes, a capability the record lacks), or a permanent tolerant reader over both types (nothing written) | `migration.md#the-open-decision-this-document-opens` | the re-typing stages of the migration (`agent`, `workflow`, the held decisions); nothing before them | **open** |
 
 **Every ruled decision now has a heading of its own.** 25 through 29 were opened as bold paragraphs inside
 their documents' *What this document does not decide* sections, and the register's pointers resolved to the
 enclosing heading; the rulings of 2026-09-05 gave each its own section, as 13, 14, 23, and 24 already had, so
 every pointer above lands on the ruling itself. 15 and 30 are argued under headings that name their subject
-rather than their number, as 13 and 14 are. No row is open: the register still exists because a ruled row is
-where a reviewer learns a question was once open and where its rule now lives, and because the next author
-reads it before opening a question that was already taken.
+rather than their number, as 13 and 14 are. One row is open, 31, and the register exists for the ruled rows
+too: a ruled row is where a reviewer learns a question was once open and where its rule now lives, and
+where the next author reads before opening a question that was already taken.
+
+**Decision 31 is argued under a heading of its own in `migration.md`**, an authored companion, which is
+where the migration it bears on is designed; the register row above points at it.
 
 **19 and 22 were never assigned, and the numbers stay unused.** Neither appears in any revision of any
 foundation document. They are the gaps left by several documents opening decisions concurrently on this
 branch and renumbering around each other, and they are recorded as gaps rather than closed up: renumbering
 would break every cross-reference the documents already carry, and silence would invite the next author to
 reuse the number for something unrelated. **Do not assign 19 or 22 to a new decision.** The next number is
-31.
+32.
 
 **20 and 21 were assigned, then renumbered, and two pointers were left behind.** Both were opened in
 `payments.md` and renumbered to 27 and 28 before that document was committed, to avoid colliding with 23

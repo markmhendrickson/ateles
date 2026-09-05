@@ -77,6 +77,10 @@ Authored companions (design prose; **not** inlined into review prompts):
   scenarios in [`scenarios_extended.md`](foundation/scenarios_extended.md).
 - [**Workflows**](foundation/workflows.md) — designs of the core workflows (intake and successors);
   purpose, steps, fast paths — binds via `workflow` entities and `render_workflow_docs.py --check`.
+- [**Migration**](foundation/migration.md) — the population plan's second leg: how the record an instance
+  already holds is carried into the design's types — each type's disposition (keep, re-type, derive,
+  retire, introduce), the record primitive that carries it, the order and its dependencies, what is
+  reversible, how the carrying is itself governed, and the gaps the mapping exposed in the foundation.
 
 Companion report (not a foundation design document; not in the review reading list):
 
