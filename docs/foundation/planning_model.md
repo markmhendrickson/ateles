@@ -22,7 +22,13 @@ the operator's argument that explicit ancestry serves both execution and priorit
 expects an ancestor by default, satisfied at near-zero noise by a default ancestor per intake class rather
 than a finding on every orphan; the no-authoring refusal restated as the line the default and the refusal
 meet at; decision 61 reframed from a per-level expectation to a per-class default, still open and still
-blocked on decision 57).
+blocked on decision 57). Revised by the rulings pass of 2026-09-06 (revision 48: decision 57 ruled — five
+levels, task → plan → project → strategy → mission, on the operator's word; objective settled as content
+within a strategy record and not a sixth level. Decision 61 not ruled: the priority pass (revision 47)
+reframed the question after this ruling was drafted against the pre-reversal framing, from "where a
+per-level ancestry expectation is declared" to "where an intake class's default ancestor is declared," and
+the reframed question is left as revision 47 stated it, still open and still blocked on 57, since ruling on
+the superseded framing would rule a question that no longer exists in that shape).
 
 ## Purpose
 
@@ -366,23 +372,50 @@ written and this model has none.
 
 ## Which levels an instance declares, and what it calls them
 
-**Open decision 57.** Registered in `conformance.md#the-register-of-open-design-decisions`. The rules above
-hold for any set of planning types with a level mark; which types an instance registers, in which order,
-under which names, and where its existing records sit among them is the instance's to declare, and the
-question is put to the operator because the answer is a statement of how they think about their own work.
+**Ruled (2026-09-06).** Registered in `conformance.md#the-register-of-open-design-decisions`. Five levels,
+in order: **task → plan → project → strategy → mission**, with the tenets and principles above the mission
+as a level that is read and never amended by the swarm. The operator, on the recommendation put to him:
+*"strategic materials (which perhaps can themselves contain objectives) do seem like an important link
+between projects and missions."*
 
-**The options.** The full set the operator's instance sketches — task, plan, project, objective,
+**Strategy is a level.** A project's justification jumping straight to a mission is too coarse to derive
+acceptance criteria or relative standing from — a mission states a direction long enough to outlive any
+one project, and a project needs something at the grain of a strategy to check its criteria against and to
+rank against its siblings. Strategy is where a mission becomes actionable, sitting between the two and
+carrying that translation. **Cost accepted:** a fifth `amend_<level>` class, and a rung in every declared
+ascent — every step that reads upward through a project now has a strategy record between it and the
+mission, whether or not that step declared a read that far.
+
+**Objective is not a level.** The operator's own phrase carries the ruling: strategic materials "can
+themselves contain objectives" — an objective is authored content *within* a strategy record, never a
+record with its own `amend_objective` class, its own reserved grant, and its own rung in the ascent.
+Reason: principle 6 (extend the mechanism that already generalizes; do not build a second one where
+content already serves) and the identical reasoning that made a `decision` an entity carried under a
+planning record rather than a level of the ladder in its own right
+(`#downward-state-is-derived-upward-content-is-authored-as-entities`). A strategy's statement may hold
+objective-shaped content — the criteria a project beneath it is measured against — and that content is the
+strategy's to author and amend, not a second thing the registry marks.
+
+**The options considered.** The full set the operator's instance sketches — task, plan, project, objective,
 strategy, mission, with the tenets and principles above the mission as a level that is read and never
 amended by the swarm; a shorter set, in which a project is a plan with a longer horizon and an objective is
 a strategy's criterion rather than a record of its own; or the two the design needs to state itself — the
-task and one planning level above it — with the rest admitted as the operator registers them. **What would
-decide it:** whether any rule above reads a level by name. None does: every rule reads the mark and the
-ascent, so the design is indifferent, and the choice is the operator's alone. Two consequences of the
-choice are stated so that it is made knowingly. Each registered level is an `amend_<level>` class the
-operator lists or leaves reserved, so more levels are more classes to write. And a level whose records are
-read by every step beneath them — a mission — is on every ascent, so what it says is read on every batch
-that declares it, and a statement that long changes the reading budget of every step that reads it
+task and one planning level above it — with the rest admitted as the operator registers them. The ruling
+takes the middle path in a different cut than any of the three as first framed: five named levels, with
+objective explicitly excluded from the count as content rather than a level. **What would have decided it
+otherwise:** whether any rule above reads a level by name. None does — every rule reads the mark and the
+ascent — so the design remained indifferent on the mechanism and the choice was the operator's alone, now
+made. Two consequences follow knowingly: each registered level is an `amend_<level>` class the operator
+lists or leaves reserved, so five levels are five classes to write, one more than four; and a level whose
+records are read by every step beneath it — a mission — is on every ascent, so what it says is read on
+every batch that declares it, a statement that long changes the reading budget of every step that reads it
 (`conformance.md#always-read`).
+
+**What reopens it.** A rule of the design coming to read a level by name — none does today — or the
+operator later finding objective-shaped content outgrowing what a strategy record can carry (a criterion
+needing its own lifecycle, its own sign-off, independent of its parent strategy's amendment), which would
+be the same argument decision 51 already settled against a second `initiative`-shaped entity, re-litigated
+here.
 
 ## Missing ancestry: whether the swarm derives an absent parent, or finds the gap
 
@@ -592,20 +625,20 @@ since it names a record rather than a level.
 **A gap is judged at each edge, never over the whole chain to a root, because there is no root the design
 guarantees every chain reaches.** The **root** is defined as "the record with no `PART_OF`"
 (`#the-hierarchy-is-edges-and-a-task-has-one-line-upward`) — a description of whatever a chain happens to
-end at, not a named level every instance is required to register. Decision 57 leaves open whether an
-instance declares six levels, two, or the two the design needs to state itself with the rest admitted as
-registered; an instance that declares only `task` and `plan` has a plan as its root, and a plan with nothing
-above it in that instance is not missing a project, because the instance never declared one. Judging "does
-this chain reach a strategy" would require a level named in the judgement, which is exactly what no rule
-above does (`#which-levels-an-instance-declares-and-what-it-calls-them`: "every rule reads the mark and the
-ascent... the design is indifferent") and what decision 57 reserves to the operator. So the only judgement
-the design can make without pre-empting 57 is local: does *this* record have a `PART_OF` to a record one
-level up, where the instance's own registered order says one belongs — the same test `survey` already runs
-for the single parent it reads (`workflows.md#planning`), applied at whichever edge is being walked, and
-never accumulated into a single verdict about the whole ascent. **This depends on decision 57's shape and
-does not resolve it:** the number of edges a chain is expected to have, and what a root's own level is
-called, are exactly what 57 leaves to the operator; this section states only that the judgement is per-edge
-once the levels exist, whatever their count.
+end at, not a named level every instance is required to register. Decision 57 rules this operator's
+instance to five levels — task, plan, project, strategy, mission — but the mechanism stated here holds for
+any instance's count, including one that registers fewer or declares them under other names: an instance
+that declares only `task` and `plan` has a plan as its root, and a plan with nothing above it in that
+instance is not missing a project, because the instance never declared one. Judging "does this chain reach
+a strategy" would require a level named in the judgement, which is exactly what no rule above does
+(`#which-levels-an-instance-declares-and-what-it-calls-them`: "every rule reads the mark and the
+ascent... the design is indifferent") even where a level's name and count are now fixed for this instance.
+So the only judgement the design makes is local: does *this* record have a `PART_OF` to a record one level
+up, where the instance's own registered order says one belongs — the same test `survey` already runs for
+the single parent it reads (`workflows.md#planning`), applied at whichever edge is being walked, and never
+accumulated into a single verdict about the whole ascent. **This is independent of any instance's level
+count:** the judgement is per-edge whether an instance registers two levels or five, because no rule reads
+a level by name — only the mark and the ascent.
 
 ## Whether the operator's own amendment passes the gate
 

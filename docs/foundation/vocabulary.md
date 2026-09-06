@@ -9,7 +9,7 @@ cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 opera
 and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional [step](#step), and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14,
 16–18, 23–29: the hold verb, a condition a step holds on, the `dependency_cycle` reason class, the consent
 tolerance on `action_policy`, and an [artifact](#artifact) `PART_OF` its containing artifact), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the `intake rule` entry). Format
-follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives). Revised by the consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by role; `merge` as an action-class name retired for `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound as the task's `due_date` on the step entry; the `operator_only` step; a rule keying on a field a step wrote; no marker on a read for a special-category type; decision 55 on the [external-system](#external-system) entry). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a task status; the terminal set declared on the type; the `finding` and `sign_off` fields; `rounds_cap` and `none_permitted`). Revised by the rulings pass of 2026-09-06 (revision 38: the [verdict](#verdict) as the [sign-off](#sign-off)'s reconciled [projection](#projection); a `signed` or blocking sign-off written under a held [lease](#lease); what owning confers; the counting rule and the thresholds' home on the [quorum](#quorum) and separation entries; an initiative as a task by class; the host as an external system; a budget as a grant's and a [delegation](#delegation)'s scope term). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser never the resolver save the operator's marked self-resolution, on the [approval](#approval) entry; the right to propose as a grant capability and what stops as a task, on the proposal and [reprioritization](#reprioritization) entries; metered resources and the engine's sole governance grant, on the [grant](#grant) entry; a rule naming a work-model type refused at the write). Revised by the planning pass of 2026-09-06 (revision 40: the planning-model section — [planning record](#planning-record), [planning level](#planning-level), [ascent](#ascent), [unplanned](#unplanned), [planning decision](#planning-decision), [planner](#planner), and the [amend](#amend-a-planning-record) verb). Revised by the record-sense pass of 2026-09-06 (revision 41: the [artifact](#artifact) definition and five other sentences that read "record" against an external system rephrased to "an entry an external system holds," closing the [record](#record) Not-for collision; the Not-for scoped to a Never for `docs/foundation/adapters.md` and the five per-system [adapter](#adapter) documents). Revised by the Human Inversion mapping pass of 2026-09-06 (revision 44: two term collisions with a public essay series disambiguated — [reconciler](#reconciler) as this design's projection-parity check, never the essay's adjudicating role, and [replay](#replay) as the essay's [as-of-read](#as-of-read) sense, never this design's refused re-execution sense). Revised by the priority pass of 2026-09-06 (revision 47: the [`priority`](#priority) entry added, giving the term a home beside [`claimable`](#claimable) as a [derived read](#derived-read) a [principal](#principal) consults and is never bound to obey).
+follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives). Revised by the consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by role; `merge` as an action-class name retired for `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound as the task's `due_date` on the step entry; the `operator_only` step; a rule keying on a field a step wrote; no marker on a read for a special-category type; decision 55 on the [external-system](#external-system) entry). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a task status; the terminal set declared on the type; the `finding` and `sign_off` fields; `rounds_cap` and `none_permitted`). Revised by the rulings pass of 2026-09-06 (revision 38: the [verdict](#verdict) as the [sign-off](#sign-off)'s reconciled [projection](#projection); a `signed` or blocking sign-off written under a held [lease](#lease); what owning confers; the counting rule and the thresholds' home on the [quorum](#quorum) and separation entries; an initiative as a task by class; the host as an external system; a budget as a grant's and a [delegation](#delegation)'s scope term). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser never the resolver save the operator's marked self-resolution, on the [approval](#approval) entry; the right to propose as a grant capability and what stops as a task, on the proposal and [reprioritization](#reprioritization) entries; metered resources and the engine's sole governance grant, on the [grant](#grant) entry; a rule naming a work-model type refused at the write). Revised by the planning pass of 2026-09-06 (revision 40: the planning-model section — [planning record](#planning-record), [planning level](#planning-level), [ascent](#ascent), [unplanned](#unplanned), [planning decision](#planning-decision), [planner](#planner), and the [amend](#amend-a-planning-record) verb). Revised by the record-sense pass of 2026-09-06 (revision 41: the [artifact](#artifact) definition and five other sentences that read "record" against an external system rephrased to "an entry an external system holds," closing the [record](#record) Not-for collision; the Not-for scoped to a Never for `docs/foundation/adapters.md` and the five per-system [adapter](#adapter) documents). Revised by the Human Inversion mapping pass of 2026-09-06 (revision 44: two term collisions with a public essay series disambiguated — [reconciler](#reconciler) as this design's projection-parity check, never the essay's adjudicating role, and [replay](#replay) as the essay's [as-of-read](#as-of-read) sense, never this design's refused re-execution sense). Revised by the priority pass of 2026-09-06 (revision 47: the [`priority`](#priority) entry added, giving the term a home beside [`claimable`](#claimable) as a [derived read](#derived-read) a [principal](#principal) consults and is never bound to obey). Revised by the rulings pass of 2026-09-06 (revision 48: decision 34 ruled — the [pipeline](#retired-names) entry replaced by [engine](#engine), defined once; decision 33 ruled — the [stage](#stage) entry rewritten to authored prose only, with no `steps[].phase` field).
 
 ## Purpose
 
@@ -371,13 +371,18 @@ and nothing else — the announcement path of last resort
 **Never:** an action `PRODUCES` from no task.
 **Not for:** service for a daemon, unqualified.
 
-### pipeline
-**Definition:** the GitHub-hosted execution mechanism that opens each [step](#step) of a [workflow](#workflow) for a [batch](#batch) as
-[claimable](#claimable) step work, which the [step owner](#step-owner) [claims](#claim), and never writes a [task](#task) status.
-It delivers nothing; it is the same pull, over steps.
+### engine
+**Definition:** the execution mechanism that opens each [step](#step) of a [workflow](#workflow) for a [batch](#batch) as
+[claimable](#claimable) step work, which the [step owner](#step-owner) [claims](#claim), and reads the
+[sign-offs](#sign-off) that close them; it never writes a [task](#task) status.
+It delivers nothing; it is the same pull, over steps. Decision 34
+(`work_model.md#whether-the-step-path-is-a-mechanism-of-its-own-and-what-the-engine-is-called`) is where
+`pipeline` was retired for this sense: "GitHub-hosted" named a fact about the checkout, not a design
+property, and this is the name used throughout `gates_and_workflows.md`, `adapters.md`, and `data_model.md`
+for the same component, now defined once.
 **See:** [`work_model.md#the-four-execution-mechanisms`](work_model.md#the-four-execution-mechanisms).
-**Never:** —
-**Not for:** workflow for the pipeline (the declaration); CI for the pipeline (one of its checks).
+**Never:** "pipeline" for this sense (retired: see [Retired names](#retired-names)).
+**Not for:** workflow for the engine (the declaration); CI for the engine (one of its checks).
 
 ### interactive session
 **Definition:** the execution mechanism in which an [operator](#operator) works directly with an
@@ -400,7 +405,7 @@ a [batch](#batch) may take, and the [successors](#successor) a closing [sign-off
 **See:** [`workflows.md`](workflows.md),
 [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
 **Never:** "workflow_definition".
-**Not for:** pipeline for a workflow (one engine that runs workflows); "template" for a workflow.
+**Not for:** engine for a workflow (one engine that runs workflows); "template" for a workflow.
 
 ### step
 **Definition:** one declared position in a [workflow](#workflow)'s ordered list, carrying a name, a [step owner](#step-owner), a
@@ -437,10 +442,13 @@ dependency is what this step needs); a read dependency for `context_entity_types
 type marked special-category (the mark is the type's — `data_model.md#record-conventions`).
 
 ### stage
-**Definition:** a named group of contiguous [steps](#step) in a [workflow](#workflow), such as the review stage or the release
-stage.
-**See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
-**Never:** —
+**Definition:** authored prose only — a named group of contiguous [steps](#step) in a [workflow](#workflow)'s
+**Stages** line, such as the review stage or the release stage. No `steps[].phase` field exists (decision
+33, `workflows.md#whether-a-stage-names-anything-a-step-does-not`): a stage names a reporting grain no [gate](#gate),
+[verdict](#verdict), [fast path](#fast-path), `applies_when`, [successor](#successor), or [checkpoint](#checkpoint) keys on, and where a [batch](#batch) is is its current
+[step](#step).
+**See:** [`workflows.md#whether-a-stage-names-anything-a-step-does-not`](workflows.md#whether-a-stage-names-anything-a-step-does-not).
+**Never:** a `phase` field on a declared step.
 **Not for:** stage for a single step; phase when a group of steps is meant.
 
 ### step owner
@@ -789,7 +797,7 @@ either way, name the entity — the checkpoint's subject, or the subject of a st
 checkpoint's subject; two subjects on one checkpoint; the subject held as free text.
 
 ### steward
-**Definition:** the [pipeline](#pipeline) role that merges a pull request once every required [step](#step) is signed off and
+**Definition:** the [engine](#engine) role that merges a pull request once every required [step](#step) is signed off and
 the [action gate](#action-gate) permits the `merge_pr` [action](#action).
 **See:** [`gates_and_workflows.md#the-action-gate-is-pr-independent`](gates_and_workflows.md#the-action-gate-is-pr-independent).
 **Never:** "merger".
@@ -848,7 +856,7 @@ a router (the `route` step is a sign-off by a step owner).
 directions, [inbound](#inbound) events into [signals](#signal) about [artifacts](#artifact) and [outbound](#outbound) [actions](#action) into operations on that
 system, and the only component that touches the system.
 An adapter is a [daemon](#daemon) in the work model's sense: it self-triggers on the external system and receives no
-[task](#task); the engine reads only what the adapter wrote.
+[task](#task); the [engine](#engine) reads only what the adapter wrote.
 **See:** [`adapters.md#the-two-invariants`](adapters.md#the-two-invariants),
 [`adapters.md#what-the-adapter-does-with-every-event`](adapters.md#what-the-adapter-does-with-every-event).
 **Never:** "connector", "plugin".
@@ -1121,7 +1129,7 @@ Zero grants is deny. A capability also names the tools a principal may invoke, a
 one enforcement of that (decision 42); a budget — a bound on a resource a capability may consume — is a term
 of its parameter constraints, narrowing down a [delegation](#delegation) chain, and which resources a class's
 [actions](#action) are counted in is the `action_policy`'s `metered_resources[]`, none until written (decision 53). The
-write capability on a governance type is held by the engine alone, and every other principal's write to one
+write capability on a governance type is held by the [engine](#engine) alone, and every other principal's write to one
 is refused at admission (decision 56).
 **See:** [`authority_model.md#grants`](authority_model.md#grants),
 [`gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits`](gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits),
@@ -1287,7 +1295,7 @@ Never coerced to pending or to clear; at an [enforcement point](#enforcement-poi
 ### escalate
 **Definition:** to raise a [checkpoint](#checkpoint) on a [task](#task) the swarm cannot advance, with the reason class that says
 why.
-The [watchdog](#watchdog) escalates on repeated lapse; the engine escalates on an unreadable [workflow](#workflow); a bounded loop
+The [watchdog](#watchdog) escalates on repeated lapse; the [engine](#engine) escalates on an unreadable [workflow](#workflow); a bounded loop
 escalates when its rounds are exhausted; a [claim](#claim) predicate escalates on an `assigned_to` nobody can run.
 One decision queue, one resolution protocol: a checkpoint on a task is resolved as a checkpoint on an
 [action](#action) is (principle 6, do not build a second [gate](#gate)).
@@ -1416,3 +1424,4 @@ foundation prose only on a line that says it is retired.
 | `merge` (as an action class) | `merge_pr` | the step is `merge` and the action it takes is `merge_pr`, as `github.md` and the code workflows already named it; one word for the step and the class made the class read as the step, and the lint's step rules treat `merge` as a step name |
 | `calendar_routing_config` (a binding type) | `channel_config` | `adapters.md#scope` names the per-instance binding types once; a third name for the same binding was a second home |
 | `blocked` (as a task status) | an open [checkpoint](#checkpoint) on the task, from which [claimable](#claimable) is derived | nothing wrote it and nothing cleared it; a task the swarm cannot advance is held by a checkpoint, and a status beside the checkpoint was a second held state (principle 6) that needed a process to keep true (principle 11) |
+| `pipeline` (the step-path publisher) | [engine](#engine) | decision 34, `work_model.md#whether-the-step-path-is-a-mechanism-of-its-own-and-what-the-engine-is-called`: "GitHub-hosted" named a fact about a checkout, not a design property, and `engine` was already used in three documents and defined in none |

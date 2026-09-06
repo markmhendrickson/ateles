@@ -12,7 +12,7 @@ for changing the swarm's own operation), and PR #745 operator review (2026-09-05
 23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default),
 and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: one live instance,
 completion creates the next, `FOLLOWS` task to task), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the task-sources index, the intake rule, and open decision 36). Supersedes `docs/archive/task_execution_loop.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: an intake rule may key on a field a step wrote on a type it may name, with the writer in its provenance predicate; decision 36 untouched). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a status and claimability read from the checkpoint; the declared terminal set; two moments open a batch; `tasks_attached[]`; the next recurring instance created and read back before the closing sign-off; a terminal status only where the declaration permits none; the writer as the cross-type cycle check's enforcement point; C2 settled by the write contract). Revised by the rulings pass of 2026-09-06 (revision 38: a `signed` or blocking sign-off is written under a held lease, cited from decision 44's ruling; the bootstrap set as the closed list decision 43 rules). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 36 ruled here — a rule keys on no work-model record type, the operator's lean toward every type considered and set aside; decision 43's second half cited as ruled; the C2 and `blocked` settlements marked reviewed and upheld). Revised by the planning pass of 2026-09-06 (revision 40: a task's one `PART_OF` edge targets its parent task or a planning record; the ascent as a derived read distinct from the chain; unplanned work admitted). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: `runner`, already defined in `vocabulary.md`, settled as the seat a step's outcome depends on — no new type introduced). Revised by the priority pass of 2026-09-06 (revision 47: ordering within the claimable pool given a home beside `claimable`, argued as a derived read over the ascent, `due_date`, workflow urgency, and blast radius rather than a maintained field, on the operator's connection from the ancestry reversal; a principal's "may" rather than "must" toward the highest-standing task, with decision 62 opened on whether an instance may bind the stronger form).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: an intake rule may key on a field a step wrote on a type it may name, with the writer in its provenance predicate; decision 36 untouched). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a status and claimability read from the checkpoint; the declared terminal set; two moments open a batch; `tasks_attached[]`; the next recurring instance created and read back before the closing sign-off; a terminal status only where the declaration permits none; the writer as the cross-type cycle check's enforcement point; C2 settled by the write contract). Revised by the rulings pass of 2026-09-06 (revision 38: a `signed` or blocking sign-off is written under a held lease, cited from decision 44's ruling; the bootstrap set as the closed list decision 43 rules). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 36 ruled here — a rule keys on no work-model record type, the operator's lean toward every type considered and set aside; decision 43's second half cited as ruled; the C2 and `blocked` settlements marked reviewed and upheld). Revised by the planning pass of 2026-09-06 (revision 40: a task's one `PART_OF` edge targets its parent task or a planning record; the ascent as a derived read distinct from the chain; unplanned work admitted). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: `runner`, already defined in `vocabulary.md`, settled as the seat a step's outcome depends on — no new type introduced). Revised by the priority pass of 2026-09-06 (revision 47: ordering within the claimable pool given a home beside `claimable`, argued as a derived read over the ascent, `due_date`, workflow urgency, and blast radius rather than a maintained field, on the operator's connection from the ancestry reversal; a principal's "may" rather than "must" toward the highest-standing task, with decision 62 opened on whether an instance may bind the stronger form). Revised by the rulings pass of 2026-09-06 (revision 48: decision 34 ruled — `engine` defined, `pipeline` retired for the step-path publisher; the count of four execution mechanisms unchanged).
 
 ## Purpose
 
@@ -1183,7 +1183,8 @@ a work-model record type" clause stands (`conformance_suite.md`).
 ## The four execution mechanisms
 
 (1) Task path above. (2) Dedicated daemons that self-trigger (a mail poller produces tasks and never
-receives one). (3) The GitHub pipeline, which sequences steps for a batch and never writes task status — a
+receives one). (3) The **engine** (decision 34, `#whether-the-step-path-is-a-mechanism-of-its-own-and-what-the-engine-is-called`),
+which sequences steps for a batch and never writes task status — a
 step opening is publication of claimable step work; the step owner claims it with a lease, the same
 primitive as on a task (`gates_and_workflows.md`). It is the same pull, over steps. A roster role reachable
 by none of these cannot receive work; the count is `status.md`. A daemon showing that a non-code agent
@@ -1238,25 +1239,38 @@ the step was claimed and before it closed — is a distinct question from where 
 
 ### Whether the step path is a mechanism of its own, and what the engine is called
 
-**Open decision 34.** Registered in `conformance.md#the-register-of-open-design-decisions`. The list above counts four mechanisms, and its own words undercut
-the third: the pipeline "is the same pull, over steps" — a step opening publishes claimable step work, and
-the step owner claims it with the lease primitive a task is claimed with. What the third adds to the first
-is not a way work reaches a principal but *who publishes it*: a task is published by its creation, a step
-by the engine that opens it from the declaration. Two names also stand for that publisher: `pipeline`,
-defined in `vocabulary.md#pipeline` as the GitHub-hosted mechanism that opens steps, and "the engine",
-used throughout `gates_and_workflows.md`, `adapters.md`, and `data_model.md` for the component that opens
-steps from the entities and reads the sign-offs, and defined nowhere.
+**Ruled (2026-09-06).** Registered in `conformance.md#the-register-of-open-design-decisions`. Define
+`engine`; `pipeline` is retired as the term for the step path. **The count of four execution mechanisms is
+load-bearing and unchanged** — this ruling renames the publisher the third mechanism names, and does not
+recount the mechanisms themselves.
 
-**The options.** Count three mechanisms — pull, over tasks and steps alike; the self-triggering daemons;
-and the interactive session — and define `engine` as the component that publishes step work, retiring
-`pipeline`, whose "GitHub-hosted" is a fact about a checkout and not a design property. Or keep four and
-define `engine` beside `pipeline`, stating what separates them. Or leave the text as it stands.
+**Why the terms needed settling.** The list above counts four mechanisms, and its own words undercut the
+third as a distinct *way work reaches a principal*: the retired term "is the same pull, over steps" — a step
+opening publishes claimable step work, and the step owner claims it with the lease primitive a task is
+claimed with. What the third mechanism adds is not a new delivery shape but *who publishes the work*: a
+task is published by its creation, a step by the engine that opens it from the declaration. Two names stood
+for that publisher, one now retired: the GitHub-hosted mechanism that
+opens steps (`vocabulary.md#retired-names`), and "the engine", used throughout `gates_and_workflows.md`, `adapters.md`, and `data_model.md`
+for the component that opens steps from the entities and reads the sign-offs, defined nowhere. `engine` is
+used in three documents and defined in none of them — a term load-bearing enough to need a home, missing
+one.
 
-**Why proposed rather than applied.** The count is load-bearing beyond this section — "a roster role
-reachable by none of these cannot receive work; the count is `status.md`" — and the four are cited from a
-recorded decision (`three_execution_mechanisms_not_one`), so a recount changes what a reader checks
-against, not only a name. **What would decide it:** whether any guarantee differs between step work and
-task work once both are claimed; if none does, the two are one mechanism. Opened by the simplification pass of 2026-09-05 without the conformance matrix, which had not landed; the proof above rests on principles 6 and 9 alone and is unverified against the matrix.
+**`engine`, defined.** The component that opens each declared [step](vocabulary.md#step) of a
+[workflow](vocabulary.md#workflow) for a [batch](vocabulary.md#batch) as claimable step work, which the
+step owner claims, and reads the [sign-offs](vocabulary.md#sign-off) that close them; it writes no task
+status. It is the publisher the third execution mechanism names — the same pull, over steps, that a task
+already has over itself.
+
+**`pipeline`, retired.** "GitHub-hosted" is a fact about a checkout, not a design property: an instance
+whose steps are opened by a different substrate is still the same mechanism under this design, and a term
+that names the current checkout rather than the role would mislead the next one. Every retired use of
+`pipeline` for the step-path publisher becomes `engine`, retired from the vocabulary for that sense.
+
+**Cost accepted.** The count of four stays exactly as counted — pull over tasks and steps alike (published
+differently: a task by its creation, a step by the engine), the self-triggering daemons, and the
+interactive session — so nothing that cites the count (`status.md`, the recorded decision
+`three_execution_mechanisms_not_one`, "a roster role reachable by none of these cannot receive work") needs
+to recheck what a reader checks against; only the name of the third mechanism's publisher changes.
 
 ## Contradictions this document settles
 

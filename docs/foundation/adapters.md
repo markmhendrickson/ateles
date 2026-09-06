@@ -1,7 +1,7 @@
 # Adapters: how external systems reach the work model, and how it reaches them
 
 **Keyed document:** read when a webhook receiver, a mail, chat, calendar, or payment daemon, the
-notification path, the GitHub pipeline, or this document changes (`conformance.md`). **Kind:** foundation;
+notification path, the engine, or this document changes (`conformance.md`). **Kind:** foundation;
 states the design and never the state of a checkout. **Derived from:** `work_model.md` (artifacts, intake,
 the four execution mechanisms), `gates_and_workflows.md` (one engine sequences from the entities; actions
 and the action gate), `authority_model.md` (credentials bind to principals; approval), `workflows.md` (the

@@ -8,7 +8,7 @@ and which successors its tasks may enter, and never the state of a checkout. **D
 record for the built workflows (their step lists and fast paths, not their agent names), the agent
 policies governing outreach, payment, and people-data, `CLAUDE.md`'s people-data section, and PR #745
 operator review (2026-09-04), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Which workflows have a declaration on the record, and which are envisioned
-only, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `operator_preview` renamed `consent`; open decision 33). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 39 ruled here — what intake's `link` attaches and what hydration resolves; the payment `consent` row aligned with decision 27). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two declared intervals and the planned wait, cited in *How to read a workflow section*, `outreach`, and `operator-only`; a standing constraint on an entity a task names, read at intake). Revised by the consistency pass of 2026-09-06 (revision 35: the three `consent`-carrying workflows cite when their checkpoint is written and what the take re-evaluates). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound declared as the task's `due_date` and the `operator_only` step, cited in *How to read a workflow section* and `operator-only`; a matter, a case, or a filing as a record entity the task names, under *What `link` attaches*). Revised by the testability pass of 2026-09-06 (revision 37: `DUPLICATE_OF` at `dedupe`; `impl` closes on a mergeable pull request; `none_permitted` on `feature` and `security`; a bug needing a design choice becomes a new task; the transcript is a source, not an artifact; the `contact` allowlist at `extract`). Revised by the planning pass of 2026-09-06 (revision 40: the `planning` workflow, the `planner` role, and the thirteenth core workflow). Revised by the Human Inversion mapping pass of 2026-09-06 (revision 44: the `postmortem` workflow, the fourteenth core workflow; one sentence on `feature`'s `legal` placement as a choice `applies_when` already makes, not a chronological default).
+only, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `operator_preview` renamed `consent`; open decision 33). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 39 ruled here — what intake's `link` attaches and what hydration resolves; the payment `consent` row aligned with decision 27). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two declared intervals and the planned wait, cited in *How to read a workflow section*, `outreach`, and `operator-only`; a standing constraint on an entity a task names, read at intake). Revised by the consistency pass of 2026-09-06 (revision 35: the three `consent`-carrying workflows cite when their checkpoint is written and what the take re-evaluates). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound declared as the task's `due_date` and the `operator_only` step, cited in *How to read a workflow section* and `operator-only`; a matter, a case, or a filing as a record entity the task names, under *What `link` attaches*). Revised by the testability pass of 2026-09-06 (revision 37: `DUPLICATE_OF` at `dedupe`; `impl` closes on a mergeable pull request; `none_permitted` on `feature` and `security`; a bug needing a design choice becomes a new task; the transcript is a source, not an artifact; the `contact` allowlist at `extract`). Revised by the planning pass of 2026-09-06 (revision 40: the `planning` workflow, the `planner` role, and the thirteenth core workflow). Revised by the Human Inversion mapping pass of 2026-09-06 (revision 44: the `postmortem` workflow, the fourteenth core workflow; one sentence on `feature`'s `legal` placement as a choice `applies_when` already makes, not a chronological default). Revised by the rulings pass of 2026-09-06 (revision 45: decision 33 ruled — the `steps[].phase` field dropped; the Stages line kept as authored prose, its wording left to the condensation pass).
 
 ## Purpose
 
@@ -903,25 +903,34 @@ refers to, not a workflow this batch itself enters.
 
 ## Whether a stage names anything a step does not
 
-**Open decision 33.** Registered in `conformance.md#the-register-of-open-design-decisions`. Every workflow section above carries a **Stages** line, and
-`gates_and_workflows.md#declaration-batch-projection` defines a stage as a contiguous named group of steps
-and gives each declared step a `phase` field. No rule reads either: no gate, verdict, fast path,
+**Ruled (2026-09-06).** Registered in `conformance.md#the-register-of-open-design-decisions`. Drop the
+`steps[].phase` field. Every workflow section above carries a **Stages** line, and
+`gates_and_workflows.md#declaration-batch-projection` defined a stage as a contiguous named group of steps
+and gave each declared step a `phase` field. No rule reads either: no gate, verdict, fast path,
 `applies_when`, successor, or checkpoint keys on a stage, and where a batch is is already its current step
-(`vocabulary.md#owner-five-meanings-one-word-forbidden-alone`). So the grouping is stated in two homes —
-the prose line and the declaration's field — with no mechanism behind either, which is the shape
-principle 9 names.
+(`vocabulary.md#owner-five-meanings-one-word-forbidden-alone`). The grouping was stated in two homes — the
+prose line and the declaration's field — with no mechanism behind either, the shape principle 9 names, and
+the second option considered is the one that holds: keep the Stages line as authored prose, so the grouping
+has one home, and drop the field, since the declaration should carry nothing no rule reads.
 
-**The options.** Retire `stage` and the `phase` field, and report where a batch is by its current step.
-Or keep the Stages line as authored prose and drop the field, so the grouping has one home and the
-declaration carries nothing no rule reads. Or keep both as they stand.
+**Reason.** The field is decoration by principle 4's own test — a mechanism nothing exercises cannot fail,
+and nothing here can fail because nothing reads it. The prose line survives because it is not the same
+claim: it is a reporting aid a reader consults directly, the same convenience "the batch is in review" adds
+over "the batch is at `qa`", and dropping it would cost that grain for no gain, since nothing was reading it
+as a mechanism to begin with — it was never claiming to be one. Retiring `stage` itself, the first option,
+was set aside because `migration.md` uses the word in its own sense for its own ordered stages, and
+retiring the term here would ban a word a companion document relies on or force it to rename over a
+question that was never about that word's other use.
 
-**Why proposed rather than applied.** The Stages lines cannot be replaced by an existing term, only
-deleted, and deleting them loses a reporting grain — "the batch is in review" against "the batch is at
-`qa`" — which is a convenience rather than a guarantee but is still information a reader has today. And
-`migration.md` uses the word in another sense, for its own ordered stages, so a retirement would ban a
-word a companion relies on, or force that companion to rename. **What would decide it:** whether any
-reader reports on a batch at the stage grain; if none does, the field is decoration by principle 4's own
-test. Opened by the simplification pass of 2026-09-05 without the conformance matrix, which had not landed; the proof above rests on principles 6 and 9 alone and is unverified against the matrix.
+**Cost accepted.** `gates_and_workflows.md#declaration-batch-projection` and `vocabulary.md#step` (and any
+declared-step field list) drop `phase` from the fields a step carries; a workflow's grouping into stages is
+authored prose only, read by a person and not resolved by any rule, and a reader who wants "where a batch
+is" reads its current step, per `vocabulary.md#owner-five-meanings-one-word-forbidden-alone`, exactly as
+before this ruling.
+
+**What this leaves open.** The *Stages* prose itself — whether its wording, granularity, or presence per
+workflow section should change — is a condensation-pass matter, not decided here. This ruling settles only
+that the field is dropped and the prose is kept; it does not touch what the prose says.
 
 ## What no workflow in this document does
 

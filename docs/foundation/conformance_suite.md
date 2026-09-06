@@ -504,7 +504,7 @@ above. **M / R / U / P / D** is the class.
 | WM-35c | the same: no series entity, count, or live marker; the rule lives on the instance; ending the series is a correction to the live instance's rule; postponing is a `due_date` correction and creates nothing | the series above | census; correct the rule to end, complete; postpone a live instance | a series type, series id, occurrence count, or stored live marker; an instance created after the rule ended; a postponement creating one | M |
 | WM-35d | the same: a stopped series is one overdue instance, and its batch reaches the queue | a live instance whose batch stops advancing, `CLK`, its workflow declaring an unclaimed-step interval; another whose workflow declares none | wait | no non-terminal instance with a past `due_date` is readable; no `unclaimed_step` on the first; the second raises one (the ruling names an undeclared interval a declaration defect that raises nothing) | M |
 | WM-35e | the same: a recurring task and an action series meet only at the gate | a recurring task whose instances take an action of a class that has graduated; an instance that took none | read | the instance's `consent`-shaped step absent because of graduation; the recurrence altered by graduation; the actionless instance counted in a series | M |
-| WM-36 | `work_model.md#the-four-execution-mechanisms`: a daemon receives no task and takes no action of its own; the pipeline never writes task status | a full run | `RP` per credential, `X(*)` | a daemon credential holds a lease; the engine credential writes `task.status`; a daemon credential takes an action `PRODUCES` from no task, the announcement path excepted (X-8 closed) | M |
+| WM-36 | `work_model.md#the-four-execution-mechanisms`: a daemon receives no task and takes no action of its own; the engine never writes task status | a full run | `RP` per credential, `X(*)` | a daemon credential holds a lease; the engine credential writes `task.status`; a daemon credential takes an action `PRODUCES` from no task, the announcement path excepted (X-8 closed) | M |
 | WM-37 | the same: the interactive session | — | — | D (U-12: definitional — the session holds no lease by what it is; the recovery half is WF-21) |
 | WM-38 | `work_model.md#whether-the-step-path-is-a-mechanism-of-its-own-and-what-the-engine-is-called` | — | — | P (open decision 34; WM-36's observables are per credential and do not depend on the count or the name, so no row changes under either option) |
 | WM-39 | `work_model.md#where-tasks-come-from-every-source-indexed`: nine sources, every one ending in a task with no intake batch; the creating principal holds no privilege over the task | a full run exercising each source | read every task's provenance and first batch | a task whose provenance names none of the nine kinds; a task whose first batch is not intake; a lease on a created task held by the credential that created it | M |
@@ -1141,13 +1141,16 @@ would shift.
   (`gates_and_workflows.md#whether-the-verdict-is-a-stored-field-or-a-read-over-the-findings-and-the-author`);
   GW-51 is closed above.
 - **33, the stage and the `phase` field.** No row observes either; U-30 records it. By principle 4's own
-  test the field is decoration, which is the pass's argument stated as a finding. Retiring it loses no row.
-- **34, the step path as a mechanism, and `pipeline` against `engine`.** WM-36's observables are per
+  test the field is decoration, which is the pass's argument stated as a finding. Ruled on 2026-09-06: the
+  `steps[].phase` field is dropped and loses no row here; the Stages line stays as authored prose.
+- **34, the step path as a mechanism, and the engine's name.** WM-36's observables are per
   credential — the engine's credential never writes `task.status`, a daemon's never holds a lease — and
-  neither depends on whether the mechanisms are counted as three or four, or on which name the publisher
-  carries. WM-38 holds the decision as pending and the matrix is indifferent to it. What would not be
-  indifferent is the sentence that a roster role reachable by none of the mechanisms cannot receive work,
-  which is a measurement in `status.md` and not a row here.
+  neither depended on whether the mechanisms are counted as three or four, or on which name the publisher
+  carried. WM-38 held the decision as pending; the matrix was indifferent to it, and stays indifferent, since
+  the ruling on 2026-09-06 (`engine` defined, `pipeline` retired for this sense, the count of four
+  unchanged) renames the publisher without changing what any row observes. What would not be indifferent is
+  the sentence that a roster role reachable by none of the mechanisms cannot receive work, which is a
+  measurement in `status.md` and not a row here.
 - **35, one binding type or two.** Four rows read a binding — TG-6 (which chat receives what), CA-6 (which
   calendars may be read), PY-3a (the terminal depth), and the bootstrap's step 13 — and every one reads it
   as the binding entity, with no observable that differs by type. The matrix finds no rule that reads

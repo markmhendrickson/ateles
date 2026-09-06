@@ -10,7 +10,7 @@ from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-12 to PR-15, C5, C17), prio
 `deferral_must_be_bounded_and_escalate_off_neotoma`, `unknown_must_stay_distinct_from_a_verdict`,
 `nyctea_635_becomes_load_bearing`, PR #745 operator review (2026-09-04), and the operator memos of
 2026-09-05 (the `undetermined_scope` reason class), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: a hold on a discovered condition is a deferral under rule 5; the `dependency_cycle` reason class). What is built is `status.md`;Revised by the consistency pass of 2026-09-06 (revision 35: the merge action's class named `merge_pr` in the recovery table). What is built is `status.md`;
-how a checkpoint is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: a condition of a batch is raised on one of its tasks, never on the batch). Revised by the workflow-format pass of 2026-09-06 (revision 34: rule 5's ceiling for a holding step, and the unclaimed-step interval, each named as a field on the step). Revised by the testability pass of 2026-09-06 (revision 37: the announcement path's own outage and the capture of last resort; the window observation; `action_policy.recoveries`; recovery paths and their cadence on the binding; `lapse_cap`; which checkpoints hold a task from claim; `AWAITS` names principals). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: open decision 60 — a runner's lease-held step losing its model or harness mid-execution; the tier-eligibility half ruled as a consequence of decision 59).
+how a checkpoint is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: a condition of a batch is raised on one of its tasks, never on the batch). Revised by the workflow-format pass of 2026-09-06 (revision 34: rule 5's ceiling for a holding step, and the unclaimed-step interval, each named as a field on the step). Revised by the testability pass of 2026-09-06 (revision 37: the announcement path's own outage and the capture of last resort; the window observation; `action_policy.recoveries`; recovery paths and their cadence on the binding; `lapse_cap`; which checkpoints hold a task from claim; `AWAITS` names principals). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: open decision 60 — a runner's lease-held step losing its model or harness mid-execution; the tier-eligibility half ruled as a consequence of decision 59). Revised by the rulings pass of 2026-09-06 (revision 44: decision 60 ruled in full — unavailability holds and raises under the existing `lapse_cap`, no second clock; `capability_unavailable` named as a reason class distinct from `capability_denied`).
 
 ## Purpose
 
@@ -148,7 +148,7 @@ rule 8 was not written for: a runner that already holds the lease, has been exec
 the model or harness it started with partway through — the case that killed three runners in one night to
 one rate limit, one of them mid-rebase.
 
-**Open decision 60.** Registered in `conformance.md#the-register-of-open-design-decisions`. Unknown stays
+**Ruled (2026-09-06).** Registered in `conformance.md#the-register-of-open-design-decisions`. Unknown stays
 distinct from a verdict (principle 7), and this is squarely an unknown: the step is neither confirmed
 advanced nor confirmed failed when the runner under it disappears. Three shapes, and the design must pick
 one rather than let each runner's crash handler decide for itself:
@@ -182,11 +182,31 @@ floor. **What is ruled regardless of which lapse timing is chosen:** the claim p
 whether a runner is eligible for a class's action reads the same `min_tier` value on first claim and on
 every re-claim, so a step's tier requirement cannot be met once and forgotten.
 
-**What would decide it.** Whether an instance ever wants the fast-lapse behaviour of option 2 badly enough
-to carry a second lapse rule, against principle 6's cost of one; and whether the eligibility re-check on
-re-claim (the tier half, ruled above) needs a reason class of its own distinct from `capability_denied` —
-which already names a denial at the grant boundary and may be the same shape here, a runner denied
-eligibility for a class rather than a runner that failed to execute.
+**Ruled.** Option 1: unavailability is an `unknown` that holds the step and raises, and lapse timing is
+governed by the existing `lapse_cap` rather than a second clock — no early-release rule, no second lapse
+schedule. Reason: principle 6 forbids a parallel queue for one cause among several when the existing
+lapse-and-cap machinery already treats "the mechanism failed, the work is unknown" as its general case;
+option 2's faster recovery was weighed and set aside for exactly the cost the design already flags — a
+lapse rule that exists to serve a single cause. **Cost accepted:** a runner known to be unable to continue
+(a rate limit with a stated reset far past any reasonable hold) still occupies its lease for the ordinary
+`unclaimed_after` window before the task becomes reclaimable, rather than releasing the moment the failure
+is known.
+
+**The reason class, ruled.** Unavailability is **its own reason class, `capability_unavailable`**, distinct
+from `capability_denied`. `capability_denied` is a permission answer — a grant boundary refusing a runner
+outright, a class the runner is not eligible for regardless of when it asks. `capability_unavailable` is
+transient — the runner was eligible and had claimed the step in good standing when the model or harness it
+started under stopped answering mid-step, with no judgement that the runner should not have held the lease
+at all. Collapsing the two would blur a checkpoint the operator reads differently: `capability_denied` asks
+whether to grant something; `capability_unavailable` asks whether to wait, switch vendor, or accept the
+lapse. The tier-eligibility half from option 3 stands as already ruled above regardless of this class
+question: a re-claim reads the same `min_tier` floor a first claim does, so the reason class distinguishing
+"ineligible" from "unavailable" governs how the *first* failure is named, not whether a later re-claim can
+duck under a floor.
+
+**What reopens it.** An instance finding `repeated_lapse` and `capability_unavailable` need to be told
+apart at the checkpoint itself, rather than `capability_unavailable` riding as the named finding on a
+`repeated_lapse` checkpoint as it does today.
 
 ## The operator-invoked halt, and what undoes an action already taken
 

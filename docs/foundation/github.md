@@ -1,6 +1,6 @@
 # GitHub: the code host's full event surface, mapped to the work model
 
-**Keyed document:** read when the GitHub receiver, the pipeline that sequences from it, the triage or
+**Keyed document:** read when the GitHub receiver, the engine that sequences from it, the triage or
 summarising roles, or this document changes (`conformance.md`). **Kind:** foundation; states the design and
 never the state of a checkout. **Derived from:** `adapters.md` (the two invariants, the four outcomes, and
 the five adapter rules, which this document applies and does not restate), `work_model.md` (artifacts,
