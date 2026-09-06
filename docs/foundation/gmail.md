@@ -9,7 +9,7 @@ action gate; the three verdict values), `workflows.md` (outreach, intake, operat
 `failure_posture.md` (the halt, the recovery per action class, the checkpoint reason classes), and the
 Gmail REST API v1 surface as exposed by the `gws` CLI, read 2026-09-05, and PR #745 operator review
 (2026-09-05, rulings 13–14, 16–18, 23–29: decision 23 ruled here). What is built, and which rows have
-no code path, is `status.md`.
+no code path, is `status.md`. Revised by the testability pass of 2026-09-06 (revision 37: refusal 1's mechanical half, the field allowlist on the grant).
 
 ## Purpose
 
@@ -373,7 +373,10 @@ RGPD Art. 9). As with `github.md`'s security narrowing, this is a constraint on 
 not on what it reads, and it is the stricter of the two available places to put it: material the record
 never held cannot be copied out of it by a later summary, digest, notification, or rendered page. The
 observation's coverage states that fields were withheld by policy, distinguishing "the adapter did not read
-this" from "the adapter read it and did not write it" — which are different facts about the record.
+this" from "the adapter read it and did not write it" — which are different facts about the record. The
+mechanical half is the grant: the fields this adapter may write on a `contact` are the allowlist its grant's
+parameter constraints name, and a write outside them is denied at admission (`authority_model.md#grants`);
+what within an admitted field is incidental or sensitive is the judgement this refusal states.
 
 **2. It never sends without an action that passed the gate.** No convenience path, no retry that resends,
 no "just acknowledging receipt". Every message leaving the mailbox by the swarm's hand is a

@@ -7,7 +7,7 @@ undecided question **open** with its options, never resolving one to make the do
 section as decision; the swarm-spec section as proposal), synthesis `ent_b0ce322f768e4fc676b73139` (PR-20
 to PR-28, PR-34 to PR-38, C8, C9, C10, C13, C14, C17), prior art `ent_08460968e6f49dac21510f4a` (Track 2),
 the P4 brief `ent_683200acfb3ff5f03add966c`, `docs/multi_tenant.md`, and PR #745 operator review
-(2026-09-04). What is built, and where the substrate fails open, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 41 ruled here — write admission per entity type is default-deny, and the grant is the allowlist). Revised by the workflow-format pass of 2026-09-06 (revision 34: a required approver may be named by ownership of an entity the checkpoint's subject concerns). Revised by the consistency pass of 2026-09-06 (revision 35: the brief's Q1–Q8 and the raiser question registered as decisions 46 to 54; C13 marked settled by C9 and decision 37). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a resolution on an `operator_only` action is the operator's decision and never the confirmation; the shared-instance approver cites decision 55).
+(2026-09-04). What is built, and where the substrate fails open, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 41 ruled here — write admission per entity type is default-deny, and the grant is the allowlist). Revised by the workflow-format pass of 2026-09-06 (revision 34: a required approver may be named by ownership of an entity the checkpoint's subject concerns). Revised by the consistency pass of 2026-09-06 (revision 35: the brief's Q1–Q8 and the raiser question registered as decisions 46 to 54; C13 marked settled by C9 and decision 37). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a resolution on an `operator_only` action is the operator's decision and never the confirmation; the shared-instance approver cites decision 55). Revised by the testability pass of 2026-09-06 (revision 37: a parameter constraint on a write capability as a field allowlist — the mechanical half of minimization at capture; `AWAITS` resolves a role to principals).
 
 ## Purpose
 
@@ -133,6 +133,17 @@ would reopen it:** a project whose grants prove to be ceremony — every role gr
 day — which is the finding decision 18 names for its own default, and would argue for coarser capabilities,
 not for default-allow.
 
+**A parameter constraint on a write capability is a field allowlist.** The grant that admits a principal's
+writes to a type may name the fields it may write, and a write carrying a field outside them is denied at
+admission exactly as a write to a type the grant does not name is — read at the write, structured, and never
+after the fact. That is the mechanical half of minimization at capture
+(`gmail.md#what-this-adapter-refuses`, refusal 1; `calendar.md#what-this-adapter-refuses`, refusal 1;
+`workflows.md#meeting-processing`, `extract`): what a `contact` may hold from a transcript, a mailbox, or a
+calendar is the allowlist on the grant of the step owner or adapter that writes it, declared where every
+other capability is (`data_model.md#concepts`, `param_constraints`), and what within an admitted field is
+incidental or sensitive stays the writer's judgement, reviewed as one. Nothing is added to the tuple:
+`param_constraints` is the scope term, and a field list is one of its forms.
+
 **The grant is read at every enforcement point.** Not from a cache: a checker answering from state it can
 no longer confirm is enforcing a snapshot, and a revocation then waits for however long the cache holds,
 silently, because the checker keeps answering confidently. Reading at the check is what makes revocation's
@@ -221,7 +232,9 @@ within the tenant, never to one address for the whole swarm. No cross-principal 
 accepts.
 
 **A required approver is a principal, a role the roster resolves, or the principal an `ownership_grant`
-names on an entity the subject concerns.** The third is what lets a workflow name an approver it cannot know
+names on an entity the subject concerns.** In every case the `AWAITS` edge names principals: a role is
+resolved through the roster when the checkpoint is raised, and the role itself is carried in `needed_input`,
+since an edge's target is a principal and never a role (`data_model.md#relationships`). The third is what lets a workflow name an approver it cannot know
 at declaration: the maintainer of another plan whose field a step would correct, the principal accountable
 for a registered type a step would extend, the principal accountable for the data a shared instance pools (whether that instance is itself an external system is decision 55, `adapters.md#whether-a-second-instance-of-the-record-is-an-external-system`). Each is named in
 the declaration as a relation — whoever holds the `ownership_grant` on the entity the task `REFERS_TO`, or on
@@ -249,7 +262,8 @@ at one operator between an agent and its human — and to the operator approving
 write, which decision 43 names as bearing on it).
 
 **C13, settled by rulings made since it was opened.** The question was which entities carry the routing
-table: `swarm_roster` with `channel_config` (`multi_tenant.md`), or `operator` with `team` (#378). Two
+table: `swarm_roster` with `channel_config` (`multi_tenant.md`), or `operator` with `team` (the swarm-spec
+proposal the header cites). Two
 rulings answer it without naming it. C9, above, makes the `operator` entity one "carrying identity and
 nothing descriptive", which leaves it nothing to carry a routing table on. Decision 37 (2026-09-06,
 `gates_and_workflows.md#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-or-cannot-wait`)
@@ -276,7 +290,8 @@ principals, and the threshold's home (Safe's shape: on the governed object).
 
 ## Initiative, proposal, reprioritization
 
-Decided (README; #378 operator section): initiative, proposal, approval, ownership, and reprioritization
+Decided (README; the operator-authored section of the issue the header cites): initiative, proposal,
+approval, ownership, and reprioritization
 are first-class objects; proposal rights are distinct from execution rights; accepting an initiative
 records an explicit "what stops?" confirmed by a principal; contribution attribution and credit are in
 scope; approval is risk-tiered, and a sandbox tier carries the rights to investigate and experiment without

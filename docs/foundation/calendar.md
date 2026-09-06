@@ -9,7 +9,7 @@ actions and the action gate), `workflows.md` (meeting processing, outreach, oper
 `failure_posture.md` (the halt, the recovery per action class), `gmail.md` (the sibling system, whose
 identity and minimization rules this document shares), and the Google Calendar REST API v3 surface as
 exposed by the `gws` CLI, read 2026-09-05, and PR #745 operator review (2026-09-05, rulings 13–14, 16–18,
-23–29: decision 24 ruled here). What is built, and which rows have no code path, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `calendar_routing_config` replaced by `channel_config`, the binding type `adapters.md` names).
+23–29: decision 24 ruled here). What is built, and which rows have no code path, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `calendar_routing_config` replaced by `channel_config`, the binding type `adapters.md` names). Revised by the testability pass of 2026-09-06 (revision 37: refusal 1's mechanical half, the field allowlist on the grant).
 
 ## Purpose
 
@@ -307,7 +307,10 @@ adapter records an attendee as a reference where the record already holds a `con
 address otherwise; it does not create a `contact` for every invitee it observes, does not accumulate
 meeting-frequency statistics about people, and does not persist what an event's description discloses about
 anyone's health, finances, or family. Purpose-binding is the test: enrichment serves the operator's actual
-relationships, and a person who appears once on someone else's invitation is not one.
+relationships, and a person who appears once on someone else's invitation is not one. The mechanical half
+is the grant: the fields this adapter may write on a `contact` are the allowlist its grant's parameter
+constraints name, and a write outside them is denied at admission (`authority_model.md#grants`); what within
+an admitted field is incidental is the judgement this refusal states.
 
 **2. It never creates, moves, or cancels an event with attendees outside a checkpoint.** Each mails people.
 The class rule above is the mechanism; this is the statement that it is not to be evaded by

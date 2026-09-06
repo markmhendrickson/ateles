@@ -3,7 +3,7 @@
 **Kernel document:** read on every review (`conformance.md`). **Kind:** foundation; states the design and
 never the state of a checkout. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` (phase 0 of plan
 `ent_533d4ec2f7bfb60f66fb3fce`), prior art `ent_08460968e6f49dac21510f4a` (phase 3), ateles#727, the
-decision keys cited per invariant, and PR #745 operator review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Which mechanisms exist on a given checkout, and where nothing fires, is
+decision keys cited per invariant, and PR #745 operator review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Revised by the testability pass of 2026-09-06 (revision 37: invariants 3, 6, 8, and 10 given their mechanical form — the named instruments, the singletons' closure, the citation lint, and "landed" as a derived read). Which mechanisms exist on a given checkout, and where nothing fires, is
 measured in `status.md`, not here.
 
 ## Purpose
@@ -59,7 +59,16 @@ A zero, an empty result, or a silent pass is a claim about the tooling before it
 Prove the instrument non-zero on a known-positive case; segment the population before attributing a rate;
 state the timezone of a search window. Sources: #727 rule 3; synthesis PR-16.
 
-**Enforced by:** review. No mechanical form is known.
+**Enforced by:** a planted positive per instrument, and the instruments are named. The swarm's instruments
+are the counters and coverages the design already defines — drops per window, with the dispositions counted
+beside them (`adapters.md#what-the-adapter-does-with-every-event`); lapses per task
+(`failure_posture.md#repeated-lapse-raises-a-checkpoint`); blocked claims per window
+(`failure_posture.md#the-rules`, rule 2); and the coverage on every adapter observation
+(`data_model.md#record-conventions`) — and each is proved non-zero on a known-positive case before a zero
+read from it is believed. An instrument with no planted positive is one whose zero is not evidence; the
+conformance suite applies the same rule to its own three
+(`conformance_suite.md#the-suite-validates-its-own-instruments`), and a counter the design adds is added to
+this list or it is not an instrument.
 
 ### 4. A test that cannot fail on the thing it watches is decoration
 
@@ -93,7 +102,14 @@ reversed in `gates_and_workflows.md`, because the name was not accurate); agent_
 `ent_4d34c6f96312be686f572add`.
 
 **Enforced by:** the prior-art contract in every runner's prompt (`SWARM_PRIOR_ART_CONTRACT`) and the
-design-basis check on every issue and PR (`conformance.md`).
+design-basis check on every issue and PR (`conformance.md`) — both of which bind at review, weakly. What
+binds mechanically is the registry's closure over the design's singletons, named once, here: one decision
+queue (`checkpoint`), one gate (the action gate), one lease primitive (`LEASE`), one succession edge
+(`FOLLOWS`), one engine that opens steps, one home for step state (the sign-off, projected as
+`step_status`), and one record of an intended effect (`action`). A registered second type for any of them —
+a held-decision type beside `checkpoint`, a claim-history type, a per-step status row, a transition-event
+type — is the parallel mechanism this invariant forbids, and a census of the registry
+(`data_model.md#concepts`) is the check that fails on it.
 
 ### 7. Unknown stays distinct from a verdict
 
@@ -113,7 +129,10 @@ evidence it is fixed until the deployed checkout moves. Sources: synthesis PR-17
 `three_principle_candidates_rejected_on_verification`.
 
 **Enforced by:** this foundation's own split: no implementation state in a foundation document; every figure
-in `status.md` carries its as-of date and instrument, and that document is regenerated, not maintained.
+in `status.md` carries its as-of date and instrument, and that document is regenerated, not maintained. The
+split has a syntactic form a lint reads, stated once in `conformance.md#phases-and-implementation-state`: a
+commit hash appears in no foundation document but `status.md`, and an issue or pull-request number appears
+only where a document names what it derived from.
 
 ### 9. One source, defined once; a comment claiming parity is not parity
 
@@ -138,8 +157,12 @@ cannot fail is a report. That is a deliberate choice rather than a defect — a 
 on a stale checkout causes a larger outage than the drift it prevents — but it means drift is *detected*
 and never *prevented*, and a report only binds a reader who acts on it. What binds is the release
 read-back, which fails on a release that did not reach its terminal state. A PR's path from open to
-deployed has no single tracker; the owning session is the mechanism, and it is a person or an agent, not a
-control.
+deployed has one tracker, the task's chain: "landed" is a derived read — the chain ended under a declaration
+that permits its ending there, a `release` batch's `verify_deployed` signed or a code workflow whose
+declaration permits closing with none because the project deploys its default branch
+(`work_model.md#a-task-is-executed-only-through-a-workflow`) — and a task that reads terminal after a
+`merge_pr` under a declaration that permits no such end is the failing artefact. The owning session is still
+who acts on that read; it is not what makes it true.
 
 ### 11. State that needs a watchdog belongs in a relationship, not a field
 

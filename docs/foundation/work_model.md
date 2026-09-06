@@ -12,7 +12,7 @@ for changing the swarm's own operation), and PR #745 operator review (2026-09-05
 23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default),
 and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: one live instance,
 completion creates the next, `FOLLOWS` task to task), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the task-sources index, the intake rule, and open decision 36). Supersedes `docs/archive/task_execution_loop.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: an intake rule may key on a field a step wrote on a type it may name, with the writer in its provenance predicate; decision 36 untouched).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: an intake rule may key on a field a step wrote on a type it may name, with the writer in its provenance predicate; decision 36 untouched). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a status and claimability read from the checkpoint; the declared terminal set; two moments open a batch; `tasks_attached[]`; the next recurring instance created and read back before the closing sign-off; a terminal status only where the declaration permits none; the writer as the cross-type cycle check's enforcement point; C2 settled by the write contract).
 
 ## Purpose
 
@@ -87,8 +87,12 @@ history cannot: who holds this right now. `agent_session` carries the identity h
 
 ### The transition vocabulary
 
-The task's vocabulary is `created` plus its status (`open` / `blocked` / terminal). The lease carries
-`held` / `lapsed` / `returned`. `active` is a derived read, never a state. Each word names one thing: a
+The task's vocabulary is `created` plus its status (`open` / terminal, the terminal set being the one the
+registered type declares — below). The lease carries `held` / `lapsed` / `returned`. `active` is a derived
+read, never a state, and so is held-from-claim: a task the swarm cannot advance is held by an open
+checkpoint on it (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`), read from that edge
+and never from a status a process would have to clear (principle 11) — `blocked` as a status is retired for
+that reason (`vocabulary.md#retired-names`). Each word names one thing: a
 task whose lease holder died is a task with a lapsed lease, and a task its named principal has not taken is
 assigned-and-unclaimed. Definitions: `vocabulary.md`.
 
@@ -116,11 +120,20 @@ intake's declared fast path and never skips intake.
 
 ### What a claim predicate treats as claimable
 
-Claimable: not terminal, not `blocked`, no held lease. A lapsed lease never blocks a claim. Unassigned
-tasks are a shared pool; an assigned task is claimable only by the principal it names. The status
-vocabulary in the record is what tasks actually carry, not what an enum in code declares: a predicate is
-written against the record (principle 3), because a normalizer that fails to map a live value onto a
-terminal one makes finished work claimable. Live status distribution: `status.md`.
+Claimable: not terminal, no held lease, and no open checkpoint holding it — every checkpoint whose subject
+is the task holds it from claim, but one: `unclaimed_step` reorders and never holds, so the step it names
+stays claimable by its role (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`); a
+checkpoint on an action holds the action, and the task stays with its lease holder or, on a lapse, is
+claimable. A lapsed lease never blocks a claim. Unassigned tasks are a shared pool; an assigned task is
+claimable only by the principal it names. The status vocabulary in the record is what tasks actually carry,
+not what an enum in code declares: a predicate is written against the record (principle 3), because a
+normalizer that fails to map a live value onto a terminal one makes finished work claimable. **The reader is
+tolerant and the writer is canonical** (`data_model.md#record-conventions`): the registered `task` type
+declares its terminal set, one spelling per meaning — the design relies on two meanings, completed and
+closed without completion, the reason for the second being the closing sign-off's and the edges'
+(`DUPLICATE_OF` for a duplicate) — and a closing sign-off writes only a declared value, a terminal value
+outside the set being refused at the write as any undeclared value is; the reader maps every spelling the
+record already carries onto `open` or terminal, permanently. Live status distribution: `status.md`.
 
 ### A lapsed lease is not reaped; repeated lapse raises a checkpoint
 
@@ -153,14 +166,33 @@ urgent or trivial. Work small enough that most steps are unnecessary takes a dec
 (`gates_and_workflows.md`), which is a workflow saying which steps it skips — a decision recorded in the
 declaration, judged once, and visible to every reader — rather than a task escaping the model.
 
-**What this means for the self-triggering daemons.** A daemon produces tasks and takes actions, and it
-receives no task itself (the four execution mechanisms, below); none of that is an exception to this
-rule. Any task a daemon produces enters intake exactly like a task from any other source and is executed
-through a workflow from there — the daemon that created it holds no privilege over it and does not
-execute it outside the model. The daemon's own outbound effects are not task execution at all: they are
-actions, and each passes the action gate on its own (`gates_and_workflows.md`, C2). So the daemon loop
-sits beside the task path rather than around it, and the two meet where a daemon's output becomes a task
-in intake.
+**A terminal status is written by a closing sign-off, and only where the declaration permits closing with
+no successor.** A task's chain ends when a batch closes naming none, and a declaration says whether its
+batches may — `none_permitted` beside `successors`
+(`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`) — so a closing sign-off naming none
+under a declaration that does not permit it is refused at the write, and the task stays open. Principle 10's
+"landed" is therefore a derived read over the chain and not a status anyone writes: a task whose batch
+produced a `merge_pr` action is terminal when its chain ended under a declaration that permits its ending
+there — a `release` batch's `verify_deployed` signed, or a `feature` or `bug` declaration that permits none
+because the project deploys its default branch on its own cadence (`workflows.md#feature`) — and a terminal
+task whose last batch closed naming none under a declaration that permits no such end is the failing
+artefact. Which terminal value the sign-off writes is drawn from the set the registered type declares
+(`#what-a-claim-predicate-treats-as-claimable`).
+
+**What this means for the self-triggering daemons.** A daemon produces tasks, and it receives no task itself
+(the four execution mechanisms, below); none of that is an exception to this rule. Any task a daemon
+produces enters intake exactly like a task from any other source and is executed through a workflow from
+there — the daemon that created it holds no privilege over it and does not execute it outside the model. A
+daemon takes no action of its own: the write contract gives it tasks and observations and nothing else
+(`data_model.md#write-contract`), so an effect a daemon wants is a task it creates, and the effect is then
+an action `PRODUCES` from that task, taken at the boundary on permit
+(`adapters.md#outbound-steps-produce-actions-adapters-take-them`) — an adapter is a daemon, and every
+action it takes is a task's. The one write a daemon makes to an external system with no action behind it is
+the announcement path (`failure_posture.md#the-rules`, rule 2), which is not an action because the record
+it would be recorded in may be unreachable
+(`telegram.md#outbound-the-operations-a-step-takes-on-the-channel`). So the daemon loop sits beside the
+task path rather than around it, and the two meet where a daemon's output becomes a task in intake (C2,
+settled below).
 
 ### Changing the swarm is work, and it goes through a workflow like any other
 
@@ -320,8 +352,9 @@ batch to come into existence, which tasks are in it, and which workflow it goes 
 by a mechanism the model already has, and stating them together is what stops the answer being re-derived
 differently at each call site.
 
-**A batch comes into existence when a closing sign-off names a successor, and at no other moment.** There
-is one cause, not several. Intake's `route` step closes on a sign-off naming one successor workflow, none,
+**A batch comes into existence at one of two moments, and at no other: a task's creation, which opens its
+intake batch, and a closing sign-off naming a successor, which opens the successor's.** Two causes, both
+recorded, and no third. Intake's `route` step closes on a sign-off naming one successor workflow, none,
 or operator-only; every later batch closes the same way (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`).
 Where a successor is named, the batch for it opens and carries a `FOLLOWS` edge back to the batch that
 named it. Where none is named, the task's chain ends. Nothing else opens a batch: no daemon opens one
@@ -341,8 +374,10 @@ together into the successor, and a batch of one stays a batch of one. Two operat
 both already defined and both edges (principle 11): **detach**, which ends a task's `ADDRESSED_BY` edge and
 opens a new batch for it from the first step of its workflow, and **attach**, which writes that edge. What
 this section adds is who may do them and on what basis. Attaching a task to a batch that is already open,
-part-way through its steps, is a step owner's judgement written into that step's sign-off, never an
-adapter's guess and never a matcher's inference — the adapter rule already forbids the first
+part-way through its steps, is a step owner's judgement written into that step's sign-off — `tasks_attached[]`
+names them (`data_model.md#concepts`), so an `ADDRESSED_BY` edge written after the batch opened that no
+sign-off names is the failing artefact — never an adapter's guess and never a matcher's inference — the
+adapter rule already forbids the first
 (`adapters.md#what-the-adapter-does-with-every-event`), and the second is the routing fallthrough the pull
 rule forbids. A task attached part-way through enters at the batch's current step and inherits the
 sign-offs already written on it, which is exactly why the judgement is a recorded one: those sign-offs were made
@@ -526,15 +561,20 @@ without first ending it, and ending it is written. When the task is terminal, th
 hold does — the step owner reads the outcome and signs on its own judgement, which may be a blocking verdict
 if the task ended without doing what the batch needed.
 
-**A cycle fails closed, at the write and after it.** The record refuses a `DEPENDS_ON` write that would
-close a cycle — its hierarchical relationship types, `PART_OF` and `DEPENDS_ON`, are cycle-checked at write,
-which is a property of the record the design relies on rather than rebuilds
-(`adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`) — so an edge from batch
-A to a task whose own batch already depends, directly or through further edges, on a task attached to A is
-not written, and the step owner is told why. The walk is a read the writer makes before it writes — from the
-target task to its live batch along `ADDRESSED_BY`, from that batch along its `DEPENDS_ON` edges, and on —
-which is the bounded retrieval the record conventions already require before a write that creates a
-relationship (`data_model.md#record-conventions`). A cycle can also arise **after** the writes, with no edge
+**A cycle fails closed, at the write and after it, and two checks make it so.** The record refuses a
+`DEPENDS_ON` write that would close a cycle among its own edges — its hierarchical relationship types,
+`PART_OF` and `DEPENDS_ON`, are cycle-checked at write, which is a property of the record the design relies
+on rather than rebuilds (`adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`).
+A loop that runs through `ADDRESSED_BY` is invisible to that per-type check, so the second check is the
+writer's: before it writes, the step owner walks from the target task to its live batch along
+`ADDRESSED_BY`, from that batch along its `DEPENDS_ON` edges, and on — the bounded retrieval the record
+conventions already require before a write that creates a relationship
+(`data_model.md#record-conventions`) — and refuses its own write where the walk returns to a task attached
+to its batch. So an edge from batch A to a task whose own batch already depends, directly or through further
+edges, on a task attached to A is not written, and the step owner knows why. The writer is the enforcement
+point for the cross-type case, and the design says so rather than attributing the refusal to the record: it
+is the shape `gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits` names for
+governance writes (decision 56), and it takes whichever answer that decision does. A cycle can also arise **after** the writes, with no edge
 refused: a task attached to a batch part-way through
 (`#how-a-batch-is-formed-and-what-chooses-its-workflow`) can join two dependency chains into a loop, so the
 same walk runs at attach, and an attach that would close a cycle is refused too. Where a cycle is nonetheless
@@ -622,7 +662,8 @@ workflow completes — tested against the model above and taken as written; what
 already says about it and the three hazards it has to survive.
 
 **One live instance, never zero and never two.** A recurring task is an ordinary `task` that carries a
-`recurrence` rule and a `due_date`. At any moment exactly one instance of it is non-terminal. When the
+`recurrence` rule and a `due_date`. At any moment exactly one instance of it is non-terminal, the closing
+interval below excepted. When the
 live instance's chain ends — its last batch closes with a closing sign-off naming no successor — the
 step owner who writes that sign-off also creates the next instance: a new task, copying the completed
 one's rule and description, entering intake as every created task does
@@ -660,6 +701,19 @@ recurring task's last batch **creates the next instance as part of its close**, 
 an internal write to the record like every other write a step makes about tasks, not an action. Nor is
 this the case decision 14 rules on: the creating batch does not hold on the task it created; it closes,
 and the created instance is a peer with its own intake.
+
+**The creation precedes the sign-off, and is read back first.** The two are two writes, and the record
+gives them no transaction, so the order is the rule. The step owner creates the next instance — after the
+bounded retrieval every create makes (`data_model.md#record-conventions`), which on a re-claim finds a live
+instance already `FOLLOWS` this one and creates nothing — reads it back, and only then writes the closing
+sign-off (principle 2). A creation that fails leaves the step open, the sign-off unwritten, and the series
+with its one live instance; a sign-off that fails after the creation leaves a claimed step whose re-claim
+finds the successor and signs. So "never zero" holds at every moment, and "never two" is stated precisely:
+at no moment are two instances live but the closing interval — a predecessor whose step is claimed and not
+yet signed, and the successor its step owner has just created — and the live instance is the latest on the
+`FOLLOWS` path. The other order, sign then create, is the one the design refuses: a sign-off that lands and
+a creation that fails leaves a completed series with zero live instances, readable only as an absence, which
+is the silent stop this section exists to make loud.
 
 **Silent stop is the failure the design must survive, and it survives it by never being empty.** If
 recurrence rides on completion, a series whose instance never completes never produces the next one, and
@@ -1071,10 +1125,15 @@ task work once both are claimed; if none does, the two are one mechanism. Opened
 loop document define `created, routed, executing, verified, done` with a router assigning owners. Resolved
 for pull: the third of those states asserts what it cannot back, and routing places the judgment of fit in an actor that
 neither acts nor answers for it. That plan's state-machine criteria are superseded; the correction is a
-request to its maintainer. **C2.** `subscriptions_detect_tasks_authorize` is true of the task path and
-false of the self-triggering daemons, whose effects never pass through a task; a daemon's outbound effect
-is still an `action` through the same action gate (`gates_and_workflows.md`). Open: unify the daemon loop
-with the task path or keep both under an explicit contract (digest `ent_e04244959daf92416597ce28`).
+request to its maintainer. **C2.** `subscriptions_detect_tasks_authorize` is true of the task path and was false of the
+self-triggering daemons, whose effects were said to pass through no task. **Settled by the write contract**
+(`data_model.md#write-contract`; the testability pass of 2026-09-06): a daemon writes the tasks its poll
+produces and observations, and nothing else, so it takes no action of its own — every effect is an action
+`PRODUCES` from a task, and a daemon that wants one creates the task
+(`#a-task-is-executed-only-through-a-workflow`). Of the two options the open question named — unify the
+daemon loop with the task path, or keep both under an explicit contract (digest
+`ent_e04244959daf92416597ce28`) — this is the second, the contract being the write contract's daemon row.
+The announcement path is the one exemption, and it is not an action.
 **The reaper, retired** — lapse is read, not written; the watchdog keeps only its escalation rule
 (`failure_posture.md` rules 4–5).
 

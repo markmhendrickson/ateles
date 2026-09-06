@@ -19,7 +19,7 @@ a read-only inventory of the production record taken 2026-09-05 through the Neot
 `status.md`), the operator's 2026-09-05 direction that the plan also cover the migration of skills into the swarm, the skill
 inventory at both harness roots read the same day and the recurring-work extraction over it (both in `status.md`,
 revision 32), and the two renderers' stated contracts (`render_agent_docs.py`, `sync_skills.py`). The bootstrap sequence this document orders against is the
-conformance suite's (`conformance_suite.md`); where the two disagree, this document says so. Revised by the simplification pass of 2026-09-05 (revision 29: gap G14 closed; `workflow policy` retired). Revised by the memo-gap pass of 2026-09-06 (revision 31: gaps G1 and G12 closed). Revised 2026-09-06 (revision 32: the skills leg — five classes of skill, the mapping of each to its target, stage 11, gaps G28–G31, and open decision 42).
+conformance suite's (`conformance_suite.md`); where the two disagree, this document says so. Revised by the simplification pass of 2026-09-05 (revision 29: gap G14 closed; `workflow policy` retired). Revised by the memo-gap pass of 2026-09-06 (revision 31: gaps G1 and G12 closed). Revised 2026-09-06 (revision 32: the skills leg — five classes of skill, the mapping of each to its target, stage 11, gaps G28–G31, and open decision 42). Revised by the testability pass of 2026-09-06 (revision 37: gaps G6, G7, G8, G11, G13, and G15 closed).
 
 ## Purpose
 
@@ -82,7 +82,7 @@ the content of every declaration, the per-role gap map, and the governance value
 population's phase 5 and the operator's.
 
 **The one line the operator adds to the population plan's `next_steps`**, since this document may not
-write to that entity: *"Second leg: `docs/foundation/migration.md` (PR #745) carries the existing record
+write to that entity: *"Second leg: `docs/foundation/migration.md` (the PR that carries this document) carries the existing record
 into the declared state; its stage 4 depends on phase 2's content and its stage 6 on phase 5's values;
 stages 0–3 can start when the registry has the types."*
 
@@ -146,8 +146,8 @@ accountable for what it drops. Count classes and populated-field measurements pe
 | Source type or field (retired names marked) | Disposition | Target | Where the information goes, and why the disposition is safe |
 |---|---|---|---|
 | — (no source type) | introduce | `intake_rule` | a type the design adds (revision 30) with no counterpart on the instance. The predicates in daemon code that create a task on an entity change are its drift and not its source: each is restated as a rule by an operator's governance write, read back, before the daemon's predicate is retired (`work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`). Writes to it take the reserved default of decision 18 |
-| `task` | keep | `task` | ids stable; no bulk write. The live status vocabulary stays as written and the claim predicate reads every spelling it carries onto `open`, `blocked`, or terminal (`work_model.md#what-a-claim-predicate-treats-as-claimable`); the canonical writer uses one spelling per meaning (gap G7: the design names no canonical terminal value). `assigned_to` keeps its design meaning, eligibility. `action_type` stays as the declared classes. `priority` stays |
-| `task.blocked_reason`, and the statuses that name a wait for a principal (an approval, an input) | derive | `checkpoint` on the task, reason class per the reason's kind | a task waiting on a principal is a task with an open checkpoint, not a status; the derivation reads each non-terminal task whose status or reason names a wait, and raises one checkpoint whose subject is the task. Terminal tasks are left as written. The field stays for the tolerant reader (gap G8: `blocked` is both a design status and a condition a checkpoint holds, and the design does not say which writes which) |
+| `task` | keep | `task` | ids stable; no bulk write. The live status vocabulary stays as written and the claim predicate reads every spelling it carries onto `open` or terminal (`work_model.md#what-a-claim-predicate-treats-as-claimable`); the canonical writer uses one spelling per meaning from the set the registered type declares (gap G7, closed). `assigned_to` keeps its design meaning, eligibility. `action_type` stays as the declared classes. `priority` stays |
+| `task.blocked_reason`, and the statuses that name a wait for a principal (an approval, an input) | derive | `checkpoint` on the task, reason class per the reason's kind | a task waiting on a principal is a task with an open checkpoint, not a status; the derivation reads each non-terminal task whose status or reason names a wait, and raises one checkpoint whose subject is the task. Terminal tasks are left as written. The field stays for the tolerant reader, and a live `blocked` status is read as a wait and derived the same way (gap G8, closed: `blocked` is retired as a status) |
 | `task.confidence` (confidence scored on the task) | derive, where an action is derived; else keep as history | `action.confidence` | the design scores confidence on the action at the moment it would be taken; a task-level score is the retired engine's estimate before any action existed. It is carried onto a derived action where one is derived (below) and otherwise stays readable and unused |
 | `task.parent_task_id` | derive | `PART_OF` child → parent | one edge per populated field; the field stays. Parent completion is then a derived read |
 | `task.recurrence`, and the tasks that carry it | keep; hold the writer | `task` with its `recurrence` rule; the next instance created by the closing sign-off, `FOLLOWS` task → task (`work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next`) | the live instance the retired pattern left — one open task per obligation whose `due_date` a daemon moves after each completion — is already the design's one live instance, so nothing is rewritten and no `FOLLOWS` edge is fabricated for occurrences the retired pattern overwrote (their history was lost when the fields were). What changes is the writer: the daemon that moves the date must stop before the first instance completes under the design, or a completed instance is reopened beside the one its sign-off created — two live instances, which the ruling forbids. The hazard section names it |
@@ -802,15 +802,23 @@ numbers are separate and only two of these are opened as decisions below.
   carries acceptance criteria, and the `batch` row of `data_model.md#concepts` has no field or edge for
   them (G6).
 - **G6 — a batch's acceptance criteria have no row.** As above; a migration cannot carry criteria into a
-  field that does not exist.
+  field that does not exist. Closed by the testability pass of 2026-09-06: the criteria are the tasks' —
+  `pm` states them on the task — and the `task` row carries `acceptance_criteria[]`, amended only by a step
+  owner's correction naming the finding it answers (`gates_and_workflows.md#declaration-batch-projection`).
 - **G7 — the terminal status set is measured, never declared.** `work_model.md#what-a-claim-predicate-treats-as-claimable`
   makes the predicate read the record's live vocabulary, which is right for the reader; the canonical
   writer has no stated terminal spelling to write. Without one, every new writer chooses its own and the
-  tolerant reader grows forever.
+  tolerant reader grows forever. Closed by the testability pass of 2026-09-06: the registered `task` type
+  declares its terminal set, one spelling per meaning; the writer writes from it, and the reader stays
+  tolerant permanently (`work_model.md#what-a-claim-predicate-treats-as-claimable`).
 - **G8 — `blocked` is a stored status and a checkpoint is the held state.** Both exist in the design. It
   does not say which conditions write `blocked` rather than raise a checkpoint, nor what clears `blocked`
   — if a checkpoint's resolution does, `blocked` is a projection and needs the reconciler the design
-  requires of one.
+  requires of one. Closed by the testability pass of 2026-09-06: `blocked` is retired as a status; a task
+  the swarm cannot advance is held by an open checkpoint on it, and claimability is read from that edge,
+  `unclaimed_step` excepted (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`). The
+  derivation row above already carries the waiting statuses onto checkpoints; the field stays for the
+  tolerant reader.
 - **G9 — `PART_OF` is reserved for child-to-parent and is in use for task-to-plan.** The design gives a
   task at most one `PART_OF`; the instance uses the same edge for plan membership. No edge is named for
   the latter.
@@ -820,7 +828,8 @@ numbers are separate and only two of these are opened as decisions below.
 - **G11 — the transcript file is called an artifact.** `workflows.md#meeting-processing` lists the
   transcript file under *Artifacts* while its entry condition names the `transcription` entity in the
   record; a local file is reached through no adapter and has no `system`, so it is not an artifact by the
-  design's own test.
+  design's own test. Closed by the testability pass of 2026-09-06: the Artifacts line names the calendar
+  event alone, and the transcript is a source in the record (`workflows.md#meeting-processing`).
 - **G12 — no edge from a task to an entity in the record it concerns.** `REFERS_TO` in the design is task
   to artifact. A task that concerns a transcription, a contact, or a payment configuration — the shape
   every self-triggering daemon produces — has no named edge. Closed by the memo-gap pass of 2026-09-06:
@@ -828,14 +837,20 @@ numbers are separate and only two of these are opened as decisions below.
   for what it discovers (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`).
 - **G13 — retiring `daemon_report` removes the only signal that distinguishes an idle daemon from a
   halted one.** The write contract retires it; the failure posture says a silently halted swarm is
-  indistinguishable from an idle one. What carries a successful empty poll is unstated.
+  indistinguishable from an idle one. What carries a successful empty poll is unstated. Closed by the
+  testability pass of 2026-09-06: a successful empty poll writes one observation per declared window on the
+  daemon's own `agent_session`, carrying the poll's coverage and the dispositions counted, so a daemon silent
+  past its window is a derived read (`adapters.md#what-the-adapter-does-with-every-event`).
 - **G14 — `feedback` names two things.** The direction-of-truth table's operator feedback and the
   instance's third-party product feedback shared a type name; the operator's input on reviewed work is,
   by `gates_and_workflows.md`, a finding and not a feedback entity at all. Closed by the simplification
   pass: the table now names `task_policy` alone and points the operator's input at the finding.
 - **G15 — the design's finding has no row.** Findings bind, carry severity, and are what a verdict may
   not contradict, and `data_model.md#concepts` gives the sign-off no `findings[]` field and names no
-  `finding` entity. The type of that name on the instance records something else.
+  `finding` entity. The type of that name on the instance records something else. Closed by the
+  testability pass of 2026-09-06: the `finding` row — severity, kind, scope, evidence, text — `PART_OF` the
+  sign-off that carries it and `REFERS_TO` the batch it judges (`data_model.md#concepts`); the instance's
+  type of that name is what stage 1's registration versions over, and the carrying is stage 1's.
 - **G16 — only an adapter mints an artifact, and the migration must mint some.** The held decisions on
   merges name pull requests the record holds as typed rows but not as `artifact`; deriving their
   checkpoints needs an artifact that no adapter read produced. Either the derivation is allowed to mint

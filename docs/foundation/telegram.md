@@ -10,7 +10,7 @@ to principals; approval is authorized against the required approvers), `workflow
 workflow, and the consent step of every workflow that has one), `failure_posture.md` (the halt; the
 off-record announcement path; retry classification), and Telegram's own chat-platform API documentation, read
 2026-09-05, and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decisions 25 and 26 ruled
-here). What is built is `status.md`.
+here). What is built is `status.md`. Revised by the testability pass of 2026-09-06 (revision 37: every uncorrelated message from a bound principal is a task; the start-time binding is a cache with a declared staleness bound).
 
 ## Purpose
 
@@ -130,10 +130,13 @@ it, in order of preference:
   swarm composed; the payload that comes back is the swarm's own. See below, where this is a different
   trust posture and not merely a second mechanism.
 
-**A reply that correlates to no open checkpoint is an observation, or a task.** Where the message reads as
-a new ask — text arriving on no correlation, from the bound principal — it is the fourth outcome, a task
-entering intake. Where it correlates to nothing and asks nothing, it is an observation. Neither is a
-resolution.
+**A reply that correlates to no open checkpoint is a task.** Text arriving on no correlation, from a bound
+principal, is the fourth outcome — a task entering intake — whether or not it reads as an ask. Deciding that
+a message asks nothing is the intent read this document refuses, made by the component that answers for
+nothing, and the design's answer for every other surface is the same: a stranger's issue and a stranger's
+mail are tasks (`adapters.md#what-the-adapter-does-with-every-event`). Where the message asked nothing,
+intake says so — its closing sign-off names no successor and the task ends there, recorded by a step owner
+(`workflows.md#intake`). It is never a resolution.
 
 **A reply that correlates to a checkpoint but carries no readable decision is `unknown`, and unknown
 holds.** A checkpoint records the options it offers (`gates_and_workflows.md#the-checkpoint`). A reply
@@ -249,8 +252,8 @@ window and surfaced on the off-record announcement path.
 | `message`, text, from a chat credential bound to a principal, correlated to an open checkpoint that principal is a required approver on, carrying a readable option | handled | **resolution of that checkpoint by that principal**, authorized against the required approvers and read back on the checkpoint (`authority_model.md#approval`) |
 | `message`, text, correlated to an open checkpoint, from a principal who is **not** a required approver on it | handled | an observation on the artifact. The checkpoint stays open, awaiting whoever it awaits |
 | `message`, text, correlated to an open checkpoint, content matching none of its options | handled | an observation recording what was said; the checkpoint stays open and **no option is selected as a nearest match** |
-| `message`, text, from a bound principal, correlated to nothing, reading as a new ask | handled | a task with the message as its artifact, entering intake; classification is intake's `classify` and never the message's phrasing |
-| `message`, text, from a bound principal, reporting an operator-only action taken | handled | an observation on the task's artifact that the `record` step owner reads and signs on (`workflows.md#operator-only`); the sign-off is the step owner's, not the message's |
+| `message`, text, from a bound principal, correlated to nothing | handled | **a task**, with the message as its artifact, entering intake — always, whatever the text asks or does not ask: whether it asks anything is intake's judgement, and intake's closing sign-off names no successor where it asks nothing (`workflows.md#intake`); the adapter reads no intent, and classification is never the message's phrasing |
+| `message`, text, from a bound principal, correlated by reply to the presentation of an operator-only task's `present` step | handled | an observation on the task's artifact that the `record` step owner reads and signs on (`workflows.md#operator-only`); the sign-off is the step owner's, not the message's, and an uncorrelated report is the task row above |
 | `message`, from a chat credential bound to **no** principal | handled | an observation where it names a tracked artifact; otherwise `dropped`, reason `unbound_credential`. **Never a task, never a resolution** |
 | `message` carrying a platform command | handled | see *Commands*, below |
 | `message` carrying media (photo, document, audio, video, voice, video note, animation, sticker) | handled | an observation on the artifact, recording that media of that kind arrived, its identifier at the channel, and its stated type and size. See *What the adapter does not fetch* |
@@ -535,7 +538,9 @@ back** — never by the operation's return code.
 design already carries.** `failure_posture.md` rule 2 requires the halt to be announced on a path that
 survives the outage, which means announced when the record is unreachable — and an action is an entity in
 the record. So the announcement is not gated at the moment of a halt, because the gate cannot be evaluated
-without the record, and it is not confirmed on the record either. What holds it in bounds is that it is
+without the record, and it is not confirmed on the record either. It is sent to the chat the adapter's copy
+of the binding names, within that copy's declared staleness bound
+(`#during-a-halt-a-read-on-the-channel-is-answered-with-the-halt-and-never-with-data`). What holds it in bounds is that it is
 **strictly one-way and carries no decision**: it tells the operator that the swarm has halted or resumed,
 and aggregates the window's drops and blocked claims. It never asks for a decision, never presents a
 checkpoint, and never carries an inline keyboard — because a decision made against an unreachable record
@@ -724,9 +729,15 @@ truthfully and nothing it cannot.
 announcement path (`#outbound-the-operations-a-step-takes-on-the-channel`, the announcement row), which
 already exists, already runs without the record, and already carries exactly this content; it is addressed
 to the asker rather than broadcast, and that is the whole of the difference. It is sent **only in a chat the
-announcement path already reaches** — the binding the adapter holds from its configuration, read at start
-and not from the record — because the adapter cannot resolve a credential during a halt, and answering an
-unknown asker anywhere else would disclose the swarm's state to whoever asked. In that chat, the answer
+announcement path already reaches** — the adapter's copy of the `channel_config` binding, refreshed on every
+successful read of the record and carrying the staleness bound the binding itself declares — because the
+adapter cannot resolve a credential during a halt, and answering an unknown asker anywhere else would
+disclose the swarm's state to whoever asked. The copy is a cache, and it takes the rule every cache takes
+(`authority_model.md#grants`): past its declared bound with no refresh it resolves to `Indeterminate`, and
+the adapter answers no one and announces to no one — the capture of last resort holds what would have been
+sent (`failure_posture.md#the-rules`, rule 2) — so a chat unbound since the copy was taken is answered for
+at most the bound. An operator who wants a longer outage to stay answered declares a longer bound, which is
+a value on the binding and theirs, never a default the adapter supplies. In that chat, the answer
 discloses nothing the announcement did not. It carries no decision, no options, and no keyboard, for the
 reason the announcement path carries none: a decision taken against an unreachable record cannot be recorded
 (`adapters.md#what-the-adapter-does-with-every-event`). And the command's delivery is **not acknowledged**:

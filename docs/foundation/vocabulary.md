@@ -9,7 +9,7 @@ cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 opera
 and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional [step](#step), and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14,
 16–18, 23–29: the hold verb, a condition a step holds on, the `dependency_cycle` reason class, the consent
 tolerance on `action_policy`, and an [artifact](#artifact) `PART_OF` its containing artifact), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the `intake rule` entry). Format
-follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives). Revised by the consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by role; `merge` as an action-class name retired for `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound as the task's `due_date` on the step entry; the `operator_only` step; a rule keying on a field a step wrote; no marker on a read for a special-category type; decision 55 on the [external-system](#external-system) entry).
+follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives). Revised by the consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by role; `merge` as an action-class name retired for `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound as the task's `due_date` on the step entry; the `operator_only` step; a rule keying on a field a step wrote; no marker on a read for a special-category type; decision 55 on the [external-system](#external-system) entry). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a task status; the terminal set declared on the type; the `finding` and `sign_off` fields; `rounds_cap` and `none_permitted`).
 
 ## Purpose
 
@@ -214,8 +214,10 @@ The task's own transition vocabulary is `created` plus its status; [lease](#leas
 **Not for:** published as a separate state; routed, claimed, or released as task transitions.
 
 ### claimable
-**Definition:** the derived property of a [task](#task) whose status is neither terminal nor `blocked`, whose
-`assigned_to` is unset or names the [principal](#principal) about to [claim](#claim), and on which no [lease](#lease) is held.
+**Definition:** the derived property of a [task](#task) whose status is not terminal, on which no [lease](#lease) is
+held, which no open [checkpoint](#checkpoint) holds from claim (every task-subject reason class but
+`unclaimed_step` — `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`), and whose
+`assigned_to` is unset or names the [principal](#principal) about to [claim](#claim).
 **See:** [`work_model.md#what-a-claim-predicate-treats-as-claimable`](work_model.md#what-a-claim-predicate-treats-as-claimable).
 **Never:** —
 **Not for:** "available" for claimable; open for claimable, whether as an open task, an open pool, or a
@@ -223,6 +225,8 @@ task said to be open — `open` is a status value and means something else.
 
 ### terminal
 **Definition:** a status value after which a [task](#task), a [batch](#batch), or a [checkpoint](#checkpoint) changes no further.
+A task's terminal values are the set the registered `task` type declares, one spelling per meaning; a writer
+writes from it, and a reader tolerates every spelling the record carries.
 **See:** [`work_model.md#what-a-claim-predicate-treats-as-claimable`](work_model.md#what-a-claim-predicate-treats-as-claimable).
 **Never:** —
 **Not for:** "final" for terminal.
@@ -373,7 +377,7 @@ a [batch](#batch) may take, and the [successors](#successor) a closing [sign-off
 
 ### step
 **Definition:** one declared position in a [workflow](#workflow)'s ordered list, carrying a name, a [step owner](#step-owner), a
-`required` flag, an `on_fail` target, its [read dependencies](#read-dependency), two intervals
+`required` flag, an `on_fail` target with its `rounds_cap`, its [read dependencies](#read-dependency), two intervals
 (`unclaimed_after`, `hold_bound`, each an interval or the [task](#task)'s `due_date` —
 `gates_and_workflows.md#declaration-batch-projection`), and
 parallel-group and join fields, [claimed](#claim) by its step owner on a [batch](#batch) and closed by that
@@ -444,6 +448,9 @@ owner per artifact head is the one that stands; the superseded one stays readabl
 **Evidence:** a blocking verdict names the executed check and the output it produced, or the mechanism
 that executed it; unexecuted reasoning is a non-blocking [finding](#finding), never a block
 ([`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges)).
+**Field:** `sign_off`; its findings are `finding` entities `PART_OF` it, `SIGNED_BY` names the principal —
+the step owner's agent, or the operator on `waived` — `artifact_refs[]` carries each artifact's pinned
+state by kind, and `tasks_attached[]` names the [tasks](#task) it attached part-way (`data_model.md#concepts`).
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection),
 [`adapters.md#no-external-event-advances-a-step-by-itself`](adapters.md#no-external-event-advances-a-step-by-itself).
 **Never:** "participation_record", "step_run", "LGTM", "audit row".
@@ -470,6 +477,9 @@ recur, and correcting the work alone does not discharge it — a change to the [
 input on reviewed work is a finding and is judged on both axes. The scope a finding lands on is one of
 four, narrowest first — the batch (one-off), the step, the workflow, the agent — or `unknown`, which raises
 a [checkpoint](#checkpoint) (reason `undetermined_scope`) and is never coerced to one-off.
+**Field:** `finding` — an entity of its own, `PART_OF` the sign-off that carries it and `REFERS_TO` the batch
+it judges; a hold's finding stands with no sign-off while the hold does; its severity, kind, scope, and
+evidence are the fields the rules bind on (`data_model.md#concepts`).
 **See:** [`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges),
 [`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`](gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it).
 **Never:** —
@@ -545,7 +555,8 @@ concept.
 
 ### successor
 **Definition:** a [workflow](#workflow) that a `workflow` declares in `successors` as one a [batch](#batch) of it may enter on
-closing, of which the closing [sign-off](#sign-off) selects exactly one or none.
+closing, of which the closing [sign-off](#sign-off) selects exactly one, or none where the declaration
+permits it (`none_permitted`).
 The closing sign-off is the sign-off on the workflow's last [step](#step), which is always a single step.
 **See:** [`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`](gates_and_workflows.md#sequencing-is-data-successors-and-the-chain).
 **Never:** "downstream workflow", "handoff".
@@ -1187,7 +1198,7 @@ they appear in a document, a schema, a prompt, or an error message.
 | a task | is **executed** (plain: done, worked on) | "run", "processed" |
 | an action | is **taken** | "fired", "run", "performed" |
 | a subject that must wait | is **checkpointed**; a task the swarm cannot advance is **escalated** | "paused", "parked", "paged" |
-| a step, on a condition its owner cannot yet judge | **holds**, under a held lease, with a finding naming the condition; the hold **ends** by sign-off, checkpoint, or lapse | "is paused", "is waiting", "is blocked" (blocked is a task status) |
+| a step, on a condition its owner cannot yet judge | **holds**, under a held lease, with a finding naming the condition; the hold **ends** by sign-off, checkpoint, or lapse | "is paused", "is waiting", "is blocked" (a task with an open checkpoint on it is held by it; `blocked` as a status is retired) |
 | a batch, on closing | its tasks **enter** one successor, or the batch closes with none | "flows into", "triggers" the next workflow |
 
 ## Owner: five meanings, one word forbidden alone
@@ -1232,3 +1243,4 @@ foundation prose only on a line that says it is retired.
 | `operator_preview` (a step name) | `consent` | three step names — `operator_preview`, `consent`, `present` — for the step that carries the gate's checkpoint to the operator; the two whose work is identical now share the name |
 | `merge` (as an action class) | `merge_pr` | the step is `merge` and the action it takes is `merge_pr`, as `github.md` and the code workflows already named it; one word for the step and the class made the class read as the step, and the lint's step rules treat `merge` as a step name |
 | `calendar_routing_config` (a binding type) | `channel_config` | `adapters.md#scope` names the per-instance binding types once; a third name for the same binding was a second home |
+| `blocked` (as a task status) | an open [checkpoint](#checkpoint) on the task, from which [claimable](#claimable) is derived | nothing wrote it and nothing cleared it; a task the swarm cannot advance is held by a checkpoint, and a status beside the checkpoint was a second held state (principle 6) that needed a process to keep true (principle 11) |

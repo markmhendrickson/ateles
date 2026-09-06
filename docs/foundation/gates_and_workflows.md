@@ -10,7 +10,7 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
 memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram), and the operator's 2026-09-05 12:52 memo (revision 21: the general claim about self-modification, stated in `work_model.md` and cross-referenced from decision 17), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 17 ruled here; the `dependency_cycle` reason class), and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: the next instance is a created task and not a successor), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: `intake_rule` joins the governance list). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding). Revised by the workflow-format pass of 2026-09-06 (revision 34: two declared intervals on every step, `unclaimed_after` and `hold_bound`; a planned wait as a step's own close condition held under decision 13; required coverage as the value of `freshness`; consent over several like actions as one presentation of several checkpoints; the governance class with no policy value named among what resolves to `NEVER`).consistency pass of 2026-09-06 (revision 35: when the checkpoint a `consent` step carries is written, and what the gate evaluates at the take; the merge action's class named `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a step's bound may be declared as the task's `due_date`; an `operator_only` action inside a workflow is taken by the operator and its step closes on the confirmation, never on the resolution; a read dependency on a special-category type carries no marker of its own).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding). Revised by the workflow-format pass of 2026-09-06 (revision 34: two declared intervals on every step, `unclaimed_after` and `hold_bound`; a planned wait as a step's own close condition held under decision 13; required coverage as the value of `freshness`; consent over several like actions as one presentation of several checkpoints; the governance class with no policy value named among what resolves to `NEVER`).consistency pass of 2026-09-06 (revision 35: when the checkpoint a `consent` step carries is written, and what the gate evaluates at the take; the merge action's class named `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a step's bound may be declared as the task's `due_date`; an `operator_only` action inside a workflow is taken by the operator and its step closes on the confirmation, never on the resolution; a read dependency on a special-category type carries no marker of its own). Revised by the testability pass of 2026-09-06 (revision 37: the finding as an entity the rules bind on; `rounds_cap`; the recorded amendment; an optional step's condition reads what exists; `none_permitted`; the floor-list sentence retired; open decision 55 — where the enforcement point for a governance write sits).
 
 ## Purpose
 
@@ -35,8 +35,9 @@ and the adapters that reach them: `adapters.md`.
 `workflow` declares one entity per (project, workflow type): ordered `steps[]` (`phase`, `step_name`,
 `owner_role`, `parallel_group`, `join_step`, `required`, `applies_when` — the condition that decides
 whether an optional step opens at all, below — and `on_fail` — the earlier step a failing sign-off
-opens again — plus `reads_to_enter`, `reads_to_close`, and `freshness`, the read dependencies below, and
-`unclaimed_after` and `hold_bound`, the two intervals below), plus `fast_paths` and `successors`. `owner_role` holds a **role**, never an agent name: the
+opens again, with `rounds_cap`, the rounds that loop may take, below — plus `reads_to_enter`, `reads_to_close`, and `freshness`, the read dependencies below, and
+`unclaimed_after` and `hold_bound`, the two intervals below), plus `fast_paths` and `successors`, with
+`none_permitted` (`#sequencing-is-data-successors-and-the-chain`). `owner_role` holds a **role**, never an agent name: the
 roster resolves it to a principal when the step is claimed (`vocabulary.md#step-owner`), so one
 declaration serves every project and a renamed agent leaves no stale name in it. Step names are data: a workflow may declare steps
 beyond the review sequence (a draft step, a deterministic lint, an operator preview). A contiguous named
@@ -199,6 +200,18 @@ through the same `reads_to_enter` mechanism as the step it guards, so a conditio
 something the step never declared is a declaration error caught in the pull request that introduced it,
 and a condition whose inputs are unreadable resolves to the third value above rather than to a skip.
 
+**An optional step's condition reads what exists when the step would open.** `applies_when` is evaluated
+against what the batch's tasks are and what their change touches, and which of the two it may read follows
+from where the step sits. A step placed after the step that produces the change — `legal` after `impl` —
+may read the change. A step placed before any artifact exists — `ux` on `copy`, ahead of `impl` — has no
+change to read and declares its condition over the task set alone, as a fast path does: what the tasks name
+and the surface they concern. The declaration check enforces the placement: a condition whose declared
+inputs name an artifact type that no earlier step's `reads_to_close` names could never be evaluated, would
+always take the third value, and would open every time — an optional step in name only — and that
+declaration is refused when it is written, as one naming a role no roster resolves is
+(`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`). So an optional step is optional in
+fact, and a test can make it inapplicable.
+
 And the negative, restated here because this is where a reader will look for it: **no step is closed by
 elapsed time.** A waiver is an operator's deliberate act, not a timer; the answer to a step nobody has
 claimed is a checkpoint against its owner role (`failure_posture.md`), never an automatic clearance. A gate
@@ -259,19 +272,41 @@ it would open the `on_fail` step by a clock, which is sequencing by a timer rath
 deadline missed is a fact the operator decides on — file late, contest, let it go — and the checkpoint is
 where that decision is made; the step owner then signs the verdict that follows from it.
 
-**Scope amendment versus scope creep.** A batch carries acceptance criteria, and implementation regularly
-turns up work that was not in view when they were written. A scope boundary is a decision record, not a
-rule that outranks evidence gathered after it was written — so the addition **amends** the criterion when
-three conditions hold together: it is disclosed rather than absorbed, it is escalated to the step owner
-whose sign off the change touches, and it is defended against an acceptance criterion the batch already
-carries. On all three the criterion is amended by that owner's ruling and the batch continues with the
-work inside it. Absent any one of them the addition is scope creep, and the unrelated work is split into
-its own batch, from the first step of its workflow
+**A step with an `on_fail` target declares `rounds_cap`, the number of rounds its loop may take.** A
+failing sign-off opens the earlier step `on_fail` names, and the loop between the two is a deferral like
+every other, so rule 5 gives it a ceiling (`failure_posture.md#the-rules`): at the cap, one checkpoint on
+a task of the batch, reason `rounds_exhausted`, carrying the last blocking finding. The cap is declared on
+the step, beside the target, because a loop's tolerable length is a property of what the two steps judge
+and not of the project; an undeclared cap is treated as an undeclared interval is — nothing is raised, and
+the absence is visible in the declaration, a defect caught in the pull request that introduced it and never
+a default supplied at runtime. The cap does not close anything: a step in a loop is closed by a sign-off
+or it is open, and the checkpoint at the cap changes no verdict.
+
+**Scope amendment versus scope creep.** A batch carries acceptance criteria — the `acceptance_criteria[]`
+its tasks carry, stated on each task at `pm` (`data_model.md#concepts`; `workflows.md#feature`) — and
+implementation regularly turns up work that was not in view when they were written. A scope boundary is a
+decision record, not a rule that outranks evidence gathered after it was written — so the addition
+**amends** the criterion when three conditions hold together: it is disclosed rather than absorbed, it is
+escalated to the step owner whose sign off the change touches, and it is defended against an acceptance
+criterion the batch already carries. On all three the criterion is amended by that owner's ruling and the
+batch continues with the work inside it. Absent any one of them the addition is scope creep, and the
+unrelated work is split into its own batch, from the first step of its workflow
 (`work_model.md#a-task-is-in-at-most-one-batch-at-a-time`). What separates the two is not the size of the
 addition but whether the step owner ruled on it: undisclosed bundling is refused however small, and a
 large amendment the owner ruled on is legitimate. Scope moving silently is the failure — a batch whose
 shipped change exceeds what any principal judged carries sign offs pinned to an artifact state that no
 longer describes it (`data_model.md#record-conventions`).
+
+**An amendment is recorded, or it is creep.** The three conditions leave a trace only if the ruling is a
+write, so the ruling is two writes the record already has: the step owner records a finding, non-blocking,
+naming the addition and the criterion it is defended against; and it corrects the task's
+`acceptance_criteria[]` with a correction whose idempotency key names that finding — a correction names its
+intent in its key (`data_model.md#record-conventions`), and here the intent is the finding. Disclosed is the
+finding; escalated is the correction's attribution to the step owner whose sign off the change touches;
+defended is the criterion the finding names. A correction to the criteria attributed to anyone but a step
+owner of the batch, or naming no finding, is refused at the write. Whether a shipped change exceeds the
+criteria stays the review step's judgement, and this section does not pretend otherwise; that it exceeded
+them with no amendment on the record is a read, and it is the failing artefact.
 
 `step_status` on the task is the projection of the batch's sign-offs, so "all required steps
 signed?" fails closed in one read. A reconciler proves it agrees with the sign-offs; neither is deleted,
@@ -367,7 +402,12 @@ its step while binding what a later step must do. A conditional block hands the 
 blocked — a step owner blocking "provided the fix lands" has delegated its own judgement to the
 implementer, and the guarantee that a closed step was judged unconditionally is gone. A requirement that
 must hold later has two homes that already exist: a task, or an acceptance criterion the batch already
-carries. Neither is a clause in a verdict.
+carries. Neither is a clause in a verdict. The rule has a mechanical half and a reviewed half, and says which is
+which: neither `sign_off` nor `finding` declares a field a condition could be written in
+(`data_model.md#concepts`), so none can be written as one, and what a finding obliges of later work is a
+task that refers to it or an amendment to the acceptance criteria (above), each readable; a condition
+written as prose inside a finding's text is what the review step that reads the finding refuses, and that
+half stays a review and is recorded as one.
 
 **A blocking finding is one of two kinds, and the kind decides what may be done about it.** An
 **implementation-only** finding names a determinate defect with a determinate fix: the work is inside the
@@ -388,6 +428,18 @@ could not verify, and says so plainly, rather than blocking on a defect it infer
 defect is a reason to look; it is not a reason to block, because a block asserts that the defect is there
 and a principal downstream will act on that assertion without re-deriving it. This is principle 2 at the
 verdict: a claim that was never read back is not evidence.
+
+**A finding is an entity, and the rules above bind on its fields.** A finding is recorded as a `finding`
+(`data_model.md#concepts`), carried by the sign-off that judges the batch — `PART_OF` it — and referring to
+the batch it judges; a hold's finding stands with no sign-off for as long as the hold does
+(`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`), and the operator's finding on
+closed work has none either (`#closed-work-is-reviewed-on-the-record-and-redone-through-intake-never-reopened`).
+Its `severity` is what blocks: the refusal at submission compares the verdict to the severities of the
+findings the sign-off carries, and nothing else. Its `kind` is what decides routability. Its `evidence` is
+required where it blocks, and a blocking finding written with none is refused at the write rather than read
+as a block on inferred reasoning. Its `scope` is the standing axis below. Nothing about the shape is
+restated here (principle 9): the row is the data model's, and this section says only which rule reads
+which field.
 
 ### Whether the verdict is a stored field or a read over the findings and the author
 
@@ -410,8 +462,10 @@ refusal-at-submission rule disappears because the contradiction it refuses can n
 its findings is kept either way, but by construction instead of by a refusal, which is a shift in what
 covers it and not an exact preservation; the adapters' inbound mapping of a host's review tokens onto the
 three values (`github.md#reviews-review-comments-and-threads`) would map onto a sign-off with or without
-a blocking finding instead; and the design's finding has no row in `data_model.md` (`migration.md`, gap
-G15), so a derived verdict would rest on a type the record does not yet carry. **What would decide it:**
+a blocking finding instead; and the design's finding, which had no row in `data_model.md` when this was
+opened (`migration.md`, gap G15), now has one — so a derived verdict would rest on a type the record
+declares, and the blocker the conformance matrix named for this decision is gone. What remains is the
+question itself. **What would decide it:**
 whether any reader needs the three values faster than a read over the findings gives them — if
 `step_status` already serves that reader, the field is a second projection of one source. Opened by the simplification pass of 2026-09-05 without the conformance matrix, which had not landed; the proof above rests on principles 6 and 9 alone and is unverified against the matrix.
 
@@ -452,7 +506,12 @@ whose defect belongs to one step of one workflow is standing **on that step**, a
 it. The three are ordered narrowest-first: a defect statable about a step is not written into an agent's
 prompt, where it would bind that agent across every workflow it handles and thereby assert more than the
 finding supports. Widening the scope of a lesson is the same failure as narrowing it — one produces a rule
-that fires where it does not belong, the other a rule that does not fire where it does.
+that fires where it does not belong, the other a rule that does not fire where it does. The scope chosen is
+recorded as the finding's `scope` (`data_model.md#concepts`), and the proposed change is a task that
+`REFERS_TO` the finding, so the scope a change was made at is attributable to the finding that argued it and
+checkable against it: a write to an `agent` from a finding whose scope is `step` is the widening this
+paragraph forbids, made readable, and a finding whose scope is `unknown` produces no change until the
+checkpoint below is resolved.
 
 **Where the classification is uncertain — on either axis — the swarm asks rather than choosing.** The
 scopes a finding can land on are ordered narrowest-first, and the narrowest is **this batch**: a one-off
@@ -637,16 +696,25 @@ in particular; it would reopen only if the design admitted a task lifecycle, whi
 
 ### One step set, defined once, tested for parity
 
-The step sequence has one home. Unavoidable copies are derived at import or held equal by a parity test;
-a comment is not parity (principle 9). A data-sourced list may add steps and never remove one, as a
-correctness rule, not an availability fallback (C5). Migration is incremental, never a flag day
-(`migration_is_incremental_no_flag_day`).
+The step sequence has one home, the declaration. Unavoidable copies are derived from it or held equal to it
+by a parity test; a comment is not parity (principle 9). There is no floor list in code that the data adds
+to: the sentence that once stood here — a data-sourced list may add steps and never remove one — presupposed
+a base list in code, and under the hard dependency there is none. An unreadable declaration opens nothing
+(`#an-unreadable-workflow-is-unknown-and-unknown-holds`; C5, `failure_posture.md#contradictions-this-document-settles`),
+and a copy that adds or removes a step against the declaration fails the parity test, which is the whole of
+the rule. Migration is incremental, never a flag day (`migration_is_incremental_no_flag_day`).
 
 ### Sequencing is data: successors and the chain
 
-`workflow.successors` names the workflows a closing batch's tasks may enter next. The last step is singular
-(never a parallel group); its sign-off is the batch's closing sign-off and selects exactly one successor
-from the list, or none. None is the normal close of a task that needs no further workflow. One: the tasks
+`workflow.successors` names the workflows a closing batch's tasks may enter next, and `none_permitted` says
+whether the closing sign-off may name none. The last step is singular (never a parallel group); its sign-off
+is the batch's closing sign-off and selects exactly one successor from the list, or none where the
+declaration permits it. None is the normal close of a task that needs no further workflow, and a
+declaration that permits it says so reviewably: a closing sign-off naming none under a declaration that does
+not permit it is refused at the write, so a security batch cannot end unreleased (`workflows.md#security`),
+and a feature declaration permits none only for a project that deploys its default branch on its own
+cadence (`workflows.md#feature`) — which is what makes "landed" a derived read over the chain and not a
+status (`work_model.md#a-task-is-executed-only-through-a-workflow`). One: the tasks
 enter the successor, a new batch record opens for them, and it carries a `FOLLOWS` edge to the closed one.
 A task's chain is the batches read along `FOLLOWS` from its live batch back to intake — derived, never
 stored. No entity above the batches holds a sequence of workflows: a stored sequence would need a
@@ -704,6 +772,47 @@ Everything else stays an internal operational write and reaches no gate. The lin
 **what the write can destroy**, not where it goes — which is the distinction that separates the writes
 worth holding from the routine ones — and both use the gate and the checkpoint queue that already exist
 rather than a second path for record writes (principle 6).
+
+### Where the enforcement point for a governance write sits
+
+**Open decision 56.** Registered in `conformance.md#the-register-of-open-design-decisions`. Two controls
+stand on a governance write, and only the first has a named enforcement point. Admission is the grant: a
+write to a governance type lands only where the writer's `agent_grant` names the type, checked by the record
+at the write (decision 41, `authority_model.md#grants`). The second control — that the write is an action,
+evaluated at the action gate and taken only on a permit — has no point named where it binds. A principal
+whose grant admits `workflow` may write a declaration with no `action` behind it, and the record knows
+nothing of the gate; the writer enforcing the rule on itself is a rule read once at start, which principle
+1's placement test says binds weakly; and what a reader can check afterwards is audit-shaped — an
+observation on a governance type that no permitted action names — which detects and refuses nothing.
+
+**The options.** The record's admission check reads the action: a write to a governance type carries the
+`action` it is taken under, and the record admits it only where that action is of the type's class,
+`PRODUCES` from a task in a live batch whose step owner is the writer, and either resolves low under the
+policy at threshold or carries a terminal `approved` resolution from an awaited principal — the take-time
+permit of `#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`,
+evaluated by the record from what the record already holds. Or a proxy in front of the record evaluates the
+gate for these eight types and passes nothing else through — the shape the adapter already is at the
+external boundary, turned inward. Or the grants: no step owner's grant admits a governance type directly,
+one component holds the only grant that does and evaluates the gate before it writes, and every other
+principal's write is denied at admission, which makes decision 41's check the enforcement point for both
+controls at once.
+
+**What shifts, and why this is opened rather than settled.** Principle 1 places the check at the write, and
+all three options do; principle 6 extends a mechanism that exists, and each extends a different one — the
+record's admission check, the adapter's shape, the grant. What separates them is whose capability the design
+then depends on. The first asks the record's project to evaluate a permit, a dependency of the same kind as
+the edge types (`migration.md`, G25). The second puts a component the swarm owns on the write path to its
+own record. The third changes who may write a governance type at all, and with it the operator's own writes
+after bootstrap, which decision 43 holds. **What would decide it:** whether the record can be asked to
+evaluate a permit at all, and whether the operator wants their own governance writes to pass the same point
+— the two questions decision 43 already puts to the operator, which is why this one is put beside it and
+not ruled here.
+
+**Until it is taken**, the first control binds and the second is audited: a governance write with no
+permitted action naming it is a defect found by reading the record, never a write refused, and the
+conformance suite marks every row that tests the second control as pending this decision. The cross-type
+cycle walk of `work_model.md#a-batch-may-depend-on-a-task-it-created` has the same shape — the writer is
+its enforcement point — and takes whichever answer this decision does.
 
 ### Actions are entities; only actions are taken
 

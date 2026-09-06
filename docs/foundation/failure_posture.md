@@ -10,7 +10,7 @@ from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-12 to PR-15, C5, C17), prio
 `deferral_must_be_bounded_and_escalate_off_neotoma`, `unknown_must_stay_distinct_from_a_verdict`,
 `nyctea_635_becomes_load_bearing`, PR #745 operator review (2026-09-04), and the operator memos of
 2026-09-05 (the `undetermined_scope` reason class), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: a hold on a discovered condition is a deferral under rule 5; the `dependency_cycle` reason class). What is built is `status.md`;Revised by the consistency pass of 2026-09-06 (revision 35: the merge action's class named `merge_pr` in the recovery table). What is built is `status.md`;
-how a checkpoint is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: a condition of a batch is raised on one of its tasks, never on the batch). Revised by the workflow-format pass of 2026-09-06 (revision 34: rule 5's ceiling for a holding step, and the unclaimed-step interval, each named as a field on the step).
+how a checkpoint is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: a condition of a batch is raised on one of its tasks, never on the batch). Revised by the workflow-format pass of 2026-09-06 (revision 34: rule 5's ceiling for a holding step, and the unclaimed-step interval, each named as a field on the step). Revised by the testability pass of 2026-09-06 (revision 37: the announcement path's own outage and the capture of last resort; the window observation; `action_policy.recoveries`; recovery paths and their cadence on the binding; `lapse_cap`; which checkpoints hold a task from claim; `AWAITS` names principals).
 
 ## Purpose
 
@@ -44,6 +44,17 @@ refuse-and-requeue-as-fallback, and the hardcoded step-list floor (C5, below).
 2. **Announce the halt off-Neotoma, on entering and on leaving.** A silently halted swarm is
    indistinguishable from an idle one, this codebase's signature failure. The announcement travels a path
    that survives the outage, aggregated per window, never one page per blocked claim.
+
+   **The announcement path is itself an external system, and it can be down.** Then rule 1's capture is the
+   announcement of last resort: it holds what would have been announced — the halt entering, each window's
+   aggregate, the halt leaving — and when the path returns every captured window is announced with its
+   original time, so the path shows no gap and a reader of it cannot mistake the outage of the path for a
+   quiet swarm. No second channel is declared: it would be a second binding to keep current, and it fails
+   the same way; the capture is read by hand when nothing else answers. The window is the one declared on
+   the binding that names the path (`channel_config`), and while the record is reachable every daemon
+   writes one observation per window on its own `agent_session`, with zeros where nothing happened
+   (`adapters.md#what-the-adapter-does-with-every-event`) — so a daemon silent past its window is a derived
+   read, and an idle daemon and a dead one are distinguishable whenever the record is up.
 
 3. **The reachability check is a real read at claim time, never `/health`.** One probe when a task or a
    step is claimed, not per operation. A health endpoint can return green while every read hangs on a wedged database, so the probe
@@ -164,12 +175,24 @@ is forward-only, the design says so plainly rather than implying a reversal that
 outbound operation each recovery takes is the adapter's (`adapters.md`), which is where the systems these
 classes reach are tabled.
 
+**The record's home for the map is the policy.** `action_policy.recoveries` names, for every class listed
+in either tier, the class its recovery is taken under, or `forward_only` where the system offers no
+reversal, or `none` where the class leaves nothing to undo (`data_model.md#concepts`); a policy write that
+lists a class in a tier and no recovery for it is refused at the write, so a class cannot be granted before
+its undo is named. The table above is the design's statement for the four classes it had been silent on;
+the project's full list is the policy's, and it is what a reader — or a test — reads.
+
 **A restore obligation, with a stated cadence.** A backup nobody has restored is indistinguishable from no
 backup. Every recovery path this document names — a record snapshot, a repository bundle, a rollback target
 — is **exercised on a declared cadence**, and the exercise is a real restore, not an inspection of the
 artifact. This is principle 4 applied to recovery: a restore that has never been run cannot fail, so until
-it is run it is decoration. The cadence is declared where the path is declared; a path with no stated
-cadence is an unexercised path and is reported as one.
+it is run it is decoration. The paths and their cadence are declared where the system that holds the path
+is bound: `recovery_paths[]` on the binding entity for that system's instance (`vendor_binding`, or the one
+binding type decision 35 settles — `adapters.md#scope`), each naming the path and its `cadence` — the code
+host's binding for a repository bundle, the deploy target's for a rollback target, the record host's for a
+snapshot. Each exercise is an observation on that binding, dated by the exercise and carrying what the
+restore read back, and "overdue" is a derived read — the last exercise older than the cadence — never a
+maintained flag (principle 11). A path with no stated cadence is an unexercised path and reads as one.
 
 **Whatever detects does not remediate.** A mechanism that observes the swarm — a watchdog, an external
 prober, a health check — raises and escalates, and holds no authority to act on what it found. It performs
@@ -183,7 +206,10 @@ detector's report.
 
 A lease that lapses is not returned by anything; the task is simply claimable again (`work_model.md`).
 The rule that survives the retired reaper is about repetition: the watchdog counts lapses per task,
-with bounded backoff between re-claims, and when one task's count reaches the cap it escalates the task:
+with bounded backoff between re-claims, and when one task's count reaches `lapse_cap` — declared on the
+project's `action_policy` (`data_model.md#concepts`), never inferred; an undeclared cap raises no
+checkpoint, and the absence is visible in the policy, a defect caught where the policy is written and never
+a default supplied at runtime, as the unclaimed-step interval is treated (below) — it escalates the task:
 one checkpoint, subject the task, reason `repeated_lapse`, carrying the count and the last lease holders,
 rather than letting the task be re-claimed forever. The watchdog observes and escalates; it holds no
 authority over any lease and never chooses the next lease holder. During a halt the count still accrues,
@@ -197,7 +223,8 @@ To escalate is to raise a checkpoint on a task the swarm cannot advance. The che
 entity the action gate writes when it holds an action (`gates_and_workflows.md#the-checkpoint`); only
 its subject and its reason class differ. The reason classes the design names: `gate_hold` (an action held
 at the gate), `repeated_lapse` (above), `unreadable_workflow` (`gates_and_workflows.md`, no step opened),
-`rounds_exhausted` (rule 5, or a declared cap on an `on_fail` loop), `unspawnable_assignee`
+`rounds_exhausted` (rule 5, or the `rounds_cap` a step declares on its `on_fail` loop —
+`gates_and_workflows.md#declaration-batch-projection`), `unspawnable_assignee`
 (`work_model.md`, an `assigned_to` nobody can run, and a declared `owner_role` the roster resolves to
 nobody), `unclaimed_step` (above), `undeclared_dependency` (a step could not read a type it declared, and
 the hold reached its bound — `gates_and_workflows.md#declaration-batch-projection`), `capability_denied`
@@ -240,14 +267,30 @@ value of a required step is that its absence is visible, and a timer converts th
 permit. So a checkpoint raised on an unclaimed step names the step, its owner role, and how long it has
 been open, and stops there.
 
+**An open checkpoint whose subject is a task holds that task from claim, and `unclaimed_step` is the one
+class that does not.** A task with an open checkpoint on it — `repeated_lapse`, `rounds_exhausted`,
+`undeclared_dependency`, `capability_denied`, `undetermined_scope`, `dependency_cycle`, or a class a policy
+declares — is not claimable until the checkpoint is terminal, because each of those is raised where a
+re-claim would restart the condition the checkpoint exists to stop; on resolution the task is re-claimed or
+closed (`gates_and_workflows.md#the-checkpoint`). `unclaimed_step` is the exception by its own rule above:
+it reorders, and the step it names stays claimable by its role, since a step owner arriving late is the
+resolution. `unreadable_workflow` and `unspawnable_assignee` hold too, though nothing could claim under
+them anyway. A checkpoint whose subject is an action holds the action and not the task, whose lease holder
+carries the resolution. This is the whole of what a `blocked` status meant, read from the edge instead
+(`work_model.md#what-a-claim-predicate-treats-as-claimable`); a status beside the checkpoint was a second
+held state that needed a process to clear, and `blocked` is retired as one (`vocabulary.md#retired-names`).
+
 **An open step nobody has claimed raises a checkpoint after a declared interval, against its owner role.**
 Nothing else bounds it: no lease exists on an unclaimed step, so nothing lapses, and pending is a
 legitimate state, so no reader errors. The checkpoint's subject is one task of the step's batch (above) and
 its reason class is `unclaimed_step`; it names the batch, the step, the `owner_role` declared for it, and how
 long the step has been open,
-and it awaits the operator. It is routed against the **owner role** rather than the batch because the
+and its `AWAITS` edge names the operator principal — an edge's target is a principal, and a role is not one
+(`data_model.md#relationships`) — with the role named in its `needed_input`. It is routed against the
+**owner role** rather than the batch because the
 condition is an owner who is absent or does not exist, not work that is unimportant — routing it at the
-role is what makes an absent step owner legible as one. The interval is declared on the step, as
+role, which is what naming the role in `needed_input` does, is what makes an absent step owner legible as
+one. The interval is declared on the step, as
 `unclaimed_after` (`gates_and_workflows.md#declaration-batch-projection`), not inferred; an undeclared
 interval raises no checkpoint. And the constraint above holds without exception:
 the checkpoint alerts, and **it never signs**. It changes no verdict, closes no step, and its resolution is

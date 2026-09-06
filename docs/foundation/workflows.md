@@ -8,7 +8,7 @@ and which successors its tasks may enter, and never the state of a checkout. **D
 record for the built workflows (their step lists and fast paths, not their agent names), the agent
 policies governing outreach, payment, and people-data, `CLAUDE.md`'s people-data section, and PR #745
 operator review (2026-09-04), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Which workflows have a declaration on the record, and which are envisioned
-only, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `operator_preview` renamed `consent`; open decision 33). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 39 ruled here — what intake's `link` attaches and what hydration resolves; the payment `consent` row aligned with decision 27). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two declared intervals and the planned wait, cited in *How to read a workflow section*, `outreach`, and `operator-only`; a standing constraint on an entity a task names, read at intake). Revised by the consistency pass of 2026-09-06 (revision 35: the three `consent`-carrying workflows cite when their checkpoint is written and what the take re-evaluates). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound declared as the task's `due_date` and the `operator_only` step, cited in *How to read a workflow section* and `operator-only`; a matter, a case, or a filing as a record entity the task names, under *What `link` attaches*).
+only, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `operator_preview` renamed `consent`; open decision 33). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 39 ruled here — what intake's `link` attaches and what hydration resolves; the payment `consent` row aligned with decision 27). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two declared intervals and the planned wait, cited in *How to read a workflow section*, `outreach`, and `operator-only`; a standing constraint on an entity a task names, read at intake). Revised by the consistency pass of 2026-09-06 (revision 35: the three `consent`-carrying workflows cite when their checkpoint is written and what the take re-evaluates). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound declared as the task's `due_date` and the `operator_only` step, cited in *How to read a workflow section* and `operator-only`; a matter, a case, or a filing as a record entity the task names, under *What `link` attaches*). Revised by the testability pass of 2026-09-06 (revision 37: `DUPLICATE_OF` at `dedupe`; `impl` closes on a mergeable pull request; `none_permitted` on `feature` and `security`; a bug needing a design choice becomes a new task; the transcript is a source, not an artifact; the `contact` allowlist at `extract`).
 
 ## Purpose
 
@@ -68,8 +68,9 @@ from the declarations (below).
   evaluated at the action gate at the moment it would be taken, whatever the workflow
   (`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`); the list is what to expect, not
   a bound.
-- **Successors**: the workflows the closing sign-off may name, or none. A batch's tasks enter exactly one
-  successor or none.
+- **Successors**: the workflows the closing sign-off may name, and whether it may name none
+  (`none_permitted` — `gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`). A batch's
+  tasks enter exactly one successor or, where the declaration permits it, none.
 - **Fast paths**: the declared skips and the condition that permits each. A fast path's condition is a
   property of the task set fixed at intake — never a label on an artifact, and never a reading of what the
   change touches, because a fast path is declared before the change exists.
@@ -128,7 +129,7 @@ state (`work_model.md#intake-is-every-tasks-first-workflow`).
 |---|---|---|---|---|---|
 | 1 | `classify` | `pm` step owner | yes | | the task's `action_type` declares the classes of action it expects to produce, from what the task does; `assigned_to` is written only where a named principal is the point; `PART_OF` to a parent, or children split out, where the work is an aggregate |
 | 2 | `link` | `pm` step owner | yes | | every existing record the task **names** is attached by edge: an external record (an issue, a pull request, a thread, a page) as an artifact, and a record already in the record (a transcription, an obligation, a profile, a plan, a contact) by `REFERS_TO` from the task; nothing is attached on relevance alone (`#what-link-attaches-and-what-it-leaves-to-hydration`); finding none is a valid close |
-| 3 | `dedupe` | `pm` step owner | yes | | the task is compared against tasks that are not terminal; a duplicate closes terminal with an edge to the task it duplicates and this batch closes with no successor |
+| 3 | `dedupe` | `pm` step owner | yes | | the task is compared against tasks that are not terminal; a duplicate closes terminal with a `DUPLICATE_OF` edge to the task it duplicates (`data_model.md#relationships`) and this batch closes with no successor |
 | 4 | `prioritize` | `pm` step owner | yes | | the task's priority is set from the `priority_rubric` entity, retrieved by type, never from the classifier's own sense of urgency |
 | 5 | `route` | `pm` step owner | yes | | the closing sign-off names one successor workflow, or none, or `operator-only` |
 
@@ -268,10 +269,10 @@ step owners' grants are checked against (`authority_model.md#grants`).
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
-| 1 | `pm` | `pm` step owner | yes | | the scope, the acceptance evidence, and the design basis are stated on the task (`conformance.md#design-basis`) |
+| 1 | `pm` | `pm` step owner | yes | | the scope, the acceptance evidence (the task's `acceptance_criteria[]`), and the design basis are stated on the task (`conformance.md#design-basis`) |
 | 2 | `ux` | `ux` step owner | yes | group `design`, joins `arch` | the change's user-facing behaviour is judged against the stated scope |
 | 3 | `arch` | `arch` step owner | yes | group `design`, joins `ux` | the design basis is checked and the change conforms to the cited section, or the citation is found false |
-| 4 | `impl` | implementer | yes | | a pull request exists as an artifact of the batch and its CI is green |
+| 4 | `impl` | implementer | yes | | a pull request exists as an artifact of the batch, its CI is green at the pinned head, and it is mergeable as read (`github.md#conditions-that-are-not-events`) |
 | 5 | `pr_review` | `pr_review` step owner | yes | | the full diff is read and judged for correctness |
 | 6 | `qa` | `qa` step owner | yes | group `verification`, joins `legal` | the tests can fail on the thing they watch (`principles.md`, invariant 4) |
 | 7 | `legal` | `legal` step owner | no | group `verification`, joins `qa` | licensing, data-handling, and disclosure are judged where the change touches them |
@@ -297,8 +298,10 @@ commit.
 
 **Typical action classes:** `build`, `docs`, `git_push`, `open_pr`, `merge_pr`.
 
-**Successors:** `release`; or none, where the project deploys its default branch on its own cadence and
-the merge is the last effect the task needs.
+**Successors:** `release`; or none, where the declaration permits it (`none_permitted`) because the project
+deploys its default branch on its own cadence and the merge is the last effect the task needs — a
+declaration for a project that does not is written with none not permitted, and a closing sign-off naming
+none under it is refused (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`).
 
 **Fast paths:** `bug` skips `ux`; `copy` skips `arch`; `security` skips `ux`, `qa`, and `legal`. Each is
 for a project that declares no dedicated workflow of that type; where the project does declare one,
@@ -319,7 +322,7 @@ is wrong, ideally as a failing test.
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
 | 1 | `pm` | `pm` step owner | yes | | the defect is reproduced or the reproduction's absence is stated; the acceptance evidence is the test that goes red without the fix |
-| 2 | `impl` | implementer | yes | | a pull request exists with the fix and the red-then-green result recorded in its body |
+| 2 | `impl` | implementer | yes | | a pull request exists with the fix, mergeable as read, and the red-then-green result recorded in its body |
 | 3 | `pr_review` | `pr_review` step owner | yes | | the full diff is read; the fix addresses the cause, not the symptom |
 | 4 | `qa` | `qa` step owner | yes | | the test fails on the reverted fix (`principles.md`, invariant 4) |
 | 5 | `merge` | steward | yes | | the merge action taken through the action gate and read back; the sign-off names the successor |
@@ -327,8 +330,11 @@ is wrong, ideally as a failing test.
 <!-- /rendered -->
 
 There is no `ux` or `arch` step because a fix restores stated behaviour and does not choose new
-behaviour; a bug whose fix requires a design choice is re-routed to `feature` by closing this batch
-without a successor and having the task enter intake again, not by adding steps here.
+behaviour; a bug whose fix requires a design choice is not carried by adding steps here: this batch closes
+without a successor, its closing sign-off carrying the finding that names the choice, and the design work is
+a **new** task through intake, referring to this batch's artifacts and produced from that finding
+(`gates_and_workflows.md#closed-work-is-reviewed-on-the-record-and-redone-through-intake-never-reopened`)
+— no task enters intake twice (`#intake`).
 
 **Stages:** scoping (`pm`); implementation (`impl`); review (`pr_review`, `qa`); integration (`merge`).
 
@@ -356,7 +362,7 @@ is deployed.
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
 | 1 | `pm` | `pm` step owner | yes | | the affected surface and the fix's scope are stated in the record; the public artifacts carry no exploit detail |
-| 2 | `impl` | implementer | yes | | a pull request exists with the fix; its body describes the change, not the exploit |
+| 2 | `impl` | implementer | yes | | a pull request exists with the fix, mergeable as read; its body describes the change, not the exploit |
 | 3 | `pr_review` | `pr_review` step owner | yes | | the full diff is read and the fix is judged complete for the stated surface |
 | 4 | `merge` | steward | yes | | the merge action taken through the action gate and read back; the sign-off names `release` |
 
@@ -373,7 +379,8 @@ artifacts, checked at `pm` and `pr_review`, because the pull request and the rel
 
 **Typical action classes:** `build`, `git_push`, `open_pr`, `merge_pr`.
 
-**Successors:** `release`, always.
+**Successors:** `release`, always: the declaration does not permit none (`none_permitted`), so a closing
+sign-off naming none is refused at the write (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`).
 
 **Fast paths:** none.
 
@@ -650,7 +657,7 @@ to fails `classify` (`CLAUDE.md`, people-data processing).
 |---|---|---|---|---|---|
 | 1 | `ingest` | analyst | yes | | the transcript is in the record as a source with provenance, linked to the calendar event where one is found |
 | 2 | `summarize` | analyst | yes | | a `meeting_analysis` entity holds the summary, the decisions, and the open questions |
-| 3 | `extract` | analyst | yes | on fail: `summarize` | the action items, commitments, and participants are extracted; each participant is a `contact` entity holding what serves the relationship and nothing incidental or sensitive (RGPD Art. 9 categories are summarized or omitted, never transcribed) |
+| 3 | `extract` | analyst | yes | on fail: `summarize` | the action items, commitments, and participants are extracted; each participant is a `contact` entity holding what serves the relationship and nothing incidental or sensitive (RGPD Art. 9 categories are summarized or omitted, never transcribed); the fields a `contact` may take from a transcript are the allowlist on the analyst's grant, and a write outside them is denied at admission (`authority_model.md#grants`) |
 | 4 | `persist` | analyst | yes | | every extracted task is created in the record and enters its own intake; every entity is read back; the sign-off closes the batch |
 | 5 | `deliver` | analyst | no | | a recap per participant is drafted as an outreach task, where the brief asked for one; never sent from this batch |
 
@@ -664,8 +671,10 @@ outreach workflow's review and consent.
 **Stages:** intake of the record (`ingest`); analysis (`summarize`, `extract`); output (`persist`,
 `deliver`).
 
-**Artifacts:** the transcript file; the calendar event. The `meeting_analysis`, `contact`, and `task`
-entities are in the record.
+**Artifacts:** the calendar event. The transcript is not an artifact: it is a source in the record — the
+`transcription` entity, or the uploaded file with its provenance — reached by retrieval and through no
+adapter (`work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject`). The `meeting_analysis`,
+`contact`, and `task` entities are in the record.
 
 **Typical action classes:** none. Every outward effect is a task for another workflow.
 

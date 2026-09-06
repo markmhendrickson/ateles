@@ -8,7 +8,7 @@ intake, the four execution mechanisms), `gates_and_workflows.md` (step state fro
 action gate; the three verdict values), `workflows.md` (the code workflows, release, and security),
 `failure_posture.md` (the halt, the recovery per action class, the checkpoint reason classes), and GitHub's
 own webhook event and payload documentation, read 2026-09-04, and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). What is built, and which rows have no code
-path, is `status.md`.
+path, is `status.md`. Revised by the testability pass of 2026-09-06 (revision 37: the host's assignment never writes `assigned_to`; `impl` closes on a mergeable pull request, stated in `workflows.md`).
 
 ## Purpose
 
@@ -100,7 +100,7 @@ issue is an artifact of kind `issue`, found by `system` and `external_id`.
 | `issues.closed` by a person | handled | an observation (`state: closed`); the task's status is written by the batch's sign-offs, never by the host |
 | `issues.closed` by the host on a merge | handled | an observation; the merge confirmation already covers the effect |
 | `issues.reopened` | handled | an observation (`state: open`); it opens no step and re-enters no workflow — a task needing further work is created and enters its own intake |
-| `issues.assigned`, `issues.unassigned` | handled | an observation on the artifact; `assigned_to` on the task is written only by intake's `classify` |
+| `issues.assigned`, `issues.unassigned` | handled | an observation on the artifact; the host's assignment is never written to `assigned_to`, which is a principal's write in the record — at intake's `classify`, or by a principal later — and never an adapter's (`work_model.md#assignment-restricts-eligibility-it-never-creates-a-lease`) |
 | `issues.labeled`, `issues.unlabeled` | handled | an observation on `labels[]`; **a label naming a step is not that step's state**, and no label opens, claims, or closes anything |
 | `issues.milestoned`, `issues.demilestoned` | handled | an observation on the artifact |
 | `issues.locked`, `issues.unlocked` | handled | an observation on the artifact |
@@ -339,10 +339,10 @@ fifth outcome was invented for it.
 
 **A conflict has no step owner, and that is the gap.** A pull request becoming unmergeable is a condition
 on the artifact with no step whose closing condition it violates: `impl` may already be signed, and
-`merge`'s owner discovers it only when the merge action fails. The design's position is that the condition
-belongs to the `impl` step owner, whose sign-off closes on a pull request existing **and being
-mergeable**, so a conflict opens `impl` again by the step's `on_fail` rather than surfacing at the merge.
-That is a rule with no built path, so it is a `status.md` row.
+`merge`'s owner discovers it only when the merge action fails. The condition belongs to the `impl` step
+owner, whose sign-off closes on a pull request existing, its CI green at the pinned head, **and it being
+mergeable as read** (`workflows.md#feature`), so a conflict opens `impl` again by the step's `on_fail`
+rather than surfacing at the merge. Whether that path is built is a `status.md` row.
 
 ## The transitions the mining found unhandled
 
