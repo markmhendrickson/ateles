@@ -8,7 +8,7 @@ and which successors its tasks may enter, and never the state of a checkout. **D
 record for the built workflows (their step lists and fast paths, not their agent names), the agent
 policies governing outreach, payment, and people-data, `CLAUDE.md`'s people-data section, and PR #745
 operator review (2026-09-04), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Which workflows have a declaration on the record, and which are envisioned
-only, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `operator_preview` renamed `consent`; open decision 33). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 39 ruled here — what intake's `link` attaches and what hydration resolves; the payment `consent` row aligned with decision 27). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two declared intervals and the planned wait, cited in *How to read a workflow section*, `outreach`, and `operator-only`; a standing constraint on an entity a task names, read at intake).consistency pass of 2026-09-06 (revision 35: the three `consent`-carrying workflows cite when their checkpoint is written and what the take re-evaluates).
+only, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `operator_preview` renamed `consent`; open decision 33). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 39 ruled here — what intake's `link` attaches and what hydration resolves; the payment `consent` row aligned with decision 27). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two declared intervals and the planned wait, cited in *How to read a workflow section*, `outreach`, and `operator-only`; a standing constraint on an entity a task names, read at intake). Revised by the consistency pass of 2026-09-06 (revision 35: the three `consent`-carrying workflows cite when their checkpoint is written and what the take re-evaluates). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound declared as the task's `due_date` and the `operator_only` step, cited in *How to read a workflow section* and `operator-only`; a matter, a case, or a filing as a record entity the task names, under *What `link` attaches*).
 
 ## Purpose
 
@@ -54,7 +54,11 @@ from the declarations (below).
   (`gates_and_workflows.md#declaration-batch-projection`). Where a section's prose names a declared interval
   — a follow-up interval, the bound on an `await` — it is that step's `hold_bound`; a step whose close
   condition names an arrival from outside the swarm is a planned wait, held under decision 13 and ended by
-  that bound.
+  that bound. Either interval may be declared as the task's `due_date` where the bound is a date fixed
+  outside the swarm and known at formation; reaching it is reaching the bound, and it closes nothing. A step
+  whose action is `operator_only` carries the gate's checkpoint as a `consent` step does, holds for the
+  confirmation, and closes on it, never on the resolution
+  (`gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`).
 - **Stages**: named groups of contiguous steps, for reading and for reporting where a batch is.
 - **Artifacts**: the records in external systems the batch produces or references, attached by edge and
   never the subject of a step (`work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject`).
@@ -228,6 +232,27 @@ an agent makes within its context types, and writes back what it found. **What w
 of task in practice whose steps repeatedly retrieve the same unnamed context, batch after batch — which
 would argue for naming it in the task at creation, or for a declaration that names it as a read, and not
 for a general pull at intake.
+
+**A matter, a case, or a filing is such an anchor, and it is a record entity, not a work-model one.** Work
+that runs for months around one dispute, one claim, or one obligation to an agency — the correspondence, the
+documents, the parties, the dates — needs a bounded set for its steps to read from and write to, and the
+answer is the one this section already gives: the task names the matter, `link` attaches it by `REFERS_TO`,
+and hydration resolves each step's reads from it and from the edges it carries — the documents and threads
+that refer to it, the `contact` entities with their roles in it, the tasks that are its deadlines, each with
+its `due_date` (`data_model.md#concepts`). What the matter *is* in the record is a context entity of the
+operator's, retrieved by type and shaped by the registry
+(`migration.md#context-entities-the-design-retrieves-and-never-migrates`): the standing of an obligation, an
+episode, or a `payment_profile`, and like them named here by role and never defined. It is not a `plan`,
+which is outside the four models and held (`migration.md#gaps-and-contradictions-the-mapping-exposed`, G10);
+not a batch, which goes through one workflow for its whole life and holds on a task by edge (decisions 13
+and 14, `work_model.md#a-batch-may-depend-on-a-task-it-created`); not a parent task, which groups tasks,
+completes when they do, and holds no document or party; and not a new work-model type, because nothing about
+it is work — it is what the work concerns. Its tasks over the months are ordinary tasks, each `REFERS_TO` the
+matter, each with its own intake and chain, and a reader asking what has been done in a matter walks its
+edges. An intake rule for correspondence in a matter keys on a field, so membership reaches a rule only as a
+field a step wrote — a thread's classification naming the matter
+(`work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`) — and
+never as an edge the rule infers at evaluation.
 
 ## feature
 
@@ -678,6 +703,11 @@ batch and not a notification's delivery status, and so that a task the operator 
 visible as a batch whose `await` step has been open past its bound. That bound is `await`'s `hold_bound`, and
 because the step's close condition names no alternative to the operator's decision, reaching it is rule 5's
 ceiling (`gates_and_workflows.md#declaration-batch-projection`).
+
+A single step of another workflow whose action is `operator_only` does not route here. It carries the
+checkpoint, holds for the confirmation, and closes on it in place — the three steps above are what its life
+looks like from its own batch
+(`gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`). This workflow is for a task whose whole work is the operator's.
 
 **Stages:** presentation (`present`); decision (`await`, `record`).
 

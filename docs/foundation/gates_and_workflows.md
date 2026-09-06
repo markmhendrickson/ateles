@@ -10,7 +10,7 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
 memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram), and the operator's 2026-09-05 12:52 memo (revision 21: the general claim about self-modification, stated in `work_model.md` and cross-referenced from decision 17), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 17 ruled here; the `dependency_cycle` reason class), and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: the next instance is a created task and not a successor), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: `intake_rule` joins the governance list). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding). Revised by the workflow-format pass of 2026-09-06 (revision 34: two declared intervals on every step, `unclaimed_after` and `hold_bound`; a planned wait as a step's own close condition held under decision 13; required coverage as the value of `freshness`; consent over several like actions as one presentation of several checkpoints; the governance class with no policy value named among what resolves to `NEVER`).consistency pass of 2026-09-06 (revision 35: when the checkpoint a `consent` step carries is written, and what the gate evaluates at the take; the merge action's class named `merge_pr`).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding). Revised by the workflow-format pass of 2026-09-06 (revision 34: two declared intervals on every step, `unclaimed_after` and `hold_bound`; a planned wait as a step's own close condition held under decision 13; required coverage as the value of `freshness`; consent over several like actions as one presentation of several checkpoints; the governance class with no policy value named among what resolves to `NEVER`).consistency pass of 2026-09-06 (revision 35: when the checkpoint a `consent` step carries is written, and what the gate evaluates at the take; the merge action's class named `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a step's bound may be declared as the task's `due_date`; an `operator_only` action inside a workflow is taken by the operator and its step closes on the confirmation, never on the resolution; a read dependency on a special-category type carries no marker of its own).
 
 ## Purpose
 
@@ -86,6 +86,14 @@ again for `reads_to_close` before the sign-off is written. Nothing hydrates *dur
 reaches an external system mid-execution reintroduces the second source of truth the boundary rules exist
 to remove, and its inputs stop being a fixed set any reader can name. So a step's inputs are resolved,
 recorded, and readable before it runs, and what the step then works on is the record.
+
+**A read dependency on a type marked special-category is declared like any other and carries no marker of
+its own.** Health data and the other categories the people-data rule names are bounded differently from a
+contact — in who may be granted the type, in what may be copied out of it, in what a writer persists — but
+every one of those differences is a property of the **type**, whatever step reads it and whoever the subject
+is, so the mark sits on the registered type and the mechanisms that read it are stated once
+(`data_model.md#record-conventions`). A marker on the read would be a second place to say the same thing, and
+one that a declaration could omit.
 
 **A hydration failure is the step's failure, and it takes the path a failed read already takes.** An
 adapter that cannot fulfil a read it was asked for does not return an empty result: the read is `unknown`,
@@ -232,6 +240,24 @@ the step cannot honestly close without the arrival — reaching the bound is rul
 ends in one checkpoint, reason `rounds_exhausted`, carrying the finding, which is decision 13's third end.
 Which of the two a step has is readable from its declaration, and in neither does the bound itself close the
 step.
+
+**A bound may be declared as a date the task carries, and reaching it takes the path an interval's end
+takes.** Some steps are bounded by a date fixed outside the swarm and known when the task is formed — a
+statutory response window, a notification duty's clock, an agency's filing date — and an interval from the
+claim cannot say it: the date does not move because the step was claimed late. The date is the task's, not
+the declaration's. `due_date` is its field (`data_model.md#concepts`), written at creation or corrected by the
+step that reads the notice and establishes it, and a deadline that work sets for later work is a task with a
+`due_date` of its own (`workflows.md#intake`, source 5 of `work_model.md#where-tasks-come-from-every-source-indexed`).
+So what the declaration states is not the date but that the step's bound **is** that date: `hold_bound`, or
+`unclaimed_after`, may be declared as the task's `due_date` in place of an interval, and for a batch of several
+tasks the earliest is the bound. Nothing else changes. Reaching a date-declared bound is reaching the bound —
+the step signs on its declared alternative close where it has one, or raises one checkpoint, reason
+`rounds_exhausted`, where it has none, and the checkpoint names the date that passed. What the date does
+**not** do is close the step, in either direction. A step closed as failed because a date passed is a verdict
+no principal made — the same shape as a gate that expires into a pass, with the sign read the other way — and
+it would open the `on_fail` step by a clock, which is sequencing by a timer rather than by a verdict. A
+deadline missed is a fact the operator decides on — file late, contest, let it go — and the checkpoint is
+where that decision is made; the step owner then signs the verdict that follows from it.
 
 **Scope amendment versus scope creep.** A batch carries acceptance criteria, and implementation regularly
 turns up work that was not in view when they were written. A scope boundary is a decision record, not a
@@ -776,6 +802,53 @@ answered on a channel and acted on at `send` is a second approval surface beside
 which is the second gate principle 6 forbids and the shape `telegram.md#a-chat-message-is-not-an-instruction`
 already refuses. Writing the hold where the step that carries it opens keeps the decision on the record
 from the moment it is asked for, and evaluating again at the take keeps the permit where the action is.
+
+### An `operator_only` action is taken by the operator, and the step that carries it closes on the confirmation, never on the resolution
+
+**A step of any workflow whose action is `operator_only` is the operator-only workflow's three steps in
+one, and it does not route there.** `workflows.md#operator-only` carries a whole task the swarm structurally
+cannot complete: `present`, `await`, `record`. A single step of another workflow whose effect the operator
+must take by hand — an order at a merchant with no adapter, a submission on a portal that admits no
+automation, a booking a provider's site accepts from a person only — has the same shape, and every part of
+it already exists. The action is created when the effect becomes known
+(`#actions-are-entities-only-actions-are-taken`); the gate resolves `operator_only` to `NEVER` ahead of any
+policy and writes the checkpoint, reason `gate_hold` (`#confidence-and-three-blast-tiers`); the step carries
+the checkpoint to the operator as a `consent` step does; and it holds on the effect's arrival as a planned
+wait under decision 13, bounded by its `hold_bound` (`#declaration-batch-projection`). Routing the task to
+the operator-only workflow and back would be two successors for one step's work, on a task that is in one
+batch at a time (`work_model.md#a-task-is-in-at-most-one-batch-at-a-time`). So the step stays where it is
+declared, and the three names are what its life looks like from the batch: presented, awaiting, recorded.
+
+**The resolution is the operator's decision and the confirmation is the fact; they are two writes, and the
+step closes on the second.** The rule of the section above holds here with nothing to permit. A hold is
+decided early and a permit at the take, and for an `operator_only` class the take-time evaluation never
+permits, because the class resolves to `NEVER` whatever the resolution says (the third of its four
+conditions). So resolving the checkpoint `approved` releases no action to an agent — none can take it — and
+it does not record that the effect happened. It records that the operator decided the effect should happen
+and will take it themselves. A resolution of `denied` is the ground of the step's failing verdict: the effect
+is refused, and the step owner signs on the `on_fail` step or the declared alternative close. Principle 2
+applies to the operator as to every principal: the operator saying the thing was done is a report of a
+write, and the write is what is read. What the record then needs is the **confirmation** — the observation
+that the effect landed — and it arrives in one of two ways, readable apart. Where the system the operator
+acted on has an adapter, the confirmation is that adapter's read-back of the record the act left — the sent
+message, the calendar event, the transfer at the rail — linked to the action by the step owner (`REFERS_TO`
+action → artifact) and written as the action's confirmation as every confirmation is
+(`adapters.md#outbound-steps-produce-actions-adapters-take-them`); the row the adapter documents already carry
+for a record the swarm did not produce (`gmail.md#every-inbound-signal-and-what-it-becomes`, a sent message
+matching no action) is the row this fills, since the held step's action is what it now matches. Where the
+system has no adapter, the confirmation is an artifact that arrives through a system that has one — the
+order confirmation in the mailbox, the acknowledgement the agency mails — which is the planned wait the step
+already holds on; and where none will arrive, the step's declared close may name **the operator's report**:
+an observation on the action attributed to the operator principal, stating what the effect left. It is
+written as what it is — a report by the principal who acted, never a read-back — so that a reader asking what
+confirmed this action sees which of the two it was, which is principle 7's distinction applied to a
+confirmation's provenance. A declaration whose step may close on the report says so in its `Closes on`; a
+step whose declaration does not holds for the artifact and reaches its bound like any other.
+
+**What this adds is nothing, and what it removes is the hop.** No field and no type: the action, the
+checkpoint, the planned wait, and the confirmation exist, and the report is an observation carrying the
+attribution every write carries (`authority_model.md#attribution`). The operator-only workflow is unchanged
+and keeps its case — a task whose whole work is the operator's; this section is the step-sized one.
 
 ### Confidence and three blast tiers
 

@@ -9,7 +9,7 @@ cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 opera
 and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional [step](#step), and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14,
 16–18, 23–29: the hold verb, a condition a step holds on, the `dependency_cycle` reason class, the consent
 tolerance on `action_policy`, and an [artifact](#artifact) `PART_OF` its containing artifact), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the `intake rule` entry). Format
-follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives).consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by role; `merge` as an action-class name retired for `merge_pr`).
+follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives). Revised by the consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by role; `merge` as an action-class name retired for `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound as the task's `due_date` on the step entry; the `operator_only` step; a rule keying on a field a step wrote; no marker on a read for a special-category type; decision 55 on the [external-system](#external-system) entry).
 
 ## Purpose
 
@@ -309,7 +309,9 @@ occurrence that passed closes its instance and creates the next).
 named change kind, matching a predicate over its fields and over its provenance — is work: the rule's
 evaluator, a [daemon](#daemon), writes one [task](#task) per matching change, entering [intake](#intake),
 with provenance naming the rule and the change, and nothing else.
-A rule keys on no record of the work model (open decision 36), opens no [batch](#batch), names no
+A rule keys on no record of the work model (open decision 36) but may key on a field a [step](#step) wrote on
+a type it may name — a classification recorded on an [artifact](#artifact) — with the writer in its provenance
+predicate; it opens no [batch](#batch), names no
 [workflow](#workflow), and takes no [action](#action); writing one is a governance write, reserved to the
 [operator](#operator) by default (decision 18). The operator's word for it was *listener*; the design keeps
 that word for the socket a delivery lands on.
@@ -372,7 +374,8 @@ a [batch](#batch) may take, and the [successors](#successor) a closing [sign-off
 ### step
 **Definition:** one declared position in a [workflow](#workflow)'s ordered list, carrying a name, a [step owner](#step-owner), a
 `required` flag, an `on_fail` target, its [read dependencies](#read-dependency), two intervals
-(`unclaimed_after`, `hold_bound` — `gates_and_workflows.md#declaration-batch-projection`), and
+(`unclaimed_after`, `hold_bound`, each an interval or the [task](#task)'s `due_date` —
+`gates_and_workflows.md#declaration-batch-projection`), and
 parallel-group and join fields, [claimed](#claim) by its step owner on a [batch](#batch) and closed by that
 step owner's
 [sign-off](#sign-off).
@@ -399,7 +402,8 @@ unstated dependency is invisible until a read fails silently and something proce
 **Never:** —
 **Not for:** a read dependency for a [grant](#grant)'s admitted types (the grant is the outer bound, the
 dependency is what this step needs); a read dependency for `context_entity_types[]` (that is the
-[agent](#agent)'s information diet, declared on the agent and not on the step).
+[agent](#agent)'s information diet, declared on the agent and not on the step); a marker on the read for a
+type marked special-category (the mark is the type's — `data_model.md#record-conventions`).
 
 ### stage
 **Definition:** a named group of contiguous [steps](#step) in a [workflow](#workflow), such as the review stage or the release
@@ -607,9 +611,11 @@ destroy rather than for where they go.
 through an [adapter](#adapter).
 The record is inside that boundary, not across it: the swarm's own state lives there, so writing to it
 crosses nothing. This is the boundary every use of "outside" in these documents means, and it is stated
-once in the [action](#action)'s home section.
+once in the [action](#action)'s home section. Whether a second instance of the record's own software, owned by
+another party, is one is open decision 55.
 **See:** [`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`](gates_and_workflows.md#actions-are-entities-only-actions-are-taken),
-[`adapters.md#the-two-invariants`](adapters.md#the-two-invariants).
+[`adapters.md#the-two-invariants`](adapters.md#the-two-invariants),
+[`adapters.md#whether-a-second-instance-of-the-record-is-an-external-system`](adapters.md#whether-a-second-instance-of-the-record-is-an-external-system).
 **Never:** —
 **Not for:** "the Ateles system" or "the Neotoma system" as the thing an effect is outside of (there is one
 boundary, and the record is inside it); external for a component the swarm runs.
@@ -675,7 +681,11 @@ Named for what the series is made of: the members are actions, and the class the
 **Definition:** the [action_type](#action_type) marking an effect an [agent](#agent) structurally cannot carry out, which resolves to
 `NEVER` ahead of any policy.
 The [task](#task) that carries it is still [claimable](#claimable), by the [operator-facing agent](#operator-facing-agent).
-**See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers).
+A [step](#step) of any [workflow](#workflow) whose [action](#action) carries it stays in that workflow: the step carries the
+[checkpoint](#checkpoint), holds for the [action confirmation](#action-confirmation), and closes on it — never on
+the resolution, which is the [operator](#operator)'s decision and not the fact.
+**See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers),
+[`gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`](gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution).
 **Never:** "unclaimable".
 **Not for:** "high blast" for `operator_only` (a louder `HIGH` delays the wrong outcome rather than
 preventing it).

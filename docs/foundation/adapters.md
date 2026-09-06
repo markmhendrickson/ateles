@@ -8,7 +8,7 @@ and the action gate), `authority_model.md` (credentials bind to principals; appr
 steps whose effects leave the system), PR #745 operator review (2026-09-04, the adapter decision), and the
 operator's 2026-09-05 review (the inbound-delivery question and the adapter-packaging lean, both recorded
 below as open; and revision 18: when an artifact comes into existence, and what holds an effect before
-it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: continual inbound named as the inbound side, and the record's subscriptions as what an intake rule evaluates through). What is built, and where the adapter and the engine are still one process, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: open decision 35). Revised by the memo-gap pass of 2026-09-06 (revision 31: the source is kept, not only named). Revised by the workflow-format pass of 2026-09-06 (revision 34: a system whose delivery surface is a local filesystem is admitted through the same contract; open decision 45 — whether the host a daemon runs on is an external system).
+it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: continual inbound named as the inbound side, and the record's subscriptions as what an intake rule evaluates through). What is built, and where the adapter and the engine are still one process, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: open decision 35). Revised by the memo-gap pass of 2026-09-06 (revision 31: the source is kept, not only named). Revised by the workflow-format pass of 2026-09-06 (revision 34: a system whose delivery surface is a local filesystem is admitted through the same contract; open decision 45 — whether the host a daemon runs on is an external system). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a merchant is a system of its own and a purchase its class, under *Admitting a new adapter*; open decision 55, whether a second instance of the record is an external system).
 
 ## Purpose
 
@@ -708,6 +708,24 @@ adapter never does is the analogue of every other's host-specific erosion: it ne
 presence as a completed capture, and it never moves or deletes the file to mark it read — the mark is the
 observation, and the file stays where its system put it.
 
+**A merchant is a system of its own, and a purchase or a booking is that system's class, never the rail's.**
+A one-off order at a checkout, a repair booked with a deposit, a claim filed with an insurer: money moves,
+but not on a boundary the swarm stands at. `payments.md` covers the two rail classes, where the swarm submits
+a transfer to a payee a `payment_profile` names and reads the rail back at its declared terminal state. A
+merchant's checkout is a different system — the swarm does not own it, the effect is the merchant's record of
+an order, and the merchant's own confirmation is what reads it back — so the effect is an action on **that**
+system, its class is declared with its adapter under obligation 6, and its tier is the `action_policy`'s to
+set, the set of classes being data tabled per adapter document (`#the-admission-contract`). It is not
+`payment` or `transfer`: those presume a rail and a profile, and the payment workflow's entry condition
+excludes an inline payee by design and correctly (`workflows.md#payment`). What does carry across from the
+rails is the hazard's shape, stated in `payments.md`: the recovery of a purchase — a cancellation, a return, a
+dispute — is a request the merchant may refuse, so the design's weight sits before the take, and an admitting
+document for a class that moves the operator's money must show its confirmation (obligation 3: the merchant's
+order record, by the merchant's identifier), never the submission's return. Until a merchant has an adapter,
+the effect is `operator_only`, and its shape is
+`gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`: the step carries the checkpoint, the operator places the order, and the confirmation
+is the artifact that arrives through the mail system.
+
 ### The admission contract
 
 Six obligations. Each names what must be true, and — the part that makes it a control — **what fails when
@@ -1000,6 +1018,52 @@ step's sign-off is ever judged on host state — if a daemon-incident `verify` s
 version is what the process itself reports, that read is a declared read, and a declared read of the host is
 an adapter's. Until it is taken, no workflow declares a host read, and a process-control effect is an
 `operator_only` action.
+
+### Whether a second instance of the record is an external system
+
+**Open decision 55.** Registered in `conformance.md#the-register-of-open-design-decisions`. Two of the
+workflows the declaration format was tested against read and write an instance of the record's own software
+that another party owns: a shared contact graph several contributors pool into, groomed with the consent of the
+principal accountable for it; a sweep enumerating what an exposure reached on a shared instance. `reads_to_enter` names
+entity types, and `contact` is one — but the record's `contact` rows and the shared instance's are not the
+same rows, and nothing in a declaration says which record a read is of. The record already tells instances
+apart in provenance — an observation carries "the host or instance within it where several exist"
+(`#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`), and an intake rule's
+`provenance_predicate` keys on it — so a read *from* such an instance is attributable once it exists. What
+has no home is the read itself, the write, the freshness a step may require of it, and who approves a write
+to it; `authority_model.md#approval` already names the principal accountable for the data a shared instance
+pools as a required approver, which presumes an answer this decision has not given.
+
+**The options.** The second instance is an **external system**: the boundary is drawn by ownership and not
+by software (`gates_and_workflows.md#actions-are-entities-only-actions-are-taken` — outside is "every system
+the swarm does not own"), so an instance another party owns is on the far side of it whatever it runs; it is
+reached only through an adapter, admitted under the six obligations; its entities are artifacts, `system`
+the record's software and `external_id` the entity's id there, with the instance in every observation's
+source; a write to it is an action, its classes listed in an `action_policy`, its approver the principal accountable for the data, by
+`ownership_grant`; and a step's freshness over it is coverage, as for any system. Or the second instance is
+**the same record**, extended: the record's own peering carries the shared instance's entities into the
+operator's with the instance on their provenance, a step reads them as it reads any entity, and a write is
+an internal write the peering carries out — crossing to a party the swarm does not own with no action and no
+gate.
+
+**Where the design leans, and why this is opened rather than settled.** The boundary's definition settles
+the first half by its own words, as it does for decision 45: the record is the store the swarm holds its own
+state in, an instance another party owns is not where the swarm holds its state, so it is outside — and the
+second option puts an outward effect on the far side of the gate, which is the side door every boundary rule
+closes. `authority_model.md#principals` has reasoned this way once already: on a shared instance the store's
+`user_id` names the instance's account and not a principal, and a write identified only by it is
+unattributed — the principal model does not reach across. What holds the question open is not the boundary
+but the cost and the peering. An adapter for the record's own software is one whose client the swarm already
+has and whose event API exists — the record's subscriptions, which cannot receive an external system's
+events (`#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it`)
+but are exactly the events of a second instance — so the first option is cheaper than decision 45's; while
+the record's peering puts the second option within reach with nothing built, and is the reading a peered
+instance invites. **What would decide it:** whether a write to the shared instance must pass the gate. If the
+consent of the principal accountable for the data is required per write, or per set of like writes (`gates_and_workflows.md#the-checkpoint`),
+the write is an action, the instance is external, and peering is a transport whose outbound half is an
+adapter's; if the operator judges a peered instance one record under one authority, the boundary's
+definition is what must change, and it is stated once. Until it is taken, no declaration reads or writes a
+second instance of the record, and a write to one is an `operator_only` action.
 
 ## Prior art
 

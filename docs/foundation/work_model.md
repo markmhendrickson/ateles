@@ -12,7 +12,7 @@ for changing the swarm's own operation), and PR #745 operator review (2026-09-05
 23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default),
 and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: one live instance,
 completion creates the next, `FOLLOWS` task to task), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the task-sources index, the intake rule, and open decision 36). Supersedes `docs/archive/task_execution_loop.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: an intake rule may key on a field a step wrote on a type it may name, with the writer in its provenance predicate; decision 36 untouched).
 
 ## Purpose
 
@@ -937,6 +937,25 @@ describes fires that rule, and the second task enters intake like the first. Tha
 work, priced at intake and signed at every step by a principal; it is readable end to end through
 provenance; and its rate is bounded by the ceiling. A chain that runs through principals' recorded verdicts
 is not a runaway, and one that would be is stopped at the ceiling and announced.
+
+**A rule may key on a field a step wrote on a type it may name, and the writer is named in the rule's
+provenance predicate.** The exclusion above is over subject **types** — the seven records of the work model —
+and says nothing about who wrote the field a predicate reads; decision 36, below, is the question of the
+subject set, and this paragraph does not move it. So a classification a step owner recorded as an observation
+on an artifact — a thread marked as an invoice, a notice, a stay request, at the `classify` step of a workflow that sorts a mailbox —
+is a change of kind `updated` on a type a rule may name, and a rule reading `thread_class = invoice` keys on
+it as it keys on any field. This is the division the rules-not-inference paragraph draws, made usable: "this
+message is an invoice" is a judgement, and a rule may not make it, but a step owner may, and once the
+judgement is a field on the record a rule may read it, because reading a field asserts nothing beyond that a
+named principal recorded that the entity is of this kind. Two things keep it honest. The
+`provenance_predicate` names the writer — the step, or the role — so the rule keys on the classification a
+workflow's step owner recorded and not on the same field written by anything else, and a classification with
+no accountable writer fires nothing. And the field lands **before** the rule reads it, in a step's write, so
+the judgement has an author, a time, and a sign-off that refers to it, and the task the rule creates carries
+provenance naming both the rule and the write that fired it. A rule whose predicate needs a judgement nobody
+has written down cannot be written; the remedy is a step that writes the judgement as a field, never a rule
+that makes it. The chain this permits — a rule's task enters a workflow whose step writes the field another
+rule reads — is the one the paragraph above already allows and bounds.
 
 **How a rule is evaluated, and what the evaluator is.** The record's own subscriptions wake a consumer on
 a write the record already holds; revision 14 found them unable to receive an external system's events,

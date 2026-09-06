@@ -10,7 +10,7 @@ checkpoint), `authority_model.md` (credential custody by revocability; separatio
 `workflows.md` (the payment workflow's five steps and its two disjoint roles), `failure_posture.md`
 (recovery per action class; the rules on read-back, unknown, and bounded deferral), and the published API
 surfaces of bank-transfer and crypto rails, read 2026-09-05, and PR #745 operator review (2026-09-05,
-rulings 13–14, 16–18, 23–29: decisions 27, 28, and 29 ruled here). What is built is `status.md`.
+rulings 13–14, 16–18, 23–29: decisions 27, 28, and 29 ruled here). What is built is `status.md`. Revised by the second workflow-format pass of 2026-09-06 (revision 36: a purchase or a booking with a merchant is out of scope here, being an effect on the merchant's system and not on a rail).
 
 ## Purpose
 
@@ -31,7 +31,10 @@ keyed on and why it differs per class, the unknown case in full, and what the ad
 the general adapter rules (`adapters.md`), the payment workflow's step list (`workflows.md#payment`), the
 gate's decision function (`gates_and_workflows.md`), what the adapter is granted
 (`authority_model.md#grants`), and the per-instance binding of a rail, a payee, or an obligation, which is
-a `payment_profile` or `vendor_binding` context entity resolved at runtime and **never named here**.
+a `payment_profile` or `vendor_binding` context entity resolved at runtime and **never named here**. Also out
+of scope: a purchase or a booking with a merchant, which moves money but on the merchant's system and not on
+a rail — it is that system's action class, admitted with its adapter, and never `payment` or `transfer`
+(`adapters.md#admitting-a-new-adapter`).
 
 **Nothing in this document names a payee, an account, an address, an amount, or an obligation.** Every
 example is synthesized. That is not only a repository-hygiene rule; it is the same rule the design applies

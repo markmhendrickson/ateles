@@ -7,7 +7,7 @@ undecided question **open** with its options, never resolving one to make the do
 section as decision; the swarm-spec section as proposal), synthesis `ent_b0ce322f768e4fc676b73139` (PR-20
 to PR-28, PR-34 to PR-38, C8, C9, C10, C13, C14, C17), prior art `ent_08460968e6f49dac21510f4a` (Track 2),
 the P4 brief `ent_683200acfb3ff5f03add966c`, `docs/multi_tenant.md`, and PR #745 operator review
-(2026-09-04). What is built, and where the substrate fails open, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 41 ruled here — write admission per entity type is default-deny, and the grant is the allowlist). Revised by the workflow-format pass of 2026-09-06 (revision 34: a required approver may be named by ownership of an entity the checkpoint's subject concerns).consistency pass of 2026-09-06 (revision 35: the brief's Q1–Q8 and the raiser question registered as decisions 46 to 54; C13 marked settled by C9 and decision 37).
+(2026-09-04). What is built, and where the substrate fails open, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 41 ruled here — write admission per entity type is default-deny, and the grant is the allowlist). Revised by the workflow-format pass of 2026-09-06 (revision 34: a required approver may be named by ownership of an entity the checkpoint's subject concerns). Revised by the consistency pass of 2026-09-06 (revision 35: the brief's Q1–Q8 and the raiser question registered as decisions 46 to 54; C13 marked settled by C9 and decision 37). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a resolution on an `operator_only` action is the operator's decision and never the confirmation; the shared-instance approver cites decision 55).
 
 ## Purpose
 
@@ -223,7 +223,7 @@ accepts.
 **A required approver is a principal, a role the roster resolves, or the principal an `ownership_grant`
 names on an entity the subject concerns.** The third is what lets a workflow name an approver it cannot know
 at declaration: the maintainer of another plan whose field a step would correct, the principal accountable
-for a registered type a step would extend, the principal accountable for the data a shared instance pools. Each is named in
+for a registered type a step would extend, the principal accountable for the data a shared instance pools (whether that instance is itself an external system is decision 55, `adapters.md#whether-a-second-instance-of-the-record-is-an-external-system`). Each is named in
 the declaration as a relation — whoever holds the `ownership_grant` on the entity the task `REFERS_TO`, or on
 the type the write lands in — and resolved when the checkpoint is raised, to the principal the object's `ownership_grant` points at
 (`data_model.md#relationships`: who is asked when the object needs a decision), which is what the `AWAITS`
@@ -236,6 +236,12 @@ awaits everybody: the raiser holds the step and records the missing ownership as
 is what reaches the operator. What owning confers beyond being asked — Q7 above — is unchanged: being the
 required approver on a checkpoint about one's object is the narrowest of Q7's options, and the wider ones
 stay open.
+
+**A resolution on an `operator_only` action is the operator's decision, never the confirmation that the
+effect happened.** The approver of such an action is also the principal who takes it, by hand, on a system
+the swarm may not reach; `approved` records that decision, and what confirms the effect is a read-back, or
+the operator's report written as one (`gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`). Principle 2 holds for the operator as for
+any principal.
 
 **Open (decision 47).** Registered in `conformance.md#the-register-of-open-design-decisions`. Whether the raiser of a checkpoint may resolve it
 (the minimal separation of duties; prior art and brief Q2 and Q3 recommend forbidding it, and it applies
