@@ -13,7 +13,11 @@ approved instance plan `ent_d10ad28dffb8c6604a4151c2` and its decision keys `enf
 `data_model.md`, and `workflows.md`; decisions 17, 18, 30, 36, 39, 41, 43, 46, 47, 51, 52, and 56; and gaps G9, G10, and G31
 (`migration.md`), which this document closes. Written against the second rulings pass (revision 39), whose
 rulings of 36, 43, 47, 52, and 56 it carries. What is built is `status.md`; how each concept is recorded
-is `data_model.md`.
+is `data_model.md`. Revised by the ancestry pass of 2026-09-06 (revision 45: the operator's question on
+missing ancestry — whether the swarm derives an absent parent, or finds the gap — settled against
+`#authority-per-level-an-amendment-is-an-action-and-its-class-is-the-levels` and decisions 17, 41, 51, and
+52; `judge`'s and `route`'s defect lists extended by one item each, with no new step or type; decision 61
+opened).
 
 ## Purpose
 
@@ -374,6 +378,164 @@ operator lists or leaves reserved, so more levels are more classes to write. And
 read by every step beneath them — a mission — is on every ascent, so what it says is read on every batch
 that declares it, and a statement that long changes the reading budget of every step that reads it
 (`conformance.md#always-read`).
+
+## Missing ancestry: whether the swarm derives an absent parent, or finds the gap
+
+**The operator's question (2026-09-06):** whether the swarm should derive higher-level planning materials
+when lower-level ones lack them — a task serving no plan, a plan serving no project, a project with no
+strategy above it, transitively — or report the discrepancy with a proposal to resolve, before or after
+resolving it.
+
+### The swarm may not author a missing ancestor
+
+**It may not, and the refusal is already written, not implied.** Deriving a plan to parent an orphan task
+is authoring a planning record's statement — the plan's purpose, its scope, its `completion_criteria[]`
+(`#downward-state-is-derived-upward-content-is-authored-as-entities`) — under another name than `amend`.
+Every authored write to a planning record is an `amend_<level>` action, admitted only through the record's
+own workflow, on the engine's sole grant, and an `amend_<level>` class the operator has not listed resolves
+to `NEVER` at the gate whatever the confidence
+(`#authority-per-level-an-amendment-is-an-action-and-its-class-is-the-levels`). A step that notices the gap
+and writes the parent itself — rather than raising a task toward it — is not a special case this rule
+missed; it is the exact write the rule names, taken by a mechanism instead of a principal. Nothing in the
+gate's test ("what a write to the type changes") carves out a parent created to hold an orphan: it still
+changes what the swarm is *for*, which is the whole of what makes an amendment an action. **The refusal
+holds, stated plainly rather than left to the gate's silence: the swarm never derives a missing planning
+record.** The one exception already on the books is creation by the level above — a plan created by its
+project's `amend` step, or the operator's at the root and at bootstrap
+(`#downward-state-is-derived-upward-content-is-authored-as-entities`) — which is a parent authoring a child
+it already has, never a child inferring a parent it lacks.
+
+### What happens instead: a finding, with a proposal riding beside it
+
+**Missing ancestry is a finding, not a report.** A "report to the operator" outside the record is the
+reporting-without-binding shape the finding mechanism replaces everywhere else in this design
+(`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`): it has no author of
+record, no severity that binds a verdict, and no edge a later reader can check the disposition against. A
+finding has all three, and the design already gives it a route to the checkpoint queue where the defect
+cannot be classified alone (`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
+Missing ancestry is recorded the same way, at the point each shape below names.
+
+**Its kind is `decision_or_attestation`, never `implementation_only`.** Whether a task should serve a plan,
+or a plan a project, is a judgement about what the operator is pursuing — exactly the judgement
+`implementation_only` excludes, because routing it to an implementer would ask the implementer to supply
+the statement the finding exists to demand (`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`).
+The swarm may propose the shape of the missing record; it may not decide that the shape is correct and
+write it.
+
+**Its scope is `unknown` by the same test the finding's standing axis already applies.** The finding's
+`scope` field decides where a lesson lands — this batch, a step, a workflow, an agent
+(`data_model.md#concepts`) — and none of the four is what a missing plan or project *is about*: the gap is
+not a defect in how work gets made, it is a defect in what stands above one record. `scope: unknown` is the
+correct value on the finding's existing axis, not a misuse of it, because the axis was built for "we cannot
+tell which of these four" and this is a fifth kind of question the axis was never asked; recording it as
+`unknown` follows the same rule that forbids coercing an undetermined scope to the narrowest one
+(`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`)
+rather than extending the finding's scope enum with a value this document is not positioned to register.
+What the finding's `text` and `REFERS_TO` state — which record is short an ancestor, and at which level —
+is what makes the finding actionable without a new field.
+
+**A proposal rides beside the finding because proposing is a grant capability, not a write.** Decision 52
+holds that creating a task of the initiative class is a capability distinct from the write it would later
+confirm (`authority_model.md#what-stops-is-a-task-the-owner-seat-confirms-it-through-the-checkpoint-and-proposing-is-a-grant-capability`),
+and the institutionalization pattern already carries a proposed remedy as a task `REFERS_TO` the finding
+that argued it, through its own intake, with the raising batch not waiting
+(`#maintenance-is-work-the-planning-workflow`, decision 17). The proposal here is the same shape: a task
+`REFERS_TO` the finding, naming the ancestor's proposed statement and level, entering intake, and stopping
+at the gate as any `amend_<level>` action does until a principal with standing resolves it. Nothing new is
+built — no `proposal` entity exists in this design (decision 51) — and the finding and its proposal are two
+entities on one edge, exactly as a standing finding and its institutionalization task are.
+
+**Where the finding is recorded, on a record that already exists.** A plan with no project above it, or a
+project with no strategy above it, is found at that record's own `survey`: the declared read of "the
+statement of its parent" (`workflows.md#planning`) resolves to nothing, and `judge` records the gap as a
+finding of the kind above. This extends `judge`'s defect list by one item — no record above, where the
+instance's registered levels say one belongs — the same way the list already carries "a child record with
+no live `planning` task" as a defect of what is missing rather than what is wrong (`#maintenance-is-work-the-planning-workflow`).
+**Where the finding is recorded, on a task with no plan at all.** Here there is no planning batch to raise
+it — the `planning` workflow's entry condition is a task `PART_OF` exactly one planning record
+(`workflows.md#planning`), and an unplanned task by definition has none — so the finding is intake's, not
+the planning workflow's: `route` closes the task's intake batch with a finding naming the gap, the same
+mechanism that already closes intake with a finding when a task's `link` step reads a standing constraint
+on an entity it names (`workflows.md#intake`). No new step is added to either workflow; each already has
+the seat this finding sits in.
+
+### Before or after: whether a step declared the read
+
+**The operator's "before or after resolving" is answered by whether a step declared the ascent as a read
+it needed, not by a rule about ancestry in general.** A step that declares a planning type and reads an
+ascent that ends before that type is a step whose declared read returned nothing —
+"an ascent that ends before a declared type yields an empty read, and empty is not unknown"
+(`#upward-context-is-a-declared-read-resolved-along-the-ascent-at-hydration`) — and a successful read of
+nothing is not a hold. So where no step has declared the missing level as a read it needs, nothing is
+blocked: the finding above is recorded and rides alongside the work, surfacing when the record's own
+`planning` workflow next runs `survey`, exactly as any other finding surfaces at the step that judges the
+batch. Where a step **has** declared the missing level — a step that judges a change against a strategy's
+criteria, on a task whose ascent ends at a plan — the read is not empty, it is `unknown`: the record the
+step needed could not be resolved because it does not exist, which is a failed read and not a successful
+one that found nothing (principle 7), and the step holds exactly as any other declared read that cannot
+resolve holds. **The test that separates the two:** whether some step on the task's chain named the absent
+level in its `reads_to_enter` or `reads_to_close`. A declared read holds the step; an undeclared gap is a
+finding that does not.
+
+### Whether an orphan is a defect at all
+
+**Absence means something only where an expectation was declared, and the default where none was declared
+is permissive: no expectation, no finding.** Much of an operator's work legitimately has no project above
+it — a chore, a one-off ask, reactive work nobody planned — and the design already admits this without
+qualification: unplanned work is admitted through intake like any task, "because refusing it would force
+every chore under a plan it does not describe"
+(`#upward-context-is-a-declared-read-resolved-along-the-ascent-at-hydration`). Recording a finding on every
+task with no plan, or every plan with no project, would be exactly that refusal restated as a finding
+instead of a gate — the same forcing, one step later. The usual instinct is the other way: fail-closed,
+flag every gap, let the operator triage the noise. That instinct is wrong here because the thing being
+judged is not an action with a blast radius but a **shape** of the operator's own work, and the design has
+already ruled once that the shape of the hierarchy is the operator's to declare and not the swarm's to
+infer (`#which-levels-an-instance-declares-and-what-it-calls-them`, decision 57): a swarm that flagged every
+unplanned task would be asserting, by volume of findings, that the operator's instance is wrong to have
+chores — a judgement decision 57 already reserves. So the finding above is raised only where an expectation
+was **declared** — never inferred from the shape the record happens to have. An instance that declares
+nothing gets no findings on ancestry; an instance whose project's statement declares "every plan under this
+project is executed as a project, and a plan with no project is a finding" gets exactly that, because a
+principal wrote it, not because the swarm decided orphans are wrong.
+
+**Open decision 61.** Where the expectation is declared — per level (a field on the level's registered
+type: "a record at this level expects a parent"), per intake class (an `intake_rule`'s condition, so only
+tasks of certain classes are expected to carry a plan), or on the `planning` workflow's own declaration (an
+`applies_when` a project writes, or a `completion_criteria[]` entry naming the parent, read at `survey`) —
+is not decided by any rule above, each being a different existing mechanism this document could reuse
+without adding one. Registered in `conformance.md#the-register-of-open-design-decisions`. **Costs:** a
+per-level field is cheapest to read (one flag beside the level mark, checked at every `survey` without
+resolving a class or a declaration) but coarsest — it cannot say "objectives expect a strategy, but only
+for the revenue-tagged ones"; an `intake_rule` condition is the finest-grained of the three, reusing a
+mechanism intake already has, but ties the expectation to how a task was classified rather than to the
+planning type itself, so a plan created directly by a project's `amend` step (never through intake) would
+need a second place the same expectation is checked; a workflow-level declaration keeps the expectation
+beside the `completion_criteria[]` a principal already writes for the record, at the cost of one more thing
+a project's statement must say. This document is indifferent among the three for the same reason it is
+indifferent to the count of levels (`#which-levels-an-instance-declares-and-what-it-calls-them`): no rule
+above reads the expectation by its storage location, only by whether `judge` finds one declared. The choice
+is the operator's, made once decision 57 fixes what the levels are, since a per-level field has nothing to
+attach to before that.
+
+### Transitivity: judged edge by edge, not over the whole chain
+
+**A gap is judged at each edge, never over the whole chain to a root, because there is no root the design
+guarantees every chain reaches.** The **root** is defined as "the record with no `PART_OF`"
+(`#the-hierarchy-is-edges-and-a-task-has-one-line-upward`) — a description of whatever a chain happens to
+end at, not a named level every instance is required to register. Decision 57 leaves open whether an
+instance declares six levels, two, or the two the design needs to state itself with the rest admitted as
+registered; an instance that declares only `task` and `plan` has a plan as its root, and a plan with nothing
+above it in that instance is not missing a project, because the instance never declared one. Judging "does
+this chain reach a strategy" would require a level named in the judgement, which is exactly what no rule
+above does (`#which-levels-an-instance-declares-and-what-it-calls-them`: "every rule reads the mark and the
+ascent... the design is indifferent") and what decision 57 reserves to the operator. So the only judgement
+the design can make without pre-empting 57 is local: does *this* record have a `PART_OF` to a record one
+level up, where the instance's own registered order says one belongs — the same test `survey` already runs
+for the single parent it reads (`workflows.md#planning`), applied at whichever edge is being walked, and
+never accumulated into a single verdict about the whole ascent. **This depends on decision 57's shape and
+does not resolve it:** the number of edges a chain is expected to have, and what a root's own level is
+called, are exactly what 57 leaves to the operator; this section states only that the judgement is per-edge
+once the levels exist, whatever their count.
 
 ## Whether the operator's own amendment passes the gate
 

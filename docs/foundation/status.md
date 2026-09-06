@@ -2276,6 +2276,58 @@ the remote by repeated direct polling for over twelve minutes before the dedicat
 during which three other passes landed in sequence (the record-sense collision, the self-contradiction
 pass, and the model-and-harness-routing pass itself), each re-read fresh before this pass began.
 
+## Revision 45 (2026-09-06): missing ancestry — deriving a parent refused, a finding in its place, and one open decision
+
+The operator asked, verbatim, whether the swarm should derive higher-level planning materials when lower
+ones lack them — a task serving no plan, a plan serving no project, a project with no strategy above it,
+transitively — or report the discrepancy with a proposal, before or after resolving it. A new section of
+`planning_model.md`, "Missing ancestry: whether the swarm derives an absent parent, or finds the gap,"
+settles four of the five sub-questions and opens one decision.
+
+**Settled.** The swarm may not derive a missing ancestor: doing so is an amendment to a planning record's
+statement under another name, and every amendment is an `amend_<level>` action, reserved to `NEVER` until
+the operator lists it — the existing gate refuses it already, and this section states the refusal in
+prose rather than leaving it implied. What happens instead is a `finding`, kind `decision_or_attestation`,
+scope `unknown` on the finding's own standing axis (the gap is not one of the axis's four existing
+kinds), recorded at the record's own `survey` for a plan-with-no-project case and at intake's `route` for a
+task-with-no-plan case, since an unplanned task has no `planning` batch to raise it in; a proposal for the
+missing record's shape rides beside the finding as a task `REFERS_TO` it, on the same footing decision 17's
+institutionalization task already has, and reusing decision 52's reading that proposing is a grant
+capability distinct from the write it would confirm. Before-or-after is answered by whether a step declared
+the ascent as a read it needed: a declared read that resolves to nothing is `unknown` and holds the step
+(principle 7); an undeclared gap is a finding that rides alongside the work and never holds it. Whether an
+orphan is a defect at all is answered permissively: no expectation declared, no finding — argued from the
+existing unplanned-work admission and from decision 57 already reserving the hierarchy's shape to the
+operator, against the usual fail-closed instinct, which here would assert by finding-volume that the
+operator's own instance is wrong to have chores. Transitivity is judged edge by edge, never over the whole
+chain to a root, because "root" is `#the-hierarchy-is-edges-and-a-task-has-one-line-upward`'s description of
+wherever a chain ends and not a level every instance must register — judging "reaches a strategy" would name
+a level, which no rule above does, and decision 57 is exactly the reservation against naming one.
+
+**Opened.** Decision 61: where the ancestry expectation is declared — a field on the level's registered
+type, an `intake_rule` condition, or a `completion_criteria[]`/`applies_when` entry on the `planning`
+workflow's declaration. Registered in `conformance.md#the-register-of-open-design-decisions`, blocked on
+decision 57 fixing what the levels are before a per-level field has anything to attach to.
+
+**Extends, adds no step or type.** `judge`'s defect list (`workflows.md#planning`) gains one item — no
+record above, where the instance's registered levels say one belongs — beside the existing "a child record
+with no live `planning` task." Intake's `route` gains the same finding shape it already uses for a
+standing constraint read at `link` (`workflows.md#intake`). No new entity type, no new workflow step.
+
+**Size.** Measured 2026-09-06 with `wc -c` against the Human Inversion mapping pass (revision 44) as the
+predecessor. `planning_model.md` +14.2k (one new `##` section, five `###` subsections, and one header
+sentence); `conformance.md` +0.8k (one register row, one header sentence). No other foundation document was
+edited.
+
+**Checks, on this tree.** `check_foundation_vocabulary.py`: 100 Never items, 73 Not-for items (unchanged),
+0 Never hits (one hit found and fixed — "worked as a project" rephrased to "executed as a project"), 756
+Not-for advisory hits (up from 749 at the start of this pass, seven new hits from the added prose, all
+already-advisory words used in their ordinary sense). `check_foundation_anchors.py`: 0 broken links.
+`link_vocabulary_terms.py --check`: clean, no unlinked first mention. `test_foundation.py`: 97 passed, 1
+xfailed (the budget marker, unchanged). The branch head this pass was taken from is the Human Inversion
+mapping pass (revision 44, `02c7e0e`), confirmed unchanged on the remote by three direct polls 60 seconds
+apart before the dedicated worktree was created.
+
 ## Reading-list budget and keying, as of revision 6 (2026-09-04)
 
 Measured with `wc -c` on this branch; the caps are `foundation.py`'s `MAX_DOC_CHARS = 12_000` and
