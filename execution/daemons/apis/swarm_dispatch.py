@@ -5298,13 +5298,23 @@ class SwarmDispatcher:
                             "— no verdict recovered"
                         )
                         return None, False
+                    # Count for the log only — selection already happened in
+                    # latest_aggregation_comment. Do not rebuild a local
+                    # `candidates` list and then forget to bind it (fdb86f8
+                    # dropped the list, left the log, and CI swallowed the
+                    # NameError as "no verdict").
+                    n_candidates = sum(
+                        1
+                        for c in comments
+                        if has_vanellus_aggregation_marker(c.get("body") or "")
+                    )
                     log.info(
                         f"[{DAEMON_NAME}] {t.repository}#{t.number}: stdout had no "
                         f"verdict token — recovered {fallback_verdict!r} from the "
                         "Vanellus aggregation comment (fallback fired) "
                         f"[comment id={comment.get('id')} "
                         f"created_at={comment.get('created_at')} "
-                        f"of {len(candidates)} candidate(s)]"
+                        f"of {n_candidates} candidate(s)]"
                     )
                     return fallback_verdict, True
                 log.warning(
