@@ -1017,8 +1017,11 @@ class TestUnreadableGatesHoldAndRaise(unittest.TestCase):
         self.assertIn("error", out)
         self.assertIs(out["gates_evaluated"], False)
         self.assertEqual(out["entity_type"], "agent_grant")
+        self.assertEqual(out["reason_codes"], ["unreadable.wrong_entity_type"])
+        self.assertEqual(out["unreadable"][0]["code"], "unreadable.wrong_entity_type")
         # The bug signature: a blocking-gate list for a non-issue record.
         self.assertNotIn("blocking_gates", out)
+        self.assertNotIn("all_gates_cleared", out)
 
     def test_uninitialised_gate_status_is_flagged_not_reported_as_withheld(self):
         """No gate_status at all is 'never triaged', not 'owners withholding'."""
@@ -1033,9 +1036,59 @@ class TestUnreadableGatesHoldAndRaise(unittest.TestCase):
         ), patch.object(srv, "_pipeline_state_for", return_value={"stage": None}):
             out = srv._get_gate_status("ent_issue")
         self.assertIs(out["gates_initialised"], False)
+        self.assertEqual(out["reason_codes"], ["uninitialised.never_triaged"])
         self.assertIn("NEVER INITIALISED", out["interpretation"])
         # Must NOT phrase an absent record as a named owner withholding sign-off.
         self.assertNotIn("waiting on pavo", out["interpretation"])
+        # Primary fields must not look like ordinary pending.
+        self.assertNotIn("blocking_gates", out)
+        self.assertNotIn("all_gates_cleared", out)
+
+    def test_get_gate_status_malformed_gate_status_not_coerced_to_empty_blocking_as_pending(
+        self,
+    ):
+        """Present-but-malformed gate_status must hold-and-raise, not → {} pending."""
+        with patch.object(
+            srv,
+            "_get",
+            return_value={
+                "entity_id": "ent_issue",
+                "entity_type": "issue",
+                "snapshot": {
+                    "repo": "o/r",
+                    "github_number": 1,
+                    "gate_status": "[1,2]",
+                },
+            },
+        ), patch.object(srv, "_pipeline_state_for", return_value={"stage": None}):
+            out = srv._get_gate_status("ent_issue")
+        self.assertIn("error", out)
+        self.assertIs(out["gates_evaluated"], False)
+        self.assertEqual(out["reason_codes"], ["unreadable.malformed_gate_status"])
+        self.assertEqual(
+            out["unreadable"][0]["code"], "unreadable.malformed_gate_status"
+        )
+        self.assertNotIn("blocking_gates", out)
+        self.assertNotIn("all_gates_cleared", out)
+
+    def test_get_gate_status_malformed_json_string_not_coerced_to_pending(self):
+        with patch.object(
+            srv,
+            "_get",
+            return_value={
+                "entity_id": "ent_issue",
+                "entity_type": "issue",
+                "snapshot": {
+                    "repo": "o/r",
+                    "github_number": 1,
+                    "gate_status": "not json",
+                },
+            },
+        ), patch.object(srv, "_pipeline_state_for", return_value={"stage": None}):
+            out = srv._get_gate_status("ent_issue")
+        self.assertIs(out["gates_evaluated"], False)
+        self.assertEqual(out["reason_codes"], ["unreadable.malformed_gate_status"])
+        self.assertNotIn("blocking_gates", out)
 
     def test_real_pending_gates_still_report_as_waiting(self):
         """The genuine unsigned case is unchanged — this is not a blanket pass."""
@@ -1056,6 +1109,8 @@ class TestUnreadableGatesHoldAndRaise(unittest.TestCase):
             out = srv._get_gate_status("ent_issue")
         self.assertIs(out["gates_initialised"], True)
         self.assertIn("arch", out["blocking_gates"])
+        self.assertIs(out["all_gates_cleared"], False)
+        self.assertEqual(out["reason_codes"], [])
         self.assertIn("waiting on waxwing", out["interpretation"])
 
 
