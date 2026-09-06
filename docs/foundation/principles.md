@@ -3,7 +3,7 @@
 **Kernel document:** read on every review (`conformance.md`). **Kind:** foundation; states the design and
 never the state of a checkout. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` (phase 0 of plan
 `ent_533d4ec2f7bfb60f66fb3fce`), prior art `ent_08460968e6f49dac21510f4a` (phase 3), ateles#727, the
-decision keys cited per invariant, and PR #745 operator review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Revised by the testability pass of 2026-09-06 (revision 37: invariants 3, 6, 8, and 10 given their mechanical form — the named instruments, the singletons' closure, the citation lint, and "landed" as a derived read). Revised by the Human Inversion mapping pass of 2026-09-06 (revision 44: where the human sits, operator attention as the protected constraint, and the sovereignty reason for the owned record, stated beside the invariants; the cross-disciplinary rubric named as out of scope until P4). Revised by the vocabulary-standard pass of 2026-09-06 (revision 49: invariant 12 added, stating the operator's own standard for the vocabulary's size and overlap as a design invariant, generalizing the substitution test `status.md` revision 29 already applied to the term retired for `review step` in revision 19). Which mechanisms exist on a given checkout, and where nothing fires, is
+decision keys cited per invariant, and PR #745 operator review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Revised by the testability pass of 2026-09-06 (revision 37: invariants 3, 6, 8, and 10 given their mechanical form — the named instruments, the singletons' closure, the citation lint, and "landed" as a derived read). Revised by the Human Inversion mapping pass of 2026-09-06 (revision 44: where the human sits, operator attention as the protected constraint, and the sovereignty reason for the owned record, stated beside the invariants; the cross-disciplinary rubric named as out of scope until P4). Revised by the vocabulary-standard pass of 2026-09-06 (revision 49: invariant 12 added, stating the operator's own standard for the vocabulary's size and overlap as a design invariant, generalizing the substitution test `status.md` revision 29 already applied to the term retired for `review step` in revision 19). Revised by the naming pass of 2026-09-06 (revision 57, on the operator's voice memo: decision 73 opened under invariant 12 — whether a term should prefer a single word, and what exception admits the qualified compounds the no-overlap half currently depends on, `step owner` and the three `scope` compounds among them; the parenthesized-object verb form and a structural defect in `vocabulary.md`'s heading levels recorded with it. Opened, not ruled). Which mechanisms exist on a given checkout, and where nothing fires, is
 measured in `status.md`, not here.
 
 ## Purpose
@@ -220,6 +220,53 @@ amendment obligation above is enforced the way its parallel is: a PR that adds a
 rule that turns on it, or without having run the swap test against its neighbours, is incomplete on
 review, the same way a PR that opens a decision without registering it is incomplete under
 `conformance.md`.
+
+**Whether a term should prefer a single word, and what the exception is — open (decision 73).** The
+operator's question (2026-09-06): *"it also seems best to prefer single words for terms versus multiple
+words per term. Because whenever we have multiple words, we risk having non-term based qualifiers confused
+with actual term definitions."* The risk is real and is this invariant's own subject: where a term is
+several words, a reader cannot tell from the page whether the extra word is part of the bound term or an
+author's ordinary adjective, and `vocabulary.md`'s linker resolves that only for the entries that exist.
+37 of `vocabulary.md`'s 124 terms are multi-word.
+
+**The tension that must be stated with it: multi-word terms are currently load-bearing for this very
+invariant.** They are how the corpus discharges the no-overlap half. `owner` carries five meanings and is
+forbidden standing alone (`vocabulary.md#owner-five-meanings-one-word-forbidden-alone`) precisely because
+the bare noun was ambiguous — and `step owner` is the qualified compound that replaced it. The same
+pattern produced `waiver scope`, `finding scope`, and `permission scope`, three of bare `scope`'s four
+senses, which `vocabulary.md#scope` states are deliberately kept as qualified compounds because no fifth,
+unifying sense exists to define; `parent task` and `child task`, which qualify a bare `task` that has
+its own distinct entry; and `planning level`, `planning record`, and `planning decision`. Collapsing those
+to single words would recreate exactly the overlap this invariant exists to prevent. So the rule cannot be
+absolute, and the candidate form is a **preference with a stated exception**: prefer a single word; require
+a qualifier where the bare word is banned, or where it is already bound to a different sense.
+
+**Candidates that look genuinely collapsible**, to be swap-tested individually rather than taken as a set:
+`read dependency`, `fast path`, `blast radius`, `effect dedup`, and `reachability probe` — each of whose
+head nouns (`dependency`, `path`, `radius`, `dedup`, `probe`) is bound by no other entry. Two apparent
+candidates are not: `as-of read` and `derived read` share the head noun `read`, and `decision point` and
+`enforcement point` share `point` — and `enforcement point` is *defined in terms of* `decision point`, so
+collapsing either member of either pair reintroduces the overlap.
+
+**A third convention neither memo names, and it is part of this question:** three entries take a
+parenthesized object. Two are the work model's verb entries, `execute (a task)` and the entry for what is
+done to an action; the third is the planning model's, `amend (a planning record)`. Each is a verb whose
+bound sense depends on the object named in its parentheses, and whether that form survives a single-word
+preference has to be decided with the question rather than after it.
+
+**A separate defect this question surfaced, recorded and not fixed here.** `vocabulary.md`'s
+`### Two things a reader is looking at, and how they are written` is a prose subsection of `## Scope`
+explaining the file's own writing conventions — not a term. But it is set at `###`, the level every real
+entry uses, and `link_vocabulary_terms.py` extracts a term from *every* `###` heading, so it is read as a
+term whose name is a sentence. It is a structural defect in the file, not a multi-word term, and fixing it
+is not this decision's work; it is noted so that the count above is read correctly — the file carries 125
+`###` headings, of which 38 are multi-word, but one of the 38 is this heading, leaving 124 terms and 37
+multi-word ones.
+
+**What ruling this costs, and why it is registered rather than applied.** Any collapse is a rename across
+these documents and their generated projection, and three open PRs (#766, #767, #770) amend the same files.
+The single-word preference is also the same standard decision 72 turns on, so the two are ruled together
+and executed as one pass after those merge.
 
 ## Contradictions this document settles
 
