@@ -206,6 +206,37 @@ A convention used throughout: **a derived read is computed at read time and neve
 Where a column below is a derived read, it says so, because that is the difference between a screen that
 is a read of the record and a screen that is a second source of truth.
 
+### Screen states (empty · unknown · error)
+
+Every screen has three mutually exclusive presentation states for each list or primary read. S1 already
+states the triad for the queue (`data_model.md#retrieval-contract`, invariant 7); **this subsection
+extends that rule to S2–S9** so implementers do not treat S1 as special-case prose.
+
+- **empty** — the read succeeded; zero matching records (or zero claimable / zero open / whatever that
+  screen defines as “nothing”). Empty is never inferred from failure.
+- **unknown** — a required record, edge, or coverage window is unreachable; the proxy or primary read
+  failed; or the design uses “unknown” for saturated-unmeasured coverage. **Never rendered as empty.**
+- **error** — a write the operator just took failed, or a secondary read-back that must confirm that
+  write failed. Distinct from unknown-on-list: the list may still be known while the action is not.
+
+**Actionable recovery is mandatory on unknown and error.** At least one of: retry the read or write,
+re-authenticate, open the subject record, or re-check the credential. Surface copy as `[COPY: …]`
+placeholders — Paradisaea owns final strings. Confirmation / read-back *foundation* posture for the four
+permitted writes remains gap **[G12]**; principal-reading-a-console retrieval remains gap **[G1]**. This
+section does not invent answers for either.
+
+| Screen | Empty means | Unknown means | Error means | Recovery affordance |
+|---|---|---|---|---|
+| S1 | open-checkpoint read succeeded; zero rows for the reader | queue read failed / `AWAITS` edge unreadable | resolution write failed or read-back failed | `[COPY: retry resolve]` / `[COPY: re-auth]` / open subject |
+| S2 | claimable + open lists read OK; zero tasks in view | task / batch / `LEASE` read failed | (on task detail write paths) write failed | `[COPY: retry load]` / open record |
+| S3 | batch read OK; no findings to show (a batch with no steps is illegal under a declaration — surface that as unknown or a declaration defect, not empty) | batch / `sign_off` / `LEASE` read failed | `waived` write / finding write failed | `[COPY: retry]` / open batch entity |
+| S4 | chain read OK; no `FOLLOWS` predecessors (new task) | batch chain unreadable | redo-task write failed (otherwise n/a — read-only) | `[COPY: retry]` / open task |
+| S5 | tree read OK; no children under focus | `PART_OF` / planning-type read failed | n/a (read-only) | `[COPY: retry]`; unplanned ≠ error |
+| S6 | findings read OK; zero match filters | finding / `sign_off` edges failed | finding write failed | `[COPY: retry]` / `[COPY: save finding again]` |
+| S7 | adapters read OK; zero adapters (unusual) | window observation / coverage unreadable — **not** the same as domain `unknown` on an artifact check | n/a (read-only) | `[COPY: retry]`; do not paint silence as healthy |
+| S8 | register parse OK **and** planning `decision` read OK; both sides zero | markdown register unreadable **or** decision entities failed — show which half failed | n/a | `[COPY: retry]`; show source (file vs record) |
+| S9 | search/detail: entity not found after a successful lookup | entity / snapshot read failed | n/a | `[COPY: retry]`; distinguish not-found vs failed-read |
+
 ### S1 · The queue — the operator's decisions
 
 **The question:** *what needs me, and what am I deciding?*
@@ -259,10 +290,10 @@ fresh; the recorded ones. This is a screen-level rule with a conformance row beh
 operator resolving a checkpoint the operator raised) must be marked as one at the write, and the console
 surfaces the mark rather than hiding it (decision 47).
 
-**Empty and unknown are different.** "An empty queue is reported as an empty queue, never inferred from a
-failed read — a read that failed is `unknown` and is announced as such"
+**Empty, unknown, and failed-read are different.** "An empty queue is reported as an empty queue, never
+inferred from a failed read — a read that failed is `unknown` and is announced as such"
 (`data_model.md#retrieval-contract`). The console must have three states here, not two. This is invariant 7
-on a screen.
+on a screen. See §3 Screen states for the cross-cutting triad and recovery matrix.
 
 **Gaps: [G1]** (no retrieval contract for a principal reading a console), **[G2]** (deferral, timeout, and
 the bounded-deferral UI), **[G3]** (quorum display).
@@ -270,6 +301,8 @@ the bounded-deferral UI), **[G3]** (quorum display).
 ### S2 · Work — tasks and their batches
 
 **The question:** *what is open, what is moving, and what is stuck?*
+
+**Empty, unknown, and failed-read are different.** See §3 Screen states.
 
 Replaces today's Tasks list. The correction is conceptual, not cosmetic: a task's position is not a stage
 on a lifecycle, it is **the batch it is in and that batch's chain**.
@@ -320,6 +353,8 @@ batch with per-step state, the findings recorded against it, and the artifacts i
 
 **The question:** *what has been judged here, by whom, against what, and what is left?*
 
+**Empty, unknown, and failed-read are different.** See §3 Screen states.
+
 **Reads:** `batch`, `workflow` (the declaration: `steps[]` with `owner_role`, `required`, `applies_when`,
 `on_fail`, `rounds_cap`, `reads_to_enter[]`, `reads_to_close[]`, `unclaimed_after`, `hold_bound`),
 `sign_off`, `finding`, `LEASE` edges with `step_name`, `task` by `ADDRESSED_BY`, `artifact` by `PRODUCES`,
@@ -362,6 +397,8 @@ checkpoint (`dependency_cycle`) and appears in S1.
 
 **The question:** *how did this get here, and has it landed?*
 
+**Empty, unknown, and failed-read are different.** See §3 Screen states.
+
 Not a separate nav destination; the spine of the task detail in S2. It is called the **chain** and never
 the "history" or the "pipeline": the chain is the batches along `FOLLOWS`, and the **ascent** is the
 planning records along `PART_OF`. The design insists the two are different reads of the same task — "where
@@ -381,6 +418,9 @@ reader would see it.
 ### S5 · The hierarchy — the planning records and the ascent
 
 **The question:** *what is this work for, and what is under this record?*
+
+**Empty, unknown, and failed-read are different.** See §3 Screen states. Unplanned ascent is labeled
+unplanned, not as an error.
 
 **Reads:** planning records (a registered type the registry **marks as a planning type**, with a level —
 the design fixes the shape and not the names), `task` by `PART_OF`, `decision` by `PART_OF`, `SUPERSEDES`
@@ -411,6 +451,8 @@ from descendants at read time.
 
 **The question:** *what was objected to, does it block, and was it discharged?*
 
+**Empty, unknown, and failed-read are different.** See §3 Screen states.
+
 **Reads:** `finding` (`severity`, `kind`, `scope`, `evidence`, `text`, `step_name`, `recorded_at`),
 `sign_off` by `PART_OF`, `batch` by `REFERS_TO`, and the `task` a finding produced.
 
@@ -439,6 +481,9 @@ console's write path for review, and it is one of the four writes decision 37 ad
 
 **The question:** *is the boundary healthy, and what did it decide not to handle?*
 
+**Empty, unknown, and failed-read are different.** See §3 Screen states. Domain `unknown` on an
+artifact check (below) is not the same as **screen unknown** from a failed observation / coverage read.
+
 **Reads:** the adapter's `agent` and its `agent_session`, whose per-window observations carry the window,
 the **coverage** of the polls or deliveries made in it, and the **dispositions counted**; `artifact`
 (`system`, `external_id`, `state`, `checks`, `head`).
@@ -450,11 +495,14 @@ explicitly forbidden (`data_model.md#concepts`), and offering the affordance wou
 record the design refuses to keep.
 
 **`unknown` is a rendered value, not a blank.** A CI state the adapter could not read is `unknown` on the
-artifact and holds the step; the console shows `unknown`, distinct from failing and from passing.
+artifact and holds the step; the console shows `unknown`, distinct from failing and from passing. That
+domain value is still shown when the observation read *succeeded*; a failed observation read is screen
+unknown per §3, not a blank health panel and not a coerced empty adapter list.
 
 **Silence is a derived read**, and it is the one that matters most here: a daemon is **silent** when no
 window observation exists past its declared window *while the record is reachable*. The screen must not
 present absence of activity as health — "an idle swarm and a halted one look the same by that measure."
+Silence under a successful read is not screen unknown; silence must still not be painted as healthy.
 
 **The console never calls the external system.** Everything on this screen is the adapter's observations on
 the record. **Gap [G5]:** the drop counters are named as one of the design's instruments requiring a
@@ -465,6 +513,9 @@ disconnected counter.
 ### S8 · The register — open decisions
 
 **The question:** *what has the design not decided, and what is blocked on it?*
+
+**Empty, unknown, and failed-read are different.** See §3 Screen states. When only one half of the dual
+read fails, show which half (markdown register vs planning `decision` entities).
 
 **Reads:** the register table in `conformance.md#the-register-of-open-design-decisions`, and `decision`
 entities `PART_OF` planning records.
@@ -487,6 +538,9 @@ which is neither of the above. The design has no such concept, and this specific
 ### S9 · The record — an entity, and the swarm's own shape
 
 **The question:** *what does the record actually hold here?*
+
+**Empty, unknown, and failed-read are different.** See §3 Screen states. Not-found after a successful
+lookup is empty; a failed entity or snapshot read is unknown.
 
 Keeps the existing generic `EntityDetail` renderer and the Cmd-K search, which are good and which the
 revamp should not throw away. Adds the design's own framing:
@@ -956,3 +1010,17 @@ types under the design's names. The migration's mapping is what turns `workflow_
 render the design's screens only over `LEG`-shaped data, and every screen above would need a tolerant
 reader for the retired names. That is a real dependency and it belongs at the top of any plan built from
 this document.
+
+## 8. Acceptance checklist (ux)
+
+An implementation PR for this console is ux-complete only when:
+
+- [ ] Every screen declares empty / unknown / error (failed read) as three distinct states; empty is never inferred from failure
+- [ ] Every noun on a screen is a design vocabulary term or unmarked plain English (invariant 12); S2 forbidden-word list enforced
+- [ ] S1 options come only from the checkpoint; resolver + `resolution_note` on write; self-resolution marked
+- [ ] S2 forbids retired labels (blocked / executing / undispatched / tiers / …); claimable pool ordered by derived priority
+- [ ] Failed writes and failed reads show actionable recovery (retry / re-auth / open record) — no silent no-op
+- [ ] No second queue, notification stream, or reopen affordance (per §5)
+- [ ] Unplanned ascent (S5) is labeled as unplanned, not as an error
+- [ ] S7 never presents absence of window observations as health; artifact `unknown` is rendered, not blank
+
