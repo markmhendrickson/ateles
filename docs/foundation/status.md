@@ -2169,6 +2169,33 @@ the rewritten daemon entry), fixed by linking it. Sizes (`wc -c`, this branch ag
 `vocabulary.md` 102.5k → 105.3k; `work_model.md` 103.4k → 105.4k; `workflows.md` 63.6k → 64.2k;
 `gates_and_workflows.md` 105.5k → 107.2k; `data_model.md` 55.5k → 57.4k; `principles.md` unchanged at
 16.2k net (a citation added, none removed). No document crossed a budget threshold it was not already over.
+## Revision 43 (2026-09-06): model and harness routing — what executes a step, at what tier, and what happens when that choice is unavailable
+
+The operator asked whether the foundational docs capture model and harness routing needs per the runner.
+Checked first against a concurrent Human Inversion pass's item 5 (whether gate tiers plus `vendor_binding`
+already express routing by blast radius): as of this pass's branch head, no such rule had landed in
+`status.md` or `gates_and_workflows.md` — `grep`-checked directly rather than assumed — so all three gaps
+below were argued fresh rather than cited from it. This revision opens decision 59 (where a minimum model
+tier per action class would live, `gates_and_workflows.md#blast-radius-selects-the-gate-nothing-yet-selects-the-model-a-step-runs-at`)
+and decision 60 (a runner's lease-held step losing its model or harness mid-execution,
+`failure_posture.md#a-runners-model-or-harness-going-unavailable-mid-step`), and settles without opening a
+decision that `runner` (`vocabulary.md#runner`, already registered, retired-`claimant`'s replacement) names
+the seat a step's outcome depends on — no new entity (`work_model.md#a-steps-outcome-depends-on-which-runner-ran-it-and-runner-already-names-that-seat`).
+Decision 42 (harness preference and model tier are a `vendor_binding`'s; the tool allowlist is a dimension
+of the `agent_grant`) was already settled by the rulings pass and is cited, not restated.
+
+**Drift, read on this branch 2026-09-06. Recorded here and not in the design.**
+
+| Design rule | Built state | Instrument |
+|---|---|---|
+| a skill's harness mechanics — the tool allowlist, harness preference, model tier — are read from the `agent_grant` and the `vendor_binding` at claim time (decision 42); the skills leg (revision 32, `migration.md#the-skills-source-state-the-harnesses-hold-and-where-each-kind-goes`) retires the on-disk `SKILL.md` as a load path | `execution/daemons/apis/skill_runner.py` resolves `.claude/skills/<skill>/SKILL.md` under the repository root at claim time and prepends the entity's `prompt_markdown` to it, rather than resolving the prompt from the record; a missing file is a dispatch failure | `status.md`'s own revision-32-era row above (`the runner's read of the role file`), re-cited here because it is precisely the mechanism gap 2 and decision 42 bear on |
+| which model a runner executes at is a `vendor_binding`'s, bound to the role a runner fills, read fresh at claim (decision 42) | the current harness spawns a child agent inheriting its parent's model by default; no claim-time read of a per-role `vendor_binding` selects it | three agents observed hitting one provider rate limit simultaneously the night of 2026-09-05→06 because all three had inherited the same parent's model choice rather than each resolving its own binding |
+
+Neither row is cited as justification for a design choice (first principles: code is not design authority)
+— both are the gap between what decision 42 already rules and what a checkout does today, and the second
+is the mechanism gap 3's open decision (60) exists to give a stated outcome to.
+
+**Checks**, on this tree. `check_foundation_vocabulary.py`: 0 Never hits (unchanged). `check_foundation_anchors.py`: 0 broken links. `pytest execution/daemons/apis/test_foundation.py`: 97 passed, 1 xfailed (the budget marker, unchanged).
 
 ## Reading-list budget and keying, as of revision 6 (2026-09-04)
 

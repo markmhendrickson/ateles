@@ -10,7 +10,7 @@ from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-12 to PR-15, C5, C17), prio
 `deferral_must_be_bounded_and_escalate_off_neotoma`, `unknown_must_stay_distinct_from_a_verdict`,
 `nyctea_635_becomes_load_bearing`, PR #745 operator review (2026-09-04), and the operator memos of
 2026-09-05 (the `undetermined_scope` reason class), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: a hold on a discovered condition is a deferral under rule 5; the `dependency_cycle` reason class). What is built is `status.md`;Revised by the consistency pass of 2026-09-06 (revision 35: the merge action's class named `merge_pr` in the recovery table). What is built is `status.md`;
-how a checkpoint is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: a condition of a batch is raised on one of its tasks, never on the batch). Revised by the workflow-format pass of 2026-09-06 (revision 34: rule 5's ceiling for a holding step, and the unclaimed-step interval, each named as a field on the step). Revised by the testability pass of 2026-09-06 (revision 37: the announcement path's own outage and the capture of last resort; the window observation; `action_policy.recoveries`; recovery paths and their cadence on the binding; `lapse_cap`; which checkpoints hold a task from claim; `AWAITS` names principals).
+how a checkpoint is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: a condition of a batch is raised on one of its tasks, never on the batch). Revised by the workflow-format pass of 2026-09-06 (revision 34: rule 5's ceiling for a holding step, and the unclaimed-step interval, each named as a field on the step). Revised by the testability pass of 2026-09-06 (revision 37: the announcement path's own outage and the capture of last resort; the window observation; `action_policy.recoveries`; recovery paths and their cadence on the binding; `lapse_cap`; which checkpoints hold a task from claim; `AWAITS` names principals). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: open decision 60 — a runner's lease-held step losing its model or harness mid-execution; the tier-eligibility half ruled as a consequence of decision 59).
 
 ## Purpose
 
@@ -136,6 +136,57 @@ refuse-and-requeue-as-fallback, and the hardcoded step-list floor (C5, below).
    is a step's declared read, so it holds the step, bounded, and the bound raises the checkpoint that
    names the dependency (`gates_and_workflows.md#declaration-batch-projection`) — the retry schedule lives
    here and the escalation lives there, one mechanism each.
+
+### A runner's model or harness going unavailable mid-step
+
+Rule 8 already classifies this failure — "the mechanism that starts an agent failing, rather than the
+work" — and a model rate limit or a harness outage is exactly that mechanism, not the work: no effect was
+left, so it is retried with backoff, or deferred to a stated reset time where the failure names one, and
+exhaustion escalates as `rounds_exhausted` the same as any other bounded deferral. That much rule 8 already
+settles for the case where the runner has not yet produced an effect. What it does not settle is the case
+rule 8 was not written for: a runner that already holds the lease, has been executing the step, and loses
+the model or harness it started with partway through — the case that killed three runners in one night to
+one rate limit, one of them mid-rebase.
+
+**Open decision 60.** Registered in `conformance.md#the-register-of-open-design-decisions`. Unknown stays
+distinct from a verdict (principle 7), and this is squarely an unknown: the step is neither confirmed
+advanced nor confirmed failed when the runner under it disappears. Three shapes, and the design must pick
+one rather than let each runner's crash handler decide for itself:
+
+1. **Unavailability is an `unknown` that holds the step and raises.** The lease is left to lapse on its
+   ordinary schedule (no special-cased early release), the watchdog counts it as it counts any lapse, and
+   at `lapse_cap` the checkpoint raised is `repeated_lapse` — the reason class rule 8's own escalation
+   already uses, naming the runner's model or harness failure as the finding. This treats the mid-step case
+   as continuous with rule 8's pre-effect case: the mechanism failed, the work is unknown, and the existing
+   lapse-and-cap machinery is the one queue principle 6 already forbids duplicating.
+2. **A lapse that returns the lease immediately** rather than waiting out the ordinary interval, on the
+   reasoning that a runner known to be unable to continue (a rate limit with a stated reset far past any
+   reasonable hold) should not occupy a lease for the ordinary `unclaimed_after` window while nothing can
+   act on it. This is faster recovery at the cost of a second lapse rule for one cause among several, which
+   principle 6 weighs against.
+3. **A re-claim at a different tier.** The task becomes reclaimable and a runner bound to a different
+   `vendor_binding` — a different harness, a different model tier — claims it next. **This must not happen
+   silently below the class's required tier once decision 59 is written**: a class with a `min_tier`
+   floor is exactly as ineligible for a lower-tier runner on re-claim as on first claim, because the
+   eligibility check decision 59 settles is evaluated at the take, not once per task. A re-claim at or
+   above the required tier is unremarkable — it is the ordinary claim predicate finding a new eligible
+   runner. A re-claim silently below it is the reporting-without-binding shape principle 1 names: the step
+   completes, a sign-off is written, and nothing in the record shows the work was done under a floor the
+   policy says it should not have cleared.
+
+**Why this is not decided by the shape above alone.** Options 1 and 2 differ only in the lapse timing and
+are within the design's existing machinery either way — a value question about how eagerly to release,
+not a structural one. The tier question is structural: it determines whether `min_tier` (decision 59) is a
+real gate or a value nobody can rely on, since a floor that a re-claim can silently duck under is not a
+floor. **What is ruled regardless of which lapse timing is chosen:** the claim predicate that decides
+whether a runner is eligible for a class's action reads the same `min_tier` value on first claim and on
+every re-claim, so a step's tier requirement cannot be met once and forgotten.
+
+**What would decide it.** Whether an instance ever wants the fast-lapse behaviour of option 2 badly enough
+to carry a second lapse rule, against principle 6's cost of one; and whether the eligibility re-check on
+re-claim (the tier half, ruled above) needs a reason class of its own distinct from `capability_denied` —
+which already names a denial at the grant boundary and may be the same shape here, a runner denied
+eligibility for a class rather than a runner that failed to execute.
 
 ## The operator-invoked halt, and what undoes an action already taken
 

@@ -287,6 +287,8 @@ so that they are not reused; see the two notes below.
 | 56 | where the enforcement point sits that ties an admitted governance write to a permitted action — the record's admission check reading the action, a proxy in front of the record, or a sole-writer grant | `gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits` | — | **ruled** (2026-09-06, with 43): a sole-writer grant — for each governance type exactly one principal, the engine acting for the gate, holds the write capability and writes on a permit; every other write is refused at the record under 41; the operator's path after bootstrap runs through the same grant, never around it |
 | 57 | which planning levels an instance declares, in which order and under which names — the full set the operator's instance sketches, a shorter one, or the task and one level above it with the rest admitted as registered | `planning_model.md#which-levels-an-instance-declares-and-what-it-calls-them` | the registry's level marks on an instance, and the `amend_<level>` classes its policy lists; no rule of the design, which reads the mark and the ascent and never a level by name | **open** (the planning pass, 2026-09-06; the operator's, as a statement of how they think about their own work) |
 | 58 | whether the operator's own amendment to a planning record at a reserved level passes the gate as an `operator_only` action taken by the operator, or is an internal write under the operator's grant with attribution as its only record | `planning_model.md#whether-the-operators-own-amendment-passes-the-gate` | — | **ruled** (2026-09-06, with 43, 47, and 56): it does — the operator's amendment at a reserved level is an action held at the gate, resolved by the operator as a marked self-resolution, and written by the engine on that permit, never an internal write under the operator's own grant |
+| 59 | where a minimum model tier per action class or blast radius would live, should an instance choose to declare one — the `action_policy` beside `metered_resources[]` and `recoveries`, a field on the workflow declaration's step, or the `vendor_binding` itself | `gates_and_workflows.md#blast-radius-selects-the-gate-nothing-yet-selects-the-model-a-step-runs-at` | a runner whose bound tier is below a class's floor being scored as a lower-confidence action rather than disqualified outright; decision 60's tier-eligibility-on-re-claim ruling, which assumes this shape | **open** (model-and-harness-routing pass, 2026-09-06; the shape is argued from principles 6 and 9, the values — whether to write one, and to what — are the operator's) |
+| 60 | what a step does when the runner already holding its lease loses the model or harness it started with mid-execution: which lapse timing applies, and whether a re-claim may land below the class's `min_tier` (decision 59) once one is written | `failure_posture.md#a-runners-model-or-harness-going-unavailable-mid-step` | — | **open** (model-and-harness-routing pass, 2026-09-06; the tier-eligibility half is ruled in the same section as a consequence of decision 59's shape — a re-claim reads the same floor as a first claim — and only the lapse-timing choice and the reason-class question are left) |
 
 **Every ruled decision now has a heading of its own.** 25 through 29 were opened as bold paragraphs inside
 their documents' *What this document does not decide* sections, and the register's pointers resolved to the
@@ -299,7 +301,12 @@ lives, and where the next author reads before opening a question that was alread
 of 2026-09-06 (revision 40) opened 57, the operator's — which levels an instance declares and what it calls
 them — and 58, opened and ruled in the same pass as derivable from 43, 47, and 56, both argued in
 `planning_model.md`, which also closes gaps G9, G10, and G31 of `migration.md` without opening a decision
-for any of them; the open rows are then four — 33, 34, 55, and 57.
+for any of them; the open rows were then four — 33, 34, 55, and 57. The model-and-harness-routing pass of
+2026-09-06 opened 59 (where a minimum model tier per action class would live), argued in
+`gates_and_workflows.md`, and 60 (a runner's lease-held step losing its model or harness mid-execution),
+argued in `failure_posture.md`; the same pass settled, without opening a decision, that `runner`
+(`vocabulary.md#runner`) already names the seat gap 2 of the operator's request asked after, in
+`work_model.md`. The open rows are now six — 33, 34, 55, 57, 59, and 60.
 
 **Decisions 37 to 41 were ruled by derivation on 2026-09-06 and held for the operator's veto; the operator reviewed all five the same day and upheld them.** Nothing in those rows or in their rulings changed; the review is recorded here so that the window is known to have closed by a decision rather than to have lapsed.
 
@@ -312,7 +319,7 @@ foundation document. They are the gaps left by several documents opening decisio
 branch and renumbering around each other, and they are recorded as gaps rather than closed up: renumbering
 would break every cross-reference the documents already carry, and silence would invite the next author to
 reuse the number for something unrelated. **Do not assign 19 or 22 to a new decision.** The next number is
-59.
+61.
 
 **20 and 21 were assigned, then renumbered, and two pointers were left behind.** Both were opened in
 `payments.md` and renumbered to 27 and 28 before that document was committed, to avoid colliding with 23

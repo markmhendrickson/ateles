@@ -12,7 +12,7 @@ for changing the swarm's own operation), and PR #745 operator review (2026-09-05
 23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default),
 and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: one live instance,
 completion creates the next, `FOLLOWS` task to task), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the task-sources index, the intake rule, and open decision 36). Supersedes `docs/archive/task_execution_loop.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: an intake rule may key on a field a step wrote on a type it may name, with the writer in its provenance predicate; decision 36 untouched). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a status and claimability read from the checkpoint; the declared terminal set; two moments open a batch; `tasks_attached[]`; the next recurring instance created and read back before the closing sign-off; a terminal status only where the declaration permits none; the writer as the cross-type cycle check's enforcement point; C2 settled by the write contract). Revised by the rulings pass of 2026-09-06 (revision 38: a `signed` or blocking sign-off is written under a held lease, cited from decision 44's ruling; the bootstrap set as the closed list decision 43 rules). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 36 ruled here — a rule keys on no work-model record type, the operator's lean toward every type considered and set aside; decision 43's second half cited as ruled; the C2 and `blocked` settlements marked reviewed and upheld). Revised by the planning pass of 2026-09-06 (revision 40: a task's one `PART_OF` edge targets its parent task or a planning record; the ascent as a derived read distinct from the chain; unplanned work admitted).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: an intake rule may key on a field a step wrote on a type it may name, with the writer in its provenance predicate; decision 36 untouched). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a status and claimability read from the checkpoint; the declared terminal set; two moments open a batch; `tasks_attached[]`; the next recurring instance created and read back before the closing sign-off; a terminal status only where the declaration permits none; the writer as the cross-type cycle check's enforcement point; C2 settled by the write contract). Revised by the rulings pass of 2026-09-06 (revision 38: a `signed` or blocking sign-off is written under a held lease, cited from decision 44's ruling; the bootstrap set as the closed list decision 43 rules). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 36 ruled here — a rule keys on no work-model record type, the operator's lean toward every type considered and set aside; decision 43's second half cited as ruled; the C2 and `blocked` settlements marked reviewed and upheld). Revised by the planning pass of 2026-09-06 (revision 40: a task's one `PART_OF` edge targets its parent task or a planning record; the ascent as a derived read distinct from the chain; unplanned work admitted). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: `runner`, already defined in `vocabulary.md`, settled as the seat a step's outcome depends on — no new type introduced).
 
 ## Purpose
 
@@ -1136,6 +1136,38 @@ what it left — and that is stated as the design, not as a habit: the recovery 
 and its absence would be visible. Requiring a session to claim a lease like the other three would close the
 gap in theory and be bypassed in practice, and a rule that is bypassed is not a control (principle 1);
 naming the mechanism honestly and designing its recovery is what the model can actually hold.
+
+### A step's outcome depends on which runner ran it, and `runner` already names that seat
+
+**Settled, not opened.** `runner`/`harness` read as absent from the kernel because the retired term a
+reader would search for — `claimant`, retired for lease holder in the simplification pass (revision 29) —
+did not carry the seat's name forward with it. `vocabulary.md#runner` defines it: "the process that runs an agent and holds a
+lease on the agent's behalf, identified by a runner id the persisted lease names." Every one of the four
+mechanisms above is a way work reaches a **principal** (`agent` or `operator`); `runner` is the answer to
+the next question, which process executes on the principal's behalf once work is claimed, and it is
+distinct from `agent_session` (the identity metadata a runner's work leaves — host, checkout, branch,
+head — that observations lack, `vocabulary.md#agent_session`) and from `agent` itself (the principal, never
+the process — `vocabulary.md#runner`'s own **Not for**). No fourth thing needs naming; the two already
+named divide cleanly: what a runner *is* (the leaseholder process) from what it *left behind* (the session
+identity).
+
+**Why a step's outcome does depend on it, and why that does not call for a new type.** Harness capability,
+tool availability, and model tier are properties of the runner that executes a step, and the design already
+resolves each without inventing a runner-specific record: which tools a runner's agent may invoke is a
+dimension of its `agent_grant` (decision 41; `authority_model.md#grants`); which harness a role prefers and
+its model tier are a `vendor_binding`'s, bound to the role the runner fills (decision 42,
+`migration.md#where-a-skills-harness-mechanics-live`). A sign-off pins `agent_version`
+(`data_model.md#concepts`), so "under what allowlist, and at what tier, did the runner execute" is an
+as-of read of the grant and the binding at `signed_at` — attestable because the grant and the binding are
+in the record already, exactly the reasoning decision 42 used to reject a new context type for harness
+mechanics. `runner` itself carries no additional field for any of this and needs none: it is the identifier
+a lease names, and the properties that make one run differ from another hang off the `agent` whose lease it
+holds and the `vendor_binding` that agent's role is bound to — the design's existing per-principal and
+per-vendor homes, not a per-runner one.
+
+**What this does not settle.** That a runner's tier can change, or become unavailable, mid-lease — after
+the step was claimed and before it closed — is a distinct question from where the runner concept lives; see
+`failure_posture.md#a-runners-model-or-harness-going-unavailable-mid-step`.
 
 ### Whether the step path is a mechanism of its own, and what the engine is called
 

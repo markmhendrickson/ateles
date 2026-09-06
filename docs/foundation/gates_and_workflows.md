@@ -10,7 +10,7 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
 memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram), and the operator's 2026-09-05 12:52 memo (revision 21: the general claim about self-modification, stated in `work_model.md` and cross-referenced from decision 17), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 17 ruled here; the `dependency_cycle` reason class), and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: the next instance is a created task and not a successor), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: `intake_rule` joins the governance list). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding). Revised by the workflow-format pass of 2026-09-06 (revision 34: two declared intervals on every step, `unclaimed_after` and `hold_bound`; a planned wait as a step's own close condition held under decision 13; required coverage as the value of `freshness`; consent over several like actions as one presentation of several checkpoints; the governance class with no policy value named among what resolves to `NEVER`).consistency pass of 2026-09-06 (revision 35: when the checkpoint a `consent` step carries is written, and what the gate evaluates at the take; the merge action's class named `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a step's bound may be declared as the task's `due_date`; an `operator_only` action inside a workflow is taken by the operator and its step closes on the confirmation, never on the resolution; a read dependency on a special-category type carries no marker of its own). Revised by the testability pass of 2026-09-06 (revision 37: the finding as an entity the rules bind on; `rounds_cap`; the recorded amendment; an optional step's condition reads what exists; `none_permitted`; the floor-list sentence retired; open decision 56 — where the enforcement point for a governance write sits). Revised by the rulings pass of 2026-09-06 (revision 38: decision 32 ruled — the `verdict` stays a stored field, the sign-off's own projection of its findings and its author, reconciled at the write). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 56 ruled here — the sole-writer grant, the engine acting for the gate; the checkpoint's raiser and resolver never one principal save the operator's marked self-resolution, decision 47; the finding-as-entity settlement marked reviewed and upheld). Revised by the planning pass of 2026-09-06 (revision 40: the amendment to a planning record as the third named class of internal writes that are actions, `amend_<level>`; a lesson at a planning record's scope filed one level up).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding). Revised by the workflow-format pass of 2026-09-06 (revision 34: two declared intervals on every step, `unclaimed_after` and `hold_bound`; a planned wait as a step's own close condition held under decision 13; required coverage as the value of `freshness`; consent over several like actions as one presentation of several checkpoints; the governance class with no policy value named among what resolves to `NEVER`).consistency pass of 2026-09-06 (revision 35: when the checkpoint a `consent` step carries is written, and what the gate evaluates at the take; the merge action's class named `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a step's bound may be declared as the task's `due_date`; an `operator_only` action inside a workflow is taken by the operator and its step closes on the confirmation, never on the resolution; a read dependency on a special-category type carries no marker of its own). Revised by the testability pass of 2026-09-06 (revision 37: the finding as an entity the rules bind on; `rounds_cap`; the recorded amendment; an optional step's condition reads what exists; `none_permitted`; the floor-list sentence retired; open decision 56 — where the enforcement point for a governance write sits). Revised by the rulings pass of 2026-09-06 (revision 38: decision 32 ruled — the `verdict` stays a stored field, the sign-off's own projection of its findings and its author, reconciled at the write). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 56 ruled here — the sole-writer grant, the engine acting for the gate; the checkpoint's raiser and resolver never one principal save the operator's marked self-resolution, decision 47; the finding-as-entity settlement marked reviewed and upheld). Revised by the planning pass of 2026-09-06 (revision 40: the amendment to a planning record as the third named class of internal writes that are actions, `amend_<level>`; a lesson at a planning record's scope filed one level up). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: open decision 59 — where a minimum model tier per action class or blast radius would live, should an instance choose to declare one).
 
 ## Purpose
 
@@ -1057,6 +1057,60 @@ series clears its count; `NEVER` short-circuits ahead of the confidence axis and
 advisory path (`route_task`) and the enforcing path resolve identically, and a parity test holds the
 duplicated never-set equal across the two modules. An unreachable policy source is a halt
 (`failure_posture.md`), not a fallback policy with an empty low-blast set.
+
+### Blast radius selects the gate; nothing yet selects the model a step runs at
+
+**Open decision 59.** Registered in `conformance.md#the-register-of-open-design-decisions`. Blast radius
+selects the gate on the action a step takes (above), but which model the runner works the step under is not
+resolved from the action at all: a runner's harness preference and model tier are a `vendor_binding`'s,
+bound to the role the runner fills (decision 42, `migration.md#where-a-skills-harness-mechanics-live`), so a payment step and
+a low-blast read run at whatever tier the role's binding carries. Nothing in the design ties a step's
+required model strength to the stakes of the action it is about to take.
+
+**The shape, not the values.** Whether an instance sets a minimum tier at all, and what it sets it to, is
+the operator's cost/quality trade — the same kind of value 50b and 53b left open rather than ruling. What
+this decision settles is *where such a value would live if written*, so that the next author does not
+invent a place for it. Three candidates, read against principle 6 (extend the mechanism that already
+generalizes; do not build a parallel one) and principle 9 (one home): a `min_tier` per action class on the
+**`action_policy`**, beside `metered_resources[]` and `recoveries` — the entity already resolves a class to
+a blast tier at the moment the action would be taken, so a class's minimum model strength is a value of the
+same kind on the same entity, checked at the same evaluation rather than a second one; a field on the
+**workflow declaration**'s step — the step already carries `owner_role`, resolved to a principal at claim
+time, so a step-level minimum would sit beside it; or a field on the **`vendor_binding`** itself, which is
+where the tier that would be checked against the minimum already lives, but binding the floor to the same
+entity that supplies the value collapses the check into a tautology — a binding cannot be the thing that
+disqualifies itself.
+
+**Why `action_policy` is the shape that holds.** The two questions gate reasoning already keeps apart —
+"which actions may be taken and under what gate" is the `action_policy`'s; "which principals may claim
+which steps" is the workflow's declared step owners together with the `agent_grant`s in force
+(`#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`) — put a minimum-tier
+requirement on the first side: it is a condition on whether the action the step is about to take may
+proceed, not a condition on who may claim the step. A minimum on the workflow declaration would blur that
+line, since a step's owner role is claim eligibility and a tier floor is a gate condition, and principle 6
+already extends `action_policy` for exactly this shape of value (`metered_resources[]`, decision 53;
+`recoveries`, `lapse_cap`). Putting the floor there also keeps it evaluated where blast already is: at the
+moment the action would be taken, against the class the action carries, so a step whose declared
+`action_type` is later confirmed as the higher-blast one at execution is checked against that class's
+floor and not the one it was provisioned under.
+
+**Fail-closed, not a parallel permission system.** A class with a minimum tier written and a runner whose
+`vendor_binding` resolves below it is not a lower-confidence action to be scored and gated the ordinary
+way — the model itself is disqualified from taking the action, which is a different failure than the
+action being denied on its merits. This must not become a second decision point beside the action gate
+(principle 6): the check is a precondition the gate evaluates before scoring confidence, resolving to
+`NEVER` for that runner exactly as an unclassified action class does (`#confidence-and-three-blast-tiers`)
+— the runner is simply not eligible to take this action, and eligibility to claim the step is a separate
+question the workflow's step owners and grants already answer. A class left with no minimum written stays
+ungated on this axis, exactly as an action class the policy has not classified resolves to the existing
+rule rather than to a new default (`#confidence-and-three-blast-tiers`). See gap 3
+(`failure_posture.md#a-runners-model-or-harness-going-unavailable-mid-step`) for what happens when a
+runner already holding the lease loses the tier it started with.
+
+**What would decide it.** The values a written `action_policy` would carry are the operator's, opened
+alongside this decision and not ruled by it. What is ruled is that a `min_tier` (or equivalently-shaped
+field) per action class belongs on the `action_policy`, evaluated at the same take as blast, should an
+instance choose to declare one.
 
 ### An unreadable workflow is unknown, and unknown holds
 
