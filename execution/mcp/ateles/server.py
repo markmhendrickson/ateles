@@ -756,7 +756,29 @@ def _get_gate_status(issue_ref: str, history_limit: int = 5) -> dict:
     snap = _snapshot_of(entity)
     eid = entity.get("entity_id", entity.get("id", ""))
 
-    gate_status = snap.get("gate_status") or {}
+    # An entity id that RESOLVES is not yet an issue whose gates can be read.
+    # Passing a non-issue id (an agent_grant, a task, a checkpoint_brief) used
+    # to fall through to the gate parsing below, where a snapshot with no
+    # `gate_status` key produced `{}` — which `_blocking_gates` then reports as
+    # every gate blocking, indistinguishable from a real, fully-unsigned issue.
+    # That is the reporting-without-binding shape: the caller cannot tell "not
+    # yet reviewed" from "you read the wrong record". An unreadable gate must
+    # HOLD AND RAISE, never silently block.
+    entity_type = str(entity.get("entity_type") or snap.get("entity_type") or "").strip()
+    if entity_type and entity_type != "issue":
+        return {
+            "error": (
+                f"entity {eid} is of type '{entity_type}', not 'issue' — it has "
+                "no gate_status to read. Gate state was NOT evaluated; this is "
+                "not a report that gates are pending."
+            ),
+            "entity_id": eid,
+            "entity_type": entity_type,
+            "gates_evaluated": False,
+        }
+
+    raw_gate_status = snap.get("gate_status")
+    gate_status = raw_gate_status or {}
     if isinstance(gate_status, str):
         try:
             gate_status = json.loads(gate_status)
@@ -764,6 +786,13 @@ def _get_gate_status(issue_ref: str, history_limit: int = 5) -> dict:
             gate_status = {}
     if not isinstance(gate_status, dict):
         gate_status = {}
+
+    # `gate_status` absent entirely means the issue was never triaged — a
+    # DIFFERENT state from "triaged and every gate still pending", and the one
+    # that stalled neotoma#2301 ("pending (unverifiable) — no parent issue
+    # entity"). Report it as uninitialised so the caller escalates to triage
+    # instead of waiting on sign-offs nobody was ever asked for.
+    gates_initialised = isinstance(raw_gate_status, (dict, str)) and bool(gate_status)
 
     history = _dedupe_history(_parse_owner_history(snap.get("owner_history")))
     # Stored oldest-first; the recent entries are the ones that explain "who
@@ -786,14 +815,25 @@ def _get_gate_status(issue_ref: str, history_limit: int = 5) -> dict:
         "gate_status": gate_status,
         "blocking_gates": blocking,
         "all_gates_cleared": not blocking,
+        # True only when a gate record was actually read. False means the gates
+        # were never initialised, so `blocking_gates` reflects an ABSENT record
+        # rather than withheld sign-offs.
+        "gates_initialised": gates_initialised,
         "owner_history_recent": recent,
         "owner_history_total": len(history),
         "pipeline": pipeline,
-        "interpretation": _gate_interpretation(snap, blocking, pipeline),
+        "interpretation": _gate_interpretation(
+            snap, blocking, pipeline, gates_initialised
+        ),
     }
 
 
-def _gate_interpretation(snap: dict, blocking: list[str], pipeline: dict) -> str:
+def _gate_interpretation(
+    snap: dict,
+    blocking: list[str],
+    pipeline: dict,
+    gates_initialised: bool = True,
+) -> str:
     """One line answering "is the swarm going to continue this?".
 
     Deliberately conservative: it reports what the records show and never
@@ -813,6 +853,14 @@ def _gate_interpretation(snap: dict, blocking: list[str], pipeline: dict) -> str
     if not blocking:
         return "all gates cleared — nothing gate-blocked here"
     gates = ", ".join(blocking)
+    if not gates_initialised:
+        # Never phrase an absent record as "waiting on <owner>": nobody was
+        # asked, so nobody is withholding. The remedy is triage, not a sign-off.
+        return (
+            f"gate_status was NEVER INITIALISED on this issue — gates ({gates}) "
+            "are unevaluated, not withheld. This needs Lanius triage to "
+            "initialise them, not a sign-off from a gate owner."
+        )
     if owner:
         return f"waiting on {owner} for gate(s): {gates}"
     return f"waiting on gate(s): {gates} (no current_owner recorded)"

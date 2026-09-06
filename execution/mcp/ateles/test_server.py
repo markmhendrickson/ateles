@@ -993,5 +993,71 @@ class TestSwarmObservability(unittest.TestCase):
         self.assertIn("error", out)
 
 
+class TestUnreadableGatesHoldAndRaise(unittest.TestCase):
+    """An unreadable gate record must HOLD AND RAISE, never read as 'pending'.
+
+    The failure this locks out: a gate check that cannot distinguish "not yet
+    reviewed" from "the record it reads is broken" reports both as every gate
+    blocking, so finished work stalls on a bookkeeping state and the report
+    names gate owners who were never actually asked for anything.
+    """
+
+    def test_non_issue_entity_errors_instead_of_reporting_all_gates_pending(self):
+        """Passing an agent_grant id must not fabricate an all-pending map."""
+        with patch.object(
+            srv,
+            "_get",
+            return_value={
+                "entity_id": "ent_grant",
+                "entity_type": "agent_grant",
+                "snapshot": {"status": "active"},
+            },
+        ):
+            out = srv._get_gate_status("ent_grant")
+        self.assertIn("error", out)
+        self.assertIs(out["gates_evaluated"], False)
+        self.assertEqual(out["entity_type"], "agent_grant")
+        # The bug signature: a blocking-gate list for a non-issue record.
+        self.assertNotIn("blocking_gates", out)
+
+    def test_uninitialised_gate_status_is_flagged_not_reported_as_withheld(self):
+        """No gate_status at all is 'never triaged', not 'owners withholding'."""
+        with patch.object(
+            srv,
+            "_get",
+            return_value={
+                "entity_id": "ent_issue",
+                "entity_type": "issue",
+                "snapshot": {"repo": "o/r", "github_number": 1, "current_owner": "pavo"},
+            },
+        ), patch.object(srv, "_pipeline_state_for", return_value={"stage": None}):
+            out = srv._get_gate_status("ent_issue")
+        self.assertIs(out["gates_initialised"], False)
+        self.assertIn("NEVER INITIALISED", out["interpretation"])
+        # Must NOT phrase an absent record as a named owner withholding sign-off.
+        self.assertNotIn("waiting on pavo", out["interpretation"])
+
+    def test_real_pending_gates_still_report_as_waiting(self):
+        """The genuine unsigned case is unchanged — this is not a blanket pass."""
+        with patch.object(
+            srv,
+            "_get",
+            return_value={
+                "entity_id": "ent_issue",
+                "entity_type": "issue",
+                "snapshot": {
+                    "repo": "o/r",
+                    "github_number": 1,
+                    "current_owner": "waxwing",
+                    "gate_status": {"pm": "signed_off", "arch": "pending"},
+                },
+            },
+        ), patch.object(srv, "_pipeline_state_for", return_value={"stage": None}):
+            out = srv._get_gate_status("ent_issue")
+        self.assertIs(out["gates_initialised"], True)
+        self.assertIn("arch", out["blocking_gates"])
+        self.assertIn("waiting on waxwing", out["interpretation"])
+
+
 if __name__ == "__main__":
     unittest.main()
