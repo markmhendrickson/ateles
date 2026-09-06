@@ -4389,8 +4389,12 @@ def test_vanellus_prompt_instructs_post_via_gh_cli():
     """_vanellus_prompt must tell Vanellus to post via the gh CLI."""
     t = _trigger()
     prompt = SwarmDispatcher._vanellus_prompt(t, parent=80, lenses=["pm", "qa"])
-    # The exact marker must appear so Vanellus uses it in its comment.
-    assert _VANELLUS_COMMENT_MARKER in prompt
+    # Authoritative freshness is the HTML commit= marker (ateles#507 Eng lock).
+    assert "<!-- vanellus-aggregation commit=<full40hex> -->" in prompt
+    assert "headRefOid" in prompt
+    # Prose Reviewed commit: must be labeled optional / non-authoritative.
+    assert "OPTIONAL human redundancy" in prompt
+    assert "does not match that line" in prompt
 
 
 def test_vanellus_prompt_instructs_repeat_for_fallback():

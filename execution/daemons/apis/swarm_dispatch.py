@@ -1175,70 +1175,102 @@ def compose_fallback_comment(lens: str, agent: str, text: str) -> str:
 
 # Stable marker embedded in every Vanellus aggregation comment so the
 # dispatcher can detect whether the comment landed (dedup / missing-check).
+#
+# Bare form (legacy / unknown head): ``<!-- vanellus-aggregation -->``
+# Authoritative freshness form (ateles#507 Eng lock): 
+# ``<!-- vanellus-aggregation commit=<full40hex> -->``
+#
+# Detection MUST use ``has_vanellus_aggregation_marker`` / the prefix — the bare
+# constant is NOT a substring of the stamped form (``commit=`` sits before ``-->``).
 _VANELLUS_COMMENT_MARKER = "<!-- vanellus-aggregation -->"
+_VANELLUS_COMMENT_MARKER_PREFIX = "<!-- vanellus-aggregation"
+_VANELLUS_AGGREGATION_MARKER_RE = re.compile(
+    r"<!--\s*vanellus-aggregation(?:\s+commit=([0-9a-fA-F]{40}))?\s*-->"
+)
 
 # Page cap for the comment scan (ateles#430). 50 pages = 5000 comments, far
 # beyond any real PR; it exists so a pathological thread cannot spin the loop,
 # and it logs when hit rather than truncating silently.
 _MAX_COMMENT_PAGES = 50
 
-# Head-SHA stamp carried by every aggregation comment, so a verdict can be
-# matched to the commit it was actually made against.
-#
-# GitHub's `dismiss_stale_reviews` (enabled on both repos) dismisses a native
-# *review* when the head moves. It cannot touch an issue comment, and
-# `_pr_review_is_clear` reads the aggregation comment body directly rather than
-# `reviewDecision` — so without this stamp a verdict written against an old head
-# still reads as current, and the dispatcher files merge-readiness on a review
-# that never saw the code now proposed for merge.
+# Optional human-readable redundancy. NEVER the gate input — parsers must
+# ignore this line. Authoritative freshness is ``commit=<sha>`` on the HTML
+# aggregation marker (ateles#507 Eng lock).
 _VANELLUS_SHA_PREFIX = "Reviewed commit:"
 
 
-def compose_reviewed_commit_line(head_sha: str) -> str:
-    """The ``Reviewed commit: <sha>`` line stamped into an aggregation comment.
+def compose_vanellus_aggregation_marker(head_sha: str = "") -> str:
+    """HTML aggregation marker, optionally carrying the reviewed head SHA.
 
-    Returns "" for a falsy SHA so a composer that could not resolve the head
-    emits no stamp at all, rather than a stamp asserting the empty commit.
+    When ``head_sha`` is a full 40-hex OID, emit
+    ``<!-- vanellus-aggregation commit=<sha> -->`` — the sole input
+    ``review_verdict_matches_head`` trusts. Otherwise emit the bare legacy
+    marker so unstamped / unknown-head comments remain detectable and fail-open.
+    """
+    sha = (head_sha or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{40}", sha):
+        return f"<!-- vanellus-aggregation commit={sha} -->"
+    return _VANELLUS_COMMENT_MARKER
+
+
+def has_vanellus_aggregation_marker(body: str) -> bool:
+    """True when ``body`` carries a bare or commit=-stamped aggregation marker."""
+    return _VANELLUS_COMMENT_MARKER_PREFIX in (body or "")
+
+
+def compose_reviewed_commit_line(head_sha: str) -> str:
+    """Optional human-readable ``Reviewed commit: <sha>`` line.
+
+    Not authoritative — ``parse_aggregation_commit`` / the merge-gate freshness
+    predicate ignore this line. Kept so readers can see the SHA without opening
+    the HTML source. Returns "" when the head is unknown.
     """
     sha = (head_sha or "").strip()
     return f"{_VANELLUS_SHA_PREFIX} {sha}" if sha else ""
 
 
-def parse_reviewed_commit(body: str) -> str | None:
-    """Extract the head SHA an aggregation comment was written against.
+def parse_aggregation_commit(body: str) -> str | None:
+    """Extract ``commit=<full40hex>`` from the Vanellus aggregation HTML marker.
 
-    Returns None when the comment carries no stamp — which is how every
-    aggregation posted before this change reads. Callers decide what an
-    unstamped verdict means; see ``review_verdict_matches_head``.
+    Returns None when the comment carries no ``commit=`` attribute (bare legacy
+    marker, or no marker). Prose ``Reviewed commit:`` is intentionally ignored —
+    it is human redundancy only (ateles#507 Eng lock).
     """
-    for line in (body or "").splitlines():
-        stripped = line.strip()
-        if stripped.startswith(_VANELLUS_SHA_PREFIX):
-            sha = stripped[len(_VANELLUS_SHA_PREFIX) :].strip().strip("`")
-            return sha or None
+    for match in _VANELLUS_AGGREGATION_MARKER_RE.finditer(body or ""):
+        sha = match.group(1)
+        if sha:
+            return sha.lower()
     return None
+
+
+# Back-compat alias — same HTML-marker parse; never reads prose.
+parse_reviewed_commit = parse_aggregation_commit
 
 
 def review_verdict_matches_head(body: str, head_sha: str) -> bool:
     """True when this verdict was written against ``head_sha``.
 
-    Deliberately fails OPEN on an unstamped comment: aggregations posted before
-    the stamp existed carry no SHA, and treating them as stale would strand
-    every already-reviewed open PR the moment this ships. Those verdicts were no
-    more trustworthy before this change than after it, so this is not a
-    regression — it is the pre-existing behaviour, now confined to comments that
-    predate the stamp.
+    Freshness reads ONLY the HTML marker's ``commit=<full40hex>`` attribute.
+    Prose ``Reviewed commit:`` is ignored.
+
+    Deliberately fails OPEN on an unstamped (bare-marker / pre-stamp) comment:
+    aggregations posted before the stamp existed carry no SHA, and treating
+    them as stale would strand every already-reviewed open PR the moment this
+    ships. Those verdicts were no more trustworthy before this change than
+    after it, so this is not a regression — it is the pre-existing behaviour,
+    now confined to comments that predate the stamp.
 
     Fails open, too, when the caller cannot supply a head SHA: an unknown head
     is not evidence of staleness, and treating it as such would block merges on
     an unrelated read failure.
 
-    A stamp that is PRESENT and DIFFERENT is the real signal, and returns False.
+    A ``commit=`` that is PRESENT and DIFFERENT is the real signal, and
+    returns False.
     """
-    stamped = parse_reviewed_commit(body)
+    stamped = parse_aggregation_commit(body)
     if not stamped or not head_sha:
         return True
-    return stamped == head_sha
+    return stamped == head_sha.strip().lower()
 
 
 def latest_aggregation_comment(comments: list[dict]) -> dict | None:
@@ -1263,7 +1295,9 @@ def latest_aggregation_comment(comments: list[dict]) -> dict | None:
     and sorting only what you fetched cannot find what was never returned.
     """
     candidates = [
-        c for c in comments if _VANELLUS_COMMENT_MARKER in (c.get("body") or "")
+        c
+        for c in comments
+        if has_vanellus_aggregation_marker(c.get("body") or "")
     ]
     if not candidates:
         return None
@@ -1276,27 +1310,26 @@ def latest_aggregation_comment(comments: list[dict]) -> dict | None:
 def vanellus_comment_missing(comment_bodies: list[str]) -> bool:
     """Return True when no Vanellus aggregation comment has landed on the PR.
 
-    Detects the stable HTML marker ``_VANELLUS_COMMENT_MARKER`` that the
+    Detects the stable HTML marker (bare or ``commit=``-stamped) that the
     dispatcher prefixes to every fallback comment it posts on Vanellus's
     behalf, and that the _vanellus_prompt instructs Vanellus to include when
     it posts its own comment directly.  A missing comment means neither
     Vanellus nor a prior fallback post succeeded."""
-    return not any(_VANELLUS_COMMENT_MARKER in body for body in comment_bodies)
+    return not any(has_vanellus_aggregation_marker(body) for body in comment_bodies)
 
 
 def compose_vanellus_fallback_comment(text: str, head_sha: str = "") -> str:
     """Body for a dispatcher-posted Vanellus aggregation comment.
 
-    Prefixed with the stable marker so future dedup checks can find it, and
-    with the Vanellus attribution header so readers know which agent authored
-    the verdict.
-
-    Carries a ``Reviewed commit:`` stamp when ``head_sha`` is known, so
-    ``_pr_review_is_clear`` can tell later whether this verdict still describes
-    the code at the PR's head."""
+    Prefixed with the aggregation HTML marker (``commit=<sha>`` when known) so
+    dedup and ``_pr_review_is_clear`` freshness can find it, plus the Vanellus
+    attribution header. Optionally repeats the SHA as a human-readable
+    ``Reviewed commit:`` line — never the gate input.
+    """
+    marker = compose_vanellus_aggregation_marker(head_sha)
     reviewed = compose_reviewed_commit_line(head_sha)
     return (
-        f"{_VANELLUS_COMMENT_MARKER}\n"
+        f"{marker}\n"
         f"{attribution_header('vanellus', 'PR steward')}\n"
         + (f"{reviewed}\n" if reviewed else "")
         + f"\n{text}\n\n"
@@ -2574,7 +2607,7 @@ class SwarmDispatcher:
             m = self._REVIEW_DEFERRED_RE.search(body)
             if m:
                 latest_iso = m.group(1)
-            elif _VANELLUS_COMMENT_MARKER in body:
+            elif has_vanellus_aggregation_marker(body):
                 latest_iso = None
         return latest_iso is not None
 
@@ -2879,7 +2912,7 @@ class SwarmDispatcher:
                     m = self._REVIEW_DEFERRED_RE.search(body)
                     if m:
                         latest_iso = m.group(1)  # a newer deferral supersedes
-                    elif _VANELLUS_COMMENT_MARKER in body:
+                    elif has_vanellus_aggregation_marker(body):
                         latest_iso = None  # a verdict after a deferral clears it
                 if latest_iso is None:
                     # No live deferral: either never deferred, or a verdict has
@@ -5252,11 +5285,6 @@ class SwarmDispatcher:
                 comments = await self._all_issue_comments(
                     t.repository, t.number, client
                 )
-                candidates = [
-                    c
-                    for c in comments
-                    if _VANELLUS_COMMENT_MARKER in (c.get("body") or "")
-                ]
                 comment = latest_aggregation_comment(comments)
                 if comment is not None:
                     body = comment.get("body") or ""
@@ -5338,7 +5366,7 @@ class SwarmDispatcher:
                     log.info(
                         f"[{DAEMON_NAME}] {repository}#{pr_number}: latest "
                         f"aggregation was reviewed against "
-                        f"{(parse_reviewed_commit(body) or '')[:9]} but PR head "
+                        f"{(parse_aggregation_commit(body) or '')[:9]} but PR head "
                         f"is {head_sha[:9]} — stale verdict, treating as "
                         "not-clear"
                     )
@@ -7118,14 +7146,16 @@ class SwarmDispatcher:
             f"{_agent_prompt_instruction('vanellus', 'PR steward')}\n\n"
             "POST YOUR AGGREGATED VERDICT AS A PR COMMENT using the gh CLI "
             f"(`gh pr comment {t.number} --repo {t.repository} --body ...`). "
-            f"The comment MUST begin with the line `{_VANELLUS_COMMENT_MARKER}` "
-            "so the dispatcher can detect whether it landed. "
-            "It MUST also carry a line `Reviewed commit: <sha>` naming the head "
-            "commit you reviewed — get it with "
+            "The comment MUST begin with the HTML aggregation marker "
+            "`<!-- vanellus-aggregation commit=<full40hex> -->` naming the head "
+            "commit you reviewed (get it with "
             f"`gh pr view {t.number} --repo {t.repository} --json headRefOid "
-            "-q .headRefOid`. The dispatcher matches that SHA against the PR "
-            "head before treating your verdict as current, so an unstamped or "
-            "wrong-commit verdict will not gate a merge. "
+            "-q .headRefOid`). That `commit=` attribute is the ONLY freshness "
+            "input the dispatcher trusts — it matches that SHA against the PR "
+            "head before treating your verdict as current, so a bare/unmarked "
+            "or wrong-commit verdict will not gate a merge. "
+            "A prose `Reviewed commit: <sha>` line is OPTIONAL human redundancy "
+            "only; the dispatcher does not match that line. "
             "Repeat the full aggregated verdict text in your reply here (the "
             "dispatcher parses it and posts the comment for you if your gh "
             "call fails).\n\n"
