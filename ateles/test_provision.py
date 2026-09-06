@@ -23,6 +23,13 @@ def test_plan_registers_each_context_schema():
         assert any(schema in d for d in registered)
 
 
+def test_provision_plan_includes_apis_unroutable_ledger():
+    """Fresh-instance dry-run must plan the unroutable-ledger schema (ateles#697)."""
+    registered = [s.detail for s in plan(_clean_cfg()) if s.action == "register_schema"]
+    assert any("apis_unroutable_ledger" in d for d in registered)
+    assert "apis_unroutable_ledger" in CONTEXT_SCHEMAS
+
+
 def test_plan_seeds_operator_profile_from_config():
     details = [s.detail for s in plan(_clean_cfg()) if s.action == "seed_entity"]
     assert any("example.com" in d and "Jane" in d for d in details)
