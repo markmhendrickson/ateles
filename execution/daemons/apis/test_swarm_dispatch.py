@@ -997,7 +997,7 @@ def _ci_status_trigger(**over):
 
 
 def _wire_ci_status(monkeypatch, *, ci_state, review_clear, pr_head="abc123",
-                    pr_state="open", pr_draft=False, calls):
+                    pr_state="open", pr_draft=False, calls, review_heads=None):
     async def fake_fetch_pr(self, repo, num):
         return {"number": num, "state": pr_state, "draft": pr_draft,
                 "title": "t", "body": "Closes #80", "html_url": "u",
@@ -1006,7 +1006,11 @@ def _wire_ci_status(monkeypatch, *, ci_state, review_clear, pr_head="abc123",
     async def fake_ci(self, trigger):
         return ci_state
 
-    async def fake_clear(self, repo, num):
+    async def fake_clear(self, repo, num, head_sha=""):
+        # Record the head SEPARATELY from `calls`: one test asserts
+        # `calls == []`, and a probe entry there would mask a real dispatch.
+        if review_heads is not None:
+            review_heads.append(head_sha)
         return review_clear
 
     async def fake_route(self, trigger, parent):
@@ -1033,10 +1037,17 @@ def test_ci_status_failing_routes_to_fix(monkeypatch):
 
 def test_ci_status_green_and_review_clear_gates_readiness(monkeypatch):
     calls = []
-    d = _wire_ci_status(monkeypatch, ci_state="green", review_clear=True, calls=calls)
+    review_heads = []
+    d = _wire_ci_status(
+        monkeypatch, ci_state="green", review_clear=True, calls=calls,
+        review_heads=review_heads,
+    )
     asyncio.run(d._handle_ci_status(_ci_status_trigger()))
     assert ("gate", 87) in calls
     assert not any(c[0] == "route" for c in calls)
+    # The verdict check must be asked about the PR's CURRENT head. Passing ""
+    # here is the bug that let an approval of older code file merge-readiness.
+    assert review_heads == ["abc123"]
 
 
 def test_ci_status_green_but_review_not_clear_does_nothing(monkeypatch):
@@ -1094,7 +1105,7 @@ def test_ci_status_fetch_pr_failure_notifies_operator(monkeypatch):
     async def fake_ci(self, trigger):
         return "green"
 
-    async def fake_clear(self, repo, num):
+    async def fake_clear(self, repo, num, head_sha=""):
         return True
 
     async def fake_route(self, trigger, parent):
@@ -1139,7 +1150,7 @@ def test_ci_status_green_threads_ci_state_into_gate(monkeypatch):
     async def fake_ci(self, trigger):
         return "green"
 
-    async def fake_clear(self, repo, num):
+    async def fake_clear(self, repo, num, head_sha=""):
         return True
 
     async def fake_gate(self, trigger, parent, panel, ci_state=None):

@@ -1182,6 +1182,64 @@ _VANELLUS_COMMENT_MARKER = "<!-- vanellus-aggregation -->"
 # and it logs when hit rather than truncating silently.
 _MAX_COMMENT_PAGES = 50
 
+# Head-SHA stamp carried by every aggregation comment, so a verdict can be
+# matched to the commit it was actually made against.
+#
+# GitHub's `dismiss_stale_reviews` (enabled on both repos) dismisses a native
+# *review* when the head moves. It cannot touch an issue comment, and
+# `_pr_review_is_clear` reads the aggregation comment body directly rather than
+# `reviewDecision` — so without this stamp a verdict written against an old head
+# still reads as current, and the dispatcher files merge-readiness on a review
+# that never saw the code now proposed for merge.
+_VANELLUS_SHA_PREFIX = "Reviewed commit:"
+
+
+def compose_reviewed_commit_line(head_sha: str) -> str:
+    """The ``Reviewed commit: <sha>`` line stamped into an aggregation comment.
+
+    Returns "" for a falsy SHA so a composer that could not resolve the head
+    emits no stamp at all, rather than a stamp asserting the empty commit.
+    """
+    sha = (head_sha or "").strip()
+    return f"{_VANELLUS_SHA_PREFIX} {sha}" if sha else ""
+
+
+def parse_reviewed_commit(body: str) -> str | None:
+    """Extract the head SHA an aggregation comment was written against.
+
+    Returns None when the comment carries no stamp — which is how every
+    aggregation posted before this change reads. Callers decide what an
+    unstamped verdict means; see ``review_verdict_matches_head``.
+    """
+    for line in (body or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_VANELLUS_SHA_PREFIX):
+            sha = stripped[len(_VANELLUS_SHA_PREFIX) :].strip().strip("`")
+            return sha or None
+    return None
+
+
+def review_verdict_matches_head(body: str, head_sha: str) -> bool:
+    """True when this verdict was written against ``head_sha``.
+
+    Deliberately fails OPEN on an unstamped comment: aggregations posted before
+    the stamp existed carry no SHA, and treating them as stale would strand
+    every already-reviewed open PR the moment this ships. Those verdicts were no
+    more trustworthy before this change than after it, so this is not a
+    regression — it is the pre-existing behaviour, now confined to comments that
+    predate the stamp.
+
+    Fails open, too, when the caller cannot supply a head SHA: an unknown head
+    is not evidence of staleness, and treating it as such would block merges on
+    an unrelated read failure.
+
+    A stamp that is PRESENT and DIFFERENT is the real signal, and returns False.
+    """
+    stamped = parse_reviewed_commit(body)
+    if not stamped or not head_sha:
+        return True
+    return stamped == head_sha
+
 
 def latest_aggregation_comment(comments: list[dict]) -> dict | None:
     """Return the NEWEST Vanellus aggregation comment, or None if there is none.
@@ -1226,16 +1284,22 @@ def vanellus_comment_missing(comment_bodies: list[str]) -> bool:
     return not any(_VANELLUS_COMMENT_MARKER in body for body in comment_bodies)
 
 
-def compose_vanellus_fallback_comment(text: str) -> str:
+def compose_vanellus_fallback_comment(text: str, head_sha: str = "") -> str:
     """Body for a dispatcher-posted Vanellus aggregation comment.
 
     Prefixed with the stable marker so future dedup checks can find it, and
     with the Vanellus attribution header so readers know which agent authored
-    the verdict."""
+    the verdict.
+
+    Carries a ``Reviewed commit:`` stamp when ``head_sha`` is known, so
+    ``_pr_review_is_clear`` can tell later whether this verdict still describes
+    the code at the PR's head."""
+    reviewed = compose_reviewed_commit_line(head_sha)
     return (
         f"{_VANELLUS_COMMENT_MARKER}\n"
-        f"{attribution_header('vanellus', 'PR steward')}\n\n"
-        f"{text}\n\n"
+        f"{attribution_header('vanellus', 'PR steward')}\n"
+        + (f"{reviewed}\n" if reviewed else "")
+        + f"\n{text}\n\n"
         "_Posted by the Apis dispatcher on behalf of Vanellus — "
         "Vanellus could not post its aggregation comment directly._"
     )
@@ -5133,7 +5197,13 @@ class SwarmDispatcher:
 
         # CI green: only advance the merge-ready signal if review is ALREADY
         # clear. An unreviewed PR going green is the panel path's job, not ours.
-        if not await self._pr_review_is_clear(trigger.repository, pr_number):
+        # `current_head` is the SHA this method already validated the CI event
+        # against a few lines up. Pass it through: the verdict must have been
+        # made against the same commit CI just went green on, or merge-readiness
+        # is being filed off a review of different code.
+        if not await self._pr_review_is_clear(
+            trigger.repository, pr_number, current_head
+        ):
             log.info(
                 f"[{DAEMON_NAME}] {ref}: CI green but no clear panel verdict yet "
                 "— leaving to the review path"
@@ -5220,7 +5290,9 @@ class SwarmDispatcher:
             )
         return None, False
 
-    async def _pr_review_is_clear(self, repository: str, pr_number: int) -> bool:
+    async def _pr_review_is_clear(
+        self, repository: str, pr_number: int, head_sha: str = ""
+    ) -> bool:
         """True when the latest Vanellus aggregation on the PR is a clear verdict.
 
         Pages the PR's full comment list and selects the newest aggregation
@@ -5243,6 +5315,15 @@ class SwarmDispatcher:
         findings: a `**COMMENT**` aggregation listing a `[BLOCKING]` item read as
         clear here, and since this is the CI-green path, a PR could reach
         merge-ready on an aggregation that named its own blocker.
+
+        When ``head_sha`` is supplied, a verdict stamped with a DIFFERENT commit
+        is treated as not-clear. GitHub's `dismiss_stale_reviews` cannot help
+        here: it dismisses native reviews, and this reads the aggregation comment
+        body, which GitHub never dismisses. Without the check, pushing new
+        commits to an already-approved PR and letting CI go green files
+        merge-readiness — and emails the operator "READY TO MERGE" — off a
+        verdict that never saw the new code. Unstamped verdicts (posted before
+        the stamp existed) still pass; see ``review_verdict_matches_head``.
         """
         try:
             async with httpx.AsyncClient(timeout=30) as client:
@@ -5253,6 +5334,15 @@ class SwarmDispatcher:
                 if comment is None:
                     return False
                 body = comment.get("body") or ""
+                if not review_verdict_matches_head(body, head_sha):
+                    log.info(
+                        f"[{DAEMON_NAME}] {repository}#{pr_number}: latest "
+                        f"aggregation was reviewed against "
+                        f"{(parse_reviewed_commit(body) or '')[:9]} but PR head "
+                        f"is {head_sha[:9]} — stale verdict, treating as "
+                        "not-clear"
+                    )
+                    return False
                 return not review_blocks_merge(parse_review_verdict(body), body)
         except Exception as exc:
             log.warning(
@@ -7030,6 +7120,12 @@ class SwarmDispatcher:
             f"(`gh pr comment {t.number} --repo {t.repository} --body ...`). "
             f"The comment MUST begin with the line `{_VANELLUS_COMMENT_MARKER}` "
             "so the dispatcher can detect whether it landed. "
+            "It MUST also carry a line `Reviewed commit: <sha>` naming the head "
+            "commit you reviewed — get it with "
+            f"`gh pr view {t.number} --repo {t.repository} --json headRefOid "
+            "-q .headRefOid`. The dispatcher matches that SHA against the PR "
+            "head before treating your verdict as current, so an unstamped or "
+            "wrong-commit verdict will not gate a merge. "
             "Repeat the full aggregated verdict text in your reply here (the "
             "dispatcher parses it and posts the comment for you if your gh "
             "call fails).\n\n"
@@ -7488,7 +7584,12 @@ class SwarmDispatcher:
                         f"present on {t.repository}#{t.number} — no fallback needed"
                     )
                     return
-                body = compose_vanellus_fallback_comment(result.stdout)
+                # Stamp the commit this verdict describes. Best-effort: a
+                # failed head read yields "" and simply omits the stamp,
+                # which reads as unstamped (fail-open) rather than as a
+                # verdict against the wrong commit.
+                head_sha = (await self._pr_head_sha(t)) or ""
+                body = compose_vanellus_fallback_comment(result.stdout, head_sha)
                 post = await client.post(
                     url,
                     json={"body": body},
