@@ -1,15 +1,23 @@
-name: piculet daemon tests
+name: daemon tests
 
-# Runs the piculet daemon test suite in CI (ateles#225 / ateles#228 review
-# finding: test_watch.py existed but was never executed in CI because
-# ateles-tests.yml only triggers on ateles/**). Scoped to piculet + the repo
-# root working directory it's invoked from — not the full execution/daemons/**
-# tree, which has its own pre-existing CI-coverage gap tracked separately.
+# Runs the daemon regression suites that live under execution/daemons/**.
+# The ateles-package workflow (ateles-tests.yml) is path-scoped to ateles/**
+# and never triggers on daemon code, so daemon regression tests were invisible
+# to CI (QA gate finding on PRs #190/#198/#206, and the ateles#225 / ateles#228
+# review finding that piculet's test_watch.py existed but never ran). This lane
+# closes that gap for the Turdus and piculet daemons using only core deps
+# (httpx is a core dependency; apprise is import-guarded in lib/notify, so no
+# extra deps). The rest of execution/daemons/** still has a CI-coverage gap,
+# tracked separately.
 
 on:
   pull_request:
     paths:
+      - "execution/daemons/turdus/**"
       - "execution/daemons/piculet/**"
+      - "lib/**"
+      - "pyproject.toml"
+      - "uv.lock"
       - ".github/workflows/daemon-tests.yml"
   workflow_dispatch:
 
@@ -17,7 +25,19 @@ permissions:
   contents: read
 
 jobs:
-  pytest:
+  turdus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Run Turdus daemon tests
+        # Run from repo root so the tests' sys.path bootstrap (repo root +
+        # daemon dir) resolves lib.daemon_runtime / lib.notify imports.
+        run: uv run --extra dev python -m pytest execution/daemons/turdus/ -q
+
+  piculet:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
