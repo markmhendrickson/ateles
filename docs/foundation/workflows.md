@@ -493,7 +493,7 @@ workflow together, as one batch (`work_model.md#what-goes-through-a-workflow-is-
 
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
-| 1 | `criteria` | release steward | yes | | every criterion in the project's `release_criteria` entity, retrieved by type, is read and holds; a criterion that cannot be read is `unknown`, and unknown holds the batch (`principles.md`, invariant 7) |
+| 1 | `criteria` | release steward | yes | | every criterion in the `release_criteria` entity, retrieved by type, is read and holds; a criterion that cannot be read is `unknown`, and unknown holds the batch (`principles.md`, invariant 7) |
 | 2 | `release` | release steward | yes | on fail: `criteria` | the `release` action taken through the action gate; the tag, package, or deployment is read back at its terminal status (`principles.md`, invariant 2) |
 | 3 | `verify_deployed` | release steward | yes | on fail: `release` | the deployed checkout reports the released version; the sign-off closes the batch |
 

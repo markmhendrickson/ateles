@@ -532,7 +532,7 @@ taken (`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`). Th
 principal's hands at the boundary: on permit it performs the operation, reads the result back from the
 external system, and writes the confirmation on the action (`taken_at`, `result_ref`); the record the
 effect left is an artifact `PRODUCES` from the batch. On a checkpoint it performs nothing. The class is
-resolved under the project's `action_policy`; a class in neither set resolves to `NEVER`
+resolved under the instance's `action_policy`; a class in neither set resolves to `NEVER`
 (`gates_and_workflows.md#confidence-and-three-blast-tiers`), so a policy that wants a low-blast comment
 lists the class the comment carries. The class names in the tables below are the policy's data, not a
 closed set: `open_issue` and `notify_operator` are this document's, beside the classes the workflows

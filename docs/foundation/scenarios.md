@@ -118,8 +118,9 @@ sequenceDiagram
 
 ## (d) Several tasks enter one workflow as a batch, review through release
 
-Three tasks belong in one change. They enter the project's `workflow` together: a batch record is opened
-and each task gets an `ADDRESSED_BY` edge to it. The batch advances from step to step: each step opens,
+Three tasks belong in one change. They enter one workflow together because the closing sign-off of their
+intake batch named it as successor and carried them into it: a batch record is opened and each task gets
+an `ADDRESSED_BY` edge to it. The batch advances from step to step: each step opens,
 its step owner claims it (a lease on the step), and closes it with a `sign-off`; `step_status` on each
 task projects the same state, so it is read in one retrieval. The pull request that carries the change is an `artifact`
 attached to the batch by edge; no step is taken on it. When every required review step is signed off,
@@ -154,6 +155,7 @@ flowchart LR
 ```
 
 **Invariants:** [`work_model.md#what-goes-through-a-workflow-is-a-batch-of-tasks`](work_model.md#what-goes-through-a-workflow-is-a-batch-of-tasks),
+[`#how-a-batch-is-formed-and-what-chooses-its-workflow`](work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow),
 [`#artifacts-are-records-a-batch-leaves-never-its-subject`](work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject),
 [`#a-task-is-in-at-most-one-batch-at-a-time`](work_model.md#a-task-is-in-at-most-one-batch-at-a-time),
 [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection),
@@ -190,6 +192,7 @@ flowchart TD
 ```
 
 **Invariants:** [`work_model.md#what-goes-through-a-workflow-is-a-batch-of-tasks`](work_model.md#what-goes-through-a-workflow-is-a-batch-of-tasks),
+[`#how-a-batch-is-formed-and-what-chooses-its-workflow`](work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow),
 [`#artifacts-are-records-a-batch-leaves-never-its-subject`](work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject),
 [`#a-task-is-in-at-most-one-batch-at-a-time`](work_model.md#a-task-is-in-at-most-one-batch-at-a-time);
 `principles.md` invariant 11.

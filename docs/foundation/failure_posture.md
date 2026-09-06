@@ -251,7 +251,7 @@ in either tier, the class its recovery is taken under, or `forward_only` where t
 reversal, or `none` where the class leaves nothing to undo (`data_model.md#concepts`); a policy write that
 lists a class in a tier and no recovery for it is refused at the write, so a class cannot be granted before
 its undo is named. The table above is the design's statement for the four classes it had been silent on;
-the project's full list is the policy's, and it is what a reader — or a test — reads.
+the instance's full list is the policy's, and it is what a reader — or a test — reads.
 
 **A restore obligation, with a stated cadence.** A backup nobody has restored is indistinguishable from no
 backup. Every recovery path this document names — a record snapshot, a repository bundle, a rollback target
@@ -278,7 +278,7 @@ detector's report.
 A lease that lapses is not returned by anything; the task is simply claimable again (`work_model.md`).
 The rule that survives the retired reaper is about repetition: the watchdog counts lapses per task,
 with bounded backoff between re-claims, and when one task's count reaches `lapse_cap` — declared on the
-project's `action_policy` (`data_model.md#concepts`), never inferred; an undeclared cap raises no
+instance's `action_policy` (`data_model.md#concepts`), never inferred; an undeclared cap raises no
 checkpoint, and the absence is visible in the policy, a defect caught where the policy is written and never
 a default supplied at runtime, as the unclaimed-step interval is treated (below) — it escalates the task:
 one checkpoint, subject the task, reason `repeated_lapse`, carrying the count and the last lease holders,
