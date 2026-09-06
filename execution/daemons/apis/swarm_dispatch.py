@@ -64,7 +64,9 @@ from gate_waive import (
     format_waive_comment_multi,
 )
 from github_gateway import SwarmTrigger
+from foundation import design_basis_block, reading_block
 from issue_spec import (
+    DESIGN_BASIS,
     SECTIONS,
     SPEC_MARKER_END,
     SPEC_MARKER_START,
@@ -72,6 +74,7 @@ from issue_spec import (
     SpecSection,
     SpecState,
     assemble_spec_markdown,
+    extract_design_basis,
     splice_managed_block,
 )
 from review_learning import (
@@ -1594,6 +1597,10 @@ class SwarmDispatcher:
         }
         out: list[SpecSection] = []
         for section in SECTIONS:
+            if not section.dispatched:
+                # Authored inside another section's turn (the design basis is
+                # written in the pm turn) — never its own dispatch.
+                continue
             if section.always or section.agent in selected_agents:
                 out.append(section)
         return out
@@ -2553,11 +2560,19 @@ class SwarmDispatcher:
         worktree: str | None = None
         if lens.agent == "phoenicurus":
             worktree = await prepare_pr_worktree(repository, number, lens.agent)
+        # Same reading list the panel loop keys to the PR's paths (fail-open:
+        # a fetch failure yields [] and the lens gets the kernel only).
+        changed_files = await self._changed_files(trigger)
         try:
             result = await run_skill(
                 lens.agent,
                 self._panelist_prompt(
-                    trigger, lens, "", None, has_worktree=bool(worktree)
+                    trigger,
+                    lens,
+                    "",
+                    None,
+                    has_worktree=bool(worktree),
+                    changed_files=changed_files,
                 ),
                 github_token=_token_for_agent_on_repo(lens.agent, repository),
                 include_github_contract=True,
@@ -3194,7 +3209,12 @@ class SwarmDispatcher:
             spec_so_far = assemble_spec_markdown(state.sections or {})
             result = await run_skill(
                 section.agent,
-                self._spec_section_prompt(trigger, section, spec_so_far),
+                self._spec_section_prompt(
+                    trigger,
+                    section,
+                    spec_so_far,
+                    design_basis=(state.sections or {}).get(DESIGN_BASIS.field),
+                ),
                 github_token=_token_for_agent_on_repo(
                     section.agent, trigger.repository
                 ),
@@ -3206,6 +3226,15 @@ class SwarmDispatcher:
             # extraction yields nothing usable we still record the turn ran so
             # the sequence_state and mirror reflect progress.
             state = await spec_store.upsert_section(state, section, section_text)
+            if section.key == "pm":
+                # The pm turn also states the issue's DESIGN BASIS (fenced
+                # separately; docs/foundation/conformance.md). Stored as its
+                # own section so the mirror renders it first and the arch gate
+                # can check it. '' when Pavo emitted none — which the arch
+                # prompt then reports as MISSING rather than inferring one.
+                state = await spec_store.upsert_section(
+                    state, DESIGN_BASIS, extract_design_basis(result.stdout)
+                )
             completed.append(section.key)
             # Mirror after each section so the issue body reflects the growing
             # spec incrementally (and re-running only replaces the marked block).
@@ -3766,6 +3795,7 @@ class SwarmDispatcher:
                         parent,
                         has_worktree=bool(qa_worktree),
                         owns_pending_gate=lens.lens in pending_gates,
+                        changed_files=changed_files,
                     ),
                     github_token=_token_for_agent_on_repo(
                         lens.agent, trigger.repository
@@ -6602,9 +6632,19 @@ class SwarmDispatcher:
 
     @staticmethod
     def _spec_section_prompt(
-        t: SwarmTrigger, section: SpecSection, spec_so_far: str
+        t: SwarmTrigger,
+        section: SpecSection,
+        spec_so_far: str,
+        design_basis: str | None = None,
     ) -> str:
         """Ordered additive-spec prompt: write/replace ONLY this agent's section.
+
+        ``design_basis`` is the issue's stated basis so far (the pm turn's
+        fenced statement), handed to the arch lens for its mechanical check.
+        The pm and arch lenses also receive the foundation reading list's
+        kernel inlined (``foundation.reading_block``) — the pm gate states the
+        basis from it, the arch gate checks against it. Both blocks are empty,
+        and the prompt unchanged, on a checkout with no reading list.
 
         Each agent in the canonical sequence reads the accumulated spec-so-far
         and ADDS or REPLACES exactly its own section, building on prior sections
@@ -6674,6 +6714,39 @@ class SwarmDispatcher:
                 "pending pm gate deadlocks any PR that closes this issue."
             )
 
+        # Foundation binding (docs/foundation/conformance.md): the pm gate
+        # states the design basis from the kernel; the arch gate checks it.
+        # No reading list on this checkout → both blocks empty → prompt
+        # byte-identical to before.
+        foundation_block = ""
+        if section.lens in ("pm", "arch"):
+            readings = reading_block([])
+            if readings:
+                foundation_block = f"\n\n{readings}"
+                if section.lens == "pm":
+                    foundation_block += (
+                        "\nDESIGN BASIS (`docs/foundation/conformance.md`, "
+                        "\"Design basis\"): state, from the reading list above, "
+                        "the foundation document and section this issue "
+                        "conforms to — or that no design applies, and why. "
+                        "Return it wrapped EXACTLY between these fences, "
+                        "SEPARATE from your spec section:\n\n"
+                        "<<<DESIGN_BASIS>>>\n"
+                        "Design basis: docs/foundation/<doc>.md#<section> — "
+                        "<one line on what it governs here>\n"
+                        "<<<END_DESIGN_BASIS>>>\n\n"
+                        "or `Design basis: no design applies — <one line why>`. "
+                        "Cite only a document that exists on this checkout "
+                        "(the reading list says which do); a kernel document "
+                        "listed as not yet written states nothing and cannot "
+                        "be cited. An issue that conforms to nothing becomes "
+                        "visible here, at intake, rather than at audit."
+                    )
+                else:
+                    foundation_block += "\n" + design_basis_block(
+                        design_basis, where="the issue's Design basis section"
+                    )
+
         return (
             f"Invoke the {section.agent} agent per your appended system prompt.\n\n"
             f"You are the `{section.lens}` lens in the Ateles swarm's ORDERED "
@@ -6683,8 +6756,9 @@ class SwarmDispatcher:
             f"{t.body}\n"
             "----- END ISSUE DESCRIPTION -----\n\n"
             "The specification is assembled section-by-section, in this order: "
-            "PM → Design/UX → Eng → QA → Security → Legal. The accumulated "
-            "spec-so-far (prior sections) is below — READ IT and BUILD ON IT.\n\n"
+            "Design basis (stated in the PM turn) → PM → Design/UX → Eng → QA "
+            "→ Security → Legal. The accumulated spec-so-far (prior sections) "
+            "is below — READ IT and BUILD ON IT.\n\n"
             "----- SPEC SO FAR -----\n"
             f"{spec_so_far}\n"
             "----- END SPEC SO FAR -----\n\n"
@@ -6704,6 +6778,7 @@ class SwarmDispatcher:
             "building on the sections above>\n"
             "<<<END_SPEC_SECTION>>>"
             f"{pm_gate_block}"
+            f"{foundation_block}"
         )
 
     @staticmethod
@@ -6831,6 +6906,7 @@ class SwarmDispatcher:
         parent: int | None = None,
         has_worktree: bool = False,
         owns_pending_gate: bool = False,
+        changed_files: list[str] | None = None,
     ) -> str:
         """Build a lens panelist's prompt.
 
@@ -6839,6 +6915,14 @@ class SwarmDispatcher:
         the code" when it is reviewing diff-only would be a lie that either
         wastes its turn or invites invented output (#254 / plan
         ent_ccd6660fc28800a2ae3a5623).
+
+        `changed_files` keys the foundation reading list
+        (docs/foundation/conformance.md): every reviewing lens receives the
+        kernel plus the documents keyed to the paths this PR touches, inlined,
+        so a finding can cite the invariant by path; the pm and arch lenses
+        also receive the mechanical check of the PR body's design basis.
+        Forward-looking lenses do not review, so they get neither. Empty on a
+        checkout with no reading list.
         """
         expectation_block = (
             "Your pre-registered expectations on the parent issue were:\n"
@@ -6941,6 +7025,16 @@ class SwarmDispatcher:
                 "Do this even though this is a PR-panel review, not the issue "
                 "pipeline: the sign-off only counts once it is in `gate_status`."
             )
+        # Foundation binding: the reading list, keyed to this PR's paths.
+        foundation_block = ""
+        if not lens.forward_looking:
+            readings = reading_block(list(changed_files or []))
+            if readings:
+                foundation_block = f"\n\n{readings}"
+                if lens.lens in ("pm", "arch"):
+                    foundation_block += "\n" + design_basis_block(
+                        t.body, where="the PR body"
+                    )
         _panelist_role = f"{lens.lens} lens panelist"
         if is_provisioned(lens.agent):
             comment_identity_block = (
@@ -6985,6 +7079,7 @@ class SwarmDispatcher:
             f"{blocking_rules}"
             f"{checkoff_block}"
             f"{gate_writeback_block}"
+            f"{foundation_block}"
         )
 
     @staticmethod

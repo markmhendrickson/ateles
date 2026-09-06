@@ -4854,8 +4854,11 @@ def test_issue_pipeline_sections_persist_additively(monkeypatch):
 
     store = _FakeSpecStore.instances[-1]
     # Sections upserted in canonical order, each with its own agent's text.
-    assert [k for k, _ in store.upserts] == ["pm", "eng", "qa"]
+    # The pm turn also yields the design basis (its own field, stored right
+    # after pm; '' here because the fake emitted no <<<DESIGN_BASIS>>> fence).
+    assert [k for k, _ in store.upserts] == ["pm", "basis", "eng", "qa"]
     texts = {k: v for k, v in store.upserts}
+    assert texts["basis"] == ""
     assert texts["pm"] == "**Scope:** pavo-section body with real substance to pass the not-just-narration floor."
     assert texts["eng"] == "**Scope:** cicada-section body with real substance to pass the not-just-narration floor."
     assert texts["qa"] == "**Scope:** phoenicurus-section body with real substance to pass the not-just-narration floor."
