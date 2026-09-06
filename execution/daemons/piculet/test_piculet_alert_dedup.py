@@ -77,6 +77,34 @@ def test_alert_refires_after_clear(monkeypatch):
     assert len(notify) == 2
 
 
+def test_alert_without_clear_site_does_not_refire_promptly(monkeypatch):
+    # watch.py's only production clear call is a substring match on
+    # "Neotoma unavailable" (see the poll loop's recovery block). Every other
+    # log_error/log_warning call site — e.g. import-pipeline or
+    # entity-extraction errors — has no clear call anywhere, so a resolve-then
+    # -recur of one of those does NOT get a fresh alert; it stays gated by the
+    # stale hourly _TELEGRAM_REPEAT_INTERVAL cadence from the first incident.
+    # This documents that gap so it's CI-visible rather than silently masked
+    # by the one coincidental substring match. Fixing the gap (e.g. clearing
+    # unconditionally on every resolve) is a follow-up design call, not
+    # required by this PR.
+    tg, notify = [], []
+    _reset(monkeypatch, tg, notify)
+
+    watch.log_error("Import pipeline error: boom")
+    assert len(notify) == 1
+
+    # Simulates: error resolved between polls, then recurred as a new
+    # incident — but nothing calls _telegram_clear for this message, since
+    # its text doesn't match the one hardcoded "Neotoma unavailable" clear
+    # site.
+    watch.log_error("Import pipeline error: boom")
+    assert len(notify) == 1, (
+        "known gap: without a clear call, a resolved-then-recurring "
+        "non-'Neotoma unavailable' error does not re-notify promptly"
+    )
+
+
 def test_alert_is_due_gate_first_true_then_suppressed(monkeypatch):
     monkeypatch.setattr(watch, "_telegram_alert_state", {})
     assert watch._alert_is_due("k") is True
