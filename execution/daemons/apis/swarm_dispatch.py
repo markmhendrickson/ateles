@@ -59,6 +59,7 @@ from gate_waive import (
     CLEARED_GATE_STATES,
     AggregateWaiveOutcome,
     IssueGateStore,
+    parse_snapshot_list_field,
     WaiveOutcome,
     format_waive_comment,
     format_waive_comment_multi,
@@ -903,7 +904,12 @@ def workflow_owner_drift(
         name = snap.get("canonical_name") or wf.get("canonical_name") or (
             f"{snap.get('project', '?')}|{snap.get('workflow_type', '?')}"
         )
-        for gate in snap.get("gates") or []:
+        # parse_snapshot_list_field, not a local decode: /entities/query returns
+        # list-valued snapshot fields as JSON STRINGS, and gate_waive.py had
+        # already solved this for the dict-shaped case. Writing a second decode
+        # here is how #442 shipped a reader that crashed on every startup while
+        # its siblings handled the same payload correctly (#450).
+        for gate in parse_snapshot_list_field(snap.get("gates")):
             owner = (gate.get("owner_agent") or "").strip()
             if owner and owner not in known_agents:
                 drift.append((str(name), str(gate.get("gate_name") or "?"), owner))
