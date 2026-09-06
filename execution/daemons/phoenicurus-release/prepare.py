@@ -136,6 +136,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from lib.daemon_runtime.logging_setup import configure_daemon_logging
+from lib.notify.email_gate import email_enabled, record_suppressed  # noqa: E402
 
 # Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
 # unbounded retry logging filled a 926 GB disk on 2026-08-18.
@@ -327,6 +328,15 @@ def email_send(subject: str, body: str) -> bool:
 
     if not OPERATOR_EMAIL:
         log.info("OPERATOR_EMAIL unset — skipping release email (Telegram only)")
+        return False
+    # Global kill-switch (ateles#645). Returning False keeps Telegram as the
+    # guaranteed channel, so a release notification is never lost — only
+    # de-emailed. The message is recorded either way.
+    if not email_enabled():
+        record_suppressed(
+            channel="phoenicurus_release", subject=subject, body=body,
+            to=OPERATOR_EMAIL,
+        )
         return False
     gws = shutil.which("gws")
     if not gws:
