@@ -184,3 +184,32 @@ def cooling_providers(*, now: float | None = None) -> set[str]:
         for provider, until in _cooldown_until.items()
         if until > moment
     }
+
+
+def describe_routing_state(*, now: float | None = None) -> str:
+    """Summarize order, headroom, and cooldowns as one line for operator logs.
+
+    An operator diagnosing a routing surprise ("why did this go to codex?",
+    "why did nothing run?") needs all three facts together, because any one of
+    them alone is consistent with several different verdicts.  Claude being
+    skipped reads as exhausted headroom, as a cooldown after an auth failure,
+    or as an operator having dropped it from the order — and the remedy differs
+    in each case.  Emitting the three as one formatted line keeps them from
+    being separated by interleaved log output from concurrent dispatches, which
+    is exactly when the correlation is hardest to reconstruct after the fact.
+
+    Cooldowns render as an explicit ``none`` rather than an empty tail so that
+    "no provider is cooling" is distinguishable from a truncated line.
+    """
+    order = configured_providers()
+    headroom = configured_headroom()
+    cooling = cooling_providers(now=now)
+
+    providers = ",".join(order) if order else "none"
+    estimates = ", ".join(
+        f"{provider}={headroom[provider]:g}" for provider in PROVIDERS
+    )
+    cooling_text = ",".join(sorted(cooling)) if cooling else "none"
+    return (
+        f"providers: {providers}; headroom: {estimates}; cooling: {cooling_text}"
+    )
