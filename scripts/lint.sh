@@ -100,8 +100,15 @@ if [ -n "$NEOTOMA_BASE_URL" ]; then
     # .github/workflows/agent-config-validation.yml for the tracking note).
     echo "  - Checking agent-doc mirrors are in sync with Neotoma (informational)..."
     python execution/scripts/render_agent_docs.py --check || true
+
+    # Shared plan pages are rendered FROM docs/pages/*.html onto their
+    # rendered_page entities. A stale page is invisible — nobody reloads a
+    # link they already read — so surface drift here too. Informational:
+    # requires a token that reaches Neotoma prod.
+    echo "  - Checking plan rendered_pages are in sync with Neotoma (informational)..."
+    python execution/scripts/render_plan_page.py --check || true
 else
-    echo "  - Skipping tool_allowlist + agent-doc-mirror checks (NEOTOMA_BASE_URL unset)"
+    echo "  - Skipping tool_allowlist + agent-doc-mirror + plan-page checks (NEOTOMA_BASE_URL unset)"
 fi
 
 echo ""
