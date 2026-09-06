@@ -355,7 +355,7 @@ none was found on this branch, not that none exists anywhere.
 | a registered type declares its per-field merge policy (`reducer_config`) at registration | nothing stated | the token `reducer_config` appears nowhere in this checkout; types are registered without a declared merge policy, so concurrent writers to one field resolve by whatever the store does by default | the schema registry and `register_schema` call sites |
 | `finding`, `verdict`, and `condition` as canonical terms | used across the documents, defined nowhere | `verdict` is a field on no built entity (the built `participation_record` carries no verdict field — revision 8's row above); `finding` exists as a parsed shape in one module; `condition` names nothing built | as above |
 | a vocabulary term is spaced; an entity type or field keeps its record spelling in code font | the file mixed `step state`, `step_status`, and `sign-off` without stating which was which | a documentation convention with no runtime counterpart; the vocabulary checker enforces banned words, not term form, so the rule is held by authorship rather than mechanically | `execution/scripts/check_foundation_vocabulary.py` checks Never and Not-for lists only |
-| `artifact` bound to a record in an external system, reached through an adapter, identified by `system` and `external_id` | the term was used loosely enough to cover anything a batch produced | not assessed as a data question on this branch; the design's narrowing is new, and whether any built writer has minted an `artifact` for something the record already holds was not measured | the adapter daemons and any writer creating `artifact` rows |
+| `artifact` bound to an entry an external system holds, reached through an adapter, identified by `system` and `external_id` | the term was used loosely enough to cover anything a batch produced | not assessed as a data question on this branch; the design's narrowing is new, and whether any built writer has minted an `artifact` for something the record already holds was not measured | the adapter daemons and any writer creating `artifact` rows |
 | an adapter records sourcing through the record's provenance, carrying source, sourced-at, and coverage; freshness is derived | nothing stated | no freshness or last-synced field was found on this branch, which is the right absence, but neither is coverage recorded: an adapter that reads a page writes what it got with no statement of what it asked for, so a truncated read is indistinguishable from a complete one | the adapter daemons' read paths |
 | adapter vocabulary: `inbound`, `outbound`, `delivery`, `disposition`, `dropped`, `sourcing`, `coverage`, `freshness` | used in `adapters.md`, defined nowhere | `dropped` and `disposition` have the revision 8 row above (deliveries drop at log level with no disposition written); the remaining terms name design concepts with no built counterpart | the adapter daemons' event handlers |
 | a task is executed only through a workflow; a daemon's tasks enter intake like any other | implied by "intake is every task's first workflow", never stated as a prohibition | not assessed as a whole; the known divergence is the one revision 8 already records — pre-implementation steps back-filled on artifacts no batch addresses — which is the same shape as work advancing outside a workflow | `swarm_dispatch.py`, `lib/issue_labels.py` |
@@ -2088,6 +2088,37 @@ check and rephrased before landing). `check_foundation_anchors.py`: 0 broken lin
 `link_vocabulary_terms.py --check`: clean, after the linker linked thirty-six first mentions across eight
 blocks. `test_foundation.py`: 97 passed, 1 xfailed (the budget marker); the two index tests pass with the
 document listed in `docs/README.md` and the root README's count at twenty.
+
+## Revision 41 (2026-09-06): the record-sense collision — six sentences reading "record" against an external system
+
+The operator found the collision directly: `vocabulary.md#record` binds `record` to Neotoma and its
+Not-for line reads "the record for an external system," yet the [artifact](vocabulary.md#artifact)
+definition itself, two sentences in `adapters.md`, one in `conformance.md`, one in `payments.md`, and this
+document's own revision-40-era row all read "record" as if it belonged to or lived inside an external
+system — backwards from the boundary the term defines. Six hits, not the four named at the start: the
+phrase-based Not-for never actually caught any of them as an advisory, because none used the literal quoted
+phrase; they passed completely silently on every prior run, which the 680-hit count above did not surface.
+All six are rephrased to "an entry an external system holds" — chosen over "a thing living in" because it
+keeps `system` + `external_id` as identity legible in the very next clause, and over "the external
+system's own record of it" because that phrasing was judged to reintroduce the same word this pass exists
+to stop reusing.
+
+The scoped Not-for on `record` is escalated to a **Never for `adapters.md` and the five per-system adapter
+documents** (`github.md`, `gmail.md`, `calendar.md`, `telegram.md`, `payments.md`) only, added to
+`check_foundation_vocabulary.py`'s `PATTERNS` table with a new `files` field on `Ban` and a matching filter
+in `scan()`; `test_foundation.py`'s pattern-reachability test was updated for the item shape change. Not a
+global Never: the ordinary-English sense stands elsewhere in the corpus (`workflows.md`'s "deliverable for
+the record," `conformance_suite.md`'s "green without the record") exactly as `record`'s own Not-for already
+permits, and a global ban would fire on that legitimate prose. The sibling check for `subject` (same bound
+term, ordinary-sense shape) found no violation in the adapter documents.
+
+**Checks, on this branch after the fix.** `check_foundation_vocabulary.py`: 99 Never items (was 98), 70
+Not-for items, 0 Never hits, 704 Not-for advisory hits both before and after this pass's phrase edits (the
+six collision sentences were never among them, per above — the count is unchanged because nothing about the
+phrase-based advisory match changed; the new hits are caught by the scoped Never, not the advisory).
+`check_foundation_anchors.py`: 0 broken links. `test_foundation.py`: 97 passed, 1 xfailed (the budget
+marker, unchanged). The branch head this pass was taken from is the planning pass (revision 40), after it
+had stood unchanged on the remote for ten minutes.
 
 ## Reading-list budget and keying, as of revision 6 (2026-09-04)
 

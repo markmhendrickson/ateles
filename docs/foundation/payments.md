@@ -312,7 +312,7 @@ a transfer still moving is a duplicate the operator was told to make.
 Reading a balance is an inbound observation. The question worth settling is what it is an observation *on*,
 and the answer is not the obvious one.
 
-**A balance is not an artifact.** An artifact is a record living in an external system, identified by
+**A balance is not an artifact.** An artifact is an entry an external system holds, identified by
 `system` and `external_id` and referred to over time. A balance has no identity of its own: it is a
 **derived aggregate over an account's history**, computed at the moment of the read, and the same account
 yields a different value a second later. Minting an artifact for it would create a record whose external id

@@ -21,6 +21,10 @@ Two sources feed the ban list, and they are deliberately separate:
   syntax into a foundation document a person is meant to read. The prose still states the ban; this table
   holds the machinery. ``test_foundation.py`` asserts every key here names an entry that still exists in
   ``vocabulary.md``, so renaming a term fails the test rather than silently un-linting itself.
+  A ``PATTERNS`` item may carry a third element, ``files`` — a frozenset of filenames the ban applies to.
+  Omitted (or ``None``), it is global like every phrase-based ban. Scope a ban to a subset of documents only
+  where the vocabulary's own Not-for already says the ordinary sense is permitted elsewhere: a global Never
+  would then be wrong, not stricter, so the ban has to stay narrower than the term.
 
 Lines not scanned: any line carrying a Never or Not-for list; any line containing "retired" (a retired
 name may be named where it is retired); in vocabulary.md, the continuation lines of a wrapped Never or
@@ -47,6 +51,19 @@ from pathlib import Path
 FOUNDATION_DIR = Path("docs/foundation")
 VOCABULARY = "vocabulary.md"
 SKIPPED_FILES = {"status.md"}
+
+# Where "record" (bound to Neotoma) meeting an external-system qualifier is most expensive: adapters.md and
+# the five per-system adapter documents. Each names the record and an external system on nearly every line
+# by design, so the ordinary-English sense of "record" — permitted everywhere else per the term's own
+# Not-for — is least needed here and the ambiguity is least excusable. See PATTERNS["record"] below.
+ADAPTER_DOCS = frozenset({
+    "adapters.md",
+    "github.md",
+    "gmail.md",
+    "calendar.md",
+    "telegram.md",
+    "payments.md",
+})
 
 _NEVER_MARK = "**Never:**"
 _NOT_FOR_MARK = "**Not for:**"
@@ -153,6 +170,21 @@ PATTERNS: dict[str, dict[str, list[tuple[str, str]]]] = {
             ),
         ],
     },
+    "record": {
+        # Scoped Never: "record" reads as Neotoma everywhere in these documents, so a sentence that also
+        # names an external system as what the record is "in", "of", or "living in" reads as the record
+        # itself sitting inside the external system — backwards from decision 55 and the boundary the term
+        # defines. Not a global Never: the ordinary-English sense ("the record a step owner writes") is
+        # explicitly permitted by this same entry's Not-for and is used correctly elsewhere in the corpus.
+        "never": [
+            (
+                r"\brecord[a-z']*\s+(?:living\s+in|in|of|held\s+(?:in|by))\s+(?:an?\s+|the\s+)?"
+                r"external\s+system",
+                "",
+                ADAPTER_DOCS,
+            ),
+        ],
+    },
 }
 
 
@@ -162,6 +194,7 @@ class Ban:
     pattern: re.Pattern[str]
     sense: str  # "" for Never; the Not-for sense text otherwise
     entry: str  # the ### heading the item sits under
+    files: frozenset[str] | None = None  # None = every scanned file; else only these filenames
 
 
 @dataclass(frozen=True)
@@ -270,14 +303,18 @@ def parse_bans(vocab_text: str) -> tuple[list[Ban], list[Ban]]:
         if entry not in entries:
             continue
         for kind, items in by_kind.items():
-            for source, sense in items:
+            for item in items:
+                # Each item is (source, sense) or, to scope the ban to a subset of documents,
+                # (source, sense, files). files is a frozenset of filenames; omitted means every file.
+                source, sense, *rest = item
+                files = rest[0] if rest else None
                 try:
                     pattern = re.compile(source, re.IGNORECASE)
                 except re.error as exc:  # a bad regex in the table is a defect in the table
                     raise SystemExit(
                         f"check_foundation_vocabulary.py: bad PATTERNS regex /{source}/: {exc}"
                     ) from exc
-                ban = Ban(f"/{source}/", pattern, "" if kind == "never" else sense, entry)
+                ban = Ban(f"/{source}/", pattern, "" if kind == "never" else sense, entry, files)
                 (never if kind == "never" else not_for).append(ban)
     return never, not_for
 
@@ -353,9 +390,13 @@ def scan(root: Path, never: list[Ban], not_for: list[Ban]) -> tuple[list[Hit], l
                 continue
             prose = as_read(line)
             for ban in never:
+                if ban.files is not None and path.name not in ban.files:
+                    continue
                 if ban.pattern.search(prose):
                     never_hits.append(Hit(ban, rel, no, line.strip()))
             for ban in not_for:
+                if ban.files is not None and path.name not in ban.files:
+                    continue
                 if ban.pattern.search(prose):
                     advisory.append(Hit(ban, rel, no, line.strip()))
     return never_hits, advisory

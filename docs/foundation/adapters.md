@@ -330,7 +330,7 @@ and the adapter carries the verdict in.
 
 **Linkage.** An event names an external record; the adapter finds the artifact for it by `system` and
 `external_id` (`data_model.md#concepts`) — the pair that identifies every artifact, because an artifact
-is by definition a record in an external system reached through an adapter, and never a thing the swarm
+is by definition an entry an external system holds, reached through an adapter, and never a thing the swarm
 produced into the record (`work_model.md#artifacts-are-records-a-batch-leaves-never-its-subject`). An
 adapter therefore never mints an artifact for something the record already holds: what the swarm writes
 for itself is an entity, and only what the external system holds gets a `system` and an `external_id`. **Where the
@@ -417,8 +417,8 @@ definition rather than qualifying it, and it is stated here because a reader who
 reaches for the wrong one: an artifact with a null `external_id`, minted early and filled in later.
 
 **A thing with no external id is not an artifact; it is an entity, and the design already has somewhere to
-put it.** An artifact is a record living in an external system, and before the send there is no such
-record — not an incomplete one, none. What exists is the swarm's own composition, which lives in the
+put it.** An artifact is an entry an external system holds, and before the send there is no such
+entry — not an incomplete one, none. What exists is the swarm's own composition, which lives in the
 record and is read by retrieval, and by the test `work_model.md` already states that makes it an entity of
 its own type. The drafted message is a draft in the record, which is what
 `workflows.md#outreach` means by "the design's staging is the draft in the record": the `draft` step

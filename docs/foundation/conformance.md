@@ -169,7 +169,7 @@ is `status.md`.
 
 Rules and decisions have four homes, chosen for four audiences (synthesis C7). Each class has one
 authoritative side; the others are mirrors or restatements that are wrong until corrected. (An
-`artifact` in `vocabulary.md` is a record in an external system that a batch leaves; the classes below are
+`artifact` in `vocabulary.md` is an entry an external system holds that a batch leaves; the classes below are
 the swarm's own records, and the word is not used for them.)
 
 | Class of record | Authoritative side | Mirror or restatement |

@@ -520,7 +520,8 @@ class TestVocabularyLint:
         by_kind = {"never": {b.pattern.pattern for b in never}, "not_for": {b.pattern.pattern for b in not_for}}
         for entry, kinds in mod.PATTERNS.items():
             for kind, items in kinds.items():
-                for source, _sense in items:
+                for item in items:
+                    source = item[0]
                     assert source in by_kind[kind], f"{entry} / {kind}: /{source}/ never reached the ban list"
 
     def test_the_vocabulary_carries_no_regex_syntax(self) -> None:
