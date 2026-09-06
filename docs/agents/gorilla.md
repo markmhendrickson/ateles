@@ -7,7 +7,7 @@ name: gorilla
 description: Invoke Gorilla, the health & fitness agent — log gym workouts, analyze training progression, and consult on health & fitness grounded in your own Neotoma data. Use when the user says "gorilla", "log my workout", "how's my <lift> trending", "track my fitness", or asks a health/fitness question.
 tier: T4
 genus: Gorilla
-status: active
+status: planned
 aauth_sub: gorilla@ateles-swarm
 agent_grant: service
 observation_source_default: sensor
@@ -49,7 +49,7 @@ Invoke Gorilla, the health & fitness agent — log gym workouts, analyze trainin
 | --- | --- |
 | Tier | T4 |
 | Genus | Gorilla |
-| Status | active |
+| Status | planned |
 | AAuth sub | gorilla@ateles-swarm |
 | Agent grant | service |
 | Observation source | sensor |

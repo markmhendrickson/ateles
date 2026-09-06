@@ -7,7 +7,7 @@ name: buteo
 description: Invoke Buteo, the legal agent — contract review, marketing copy legal risk, privacy/GDPR compliance, IP and open-source licence audit. Risk analysis, not legal advice.
 tier: T4
 genus: Buteo
-status: planned
+status: active
 agent_grant: service
 observation_source_default: llm_summary
 user_invocable: true
@@ -22,7 +22,6 @@ tool_allowlist:
   - mcp__mcpsrv_neotoma__correct
   - WebSearch
   - WebFetch
-  - Read
 context_entity_types:
   - workflow_definition
   - standing_rule
@@ -57,6 +56,7 @@ operational_entity_types:
   - claim
   - regulation_note
   - strategy_drift_signal
+  - issue
 canonical_context_entities:
   - operator_profile
   - product_profile
@@ -76,13 +76,13 @@ Invoke Buteo, the legal agent — contract review, marketing copy legal risk, pr
 | --- | --- |
 | Tier | T4 |
 | Genus | Buteo |
-| Status | planned |
+| Status | active |
 | Agent grant | service |
 | Observation source | llm_summary |
 | Triggers | buteo, /buteo |
-| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, WebSearch, WebFetch, Read |
+| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, WebSearch, WebFetch |
 | Context entity types | workflow_definition, standing_rule, agent_grant, agent_definition, agent_policy, agent_strategy, contract_review, legal_research, legal_review, dispute, dispute_note, dispute_update, dispute_query, dispute_index, dispute_document, dispute_work_summary, contract_discrepancy, tax_filing, tax_form, filing_topic, negotiation_plan, claim, compliance_pass, regulation_note, architectural_decision |
-| Operational entity types | contract_review, legal_research, legal_review, decision_record, claim, regulation_note, strategy_drift_signal |
+| Operational entity types | contract_review, legal_research, legal_review, decision_record, claim, regulation_note, strategy_drift_signal, issue |
 | Entity ID | ent_6f90952eaf5d1eed51b9621c |
 
 ## Prompt

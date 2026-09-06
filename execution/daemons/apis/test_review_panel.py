@@ -351,3 +351,79 @@ def test_busiest_dispatch_files_are_not_matched_by_path_alone():
     ):
         panel = select_panel(set(), [path], max_panel=8)
         assert "security" not in [l.lens for l in panel], path
+
+
+# ── Gate-write invariant (ateles#762) ──────────────────────────────────────
+
+
+def _agent_frontmatter(agent: str) -> dict:
+    """Parse the YAML frontmatter of a rendered agent doc.
+
+    The doc is a mirror of the `agent_definition` entity, kept byte-identical
+    to Neotoma by `render_agent_docs.py --check`. Asserting against the mirror
+    therefore asserts against the live grant, without a network call in tests.
+    """
+    import re
+    from pathlib import Path
+
+    import yaml
+
+    doc = (
+        Path(__file__).resolve().parents[3] / "docs" / "agents" / f"{agent}.md"
+    )
+    text = doc.read_text()
+    # A do-not-edit banner precedes the fence, so locate it rather than
+    # assuming the file opens with it.
+    match = re.search(r"^---$(.*?)^---$", text, re.MULTILINE | re.DOTALL)
+    assert match, f"{agent}.md has no frontmatter"
+    return yaml.safe_load(match.group(1))
+
+
+def test_gate_owning_lenses_can_write_the_issue_entity():
+    """Every gate a lens is told to sign must be writable by that lens.
+
+    A lens that owns a gate signs off by correcting `gate_status.<gate>` on
+    the parent *issue* entity, and gate inheritance reads that entity as the
+    source of truth. If `issue` is missing from the agent's
+    `operational_entity_types`, the write is denied and the sign-off survives
+    only as a PR comment no gate reader consults — the PR then blocks forever
+    on a review that was clean (ateles#762, stalling neotoma#2040).
+
+    Deriving the agent list from LENSES rather than hardcoding it is the
+    point: a lens added or renamed later is covered automatically. Buteo was
+    missing this grant too and was not named in the original filing.
+    """
+    for lens in LENSES:
+        if not lens.gate:
+            continue  # non-gating lens signs nothing on the issue
+        operational = _agent_frontmatter(lens.agent).get(
+            "operational_entity_types"
+        ) or []
+        assert "issue" in operational, (
+            f"{lens.agent} owns the {lens.gate!r} gate and is instructed to "
+            f"correct() gate_status on the issue entity, but 'issue' is not in "
+            f"its operational_entity_types — the sign-off write will be denied "
+            f"and the gate will never advance."
+        )
+
+
+def test_gate_owning_lens_skills_document_the_issue_writeback():
+    """The other half of the invariant: the instruction actually exists.
+
+    The test above proves a gate owner *may* write the issue. This one proves
+    it is *told* to — so that if a skill ever drops the writeback recipe, the
+    grant assertion above does not silently pass over a lens whose sign-off no
+    longer reaches the entity at all.
+    """
+    from pathlib import Path
+
+    skills_root = Path(__file__).resolve().parents[3] / ".claude" / "skills"
+    for lens in LENSES:
+        if not lens.gate:
+            continue
+        skill = (skills_root / lens.agent / "SKILL.md").read_text()
+        assert "issue_entity_id" in skill, (
+            f"{lens.agent} owns the {lens.gate!r} gate but its SKILL.md no "
+            f"longer references <issue_entity_id> — either restore the gate "
+            f"writeback recipe or remove the gate from its lens."
+        )
