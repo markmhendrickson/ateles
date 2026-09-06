@@ -2197,6 +2197,85 @@ is the mechanism gap 3's open decision (60) exists to give a stated outcome to.
 
 **Checks**, on this tree. `check_foundation_vocabulary.py`: 0 Never hits (unchanged). `check_foundation_anchors.py`: 0 broken links. `pytest execution/daemons/apis/test_foundation.py`: 97 passed, 1 xfailed (the budget marker, unchanged).
 
+## Revision 44 (2026-09-06): the Human Inversion mapping — three stances, two term collisions, a workflow, and one flag
+
+The operator asked what a public essay series (*The Human Inversion*, markmhendrickson.com, six parts, the
+sixth unpublished) says the foundation does not yet, applied against PR #745. A prior mapping pass (read in
+full, in the scratchpad, not re-derived here) found nineteen of forty-five claims represented, fourteen
+partial, seven absent, and five contradicted; this revision applies the seven items the operator's
+instructions named, all to documents in this directory.
+
+**`principles.md`.** A new section, "Where the human sits, what it protects, and why the record is owned,"
+states three stances beside the invariants, each citing its part: where the human sits (the foundation end
+is the operator's, the review end is agents', and the human's presence at review is the checkpoint and the
+finding); operator attention as the constraint the channel's declared subset, `draft_lint`'s ordering, and
+checkpoint grouping already protect; and the sovereignty reason for the owned record (Neotoma as the hard
+dependency, public prompts with runtime context entities, named as an architectural reason rather than a
+new mechanism). The same section states, in one paragraph, that a cross-disciplinary rubric is out of
+scope here by name — `priority_rubric` and `confidence_rubric` are narrow policy inputs, and the README's
+own P5 deferral ("no design until P4 is designed") is restated rather than pre-empted — and connects the
+sovereignty stance to the model-and-harness-routing pass's open decision 59 with one sentence, citing it by
+number rather than restating its argument.
+
+**`vocabulary.md`.** Two term-collision entries. `reconciler`: this design's sense (the mechanical check
+that proves a projection agrees with its sign-offs, already used informally at `step_status` and
+`projection`) against the essay's sense (an adjudicating role); the README's "a topology … not a single
+human bottleneck" is quoted as the design's own statement of the divergence. `replay`: this design's
+refused sense (re-doing a prior action or step from a stored trace, the shape decision 40 refuses for
+session reasoning) against the essay's sense (reading a reasoning chain later, which this design already
+has as the as-of read decision 40 names) — cross-linked to `effect dedup`'s existing "replay is refused
+outright" Never.
+
+**`workflows.md`.** One sentence added to `feature`'s prose answering the legal-placement question from
+principles rather than from tone: `applies_when` seating `legal` by relevance, after `impl`, is the design's
+form of "not exiled to a gate of last resort," the same principle that fails an unclassified action type
+closed rather than open by default; a project needing legal judged before implementation seats it in its
+own workflow's design stage, which the design does not preclude and does not declare here. A new workflow,
+`postmortem` (the fourteenth core workflow, `## Scope` updated), entered by an `intake_rule` on a halt's
+read-back, a checkpoint reaching a terminal state in `repeated_lapse`/`rounds_exhausted`/`dependency_cycle`,
+or a landed institutionalization task (decision 17); its steps scope the incident, investigate and record a
+finding naming the observations that should have caught the drift, review the finding's evidence, and route
+the remedy exactly as any other finding is routed — an implementation task, or decision 17's
+institutionalization task — writing no fix itself. Relates explicitly to the essay's Part 5: "publish
+postmortems when drift happened anyway, with links to the observations that should have prevented it."
+
+**`data_model.md`.** One bullet in *Record conventions*, beside the existing sign-off pinning bullet:
+`sign_off.agent_version` pins the agent and its version, and `artifact_refs[]` names what was judged, but
+neither pins the model or harness observed at the write — that is a `vendor_binding`'s, per decision 42,
+resolved by role rather than recorded per sign-off. Stated as an absence and why (adding the field is a
+schema question, not a docs correction), with open decision 59 named as the adjacent, already-open question
+this would be the attribution-side counterpart to.
+
+**`conformance.md`.** Decision 40's register row carries one added sentence: flagged, not reopened, against
+the essay's Part 4 claim that "the reasoning chain of the agent … [is] available months later," which
+decision 40 contradicts by design. No decision opened, no decision ruled, no argument added to either
+document.
+
+**What was found already done.** Item 5 (model routing bound per class, never chosen by the step) was
+settled independently by the model-and-harness-routing pass (revision 43, decision 59) while this pass was
+being written — both passes checked for the other and neither found it in time; this pass adds one
+connecting sentence in `principles.md` citing decision 59 by number and touches neither
+`gates_and_workflows.md` nor `failure_posture.md`, leaving that pass's open decisions exactly as it left
+them.
+
+**Size.** Measured 2026-09-06 with `wc -c` on this branch against the model-and-harness-routing pass
+(revision 43) as the predecessor. `principles.md` +2.6k (three stances and the rubric deferral);
+`vocabulary.md` +1.6k (two entries); `workflows.md` +3.1k (the `postmortem` section and one sentence on
+`feature`); `data_model.md` +0.7k (one bullet); `conformance.md` +0.2k (one sentence on decision 40's row).
+Net **+8.2k** across the five files touched; no other foundation document was edited.
+
+**Checks, on this tree.** `check_foundation_vocabulary.py`: 100 Never items (was 99, `replay` added), 73
+Not-for items (was 70, `reconciler` and `replay` added), 0 Never hits, 749 Not-for advisory hits (up from
+733 at the start of this pass — legitimate uses of already-advisory words in the new prose, mainly `tier`
+in the blast-tier sense). `check_foundation_anchors.py`: 0 broken links. `link_vocabulary_terms.py --check`:
+clean, after the linker linked four first mentions across four blocks, two of them retroactive
+(`step_status` and `projection`'s existing informal "reconciler" became linkable once the term entry
+existed). `test_foundation.py`: 97 passed, 1 xfailed (the budget marker, unchanged). The branch head this
+pass was taken from is the model-and-harness-routing pass (revision 43, `49c04e1`), confirmed unchanged on
+the remote by repeated direct polling for over twelve minutes before the dedicated worktree was created —
+during which three other passes landed in sequence (the record-sense collision, the self-contradiction
+pass, and the model-and-harness-routing pass itself), each re-read fresh before this pass began.
+
 ## Reading-list budget and keying, as of revision 6 (2026-09-04)
 
 Measured with `wc -c` on this branch; the caps are `foundation.py`'s `MAX_DOC_CHARS = 12_000` and

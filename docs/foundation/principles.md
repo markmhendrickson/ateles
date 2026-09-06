@@ -3,7 +3,7 @@
 **Kernel document:** read on every review (`conformance.md`). **Kind:** foundation; states the design and
 never the state of a checkout. **Derived from:** synthesis `ent_b0ce322f768e4fc676b73139` (phase 0 of plan
 `ent_533d4ec2f7bfb60f66fb3fce`), prior art `ent_08460968e6f49dac21510f4a` (phase 3), ateles#727, the
-decision keys cited per invariant, and PR #745 operator review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Revised by the testability pass of 2026-09-06 (revision 37: invariants 3, 6, 8, and 10 given their mechanical form — the named instruments, the singletons' closure, the citation lint, and "landed" as a derived read). Which mechanisms exist on a given checkout, and where nothing fires, is
+decision keys cited per invariant, and PR #745 operator review (2026-09-04), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Revised by the testability pass of 2026-09-06 (revision 37: invariants 3, 6, 8, and 10 given their mechanical form — the named instruments, the singletons' closure, the citation lint, and "landed" as a derived read). Revised by the Human Inversion mapping pass of 2026-09-06 (revision 44: where the human sits, operator attention as the protected constraint, and the sovereignty reason for the owned record, stated beside the invariants; the cross-disciplinary rubric named as out of scope until P4). Which mechanisms exist on a given checkout, and where nothing fires, is
 measured in `status.md`, not here.
 
 ## Purpose
@@ -215,6 +215,67 @@ The one deliberate exception, recorded as the narrow thing it is: **a rule may l
 its audience is interactive sessions and compaction survival is the binding property.** That is a real
 reason on the axis above — for that surface, re-injection is when the rule is read — and it is not a
 general licence, because the same text reaches no agent the swarm runs.
+
+## Where the human sits, what it protects, and why the record is owned
+
+Three stances this design already builds toward without stating as such, made explicit here because a
+public essay series (*The Human Inversion*, markmhendrickson.com) argues each one and a reader comparing
+the two should find the design's position named rather than inferred.
+
+**Where the human sits.** *The Human Inversion* (Part 1) narrows to "humans at the ends, AI in the middle"
+— foundation and review. This design's two ends are not symmetric. The foundation end is the operator's
+alone: "the reservation is per action class, it lives in the policy, and it is the operator's to write"
+(`work_model.md`). The review end is staffed by agents — `pm`, `ux`, `arch`, `pr_review`, `qa`, and `legal`
+are [review steps](vocabulary.md#review-step), and nothing distinguishes one from a working step but what
+its owner does. The human's presence at review is the [checkpoint](vocabulary.md#checkpoint) and the
+[finding](vocabulary.md#finding): the operator's input on reviewed work is itself a finding, judged on the
+same severity and standing axes as any other (`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`).
+So an agent-staffed review step is not an accident this design tolerates — it is what "humans at the ends"
+becomes once the end in question is a checkpoint rather than a step: the human sits at the standard (the
+policy an agent's verdict is checked against) and at the decision (the checkpoint, the finding), and by
+default not at the review step itself.
+
+**Attention as the protected constraint.** Part 2 (*The Attention Ceiling*) names the binding constraint as
+one human's attention on what goes into models and what comes out of them. This design does not state that
+as an invariant, but every mechanism that touches what the operator sees exists to protect exactly that
+budget: `draft_lint` sits before the operator sees anything, so that the operator's attention is spent on
+judgement, not on defects a script can find (`workflows.md#social-content`); a channel carries only a
+declared subset — a checkpoint awaiting the operator, the announcement path, a delivery a workflow declared
+(decision 37) — because completed work is read on demand, not carried to the operator unasked; and consent over several like actions is one
+presentation of several checkpoints, never one checkpoint standing in for many
+(`gates_and_workflows.md#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-or-cannot-wait`).
+Read together, these are one rule applied three times: operator attention is a finite, non-renewable
+input, and a mechanism that touches what reaches the operator declares what it is protecting the operator
+from doing instead — re-deriving what a script already checked, watching a channel for what a declared
+subset already surfaces, or resolving one decision at a time when several share one shape.
+
+**Why the record is owned.** Part 6 (unpublished; *The Inversion's Bill*) argues that the act which makes
+judgement usable — writing it down so agents and successors can act on it — is the same act that makes it
+takeable by whoever hosts the store where it accumulates, and that ownership of that store is therefore an
+architectural question and not a contractual one. This design's mechanisms already build toward that
+answer without stating the reason: Neotoma is the swarm's foundational level of truth, and the swarm halts
+without it (`failure_posture.md#the-decision`); a prompt is public and generic, describing a role and never
+an operator, with the operator's specifics held in context entities the operator's own record supplies at
+runtime. State the reason once: the record is owned by the operator, not merely kept confidential by a
+vendor's promise, because the value this design accumulates — findings, the standing findings that become
+rules, corrections — is exactly the compounding judgement Part 6 describes, and a compounding asset that
+cannot be relocated is not fully owned. This is the reason for mechanisms already built; it adds no new
+one. Where the series also argues for routing commodity execution to a frontier vendor and reserving
+locally-run inference for the judgement that defines the firm, this design ties the two only at the gate,
+not at the vendor: open decision 59 (`gates_and_workflows.md#blast-radius-selects-the-gate-nothing-yet-selects-the-model-a-step-runs-at`)
+would bind a step's minimum model strength to the blast tier of the action it is about to take, evaluated
+at the same take as blast and never chosen by the step itself — the mechanism the series' routing argument
+needs, independent of whether an instance also chooses to route the highest tier to a locally-run binding.
+
+**A cross-disciplinary rubric is out of scope here, by name.** Part 4 (*The Reconciler and the Rubric*)
+argues for a single object: the written precedence order among competing goods, so the same trade-off
+resolves the same way twice. No such object exists in this design. `priority_rubric` and
+`confidence_rubric` are narrow policy inputs a step reads, each scoped to one kind of judgement, not the
+general precedence-order object Part 4 describes — and the README already defers that object by name:
+"Strategy/rubric ownership … none yet … Vision; no design until P4 is designed." This section states the
+same deferral rather than declaring the object prematurely: a rubric of that shape waits on distributed
+authority (P4) being designed first, and nothing here should be read as an implicit design for it in the
+meantime.
 
 ## Beyond the sources
 

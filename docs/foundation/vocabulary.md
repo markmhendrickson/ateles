@@ -9,7 +9,7 @@ cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 opera
 and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional [step](#step), and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14,
 16–18, 23–29: the hold verb, a condition a step holds on, the `dependency_cycle` reason class, the consent
 tolerance on `action_policy`, and an [artifact](#artifact) `PART_OF` its containing artifact), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the `intake rule` entry). Format
-follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives). Revised by the consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by role; `merge` as an action-class name retired for `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound as the task's `due_date` on the step entry; the `operator_only` step; a rule keying on a field a step wrote; no marker on a read for a special-category type; decision 55 on the [external-system](#external-system) entry). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a task status; the terminal set declared on the type; the `finding` and `sign_off` fields; `rounds_cap` and `none_permitted`). Revised by the rulings pass of 2026-09-06 (revision 38: the [verdict](#verdict) as the [sign-off](#sign-off)'s reconciled [projection](#projection); a `signed` or blocking sign-off written under a held [lease](#lease); what owning confers; the counting rule and the thresholds' home on the [quorum](#quorum) and separation entries; an initiative as a task by class; the host as an external system; a budget as a grant's and a [delegation](#delegation)'s scope term). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser never the resolver save the operator's marked self-resolution, on the [approval](#approval) entry; the right to propose as a grant capability and what stops as a task, on the proposal and [reprioritization](#reprioritization) entries; metered resources and the engine's sole governance grant, on the [grant](#grant) entry; a rule naming a work-model type refused at the write). Revised by the planning pass of 2026-09-06 (revision 40: the planning-model section — [planning record](#planning-record), [planning level](#planning-level), [ascent](#ascent), [unplanned](#unplanned), [planning decision](#planning-decision), [planner](#planner), and the [amend](#amend-a-planning-record) verb). Revised by the record-sense pass of 2026-09-06 (revision 41: the [artifact](#artifact) definition and five other sentences that read "record" against an external system rephrased to "an entry an external system holds," closing the [record](#record) Not-for collision; the Not-for scoped to a Never for `docs/foundation/adapters.md` and the five per-system [adapter](#adapter) documents).
+follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives). Revised by the consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by role; `merge` as an action-class name retired for `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound as the task's `due_date` on the step entry; the `operator_only` step; a rule keying on a field a step wrote; no marker on a read for a special-category type; decision 55 on the [external-system](#external-system) entry). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a task status; the terminal set declared on the type; the `finding` and `sign_off` fields; `rounds_cap` and `none_permitted`). Revised by the rulings pass of 2026-09-06 (revision 38: the [verdict](#verdict) as the [sign-off](#sign-off)'s reconciled [projection](#projection); a `signed` or blocking sign-off written under a held [lease](#lease); what owning confers; the counting rule and the thresholds' home on the [quorum](#quorum) and separation entries; an initiative as a task by class; the host as an external system; a budget as a grant's and a [delegation](#delegation)'s scope term). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser never the resolver save the operator's marked self-resolution, on the [approval](#approval) entry; the right to propose as a grant capability and what stops as a task, on the proposal and [reprioritization](#reprioritization) entries; metered resources and the engine's sole governance grant, on the [grant](#grant) entry; a rule naming a work-model type refused at the write). Revised by the planning pass of 2026-09-06 (revision 40: the planning-model section — [planning record](#planning-record), [planning level](#planning-level), [ascent](#ascent), [unplanned](#unplanned), [planning decision](#planning-decision), [planner](#planner), and the [amend](#amend-a-planning-record) verb). Revised by the record-sense pass of 2026-09-06 (revision 41: the [artifact](#artifact) definition and five other sentences that read "record" against an external system rephrased to "an entry an external system holds," closing the [record](#record) Not-for collision; the Not-for scoped to a Never for `docs/foundation/adapters.md` and the five per-system [adapter](#adapter) documents). Revised by the Human Inversion mapping pass of 2026-09-06 (revision 44: two term collisions with a public essay series disambiguated — [reconciler](#reconciler) as this design's projection-parity check, never the essay's adjudicating role, and [replay](#replay) as the essay's [as-of-read](#as-of-read) sense, never this design's refused re-execution sense).
 
 ## Purpose
 
@@ -554,13 +554,30 @@ other the projection of it).
 ### step_status
 **Definition:** the map on the [task](#task) projecting each [step](#step)'s
 [step state](#step-state) on its [batch](#batch) so that it is read in one retrieval, derived from the
-[sign-offs](#sign-off) and proved equal to them by a reconciler.
+[sign-offs](#sign-off) and proved equal to them by a [reconciler](#reconciler).
 Written as the field the record names, in code font, because that is what a reader queries; the state it
 projects is the spaced concept step state.
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
 **Never:** "gate_status".
 **Not for:** history for the projection; a second source of truth; `step_status` as the name of the
 concept.
+
+### reconciler
+**Definition:** in this design, the mechanical check that proves a stored [projection](#projection) —
+chiefly [step_status](#step_status) — agrees with the [sign-offs](#sign-off) it is derived from; not a role
+and not a [principal](#principal).
+**Not for:** the sense of a public essay series (*The Human Inversion*, Part 4: a person, "often the most
+senior cross-functional person on the team or the founder," who adjudicates cross-disciplinary tension
+against a rubric). This design distributes that function rather than naming a role for it: the
+[operator](#operator) is the required seat on any [checkpoint](#checkpoint) whose subject concerns an
+object it owns (decision 46); the `arch` [review step](#review-step) checks a change against its cited
+design basis; an unresolvable scope is put to the operator rather than guessed (`undetermined_scope`);
+and the README states the divergence directly — "Reconciliation is a topology of domain owners, approvers,
+and quorums, not a single human bottleneck." Where the essay's sense is meant, "the operator" or "the
+owning principal" is this design's term, never "reconciler."
+**See:** [`authority_model.md#what-owning-confers-the-required-seat`](authority_model.md#what-owning-confers-the-required-seat).
+**Never:** —
+**Not for:** the essay's sense above; a stored role or principal type (none exists).
 
 ### fast path
 **Definition:** a declared skip of [steps](#step) that a [workflow](#workflow) permits for a named class of [tasks](#task).
@@ -774,6 +791,21 @@ re-claimed [task](#task) never repeats an effect that already happened.
 [`data_model.md#record-conventions`](data_model.md#record-conventions).
 **Never:** "replay protection" (replay is refused outright).
 **Not for:** "retry" for dedup.
+
+### replay
+**Definition:** doing a prior [action](#action) or [step](#step) a second time from a stored trace; refused
+outright in this design. [Effect dedup](#effect-dedup) exists so a re-claimed step or [task](#task) never repeats an
+effect that already happened, and decision 40 refuses the adjacent shape — a stored reasoning trace a later
+reader replays to reconstruct a step's judgement
+(`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`).
+**Not for:** the sense of a public essay series (*The Human Inversion*, Part 4: reading a session's
+reasoning chain months later). That sense is an as-of read over what a [sign-off](#sign-off) names it
+read, resolved at its `signed_at` (decision 40) — never a stored trace and never a second doing. Where
+"replay" is meant in that reading sense, "as-of read" is this design's term.
+**See:** [`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`](gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read).
+**Never:** "replay protection" (see [effect dedup](#effect-dedup)).
+**Not for:** the essay's sense above; deterministic code replay (`docs/durable_execution_substrate.md`,
+which this design also refuses in favour of explicit persisted state machines).
 
 ## Core workflows (`workflows.md`)
 
@@ -1263,7 +1295,7 @@ a [step state](#step-state), the chain, or a parent's completion.
 
 ### projection
 **Definition:** a stored copy of a [derived read](#derived-read), kept where a decision must be taken from one entity read and
-proved equal to its source by a reconciler, such as `step_status`.
+proved equal to its source by a [reconciler](#reconciler), such as `step_status`.
 **See:** [`data_model.md#concepts`](data_model.md#concepts).
 **Never:** "hot path" (retired: the path had no property the projection kept for it does not state).
 **Not for:** source of truth for a projection; history for a projection; cache for a projection; a

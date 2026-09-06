@@ -8,7 +8,7 @@ and which successors its tasks may enter, and never the state of a checkout. **D
 record for the built workflows (their step lists and fast paths, not their agent names), the agent
 policies governing outreach, payment, and people-data, `CLAUDE.md`'s people-data section, and PR #745
 operator review (2026-09-04), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Which workflows have a declaration on the record, and which are envisioned
-only, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `operator_preview` renamed `consent`; open decision 33). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 39 ruled here — what intake's `link` attaches and what hydration resolves; the payment `consent` row aligned with decision 27). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two declared intervals and the planned wait, cited in *How to read a workflow section*, `outreach`, and `operator-only`; a standing constraint on an entity a task names, read at intake). Revised by the consistency pass of 2026-09-06 (revision 35: the three `consent`-carrying workflows cite when their checkpoint is written and what the take re-evaluates). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound declared as the task's `due_date` and the `operator_only` step, cited in *How to read a workflow section* and `operator-only`; a matter, a case, or a filing as a record entity the task names, under *What `link` attaches*). Revised by the testability pass of 2026-09-06 (revision 37: `DUPLICATE_OF` at `dedupe`; `impl` closes on a mergeable pull request; `none_permitted` on `feature` and `security`; a bug needing a design choice becomes a new task; the transcript is a source, not an artifact; the `contact` allowlist at `extract`). Revised by the planning pass of 2026-09-06 (revision 40: the `planning` workflow, the `planner` role, and the thirteenth core workflow).
+only, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `operator_preview` renamed `consent`; open decision 33). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 39 ruled here — what intake's `link` attaches and what hydration resolves; the payment `consent` row aligned with decision 27). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two declared intervals and the planned wait, cited in *How to read a workflow section*, `outreach`, and `operator-only`; a standing constraint on an entity a task names, read at intake). Revised by the consistency pass of 2026-09-06 (revision 35: the three `consent`-carrying workflows cite when their checkpoint is written and what the take re-evaluates). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound declared as the task's `due_date` and the `operator_only` step, cited in *How to read a workflow section* and `operator-only`; a matter, a case, or a filing as a record entity the task names, under *What `link` attaches*). Revised by the testability pass of 2026-09-06 (revision 37: `DUPLICATE_OF` at `dedupe`; `impl` closes on a mergeable pull request; `none_permitted` on `feature` and `security`; a bug needing a design choice becomes a new task; the transcript is a source, not an artifact; the `contact` allowlist at `extract`). Revised by the planning pass of 2026-09-06 (revision 40: the `planning` workflow, the `planner` role, and the thirteenth core workflow). Revised by the Human Inversion mapping pass of 2026-09-06 (revision 44: the `postmortem` workflow, the fourteenth core workflow; one sentence on `feature`'s `legal` placement as a choice `applies_when` already makes, not a chronological default).
 
 ## Purpose
 
@@ -20,9 +20,9 @@ this document cannot give is a step to question.
 
 ## Scope
 
-Thirteen core workflows: intake, feature, bug, security, copy, social content, release, outreach, payment,
-research and analysis, meeting processing, operator-only, and planning, with session digestion beside
-them as the recovery path of the one execution mechanism that holds no lease. Each is a workflow type; a `workflow` entity
+Fourteen core workflows: intake, feature, bug, security, copy, social content, release, outreach, payment,
+research and analysis, meeting processing, operator-only, planning, and postmortem, with session digestion
+beside them as the recovery path of the one execution mechanism that holds no lease. Each is a workflow type; a `workflow` entity
 is declared per (project, workflow type), so one type may have several declarations that share the design
 stated here and differ in step owners and thresholds. A step owner is declared as a **role** and resolved
 to a principal at claim time: the declaration's `owner_role` holds the role, the roster binds that role to
@@ -287,7 +287,15 @@ needs the other's verdict; the join is what makes the batch wait for both. `lega
 step, and it carries an `applies_when` condition: it opens where the change touches licensing,
 data-handling, or disclosure, and is recorded inapplicable where it does not, with the condition that
 ruled it out (`gates_and_workflows.md#declaration-batch-projection`). Every other step here is required
-and opens on every batch. `merge` is a step so that the merge
+and opens on every batch. This placement — a review step, seated after `impl`, gated by relevance rather
+than by a chronological default — is the design's answer to where a discipline like legal belongs: it is
+not exiled to a gate of last resort (a public essay series, *The Human Inversion*, Part 3, on the
+pre-inversion shape where such disciplines "lived almost entirely at foundation … and review … but were
+exiled to the gates"), because `applies_when` seats it exactly where its relevance is decided, the same
+principle that fails an unclassified action type closed rather than passing it by default. A project whose
+legal risk must be judged before implementation starts, not after, expresses that by seating `legal` in the
+design stage of its own workflow declaration instead — the design does not preclude it, and does not
+declare it here. `merge` is a step so that the merge
 action has a step owner to claim it, a taking to record, and a sign-off to close the batch with; the
 action itself is governed by action policy, not by the step
 (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`).
@@ -835,6 +843,63 @@ legal role on one whose scope names a jurisdiction — each with an `applies_whe
 statement, each closing on that role's findings, and each recorded inapplicable where its condition does
 not hold. That is the home of the plan-participation protocol the roles once carried by hand, and a
 role's concern is a blocking finding `amend` cannot sign around (`planning_model.md#maintenance-is-work-the-planning-workflow`).
+
+## postmortem
+
+**Purpose:** turn a halt, a repeated failure, or a standing finding into a written account of what the
+observations should have caught and did not, so drift that happened anyway is institutionalized rather
+than left to recur unremarked — the class of work a public essay series (*The Human Inversion*, Part 5)
+names directly: "publish postmortems when drift happened anyway, with links to the observations that
+should have prevented it."
+
+**Entry condition:** an `intake_rule` matching one of three classifications recorded on an existing entity,
+never a work-model record type itself (decision 36): the operator-invoked halt's read-back confirming it
+stopped (`failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`), written
+as an observation on the `agent_session` or artifact the halt concerned; a checkpoint whose reason is
+`repeated_lapse`, `rounds_exhausted`, or `dependency_cycle` reaching a terminal resolution
+(`failure_posture.md#the-rules`); or a standing [finding](vocabulary.md#finding) whose institutionalization
+task (decision 17) has landed and closed. Each of the three is a change to a field already written by
+another step, never a new listener on the work model. A task this rule creates enters intake and is
+classified like any other; `classify` names which of the three fired and the entity it fired on.
+
+**Steps**
+
+<!-- rendered: workflow=<project>|postmortem steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `pm` | `pm` step owner | yes | | the triggering halt, checkpoint, or standing finding is named, with its subject and reason class, and the scope of the review is stated on the task |
+| 2 | `investigate` | analyst | yes | | the observations that should have caught the drift before it compounded are named by reference, resolved as of the incident's time, and a finding is recorded stating what was missing — a gate, a check, a declared read, an instrument — not merely what happened |
+| 3 | `pr_review` | `pr_review` step owner | yes | | the finding names an executed check or a resolvable reference for every claim, per principle 2, and is judged complete for the incident's scope |
+| 4 | `merge` | steward | yes | | the finding's remedy is routed: an implementation-only fix as a task through intake, referring to this batch's finding; a decision-or-attestation gap as the institutionalization task of decision 17, referring to the same finding; the sign-off names the successor |
+
+<!-- /rendered -->
+
+`investigate` is separate from `pm` so that the incident is scoped before the account of it is written, and
+separate from `pr_review` so that a claim about what should have caught the drift is checked before it is
+institutionalized — the same reason `survey` and `judge` are separated in `planning`. This workflow writes
+no fix itself: its output is the finding and the task the finding produces, never a direct change to the
+agent, workflow, or step that produced the drift, because a proposed change is a proposal until the gate
+lets it through, never a mutation an agent makes to itself on its own finding
+(`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
+Where the incident's remedy is a recovery already taken under `action_policy.recoveries`
+(`failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`), this workflow
+does not repeat that recovery — it names, as part of `investigate`'s finding, whether the recovery path was
+exercised and read back, which is a recovery exercise in the sense that document already requires, not a
+new one this workflow invents.
+
+**Stages:** scoping (`pm`); investigation (`investigate`); review (`pr_review`); routing (`merge`).
+
+**Artifacts:** the issue that carries the account, where the project files one; none otherwise — the
+finding and the tasks it produces are in the record.
+
+**Typical action classes:** none of its own; a recovery a finding names as unexercised is an action under
+its own class, taken through the action gate like any other recovery.
+
+**Successors:** none. The closing sign-off's effect is the routed task or the institutionalization task it
+refers to, not a workflow this batch itself enters.
+
+**Fast paths:** none.
 
 ## Whether a stage names anything a step does not
 
