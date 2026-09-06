@@ -25,10 +25,11 @@ re-runs whenever a term is added.
 
 **What it deliberately does not link.** Some terms are ordinary English words that this vocabulary
 also binds to a specific sense — `status`, `active`, `held`, `created`, `condition`, `chain`, `stage`,
-`coverage`, `delivery`, `grant`, `approval`, `initiative`, `record`, `subject`, and the two verb entries
-`execute (a task)` and `take (an action)`. Linking their first occurrence mislabels the ordinary use:
+`coverage`, `delivery`, `event`, `grant`, `approval`, `initiative`, `record`, `subject`, and the two verb
+entries `execute (a task)` and `take (an action)`. Linking their first occurrence mislabels the ordinary use:
 "bans are held as regular expressions" is not the lease state, "the owner takes a view" is not the action
-verb, and "the record a step owner writes" is not the store. Their
+verb, "the record a step owner writes" is not the store, and a calendar event or "the code host's event
+surface" is not the adapter-vocabulary term. Their
 mentions are left to the author, who knows which sense is meant. `GENERIC` below is that list; a wrong
 link is worse than none.
 
@@ -69,6 +70,7 @@ GENERIC = frozenset(
         "coverage",
         "created",
         "delivery",
+        "event",
         "execute (a task)",
         "grant",
         "held",

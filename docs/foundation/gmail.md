@@ -9,7 +9,7 @@ action gate; the three verdict values), `workflows.md` (outreach, intake, operat
 `failure_posture.md` (the halt, the recovery per action class, the checkpoint reason classes), and the
 Gmail REST API v1 surface as exposed by the `gws` CLI, read 2026-09-05, and PR #745 operator review
 (2026-09-05, rulings 13–14, 16–18, 23–29: decision 23 ruled here). What is built, and which rows have
-no code path, is `status.md`. Revised by the testability pass of 2026-09-06 (revision 37: refusal 1's mechanical half, the field allowlist on the grant).
+no code path, is `status.md`. Revised by the testability pass of 2026-09-06 (revision 37: refusal 1's mechanical half, the field allowlist on the grant). Revised by the event/signal/delivery pass of 2026-09-06 (revision 38: "Every inbound signal, and what it becomes" and its table headers, Linkage, Identity, and the disposition sentence renamed to `event`, matching `github.md`'s "Event and action" precedent; `signal` kept only where the design means the record's reading of an event).
 
 ## Purpose
 
@@ -110,7 +110,7 @@ derived, not stored. This is the same ruling `adapters.md` makes about freshness
 in this system where an adapter is most tempted to break it. **The drift note below records that the built
 path does keep such state.**
 
-## Every inbound signal, and what it becomes
+## Every inbound event, and what it becomes
 
 The `system`/`external_id` pair identifies each artifact as the table above states. Rows are marked
 **handled**, **deliberately ignored**, or **unhandled** — the third being a gap, which is a `status.md` row
@@ -118,7 +118,7 @@ and not a silent omission here.
 
 ### Messages
 
-| Signal | Status | Outcome in the record |
+| Event | Status | Outcome in the record |
 |---|---|---|
 | a message added, on a thread the record does not track | handled | a task with the thread as its artifact, entering intake; the message is minted `PART_OF` the thread. The mail poller is the daemon mechanism of `work_model.md#the-four-execution-mechanisms`, which produces tasks and never receives one |
 | a message added, on a thread attached to an open outreach batch, from the party the batch addresses | handled | an observation on the thread artifact; the `follow_up` step owner reads it as the reply the step closes on (`workflows.md#outreach`). **It closes no step by itself** — the step owner reads it and signs |
@@ -134,7 +134,7 @@ and not a silent omission here.
 
 ### Threads and labels
 
-| Signal | Status | Outcome in the record |
+| Event | Status | Outcome in the record |
 |---|---|---|
 | a label added to, or removed from, a message or thread | handled | an observation on `labels[]`. **A label naming a step is not that step's state**, and no label opens, claims, or closes anything. This is `adapters.md`'s rule and the mail system erodes it harder than the code host does, because a mailbox's labels are the operator's own working vocabulary and read as status to a human eye |
 | a thread archived (the inbox label removed) | handled | an observation. Archiving is a label change and is not a completion: a task's status is written by its batch's sign-offs |
@@ -148,7 +148,7 @@ and not a silent omission here.
 These have no analogue in `github.md`'s tables and they matter more here, because several of them can
 redirect or suppress mail without touching a single message.
 
-| Signal | Status | Outcome in the record |
+| Event | Status | Outcome in the record |
 |---|---|---|
 | the watch subscription expiring, or being stopped | handled | an observation, **and announced on the off-record path**. A watch expires on a fixed horizon and must be renewed; an adapter whose watch lapsed looks exactly like a mailbox with no mail, which is `failure_posture.md` rule 2's failure at the boundary |
 | an auto-forwarding rule created, changed, or enabled | handled | an observation, **and announced on the off-record path**. A forwarding rule sends the operator's mail somewhere else, standing, without any further action — the mail system's nearest thing to the code host's auto-merge, and read the same way: a permit nobody asked the gate for. The design's position is that the swarm never creates one; see *What this adapter refuses* |
@@ -202,9 +202,9 @@ task points at, and that is what is ruled. The general rule — where an externa
 levels of one thing, each level is an artifact and the contained one is `PART_OF` the containing one — is
 stated once, under linkage in `adapters.md`; this section applies it to the mail system.
 
-**Linkage, per direction.** Inbound, a signal links to the artifact whose id it carries: a history entry
+**Linkage, per direction.** Inbound, an event links to the artifact whose id it carries: a history entry
 naming a message id lands as an observation on that message, minted `PART_OF` its thread where the record
-does not yet hold it, and the thread is reachable from it by the edge; a signal about the thread as a whole
+does not yet hold it, and the thread is reachable from it by the edge; an event about the thread as a whole
 — a label applied to it, its archival — lands on the thread. Outbound, an action refers to the unit whose id
 its operation needs: `send` creates a message, and the confirmation mints that message `PART_OF` the thread
 the send began or joined; `follow_up` replies on the thread, and its confirmation mints the reply the same
@@ -287,7 +287,7 @@ design's answer is the same in both — the swarm does not use the operation.
 
 ## How the five rules apply to this system
 
-**Identity.** The actor of an inbound signal is an **email address**, and the adapter resolves it through
+**Identity.** The actor of an inbound event is an **email address**, and the adapter resolves it through
 the credential binding (`authority_model.md#principals`). This system makes the rule harder than the code
 host does, in three ways worth stating because each is a way it fails quietly:
 
@@ -314,7 +314,7 @@ message **on a thread a batch addresses**, where the record intended a send and 
 that happened. A sent message on an untracked thread is an ordinary new record, and it takes the
 untracked-thread path.
 
-**Linkage.** An inbound signal names a message id and a thread id; the adapter finds the artifact by
+**Linkage.** An inbound event names a message id and a thread id; the adapter finds the artifact by
 `system` and `external_id`. The system-specific point is the one the identity section already touched: a
 reply arriving on a tracked thread links by thread id, which the mail system supplies, and does **not**
 depend on parsing the `In-Reply-To` and `References` headers — those are the fallback for a message whose
@@ -338,7 +338,7 @@ one where the rule matters most, because the effect is irreversible: an action w
 stronger evidence of a prior commit than a success response is of the present one. An adapter that resends
 on an unconfirmed key has sent the message twice to a person.
 
-**Unknown, and every delivery's disposition.** A signal the adapter cannot map is an observation that says
+**Unknown, and every delivery's disposition.** An event the adapter cannot map is an observation that says
 so and is never coerced to the nearest outcome (principle 7). The system-specific values that must stay
 `unknown` rather than defaulting: a message body the adapter could not decode or decrypt; an authentication
 result it could not read; a history interval it could not fetch because the marker expired; and a
@@ -346,7 +346,7 @@ thread read whose page was truncated. Each of these has an obvious wrong default
 nothing happened, no more messages — and each wrong default is indistinguishable, downstream, from the true
 version of the same value.
 
-Every signal resolves to one of the four outcomes or to `dropped` with a reason, counted per window and
+Every event resolves to one of the four outcomes or to `dropped` with a reason, counted per window and
 surfaced on the off-record announcement path. The reasons this document introduces: `untracked_mailbox`,
 `draft_not_used`, `presentation_only`, `client_configuration`, `out_of_scope_class`, and the refusal
 reasons below.
@@ -415,7 +415,7 @@ right column is inventory: capabilities that exist and that this design has no s
 | API capability | Design's use |
 |---|---|
 | read a message, a thread; list messages, list threads | **used**, and it is the primary inbound path |
-| the mailbox watch and its history log | **used** — as a wake-up, with the history entries as the signal |
+| the mailbox watch and its history log | **used** — as a wake-up, with the history entries as the event |
 | send a message; send a reply on a thread | **used**; the outreach workflow's whole outbound half |
 | read the sent folder | **used**, for confirmation and for the escaped-send defect |
 | modify labels on a message or thread; archive | **used**, narrowly, at `persist` and `record` |
@@ -451,7 +451,7 @@ the history log's retention are the API's documented behaviour, not measured her
 
 **What would make this stale, in order of likelihood.** A new method or resource on any of those trees, which
 would appear as a row this document does not name — and would surface as a rising `out_of_scope_class` drop
-count only if it produced inbound signals, so an outbound capability added by the vendor is the case this
+count only if it produced inbound events, so an outbound capability added by the vendor is the case this
 document's own controls do **not** catch. A change to the history log's retention, which changes how large a
 gap an expired marker implies. A change to what the change notification carries: if it ever carried the change
 itself, the whole of *What arrives* would be rewritten and many rows would become events rather than reads.
@@ -479,7 +479,7 @@ Read 2026-09-05 on this branch by enumerating every `gws gmail` and `gws calenda
 | a label is never step state | **two daemons read a processed-label as the done condition.** One excludes `-label:<name>/processed` in its poll query and writes the label to stop re-notification, mutating the unread flag in the same write; the other refuses a message carrying its own processed label. Each is a second place step state lives, editable by any external actor and backed by no sign-off | `execution/daemons/turdus/turdus.py`, `execution/daemons/riparia/riparia.py` |
 | an adapter keeps no history of its own | **three adapter-local state files.** One holds a `last_message_id` cursor, a 500-entry dedup set, a processed count, and a last-poll timestamp; a second holds a once-per-day marker gating the calendar leg; a third holds a chat cursor | `execution/daemons/turdus/.turdus_state.json`, `execution/daemons/monedula/.monedula_last_run`, `.monedula_tg_offset` |
 | every delivery resolves to an outcome or to `dropped` with a counted reason | **four silent branches.** An inbound message failing the process test is skipped with no counter, log, or record; a partially matched message is logged and abandoned; a message classified as noise is marked handled and dropped uncounted; an informational message is stored with no task, no label, and no notification. Each is the receipt-without-disposition shape the disposition rule exists to close | `riparia.py`, `turdus.py` |
-| inbound arrives by the mailbox watch, and the history log is the signal | **neither is used.** Zero occurrences of the watch, of Pub/Sub, or of the history log repo-wide; inbound is six polling sites issuing list-and-read queries. This is not a defect against a built design — it is the built path having chosen the other of the two the vendor offers, and it means the expired-marker reasoning above has no code it corresponds to | `turdus.py`, `riparia.py`, `email_channel.py` |
+| inbound arrives by the mailbox watch, and the history log is the event | **neither is used.** Zero occurrences of the watch, of Pub/Sub, or of the history log repo-wide; inbound is six polling sites issuing list-and-read queries. This is not a defect against a built design — it is the built path having chosen the other of the two the vendor offers, and it means the expired-marker reasoning above has no code it corresponds to | `turdus.py`, `riparia.py`, `email_channel.py` |
 | the design does not depend on a mail-system draft, and never updates one | **consistent, and by absence:** zero production call sites for any draft method. Drafts are staged only by agent instruction. The send-gate hook blocks the update, send, and helper shapes at the tool boundary with a per-command inline override — but the daemons' own send paths run as launchd subprocesses and are not subject to it | `.claude/hooks/gmail_send_gate.py`; the send sites above |
 
 The refusals this document states are therefore **partly already true by absence** (drafts, filters,
@@ -511,7 +511,7 @@ domain's.
 
 ## Beyond the sources
 
-The per-signal mapping, the handled / deliberately ignored / unhandled marking, the seven refusals, the
+The per-event mapping, the handled / deliberately ignored / unhandled marking, the seven refusals, the
 capture-minimization rule stated as an adapter constraint rather than a workflow one, the treatment of a
 bounce as an ordinary inbound message rather than a status on the original action, the empty recovery row
 and its justification, and the ruling of decision 23 are this document's, applying `adapters.md`'s rules to

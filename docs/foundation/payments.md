@@ -10,12 +10,12 @@ checkpoint), `authority_model.md` (credential custody by revocability; separatio
 `workflows.md` (the payment workflow's five steps and its two disjoint roles), `failure_posture.md`
 (recovery per action class; the rules on read-back, unknown, and bounded deferral), and the published API
 surfaces of bank-transfer and crypto rails, read 2026-09-05, and PR #745 operator review (2026-09-05,
-rulings 13–14, 16–18, 23–29: decisions 27, 28, and 29 ruled here). What is built is `status.md`. Revised by the second workflow-format pass of 2026-09-06 (revision 36: a purchase or a booking with a merchant is out of scope here, being an effect on the merchant's system and not on a rail). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser-resolves and quorum pointers cite decisions 47 and 50 as ruled).
+rulings 13–14, 16–18, 23–29: decisions 27, 28, and 29 ruled here). What is built is `status.md`. Revised by the second workflow-format pass of 2026-09-06 (revision 36: a purchase or a booking with a merchant is out of scope here, being an effect on the merchant's system and not on a rail). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser-resolves and quorum pointers cite decisions 47 and 50 as ruled). Revised by the event/signal/delivery pass of 2026-09-06 (revision 40: the Purpose sentence, "Inbound: every signal a rail can produce," its two subsection headings, its table headers, and the Linkage rule renamed to `event`; `signal` kept only in its ordinary-English sense).
 
 ## Purpose
 
 Be the payment adapter in full, across the rail classes the design contemplates: what the rails hold as
-artifacts, every inbound signal mapped to one of the four outcomes `adapters.md` defines or to `dropped`
+artifacts, every inbound event mapped to one of the four outcomes `adapters.md` defines or to `dropped`
 with a reason, every outbound operation with its action class and what confirms it, and — the question this
 document exists to answer — **what the design does with a submitted transfer whose confirmation never
 returns**, where the effect may or may not have landed and re-submitting could pay twice.
@@ -262,7 +262,7 @@ a policy decision about the amount, not a fact about the chain.
 **Two consequences for this design.** The depth (or the rail state) that counts as terminal is **declared**,
 not assumed: the criterion is stated in this document per rail class, and the value is bound per rail
 instance in the `vendor_binding` (decision 29, below) — an adapter that hardcodes a depth has made a risk
-decision that was never its own to make. And a later inbound signal reporting that a terminal state was undone is
+decision that was never its own to make. And a later inbound event reporting that a terminal state was undone is
 an **observation and a defect to surface**, never a silent correction of the record: the confirmation
 stands, because it was true when it was read, and the reversal is recorded beside it so both are readable.
 What follows from a reversal is a new decision, taken as its own action through the gate, and never the
@@ -421,16 +421,16 @@ transfer's identifier, the amount — and the payee's own identifying details st
 holds them and are referenced rather than copied. A checkpoint presented to the operator carries what the
 operator needs to decide, which is not the same as everything the adapter read.
 
-## Inbound: every signal a rail can produce
+## Inbound: every event a rail can produce
 
 The rails deliver fewer distinct event kinds than a code host or a chat channel, and most of what matters
 arrives by a read rather than by a notification the rail sends. The disposition rule holds regardless: every delivery resolves to one
 of the four outcomes or to `dropped` with a reason, counted per window and surfaced on the off-record
 announcement path.
 
-### Signals about a transfer the swarm submitted
+### Events about a transfer the swarm submitted
 
-| Signal | Status | Outcome in the record |
+| Event | Status | Outcome in the record |
 |---|---|---|
 | a transfer reaches its declared terminal state, read back or notified | handled | an **action confirmation** on the `payment`-class action whose `dedup_key` matches (`taken_at`, `result_ref` naming the transfer); the transfer is an artifact `PRODUCES` from the batch. The `reconcile` step owner reads it and signs, and the `transaction` entity is that step's write, **never the adapter's** |
 | a transfer moves through a non-terminal state (accepted, converting, processing, awaiting funds, broadcast but unconfirmed) | handled | an observation on the artifact. **It is not a confirmation**: the effect is not yet what the action intended, and folding a non-terminal state into "sent" is how a pending payment is reported as complete |
@@ -440,9 +440,9 @@ announcement path.
 | a rail-side issue blocking a transfer (a compliance hold, a document required, a verification pending) | handled | an observation on the artifact; the transfer is non-terminal and the step stays open. Supplying what is asked for is **operator-only**: it is out-of-band identity or documentation work no agent performs (`workflows.md#operator-only`) |
 | a transfer submitted whose confirmation never returned | handled | **no write beyond the action's own unknown state.** See *The unknown case* |
 
-### Signals about money the swarm did not send
+### Events about money the swarm did not send
 
-| Signal | Status | Outcome in the record |
+| Event | Status | Outcome in the record |
 |---|---|---|
 | an incoming payment received | handled | an observation on the artifact for the obligation it settles, where one is tracked; otherwise a task for intake with the transfer as its artifact. **The adapter never matches an incoming payment to an obligation by its reference text** — the reference is a hint, and the matching is a step's judgement, signed |
 | an outgoing payment the swarm did not make | handled | an observation, **and a defect to surface**, as above |
@@ -540,7 +540,7 @@ address, or a reference string it read somewhere. A payee resolved by anything o
 payee nobody verified, and `verify` exists precisely to check that the payee and amount match the profile
 before the operator is asked.
 
-**Linkage.** A signal names a transfer at a rail; the adapter finds the artifact by `system` and
+**Linkage.** An event names a transfer at a rail; the adapter finds the artifact by `system` and
 `external_id`. A transfer the record holds no action for is an artifact with no batch, and — unlike
 elsewhere in the design, where such a record yields a task for intake — an *outgoing* one is a defect to
 surface, because money left an account the swarm holds a credential for and nothing in the record intended
@@ -835,7 +835,7 @@ component that would otherwise collapse it by being the only one at the boundary
 
 ## Beyond the sources
 
-The mapping of rail signals to the four outcomes, the statement of what `dedup_key` is keyed on and the
+The mapping of rail events to the four outcomes, the statement of what `dedup_key` is keyed on and the
 per-class resolution of the unknown case, the ruling that a balance is an observation on an account's
 artifact rather than an artifact of its own, the composition argument against a second gate, the
 metadata-suppression refusal and its three properties, and the extension of the separation of duties to the

@@ -9,7 +9,7 @@ actions and the action gate), `workflows.md` (meeting processing, outreach, oper
 `failure_posture.md` (the halt, the recovery per action class), `gmail.md` (the sibling system, whose
 identity and minimization rules this document shares), and the Google Calendar REST API v3 surface as
 exposed by the `gws` CLI, read 2026-09-05, and PR #745 operator review (2026-09-05, rulings 13–14, 16–18,
-23–29: decision 24 ruled here). What is built, and which rows have no code path, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `calendar_routing_config` replaced by `channel_config`, the binding type `adapters.md` names). Revised by the testability pass of 2026-09-06 (revision 37: refusal 1's mechanical half, the field allowlist on the grant).
+23–29: decision 24 ruled here). What is built, and which rows have no code path, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `calendar_routing_config` replaced by `channel_config`, the binding type `adapters.md` names). Revised by the testability pass of 2026-09-06 (revision 37: refusal 1's mechanical half, the field allowlist on the grant). Revised by the event/signal/delivery pass of 2026-09-06 (revision 38: "Every inbound signal, and what it becomes" and its table headers, Linkage, Identity, and the disposition sentence renamed to `event`, matching `github.md`'s and `gmail.md`'s precedent; `signal` kept only in its ordinary-English sense).
 
 ## Purpose
 
@@ -82,7 +82,7 @@ with the objection to it answered below. The general rule — where an external 
 of one thing, each is an artifact and the contained one is `PART_OF` the containing one — is stated once,
 under linkage in `adapters.md`; this section applies it to the calendar.
 
-**Linkage, per direction.** Inbound, a signal links to the artifact whose id it carries: a change to the
+**Linkage, per direction.** Inbound, an event links to the artifact whose id it carries: a change to the
 series — its rule, its title, its attendees — lands on the series artifact; an occurrence modified or
 cancelled independently lands on that occurrence's artifact, minted `PART_OF` the series where the record
 does not yet hold it; an occurrence read from an instances query over a window is minted the same way, with
@@ -129,7 +129,7 @@ never a series or its rule — consistent with the occurrence half of this rulin
 The count and the citations are in *Drift* below. The built path chose nothing; it read what one flag
 returns, and the operator's standing instruction is that the code is not established design guidance.
 
-## Every inbound signal, and what it becomes
+## Every inbound event, and what it becomes
 
 The calendar offers a **watch** on events, on the calendar list, on access rules, and on settings, which
 posts a notification when something in the watched collection changes. As in `gmail.md`, the notification is
@@ -142,7 +142,7 @@ Rows are marked **handled**, **deliberately ignored**, or **unhandled** — the 
 
 ### Events
 
-| Signal | Status | Outcome in the record |
+| Event | Status | Outcome in the record |
 |---|---|---|
 | an event created on a tracked calendar, that the record does not track | handled | an artifact; **and a task for intake where the event carries an ask** — a meeting to prepare for, a recurring obligation the calendar drives. An event carrying no ask is an artifact and no task, which is a valid outcome and not a drop |
 | an invitation received (an event created on the operator's calendar by someone else) | handled | an artifact, and a task for intake. It is distinguished from the row above by the organizer not being the operator, and the distinction matters because the response is an outward-facing act — see the outbound table |
@@ -164,7 +164,7 @@ Rows are marked **handled**, **deliberately ignored**, or **unhandled** — the 
 
 ### Calendars, sharing, and settings
 
-| Signal | Status | Outcome in the record |
+| Event | Status | Outcome in the record |
 |---|---|---|
 | a calendar added to, or removed from, the operator's calendar list | handled | an observation, **and announced on the off-record path**: the set of calendars the adapter sees just changed, and a calendar silently absent is indistinguishable from a calendar with nothing on it |
 | a calendar's access rules changed (a share added, changed, or revoked) | handled | an observation, **and announced**. Someone gaining write access to the operator's calendar can create events that the adapter will read as records; someone revoking the swarm's access ends every read this document depends on |
@@ -249,7 +249,7 @@ writing one deliberately, not by the adapter mirroring task state.
 
 ## How the five rules apply to this system
 
-**Identity.** The actor of an inbound signal is an **email address** — the organizer's, or an attendee's —
+**Identity.** The actor of an inbound event is an **email address** — the organizer's, or an attendee's —
 and the adapter resolves it through the credential binding (`authority_model.md#principals`). Everything
 `gmail.md` says about addresses applies here unchanged and is cited rather than restated: an address is not
 an account, a mailbox has many addresses, and an unrecognized address is never resolved to the operator.
@@ -261,7 +261,7 @@ and carries lower coverage. And an event's **organizer** is the principal whose 
 change made by an attendee to their own copy does not change the organizer's event, so an observation from
 a non-organizer copy is an observation about that copy and says so.
 
-**Linkage.** An inbound signal names a calendar id and an event id; the adapter finds the artifact by
+**Linkage.** An inbound event names a calendar id and an event id; the adapter finds the artifact by
 `system` and that pair. Two system-specific wrinkles. A recurring occurrence names the series through a
 parent id and its own original start instant, and it resolves to an occurrence artifact `PART_OF` the
 series artifact (decision 24, above). And a meeting
@@ -287,7 +287,7 @@ cover; an occurrence set over an unbounded series, which has no complete value; 
 timezone the adapter could not resolve, whose time is therefore not a known instant. Each has an obvious
 wrong default and each wrong default is indistinguishable downstream from the true version.
 
-Every signal resolves to one of the four outcomes or to `dropped` with a reason, counted per window and
+Every event resolves to one of the four outcomes or to `dropped` with a reason, counted per window and
 surfaced on the off-record announcement path. The reasons this document introduces: `untracked_calendar`,
 `presentation_only`, `client_configuration`, `identity_moved`, and `out_of_scope_class`.
 
@@ -348,7 +348,7 @@ capabilities that exist and that this design has no step reaching for.
 | API capability | Design's use |
 |---|---|
 | list events over a window; read one event | **used**, and it is the primary inbound path |
-| the events watch, with a sync token | **used** — as a wake-up, with the changed-entry read as the signal |
+| the events watch, with a sync token | **used** — as a wake-up, with the changed-entry read as the event |
 | create an event | **used**, at `record` and `deliver`, with the attendee-dependent class |
 | update or move an event in time; cancel one | **used**, same classing |
 | read an event's attendees and their responses | **used**, and it is what decides the action class |
@@ -443,7 +443,7 @@ invitation as a task, a colour as a category — never becomes the domain's.
 
 ## Beyond the sources
 
-The per-signal mapping, the handled / deliberately ignored / unhandled marking, the eight refusals, the
+The per-event mapping, the handled / deliberately ignored / unhandled marking, the eight refusals, the
 attendee-dependent action class and its fail-closed default, the treatment of a meeting's beginning and
 ending as derivations rather than events, the use of the client-supplied event id as the outbound dedup
 key's identity, and the ruling of decision 24 are this document's, applying `adapters.md`'s rules to the
