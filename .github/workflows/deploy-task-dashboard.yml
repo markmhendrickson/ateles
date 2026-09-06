@@ -1,0 +1,212 @@
+name: Deploy task dashboard
+
+# Deploys merged `main` to the operator's task-dashboard instance.
+#
+# WHY THIS EXISTS: the dashboard ran only on the operator's laptop, on
+# localhost:5273. When it went down, every task link produced that day died
+# with it — and those links never resolved for anyone else, on any device, in
+# the first place. It was the last piece of the swarm tied to local hardware.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# THIS REPO IS PUBLIC. No app name or hostname may appear in this file.
+# ─────────────────────────────────────────────────────────────────────────────
+# Both come from repository secrets. The canonical binding — app, region,
+# domain, secret names, verified deploy command — lives in the
+# `deployment_configuration` entity in Neotoma.
+#
+# This workflow deliberately mirrors neotoma's `deploy-operator-instance.yml`
+# (neotoma#2278, #2289) rather than inventing a second deploy shape: same CI
+# gate, same queue-never-cancel concurrency, same explicit `-c` config flag,
+# and the same insistence that a deploy exiting 0 is NOT evidence of a deploy.
+#
+# Required repository secrets:
+#   DASHBOARD_APP        Fly app name
+#   DASHBOARD_HOST       hostname to verify (no scheme)
+#   FLY_API_TOKEN        Fly deploy token for the app's org
+#                        (override with DASHBOARD_FLY_TOKEN if it moves org)
+#
+# The job SKIPS cleanly when DASHBOARD_APP is unset, so forks are unaffected.
+
+on:
+  push:
+    branches: [main]
+    # Only redeploy when something the served build actually contains changed.
+    paths:
+      - "apps/task-dashboard/**"
+      - ".github/workflows/deploy-task-dashboard.yml"
+  workflow_dispatch:
+    inputs:
+      skip_ci_gate:
+        description: "Deploy without waiting for CI (emergency use)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read # read CI conclusions for the commit being deployed
+
+# NOT cancel-in-progress. Cancelling `flyctl deploy` mid-flight can leave a
+# machine stopped or half-updated. Two merges in quick succession should deploy
+# in order, the second superseding the first.
+concurrency:
+  group: deploy-task-dashboard
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/task-dashboard
+    steps:
+      - name: Check instance is configured
+        id: gate
+        working-directory: .
+        env:
+          APP: ${{ secrets.DASHBOARD_APP }}
+        run: |
+          if [ -z "$APP" ]; then
+            echo "DASHBOARD_APP not set — no dashboard instance configured; skipping."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.gate.outputs.configured == 'true'
+        uses: actions/checkout@v4
+
+      # ── SAFETY GATE ──────────────────────────────────────────────────────
+      # Only deploy a commit whose CI is green. Merged-to-main is not itself
+      # evidence of green: main can go red through a merge-order interaction
+      # that neither PR showed. Polls combined check-runs for the exact SHA
+      # rather than using workflow_run, whose single conclusion cannot say
+      # which lane failed. A timeout FAILS — it is never treated as a pass.
+      - name: Wait for CI to pass on this commit
+        if: steps.gate.outputs.configured == 'true' && !inputs.skip_ci_gate
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          DEADLINE=$(( $(date +%s) + 30 * 60 ))
+          while :; do
+            RAW=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate \
+                    --jq '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv' || true)
+            if [ -z "$RAW" ]; then
+              echo "No check-runs reported yet for $SHA; waiting…"
+            else
+              PENDING=0; FAILED=""
+              while IFS=$'\t' read -r NAME STATUS CONCLUSION; do
+                [ -z "${NAME:-}" ] && continue
+                # Skip this workflow's own check-run, or it waits on itself.
+                case "$NAME" in
+                  deploy|"Deploy task dashboard"*) continue ;;
+                esac
+                if [ "$STATUS" != "completed" ]; then
+                  PENDING=$((PENDING + 1)); continue
+                fi
+                case "$CONCLUSION" in
+                  success|skipped|neutral) ;;
+                  *) FAILED="${FAILED}${NAME} (${CONCLUSION}); " ;;
+                esac
+              done <<< "$RAW"
+
+              if [ -n "$FAILED" ]; then
+                echo "FAIL: CI is not green on $SHA — $FAILED"
+                exit 1
+              fi
+              if [ "$PENDING" -eq 0 ]; then
+                echo "OK: all check-runs green on $SHA."
+                break
+              fi
+              echo "Waiting on $PENDING in-progress check-run(s)…"
+            fi
+            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+              echo "FAIL: timed out after 30m waiting for CI on $SHA. Not deploying."
+              exit 1
+            fi
+            sleep 30
+          done
+
+      - name: Setup flyctl
+        if: steps.gate.outputs.configured == 'true'
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # `-c fly.dashboard.toml` is LOAD-BEARING. `flyctl deploy` defaults to
+      # fly.toml and REAPPLIES the selected config's [[vm]] block over the
+      # running machine — it does not merge, and prints no warning when it
+      # shrinks one (neotoma#2289). --app and --primary-region are passed
+      # explicitly because this public repo's config names neither.
+      - name: Deploy to Fly
+        if: steps.gate.outputs.configured == 'true'
+        env:
+          FLY_API_TOKEN: ${{ secrets.DASHBOARD_FLY_TOKEN || secrets.FLY_API_TOKEN }}
+          APP: ${{ secrets.DASHBOARD_APP }}
+          REGION: ${{ vars.DASHBOARD_REGION || 'ams' }}
+          SHA: ${{ github.sha }}
+        run: |
+          flyctl deploy -c fly.dashboard.toml \
+            --app "$APP" --primary-region "$REGION" --remote-only \
+            --build-arg DASHBOARD_GIT_SHA="$SHA"
+
+      # ── POST-DEPLOY VERIFICATION ─────────────────────────────────────────
+      # `flyctl deploy` exiting 0 is NOT evidence the new build is serving.
+      # Neotoma shipped a month-old image TWICE while reporting deploy success.
+      # Check (b) is the one that catches it: it compares the commit the
+      # RUNNING process reports against the commit we just deployed.
+      - name: Verify deploy
+        if: steps.gate.outputs.configured == 'true'
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          HOST: ${{ secrets.DASHBOARD_HOST }}
+        run: |
+          set -euo pipefail
+
+          # (a) the service is up and answering.
+          curl -fsS --retry 5 --retry-delay 5 --retry-all-errors \
+            "https://$HOST/healthz" -o /tmp/healthz.json
+          cat /tmp/healthz.json
+
+          # (b) THE BUILD IS THE ONE WE JUST DEPLOYED, and auth is configured.
+          #     A dashboard serving without auth would publish the operator's
+          #     whole task graph, so an unconfigured deploy fails here loudly
+          #     rather than sitting there quietly serving a 503 to him alone.
+          node -e '
+            const j = require("/tmp/healthz.json");
+            const exp = process.env.EXPECTED_SHA;
+            const fail = (m) => { console.error("FAIL: " + m); process.exit(1); };
+            if (!j.ok) fail("/healthz not ok");
+            if (!/^[0-9a-f]{40}$/.test(j.git_sha || "")) {
+              fail(`git_sha ${j.git_sha} is not a commit — build arg not applied`);
+            }
+            if (j.git_sha !== exp) {
+              fail(`STALE BUILD: serving ${j.git_sha}, deployed ${exp}`);
+            }
+            if (j.auth_configured !== true) {
+              fail("auth is NOT configured on the deployed instance — it is refusing to serve");
+            }
+            console.log("OK: serving", j.git_sha, "with auth configured");
+          '
+
+          # (c) THE GATE IS ACTUALLY CLOSED. Verifying the code is deployed is
+          #     not the same as verifying it protects anything: an anonymous
+          #     request for the app root must NOT return the app. This is the
+          #     check that would catch the gate being bypassed or reordered.
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' "https://$HOST/")
+          echo "anonymous GET / -> $CODE"
+          case "$CODE" in
+            302|303|401|403|503) ;;
+            *) echo "FAIL: anonymous request returned $CODE — the dashboard is PUBLIC"; exit 1 ;;
+          esac
+
+          # And an anonymous API read must not return data either.
+          API=$(curl -s -o /dev/null -w '%{http_code}' "https://$HOST/api/tasks?limit=1")
+          echo "anonymous GET /api/tasks -> $API"
+          case "$API" in
+            401|403|503) ;;
+            *) echo "FAIL: anonymous API read returned $API — the graph is EXPOSED"; exit 1 ;;
+          esac
