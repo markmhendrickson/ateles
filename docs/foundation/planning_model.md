@@ -17,7 +17,12 @@ is `data_model.md`. Revised by the ancestry pass of 2026-09-06 (revision 45: the
 missing ancestry — whether the swarm derives an absent parent, or finds the gap — settled against
 `#authority-per-level-an-amendment-is-an-action-and-its-class-is-the-levels` and decisions 17, 41, 51, and
 52; `judge`'s and `route`'s defect lists extended by one item each, with no new step or type; decision 61
-opened).
+opened). Revised by the priority pass of 2026-09-06 (revision 47: the permissive orphan default reversed on
+the operator's argument that explicit ancestry serves both execution and prioritization — every task now
+expects an ancestor by default, satisfied at near-zero noise by a default ancestor per intake class rather
+than a finding on every orphan; the no-authoring refusal restated as the line the default and the refusal
+meet at; decision 61 reframed from a per-level expectation to a per-class default, still open and still
+blocked on decision 57).
 
 ## Purpose
 
@@ -479,43 +484,108 @@ finding that does not.
 
 ### Whether an orphan is a defect at all
 
-**Absence means something only where an expectation was declared, and the default where none was declared
-is permissive: no expectation, no finding.** Much of an operator's work legitimately has no project above
-it — a chore, a one-off ask, reactive work nobody planned — and the design already admits this without
-qualification: unplanned work is admitted through intake like any task, "because refusing it would force
-every chore under a plan it does not describe"
-(`#upward-context-is-a-declared-read-resolved-along-the-ascent-at-hydration`). Recording a finding on every
-task with no plan, or every plan with no project, would be exactly that refusal restated as a finding
-instead of a gate — the same forcing, one step later. The usual instinct is the other way: fail-closed,
-flag every gap, let the operator triage the noise. That instinct is wrong here because the thing being
-judged is not an action with a blast radius but a **shape** of the operator's own work, and the design has
-already ruled once that the shape of the hierarchy is the operator's to declare and not the swarm's to
-infer (`#which-levels-an-instance-declares-and-what-it-calls-them`, decision 57): a swarm that flagged every
-unplanned task would be asserting, by volume of findings, that the operator's instance is wrong to have
-chores — a judgement decision 57 already reserves. So the finding above is raised only where an expectation
-was **declared** — never inferred from the shape the record happens to have. An instance that declares
-nothing gets no findings on ancestry; an instance whose project's statement declares "every plan under this
-project is executed as a project, and a plan with no project is a finding" gets exactly that, because a
-principal wrote it, not because the swarm decided orphans are wrong.
+**Reversed (2026-09-06, superseding the permissive default this section stated the same day).** The
+operator argued the other way, in his own words: *"an argument can be made that all work – even household
+and correspondence work ought to be taken – in light of higher level justifications and planning since
+there's always the question of why we're doing the work even if the answer is often implicit. Making
+explicit could help both execute the work with a clearer idea of what it takes to be successful as well as
+help prioritize."* The load-bearing point is not tidiness. **An ancestor is where a task's acceptance
+criteria and its relative standing come from**
+(`#downward-state-is-derived-upward-content-is-authored-as-entities`): a chore `PART_OF` a plan whose
+statement is "keep the household unattended and provisioned" has a different `completion_criteria[]` and a
+different claim on attention than the same chore with nothing above it, and a swarm that cannot read what a
+task is *for* cannot judge either — the connection to priority is argued in full at
+`work_model.md#priority-orders-the-claimable-pool-it-does-not-enter-it`. The prior paragraph's reasoning was
+not wrong about finding-volume — it is answered below, not retracted — but it was wrong to conclude from
+finding-volume alone that no expectation should exist; the operator's argument is that the expectation
+should be universal and the noise should be solved a different way. **The default is now: every task has an
+ancestor.** An unplanned task is the gap, not the tolerated shape.
 
-**Open decision 61.** Where the expectation is declared — per level (a field on the level's registered
-type: "a record at this level expects a parent"), per intake class (an `intake_rule`'s condition, so only
-tasks of certain classes are expected to carry a plan), or on the `planning` workflow's own declaration (an
-`applies_when` a project writes, or a `completion_criteria[]` entry naming the parent, read at `survey`) —
-is not decided by any rule above, each being a different existing mechanism this document could reuse
-without adding one. Registered in `conformance.md#the-register-of-open-design-decisions`. **Costs:** a
-per-level field is cheapest to read (one flag beside the level mark, checked at every `survey` without
-resolving a class or a declaration) but coarsest — it cannot say "objectives expect a strategy, but only
-for the revenue-tagged ones"; an `intake_rule` condition is the finest-grained of the three, reusing a
-mechanism intake already has, but ties the expectation to how a task was classified rather than to the
-planning type itself, so a plan created directly by a project's `amend` step (never through intake) would
-need a second place the same expectation is checked; a workflow-level declaration keeps the expectation
-beside the `completion_criteria[]` a principal already writes for the record, at the cost of one more thing
-a project's statement must say. This document is indifferent among the three for the same reason it is
-indifferent to the count of levels (`#which-levels-an-instance-declares-and-what-it-calls-them`): no rule
-above reads the expectation by its storage location, only by whether `judge` finds one declared. The choice
-is the operator's, made once decision 57 fixes what the levels are, since a per-level field has nothing to
-attach to before that.
+**What this does not reopen.** Unplanned work is still admitted through intake — nothing here blocks
+ordinary work on a missing ancestor, which is the same refusal-by-forcing this document already named as
+wrong, and the operator's own argument is explicitly about explicitness, not gating: "could help... execute
+the work," never "must have or cannot proceed." `#before-or-after-whether-a-step-declared-the-read` is
+unchanged by the reversal: a step that has not declared the ancestor as a read it needs still opens; a step
+that has still holds on the same test as before. What changes is only what happens where nothing was
+declared and no default resolves the gap — previously nothing, now a finding, per the next paragraph.
+
+**Where the volume goes: a default ancestor per intake class, not a finding on every orphan.** The prior
+section's real concern survives the reversal and is answered here rather than by falling back to
+permissiveness. Two readings satisfy "every task has an ancestor":
+
+1. **A finding on every orphan.** `judge` (at a `survey`) and `route` (at intake) raise the
+   `decision_or_attestation` finding described above on every task or record with nothing above it,
+   whatever the intake class. This gives the operator's ask in full but at the finding-volume cost the prior
+   paragraph named: a swarm that flagged every unplanned chore would still be asserting, by volume, that the
+   operator's own instance is wrong to run one — the same objection, now overruled by the operator's
+   argument rather than by the swarm's judgement of it, but the noise itself does not disappear because the
+   objection was overruled.
+2. **A default ancestor per intake class.** An `intake_rule`'s classification carries a default `PART_OF`
+   target — a standing plan the operator names once per class ("household chore" classifies under the
+   operator's standing household plan; "correspondence" under a standing correspondence plan) — written at
+   `classify` the same way a named parent is written today
+   (`workflows.md#intake`, step 1: "`PART_OF` to a parent... where the work is an aggregate," extended to
+   read a class default where the task names no parent of its own). A task classified into a class with a
+   registered default is never an orphan at all: it acquires the ancestor at intake, at zero authoring cost
+   per task, and the operator has stated the justification exactly once, for the whole class, rather than
+   deriving it per instance. Only a task in a class with **no** registered default, or one `classify` cannot
+   place in any registered class, reaches `route` still unplanned — and that residue is small by
+   construction, not by the swarm's forbearance, so the finding on it is not the finding-volume problem the
+   prior paragraph named.
+
+**The second reading carries this pass, evaluated against the first on its own terms.** It gives the
+operator what he asked for — every task explicable against a higher-level justification, explicit rather
+than implicit — at close to the noise of the permissive default, because the "explaining" work is done once
+per class by a principal rather than once per task by a finding. It costs the operator one authoring act per
+intake class (naming the standing plan a class of chore serves) instead of zero, which is the price of
+explicitness the first reading would extract per-task in findings instead. The first reading is not wrong
+and is not foreclosed — an instance may still declare "flag every orphan, even in a defaulted class" as a
+per-level or per-class override of the default — but it is not this document's default, for the reason
+`#which-levels-an-instance-declares-and-what-it-calls-them` already gives about volume-by-assertion: a
+standing finding on every member of a well-understood class asserts, by volume, that the class should not
+exist, which is a judgement decision 57 already reserves and which the operator's own argument does not
+ask for — he asked for explicitness, not for the swarm to keep re-litigating that chores belong under a
+household plan once he has said so.
+
+**What intake does with an orphan.** `classify` first checks the task's own name (an issue against a plan,
+an ask under an objective) as it already does; failing that, it checks the task's intake class against the
+registered class defaults above and writes the default `PART_OF` where one exists; only where neither
+resolves does the task reach `route` unplanned. `route` then does what `#what-happens-instead-a-finding-with-a-proposal-riding-beside-it`
+already specifies — closes with the `decision_or_attestation` finding, `scope: unknown`, and a proposal
+task riding beside it naming the missing ancestor's shape — and still routes the task to its successor
+workflow on the same batch. **The finding never holds the task; it rides beside it.** This is the same
+before/after test this document already draws: an *undeclared* gap is a finding that does not block; a
+*declared* read on the ascent that cannot resolve is `unknown` and holds the step that declared it
+(`#before-or-after-whether-a-step-declared-the-read`). Nothing about the reversal changes which of those two
+a given gap is — it changes only how many gaps a well-defaulted instance has left to be either one.
+
+**The refusal from the prior pass is unchanged and restated because the distinction is now load-bearing.**
+The swarm still may not author a missing ancestor: `#the-swarm-may-not-author-a-missing-ancestor` holds
+exactly as ruled, and the class default above is not an exception to it, stated plainly because the two are
+easy to conflate now that a default routinely supplies what a per-task authoring act used to leave missing.
+**A default ancestor is a pre-authored record the operator declared once, for a class, before any orphan of
+that class existed; it is never the swarm inventing a parent for the orphan in front of it.** The write
+`classify` makes is `PART_OF` an existing plan the operator's `intake_rule` already names — the identical
+write it makes today when a task names its own parent by identifier — never a write to the plan's own
+statement, its `completion_criteria[]`, or its existence. Where no class default exists and no name
+resolves, `classify` writes nothing upward and the gap goes to the finding above: the class-default path and
+the authoring refusal meet at exactly that line, and nowhere does resolving the operator's argument require
+crossing it.
+
+**Open decision 61, reframed by the reversal.** The question is now where an intake class's *default
+ancestor* is declared — the same three candidates as before (a field on the level's registered type, an
+`intake_rule` condition, or a `completion_criteria[]`/`applies_when` entry on the `planning` workflow's
+declaration), but the `intake_rule` candidate now reads as the natural site, since a "default ancestor per
+intake class" is by construction a property of the class, and the `intake_rule` is where a class is already
+defined for other purposes (`work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`).
+The document remains formally indifferent among the three, for the reason it already gives — no rule above
+reads the expectation by its storage location, only by whether `classify` finds a default declared — but
+notes the lean toward `intake_rule` as a consequence of the reversal rather than pre-empting decision 57.
+Registered in `conformance.md#the-register-of-open-design-decisions`. **Depends on decision 57**, which
+fixes what the levels are and are called, without resolving it: a per-level field or a workflow declaration
+naming "objective" or "strategy" has nothing to attach to before an instance registers those levels, and an
+`intake_rule` default naming a specific standing plan is the one candidate that does not wait on 57 at all,
+since it names a record rather than a level.
 
 ### Transitivity: judged edge by edge, not over the whole chain
 

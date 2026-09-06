@@ -12,7 +12,7 @@ for changing the swarm's own operation), and PR #745 operator review (2026-09-05
 23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default),
 and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: one live instance,
 completion creates the next, `FOLLOWS` task to task), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the task-sources index, the intake rule, and open decision 36). Supersedes `docs/archive/task_execution_loop.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: an intake rule may key on a field a step wrote on a type it may name, with the writer in its provenance predicate; decision 36 untouched). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a status and claimability read from the checkpoint; the declared terminal set; two moments open a batch; `tasks_attached[]`; the next recurring instance created and read back before the closing sign-off; a terminal status only where the declaration permits none; the writer as the cross-type cycle check's enforcement point; C2 settled by the write contract). Revised by the rulings pass of 2026-09-06 (revision 38: a `signed` or blocking sign-off is written under a held lease, cited from decision 44's ruling; the bootstrap set as the closed list decision 43 rules). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 36 ruled here — a rule keys on no work-model record type, the operator's lean toward every type considered and set aside; decision 43's second half cited as ruled; the C2 and `blocked` settlements marked reviewed and upheld). Revised by the planning pass of 2026-09-06 (revision 40: a task's one `PART_OF` edge targets its parent task or a planning record; the ascent as a derived read distinct from the chain; unplanned work admitted). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: `runner`, already defined in `vocabulary.md`, settled as the seat a step's outcome depends on — no new type introduced).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: an intake rule may key on a field a step wrote on a type it may name, with the writer in its provenance predicate; decision 36 untouched). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a status and claimability read from the checkpoint; the declared terminal set; two moments open a batch; `tasks_attached[]`; the next recurring instance created and read back before the closing sign-off; a terminal status only where the declaration permits none; the writer as the cross-type cycle check's enforcement point; C2 settled by the write contract). Revised by the rulings pass of 2026-09-06 (revision 38: a `signed` or blocking sign-off is written under a held lease, cited from decision 44's ruling; the bootstrap set as the closed list decision 43 rules). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 36 ruled here — a rule keys on no work-model record type, the operator's lean toward every type considered and set aside; decision 43's second half cited as ruled; the C2 and `blocked` settlements marked reviewed and upheld). Revised by the planning pass of 2026-09-06 (revision 40: a task's one `PART_OF` edge targets its parent task or a planning record; the ascent as a derived read distinct from the chain; unplanned work admitted). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: `runner`, already defined in `vocabulary.md`, settled as the seat a step's outcome depends on — no new type introduced). Revised by the priority pass of 2026-09-06 (revision 47: ordering within the claimable pool given a home beside `claimable`, argued as a derived read over the ascent, `due_date`, workflow urgency, and blast radius rather than a maintained field, on the operator's connection from the ancestry reversal; a principal's "may" rather than "must" toward the highest-standing task, with decision 62 opened on whether an instance may bind the stronger form).
 
 ## Purpose
 
@@ -140,6 +140,73 @@ closed without completion, the reason for the second being the closing sign-off'
 (`DUPLICATE_OF` for a duplicate) — and a closing sign-off writes only a declared value, a terminal value
 outside the set being refused at the write as any undeclared value is; the reader maps every spelling the
 record already carries onto `open` or terminal, permanently. Live status distribution: `status.md`.
+
+### Priority orders the claimable pool; it does not enter it
+
+**Pull answers "is this mine"; nothing above answers "which of my several"** (`#pull-is-the-only-delivery-assignment-constrains-eligibility`:
+"a claim is a 1:1 judgment"). A principal with three tasks it may legitimately take has a claim predicate
+that returns all three claimable and a design that, until now, said nothing about the order it takes them
+in — a mechanism that reports without binding, in exactly the sense principle 1 refuses of any other
+mechanism. This section gives ordering a home beside claimability, the same read a claim predicate already
+makes, so that pull stays the only delivery mechanism and priority never becomes a second one.
+
+**Priority is derived, not authored, for the everyday ordering question — argued from principle 11 and from
+what already exists.** A stored `priority` integer a principal sets and nobody revisits is exactly the field
+principle 11 names: the ascent it should reflect moves — a plan is re-prioritized, an objective's standing
+changes, a due date arrives — and a stored value on the task does not move with it unless some process
+re-writes every task under the changed record, which is the watchdog principle 11 refuses to require. What
+already exists in this design confirms the shape rather than inventing it: a planning record's `next_steps`
+is already "a derived read: the record's open descendants in priority order"
+(`#maintenance-is-work-the-planning-workflow`) — the design derives ordering at the plan level today and has
+never stored it there. The everyday claim-ordering question this section answers is the same read, one level
+down: for the pool of tasks one principal may legitimately take, order by what is already on the record and
+already read elsewhere — the standing of the task's ascent (an objective's declared weight, a plan's), a
+`due_date` at hand, an urgency the workflow's own declaration carries (an `applies_when` or a step's
+`hold_bound`), and the blast radius of what the task would produce (`gates_and_workflows.md#confidence-and-three-blast-tiers`)
+— read together at claim time and never stored.
+
+**This is not the general rubric, and does not reopen its deferral.** `priority_rubric` is a narrow,
+existing context entity already read at intake's `prioritize`, distinct from the cross-disciplinary
+precedence-order object `principles.md#where-the-human-sits-what-it-protects-and-why-the-record-is-owned`
+names out of scope until P4, by name; this section reads the same narrow entity a claim predicate already
+has access to, alongside the ascent and the workflow declaration, and proposes no new object. What `prioritize` currently does — set a
+`priority` field once, at intake, from the rubric (`workflows.md#intake`) — is not withdrawn by this section;
+it is joined by a claim-time read that also consults the ascent, which may have changed since intake ran. The
+stored field and the derived read can disagree, and where they do the derived read is what a claim predicate
+consults, for the reason principle 11 gives: the stored value is a snapshot from whenever `prioritize` last
+ran, and the ascent is current.
+
+**A principal is not obliged to take the highest-standing task.** The pull invariant's "is this mine" is a
+1:1 judgment a principal makes about fit, and a high-priority task a principal is not fit for is legitimately
+declined the same way any other claimable task is — priority orders what a claim predicate *presents*, it
+does not narrow what a claim predicate *permits*. Binding a principal to "must take the highest-standing
+claimable task" would convert a 1:1 fitness judgment into a 1:N routing choice with the exact fallthrough
+hazard `#pull-is-the-only-delivery-assignment-constrains-eligibility` already refuses — a principal coerced
+onto a task it should decline is a wrong guess reaching an executor with nobody accountable for the choice,
+the same failure pull was built to prevent. What priority binds instead is presentation and reporting, not
+selection: a principal's tool surface lists claimable work in priority order, so declining the top of the list
+is a visible, attributable act rather than an invisible skip, and a principal that repeatedly claims low-
+standing work while high-standing work of the same class sits claimable is a pattern a review reads from the
+record — the observable is named below.
+
+**The observable that catches a violation.** Because nothing is stored, there is no field to check for a
+false ordering; the check is over the record precisely as the conformance suite already tests derived
+reads elsewhere (`conformance_suite.md`). The read is: at any claim, was there a claimable task of the same
+`action_type`, unassigned or assigned to the same principal, with strictly higher standing on the terms
+above, that the claim predicate returned but the principal did not take? Repeated instances, on the same
+principal, of a lower-standing claim taken while a higher-standing one of the same class sat claimable and
+undeclined is the pattern a standing finding names — not the single instance, which may be a legitimate
+fitness judgment, but the recurrence, exactly as `#a-lapsed-lease-is-not-reaped-repeated-lapse-raises-a-checkpoint`
+already escalates on repetition rather than on the first occurrence. A conformance-suite row for this
+mechanism (`conformance_suite.md`) is a mechanical check over exactly this read.
+
+**The operator's connection.** Priority is arguable, in the sense that it can be read and contested, only
+because ancestry makes it explicit: a task with no declared ascent has nothing for a claim-time read to
+weigh beyond its own `due_date` and its own workflow's urgency, and the operator raised prioritization
+*from* the ancestry argument for exactly this reason — "making explicit could help... prioritize"
+(`planning_model.md#whether-an-orphan-is-a-defect-at-all`) is the same sentence that argues every task
+should have an ancestor. The two settlements are one connected argument: ancestry supplies what priority
+reads, and priority is the reason ancestry's explicitness pays for itself day to day, not only at review.
 
 ### A lapsed lease is not reaped; repeated lapse raises a checkpoint
 

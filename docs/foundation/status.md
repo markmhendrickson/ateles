@@ -2392,6 +2392,89 @@ register row, one header sentence). No other foundation document was edited.
 `check_foundation_anchors.py`: 0 broken links. `test_foundation.py`: 97 passed, 1 xfailed (the budget
 marker, unchanged). The branch head this pass was taken from is the ancestry pass (revision 45, `25aa4a9`),
 confirmed unchanged on the remote by three direct polls before the dedicated worktree was created.
+## Revision 47 (2026-09-06): the orphan default reversed, and priority given a home beside `claimable`
+
+The operator connected two questions: whether the swarm should derive higher-level planning materials from
+their own argument that explicitness helps both execution and prioritization, and — separately — where task
+prioritization lives, since `work_model.md` already states that pull answers "is this mine" but nothing
+says which of several legitimately-mine tasks comes first.
+
+**Part 1 — the permissive default of revision 45 reversed.** The operator's argument — quoted in full in
+`planning_model.md#whether-an-orphan-is-a-defect-at-all` — is that even household and correspondence work
+should be taken in light of higher-level justification, made explicit rather than left implicit, both to
+execute with a clearer idea of success and to help prioritize. The default is now **every task has an
+ancestor**; an unplanned task is the gap, not the tolerated shape. The finding-volume objection revision 45
+raised is answered, not retracted: two readings were weighed — a finding on every orphan, or a **default
+ancestor per intake class** written at `classify` the same way a named parent is written today — and the
+second carries this pass as the near-zero-noise reading, evaluated against the first on the operator's own
+terms rather than assumed. Intake's behaviour: `classify` resolves the task's own naming first, then a
+registered class default, and only a task in an undefaulted or unclassifiable class reaches `route` still
+unplanned, where the existing revision-45 mechanism applies unchanged — a `decision_or_attestation` finding,
+`scope: unknown`, a proposal riding beside it, and the task still routed to its successor on the same batch;
+the finding never holds ordinary work. The no-authoring refusal from revision 45
+(`#the-swarm-may-not-author-a-missing-ancestor`) is restated and made explicit against the new default: a
+class default is a record the operator pre-authored once, before any orphan of that class existed, and
+`classify` writing `PART_OF` to it is the identical write it makes today when a task names its own parent —
+never a write to the plan's statement, `completion_criteria[]`, or existence. Decision 61 is reframed from a
+per-level ancestry expectation to a per-class default's storage location, with a lean toward `intake_rule` as
+the site that does not wait on decision 57 (unlike a per-level field or workflow declaration, which need the
+levels registered first); still open, still registered in
+`conformance.md#the-register-of-open-design-decisions`.
+
+**Part 2 — priority.** Prior art existed but was scattered and unconnected: `data_model.md`'s task row
+already lists `priority` as a field, `workflows.md#intake`'s `prioritize` step already sets it from
+`priority_rubric`, `authority_model.md`'s decision 52 already permits a `priority` correction as a
+governance-scale "stop," and `planning_model.md` already derives a plan's `next_steps` as "the open
+descendants in priority order" — but no vocabulary entry existed, and nothing connected any of this to
+`claimable` or bound a claiming principal to anything. `work_model.md#priority-orders-the-claimable-pool-it-does-not-enter-it`,
+placed immediately after `#what-a-claim-predicate-treats-as-claimable`, settles: **priority is a derived
+read for the everyday ordering question**, argued from principle 11 (a stored value the ascent should track
+but does not is exactly the watchdog-needing field the principle refuses) and from the existing derived
+`next_steps` precedent, applied one level down to the pool a single principal may claim from — read together
+at claim time from the ascent's declared standing, the task's `due_date`, the workflow's declared urgency,
+and blast radius. This does not withdraw or reopen the stored `priority` field `prioritize` sets at intake,
+which stays as a snapshot and remains what a `reprioritization` corrects; the two can disagree, and the
+derived read is authoritative where they do. It is explicitly not the cross-disciplinary rubric
+`principles.md#where-the-human-sits-what-it-protects-and-why-the-record-is-owned` defers to P4 —
+`priority_rubric` is a narrow input the derived read consults, unchanged in scope. **What binds a claimant:
+"may," not "must."** A principal may decline a high-priority task it judges unfit, the same 1:1 fitness
+judgment pull already protects; priority orders what a claim predicate presents, never what it permits,
+because binding "must" would reintroduce the routing-by-inference fallthrough hazard pull was built to
+refuse. The observable that catches a violation is named as a repeated-pattern read over the record —
+a principal repeatedly claiming lower-standing work of the same class while higher-standing work of that
+class sits claimable and undeclined — mirroring the repeated-lapse escalation shape already in this
+document, never a single-instance check. Decision 62 is opened: whether an instance may nonetheless bind
+some class to "must," which this document declines to build unprompted and leaves to the operator.
+`vocabulary.md#priority` gives the term its house-style entry, beside `claimable`.
+
+**What was found already settled, making one framing moot.** The brief's premise that priority "appears as
+prose... with no defined term and no home" was only half right: extensive prose already existed (`data_model.md`,
+`workflows.md#intake`, `authority_model.md`'s decision 52, `planning_model.md`'s `next_steps`), and the real
+gap was narrower than a missing concept — it was the missing connection between that prose and `claimable`,
+and the missing vocabulary entry. No document contradicted; the gap was consolidation, not invention
+(principle 9: grepped before adding, and the grep is why the section reads as extending four existing
+mechanisms rather than proposing a fifth).
+
+**Size.** Measured 2026-09-06 with `wc -c` against revision 45 as the predecessor. `planning_model.md`
++6.4k (the orphan-default section rewritten; decision 61 reframed); `work_model.md` +6.6k (one new section,
+`#priority-orders-the-claimable-pool-it-does-not-enter-it`); `vocabulary.md` +2.3k (the `priority` entry);
+`conformance.md` +1.3k (decision 61's row reframed; decision 62 opened; the register's summary paragraph and
+next-number line updated to 63). Net **+16.6k** across the four files touched; no other foundation document
+was edited.
+
+**Checks, on this tree.** `check_foundation_vocabulary.py`: 100 Never items, 73 Not-for items (unchanged), 0
+Never hits (fifteen hits found and fixed in draft — "claimant" for the pre-claim principal, retired in
+favour of "principal" per the `lease` entry's own Never; "running" inside a quoted example plan statement,
+reworded), 767 Not-for advisory hits (up from 756 at the start of this pass, eleven new hits from the added
+prose, all already-advisory words — `tier`, `command`, `owner` compounds — used in their ordinary sense).
+`check_foundation_anchors.py`: 0 broken links (one dangling self-reference introduced in draft, corrected to
+the real `work_model.md` anchor; one reference to a bolded-but-unheaded sentence in `principles.md`,
+corrected to the enclosing `##` heading). `link_vocabulary_terms.py --check`: 9 unlinked first mentions
+across 2 blocks found and fixed by running the linker (one run introduced a nested-bracket malformed link
+around the word "watchdog" inside a quoted principle title, caught by a post-link diff read and
+hand-corrected); clean on recheck. `test_foundation.py`: 97 passed, 1 xfailed (the budget marker, unchanged). The branch head this pass
+was taken from is the ancestry pass (revision 45, `25aa4a9`), confirmed unchanged on the remote by three
+direct polls 60 seconds apart before the dedicated worktree was created.
 
 ## Reading-list budget and keying, as of revision 6 (2026-09-04)
 
