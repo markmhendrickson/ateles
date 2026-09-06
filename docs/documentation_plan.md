@@ -60,9 +60,9 @@ deep reference consulted occasionally. "Status" = does an adequate doc exist tod
 
 | # | Doc | Purpose | Status |
 | --- | --- | --- | --- |
-| 14 | **Swarm orchestration** (`swarm_orchestration.md`) | `workflow_definition` + gate semantics + the artifact-header dispatch contract | ✅ exists |
-| 15 | **Agent execution** (`agent_execution_runbook.md`, `task_execution_loop.md`) | How a dispatch runs end-to-end; readiness + execution gates | ✅ exists |
-| 16 | **HITL & gating** (`swarm_hitl_checkpoints_design.md`) | Confidence × blast-radius, checkpoint_brief approval | ✅ exists (design) |
+| 14 | **Gates and workflows** (`foundation/gates_and_workflows.md`) | `workflow` / batch / `sign-off` / `step_status`; one step set; the action gate. Supersedes `swarm_orchestration.md` and `swarm_hitl_checkpoints_design.md` (archived 2026-09-02) | ✅ foundation |
+| 15 | **Agent execution** (`agent_execution_runbook.md`, `foundation/work_model.md`) | How a dispatch runs end-to-end; the pull work model. `task_execution_loop.md` described the retired push model (archived 2026-09-02) | ✅ exists |
+| 16 | **HITL & gating** (`foundation/gates_and_workflows.md`, `foundation/authority_model.md`) | Blast tiers, checkpoint_brief approval, who may resolve; what is built as of a date is `foundation/status.md` | ✅ foundation |
 | 17 | **GitHub interaction** (`pr_review_routing.md`, `swarm-trigger-layer.md`, `swarm_github_interaction_design.md`) | Issue/PR triage, PR-review routing, webhook→Apis | ✅ exists |
 | 18 | **A2A gateway** (`a2a.md`) | Inbound agent-to-agent task receiver | ✅ exists |
 | 19 | **Session integrity** (`session_integrity.md`) | Plan-link / turn-storage / artifact-linkage invariant + hooks | ✅ exists |
@@ -101,9 +101,13 @@ docs from this sediment.
 Architecture/operating docs that match the audited reality:
 
 `architecture.md`, `taxonomy.md`, `phases.md`, `data_types.md`, `neotoma_vs_alternatives.md`,
-`swarm_orchestration.md`, `swarm_smoke_test_plan.md`, `smoke_test_runbook.md`, `task_execution_loop.md`,
+`foundation/*` (19 documents: a 3-document always-read kernel; 12 path-keyed documents, five of them one
+per external system — `github.md`, `gmail.md`, `calendar.md`, `telegram.md`, `payments.md`, and one the
+acceptance suite's design, `conformance_suite.md`; and 4
+companions — `scenarios.md`, `workflows.md`, `migration.md`, and `foundation/status.md`, the dated
+implementation-gap measurement), `swarm_smoke_test_plan.md`, `smoke_test_runbook.md`,
 `agent_execution_runbook.md`, `agent_execution_architecture.md`, `a2a.md`, `pr_review_routing.md`,
-`swarm-trigger-layer.md`, `swarm_github_interaction_design.md`, `swarm_hitl_checkpoints_design.md`,
+`swarm-trigger-layer.md`, `swarm_github_interaction_design.md`,
 `swarm_qa_evals_design.md`, `swarm_qa_evals_qe3_design.md`, `durable_execution_substrate.md`, `aauth.md`,
 `aauth/keys.md`, `secrets_management.md`, `credential_management.md`, `credential_health.md`,
 `session_integrity.md`, `setup.md`, `cloud_hosting.md`, `daemon_rc_autodeploy.md`,
