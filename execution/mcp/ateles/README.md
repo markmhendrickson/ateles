@@ -40,14 +40,17 @@ not read the data"*, and never report the second as the first:
 - a failed marker read yields `stage: "unknown"` with the reason, not "no pipeline running";
 - a failed issue listing yields an `error`, not an empty all-clear;
 - partial failures appear under `unreadable` / `listing_errors` rather than being dropped;
-- `get_gate_status` additionally distinguishes **unreadable** (wrong entity type /
-  malformed `gate_status` → `gates_evaluated: false`, `reason_codes` /
-  `unreadable[]`, **no** `blocking_gates`) from **never-triaged**
-  (`gates_initialised: false`, `reason_codes: ["uninitialised.never_triaged"]`,
-  **no** fabricated pending list) from **genuine unsigned** (`blocking_gates` +
-  `all_gates_cleared` mean withheld sign-offs). Do not treat
-  `blocking_gates` / `all_gates_cleared` as pending when evaluation failed or
-  gates were never initialised.
+- `get_gate_status` always emits `gates_evaluated` as a boolean (never omit it —
+  absence collapses success into unevaluable under ordinary falsy checks).
+  `true` means the record was read and interpreted, including **never-triaged**;
+  `false` is reserved for **unreadable** only (wrong entity type / malformed
+  `gate_status` → `reason_codes` / `unreadable[]`, **no** `blocking_gates`).
+  Never-triaged additionally carries `gates_initialised: false` and
+  `reason_codes: ["uninitialised.never_triaged"]` with **no** fabricated pending
+  list. **Genuine unsigned** (`gates_evaluated: true`, `gates_initialised: true`)
+  uses `blocking_gates` + `all_gates_cleared` for withheld sign-offs. Do not treat
+  `blocking_gates` / `all_gates_cleared` as pending when `gates_evaluated` is
+  false or gates were never initialised.
 
 An empty queue therefore means the queue is genuinely empty. This is control #9
 of the Agentic SDLC security enforcement plan: a monitor that under-reports on

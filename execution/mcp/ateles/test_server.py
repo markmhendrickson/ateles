@@ -1035,6 +1035,7 @@ class TestUnreadableGatesHoldAndRaise(unittest.TestCase):
             },
         ), patch.object(srv, "_pipeline_state_for", return_value={"stage": None}):
             out = srv._get_gate_status("ent_issue")
+        self.assertIs(out["gates_evaluated"], True)
         self.assertIs(out["gates_initialised"], False)
         self.assertEqual(out["reason_codes"], ["uninitialised.never_triaged"])
         self.assertIn("NEVER INITIALISED", out["interpretation"])
@@ -1107,6 +1108,7 @@ class TestUnreadableGatesHoldAndRaise(unittest.TestCase):
             },
         ), patch.object(srv, "_pipeline_state_for", return_value={"stage": None}):
             out = srv._get_gate_status("ent_issue")
+        self.assertIs(out["gates_evaluated"], True)
         self.assertIs(out["gates_initialised"], True)
         self.assertIn("arch", out["blocking_gates"])
         self.assertIs(out["all_gates_cleared"], False)

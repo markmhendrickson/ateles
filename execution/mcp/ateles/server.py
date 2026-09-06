@@ -91,14 +91,18 @@ threshold, and reason. Act on the operator's decision via resolve_checkpoint —
 do NOT execute the held task yourself.
 5. **Neotoma first.** Durable memory lives in Neotoma. Store, don't leave in \
 conversation.
-6. **Gate readout branches.** On get_gate_status: if gates_evaluated is false \
-(or reason_codes contains unreadable.*), the record is unevaluable — do not wait \
-on gate owners; fix the ref or escalate. If gates_initialised is false (or \
-reason_codes contains uninitialised.*), the issue was never triaged — escalate \
-to Lanius triage, do not treat missing blocking_gates as ordinary pending. Only \
-when gates are evaluated and initialised do blocking_gates / all_gates_cleared \
-mean withheld sign-offs. Prefer reason_codes / interpretation over raw \
-blocking_gates truthiness.
+6. **Gate readout branches.** On get_gate_status, gates_evaluated is ALWAYS \
+present and boolean — branch on its VALUE, never on key absence (omission is \
+not a signal). gates_evaluated=true means the record was read and interpreted \
+(including never-triaged). gates_evaluated=false means the record itself was \
+unreadable/malformed (or reason_codes contains unreadable.*) — unevaluable; \
+do not wait on gate owners; fix the ref or escalate. If gates_evaluated is true \
+and gates_initialised is false (or reason_codes contains uninitialised.*), the \
+issue was never triaged — escalate to Lanius triage, do not treat missing \
+blocking_gates as ordinary pending. Only when gates_evaluated is true AND \
+gates_initialised is true do blocking_gates / all_gates_cleared mean withheld \
+sign-offs. Prefer reason_codes / interpretation over raw blocking_gates \
+truthiness.
 """
 
 
@@ -847,6 +851,10 @@ def _get_gate_status(issue_ref: str, history_limit: int = 5) -> dict:
         f"{repo_name}#{number_val}" if repo_name and number_val else issue_ref
     )
 
+    # gates_evaluated is always present. True = the issue record was read and
+    # interpreted (success OR never-triaged). False is reserved for the
+    # hold-and-raise paths above (wrong type / malformed). Omitting the key
+    # collapses success into "unevaluable" under ordinary falsy checks.
     base = {
         "entity_id": eid,
         "issue_ref": issue_ref_out,
@@ -855,6 +863,7 @@ def _get_gate_status(issue_ref: str, history_limit: int = 5) -> dict:
         "github_url": snap.get("github_url", ""),
         "current_owner": snap.get("current_owner", ""),
         "gate_status": gate_status,
+        "gates_evaluated": True,
         "gates_initialised": gates_initialised,
         "owner_history_recent": recent,
         "owner_history_total": len(history),
@@ -902,9 +911,9 @@ def _gate_interpretation(
     # Triage-before-pending: an absent record is not owners withholding.
     if not gates_initialised:
         return (
-            "gate_status was NEVER INITIALISED on this issue — gate state is "
-            "unevaluated, not withheld. Needs Lanius triage to initialise, "
-            "not a sign-off from a gate owner."
+            "gate_status was NEVER INITIALISED on this issue — evaluated as "
+            "no gate record yet, not withheld. Needs Lanius triage to "
+            "initialise, not a sign-off from a gate owner."
         )
     stage = pipeline.get("stage")
     if stage == "queued":
@@ -1486,17 +1495,21 @@ TOOLS = [
         description=(
             "Read-only. For an issue ('owner/repo#123' or an 'ent_...' entity id), "
             "return gate_status, current_owner, blocking gates, recent owner_history, "
-            "and pipeline state. Branch on structured signals — do NOT treat "
+            "and pipeline state. gates_evaluated is ALWAYS present and boolean — "
+            "branch on its value, never on key absence: true whenever the record "
+            "was read and interpreted (including never-triaged); false ONLY when "
+            "the record itself is unreadable/malformed (indeterminate — not 'no "
+            "gates'). Branch further on structured signals — do NOT treat "
             "blocking_gates / all_gates_cleared truthiness alone as pending: "
             "(1) gates_evaluated=false or reason_codes unreadable.* → record is "
             "unevaluable (wrong type / malformed); omit blocking_gates; do not wait "
             "on owners — fix the ref or escalate; "
-            "(2) gates_initialised=false or reason_codes uninitialised.* → never "
-            "triaged; blocking_gates omitted; escalate to Lanius triage, not a gate "
-            "owner; "
-            "(3) otherwise blocking_gates / all_gates_cleared mean genuine withheld "
-            "sign-offs — wait/route as today. Prefer reason_codes and interpretation. "
-            "This tool never writes gate state."
+            "(2) gates_evaluated=true and (gates_initialised=false or reason_codes "
+            "uninitialised.*) → never triaged; blocking_gates omitted; escalate to "
+            "Lanius triage, not a gate owner; "
+            "(3) gates_evaluated=true and gates_initialised=true → blocking_gates / "
+            "all_gates_cleared mean genuine withheld sign-offs — wait/route as today. "
+            "Prefer reason_codes and interpretation. This tool never writes gate state."
         ),
         inputSchema={
             "type": "object",
