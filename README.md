@@ -11,7 +11,7 @@ life end to end, with the governance substrate (identity, capability, gating, au
 against the vision.
 
 Ateles is a design and a working example of it. The design is
-[`docs/foundation/`](docs/foundation/): nineteen documents that state how work is created, taken,
+[`docs/foundation/`](docs/foundation/): twenty documents that state how work is created, taken,
 executed, and approved, and what the swarm does when it cannot reach its own record. The example is what
 runs against that design — background daemons and skills that already automate code review, releases,
 issue triage, email, calendar, recurring payments (fiat + Bitcoin), meeting capture and recap, health
@@ -236,6 +236,7 @@ tooling and for daemons that need code on disk, but never the source of truth.
 | Step state | derived from batch + lease + sign-off | none — never stored |
 | Operating rules | `agent_policy` | rendered skills and `docs/agents/` |
 | Entity types and edges | the schema registry on the record | `docs/foundation/data_model.md` tables, via `render_data_model.py --check` |
+| A plan's statement and decisions | the planning record and the `decision` entities `PART_OF` it, written by the `planning` workflow ([`planning_model.md`](docs/foundation/planning_model.md)) | any document rendered from the statement; a plan's progress is never stored |
 
 The full entity and relationship tables — `task`, `batch`, `LEASE`, `sign_off`, `action`, `checkpoint`,
 `artifact`, `workflow`, `action_policy`, `agent_session`, the authority entities, and the `ADDRESSED_BY` /

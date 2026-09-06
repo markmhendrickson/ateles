@@ -8,7 +8,7 @@ and which successors its tasks may enter, and never the state of a checkout. **D
 record for the built workflows (their step lists and fast paths, not their agent names), the agent
 policies governing outreach, payment, and people-data, `CLAUDE.md`'s people-data section, and PR #745
 operator review (2026-09-04), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). Which workflows have a declaration on the record, and which are envisioned
-only, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `operator_preview` renamed `consent`; open decision 33). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 39 ruled here — what intake's `link` attaches and what hydration resolves; the payment `consent` row aligned with decision 27). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two declared intervals and the planned wait, cited in *How to read a workflow section*, `outreach`, and `operator-only`; a standing constraint on an entity a task names, read at intake). Revised by the consistency pass of 2026-09-06 (revision 35: the three `consent`-carrying workflows cite when their checkpoint is written and what the take re-evaluates). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound declared as the task's `due_date` and the `operator_only` step, cited in *How to read a workflow section* and `operator-only`; a matter, a case, or a filing as a record entity the task names, under *What `link` attaches*). Revised by the testability pass of 2026-09-06 (revision 37: `DUPLICATE_OF` at `dedupe`; `impl` closes on a mergeable pull request; `none_permitted` on `feature` and `security`; a bug needing a design choice becomes a new task; the transcript is a source, not an artifact; the `contact` allowlist at `extract`).
+only, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `operator_preview` renamed `consent`; open decision 33). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 39 ruled here — what intake's `link` attaches and what hydration resolves; the payment `consent` row aligned with decision 27). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two declared intervals and the planned wait, cited in *How to read a workflow section*, `outreach`, and `operator-only`; a standing constraint on an entity a task names, read at intake). Revised by the consistency pass of 2026-09-06 (revision 35: the three `consent`-carrying workflows cite when their checkpoint is written and what the take re-evaluates). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound declared as the task's `due_date` and the `operator_only` step, cited in *How to read a workflow section* and `operator-only`; a matter, a case, or a filing as a record entity the task names, under *What `link` attaches*). Revised by the testability pass of 2026-09-06 (revision 37: `DUPLICATE_OF` at `dedupe`; `impl` closes on a mergeable pull request; `none_permitted` on `feature` and `security`; a bug needing a design choice becomes a new task; the transcript is a source, not an artifact; the `contact` allowlist at `extract`). Revised by the planning pass of 2026-09-06 (revision 40: the `planning` workflow, the `planner` role, and the thirteenth core workflow).
 
 ## Purpose
 
@@ -20,8 +20,9 @@ this document cannot give is a step to question.
 
 ## Scope
 
-Twelve core workflows: intake, feature, bug, security, copy, social content, release, outreach, payment,
-research and analysis, meeting processing, and operator-only. Each is a workflow type; a `workflow` entity
+Thirteen core workflows: intake, feature, bug, security, copy, social content, release, outreach, payment,
+research and analysis, meeting processing, operator-only, and planning, with session digestion beside
+them as the recovery path of the one execution mechanism that holds no lease. Each is a workflow type; a `workflow` entity
 is declared per (project, workflow type), so one type may have several declarations that share the design
 stated here and differ in step owners and thresholds. A step owner is declared as a **role** and resolved
 to a principal at claim time: the declaration's `owner_role` holds the role, the roster binds that role to
@@ -110,6 +111,7 @@ is declared.
 | operator-facing agent | every step that carries a checkpoint or a task to the operator (`vocabulary.md#operator-facing-agent`) |
 | payer, verifier | the two disjoint roles of the payment workflow |
 | researcher, analyst | the working steps of research and of meeting processing |
+| planner | every step of the planning workflow, declared per project and once for the levels above a project (`#planning`) |
 
 ## intake
 
@@ -773,6 +775,65 @@ the workflow that owns it.
 **Successors:** none. Each filed task enters intake on its own.
 
 **Fast paths:** none.
+
+## planning
+
+**Purpose:** keep one planning record consistent with the work beneath it and the record above it — its
+completion criteria judged against its descendants' derived state, its decisions recorded as entities, the
+work it still owes created as tasks, and the lessons that belong to its parent filed upward — so that the
+layers of the planning hierarchy are held together by sign-offs rather than by a session's convention
+(`planning_model.md#maintenance-is-work-the-planning-workflow`).
+
+**Entry condition:** intake closed naming `planning`; the task is `PART_OF` exactly one planning record,
+which is the batch's subject and the first record on the task's ascent; it is the record's one live
+recurring instance (`work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next`),
+carrying a `recurrence` rule read from the record's `cadence`, whose `due_date` a descendant task's closing
+sign-off corrects to now and whose next instance this batch's closing sign-off creates. A planning task
+`PART_OF` no record, or two, fails `classify`.
+
+**Steps**
+
+<!-- rendered: workflow=*|planning steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `survey` | `planner` | yes | | the record's statement and its parent's, the derived reads over its descendants (completion, the open and terminal counts, the descendants held by a checkpoint, the open tasks in priority order, the child records with no live `planning` task), and the `decision` entities under it are read, resolved along the task's ascent and down the record's edges, and named on the sign-off as what was read |
+| 2 | `judge` | `planner` | yes | | findings are recorded, one each: a completion criterion met that nothing closed on; a criterion the descendants cannot meet as stated; a descendant the statement does not describe; a decision under the record the work has since contradicted; a lesson that belongs to the parent; a child record no batch maintains |
+| 3 | `amend` | `planner` | yes | on fail: `judge` | every finding's remedy is written through the record's own primitives and read back: a correction to the statement and each new `decision` entity `PART_OF` the record as `amend_<level>` actions through the action gate, written by the engine on the permit; a task `PART_OF` the record for each criterion still owed; a task `PART_OF` the parent for each lesson that lands there; the next `planning` instance created before the sign-off; the sign-off closes the batch naming no successor |
+
+<!-- /rendered -->
+
+`survey` is separate from `judge` so that what the batch read is named on one sign-off and what it
+concluded on another, and a finding is checkable against the reads it was made on (decision 40). `judge`
+writes nothing to the record but findings, so that a planner cannot amend a statement on a judgement it
+did not record. `amend` is the only step that writes authored content, and it writes through the gate: an
+`amend_<level>` class the policy lists in neither tier resolves to `NEVER`, so an amendment at a level the
+operator has not loosened is a checkpoint the operator resolves, and the step holds on it as a `consent`
+step holds (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`).
+What the workflow never writes is stated once: a descendant's status, any derived read, the parent's
+statement, or anything on a record the task is not `PART_OF`
+(`planning_model.md#the-mechanism-against-cross-record-collision-is-the-subject`). A finding that a
+child record has no live `planning` task is remedied at `amend` by creating that child's first instance,
+which is what makes an unmaintained record a finding rather than a silence.
+
+**Stages:** reading (`survey`); judgement (`judge`); writing (`amend`).
+
+**Artifacts:** none. The planning record, the `decision` entities, and the tasks are in the record; a
+document rendered from a statement is a render target, not an artifact of this batch.
+
+**Typical action classes:** `amend_<level>`, one class per planning level the instance registers.
+
+**Successors:** none. The closing sign-off creates the next instance, which is a task creation and not a
+successor, as every recurring task's is.
+
+**Fast paths:** none.
+
+**Applicability:** a project may declare optional review steps between `judge` and `amend`, one per role
+whose judgement the record's level warrants — the finance role on a plan whose criteria name a figure, the
+legal role on one whose scope names a jurisdiction — each with an `applies_when` over the record's type and
+statement, each closing on that role's findings, and each recorded inapplicable where its condition does
+not hold. That is the home of the plan-participation protocol the roles once carried by hand, and a
+role's concern is a blocking finding `amend` cannot sign around (`planning_model.md#maintenance-is-work-the-planning-workflow`).
 
 ## Whether a stage names anything a step does not
 

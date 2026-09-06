@@ -10,7 +10,7 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
 memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram), and the operator's 2026-09-05 12:52 memo (revision 21: the general claim about self-modification, stated in `work_model.md` and cross-referenced from decision 17), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 17 ruled here; the `dependency_cycle` reason class), and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: the next instance is a created task and not a successor), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: `intake_rule` joins the governance list). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding). Revised by the workflow-format pass of 2026-09-06 (revision 34: two declared intervals on every step, `unclaimed_after` and `hold_bound`; a planned wait as a step's own close condition held under decision 13; required coverage as the value of `freshness`; consent over several like actions as one presentation of several checkpoints; the governance class with no policy value named among what resolves to `NEVER`).consistency pass of 2026-09-06 (revision 35: when the checkpoint a `consent` step carries is written, and what the gate evaluates at the take; the merge action's class named `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a step's bound may be declared as the task's `due_date`; an `operator_only` action inside a workflow is taken by the operator and its step closes on the confirmation, never on the resolution; a read dependency on a special-category type carries no marker of its own). Revised by the testability pass of 2026-09-06 (revision 37: the finding as an entity the rules bind on; `rounds_cap`; the recorded amendment; an optional step's condition reads what exists; `none_permitted`; the floor-list sentence retired; open decision 56 — where the enforcement point for a governance write sits). Revised by the rulings pass of 2026-09-06 (revision 38: decision 32 ruled — the `verdict` stays a stored field, the sign-off's own projection of its findings and its author, reconciled at the write). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 56 ruled here — the sole-writer grant, the engine acting for the gate; the checkpoint's raiser and resolver never one principal save the operator's marked self-resolution, decision 47; the finding-as-entity settlement marked reviewed and upheld).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding). Revised by the workflow-format pass of 2026-09-06 (revision 34: two declared intervals on every step, `unclaimed_after` and `hold_bound`; a planned wait as a step's own close condition held under decision 13; required coverage as the value of `freshness`; consent over several like actions as one presentation of several checkpoints; the governance class with no policy value named among what resolves to `NEVER`).consistency pass of 2026-09-06 (revision 35: when the checkpoint a `consent` step carries is written, and what the gate evaluates at the take; the merge action's class named `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a step's bound may be declared as the task's `due_date`; an `operator_only` action inside a workflow is taken by the operator and its step closes on the confirmation, never on the resolution; a read dependency on a special-category type carries no marker of its own). Revised by the testability pass of 2026-09-06 (revision 37: the finding as an entity the rules bind on; `rounds_cap`; the recorded amendment; an optional step's condition reads what exists; `none_permitted`; the floor-list sentence retired; open decision 56 — where the enforcement point for a governance write sits). Revised by the rulings pass of 2026-09-06 (revision 38: decision 32 ruled — the `verdict` stays a stored field, the sign-off's own projection of its findings and its author, reconciled at the write). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 56 ruled here — the sole-writer grant, the engine acting for the gate; the checkpoint's raiser and resolver never one principal save the operator's marked self-resolution, decision 47; the finding-as-entity settlement marked reviewed and upheld). Revised by the planning pass of 2026-09-06 (revision 40: the amendment to a planning record as the third named class of internal writes that are actions, `amend_<level>`; a lesson at a planning record's scope filed one level up).
 
 ## Purpose
 
@@ -621,6 +621,13 @@ axis states that what produced the work will produce the defect again. A step ow
 and filed the finding as standing has signed nothing false; a step owner that signed without filing it has,
 and that is the failure the standing axis catches, not one that sequencing would.
 
+**The same shape one level up, for a lesson at a planning record's scope.** A finding a `planning` batch
+records whose remedy is a change to the record's parent — the objective the plan was derived from was
+wrong, not the plan — produces a task `PART_OF` the parent, judged by the parent's own planning batch, and
+the raising batch does not wait for it; the producer axis above is unchanged, and the level a lesson lands
+on is read from where the task is filed
+(`planning_model.md#maintenance-is-work-the-planning-workflow`).
+
 **What decision 14 permits and this ruling declines.** A batch may hold on a task it created where its
 sign-off would be a lie without it. An institutionalization task is not such a case, by the reasoning above,
 so a step owner does not record a `DEPENDS_ON` edge to one, and a batch whose step owner believes its work
@@ -787,7 +794,7 @@ rule set stands beside them under a name of its own. Which actions may be taken 
 `action_policy` entity, the policy a principal evaluates the action gate against. A step owner's right to
 sign off a step comes from its declared role and its grant; whether the `merge_pr` action that follows may
 be taken is the action policy's. Neither the declaration, the grants, nor the policy governs internal operational
-writes to Neotoma, which are not actions — **except for two named classes, which are.**
+writes to Neotoma, which are not actions — **except for three named classes, which are.**
 
 **Governance writes are actions, and the governance types are one closed list, stated here and nowhere
 else.** A write to any of these eight is an action, evaluated at the action gate under the project's
@@ -815,9 +822,21 @@ rather than each author's estimate. A held one carries the reason class `lossy_r
 (`vocabulary.md#checkpoint`). A single-field correction is not in this class; a template applied across
 every agent's capability set is.
 
-Everything else stays an internal operational write and reaches no gate. The line these two classes draw is
+**An amendment to a planning record's authored content is an action, and its class is the level's.** A
+correction to a plan's statement, a planning decision written under it, a planning record created — each
+changes what every task beneath the record is for and is judged against, and the blast is the record's
+descendants, which at the root is everything. So each is an action of class `amend_<level>`, named per
+planning level as the registry marks it, taken at the `planning` workflow's `amend` step through this gate,
+written by the engine on the permit as the planning types are on its grant alone (decision 56's shape),
+and confirmed by the write's read-back; a planning type is not a governance type, because a statement
+changes what the swarm is for and not what it may do, and it is admitted to a writer by grant like every
+other type. A class the policy lists in neither tier resolves to `NEVER` (`#confidence-and-three-blast-tiers`),
+so the levels an operator has not listed are reserved by construction and loosened one class at a time
+(`planning_model.md#authority-per-level-an-amendment-is-an-action-and-its-class-is-the-levels`).
+
+Everything else stays an internal operational write and reaches no gate. The line these three classes draw is
 **what the write can destroy**, not where it goes — which is the distinction that separates the writes
-worth holding from the routine ones — and both use the gate and the checkpoint queue that already exist
+worth holding from the routine ones — and all three use the gate and the checkpoint queue that already exist
 rather than a second path for record writes (principle 6).
 
 ### Where the enforcement point for a governance write sits

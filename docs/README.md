@@ -84,6 +84,11 @@ Keyed (read when matching paths change — see `conformance.md`):
   say; the pairs of rules whose observables contradict; the bootstrap sequence a from-zero run needs; the
   permutation axes and which cross-products are load-bearing; and the disposable-instance isolation that
   makes touching the production record impossible rather than unlikely.
+- [**Planning model**](foundation/planning_model.md) — the layered planning records above a task: the
+  hierarchy as one `PART_OF` edge per record, upward in level, open in depth; the ascent a step reads as a
+  declared read resolved at hydration; every level's progress derived and never stored, its statement and
+  decisions authored as entities through the `planning` workflow; an amendment as an action whose class is
+  the level's, reserved by construction until the operator lists it; and why a session binds no plan.
 - [**Authority model**](foundation/authority_model.md) — the tuple `principal + domain + scope + action +
   conditions + time` defined whole: principals, tenancy, ownership, grants, attribution, delegation,
   approval, quorum and separation of duties, and the initiative objects, with the identity decision

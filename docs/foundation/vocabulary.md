@@ -9,7 +9,7 @@ cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 opera
 and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional [step](#step), and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14,
 16–18, 23–29: the hold verb, a condition a step holds on, the `dependency_cycle` reason class, the consent
 tolerance on `action_policy`, and an [artifact](#artifact) `PART_OF` its containing artifact), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the `intake rule` entry). Format
-follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives). Revised by the consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by role; `merge` as an action-class name retired for `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound as the task's `due_date` on the step entry; the `operator_only` step; a rule keying on a field a step wrote; no marker on a read for a special-category type; decision 55 on the [external-system](#external-system) entry). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a task status; the terminal set declared on the type; the `finding` and `sign_off` fields; `rounds_cap` and `none_permitted`). Revised by the rulings pass of 2026-09-06 (revision 38: the [verdict](#verdict) as the [sign-off](#sign-off)'s reconciled [projection](#projection); a `signed` or blocking sign-off written under a held [lease](#lease); what owning confers; the counting rule and the thresholds' home on the [quorum](#quorum) and separation entries; an initiative as a task by class; the host as an external system; a budget as a grant's and a [delegation](#delegation)'s scope term). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser never the resolver save the operator's marked self-resolution, on the [approval](#approval) entry; the right to propose as a grant capability and what stops as a task, on the proposal and [reprioritization](#reprioritization) entries; metered resources and the engine's sole governance grant, on the [grant](#grant) entry; a rule naming a work-model type refused at the write).
+follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives). Revised by the consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by role; `merge` as an action-class name retired for `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound as the task's `due_date` on the step entry; the `operator_only` step; a rule keying on a field a step wrote; no marker on a read for a special-category type; decision 55 on the [external-system](#external-system) entry). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a task status; the terminal set declared on the type; the `finding` and `sign_off` fields; `rounds_cap` and `none_permitted`). Revised by the rulings pass of 2026-09-06 (revision 38: the [verdict](#verdict) as the [sign-off](#sign-off)'s reconciled [projection](#projection); a `signed` or blocking sign-off written under a held [lease](#lease); what owning confers; the counting rule and the thresholds' home on the [quorum](#quorum) and separation entries; an initiative as a task by class; the host as an external system; a budget as a grant's and a [delegation](#delegation)'s scope term). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser never the resolver save the operator's marked self-resolution, on the [approval](#approval) entry; the right to propose as a grant capability and what stops as a task, on the proposal and [reprioritization](#reprioritization) entries; metered resources and the engine's sole governance grant, on the [grant](#grant) entry; a rule naming a work-model type refused at the write). Revised by the planning pass of 2026-09-06 (revision 40: the planning-model section — [planning record](#planning-record), [planning level](#planning-level), [ascent](#ascent), [unplanned](#unplanned), [planning decision](#planning-decision), [planner](#planner), and the [amend](#amend-a-planning-record) verb).
 
 ## Purpose
 
@@ -936,6 +936,77 @@ past [drop](#dropped) or hold are all derived through it, which is why none of t
 [`failure_posture.md#refuse-resume-by-replay-where-actions-are-consent-gated`](failure_posture.md#refuse-resume-by-replay-where-actions-are-consent-gated));
 an as-of read along event time for what was known (that is the look-ahead the ingestion axis exists to
 prevent).
+
+## Planning model (`planning_model.md`)
+
+### planning record
+**Definition:** an entity of a registered type the registry marks as a planning type with a level, under
+which [tasks](#task) and lower planning records sit by `PART_OF`, whose progress is a [derived read](#derived-read) over its
+descendants and whose statement and [planning decisions](#planning-decision) are authored through the planning [workflow](#workflow).
+**See:** [`planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward`](planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward),
+[`data_model.md#concepts`](data_model.md#concepts).
+**Never:** —
+**Not for:** "roadmap item" or "portfolio item" for a planning record; a parent task for a planning record (a parent task groups tasks and holds no statement); a
+batch for a planning record; a matter or a case for one (that is what work concerns, not what it is for).
+
+### planning level
+**Definition:** the rank the registry's planning mark carries on a type, by which a [planning record](#planning-record)'s
+`PART_OF` [edge](#edge) points only to a record of a higher rank, and which names the `amend_<level>` [action](#action) class
+an amendment at that rank takes.
+**See:** [`planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward`](planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward),
+[`planning_model.md#which-levels-an-instance-declares-and-what-it-calls-them`](planning_model.md#which-levels-an-instance-declares-and-what-it-calls-them).
+**Never:** —
+**Not for:** "tier" for a planning level (a tier is a blast tier); a field on the entity for its level
+(the mark is the type's); a fixed count of levels.
+
+### ascent
+**Definition:** the [planning records](#planning-record) above a [task](#task), read upward along `PART_OF` from the task to the root,
+a [derived read](#derived-read) a [step](#step) resolves at [hydration](#hydration) for the planning types its declaration names.
+The ascent is where a task has been placed; the chain is where it has been.
+**See:** [`planning_model.md#upward-context-is-a-declared-read-resolved-along-the-ascent-at-hydration`](planning_model.md#upward-context-is-a-declared-read-resolved-along-the-ascent-at-hydration).
+**Never:** —
+**Not for:** "context depth" as a number on a step (the depth is the set of planning types the step
+declares); chain for the ascent (the chain is the batches along `FOLLOWS`); a stored `plan_id` or list of
+records for the ascent.
+
+### unplanned
+**Definition:** the [derived read](#derived-read) of a [task](#task) whose [ascent](#ascent) is empty — no [planning record](#planning-record) above it — admitted
+through [intake](#intake) like any task and counted where the swarm's instruments are counted.
+**See:** [`planning_model.md#upward-context-is-a-declared-read-resolved-along-the-ascent-at-hydration`](planning_model.md#upward-context-is-a-declared-read-resolved-along-the-ascent-at-hydration).
+**Never:** —
+**Not for:** "orphan" for an unplanned task; "uncategorized" as a status; a status value for unplanned; a
+bucket record that unplanned tasks are put under.
+
+### planning decision
+**Definition:** a `decision` entity `PART_OF` the [planning record](#planning-record) it was taken under, carrying the decision,
+its reason, and its date, written once by the planning [workflow](#workflow)'s `amend` [step](#step) and reversed only by a
+later decision that `SUPERSEDES` it.
+**See:** [`planning_model.md#downward-state-is-derived-upward-content-is-authored-as-entities`](planning_model.md#downward-state-is-derived-upward-content-is-authored-as-entities),
+[`data_model.md#relationships`](data_model.md#relationships).
+**Never:** —
+**Not for:** "decisions map" for a planning decision (a decision is an entity, never a key in a map); the
+resolution of a checkpoint for a planning decision (a resolution is a principal's answer on a held action
+or task); a register decision of this directory for a planning decision.
+
+### planner
+**Definition:** the role that [claims](#claim) every [step](#step) of the planning [workflow](#workflow), resolved by the roster per
+project, and once for the levels above a project.
+**See:** [`workflows.md#planning`](workflows.md#planning),
+[`planning_model.md#maintenance-is-work-the-planning-workflow`](planning_model.md#maintenance-is-work-the-planning-workflow).
+**Never:** —
+**Not for:** "plan owner" for the planner (ownership is the required seat on the record's checkpoints, and
+the planner is the step owner of its batches); a session for the planner (a session binds no plan and
+holds no lease).
+
+### amend (a planning record)
+**Definition:** to write a [planning record](#planning-record)'s authored content — a correction to its statement, a planning
+decision under it, a record created beneath it — as an [action](#action) of the class `amend_<level>` for the
+record's [planning level](#planning-level), taken at the planning [workflow](#workflow)'s `amend` [step](#step) through the [action gate](#action-gate).
+**See:** [`planning_model.md#authority-per-level-an-amendment-is-an-action-and-its-class-is-the-levels`](planning_model.md#authority-per-level-an-amendment-is-an-action-and-its-class-is-the-levels).
+**Never:** —
+**Not for:** "update the plan" for an amendment made outside the planning workflow; correcting a task's
+acceptance criteria (that amendment is a step owner's, on the task); a governance write for an amendment
+(a planning type is not on the list of eight).
 
 ## Authority model (`authority_model.md`)
 
