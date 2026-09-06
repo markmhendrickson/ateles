@@ -99,9 +99,9 @@ jobs:
       - name: Install MCP server deps
         run: |
           uv venv .mcp-venv
-          # mcp 2.0 renamed Tool.inputSchema → input_schema and removed Server.list_tools;
-          # pin <2 until execution/mcp/ateles is migrated.
-          VIRTUAL_ENV=.mcp-venv uv pip install "mcp>=1.1.0,<2" httpx
+          # requirements.txt is the single source of truth for the pin
+          # (mcp 2.0 renamed Tool.inputSchema and removed Server.list_tools).
+          VIRTUAL_ENV=.mcp-venv uv pip install -r execution/mcp/ateles/requirements.txt
       - name: Run ateles MCP server tests
         run: .mcp-venv/bin/python execution/mcp/ateles/test_server.py
       - name: Run ateles MCP server smoke tests
