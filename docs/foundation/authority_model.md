@@ -143,6 +143,7 @@ taking should have asked the accountable principal — which would argue for the
 - The grant is read at every enforcement point.
 - The decision precedes the effect.
 - A denial raises a checkpoint, and the denied principal does not route around it.
+- Custody by revocability.
 - Rotation is staged, never a flag day.
 - Revocation's reach is every grant that matched the credential, and it is only as fast as the check that reads it.
 
