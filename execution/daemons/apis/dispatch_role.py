@@ -46,9 +46,30 @@ NOT the eligibility rules (headroom floor, cooldowns, binary presence). The
 operator wants this while automatic balancing is still being trusted. Without
 it, ``harness_router`` chooses using the headroom file.
 
-Exit codes: 0 on a successful run, 1 on any failure. The agent's stdout goes to
-this process's stdout; diagnostics go to stderr, so the caller can pipe the
-result cleanly.
+Exit codes: 0 on a successful run, non-zero on any failure. The agent's stdout
+goes to this process's stdout; diagnostics go to stderr, so the caller can pipe
+the result cleanly.
+
+THE ENVELOPE IS UNCONDITIONAL (ateles#585)
+------------------------------------------
+Under ``--json`` this entrypoint writes exactly one JSON envelope on stdout on
+EVERY exit path — success, refusal, provider failure, unhandled exception,
+usage error, and death by signal. An empty output file is not a reachable
+outcome.
+
+That is a correctness requirement, not a nicety. Before #585 the envelope was
+written only after ``asyncio.run`` returned, so anything that killed the
+process mid-dispatch (a SIGTERM/SIGHUP from a harness that backgrounds or
+times out its shell call being the observed cause) left a 0-byte file, three
+healthy-looking banner lines on stderr, and no other trace. The caller could
+not distinguish "still working" from "died ten seconds ago", and read the
+silence as success. A dispatcher that fails invisibly is worse than one that
+crashes loudly, so failure is now always self-reporting:
+
+* ``ok: false`` with a ``reason`` naming the failure class,
+* a non-zero exit code, and
+* for a signal, exit ``128 + signum`` (SIGTERM -> 143), preserving the shell
+  convention the caller already knows how to read.
 
 NOT IN SCOPE (deliberately)
 ---------------------------
@@ -63,6 +84,7 @@ import argparse
 import asyncio
 import json
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -249,7 +271,124 @@ def _headroom_note() -> str:
     return f"headroom [{source}]: {rendered}; cooling: {cooling}"
 
 
+class _Emitter:
+    """Guarantees exactly one JSON envelope on stdout, whatever happens.
+
+    Every exit path funnels through ``emit``. The ``_done`` latch makes it
+    idempotent, which matters because the paths race: a SIGTERM can arrive
+    while the normal result is being written, and two envelopes in one stream
+    is a parse error for the caller — as unusable as zero.
+
+    ``enabled`` is False without ``--json``: the human-readable mode keeps its
+    plain-text output, and the failure detail still reaches stderr.
+    """
+
+    def __init__(self, *, enabled: bool, role: str) -> None:
+        self.enabled = enabled
+        self.role = role
+        self._done = False
+
+    def emit(self, payload: dict) -> None:
+        if self._done:
+            return
+        self._done = True
+        if not self.enabled:
+            return
+        body = {"role": self.role, **payload}
+        try:
+            sys.stdout.write(json.dumps(body, indent=2) + "\n")
+            sys.stdout.flush()
+        except Exception:  # noqa: BLE001
+            # stdout is gone (closed pipe / full disk). Nothing further can be
+            # done for the caller, but this must not mask the original failure
+            # or turn a reported error into a traceback.
+            pass
+
+    def emit_failure(self, reason: str, **extra) -> None:
+        """The failure envelope. ``reason`` is required and never empty."""
+        self.emit(
+            {
+                "ok": False,
+                "reason": reason,
+                "provider": extra.pop("provider", None),
+                "attempted_providers": extra.pop("attempted_providers", []),
+                "returncode": extra.pop("returncode", None),
+                "error": extra.pop("error", reason),
+                "stdout": extra.pop("stdout", ""),
+                "stderr": extra.pop("stderr", ""),
+                **extra,
+            }
+        )
+
+
+def _usage_failure(emitter: _Emitter, reason: str) -> int:
+    """A usage error, reported through the emitter rather than argparse.
+
+    ``parser.error`` raises ``SystemExit(2)`` straight past the emitter, which
+    left ``--json`` callers with the 0-byte stdout of ateles#585 — the exact
+    signature this module exists to eliminate. Loud on stderr (argparse's own
+    behaviour is preserved) AND structured on stdout, so neither a human nor a
+    parser is left guessing. Exit 2 is kept: it is the conventional usage
+    status and callers may already branch on it.
+    """
+    print(f"dispatch_role: error: {reason}", file=sys.stderr)
+    emitter.emit_failure(reason, error="usage error")
+    return 2
+
+
+def _install_signal_envelope(emitter: _Emitter) -> None:
+    """Turn a fatal signal into a reported failure instead of silence.
+
+    SIGTERM and SIGHUP are the observed killers (#585): a harness that
+    backgrounds or times out its shell call delivers one of them, and Python's
+    default disposition is to die immediately, writing nothing. SIGINT is
+    included for symmetry with an operator's Ctrl-C.
+
+    The handler emits, then re-raises the signal through the default handler so
+    the process still dies with the conventional ``128 + signum`` status rather
+    than a laundered exit 0 — a caller checking only the exit code must not be
+    told a killed dispatch succeeded.
+    """
+    def _handler(signum, _frame):  # pragma: no cover - exercised as a subprocess
+        name = signal.Signals(signum).name
+        emitter.emit_failure(
+            f"dispatch terminated by {name} before the run completed",
+            error=f"killed by {name}",
+        )
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    for _sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        try:
+            signal.signal(_sig, _handler)
+        except (ValueError, OSError, AttributeError):
+            # Not the main thread, or the platform lacks the signal. Losing one
+            # handler must not prevent the dispatch from running at all.
+            pass
+
+
+def _peek_argv(argv: list[str]) -> tuple[bool, str]:
+    """Detect ``--json`` and ``--role`` before argparse runs.
+
+    ``parse_args`` can fail (unknown flags, bad types) by calling ``error``,
+    which raises ``SystemExit(2)`` before the caller knows ``args.json``. A
+    caller redirecting stdout to a file still gets the #585 0-byte signature
+    unless the emitter exists first.
+    """
+    json_mode = "--json" in argv
+    role = ""
+    for i, arg in enumerate(argv):
+        if arg == "--role" and i + 1 < len(argv):
+            role = argv[i + 1].strip().lower()
+            break
+    return json_mode, role
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    json_mode, peek_role = _peek_argv(argv)
+    emitter = _Emitter(enabled=json_mode, role=peek_role)
+
     parser = argparse.ArgumentParser(
         prog="dispatch_role",
         description=(
@@ -305,32 +444,72 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print the dispatchable role names and exit.",
     )
-    args = parser.parse_args(argv)
+
+    def _parser_error(message: str) -> None:
+        print(f"dispatch_role: error: {message}", file=sys.stderr)
+        emitter.emit_failure(message, error="usage error")
+        raise SystemExit(2)
+
+    parser.error = _parser_error  # type: ignore[method-assign]
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 2
 
     if args.list_roles:
         for name in available_roles():
             print(name)
         return 0
-    if not args.role:
-        parser.error("--role is required (or use --list-roles)")
+    # Armed before ANY work that can fail — including the usage checks below —
+    # and before the signal handlers, so there is no window in which this
+    # process can die reporting nothing. A usage error is still a dispatch that
+    # produced no result, and a caller parsing --json must not be handed the
+    # 0-byte file of ateles#585 just because argparse rejected the arguments.
+    emitter.enabled = args.json
+    emitter.role = (args.role or peek_role or "").strip().lower()
+    _install_signal_envelope(emitter)
 
-    # Resolve the task text from exactly one source.
+    if not args.role:
+        return _usage_failure(emitter, "--role is required (or use --list-roles)")
+
+    role = args.role.strip().lower()
+    emitter.role = role
+
+    # Resolve the task text from exactly one source. A missing or unreadable
+    # --task-file used to raise straight out of main() as a traceback with no
+    # envelope; it is a dispatch failure like any other.
     if args.task_file:
-        task = Path(args.task_file).read_text(encoding="utf-8")
+        try:
+            task = Path(args.task_file).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            reason = f"could not read --task-file {args.task_file!r}: {exc}"
+            print(f"dispatch_role: {reason}", file=sys.stderr)
+            emitter.emit_failure(reason)
+            return 1
     elif args.task == "-":
-        task = sys.stdin.read()
+        # Reading a closed or blocked stdin raises; it is a dispatch failure
+        # like any other, not a traceback with no envelope.
+        try:
+            task = sys.stdin.read()
+        except (OSError, ValueError, UnicodeDecodeError) as exc:
+            reason = f"could not read task from stdin: {exc}"
+            print(f"dispatch_role: {reason}", file=sys.stderr)
+            emitter.emit_failure(reason)
+            return 1
     elif args.task:
         task = args.task
     else:
-        parser.error("one of --task, --task-file is required")
+        return _usage_failure(emitter, "one of --task, --task-file is required")
     if not task.strip():
-        parser.error("task description is empty")
-
-    role = args.role.strip().lower()
+        reason = "task description is empty"
+        print(f"dispatch_role: {reason}", file=sys.stderr)
+        emitter.emit_failure(reason)
+        return 1
 
     refusal = _preflight(role, provider=args.provider)
     if refusal:
         print(f"dispatch_role: {refusal}", file=sys.stderr)
+        emitter.emit_failure(refusal)
         return 1
 
     # Report the identity actually loaded, so a degraded dispatch (Neotoma
@@ -356,36 +535,47 @@ def main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
     )
 
-    result = asyncio.run(
-        dispatch(
-            role,
-            task,
-            provider=args.provider,
-            cwd=args.cwd,
-            timeout=args.timeout,
-            task_entity_id=args.task_entity_id,
-        )
-    )
-
-    if args.json:
-        print(
-            json.dumps(
-                {
-                    "role": role,
-                    "ok": result.ok,
-                    "provider": result.provider,
-                    "attempted_providers": list(result.attempted_providers),
-                    "returncode": result.returncode,
-                    "error": result.error,
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
-                },
-                indent=2,
+    # run_skill is documented to return a SkillResult on every failure it
+    # anticipates, but "anticipates" is the operative word: an unhandled
+    # exception anywhere beneath it (a provider adapter, the Neotoma client, an
+    # asyncio teardown) previously escaped as a traceback with an empty
+    # envelope. Catch BaseException so a SystemExit or KeyboardInterrupt raised
+    # deep in the stack is reported too, then re-raise nothing — the reason is
+    # already in the envelope and the exit code carries the failure.
+    try:
+        result = asyncio.run(
+            dispatch(
+                role,
+                task,
+                provider=args.provider,
+                cwd=args.cwd,
+                timeout=args.timeout,
+                task_entity_id=args.task_entity_id,
             )
         )
-    else:
-        if result.stdout:
-            print(result.stdout)
+    except BaseException as exc:  # noqa: BLE001 — see above
+        reason = f"dispatch raised {type(exc).__name__}: {exc}"
+        print(f"dispatch_role: {reason}", file=sys.stderr)
+        import traceback
+
+        traceback.print_exc(file=sys.stderr)
+        emitter.emit_failure(reason)
+        return 1
+
+    emitter.emit(
+        {
+            "ok": result.ok,
+            **({} if result.ok else {"reason": result.error or "dispatch failed"}),
+            "provider": result.provider,
+            "attempted_providers": list(result.attempted_providers),
+            "returncode": result.returncode,
+            "error": result.error,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+    )
+    if not args.json and result.stdout:
+        print(result.stdout)
 
     print(
         f"dispatch_role: ok={result.ok} provider={result.provider or '(none)'} "
