@@ -13,7 +13,7 @@ Every rule `workflows.md` owns, one entry each: the rule's own statement from `c
 
 ## [Roles named in this document](../workflows.md#roles-named-in-this-document)
 
-- **WF-2** — every role resolves against the roster per project *[M]*
+- **WF-2** — every role resolves against the roster per declaration scope *[M]*
 
 ## [intake](../workflows.md#intake)
 
@@ -27,7 +27,7 @@ Every rule `workflows.md` owns, one entry each: the rule's own statement from `c
 ## [feature](../workflows.md#feature)
 
 - **WF-9** — entry names a repository; `pm` states scope, evidence, basis; `ux`+`arch` parallel and joined; `impl` closes on a pull request artifact with checks passing; `pr_review`, `qa` judgements; `legal` optional by `applies_when`; `merge` is an action, read back, names the successor *[M for structure; R for judgements]*
-- **WF-10** — feature fast paths: taken only where the project declares no workflow of that type *[M]*
+- **WF-10** — feature fast paths: taken only where the declaration scope declares no workflow of that type *[M]*
 
 ## [bug](../workflows.md#bug)
 

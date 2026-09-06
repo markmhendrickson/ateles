@@ -33,7 +33,12 @@ rulings-61-62-64 pass of 2026-09-06 (decision 61 ruled — the default ancestor 
 unblocked now that decision 57 fixes the levels). Revised by the project-term pass of 2026-09-06 (revision 67:
 decision 70 opened — `project` names decision 57's planning level and is also the scoping key on `workflow`
 and `batch`, and nothing yet says whether the two are one thing; the possessives that read the key as
-ownership are resolved to the owners the rules name, in this document and across the corpus).
+ownership are resolved to the owners the rules name, in this document and across the corpus). Revised by the
+decision-70 ruling of 2026-09-06 (revision 68, the operator's word: decision 70 ruled — two concepts share
+one word; the planning level keeps `project`, the scoping key on `workflow` and `batch` is renamed
+`declaration_scope`, and the section that posed the question now argues the ruling, with G20's global
+roster as the evidence a planning record cannot be the key and invariant 12 as what obliges the rename
+rather than a note; three existing terms swap-tested and rejected before the compound was coined).
 
 ## Purpose
 
@@ -422,39 +427,69 @@ needing its own lifecycle, its own sign-off, independent of its parent strategy'
 be the same argument decision 51 already settled against a second `initiative`-shaped entity, re-litigated
 here.
 
-### `project` names a planning level; the scoping key on a declaration is the same word and not yet the same thing
+### `project` names a planning level; the scoping key on a declaration is a different term
 
-Decision 57 makes `project` a **planning level** — the tier above `plan`, an ancestry mark a task reaches
-by its `PART_OF` line, read for justification and for relative standing
-(`#the-hierarchy-is-edges-and-a-task-has-one-line-upward`). A level owns its own record, its own
-`planning` batch, and the child records its `amend` step creates, and it owns nothing else: no policy,
-no workflow declaration, no roster.
+**Ruled (decision 70, 2026-09-06, the operator's): they are two concepts sharing one word. The planning
+level keeps the name `project`. The scoping key on `workflow` and `batch` is renamed
+`declaration_scope`, and the concept is `declaration scope` (`vocabulary.md#declaration-scope`).**
 
-The same word is also a **scoping key on two declarations**. `workflow` and `batch` each carry a `project`
-field (`data_model.md#concepts`), and `workflow` declares one entity per (project, workflow type)
-(`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`); the
-roster is described as binding per project (`workflows.md#roles-named-in-this-document`) while an
-instance's is one global map (`migration.md`, G20). Nothing states whether the key is the level's record
-or a separate scope that merely shares its name, and `conformance_suite.md#against-migrationmds-bootstrap-leg`
-already records the consequence: a task carries no `project`, no rule says how it acquires one, and so the
-intake batch opened at its creation has a `project` from nowhere.
+**The planning level has the stronger claim to the word.** Decision 57 registers five levels — task, plan,
+project, strategy, mission — and makes `project` the tier above `plan`: an ancestry mark a task reaches by
+its `PART_OF` line, read for justification and for relative standing
+(`#the-hierarchy-is-edges-and-a-task-has-one-line-upward`). That is a settled ruling with rules turning on
+it: the ascent is a derived read on the task (`data_model.md#concepts`), the `amend_<level>` class is the
+level's (`#authority-per-level-an-amendment-is-an-action-and-its-class-is-the-levels`), and a missing
+ancestor is a finding rather than something the swarm may author
+(`#the-swarm-may-not-author-a-missing-ancestor`). A level owns its own record, its own `planning` batch,
+and the child records its `amend` step creates, and it owns nothing else: no policy, no workflow
+declaration, no roster.
 
-**What this pass settled, and what it did not.** The possessive "the project's `X`" was doing the work of
-an answer wherever it appeared — reading as though a project owned a policy, a workflow, or a criteria
-entity. Where the design already names an owner, the possessive is now that owner's: the `action_policy`
-is the **instance's**, since its row declares no `project` field and it is the one policy a principal
-evaluates the action gate against (`github.md#what-this-section-does-not-decide` already names it that way);
-`release_criteria` is a context entity **retrieved by type**, like `priority_rubric` and `brand_voice`,
-and carries no possessive; a `record_migration` declaration is named by its scoped id,
-`` `<project>|record_migration` ``, which states the scoping without asserting ownership. What stays
-undecided is the key itself.
+**The scoping key is not that, and one piece of evidence settles it rather than merely suggesting it.**
+`migration.md`'s gap G20 records that the roster "binds per project in `workflows.md`" while being **one
+global map on the instance**. A planning record cannot key a global map: there are many project records on
+an instance and one roster, so under the planning reading the map would have to be either per-record (which
+is not what the instance holds) or keyed on a record chosen arbitrarily from many (which is not a key at
+all). The same reading fails a second time on what the key selects. `workflow` declares one entity per
+scope and workflow type (`gates_and_workflows.md#declaration-batch-projection`), and a declaration says how
+work of a type is executed — its steps, its owner roles, its thresholds, whether its closing sign-off may
+name no successor because the branch it deploys is deployed on its own cadence
+(`workflows.md#feature`). None of that is a property of a justification. A project record states what the
+operator is pursuing and why; it does not state a deployment cadence, and a rule that read the two as one
+thing would make every planning record carry deployment facts it has no reason to hold.
 
-**The question, open.** Whether the `project` field on `workflow` and `batch` is a reference to the
-planning record at the `project` level — in which case a task acquires one from its ascent and the
-`*|intake` wildcard is a declaration that binds at every project — or a separate deployment-scope term
-that shares the word and should be renamed under invariant 12, which forbids one term carrying two senses.
-Registered as decision 70. Until it is ruled, no document should read the field as ownership: a scoping
-key selects which declaration applies, and selecting is not owning.
+**Invariant 12 is what obliges the rename rather than a note.** One word carrying two distinct senses is
+the overlap the invariant forbids by name, and its swap test decides which way the rename runs: run on the
+corpus's own sentences, "a task acquires its `project` from its ascent" and "a task acquires its
+`declaration_scope` from its ascent" do not mean the same thing — the ascent yields a planning record, and
+the scope is not one. Two sentences that resist substitution are two terms
+(`principles.md#12-as-few-terms-as-the-design-needs-and-no-fewer-no-term-overlaps-another`).
+
+**Why a compound rather than an existing term.** Three candidates were tested before one was coined.
+`instance` is the closest and fails on cardinality: an instance may declare several workflow types under
+several scopes, and "one entity per (instance, workflow type)" would forbid the several declarations of one
+type that `workflows.md` states exist. `domain` is taken, for the region an authority covers
+(`vocabulary.md#domain`), and swapping it in would assert that which declaration applies is decided by what
+a principal may act on, which the design denies — the gate and the declaration are separate mechanisms.
+`tenant` is the isolation boundary no read or write crosses (`vocabulary.md#tenant`), which is coarser
+than a scope by construction: one tenant runs several. `declaration scope` follows the pattern the corpus
+already uses for exactly this problem — bare `scope` carries four senses, and each is disambiguated by a
+qualifier rather than by argument (`vocabulary.md#waiver-scope`, `#finding-scope`, `#permission-scope`).
+
+**What the ruling does not decide.** How a task acquires the `declaration_scope` its intake batch carries.
+The task's row carries no such field and no rule states the derivation, so the intake batch opened at a
+task's creation still has one from nowhere
+(`conformance_suite.md#what-the-documents-leave-unspecified-here-and-how-each-is-recorded`). The ruling removes one candidate answer —
+it cannot be read off the ascent, since the ascent yields planning records and the scope is not one — and
+the derivation that fits the model is that intake's `classify` writes it, as it writes `action_type`. That
+remains recorded as a gap rather than ruled here, because it is a rule about intake and belongs where
+intake is stated. Whether `*|intake`'s `*` is a wildcard the resolver understands or a rendering
+convenience is likewise untouched: it was never a question about which sense the word carried.
+
+**What reopens it.** A rule of the design coming to read a declaration's scope off a planning record —
+none does today, and the roster's global map is the standing evidence against one. Or the operator
+choosing to bind exactly one declaration scope per project record, which would make the two coextensive in
+practice; that would still be two terms, since coextension is not identity, and the invariant's test is
+whether a sentence changes meaning, not whether the two sets happen to match on one instance.
 
 ## Missing ancestry: whether the swarm derives an absent parent, or finds the gap
 

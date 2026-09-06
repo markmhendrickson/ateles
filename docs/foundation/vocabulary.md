@@ -9,7 +9,7 @@ cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 opera
 and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional [step](#step), and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14,
 16–18, 23–29: the hold verb, a condition a step holds on, the `dependency_cycle` reason class, the consent
 tolerance on `action_policy`, and an [artifact](#artifact) `PART_OF` its containing artifact), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the `intake rule` entry). Format
-follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives). Revised by the consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by [role](#role); `merge` as an action-class name retired for `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound as the task's `due_date` on the step entry; the `operator_only` step; a rule keying on a field a step wrote; no marker on a read for a special-category type; decision 55 on the [external-system](#external-system) entry). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a task status; the terminal set declared on the type; the `finding` and `sign_off` fields; `rounds_cap` and `none_permitted`). Revised by the rulings pass of 2026-09-06 (revision 38: the [verdict](#verdict) as the [sign-off](#sign-off)'s reconciled [projection](#projection); a `signed` or blocking sign-off written under a held [lease](#lease); what owning confers; the counting rule and the thresholds' home on the [quorum](#quorum) and separation entries; an initiative as a task by class; the host as an external system; a budget as a grant's and a [delegation](#delegation)'s scope term). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser never the resolver save the operator's marked self-resolution, on the [approval](#approval) entry; the right to propose as a grant capability and what stops as a task, on the proposal and [reprioritization](#reprioritization) entries; metered resources and the engine's sole governance grant, on the [grant](#grant) entry; a rule naming a work-model type refused at the write). Revised by the planning pass of 2026-09-06 (revision 40: the planning-model section — [planning record](#planning-record), [planning level](#planning-level), [ascent](#ascent), [unplanned](#unplanned), [planning decision](#planning-decision), [planner](#planner), and the [amend](#amend-a-planning-record) verb). Revised by the record-sense pass of 2026-09-06 (revision 41: the [artifact](#artifact) definition and five other sentences that read "record" against an external system rephrased to "an entry an external system holds," closing the [record](#record) Not-for collision; the Not-for scoped to a Never for `docs/foundation/adapters.md` and the five per-system [adapter](#adapter) documents). Revised by the Human Inversion mapping pass of 2026-09-06 (revision 44: two term collisions with a public essay series disambiguated — [reconciler](#reconciler) as this design's projection-parity check, never the essay's adjudicating role, and [replay](#replay) as the essay's [as-of-read](#as-of-read) sense, never this design's refused re-execution sense). Revised by the priority pass of 2026-09-06 (revision 47: the [`priority`](#priority) entry added, giving the term a home beside [`claimable`](#claimable) as a [derived read](#derived-read) a [principal](#principal) consults and is never bound to obey). Revised by the rulings pass of 2026-09-06 (revision 48: decision 34 ruled — the [pipeline](#retired-names) entry replaced by [engine](#engine), defined once; decision 33 ruled — the [stage](#stage) entry rewritten to authored prose only, with no `steps[].phase` field). Revised by the event/signal/delivery pass of 2026-09-06 (revision 49: the [event](#event) entry added — the delivery's payload, distinct from the [delivery](#delivery) that carried it and the [signal](#signal) the adapter reads it into — and the [delivery](#delivery) and [signal](#signal) entries cross-referenced against it; the operator's question of whether events, signals, and deliveries are properly distinguished). Revised by the transport-and-delivery pass of 2026-09-06 (revision 50: [mapping](#mapping), [receiver](#receiver), [signature](#signature), and [idempotency key](#idempotency-key) entries added; [effect dedup](#effect-dedup) tightened to name the key by reference; [cursor](#freshness) and capability left as prose on the [grant](#grant) entry, the latter checked for collision and found none). Revised by the operator's 2026-09-06 terminology review of role, domain, and scope (revision 52: the [role](#role) entry added, beside [step owner](#step-owner); the [domain](#domain) and [permission scope](#permission-scope) entries added for the [authority](#authority) tuple's second and third terms; [finding scope](#finding-scope) and [waiver scope](#waiver-scope) added as qualified compounds rather than one entry for bare `scope`'s four senses, with bare scope left to the author and the `## Scope` heading untouched). Revised by the adversarial term audit of 2026-09-06 (revision 53: the [governance write](#governance-write) entry added — cited by name across six documents with no entry of its own, its definition already stated verbatim in `gates_and_workflows.md`; ten Not-for/Never violations fixed by unambiguous rephrasing, the `record`-for-external-system pattern found again in three new sites and a stale `steps[].phase` field removed from `data_model.md`). Revised by the checker-mechanism pass of 2026-09-06 (revision 54: `check_foundation_vocabulary.py`'s `record` ban rebuilt as a structural, corpus-wide check — a bound term possessed by, or governed by a preposition or relative clause pointing at, a foreign-system noun — after the literal-phrase, six-document-scoped version missed two more rounds of paraphrase; 28 further Not-for/Never violations this rebuilt check found across `adapters.md`, `calendar.md`, `conformance.md`, `data_model.md`, `gmail.md`, `migration.md`, `payments.md`, `work_model.md`, and `workflows.md` fixed by the same unambiguous rephrasing; one `adapters.md` heading renamed with its four cross-references, its anchor confirmed unused outside `docs/foundation`; `as_read` extended to strip `**bold**`/`*italic*` emphasis, closing a second escape the fix found live in `data_model.md`). Revised by the peering pass of 2026-09-06 (revision 56, rebased onto the checker-mechanism and self-awareness passes: decision 55 ruled on the [external system](#external-system) entry — a second instance of the record is not one; the [governance write](#governance-write) entry's admission sentence extended to name a synced write's own, unattributed shape).
+follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives). Revised by the consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by [role](#role); `merge` as an action-class name retired for `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound as the task's `due_date` on the step entry; the `operator_only` step; a rule keying on a field a step wrote; no marker on a read for a special-category type; decision 55 on the [external-system](#external-system) entry). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a task status; the terminal set declared on the type; the `finding` and `sign_off` fields; `rounds_cap` and `none_permitted`). Revised by the rulings pass of 2026-09-06 (revision 38: the [verdict](#verdict) as the [sign-off](#sign-off)'s reconciled [projection](#projection); a `signed` or blocking sign-off written under a held [lease](#lease); what owning confers; the counting rule and the thresholds' home on the [quorum](#quorum) and separation entries; an initiative as a task by class; the host as an external system; a budget as a grant's and a [delegation](#delegation)'s scope term). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser never the resolver save the operator's marked self-resolution, on the [approval](#approval) entry; the right to propose as a grant capability and what stops as a task, on the proposal and [reprioritization](#reprioritization) entries; metered resources and the engine's sole governance grant, on the [grant](#grant) entry; a rule naming a work-model type refused at the write). Revised by the planning pass of 2026-09-06 (revision 40: the planning-model section — [planning record](#planning-record), [planning level](#planning-level), [ascent](#ascent), [unplanned](#unplanned), [planning decision](#planning-decision), [planner](#planner), and the [amend](#amend-a-planning-record) verb). Revised by the record-sense pass of 2026-09-06 (revision 41: the [artifact](#artifact) definition and five other sentences that read "record" against an external system rephrased to "an entry an external system holds," closing the [record](#record) Not-for collision; the Not-for scoped to a Never for `docs/foundation/adapters.md` and the five per-system [adapter](#adapter) documents). Revised by the Human Inversion mapping pass of 2026-09-06 (revision 44: two term collisions with a public essay series disambiguated — [reconciler](#reconciler) as this design's projection-parity check, never the essay's adjudicating role, and [replay](#replay) as the essay's [as-of-read](#as-of-read) sense, never this design's refused re-execution sense). Revised by the priority pass of 2026-09-06 (revision 47: the [`priority`](#priority) entry added, giving the term a home beside [`claimable`](#claimable) as a [derived read](#derived-read) a [principal](#principal) consults and is never bound to obey). Revised by the rulings pass of 2026-09-06 (revision 48: decision 34 ruled — the [pipeline](#retired-names) entry replaced by [engine](#engine), defined once; decision 33 ruled — the [stage](#stage) entry rewritten to authored prose only, with no `steps[].phase` field). Revised by the event/signal/delivery pass of 2026-09-06 (revision 49: the [event](#event) entry added — the delivery's payload, distinct from the [delivery](#delivery) that carried it and the [signal](#signal) the adapter reads it into — and the [delivery](#delivery) and [signal](#signal) entries cross-referenced against it; the operator's question of whether events, signals, and deliveries are properly distinguished). Revised by the transport-and-delivery pass of 2026-09-06 (revision 50: [mapping](#mapping), [receiver](#receiver), [signature](#signature), and [idempotency key](#idempotency-key) entries added; [effect dedup](#effect-dedup) tightened to name the key by reference; [cursor](#freshness) and capability left as prose on the [grant](#grant) entry, the latter checked for collision and found none). Revised by the operator's 2026-09-06 terminology review of role, domain, and scope (revision 52: the [role](#role) entry added, beside [step owner](#step-owner); the [domain](#domain) and [permission scope](#permission-scope) entries added for the [authority](#authority) tuple's second and third terms; [finding scope](#finding-scope) and [waiver scope](#waiver-scope) added as qualified compounds rather than one entry for bare `scope`'s four senses, with bare scope left to the author and the `## Scope` heading untouched). Revised by the adversarial term audit of 2026-09-06 (revision 53: the [governance write](#governance-write) entry added — cited by name across six documents with no entry of its own, its definition already stated verbatim in `gates_and_workflows.md`; ten Not-for/Never violations fixed by unambiguous rephrasing, the `record`-for-external-system pattern found again in three new sites and a stale `steps[].phase` field removed from `data_model.md`). Revised by the checker-mechanism pass of 2026-09-06 (revision 54: `check_foundation_vocabulary.py`'s `record` ban rebuilt as a structural, corpus-wide check — a bound term possessed by, or governed by a preposition or relative clause pointing at, a foreign-system noun — after the literal-phrase, six-document-scoped version missed two more rounds of paraphrase; 28 further Not-for/Never violations this rebuilt check found across `adapters.md`, `calendar.md`, `conformance.md`, `data_model.md`, `gmail.md`, `migration.md`, `payments.md`, `work_model.md`, and `workflows.md` fixed by the same unambiguous rephrasing; one `adapters.md` heading renamed with its four cross-references, its anchor confirmed unused outside `docs/foundation`; `as_read` extended to strip `**bold**`/`*italic*` emphasis, closing a second escape the fix found live in `data_model.md`). Revised by the decision-70 ruling of 2026-09-06 (revision 68: [declaration scope](#declaration-scope) added — the key that selects which [workflow](#workflow) declaration a [batch](#batch) runs under, swap-tested against `instance`, [domain](#domain), and [tenant](#tenant) and distinguished from the planning level; [project](#project) added beside it, defining the planning sense and banning the scoping sense; `project` retired as the name of the scoping key). Revised by the peering pass of 2026-09-06 (revision 56, rebased onto the checker-mechanism and self-awareness passes: decision 55 ruled on the [external system](#external-system) entry — a second instance of the record is not one; the [governance write](#governance-write) entry's admission sentence extended to name a synced write's own, unattributed shape).
 
 ## Purpose
 
@@ -361,8 +361,8 @@ that word for the socket a delivery lands on.
 rule, or "template" (the rule authors the created task's text; classification is intake's).
 
 ### operator-facing agent
-**Definition:** the [agent](#agent) the roster resolves to the operator-facing [role](#role) — bound per project in
-`swarm_roster`, never named in the design — which [claims](#claim) operator-only [tasks](#task),
+**Definition:** the [agent](#agent) the roster resolves to the operator-facing [role](#role) — bound per
+[declaration scope](#declaration-scope) in `swarm_roster`, never named in the design — which [claims](#claim) operator-only [tasks](#task),
 carries them and their [checkpoints](#checkpoint) to the [operator](#operator), and records the outcome.
 **See:** [`work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent`](work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent).
 **Never:** —
@@ -406,8 +406,31 @@ declared [workflow](#workflow) with an owning [role](#role) rather than an emerg
 
 ## Gate model (`gates_and_workflows.md`)
 
+### declaration scope
+**Definition:** the key, paired with a workflow type, that selects which [workflow](#workflow) declaration a
+[batch](#batch) is run under — the body of work one instance runs, against which its declarations and its
+roster are keyed.
+Selecting is not owning: a declaration scope says which declaration applies, never that anything owns it
+(decision 70, ruled 2026-09-06). It is **not** the [planning level](#planning-level) named `project`, which
+is an ancestry mark read for justification and owns only its own record — the two share a word in ordinary
+use and the design distinguishes them, which is what invariant 12 obliges a rename for. The swap test:
+"a [task](#task) acquires its `project` from its ascent" and "a task acquires its `declaration_scope`
+from its ascent" do not mean the same thing, because an [ascent](#ascent) yields [planning records](#planning-record)
+and a scope is not one.
+**Field:** `workflow.declaration_scope`, `batch.declaration_scope`.
+**See:** [`planning_model.md#project-names-a-planning-level-the-scoping-key-on-a-declaration-is-a-different-term`](planning_model.md#project-names-a-planning-level-the-scoping-key-on-a-declaration-is-a-different-term),
+[`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
+**Never:** `project` for a declaration scope (retired in this sense: the word is the planning level's).
+**Not for:** [domain](#domain) for a declaration scope (a domain is the region an [authority](#authority)
+covers, and which declaration applies is not decided by what a [principal](#principal) may act on);
+[tenant](#tenant) for a declaration scope (a tenant is the isolation boundary, and runs several scopes); a
+whole instance for a declaration scope (an instance may run several scopes, which is what lets one workflow
+type have several declarations); a declaration scope as an owner of anything — of a
+[planning record](#planning-record), a policy, a declaration, or an [agent](#agent) — since selecting which
+declaration applies confers no ownership.
+
 ### workflow
-**Definition:** the declaration, per (project, workflow type), of an ordered list of [steps](#step), the [fast paths](#fast-path)
+**Definition:** the declaration, per ([declaration scope](#declaration-scope), workflow type), of an ordered list of [steps](#step), the [fast paths](#fast-path)
 a [batch](#batch) may take, and the [successors](#successor) a closing [sign-off](#sign-off) may name.
 **See:** [`workflows.md`](workflows.md),
 [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
@@ -461,9 +484,9 @@ type marked special-category (the mark is the type's — `data_model.md#record-c
 ### step owner
 **Definition:** the **role** declared on a [step](#step), which the roster resolves to a [principal](#principal) at [claim](#claim) time;
 that principal claims the step on a [batch](#batch) and its [sign-off](#sign-off) closes it. The declaration names a [role](#role) so that
-one [workflow](#workflow) serves every project and a renamed or replaced [agent](#agent) leaves no stale name in it; the
+one [workflow](#workflow) serves every [declaration scope](#declaration-scope) and a renamed or replaced [agent](#agent) leaves no stale name in it; the
 resolution to a principal happens when the step is claimed, against `swarm_roster` for the batch's
-project, and a step whose role resolves to no principal raises a [checkpoint](#checkpoint) (reason
+scope, and a step whose role resolves to no principal raises a [checkpoint](#checkpoint) (reason
 `unspawnable_assignee`) rather than falling through to any available agent.
 **Field:** `workflow.steps[].owner_role` (the design's name; the field is `owner_agent` in the built
 declarations and holds a role there too — `status.md`).
@@ -473,8 +496,8 @@ declarations and holds a role there too — `status.md`).
 
 ### role
 **Definition:** a name a declaration carries in place of a [principal](#principal), resolved to one at the moment the
-declaration is acted on — `swarm_roster` per project, and once for the levels above a project
-(`vocabulary.md#planner`) — so that one declaration serves every project and a renamed or replaced
+declaration is acted on — `swarm_roster` per [declaration scope](#declaration-scope), and once for the levels above a [project](#project)
+(`vocabulary.md#planner`) — so that one declaration serves every scope and a renamed or replaced
 [agent](#agent) leaves no stale name in it.
 [Step owner](#step-owner) is a role, resolved when a [step](#step) is [claimed](#claim); an [approval](#approval)'s required
 principal may also be a role the roster resolves, carried in `needed_input` because an `AWAITS`
@@ -633,7 +656,8 @@ confidence); "requirement" for an acceptance criterion of a [batch](#batch).
 **Definition:** the state of one [step](#step) within one [batch](#batch), derived at read time from [edges](#edge)
 and never stored: open (the batch and the step), [claimed](#claim) (a [lease](#lease) from the
 [step owner](#step-owner) to the step on that batch), or signed (a [sign-off](#sign-off)).
-The concept is written in spaced words, "step state"; the map that projects it onto the [task](#task) is the field
+The concept is written in spaced words, "step state"; the map that renders it onto the [task](#task) as a
+[projection](#projection) is the field
 [`step_status`](#step_status), and the two are not the same thing.
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
 **Never:** "gate status".
@@ -641,11 +665,11 @@ The concept is written in spaced words, "step state"; the map that projects it o
 other the projection of it).
 
 ### step_status
-**Definition:** the map on the [task](#task) projecting each [step](#step)'s
+**Definition:** the map on the [task](#task) holding, as a [projection](#projection), each [step](#step)'s
 [step state](#step-state) on its [batch](#batch) so that it is read in one retrieval, derived from the
 [sign-offs](#sign-off) and proved equal to them by a [reconciler](#reconciler).
 Written as the field the record names, in code font, because that is what a reader queries; the state it
-projects is the spaced concept step state.
+holds is the spaced concept step state.
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
 **Never:** "gate_status".
 **Not for:** history for the projection; a second source of truth; `step_status` as the name of the
@@ -729,7 +753,7 @@ declaration and the grants).
 ### governance write
 **Definition:** a write to one of eight closed, named record types — `agent`, `agent_policy`, a [workflow](#workflow)
 declaration, [`action_policy`](#action_policy), an [agent grant](#grant), `swarm_roster`, the schema registry, or an
-[intake rule](#intake-rule) — evaluated as an [action](#action) at the [action gate](#action-gate) under the project's
+[intake rule](#intake-rule) — evaluated as an [action](#action) at the [action gate](#action-gate) under the instance's
 `action_policy`, because each of the eight defines what the swarm may do, what a [principal](#principal) is, or how
 work reaches the swarm.
 The list is stated once, at its one home, and never restated elsewhere in this document or any other; a type a
@@ -1193,6 +1217,23 @@ descendants and whose statement and [planning decisions](#planning-decision) are
 **Not for:** "roadmap item" or "portfolio item" for a planning record; a parent task for a planning record (a parent task groups tasks and holds no statement); a
 batch for a planning record; a matter or a case for one (that is what work concerns, not what it is for).
 
+### project
+**Definition:** the [planning level](#planning-level) one rank above `plan` and one below `strategy`, among
+the five decision 57 registers — an [ascent](#ascent) mark a [task](#task) reaches along `PART_OF`, read
+for justification and for relative standing.
+It is a [planning record](#planning-record) and nothing more: it owns its own statement, its own `planning`
+[batch](#batch), and the child records its `amend` [step](#step) creates, and it owns no policy, no
+[workflow](#workflow) declaration, and no roster. Which declaration a [batch](#batch) runs under is the
+[declaration scope](#declaration-scope), a different term the design distinguishes (decision 70, ruled
+2026-09-06).
+**See:** [`planning_model.md#which-levels-an-instance-declares-and-what-it-calls-them`](planning_model.md#which-levels-an-instance-declares-and-what-it-calls-them),
+[`planning_model.md#project-names-a-planning-level-the-scoping-key-on-a-declaration-is-a-different-term`](planning_model.md#project-names-a-planning-level-the-scoping-key-on-a-declaration-is-a-different-term).
+**Never:** `project` as the scoping key on a `workflow` or a `batch` (that is the
+[declaration scope](#declaration-scope)).
+**Not for:** "epic" for a project; a project as the owner of an `action_policy`, a `workflow`, or a
+`swarm_roster`; a project as a fixed level every instance must register (decision 57 is one instance's
+choice, and the design reads the mark and the ascent, never a level by name).
+
 ### planning level
 **Definition:** the rank the registry's planning mark carries on a type, by which a [planning record](#planning-record)'s
 `PART_OF` [edge](#edge) points only to a record of a higher rank, and which names the `amend_<level>` [action](#action) class
@@ -1234,7 +1275,7 @@ or task); a register decision of this directory for a planning decision.
 
 ### planner
 **Definition:** the [role](#role) that [claims](#claim) every [step](#step) of the planning [workflow](#workflow), resolved by the roster per
-project, and once for the levels above a project.
+[declaration scope](#declaration-scope), and once for the levels above a [project](#project).
 **See:** [`workflows.md#planning`](workflows.md#planning),
 [`planning_model.md#maintenance-is-work-the-planning-workflow`](planning_model.md#maintenance-is-work-the-planning-workflow).
 **Never:** —
