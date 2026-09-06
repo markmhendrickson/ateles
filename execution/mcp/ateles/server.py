@@ -14,7 +14,8 @@ Tools:
   resolve_checkpoint  — approve/reject a checkpoint with validation
                         (the ONLY mutating tool)
   get_gate_status     — an issue's gate_status, owner, blocking gates, history,
-                        and pipeline state                        [read-only]
+                        and pipeline state; distinguishes unreadable /
+                        uninitialised from genuine pending          [read-only]
   list_pipeline_queue — who holds the issue-pipeline slot, who is queued, and
                         how long each has waited                  [read-only]
   get_dispatch_health — dispatcher liveness, recent activity, failures
@@ -90,6 +91,18 @@ threshold, and reason. Act on the operator's decision via resolve_checkpoint —
 do NOT execute the held task yourself.
 5. **Neotoma first.** Durable memory lives in Neotoma. Store, don't leave in \
 conversation.
+6. **Gate readout branches.** On get_gate_status, gates_evaluated is ALWAYS \
+present and boolean — branch on its VALUE, never on key absence (omission is \
+not a signal). gates_evaluated=true means the record was read and interpreted \
+(including never-triaged). gates_evaluated=false means the record itself was \
+unreadable/malformed (or reason_codes contains unreadable.*) — unevaluable; \
+do not wait on gate owners; fix the ref or escalate. If gates_evaluated is true \
+and gates_initialised is false (or reason_codes contains uninitialised.*), the \
+issue was never triaged — escalate to Lanius triage, do not treat missing \
+blocking_gates as ordinary pending. Only when gates_evaluated is true AND \
+gates_initialised is true do blocking_gates / all_gates_cleared mean withheld \
+sign-offs. Prefer reason_codes / interpretation over raw blocking_gates \
+truthiness.
 """
 
 
@@ -756,44 +769,137 @@ def _get_gate_status(issue_ref: str, history_limit: int = 5) -> dict:
     snap = _snapshot_of(entity)
     eid = entity.get("entity_id", entity.get("id", ""))
 
-    gate_status = snap.get("gate_status") or {}
-    if isinstance(gate_status, str):
-        try:
-            gate_status = json.loads(gate_status)
-        except (ValueError, TypeError):
-            gate_status = {}
-    if not isinstance(gate_status, dict):
+    # An entity id that RESOLVES is not yet an issue whose gates can be read.
+    # Passing a non-issue id (an agent_grant, a task, a checkpoint_brief) used
+    # to fall through to the gate parsing below, where a snapshot with no
+    # `gate_status` key produced `{}` — which `_blocking_gates` then reports as
+    # every gate blocking, indistinguishable from a real, fully-unsigned issue.
+    # That is the reporting-without-binding shape: the caller cannot tell "not
+    # yet reviewed" from "you read the wrong record". An unreadable gate must
+    # HOLD AND RAISE, never silently block.
+    entity_type = str(entity.get("entity_type") or snap.get("entity_type") or "").strip()
+    if entity_type and entity_type != "issue":
+        code = "unreadable.wrong_entity_type"
+        detail = (
+            f"entity {eid} is of type '{entity_type}', not 'issue' — it has "
+            "no gate_status to read. Gate state was NOT evaluated; this is "
+            "not a report that gates are pending. Pass owner/repo#N or an "
+            "issue ent_… id."
+        )
+        return {
+            "error": detail,
+            "entity_id": eid,
+            "entity_type": entity_type,
+            "gates_evaluated": False,
+            "reason_codes": [code],
+            "unreadable": [{"code": code, "detail": detail}],
+        }
+
+    raw_gate_status = snap.get("gate_status") if "gate_status" in snap else None
+    gate_absent = "gate_status" not in snap or raw_gate_status is None
+
+    # Present-but-malformed must HOLD AND RAISE — never coerce to {} and
+    # fabricate an all-gates-pending list (the exact drift #763 targets).
+    if not gate_absent:
+        parsed: Any = raw_gate_status
+        if isinstance(raw_gate_status, str):
+            try:
+                parsed = json.loads(raw_gate_status)
+            except (ValueError, TypeError) as exc:
+                code = "unreadable.malformed_gate_status"
+                detail = (
+                    f"gate_status on {eid} is present but not valid JSON "
+                    f"({type(exc).__name__}); gate state was NOT evaluated."
+                )
+                return {
+                    "error": detail,
+                    "entity_id": eid,
+                    "gates_evaluated": False,
+                    "reason_codes": [code],
+                    "unreadable": [{"code": code, "detail": detail}],
+                }
+        if not isinstance(parsed, dict):
+            code = "unreadable.malformed_gate_status"
+            detail = (
+                f"gate_status on {eid} is present but not an object "
+                f"(got {type(parsed).__name__}); gate state was NOT evaluated."
+            )
+            return {
+                "error": detail,
+                "entity_id": eid,
+                "gates_evaluated": False,
+                "reason_codes": [code],
+                "unreadable": [{"code": code, "detail": detail}],
+            }
+        gate_status = parsed
+    else:
         gate_status = {}
+
+    # Absent / empty gate_status means never triaged — orthogonal to
+    # unreadable. Do not fabricate blocking_gates / all_gates_cleared=false.
+    gates_initialised = bool(gate_status)
 
     history = _dedupe_history(_parse_owner_history(snap.get("owner_history")))
     # Stored oldest-first; the recent entries are the ones that explain "who
     # has it now and why".
     recent = history[-history_limit:] if history_limit > 0 else history
 
-    blocking = _blocking_gates(gate_status)
     repo_name = str(snap.get("repo") or snap.get("repository") or "")
     number_val = snap.get("github_number") or snap.get("issue_number") or snap.get("number")
-
     pipeline = _pipeline_state_for(repo_name, number_val)
+    issue_ref_out = (
+        f"{repo_name}#{number_val}" if repo_name and number_val else issue_ref
+    )
 
-    return {
+    # gates_evaluated is always present. True = the issue record was read and
+    # interpreted (success OR never-triaged). False is reserved for the
+    # hold-and-raise paths above (wrong type / malformed). Omitting the key
+    # collapses success into "unevaluable" under ordinary falsy checks.
+    base = {
         "entity_id": eid,
-        "issue_ref": f"{repo_name}#{number_val}" if repo_name and number_val else issue_ref,
+        "issue_ref": issue_ref_out,
         "title": snap.get("title", ""),
         "status": snap.get("status", ""),
         "github_url": snap.get("github_url", ""),
         "current_owner": snap.get("current_owner", ""),
         "gate_status": gate_status,
-        "blocking_gates": blocking,
-        "all_gates_cleared": not blocking,
+        "gates_evaluated": True,
+        "gates_initialised": gates_initialised,
         "owner_history_recent": recent,
         "owner_history_total": len(history),
         "pipeline": pipeline,
-        "interpretation": _gate_interpretation(snap, blocking, pipeline),
+    }
+
+    if not gates_initialised:
+        code = "uninitialised.never_triaged"
+        return {
+            **base,
+            "reason_codes": [code],
+            # Omit blocking_gates / all_gates_cleared — those fields mean
+            # withheld sign-offs only when a gate record was actually read.
+            "interpretation": _gate_interpretation(
+                snap, [], pipeline, gates_initialised=False
+            ),
+        }
+
+    blocking = _blocking_gates(gate_status)
+    return {
+        **base,
+        "blocking_gates": blocking,
+        "all_gates_cleared": not blocking,
+        "reason_codes": [],
+        "interpretation": _gate_interpretation(
+            snap, blocking, pipeline, gates_initialised=True
+        ),
     }
 
 
-def _gate_interpretation(snap: dict, blocking: list[str], pipeline: dict) -> str:
+def _gate_interpretation(
+    snap: dict,
+    blocking: list[str],
+    pipeline: dict,
+    gates_initialised: bool = True,
+) -> str:
     """One line answering "is the swarm going to continue this?".
 
     Deliberately conservative: it reports what the records show and never
@@ -802,6 +908,13 @@ def _gate_interpretation(snap: dict, blocking: list[str], pipeline: dict) -> str
     owner = str(snap.get("current_owner") or "").strip()
     if str(snap.get("status", "")).strip().lower() == "closed":
         return "issue is closed"
+    # Triage-before-pending: an absent record is not owners withholding.
+    if not gates_initialised:
+        return (
+            "gate_status was NEVER INITIALISED on this issue — evaluated as "
+            "no gate record yet, not withheld. Needs Lanius triage to "
+            "initialise, not a sign-off from a gate owner."
+        )
     stage = pipeline.get("stage")
     if stage == "queued":
         return (
@@ -1380,12 +1493,23 @@ TOOLS = [
     Tool(
         name="get_gate_status",
         description=(
-            "Read-only. For an issue (an 'owner/repo#123' ref or an 'ent_...' entity id), "
-            "return its gate_status, current_owner, which gates are still blocking, the "
-            "most recent owner_history entries, and whether a pipeline is currently "
-            "queued or inflight for it. Answers 'is the swarm going to continue this, "
-            "and what is it waiting on?' in one call instead of a manual entity read. "
-            "This tool never writes gate state: a session must not sign off its own gates."
+            "Read-only. For an issue ('owner/repo#123' or an 'ent_...' entity id), "
+            "return gate_status, current_owner, blocking gates, recent owner_history, "
+            "and pipeline state. gates_evaluated is ALWAYS present and boolean — "
+            "branch on its value, never on key absence: true whenever the record "
+            "was read and interpreted (including never-triaged); false ONLY when "
+            "the record itself is unreadable/malformed (indeterminate — not 'no "
+            "gates'). Branch further on structured signals — do NOT treat "
+            "blocking_gates / all_gates_cleared truthiness alone as pending: "
+            "(1) gates_evaluated=false or reason_codes unreadable.* → record is "
+            "unevaluable (wrong type / malformed); omit blocking_gates; do not wait "
+            "on owners — fix the ref or escalate; "
+            "(2) gates_evaluated=true and (gates_initialised=false or reason_codes "
+            "uninitialised.*) → never triaged; blocking_gates omitted; escalate to "
+            "Lanius triage, not a gate owner; "
+            "(3) gates_evaluated=true and gates_initialised=true → blocking_gates / "
+            "all_gates_cleared mean genuine withheld sign-offs — wait/route as today. "
+            "Prefer reason_codes and interpretation. This tool never writes gate state."
         ),
         inputSchema={
             "type": "object",
