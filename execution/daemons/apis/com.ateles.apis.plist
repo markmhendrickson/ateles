@@ -5,10 +5,13 @@
     <key>Label</key>
     <string>com.ateles.apis</string>
 
+    <!-- Apis runs from the DEPLOYMENT checkout (~/ateles-rc-src), never from the
+         shared session clone (~/repos/ateles), which is dirty most of the time.
+         See CLAUDE.md "Which checkout a daemon runs from". -->
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/markmhendrickson/repos/ateles/.venv/bin/python3</string>
-        <string>/Users/markmhendrickson/repos/ateles/execution/daemons/apis/apis.py</string>
+        <string>/Users/markmhendrickson/ateles-rc-src/.venv/bin/python3</string>
+        <string>/Users/markmhendrickson/ateles-rc-src/execution/daemons/apis/apis.py</string>
     </array>
 
     <!-- Run at login -->
@@ -33,6 +36,12 @@
     <key>StandardErrorPath</key>
     <string>/Users/markmhendrickson/Library/Logs/ateles/apis.log</string>
 
+    <!-- EVERY autonomy flag is listed explicitly, including those whose value
+         equals the code default. An absent key is indistinguishable from an
+         unmade decision: `ATELES_SWARM_AUTO_BUILD` was missing here entirely
+         while the running daemon carried it, so the file could not record what
+         the swarm was actually authorised to do. `plist_drift.py`
+         compares this file against the live launchd environment at startup. -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
@@ -42,15 +51,52 @@
         <key>NEOTOMA_BASE_URL</key>
         <string>https://neotoma.markmhendrickson.com</string>
         <key>VIRTUAL_ENV</key>
-        <string>/Users/markmhendrickson/repos/ateles/.venv</string>
+        <string>/Users/markmhendrickson/ateles-rc-src/.venv</string>
         <key>PYTHONPATH</key>
-        <string>/Users/markmhendrickson/repos/ateles/.venv/lib/python3.14/site-packages</string>
+        <string>/Users/markmhendrickson/ateles-rc-src/.venv/lib/python3.14/site-packages</string>
+        <!-- Repo the daemon operates on (the deployment checkout). -->
+        <key>ATELES_REPO_PATH</key>
+        <string>/Users/markmhendrickson/ateles-rc-src</string>
         <!-- GitHub webhook gateway (ateles#80). Secret + tokens come from
              ~/.config/neotoma/.env, loaded by the daemon at startup. -->
         <key>APIS_GITHUB_WEBHOOK_PORT</key>
         <string>8742</string>
-        <key>APIS_AUTONOMY_AUTO_MERGE</key>
+
+        <!-- === Autonomy boundaries ===================================== -->
+        <!-- Build handoff: a fully-assembled spec whose gates are green chains
+             into an implementation PR. OFF = spec-only, notify-and-wait for the
+             operator's `build` approval. Disabled twice as an incident rollback
+             (2026-07-31 for ateles#359, 2026-08-20 for ateles#460) and left off
+             after both fixes landed, because the re-enable lived only in an
+             ended session. Re-enabled here now that #460's cause is fixed and
+             deployed (PR #482). Any future rollback MUST file a task to restore
+             it — see docs/runbooks/apis_autonomy_flags.md. -->
+        <key>ATELES_SWARM_AUTO_BUILD</key>
         <string>1</string>
+        <!-- Merge without operator involvement once the panel is green. Set to
+             0: merge is the boundary that should stay human, and it must not be
+             the OPEN one while the safer build handoff is closed. ateles#381
+             also reports a merge firing with pr_review pending. Operator
+             approval can still trigger a merge via APIS_APPROVAL_TRIGGERS_MERGE. -->
+        <key>APIS_AUTONOMY_AUTO_MERGE</key>
+        <string>0</string>
+        <!-- An explicit operator approval performs the merge itself — distinct
+             from APIS_AUTONOMY_AUTO_MERGE above: the human act is still
+             required. Set to 0: matches swarm_dispatch.py's code default: no
+             approval path merges on its own until the operator opts in. -->
+        <key>APIS_APPROVAL_TRIGGERS_MERGE</key>
+        <string>0</string>
+        <!-- Re-review a PR automatically after a fix round pushes new commits. -->
+        <key>ATELES_SWARM_AUTO_REREVIEW</key>
+        <string>1</string>
+
+        <!-- Repositories whose in-flight pipelines resume on daemon start. -->
+        <key>APIS_RESUME_REPOSITORIES</key>
+        <string>markmhendrickson/ateles,markmhendrickson/neotoma,markmhendrickson/foundation</string>
+        <!-- Concurrency cap for the ordered issue spec pipeline. -->
+        <key>APIS_MAX_CONCURRENT_ISSUE_PIPELINES</key>
+        <string>3</string>
+
         <!-- Subscription-backed harness router. Headroom can be adjusted live
              through ~/.config/ateles/harness-headroom.json without restart. -->
         <key>APIS_HARNESS_PROVIDERS</key>
