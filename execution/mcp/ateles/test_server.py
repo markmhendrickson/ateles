@@ -1115,6 +1115,37 @@ class TestUnreadableGatesHoldAndRaise(unittest.TestCase):
         self.assertEqual(out["reason_codes"], [])
         self.assertIn("waiting on waxwing", out["interpretation"])
 
+    def test_gates_evaluated_truthiness_does_not_collapse_evaluated_paths(self):
+        """Ordinary falsy checks must not treat success/never-triaged as unevaluable.
+
+        Callers write `if not out.get("gates_evaluated")`. Omitting the key on
+        evaluated paths re-collapses states into hold-and-raise — the footgun
+        Waxwing flagged on #761. Effect: evaluated answers are truthy.
+        """
+        never_triaged = {
+            "entity_id": "ent_issue",
+            "entity_type": "issue",
+            "snapshot": {"repo": "o/r", "github_number": 1},
+        }
+        unsigned = {
+            "entity_id": "ent_issue",
+            "entity_type": "issue",
+            "snapshot": {
+                "repo": "o/r",
+                "github_number": 1,
+                "gate_status": {"pm": "pending"},
+            },
+        }
+        for payload in (never_triaged, unsigned):
+            with patch.object(srv, "_get", return_value=payload), patch.object(
+                srv, "_pipeline_state_for", return_value={"stage": None}
+            ):
+                out = srv._get_gate_status("ent_issue")
+            # Key present AND true — `.get` default None / missing must not win.
+            self.assertIn("gates_evaluated", out)
+            self.assertTrue(out.get("gates_evaluated"))
+            self.assertFalse(not out.get("gates_evaluated"))
+
 
 if __name__ == "__main__":
     unittest.main()
