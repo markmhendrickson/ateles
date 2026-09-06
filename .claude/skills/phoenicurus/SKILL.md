@@ -113,7 +113,14 @@ correct(entity_id=<issue_entity_id>, fields={
   "owner_history": [*existing_history, {"agent": "phoenicurus", "gate": "qa", "at": "<ISO timestamp>", "action": "signed_off"}]
 }, observation_source="workflow_state")
 
-# 2. Check join condition: if legal is also signed_off (or not_required), advance
+# 1b. Read-back — correct() returning 200 is NOT proof the field mutation landed
+snapshot = retrieve_entity_snapshot(entity_id=<issue_entity_id>)
+if (snapshot.get("gate_status") or {}).get("qa") != "signed_off":
+    # Do NOT emit SIGNED_OFF. Post **BLOCKED** with reason, attempted vs read-back,
+    # and next action (retry / escalate to Anthus / check agent_grant for phoenicurus).
+    raise GateWritebackError("qa gate writeback failed read-back")
+
+# 2. Check join condition ONLY after read-back confirms: if legal is also signed_off (or not_required), advance
 legal_status = existing_gate_status.get("legal", "not_required")
 if legal_status in ("signed_off", "waived", "not_required"):
     correct(entity_id=<issue_entity_id>, fields={"current_owner": "struthio"}, observation_source="workflow_state")
