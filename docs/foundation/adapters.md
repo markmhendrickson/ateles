@@ -8,7 +8,7 @@ and the action gate), `authority_model.md` (credentials bind to principals; appr
 steps whose effects leave the system), PR #745 operator review (2026-09-04, the adapter decision), and the
 operator's 2026-09-05 review (the inbound-delivery question and the adapter-packaging lean, both recorded
 below as open; and revision 18: when an artifact comes into existence, and what holds an effect before
-it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: continual inbound named as the inbound side, and the record's subscriptions as what an intake rule evaluates through). What is built, and where the adapter and the engine are still one process, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: open decision 35). Revised by the memo-gap pass of 2026-09-06 (revision 31: the source is kept, not only named). Revised by the workflow-format pass of 2026-09-06 (revision 34: a system whose delivery surface is a local filesystem is admitted through the same contract; open decision 45 — whether the host a daemon runs on is an external system). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a merchant is a system of its own and a purchase its class, under *Admitting a new adapter*; open decision 55, whether a second instance of the record is an external system). Revised by the testability pass of 2026-09-06 (revision 37: the window declared on the binding and the per-window observation on the adapter's `agent_session`; a credential-less outbound operation is a denial, never a drop; the linkage section states what a sign-off pins per kind).
+it has an external id), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the inbound-outcome and step-boundary diagrams), and revision 21 (the per-system Gmail and Calendar documents, whose sections here become pointers), and the operator's 2026-09-05 question of whether the foundation anticipates the swarm's addition of adapters (revision 22: the admission contract, the adapter document contract, who admits an adapter, and the degrees of trust grants already express), and revision 24 (the per-system Telegram and Payments documents, whose sections here become pointers), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 16 ruled here; the two-level artifact rule stated under linkage), and the operator's 2026-09-05 ruling of decision 15 (revision 27: adapters bundled in this repository until a second consumer of them exists), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: continual inbound named as the inbound side, and the record's subscriptions as what an intake rule evaluates through). What is built, and where the adapter and the engine are still one process, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: open decision 35). Revised by the memo-gap pass of 2026-09-06 (revision 31: the source is kept, not only named). Revised by the workflow-format pass of 2026-09-06 (revision 34: a system whose delivery surface is a local filesystem is admitted through the same contract; open decision 45 — whether the host a daemon runs on is an external system). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a merchant is a system of its own and a purchase its class, under *Admitting a new adapter*; open decision 55, whether a second instance of the record is an external system). Revised by the testability pass of 2026-09-06 (revision 37: the window declared on the binding and the per-window observation on the adapter's `agent_session`; a credential-less outbound operation is a denial, never a drop; the linkage section states what a sign-off pins per kind). Revised by the rulings pass of 2026-09-06 (revision 38: decision 35 ruled as settled by the conformance suite — one binding type per external system, routing a field of it, the name and the substitution deferred to the condensation pass; decision 45 ruled — the host a daemon runs on is an external system).
 
 ## Purpose
 
@@ -33,8 +33,10 @@ gate's decision function (`gates_and_workflows.md`), what an adapter is granted
 (`authority_model.md#grants`), the per-system mapping in full for the three systems that have their own
 documents (`github.md`, `gmail.md`, `calendar.md`, each applying these rules to its system's whole
 surface), and the per-instance binding
-of a system to an operator, which is the `channel_config` and `vendor_binding` context entities, resolved
-at runtime and never named here.
+of a system to an operator, which is one binding context entity per instance — carried in these documents
+under two names, `channel_config` and `vendor_binding`, that decision 35 rules one type
+(`#whether-one-binding-type-or-two-names-an-external-systems-instance`) — resolved at runtime and never
+named here.
 
 ## The two invariants
 
@@ -284,7 +286,7 @@ per-instance binding the direction-of-truth table names
 is `dropped`, reason `untracked_mailbox` (`gmail.md#every-inbound-signal-and-what-it-becomes`), and that is
 the scope rule for every system. The cadence is the external system's where it delivers — a webhook, a
 watch — and, where a system must be asked, the interval is a value of the binding, per instance, never a
-constant of the design; which binding type carries it is decision 35
+constant of the design, carried by the one binding type decision 35 rules
 (`#whether-one-binding-type-or-two-names-an-external-systems-instance`). And there is no freshness policy
 beside these: how current the record's picture is remains a derived read over sourcing and coverage
 (`#what-the-adapter-does-with-every-event`), and the only place a **requirement** on freshness is stated is
@@ -973,7 +975,13 @@ rule in this document is about what an adapter does and none about where its cod
 
 ### Whether one binding type or two names an external system's instance
 
-**Open decision 35.** Registered in `conformance.md#the-register-of-open-design-decisions`. The per-instance binding of a system to an operator is named in
+**Ruled (decision 35, 2026-09-06): one binding type per external system, with routing as a field of it —
+closed as settled by revision 33, the conformance suite.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. The name the one type takes, and the substitution of
+it for the two names across the documents and the schema, are the condensation pass's; until that pass lands
+the two names stand in the text as two names for one type.
+
+**The question.** The per-instance binding of a system to an operator is named in
 this document's scope as two context entity types, `channel_config` and `vendor_binding`, and the
 per-system documents use them by system: the mail system, the chat channel, and the calendar bind through
 `channel_config`; the code host and the rails through `vendor_binding`. Nothing in the foundation states
@@ -988,12 +996,47 @@ distinguishing rule stated here. Or the two types as they stand, undistinguished
 
 **Why proposed rather than applied.** Both are context entities the design retrieves by type and never
 defines, so their shape is the record's, and merging them is a schema change with a migration of its own
-(`migration.md`) rather than a substitution in prose. **What would decide it:** whether any rule ever
-reads the two differently; if none does, they are one type under two names. Opened by the simplification pass of 2026-09-05 without the conformance matrix, which had not landed; the proof above rests on principles 6 and 9 alone and is unverified against the matrix.
+(`migration.md`) rather than a substitution in prose. **What would decide it,** as the question was opened: whether any rule ever
+reads the two differently; if none does, they are one type under two names. Opened by the simplification pass of 2026-09-05 without the conformance matrix, which had not landed; the proof above rested on principles 6 and 9 alone.
+
+**Why it is settled, and by what.** The deciding test was stated when the decision was opened, and revision
+33 ran it over every row of the matrix and reported the result
+(`conformance_suite.md#the-simplification-pass-verified-against-the-matrix`): "Four rows read a binding —
+TG-6, CA-6, PY-3a, and the bootstrap's step 13 — and every one reads it as the binding entity, with no
+observable that differs by type. The matrix finds no rule that reads `channel_config` and `vendor_binding`
+differently, which is the condition the pass named as deciding it." A decision whose deciding fact has been
+supplied is settled, and this ruling records that rather than re-arguing it. Principle 9 supplies the rest:
+two type names for one role is the two-names signature, and the one thing the division was leaned on for —
+which chat receives which class of message — is a field of the binding, as
+`telegram.md#chats-groups-and-who-can-see-what` already reads it. Ruled decisions 29 and 37 name the two
+types by name in their text; under this ruling those become a consistency edit when the name is chosen, not
+a reversal.
+
+**Cost accepted.** A schema change to two context types with a record migration of its own
+(`migration.md`), and a substitution across every document that names either type — deferred, not avoided,
+and the cost grows with every binding added under two names: decision 45 below adds a per-host binding of
+the same role, and decision 55 would add another. The condensation pass takes the name and the substitution
+together because the choice is one of wording across every document at once, which is that pass's subject.
+
+**What would reopen it.** A rule that reads a channel binding and a vendor binding differently — a class of
+message only a channel can carry, or a terminal depth only a rail can declare, stated as a rule rather than
+as a field's value. The matrix found none; one written later would be the distinguishing rule the second
+option asked for, and the type would split on it.
+
+**Matrix.** AD-35 closes; TG-6, CA-6, and PY-3a are unchanged.
 
 ### Whether the host a daemon runs on is an external system
 
-**Open decision 45.** Registered in `conformance.md#the-register-of-open-design-decisions`. Two of the
+**Ruled (decision 45, 2026-09-06): the host a daemon runs on is an external system.** Registered as ruled
+in `conformance.md#the-register-of-open-design-decisions`. Its processes and checkouts are artifacts with a
+`system` and an `external_id`; a restart, a redeploy, and a checkout update are action classes of the host's
+adapter, listed in the `action_policy` under obligation 6; a reset that discards commits is `operator_only`;
+and the six obligations bind that adapter as they bind every adapter. Nothing is built until a declaration
+reads host state: the interim the decision was opened with — no declaration reads the host, and a
+process-control effect is `operator_only` — is already the fail-closed posture, and it stands as the default
+until a workflow declares the read.
+
+**The question.** Two of the
 workflows the declaration format was tested against read state that is neither the record's nor a tabled
 external system's: which checkout a daemon runs from, the environment of its process, the size of its
 log, whether a rendered mirror on disk equals what the record renders. Their remedies write to the same place
@@ -1014,21 +1057,52 @@ boundary: the `agent_session` is the only record of a runner, a read of the host
 process control is an operator act, out of band, as the first declaration is
 (`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`).
 
-**Where the design leans, and why this is opened rather than settled.** The boundary definition settles the
+**Where the design leaned, and why this was opened rather than settled.** The boundary definition settles the
 first half by its own words: the host is not on the list of what the swarm is, so it is outside, and the only
-component that reads outside is an adapter. What it does not settle is whether the design *wants* an adapter
-here, and that is the operator's. The first option gives a daemon incident a declared read — the host's
+component that reads outside is an adapter. What it did not settle was whether the design *wants* an adapter
+here, and that was left to the operator on cost. The first option gives a daemon incident a declared read — the host's
 account beside the runner's, a disagreement between them being the finding — and puts process control under
 the gate, which is where an approved redeploy that would have reverted a live guard should have been held.
 Its cost is an adapter for a system with no event API and no credential in the usual sense, a per-host
 binding (`#whether-one-binding-type-or-two-names-an-external-systems-instance`), and a document whose inbound
 table enumerates a poll's differences as the system's events. The second keeps the boundary short and costs
 the record the ability to say which checkout a daemon was on when it signed — the gap the runner's
-self-report leaves whenever the runner is the thing that has stopped. **What would decide it:** whether a
-step's sign-off is ever judged on host state — if a daemon-incident `verify` step must attest that the fixed
-version is what the process itself reports, that read is a declared read, and a declared read of the host is
-an adapter's. Until it is taken, no workflow declares a host read, and a process-control effect is an
-`operator_only` action.
+self-report leaves whenever the runner is the thing that has stopped. **What would decide it,** as the question
+was opened: whether a step's sign-off is ever judged on host state — if a daemon-incident `verify` step must
+attest that the fixed version is what the process itself reports, that read is a declared read, and a declared
+read of the host is an adapter's.
+
+**Why external, and why now.** The boundary is drawn by ownership and stated once: the swarm is the engine,
+the agents, the adapters, and the record, and outside is "every system the swarm does not own"
+(`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`). The machine the swarm's processes run
+on is not on that list and is not owned by the swarm — the operator owns it, or a hosting vendor does — so
+it is outside by the definition's own words, which the question conceded when it was opened. The failure
+posture makes process control an action already: "Whatever detects does not remediate … Remediation is an
+action, taken by a principal through the gate" (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`),
+and an action on a system the swarm does not own is an adapter's to take. Principles 8 and 10 supply the
+reason the design wants the read at all, which was the half left to the operator: "a merged PR is not
+evidence it is fixed until the deployed checkout moves", so the deployed checkout's state is evidence the
+design already demands, and the deciding test is met by every daemon-incident `verify` step that must attest
+the fixed version is what the process itself reports. A read a sign-off is judged on is a declared read, and a
+declared read of a system outside the boundary is an adapter's. The second option would have left the
+runner's account of itself as the only record of the runner in exactly the case that needs the read — the one
+where the runner has stopped.
+
+**Cost accepted.** An adapter for a system with no event API and no credential in the usual sense: a poll
+whose differences are the events, an inbound table that enumerates them, a per-host binding of the one type
+decision 35 rules, and a document under `#what-an-adapters-document-must-contain`. The cost is deferred by
+the interim — nothing is built until a declaration reads the host — so ruling costs nothing today and settles
+what the first such declaration builds. The want-question had been left to the operator on cost; it is ruled
+here because the cost was already deferred, the classification was already the boundary's, and the ruling
+adds no obligation that a declaration does not.
+
+**What would reopen it.** A redefinition of the boundary — the swarm coming to own its host in the sense the
+boundary means — which would have to be stated once, in the action's home section, and would move the host
+inside for every rule at once.
+
+**Matrix.** A sixth adapter's admission rows (AD-21 to AD-26) apply to the host's adapter when it is
+declared, and its action classes take their gate rows with it. Decision 55, beside this one, stays open: it
+shares this boundary reasoning and differs on the record's peering, which is the operator's.
 
 ### Whether a second instance of the record is an external system
 

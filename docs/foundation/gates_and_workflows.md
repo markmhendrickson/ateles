@@ -10,7 +10,7 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
 memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram), and the operator's 2026-09-05 12:52 memo (revision 21: the general claim about self-modification, stated in `work_model.md` and cross-referenced from decision 17), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 17 ruled here; the `dependency_cycle` reason class), and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: the next instance is a created task and not a successor), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: `intake_rule` joins the governance list). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding). Revised by the workflow-format pass of 2026-09-06 (revision 34: two declared intervals on every step, `unclaimed_after` and `hold_bound`; a planned wait as a step's own close condition held under decision 13; required coverage as the value of `freshness`; consent over several like actions as one presentation of several checkpoints; the governance class with no policy value named among what resolves to `NEVER`).consistency pass of 2026-09-06 (revision 35: when the checkpoint a `consent` step carries is written, and what the gate evaluates at the take; the merge action's class named `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a step's bound may be declared as the task's `due_date`; an `operator_only` action inside a workflow is taken by the operator and its step closes on the confirmation, never on the resolution; a read dependency on a special-category type carries no marker of its own). Revised by the testability pass of 2026-09-06 (revision 37: the finding as an entity the rules bind on; `rounds_cap`; the recorded amendment; an optional step's condition reads what exists; `none_permitted`; the floor-list sentence retired; open decision 55 — where the enforcement point for a governance write sits).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding). Revised by the workflow-format pass of 2026-09-06 (revision 34: two declared intervals on every step, `unclaimed_after` and `hold_bound`; a planned wait as a step's own close condition held under decision 13; required coverage as the value of `freshness`; consent over several like actions as one presentation of several checkpoints; the governance class with no policy value named among what resolves to `NEVER`).consistency pass of 2026-09-06 (revision 35: when the checkpoint a `consent` step carries is written, and what the gate evaluates at the take; the merge action's class named `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a step's bound may be declared as the task's `due_date`; an `operator_only` action inside a workflow is taken by the operator and its step closes on the confirmation, never on the resolution; a read dependency on a special-category type carries no marker of its own). Revised by the testability pass of 2026-09-06 (revision 37: the finding as an entity the rules bind on; `rounds_cap`; the recorded amendment; an optional step's condition reads what exists; `none_permitted`; the floor-list sentence retired; open decision 56 — where the enforcement point for a governance write sits). Revised by the rulings pass of 2026-09-06 (revision 38: decision 32 ruled — the `verdict` stays a stored field, the sign-off's own projection of its findings and its author, reconciled at the write).
 
 ## Purpose
 
@@ -443,7 +443,11 @@ which field.
 
 ### Whether the verdict is a stored field or a read over the findings and the author
 
-**Open decision 32.** Registered in `conformance.md#the-register-of-open-design-decisions`. A sign-off stores a `verdict` — `signed`, a blocking value, or
+**Ruled (decision 32, 2026-09-06): the `verdict` stays a stored field, as the sign-off's own projection of
+its findings and its author, reconciled at the write.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. The field is not retired.
+
+**The question.** A sign-off stores a `verdict` — `signed`, a blocking value, or
 `waived` — and the rules above make it agree with what else the sign-off carries: the findings bind, a
 verdict contradicting them is refused at submission, and `waived` is the one value only the operator
 principal may write, on a step it does not own. Everything the field states is therefore derivable from
@@ -464,10 +468,52 @@ covers it and not an exact preservation; the adapters' inbound mapping of a host
 three values (`github.md#reviews-review-comments-and-threads`) would map onto a sign-off with or without
 a blocking finding instead; and the design's finding, which had no row in `data_model.md` when this was
 opened (`migration.md`, gap G15), now has one — so a derived verdict would rest on a type the record
-declares, and the blocker the conformance matrix named for this decision is gone. What remains is the
-question itself. **What would decide it:**
+declares, and the blocker the conformance matrix named for this decision is gone. What remained was the
+question itself. **What would decide it,** as the question was opened:
 whether any reader needs the three values faster than a read over the findings gives them — if
-`step_status` already serves that reader, the field is a second projection of one source. Opened by the simplification pass of 2026-09-05 without the conformance matrix, which had not landed; the proof above rests on principles 6 and 9 alone and is unverified against the matrix.
+`step_status` already serves that reader, the field is a second projection of one source. Opened by the simplification pass of 2026-09-05 without the conformance matrix, which had not landed; the proof above rested on principles 6 and 9 alone.
+
+**Why the field stays.** Principle 11 forbids stored state that needs a process to stay true, and names one
+exception — "a projection is the one exception, and it is reconciled" (`data_model.md#concepts`). The verdict is
+that exception in its cleanest form, because the reconciler runs at the only moment the field can change: a
+sign-off is a terminal write that supplies every field, the findings it carries are the `finding` entities
+written `PART_OF` it in that write, and a verdict is never revised in place — so the refusal at submission
+compares the verdict to the severities of exactly the findings the sign-off will ever carry, and nothing
+afterwards can make them disagree. A finding written later on the same work is the operator's finding on closed
+work (`#closed-work-is-reviewed-on-the-record-and-redone-through-intake-never-reopened`) or a hold's
+(`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`), and neither is `PART_OF` a sign-off.
+`step_status` is the same shape one level up — proved equal to the sign-offs by a reconciler, neither a second
+source of truth (`#declaration-batch-projection`) — and the verdict is what `step_status` is built from. So the
+deciding test is answered the other way round from the way it was posed: `step_status` does not serve the
+reader instead of the verdict, it is served *by* the verdict, and retiring the field would move the
+projection's source from a stated judgement to the absence of one.
+
+That absence is the reason of principle, and it is principle 5's. Under derivation a sign-off carrying no
+finding is `signed`: silence is approval, and a step owner who recorded nothing has closed a step by omission.
+Under the field the step owner states `signed`, and a sign-off with no verdict is a rejected write, an error
+never swallowed — the fail-closed branch. The verdict is the step owner's stated judgement; the findings are its
+evidence; the design asks for both because a claim never made cannot be read back (principle 2), and the
+refusal at submission is precisely the read-back of the one against the other. The rulings of revision 12 that
+the findings bind and a contradicting verdict is refused, and that a verdict is terminal and unconditional, are
+written against a stated verdict and lose their mechanic without one: the retirement case above says the
+refusal "disappears because the contradiction it refuses can no longer be written", and what disappears with
+it is the statement the contradiction was measured against. Retirement would have bought one field fewer; it
+would have cost a step closing on evidence nobody summarized.
+
+**What the blocker was, and that it is gone.** The conformance matrix found this decision blocked on the
+finding having no recorded shape (U-6; `migration.md`, G15). The testability pass (revision 37) gave the
+`finding` its row, which is what made a ruling writable against a declared type; the shape did not decide the
+question — it made a derived verdict possible, and the ruling above is that it is not the right one.
+
+**Cost accepted.** One stored value a derivation could reproduce, plus the reconciler at the write, which is
+the refusal the design already had. The inbound mapping of a host's review tokens onto the three values
+(`github.md#reviews-review-comments-and-threads`) stands as written.
+
+**What would reopen it.** A finding that may be attached to a sign-off after its write — which would make the
+reconciler a process rather than a moment, and the field the stored state principle 11 forbids. The design has
+no such write, and admitting one would reopen more than this decision.
+
+**Matrix.** GW-19, GW-20, and GW-21 stand as mechanical rows; GW-51 closes (`conformance_suite.md`).
 
 ### A finding is one-off or standing, and a standing one obliges a change to what produced it
 

@@ -12,7 +12,7 @@ for changing the swarm's own operation), and PR #745 operator review (2026-09-05
 23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default),
 and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: one live instance,
 completion creates the next, `FOLLOWS` task to task), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the task-sources index, the intake rule, and open decision 36). Supersedes `docs/archive/task_execution_loop.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: an intake rule may key on a field a step wrote on a type it may name, with the writer in its provenance predicate; decision 36 untouched). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a status and claimability read from the checkpoint; the declared terminal set; two moments open a batch; `tasks_attached[]`; the next recurring instance created and read back before the closing sign-off; a terminal status only where the declaration permits none; the writer as the cross-type cycle check's enforcement point; C2 settled by the write contract).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: an intake rule may key on a field a step wrote on a type it may name, with the writer in its provenance predicate; decision 36 untouched). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a status and claimability read from the checkpoint; the declared terminal set; two moments open a batch; `tasks_attached[]`; the next recurring instance created and read back before the closing sign-off; a terminal status only where the declaration permits none; the writer as the cross-type cycle check's enforcement point; C2 settled by the write contract). Revised by the rulings pass of 2026-09-06 (revision 38: a `signed` or blocking sign-off is written under a held lease, cited from decision 44's ruling; the bootstrap set as the closed list decision 43 rules).
 
 ## Purpose
 
@@ -63,7 +63,12 @@ is assigned-and-unclaimed, a fact about that principal, not a lease left hanging
 Two agents must not both take a task; a killed runner must not leave one held forever. The claim is keyed
 on the task; the holder is read back after the write: an agent holds only if the persisted lease names
 its runner id (principle 2). Atomicity is proven by the implementation, never assumed of the store: a
-last-writer-wins snapshot and a name-collision policy that de-duplicates into one row do not raise.
+last-writer-wins snapshot and a name-collision policy that de-duplicates into one row do not raise. The
+lease is load-bearing for the verdict as well as for exclusion: a sign-off carrying `signed` or a blocking
+verdict is written by a signer whose lease on the step is held at the write, and one from a lapsed or
+returned lease is refused at submission, so two runners of one role cannot each leave a standing verdict on
+one head (decision 44,
+`conformance_suite.md#whether-a-sign-off-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`).
 
 ### The lease is a relationship, not a set of task fields
 
@@ -325,7 +330,12 @@ the limitation is stated rather than mechanized, and what the design says about 
 already says elsewhere. **The first declaration is an operator act**, of the same kind as issuing a
 credential or widening a grant: provisioning is operator-only and out of band
 (`authority_model.md#grants`), an agent neither performs it nor is empowered to have it performed by
-raising a checkpoint. **A workflow too broken to open a step is an unreadable workflow**, which is a defined
+raising a checkpoint. The set of such acts is closed and enumerated — the thirteen-record table of
+`conformance_suite.md#the-minimal-record-set-in-order`, each member read back — and a write to any of those
+kinds of record after the set exists is not provisioning (decision 43, ruled in its enumeration half;
+whether the operator's own later governance write is gated is its open half,
+`conformance_suite.md#what-the-bootstrap-set-is-and-whether-the-operators-later-governance-writes-are-gated`).
+**A workflow too broken to open a step is an unreadable workflow**, which is a defined
 state: no step of it is opened or claimed, its batch's tasks are escalated with one checkpoint (reason
 `unreadable_workflow`), and nothing proceeds on an empty sequence
 (`gates_and_workflows.md#an-unreadable-workflow-is-unknown-and-unknown-holds`). The repair then arrives

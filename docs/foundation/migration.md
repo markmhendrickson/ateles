@@ -19,7 +19,7 @@ a read-only inventory of the production record taken 2026-09-05 through the Neot
 `status.md`), the operator's 2026-09-05 direction that the plan also cover the migration of skills into the swarm, the skill
 inventory at both harness roots read the same day and the recurring-work extraction over it (both in `status.md`,
 revision 32), and the two renderers' stated contracts (`render_agent_docs.py`, `sync_skills.py`). The bootstrap sequence this document orders against is the
-conformance suite's (`conformance_suite.md`); where the two disagree, this document says so. Revised by the simplification pass of 2026-09-05 (revision 29: gap G14 closed; `workflow policy` retired). Revised by the memo-gap pass of 2026-09-06 (revision 31: gaps G1 and G12 closed). Revised 2026-09-06 (revision 32: the skills leg — five classes of skill, the mapping of each to its target, stage 11, gaps G28–G31, and open decision 42). Revised by the testability pass of 2026-09-06 (revision 37: gaps G6, G7, G8, G11, G13, and G15 closed).
+conformance suite's (`conformance_suite.md`); where the two disagree, this document says so. Revised by the simplification pass of 2026-09-05 (revision 29: gap G14 closed; `workflow policy` retired). Revised by the memo-gap pass of 2026-09-06 (revision 31: gaps G1 and G12 closed). Revised 2026-09-06 (revision 32: the skills leg — five classes of skill, the mapping of each to its target, stage 11, gaps G28–G31, and open decision 42). Revised by the testability pass of 2026-09-06 (revision 37: gaps G6, G7, G8, G11, G13, and G15 closed). Revised by the rulings pass of 2026-09-06 (revision 38: decisions 31 and 42 ruled — the merge form for a re-type, and a skill's harness mechanics split among the grant, a `vendor_binding`, and the harness's own configuration; gap G19 closed).
 
 ## Purpose
 
@@ -106,10 +106,10 @@ provenance to that source and to the interpretation that produced it; and `merge
 entity into the target, which rewrites the legacy observations onto the survivor and marks the legacy id
 as merged, so the old id keeps resolving through its merge pointer and an as-of read on either id
 reconstructs the same history. The survivor's id is new; the legacy id redirects. Every inbound edge is
-repointed by the merge rather than re-derived (`data_model.md#record-conventions`, on merges). Whether this
-is the right mechanism, or whether the record should gain a type alias so that ids never change, is open
-decision 31 (below); until it is ruled, re-type means the three-primitive form, and stage 4 onward waits on
-the ruling.
+repointed by the merge rather than re-derived (`data_model.md#record-conventions`, on merges). That this is
+the mechanism — and not a type alias the record would have to gain so that ids never change — is decision
+31, ruled 2026-09-06 (`#how-a-registered-entity-type-is-renamed-on-a-live-record`): re-type means the
+three-primitive form, and stages 4 and 7 no longer wait on it.
 
 **Derive.** A target concept exists in the design and has no source type, but the information that would
 populate it is spread across a source type's fields — a held action inside a retired approval record, a
@@ -380,15 +380,17 @@ record through its primitives and reaches an external system only through an ada
 (`gates_and_workflows.md#external-systems-are-reached-only-through-adapters`); the harness's way of issuing
 those calls is the harness's, and it changes with the harness.
 
-**The residue is the operator's, and it is open decision 42.** After the three moves above, a skill still
+**The residue is decision 42, ruled below.** After the three moves above, a skill still
 carries mechanics that bind a harness rather than the record: which tools an agent may invoke (the tool
-allowlist that gap G19 already found homeless), which harness a role prefers and which model tier, the
+allowlist that gap G19 had found homeless), which harness a role prefers and which model tier, the
 environment variables the harness router reads, hook wiring. These are not the record's and not an
 external system's; they are properties of the harness that executes an agent. Whether they belong in the
 record at all — as a context entity the design would have to introduce, bound per harness the way a
 `vendor_binding` is bound per system — or stay outside it, in the harness's own configuration, read by no
 principal and governed by no gate, is not a mapping question. It changes what the record knows about how its
-agents execute, and it is argued below.
+agents execute, and it is ruled below (`#where-a-skills-harness-mechanics-live`): the tools an agent may
+invoke are a dimension of its grant, the harness preference and the model tier are a `vendor_binding`'s,
+and hook wiring and environment stay the harness's.
 
 ### Standing rules inside skills go to `task_policy`, by kind, and never by value
 
@@ -649,7 +651,7 @@ correction.
 **Stage 7 — the agents (workflow; re-typing merges).** For each agent under the retired name: read out
 its `raw_fragments`, decide each field, create the `agent` as an interpretation of the same source, write
 its `principal_binding`, merge the retired entity into it, read back both ids, and re-render the mirrors
-(`conformance.md#direction-of-truth-per-class-of-record`). **Depends on** stages 1 and 3 and decision 31.
+(`conformance.md#direction-of-truth-per-class-of-record`). **Depends on** stages 1 and 3; decision 31 is ruled (the merge form), so nothing here waits on it.
 Reversible by split. The retired loader keeps reading the retired name until the daemons are redeployed,
 which is why stage 3 widened the grants to both names and why the merged id must keep resolving: a daemon
 that loads its definition by the old id mid-migration must get the same content.
@@ -787,7 +789,9 @@ numbers are separate and only two of these are opened as decisions below.
   record's primitives change fields, identity rules, and observations' owners, never an entity's type.
   The tolerant-reader rule (`data_model.md#record-conventions`) is written for field names; nothing says
   whether it applies to type names, whether a rename is a merge into a new-typed entity (id changes), or
-  whether the record should gain an alias. Opened as decision 31.
+  whether the record should gain an alias. Opened as decision 31, and closed by its ruling of 2026-09-06: a
+  rename is the merge form, no alias is built, and the tolerant reader the field rule requires is kept for
+  the type name too (`#how-a-registered-entity-type-is-renamed-on-a-live-record`).
 - **G3 — a retired escalation's subject is often neither a task nor an action.** The checkpoint admits
   exactly two subjects; the retired type's subjects include configuration entities and checkouts. The
   design should say that a condition about an entity that is not work is a task for intake, or admit a third
@@ -863,7 +867,10 @@ numbers are separate and only two of these are opened as decisions below.
   dual-admit window load-bearing for the migration too.
 - **G19 — the harness tool allowlist has no home.** `authority_model.md#grants` reasons about a stub
   with a wildcard tool allowlist; the `agent` row has no such field and the grant models operations,
-  entity types, and repositories, not harness tools.
+  entity types, and repositories, not harness tools. Closed by the ruling of decision 42 (2026-09-06): the
+  tools a principal may invoke are a dimension of its `agent_grant`'s capabilities, and a harness's own
+  allowlist is a copy derived from the grant or held equal to it by a parity test
+  (`#where-a-skills-harness-mechanics-live`; `data_model.md#concepts`, the grant row).
 - **G20 — the roster binds per project in `workflows.md` and is one global map on the instance.**
 - **G21 — the roster has no row in `data_model.md`.** It is one of the governance types and the
   resolver every `owner_role` depends on, and its fields and edges are stated nowhere.
@@ -914,15 +921,26 @@ numbers are separate and only two of these are opened as decisions below.
   review step on a batch nor an analysis answering a question. G10 leaves plans outside the target model; until it
   is closed this work is dropped from the prompts and recorded as undeclared, never re-declared as something else.
 
-## The open decisions this document opens
+## The decisions this document opened, and how each was ruled
 
-Registered in `conformance.md#the-register-of-open-design-decisions` in the same change, as that
-section requires. Two decisions are opened — 31 by the record mapping, 42 by the skills leg; the other question a reader might expect here — which tier the
-migration's classes take — is a policy value under decision 18's ruling and is stated as one below.
+Registered in `conformance.md#the-register-of-open-design-decisions` in the change that opened each, as
+that section requires, and moved to ruled there on 2026-09-06. Two decisions were opened — 31 by the record
+mapping, 42 by the skills leg — and both are ruled below, in the idiom of the earlier rulings: the ruling,
+its reason, the cost accepted, and what would reopen it. The other question a reader might expect here —
+which tier the migration's classes take — is a policy value under decision 18's ruling and is stated as one
+below.
 
-### Open decision 31: how a registered entity type is renamed on a live record
+### How a registered entity type is renamed on a live record
 
-Three answers, each with
+**Ruled (decision 31, 2026-09-06): the merge form.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. A rename is carried by the three primitives the
+dispositions section already names — register the target type, interpret over the same source, merge the
+retired entity into the survivor — so the retired id resolves through its merge pointer and every inbound
+edge is repointed; and the tolerant reader that `data_model.md#record-conventions` requires of every reader
+for a field name is kept, permanently, for the type name too. No alias is built, and the reader alone is not
+the answer.
+
+**The question, and the three answers it had.** Three answers, each with
 a cost the others do not have. **Merge into a new-typed entity** (the form this document assumes): the
 target entity is created as an interpretation of the same source and the retired entity is merged into
 it, so observations, provenance, and every inbound edge move to the survivor and the retired id resolves
@@ -935,13 +953,48 @@ second name for one thing that the tolerant-reader rule was written to avoid nee
 tolerant reader over both types**: nothing is written, every reader of `agent` reads `agent` and the
 retired type, and the new type is populated only by new writes; the cost is that the design's own claim
 that a rename leaves no stale name is false for the record forever, and that every reader carries the
-union. **What would decide it:** whether any reader outside the record holds an entity id it cannot be
-told about; if none does, the merge form's cost is nil and it is the answer, because it is made of
-primitives the record already has. **Until it is taken**, stages 4 and 7 wait, and stages 0 to 3 do not.
+union. **What would decide it,** as the question was opened: whether any reader outside the record holds an
+entity id it cannot be told about; if none does, the merge form's cost is nil and it is the answer, because
+it is made of primitives the record already has.
 
-### Open decision 42: where a skill's harness mechanics live
+**Why the merge, and why not the other two.** Principle 6: the merge is made of primitives the record
+already has (`#dispositions-and-the-primitive-that-carries-each`), and the alias is a capability the record
+lacks and would have to gain — a parallel mechanism for one case, kept alive by every later rename.
+Principle 9: an alias is two names for one thing by construction, which is what the tolerant-reader rule was
+written so that the record would never need; and a reader-only rename leaves two live types in the record
+forever, so the C4 rule — a rename leaves no stale name
+(`gates_and_workflows.md#contradictions-this-document-settles`) — would be false by design rather than false
+until a stage completes. Ruled decision 6 makes the cost the merge form was charged with — that every merge
+is a lossy record mutation held at the gate — a control already in place rather than a new one: the
+re-typing stages are governance writes and merges through the gate
+(`#ordering-dependencies-and-what-each-stage-depends-on`), which is where a lossy mutation belongs. And
+ruled decision 12 already implies the rename this decision was opened for, the retired agent type to
+`agent`, so what was open was only the mechanism. The deciding test is answered by the merge pointer: an
+outside holder of the retired id resolves through the redirect to the survivor and its whole history, so it
+need not be told; a holder that must write to the survivor is told by the redirect it reads.
 
-After the skills section's three moves — what is read and written to the declaration, which system and operation
+**Cost accepted.** Every retired id becomes a redirect, and every reference held outside the record — a
+grant's capability, a prompt, a configuration file, a private note — points at a redirect until it is
+corrected; the grant corrections are governance writes under ruled decision 18, and stage 3 already makes
+them. How many entities and grants that is on an instance is `status.md`'s (the record inventory), not this
+section's. The reader stays tolerant of both type names forever, as the field rule already asks of it.
+
+**What would reopen it.** A reader outside the record that holds an entity id, cannot follow a merge
+pointer, and cannot be corrected — a system the swarm does not own that has stored the id as a foreign key
+with no redirect on read. None is known; one would argue for the alias, and for building it once rather
+than per rename.
+
+**What it unblocks.** Stages 4 and 7 (`#ordering-dependencies-and-what-each-stage-depends-on`), which
+waited on this ruling; the pending mark on MG-2 and the MG-12 pointer row in `conformance_suite.md`.
+
+### Where a skill's harness mechanics live
+
+**Ruled (decision 42, 2026-09-06): split by what each mechanic is — the tools a principal may invoke are a
+dimension of its grant; the harness a role prefers and its model tier are a `vendor_binding` for the harness
+as a vendor; hook wiring and environment stay outside the record, as harness plumbing.** Registered as ruled
+in `conformance.md#the-register-of-open-design-decisions`. No new context type is introduced.
+
+**The question, and the three answers it had.** After the skills section's three moves — what is read and written to the declaration, which system and operation
 to the adapter document, how the record is called to the record's own interface — a skill still carries what binds
 a **harness** rather than the record or an external system: the tool allowlist an agent runs under (gap G19), the
 harness a role prefers and its model tier, the environment the harness selector reads, hook wiring. Three answers,
@@ -956,10 +1009,44 @@ constraint forbids, and a `data_model.md` row that grows with every harness. **O
 configuration, read by no principal and governed by no gate, as it is today; the cost is that the record cannot say
 under what tool bounds an agent executed, so a sign-off's pinned agent version pins the prompt and not the reach, and
 a change to an agent's reach is invisible to the mechanism the design built to see changes to agents. **What would
-decide it:** whether the tool bound is part of what a sign-off attests — if a review of a batch may legitimately ask
-under what allowlist the implementer executed, the bound is in the record; if not, it is the harness's. **Until it is
-taken**, the mechanics are dropped from prompts at stage 7 and held in the harness's configuration, which is the
-third answer by default and not by ruling, and stage 11's runner redeployment does not narrow them.
+decide it,** as the question was opened: whether the tool bound is part of what a sign-off attests — if a review of a
+batch may legitimately ask under what allowlist the implementer executed, the bound is in the record; if not, it is the
+harness's.
+
+**Why the three go three ways.** The three mechanics are not one kind of thing, and the question treated them as one. **Which
+tools a principal may invoke is a bound on what it may do**, and the design has exactly one home for such a bound:
+the tuple's `scope` is "the operations within the domain, with per-tool parameter constraints", carried by
+`agent_grant.capabilities` and `param_constraints` (`authority_model.md#the-tuple`), and `authority_model.md#grants`
+already reasons about "a stub with a wildcard tool allowlist" as the fail-open grant shape — so the bound was a
+grant's in the design's own words before the grant had a field for it. Principle 6 extends the grant rather than
+introducing a per-harness type; ruled decision 41 makes the grant the allowlist read at every enforcement point,
+and a wildcard over tools is the same fail-open shape as a wildcard over types. Where a harness needs an allowlist
+of its own in its configuration, that list is a copy: derived from the grant at load, or held equal to it by a
+parity test, and never a second home (principle 9). **Which harness a role prefers and which model tier** binds
+the role to a vendor's instance and settings, which is what a `vendor_binding` is: the design already sends "which
+client to use" to a vendor binding's capability slot (`#the-format-gap-where-a-skills-harness-mechanics-go`), and a
+harness is a vendor the swarm runs its agents on. **Hook wiring and the environment the harness selector reads** are
+how a harness executes, not what an agent may do or where it runs; they are read by no principal and govern no
+write, and they change with the harness — the same reasoning that keeps the harness's way of calling the record out
+of the design (above). The deciding test is met, and met without a new entity: ruled decision 40 has a sign-off pin
+the agent version and name what it read, and "under what allowlist did the implementer execute" is then an as-of
+read of the grant at `signed_at`, along ingestion time (`adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`) — the grant is in the record already,
+so the bound is attestable the moment it lives there. The public-prompt constraint rejects fields on the `agent`: a
+harness-specific, instance-specific value on a public, generic entity is the leak that constraint forbids.
+
+**Cost accepted.** `agent_grant.capabilities[]` gains a tool dimension (`data_model.md#concepts`), a schema change
+and a governance write per grant that names tools. A harness that cannot enforce a grant-derived allowlist leaves
+the bound reporting-only for that harness, and principle 1 names it as such rather than hiding it. The format-gap
+section had framed the residue as the operator's; it is ruled here because two ruled decisions and the tuple's own
+definition of `scope` answer it, and no operator lean was recorded to contradict.
+
+**What would reopen it.** A harness mechanic that is none of the three — neither a bound on what an agent may do,
+nor a binding to a vendor's instance, nor plumbing — would need a home this ruling does not give it; and a
+sign-off found to be judged on hook wiring or environment would move that mechanic from plumbing to something the
+record must hold.
+
+**What it unblocks.** Stage 11's runner redeployment narrows what a runner may invoke from the grant rather than
+from a skill file; the pending mark on MG-13 in `conformance_suite.md` resolves; gap G19 closes.
 
 ## The policy values leg two needs, and the two postures
 

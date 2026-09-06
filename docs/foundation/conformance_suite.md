@@ -22,7 +22,7 @@ stand rather than removed; and the testability pass (revision 37), which carried
 and fifteen open contradictions below back into the documents that own them — each row marked with what its
 home now says, or with why no wording could make it mechanical, and kept where it stands rather than
 removed. The operator's standing instruction
-that this document applies to itself: *the code is not established design guidance.*
+that this document applies to itself: *the code is not established design guidance.* Revised by the rulings pass of 2026-09-06 (revision 38: decision 44 ruled — a `signed` or blocking sign-off requires a held lease by its signer; decision 43 ruled in its enumeration half — the bootstrap set is the thirteen-record table, every member read back; the rows that waited on decisions 31, 32, 35, 42, 43, 44, 48 to 51, 53, and 54 updated).
 
 ## Purpose
 
@@ -245,12 +245,12 @@ design names.
 | # | Record | Why it is needed before the next | Status | What the suite reads back |
 |---|---|---|---|---|
 | 0 | an empty instance, nonce-identified, run-credentialed | the isolation layers above | infrastructure | the nonce; the empty census |
-| 1 | the registry: every entity type and relationship type the concept tables name (`data_model.md#concepts`, `data_model.md#relationships`), each with a version and a `reducer_config` | nothing can be written until its type exists; a type registered later leaves earlier writes in `raw_fragments` forever (`data_model.md#record-conventions`) | **open** — this is the first governance write, and whether it is an operator act is the unbounded-set question below | every type present with its declared fields; a write of an undeclared field lands in `raw_fragments` |
+| 1 | the registry: every entity type and relationship type the concept tables name (`data_model.md#concepts`, `data_model.md#relationships`), each with a version and a `reducer_config` | nothing can be written until its type exists; a type registered later leaves earlier writes in `raw_fragments` forever (`data_model.md#record-conventions`) | **derived** — the first member of the closed set (decision 43, ruled in its enumeration half below): an operator act by membership, read back | every type present with its declared fields; a write of an undeclared field lands in `raw_fragments` |
 | 2 | the `operator` entity: the human principal | every authority edge attaches here; nothing else can own, bind, or resolve until it exists (`authority_model.md#principals`) | **derived** as the second record, **open** as to attribution | the entity, identity only; `operator_profile` absent or separate, carrying no edge |
 | 3 | the credential binding: the run credential → the `operator` | from here every write attributes; before it, every write is unattributed | **derived** that it comes third; **gap** that the binding has no type (below) | the binding resolves the credential to the operator; a write after it carries the principal |
 | 4 | one `ownership_grant` per registered type → the operator | at most one per type, and a later version of the type is "made by or on behalf of the owner" | **derived** from step 1's convention, once a principal exists | exactly one edge per type |
-| 5 | the project's `action_policy`: the low and high sets, the classes carrying `operator_only`, `confidence_threshold`, `recurrence_count`, `always_checkpoint_boundaries`, the lossy-mutation count | without it every class is unclassified and resolves to `NEVER`, which is the safe posture and also one in which nothing can be taken (`gates_and_workflows.md#confidence-and-three-blast-tiers`) | **open** — ruling 18 makes every governance class `operator_only` until the operator writes a value, and says the operator grants classes "by writing the policy themselves"; whether that write is an action held for the operator to approve, or an act outside the gate, is decision 43 | the policy, read back field by field; a governance write after it raises a checkpoint or is permitted, per its class |
-| 6 | the first agents: at least the `pm` step owner's agent and the operator-facing agent, each with `principal_binding` → the operator | intake's every step is the `pm` step owner's; operator-only work and every checkpoint the operator is carried is the operator-facing agent's (`workflows.md#roles-named-in-this-document`) | **derived** as to which two; **open** as to the gate (step 5) | each `agent` with `prompt_markdown`, `context_entity_types[]`, a version; the binding edge |
+| 5 | the project's `action_policy`: the low and high sets, the classes carrying `operator_only`, `confidence_threshold`, `recurrence_count`, `always_checkpoint_boundaries`, the lossy-mutation count | without it every class is unclassified and resolves to `NEVER`, which is the safe posture and also one in which nothing can be taken (`gates_and_workflows.md#confidence-and-three-blast-tiers`) | **derived** as a member of the closed set (decision 43): the first policy is the bootstrap write ruling 18's "by writing the policy themselves" describes; whether the operator's *later* writes to it are held for the operator to approve, or exempt, is 43's open half | the policy, read back field by field; a governance write after it raises a checkpoint or is permitted, per its class |
+| 6 | the first agents: at least the `pm` step owner's agent and the operator-facing agent, each with `principal_binding` → the operator | intake's every step is the `pm` step owner's; operator-only work and every checkpoint the operator is carried is the operator-facing agent's (`workflows.md#roles-named-in-this-document`) | **derived** as to which two, and as members of the closed set (decision 43); the gate on later writes to them is 43's open half (step 5) | each `agent` with `prompt_markdown`, `context_entity_types[]`, a version; the binding edge |
 | 7 | one `agent_grant` per agent, matched on that agent's `(sub, iss)`, with an expiry | zero grants is deny; the agent cannot claim, read, or write until one matches | **derived** | permit on a declared capability; deny on an undeclared one; `Indeterminate` on an unreadable grant |
 | 8 | the credential binding per agent: its `sub` → the `agent` | the AAuth `sub` binds to the agent and reaches the operator through the agent's `principal_binding` | **derived**; same type gap as step 3 | a write by the agent attributes A-for-B |
 | 9 | the `swarm_roster` for the project: role → agent, by role | a workflow's `owner_role` is resolved against it at claim, and — by `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol` — at declaration, so the roster must precede the first declaration | **derived** | every role the intake declaration names resolves |
@@ -273,8 +273,9 @@ before 6, 9, 11, 13). Every other adjacency is a choice the suite may make and m
 
 ### What the documents leave unspecified here, and how each is recorded
 
-**The bootstrap set is unbounded, and that is the finding.** The design names one out-of-band act — the
-first declaration — and likens it to "issuing a credential or widening a grant". It does not enumerate the
+**The bootstrap set was unbounded, and that was the finding; decision 43 closes it in its enumeration
+half.** The design named one out-of-band act — the
+first declaration — and likened it to "issuing a credential or widening a grant". It did not enumerate the
 set. Steps 1, 2, 5, 6, 7, 9, and 13 above are each a governance write, and each has to happen before the
 gate can hold anything, so each is either an operator act or a write held at a gate against an absent
 policy. A set that is not enumerated is a side door with no boundary: any later governance write can call
@@ -284,7 +285,10 @@ types *after* the set exists is an action like any other — including the opera
 the half the design has not faced, and ruling 18 sharpens it by saying the operator grants a class "by
 writing the policy themselves": once the gate exists, is the operator's write to `action_policy` gated
 (held for the operator to approve, raising the raiser-resolves question `authority_model.md#approval`
-leaves open, decision 47) or is "operator act" a standing exemption? Opened as **open decision 43** below.
+leaves open, decision 47) or is "operator act" a standing exemption? Opened as decision 43 below, and ruled
+there on 2026-09-06 in its enumeration half: the closed list is the table above, every member read back, and
+a write to any of those thirteen kinds of record after the set exists is not provisioning. The last clause —
+whether the operator's own write after bootstrap is gated — is the half that stays open.
 
 **The intake batch's opener is derivable, and the wording that hides it is a contradiction.**
 `work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow` states that a batch comes into
@@ -379,7 +383,7 @@ number and says what its home now says, so the row stays true and a reader can c
 | U-10 | `failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`: every action class names its recovery | **closed** by the testability pass (revision 37): `action_policy.recoveries` — class → the recovery's class, `forward_only`, or `none` — with a policy write listing a class and no entry refused at the write (`failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`; `data_model.md#concepts`). FP-11 reads it | — |
 | U-11 | the same section: the restore obligation with a stated cadence | **closed** by the testability pass (revision 37): `recovery_paths[]`, each with a `cadence`, on the binding entity of the system that holds the path; an exercise is a dated observation on that binding carrying what the restore read back; overdue is a derived read (`failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`). FP-13 reads it | — |
 | U-12 | `work_model.md#the-four-execution-mechanisms`: the interactive session holds no lease | **D**, definitional (the testability pass, revision 37): the rule states what an interactive session is — a work source that holds no lease — and the document says a claim requirement would be bypassed in practice; its violation leaves no artefact by its nature. The recovery half is WF-21. WM-37 is marked D | — |
-| U-13 | `work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`: the first declaration is an operator act | the set of operator acts is unbounded (the bootstrap section), and ruling 18 adds to it without bounding it | a closed bootstrap set; **open decision 43** |
+| U-13 | `work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`: the first declaration is an operator act | the set of operator acts is unbounded (the bootstrap section), and ruling 18 adds to it without bounding it | **closed** in its enumeration half by the ruling of decision 43 (2026-09-06): the set is the thirteen-record table (`#the-minimal-record-set-in-order`), every member read back, and a write to those types after the set exists is not provisioning; whether the operator's own later governance write is gated is 43's open half, tested under the governance axis |
 | U-14 | `gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`: governance writes are actions | **open decision 56** (the testability pass, revision 37; `gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits`): the record's admission check reading the action, a proxy in front of the record, or a sole-writer grant — put beside decision 43, whose two questions decide it. Until it is taken the rows that test the permitted-action half are **P** on it (WM-22, GW-29, GW-33, WM-40b, AD-27, MG-4, and GW-33a), and the admission half stays M under ruling 41 | — |
 | U-15 | `workflows.md#meeting-processing` `extract`; `gmail.md#what-this-adapter-refuses` refusal 1; `calendar.md#what-this-adapter-refuses` refusal 1: minimization at capture, nothing incidental or sensitive | **closed** for shape, **R** for content, by the testability pass (revision 37): a parameter constraint on a write capability is a field allowlist, denied at admission (`authority_model.md#grants`); refusal 1 of `gmail.md` and `calendar.md` and `extract` in `workflows.md#meeting-processing` cite it. WF-19 reads it | — |
 | U-16 | `telegram.md#messages`: a message "reading as a new ask" is a task; one that "asks nothing" is an observation | **closed** by the testability pass (revision 37): every uncorrelated free-text message from a bound principal is a task, and intake's closing sign-off names no successor where it asks nothing (`telegram.md#messages`; `telegram.md#which-checkpoint-a-reply-answers-is-decided-by-correlation-not-by-reading-the-text`). TG-1 reads it | — |
@@ -390,7 +394,7 @@ number and says what its home now says, so the row stays true and a reader can c
 | U-21 | `data_model.md#record-conventions`: a sign-off is pinned to the artifact state it judged, by `head` | **closed** by the testability pass (revision 37): `artifact_refs[]` carries a per-kind pinned state, the kinds listed once in `data_model.md#record-conventions` — `head`; the message itself; the message set with its coverage; the dated fact; the declaration as read; the rail state as read — and a kind admitted later states its own under linkage. DM-6 reads it | — |
 | U-22 | `workflows.md#security`: the closing sign-off's only permitted successor is `release` | **closed** by the testability pass (revision 37): `none_permitted` beside `successors`; a closing sign-off naming none under a declaration that does not permit it is refused at the write, and `security` does not permit it (`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`; `workflows.md#security`). WF-12 reads it | — |
 | U-23 | `workflows.md#intake` `dedupe`: a duplicate closes terminal with an edge to the task it duplicates | **closed** by the testability pass (revision 37): `DUPLICATE_OF`, task → task (`data_model.md#relationships`; `workflows.md#intake`). WF-5 reads it | — |
-| U-24 | `work_model.md#the-claim-and-the-lease-are-one-primitive`, read against the sign-off rule | nothing says whether a sign-off written by a step owner whose lease has lapsed closes the step; two runners of one role can each hold "the step owner's" verdict, and the latest stands | **open decision 44** below; until ruled, the suite designs both branches and holds them |
+| U-24 | `work_model.md#the-claim-and-the-lease-are-one-primitive`, read against the sign-off rule | nothing says whether a sign-off written by a step owner whose lease has lapsed closes the step; two runners of one role can each hold "the step owner's" verdict, and the latest stands | **closed** by the ruling of decision 44 (2026-09-06): a `signed` or blocking sign-off requires a held lease by its signer at the write, and a late one is refused (`#whether-a-sign-off-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`); the work-model axis's cell is mechanical |
 | U-25 | `work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow`: attaching a task part-way through is a step owner's judgement written into that step's sign-off | **closed** by the testability pass (revision 37): `tasks_attached[]` on `sign_off` (`data_model.md#concepts`; `work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow`). WM-28 reads it | — |
 | U-26 | `gates_and_workflows.md#declaration-batch-projection`: an optional step's `applies_when` is evaluated against what the change touches | **closed** by the testability pass (revision 37): an optional step's condition reads what exists when the step would open — the task set where no artifact does — and a condition naming an artifact type no earlier step's `reads_to_close` names is refused at declaration (`gates_and_workflows.md#declaration-batch-projection`). GW-14 and WF-13 read it | — |
 | U-27 | `telegram.md#during-a-halt-a-read-on-the-channel-is-answered-with-the-halt-and-never-with-data`: the answer goes only to the chat the adapter's binding names, read at start and not from the record | **closed** by the testability pass (revision 37): the start-time binding is a cache with the staleness bound `channel_config` declares, refreshed on every successful read and `Indeterminate` past it, when the adapter answers no one (`telegram.md#during-a-halt-a-read-on-the-channel-is-answered-with-the-halt-and-never-with-data`). TG-12a reads it | — |
@@ -482,7 +486,7 @@ above. **M / R / U / P / D** is the class.
 | WM-22b | the same: the class covering `action_policy` writes is itself reserved | `B0` | an agent writes a policy value granting a class | it lands with no checkpoint | M |
 | WM-23 | the same: an agent cannot widen its own grant | agent A | A writes an `agent_grant` naming A | the grant is read as in force with no permitted action behind it | M |
 | WM-24 | the same: `operator_only` on a governance class cannot be demoted | `B0+pol(low: [agent_policy_write], operator_only: [agent_policy_write])` | an action of that class | it is taken | M |
-| WM-25 | the same: bootstrapping | `B0` | — | — | P (open decision 43; finding U-13 points at it) |
+| WM-25 | the same: bootstrapping — the set is the thirteen-record table, every member read back | `B0` | write the thirteen records as the operator principal, reading each back; route the first task | the first task does not route with all thirteen written; a member not read back; a record outside the table needed before the first task routes | M for the set (decision 43, ruled in part); P for whether the operator's own later governance write is held (43's open half; the governance axis) |
 | WM-26 | `work_model.md#what-goes-through-a-workflow-is-a-batch-of-tasks` | three tasks routed together | read the batch | more or fewer than one batch; a task with no `ADDRESSED_BY`; a batch-of-one taking a path a batch-of-three does not | M |
 | WM-27 | `work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow`: opened only by a closing sign-off | every batch after a full run | read `FOLLOWS` and the predecessor's closing sign-off | a non-intake batch with no `FOLLOWS`; a `FOLLOWS` target whose closing sign-off's `successor` is not this batch's `workflow_type`; a batch opened by a daemon, an adapter, or a sweeper credential in `RP` | M |
 | WM-28 | the same: attach part-way is a step owner's judgement in a sign-off; the task inherits the sign-offs | a batch at step 3; attach a task | read the edge and the sign-offs | an `ADDRESSED_BY` edge created after open that no sign-off's `tasks_attached[]` names; the attached task's step state differs from the batch's | M (U-25 closed) |
@@ -568,7 +572,7 @@ above. **M / R / U / P / D** is the class.
 | GW-48 | the same: deferral bounded; timeout terminal, never continues | a checkpoint deferred past its bound, `CLK` | wait | it is not terminal; the action is taken or the task re-claimed after timeout | M |
 | GW-49 | the same: one queue, one protocol | a checkpoint on an action and one on a task | present and resolve both | a second presentation path or resolution protocol | M |
 | GW-50 | the same, and `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`: a condition that stops a whole batch is raised on one of its tasks, never on the batch; one per stopped batch; it names the batch and the step | a batch with three tasks whose workflow is unreadable; one with a step nobody claimed past its interval | read checkpoints | a checkpoint whose `CHECKPOINTS` edge names the batch; more than one open with the same reason on the batch's tasks; `needed_input` naming neither the batch nor the step; the other tasks not readable as held through their `ADDRESSED_BY` edge | M (formerly P on X-1, closed) |
-| GW-51 | `gates_and_workflows.md#whether-the-verdict-is-a-stored-field-or-a-read-over-the-findings-and-the-author` | — | — | P (open decision 32; GW-19, GW-20, and GW-21 are the rows a ruling would rewrite — *The simplification pass, verified against the matrix*, below; the blocker the matrix named, the finding's shape, closed with U-6) |
+| GW-51 | `gates_and_workflows.md#whether-the-verdict-is-a-stored-field-or-a-read-over-the-findings-and-the-author` | — | — | closed: decision 32 ruled 2026-09-06 — the field stays as the sign-off's own projection of its findings and its author, reconciled at the write (`gates_and_workflows.md#whether-the-verdict-is-a-stored-field-or-a-read-over-the-findings-and-the-author`); GW-19, GW-20, and GW-21 stand as its rows, unchanged |
 | GW-52 | `gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read` (ruling 40): what a step produced is written as the entities it is; what it read is named on the sign-off (`REFERS_TO` → entity, `artifact_refs[]` with heads) and reproduced by an as-of read at `signed_at`; its reasoning is not written; `agent_session` gains no transcript | a step that read two record entities and one artifact; an observation on one of them corrected after `signed_at` | read the sign-off; as-of read at `signed_at` along ingestion time | a read entity absent from the sign-off's references; a copy of a read entity's state stored on the sign-off or the session; a transcript or reasoning field anywhere; the as-of read returning the corrected value | M |
 | GW-53 | `gates_and_workflows.md#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-the-operator-or-cannot-wait` (ruling 37): the operator's view is a read under the operator's grant; a channel carries a declared subset — a checkpoint awaiting the operator, the announcement path, a declared delivery — and completed work is not carried unless the binding or a `deliver` step says so | a batch closing; a finding filed; a checkpoint raised; a `deliver` step naming a channel; `channel_config` declaring one reason class | `X(chat)`, `RP` | the closing or the finding reaches the channel; the checkpoint or the declared delivery does not; a message of an undeclared class sent; a dashboard read under any credential but the operator's; a stored picture of the queue beside the record | M |
 | GW-54 | `gates_and_workflows.md#closed-work-is-reviewed-on-the-record-and-redone-through-intake-never-reopened` (ruling 38): a closed batch is never reopened; the input is a finding on it; the redo is a new task through intake referring to the closed batch's artifacts, with provenance to the finding | a closed batch; the operator records a finding on it | read | a terminal task returned to open; a sign-off written into the closed batch; a batch reopened or a step of it re-claimed; the redo task with no `REFERS_TO` to the closed batch's artifacts or no provenance to the finding; the redo entering any workflow but through intake | M |
@@ -624,8 +628,8 @@ above. **M / R / U / P / D** is the class.
 | AU-16 | `authority_model.md#approval`: yes/no/veto by a required principal; authorized against required approvers; timeout terminal; silence never accepts; no cross-principal auto-approve; notification via roster and channel config | a checkpoint awaiting P; Q resolves; nobody resolves past the bound | — | Q's resolution lands; the action is taken with no resolution; the timeout continues; `CH` shows one address for the whole swarm | M |
 | AU-17 | the same: raiser resolves | — | — | P (open decision 47) |
 | AU-18 | `authority_model.md#structural-checks-quorum-and-separation-of-duties`: payment's disjoint verifier | `T-at(payment, verify)` | the payer signs `verify` | it lands | M |
-| AU-19 | the same: quorum, counting rule | — | — | P (Q1–Q3: open decisions 48 to 50) |
-| AU-20 | `authority_model.md#initiative-proposal-reprioritization` | — | — | P (Q4–Q8: open decisions 51 to 54) |
+| AU-19 | the same: the counting rule; count and disjointness over the checkpoint's principal edges; the thresholds on the `action_policy` per class | a checkpoint awaiting a quorum of two under a policy declaring `quorum` for the class, resolved by two agents bound to one principal; a class with no `quorum` value awaiting three, two resolving; a class naming a `disjoint_roles[]` pair, both roles resolving to one principal's agents | read | the two agents' resolutions count as two interests; the class with no value resolves on two of three; the pair passes; the check reads anything but `AWAITS`, `RESOLVED_BY`, and `RAISED_BY`; a vote, tally, or approval-set type in the census | M for 48, 49, and 50's home (ruled 2026-09-06 — `authority_model.md#structural-checks-quorum-and-separation-of-duties`); P for which checks apply to which classes (50's open half) |
+| AU-20 | `authority_model.md#initiative-proposal-reprioritization`: initiative approval is the checkpoint; a budget attenuates and consumption is derived; credit is a read model | an initiative entering intake as a task; a delegate whose `scope` carries a budget wider than its delegator's; a full run | read; census | an `initiative`, `proposal`, or `approval` type beside the task and the checkpoint; the acceptance recorded anywhere but a checkpoint's resolution; the wider budget admitted; a stored balance or consumed amount; a `credit` type or a stored credit field | M for 51, 53's shape, and 54 (ruled 2026-09-06 — `authority_model.md#initiative-proposal-reprioritization`); P for 52 and for which resources are budgeted (53's open half) |
 | AU-21 | `authority_model.md#grants` (ruling 41): write admission per entity type is default-deny; the grant is the allowlist, read at every enforcement point; a capability naming every type is the fail-open shape; attribution is required besides and prevents nothing | an agent whose grant names `contact` and not `payment_profile`; a grant carrying a wildcard over types | write each type; register the wildcard grant | the `payment_profile` write lands; the wildcard grant is read as in force for a human or admits a type the agent's definition does not name; a write admitted on attribution alone | M |
 
 ### `data_model.md`
@@ -699,7 +703,7 @@ above. **M / R / U / P / D** is the class.
 | AD-32 | `adapters.md#what-an-adapters-document-must-contain`: eight required parts; a row marked unhandled is a named gap | the sixth adapter's document | lint it for the eight parts and the three-way marking on every inbound row | a part absent; an inbound row with no status; an unhandled row with no `status.md` row | M for structure (the lint is a contract, as the rule-coverage check is); R for whether the parts say anything true |
 | AD-33 | `adapters.md#degrees-of-trust-the-design-distinguishes-and-grants-already-express-it`: no trust level on the adapter; scope is the grant, risk is the class | the registered `agent` type; two adapters' grants | census; read | a trust, tier, or risk field on `agent`; a read-only adapter whose grant confers a write; an action class resolved from the adapter's identity rather than from the policy | M |
 | AD-34 | `adapters.md#the-relationship-to-decision-15-which-this-section-did-not-resolve` and `adapters.md#the-adapter-and-the-engine-are-two-roles` (ruling 15): the obligations hold wherever the code lives; the roles meet only in the record | as AD-1, AD-30 | — | as those; no row in this matrix names a repository | M (ruling 15 changes no observable, which is what the ruling says of itself) |
-| AD-35 | `adapters.md#whether-one-binding-type-or-two-names-an-external-systems-instance` | — | — | P (open decision 35; TG-6, CA-6, PY-3a, and the bootstrap's step 13 read "the binding entity" and none reads the two types differently — *The simplification pass, verified against the matrix*, below) |
+| AD-35 | `adapters.md#whether-one-binding-type-or-two-names-an-external-systems-instance` | — | — | closed: decision 35 ruled 2026-09-06 as settled by this document's reading — one binding type, routing a field of it (`adapters.md#whether-one-binding-type-or-two-names-an-external-systems-instance`); TG-6, CA-6, and PY-3a are its rows and are unchanged; the name and the substitution are the condensation pass's |
 | AD-36 | `adapters.md#github`, `adapters.md#gmail`, `adapters.md#telegram`, `adapters.md#calendar`, `adapters.md#payments`: each section points at its document and names the two rules its system erodes hardest; an artifact with no batch never receives retroactive step state | `X(github)` delivers a pull request opened before any task exists | read the artifact; route the task it yields | any step state, `not_required`, `not_applicable`, or clear written on the artifact; the batch that later addresses it skipping a step on the strength of the artifact's age; its `impl` sign-off not citing the existing pull request in `artifact_refs[]` | M |
 | AD-37 | `adapters.md#continual-inbound-is-the-inbound-side-and-an-intake-rule-evaluates-downstream-of-it`: a tracked artifact is kept current by every delivered event whether or not a step waits; the scope is the inbound table intersected with the binding; freshness is never a policy; the evaluator sits downstream of the adapter, fed by the record's subscriptions; outcome 4 is not suppressible by a rule | `X(mail)` delivers on a tracked thread with no step waiting, and on a mailbox the binding does not name; an untracked new message with a rule that would exclude it | deliver | the tracked thread's observation absent; the unbound mailbox's message anything but `dropped`, reason `untracked_mailbox`; a scheduled read the binding did not set and no step declared; the adapter reading an `intake_rule`; the untracked message not reaching intake | M |
 | AD-38 | `adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`: the source is kept, not only named — the raw delivery or page, identified by the delivery id or the read's coverage, with the observations interpreted from it linking back; a corrected mapping is re-applied to the source, producing observations with the source's event time and a new ingestion time; no payload cache in the adapter | a delivery; its mapping corrected afterward | read provenance; re-interpret; inspect the adapter's state | an observation with no source it links to; the source not the raw thing read; a re-interpretation that asks `X` again or that overwrites the first reading; a payload table beside the record | M |
@@ -850,7 +854,7 @@ migration's writes would leave the largest lossy mutation the swarm will ever ma
 | # | Rule | Setup | Action | Red when | Class |
 |---|---|---|---|---|---|
 | MG-1 | `migration.md#dispositions-and-the-primitive-that-carries-each`: no entity deleted and recreated; no verdict written for a principal that did not write it; no field bulk-rewritten to a new spelling; no write to an entity a process that does not know the new shape is still writing | `LEG` | run leg two | a legacy id that stops resolving; a `sign_off` attributed to the agent a step record names; a bulk correction of a field's spelling; a write to a type whose retired writer is live (MG-8) | M |
-| MG-2 | the same: re-type is three primitives — register, interpret over the same source, merge — and the old id redirects; every inbound edge is repointed by the merge | `LEG` with one retired declaration | re-type it | the survivor lacks provenance to the source; the retired id does not resolve through a merge pointer; an as-of read on either id before the merge differs from the other; an inbound edge lost | M (P on decision 31 for whether this is the mechanism at all) |
+| MG-2 | the same: re-type is three primitives — register, interpret over the same source, merge — and the old id redirects; every inbound edge is repointed by the merge | `LEG` with one retired declaration | re-type it | the survivor lacks provenance to the source; the retired id does not resolve through a merge pointer; an as-of read on either id before the merge differs from the other; an inbound edge lost | M (decision 31 ruled 2026-09-06: the merge form is the mechanism — `migration.md#how-a-registered-entity-type-is-renamed-on-a-live-record`) |
 | MG-3 | the same: retire means freeze — no writer produces the type after its stage, nothing is deleted, and the freeze is verified by the count not moving | `LEG` after every writer's redeployment | wait a window | the count of a retired type moves; an entity deleted | M |
 | MG-4 | `migration.md#how-the-migration-is-governed`: leg one is the enumerated operator act and ends when this document's bootstrap read-backs hold; leg two is tasks through `record_migration`, each write an action of its class, each class reserved until the operator writes a value | `LEG`, `B0` | run stage 3 with no policy value for a migration class; then with one | a stage-3 write with no action behind it; a class with no value taken rather than held `NEVER`; a leg-two write by the operator's bare credential outside a batch; a batch producing an ungranted class claimed by anyone but the operator-facing agent | M; P for the enforcement point (open decision 56) |
 | MG-5 | the same: the `record_migration` declaration — five steps with their owner roles, `on_fail` on `verify` opening `apply`, `reads_to_enter` naming the retired types, `reads_to_close` naming the targets, no successor | `B0` | declare it; declare a variant whose `reads_to_close` names an unregistered type | the variant lands; `apply` opens before `map` is signed; `verify` signed by the `apply` step's owner; a successor named | M |
@@ -860,8 +864,8 @@ migration's writes would leave the largest lossy mutation the swarm will ever ma
 | MG-9 | `migration.md#reversibility`: a registration is not reversible and is checked first; a merge is a lossy record mutation held at the gate; a derivation is reversed by ending its rows | `LEG` | reverse each | reversing a merge and leaving the survivor's edges pointing nowhere; a merge taken with no checkpoint; a registration attempted with no `ownership_grant` | M |
 | MG-10 | `migration.md#verification`: each stage has its read-back, and the `verify` step re-reads independently of `apply`'s own | `LEG` | run a stage whose `apply` read-back is faked green | `verify` signs on `apply`'s read-back; any stage's proof read from a response code | M |
 | MG-11 | `migration.md#gaps-and-contradictions-the-mapping-exposed` | — | — | findings, not rules: the ones this suite's rows also hit are cross-referenced by number above (G1, G7, G8, G11, G12, G13, G15, G17, G21, G25); G1, G6, G7, G8, G11, G12, G13, and G15 are closed on both sides |
-| MG-12 | `migration.md#the-open-decisions-this-document-opens`, `migration.md#open-decision-31-how-a-registered-entity-type-is-renamed-on-a-live-record`, `migration.md#the-policy-values-leg-two-needs-and-the-two-postures` | — | — | P (decision 31); the policy values are the operator's under ruling 18, and MG-4 tests the reserved default |
-| MG-13 | `migration.md#the-skills-source-state-the-harnesses-hold-and-where-each-kind-goes` and its parts (`migration.md#five-classes-of-skill`, `migration.md#role-skill--agent-and-what-the-file-becomes`, `migration.md#procedure-skill--workflow-declaration-step-or-adapter-operation`, `migration.md#standing-rules-inside-skills-go-to-task_policy-by-kind-and-never-by-value`, `migration.md#the-duplicated-procedure-and-what-the-roles-collapse-to`, `migration.md#ordering-and-the-cutover-for-the-skills`): a skill is source state and never a target; a role skill rides the `agent` row and its file becomes a render target; a procedure skill maps to a declaration, a step, or an adapter operation; standing rules go to `task_policy` by kind, never by value; the duplicated per-role procedures collapse to the one declared review step, predicates becoming `applies_when`; the cutover is declaration, dual availability, one closed batch, then retirement | `LEG` plus a skill inventory of the five classes | run stage 11 | a runner loading a role from a skill file after the cutover; a `workflow` or `agent_policy` entity minted from a skill with no governance write; an operator value written into an `agent_policy` where a `task_policy` kind was the target; two declared review steps for one collapsed procedure; a skill retired before its target was read back as available | M (P on decision 42 for where the harness mechanics land — `migration.md#the-format-gap-where-a-skills-harness-mechanics-go`, `migration.md#open-decision-42-where-a-skills-harness-mechanics-live`) |
+| MG-12 | `migration.md#the-decisions-this-document-opened-and-how-each-was-ruled`, `migration.md#how-a-registered-entity-type-is-renamed-on-a-live-record`, `migration.md#where-a-skills-harness-mechanics-live`, `migration.md#the-policy-values-leg-two-needs-and-the-two-postures` | — | — | decision 31 ruled 2026-09-06 (the merge form; MG-2 is its row) and decision 42 ruled 2026-09-06 (MG-13 is its row); the policy values are the operator's under ruling 18, and MG-4 tests the reserved default |
+| MG-13 | `migration.md#the-skills-source-state-the-harnesses-hold-and-where-each-kind-goes` and its parts (`migration.md#five-classes-of-skill`, `migration.md#role-skill--agent-and-what-the-file-becomes`, `migration.md#procedure-skill--workflow-declaration-step-or-adapter-operation`, `migration.md#standing-rules-inside-skills-go-to-task_policy-by-kind-and-never-by-value`, `migration.md#the-duplicated-procedure-and-what-the-roles-collapse-to`, `migration.md#ordering-and-the-cutover-for-the-skills`): a skill is source state and never a target; a role skill rides the `agent` row and its file becomes a render target; a procedure skill maps to a declaration, a step, or an adapter operation; standing rules go to `task_policy` by kind, never by value; the duplicated per-role procedures collapse to the one declared review step, predicates becoming `applies_when`; the cutover is declaration, dual availability, one closed batch, then retirement | `LEG` plus a skill inventory of the five classes | run stage 11 | a runner loading a role from a skill file after the cutover; a `workflow` or `agent_policy` entity minted from a skill with no governance write; an operator value written into an `agent_policy` where a `task_policy` kind was the target; two declared review steps for one collapsed procedure; a skill retired before its target was read back as available; after the cutover, a runner invoking a tool its grant does not name, or a harness preference or model tier read from an `agent` entity or a skill file rather than a `vendor_binding` | M (decision 42 ruled 2026-09-06 — `migration.md#the-format-gap-where-a-skills-harness-mechanics-go`, `migration.md#where-a-skills-harness-mechanics-live`) |
 ### `vocabulary.md`
 
 Every **Never** item is a rule, and there are ninety-two as the checker parses them. They fall into four
@@ -996,8 +1000,9 @@ Lease {claimed, renewed, lapsed, returned} × step {open, closed} × batch {one 
 batch created, a condition discovered mid-flight, a cycle}. Kept:
 
 - **Lapse while a step is claimed**: the step reads open (claimable again); a second runner of the same
-  role claims; the first runner's late sign-off — **open decision 44**, both branches designed (U-24).
-  This is the one cell where the documents' answer is missing rather than merely untested.
+  role claims; the first runner's late sign-off is refused — decision 44, ruled 2026-09-06 (U-24 closed):
+  the late write does not land, the second runner's verdict is the one that can stand, and two verdicts from
+  two runners on one head is the failing artefact.
 - **Return with the step still open**: the lease holder ends the lease without signing; the step is claimable
   and unsigned; nothing closes it (GW-17).
 - **Renewal past the step's close**: a sign-off written, then the lease renewed — the lease on a signed
@@ -1109,7 +1114,9 @@ would shift.
   the data model now declares (U-6, closed by the testability pass; `migration.md`, G15 closed). The
   matrix's reading was that the retirement was blocked on U-6 and not on the field; that blocker is gone,
   the refusal at submission (GW-19) is no longer the only mechanical control the findings have (DM-27 is
-  another), and the decision stands open on its own question, which this document does not rule.
+  another), and the decision was ruled on its own question on 2026-09-06: the field stays
+  (`gates_and_workflows.md#whether-the-verdict-is-a-stored-field-or-a-read-over-the-findings-and-the-author`);
+  GW-51 is closed above.
 - **33, the stage and the `phase` field.** No row observes either; U-30 records it. By principle 4's own
   test the field is decoration, which is the pass's argument stated as a finding. Retiring it loses no row.
 - **34, the step path as a mechanism, and `pipeline` against `engine`.** WM-36's observables are per
@@ -1122,6 +1129,8 @@ would shift.
   calendars may be read), PY-3a (the terminal depth), and the bootstrap's step 13 — and every one reads it
   as the binding entity, with no observable that differs by type. The matrix finds no rule that reads
   `channel_config` and `vendor_binding` differently, which is the condition the pass named as deciding it.
+  Decision 35 was ruled settled by this reading on 2026-09-06
+  (`adapters.md#whether-one-binding-type-or-two-names-an-external-systems-instance`); AD-35 is closed above.
 
 **The defects the pass noticed and left, placed.** The governance list stated three ways was X-16
 (`migration.md`, G1), closed by revision 31. The `unclaimed_step` checkpoint's subject was X-1, closed by
@@ -1146,14 +1155,23 @@ turns rows green one document at a time — the bootstrap set first, because not
 made through a PR that says so (`conformance.md#amending-a-foundation-document`), never a change to the
 row.
 
-## Open decisions this document opens
+## The decisions this document opened, and how each was ruled
 
-Two, registered in `conformance.md#the-register-of-open-design-decisions` in the same change, in the idiom
-the ruled decisions were opened in, and numbered from the register's next free number, which is why the
-bootstrap question and the lapsed-lease question carry 43 and 44 and not the numbers the register has
-since assigned to other questions.
+Two, registered in `conformance.md#the-register-of-open-design-decisions` in the change that opened them, in
+the idiom the ruled decisions were opened in, and numbered from the register's then next free number, which
+is why the bootstrap question and the lapsed-lease question carry 43 and 44 and not the numbers the register
+has since assigned to other questions. Both are ruled below — 44 whole, and 43 in one of its two halves — and
+the rows that waited on them are updated in the matrix above.
 
-### Open decision 43: what the bootstrap set is, and whether the operator's later governance writes are gated
+### What the bootstrap set is, and whether the operator's later governance writes are gated
+
+**Ruled in part (decision 43, 2026-09-06): the bootstrap set is closed and enumerated, and the list is the
+thirteen-record table in `#the-minimal-record-set-in-order`.** Registered in
+`conformance.md#the-register-of-open-design-decisions` as ruled in that half and open in the other. Every
+member of the set is written as the operator principal and read back (principle 2); a write to any of those
+thirteen kinds of record *after* the set exists is not provisioning, whoever makes it, and may not call
+itself so. **The second half — whether the operator's own governance write after bootstrap is gated or
+exempt — stays open**, and the register's row says so beside the ruled half.
 
 **The question.** `work_model.md` settles that the first workflow declaration is an operator act, out of
 band, and stops. A from-zero run has to write thirteen kinds of record before the first task can be
@@ -1184,11 +1202,58 @@ same shape as the agents' — which is a question about what the operator wants 
 later, and is theirs. The enumeration half has no second candidate: an unbounded set is the defect, so the
 only open part is what the list contains, and this document's bootstrap table is the proposal.
 
-**Until it is taken**, the suite treats the thirteen records of the bootstrap table as the set, writes
-them as the operator principal, reads each back, and holds both branches of the second half; a reader
+**Why the list, and why this list.** The enumeration half had no second candidate, as the question said
+when it was opened: an unbounded set is a side door with no boundary (principle 1; finding U-13), so the only
+open part was the list's contents, and the table above is the list the documents derive — each row marked by
+whether the documents settle it or the suite had to choose, each with the dependency that places it and the
+read-back that proves it. Ruling the set closed turns three of the table's marks from open to derived: step
+1, the registry, is the first member of the set and an operator act by membership; step 5, the first
+`action_policy`, is a member, and ruled decision 18's "by writing the policy themselves" describes the
+bootstrap write of it; step 6, the first agents, is a member for the same reason. `migration.md`'s leg one
+enumerates the same set for a populated instance, and the two enumerations were read side by side above
+(`#against-migrationmds-bootstrap-leg`) and agree on membership. The attribution mark on step 2 and the type
+gap on steps 3 and 8 are unchanged, since they are gaps and not this decision's.
+
+**What stays open, and why it is the operator's.** Once the set exists and the gate can hold, is the
+operator's write to `action_policy` an action of its class — held, and resolved by the operator, in the shape
+revision 36 gave the `operator_only` action, where the resolution is the decision and never the confirmation
+— or a standing exemption? The design's logic leans to gated: the rulings of revision 12 make governance
+writes actions, the no-side-door rule "is not conditioned on who created the task or why"
+(`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`), ruled decision 18
+makes the loosening a deliberate write with an author and a date, and the governance axis below already
+tests reserved × operator-initiated and reserved × self-initiated as one cell. What the logic does not settle
+is whether the operator wants his own governance writes readable in the same shape as the agents' — one
+self-approval per write for a solo operator, Clark-Wilson's one-interest ceremony — and that is a question
+about what he wants to read back later, which the question named as his when it was opened. It is ruled
+with decision 47 (the raiser resolving) or not at all, since a gated operator write is resolvable only if the
+operator may resolve a checkpoint he raised; and decision 56 (where the enforcement point for a governance
+write sits) is put beside it for the same reason.
+
+**Cost accepted, for the ruled half.** The thirteen records are the whole of provisioning: a fourteenth kind
+of record that must exist before the first task can be routed is a change to this table through a pull
+request, never an act that calls itself bootstrap. A populated instance's leg one (`migration.md`) carries two
+additions derived from what is live there, and those are the migration's, tested on its legacy fixture
+(MG-6), not members of the set.
+
+**What would reopen the ruled half.** A from-zero run that cannot route its first task with exactly these
+thirteen written — a missing member, added to the table by the change that finds it.
+
+**Until the open half is taken**, the suite treats the thirteen records of the bootstrap table as the set,
+writes them as the operator principal, reads each back, and holds both branches of the second half; a reader
 should assume neither branch and read the project's `action_policy`.
 
-### Open decision 44: whether a sign-off from a step owner whose lease has lapsed closes the step
+### Whether a sign-off from a step owner whose lease has lapsed closes the step
+
+**Ruled (decision 44, 2026-09-06): a sign-off carrying `signed` or a blocking verdict requires a held lease
+by its signer at the moment of the write.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. A sign-off written on a step whose lease the signer
+does not hold — lapsed, returned, or held by another runner — is refused at submission, an error and never
+swallowed, and the current lease holder's verdict is the one that can stand. The record cannot hold two
+verdicts from two runners on one step at one head. The operator principal's `waived` is the one sign-off
+written without a lease: it closes a step the operator does not own and never claimed, and it is already the
+one verdict a principal other than the step owner may write
+(`gates_and_workflows.md#declaration-batch-projection`), so its rule is its own and this one does not reach
+it.
 
 **The question.** A step is claimed with a lease and closed by its owner's sign-off, and the two are
 stated separately. Nothing says the second depends on the first. So a runner whose lease lapsed, and whose
@@ -1212,8 +1277,33 @@ head moved, and the pinning rule catches the head but not the runner.
 "two agents must not both take a task" — reads as the first; the sign-off rule's silence reads as the
 second.
 
-**Until it is taken**, a sign-off's validity does not depend on lease state, which is what the documents
-say by saying nothing, and the suite designs both branches (row U-24) and holds them.
+**Why the lease is load-bearing for the verdict.** The claim primitive's own rationale is the first
+reason: "two agents must not both take a task", and "an agent holds only if the persisted lease names its
+runner id" (`work_model.md#the-claim-and-the-lease-are-one-primitive`; principle 2, the read-back of the
+holder). A sign-off is the close of work held under a lease; a close from a lease not held is a close from
+nothing held, and a runner that was not holding the step was not its step owner at the write, whatever role
+it resolved to. `failure_posture.md#the-rules`, rule 4, already forbids this writer under another name: the
+step owner whose write failed does not replay its verdict later — "the work is re-claimed when the record
+returns … The verdict is re-derived then, not replayed" — because the artifact may have moved under it; a
+late sign-off from a lapsed lease is that replayed verdict arriving by another road, and the pinning rule
+catches the head but not the runner. Ruled decision 13 ties holding a step to a renewed lease. And principle
+11 supplies the reason this costs no new state: the lease is already the edge that says who is working, so
+making the verdict depend on it is a read at the write — is the signer's lease `held` on this step now — and
+not a field, a flag, or a process. The other branch would have left the lease as exclusion only, and let a
+runner the swarm believed dead write a verdict on work it read before the head moved.
+
+**Cost accepted.** An honest sign-off written a second after its lease expired is refused and its work
+re-derived by whoever claims next — the at-least-once cost the design already accepts for actions
+(`work_model.md#at-least-once-implies-effect-dedup`), and the cost the question named. A step owner that
+wants its sign-off to land renews its lease until the write returns, which is what every claimed step already
+does between claim and sign-off.
+
+**What would reopen it.** A step whose sign-off must be writable by a principal that cannot hold its lease.
+None is known: the operator's `waived` is the one such write, and it is excepted above by the rule that
+already governs it.
+
+**Matrix.** U-24 closes and the work-model axis's one missing cell fills: a late sign-off refused is a
+mechanical row, and two verdicts on one head from two runners is its failing artefact.
 
 ## Prior art
 

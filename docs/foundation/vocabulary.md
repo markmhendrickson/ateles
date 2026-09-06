@@ -9,7 +9,7 @@ cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 opera
 and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional [step](#step), and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14,
 16–18, 23–29: the hold verb, a condition a step holds on, the `dependency_cycle` reason class, the consent
 tolerance on `action_policy`, and an [artifact](#artifact) `PART_OF` its containing artifact), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the `intake rule` entry). Format
-follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives). Revised by the consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by role; `merge` as an action-class name retired for `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound as the task's `due_date` on the step entry; the `operator_only` step; a rule keying on a field a step wrote; no marker on a read for a special-category type; decision 55 on the [external-system](#external-system) entry). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a task status; the terminal set declared on the type; the `finding` and `sign_off` fields; `rounds_cap` and `none_permitted`).
+follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives). Revised by the consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by role; `merge` as an action-class name retired for `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound as the task's `due_date` on the step entry; the `operator_only` step; a rule keying on a field a step wrote; no marker on a read for a special-category type; decision 55 on the [external-system](#external-system) entry). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a task status; the terminal set declared on the type; the `finding` and `sign_off` fields; `rounds_cap` and `none_permitted`). Revised by the rulings pass of 2026-09-06 (revision 38: the [verdict](#verdict) as the [sign-off](#sign-off)'s reconciled [projection](#projection); a `signed` or blocking sign-off written under a held [lease](#lease); what owning confers; the counting rule and the thresholds' home on the [quorum](#quorum) and separation entries; an initiative as a task by class; the host as an external system; a budget as a grant's and a [delegation](#delegation)'s scope term).
 
 ## Purpose
 
@@ -164,8 +164,11 @@ claim).
 [batch](#batch), carrying `claimed_at` and `expires_at`, that lapses without cooperation from its holder.
 The [claim](#claim) and the lease are one primitive; renewal is the heartbeat; the task carries no lease fields.
 Its **lease holder** is the principal the persisted lease names, [read back](#read-back) from the lease and never
-from a task field; it is the only role the lease has, and it needs no term of its own.
-**See:** [`work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields`](work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields).
+from a task field; it is the only role the lease has, and it needs no term of its own. A held lease is also
+what makes a [sign-off](#sign-off) the current step owner's: a `signed` or blocking sign-off from a lease not
+held is refused at the write (decision 44).
+**See:** [`work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields`](work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields),
+[`conformance_suite.md#whether-a-sign-off-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`](conformance_suite.md#whether-a-sign-off-from-a-step-owner-whose-lease-has-lapsed-closes-the-step).
 **Never:** "claimant" (retired: say lease holder).
 **Not for:** "claim fields" for the lease (the task carries none); "lock" for a lease (a lock outlives its holder); "heartbeat" for the lease (the heartbeat
 renews the lease; it is not the lease); owner standing alone, for the lease holder or for anything else — the word carries five meanings
@@ -445,6 +448,11 @@ naming its step and carrying its reason — so a waived step is queryable as wai
 batch-level flag or as prose on an artifact.
 **Terminal, and never revised in place:** a later judgement is a new sign-off, and the latest per step
 owner per artifact head is the one that stands; the superseded one stays readable.
+**Under a held lease:** a sign-off carrying `signed` or a blocking verdict is written by a signer whose
+[lease](#lease) on the step is held at the write; one from a [lapsed](#lapsed) or [returned](#returned) lease, or from a [runner](#runner) that
+does not hold it, is refused at submission, and the current lease holder's stands. `waived` is the operator
+principal's and needs none (decision 44,
+[`conformance_suite.md#whether-a-sign-off-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`](conformance_suite.md#whether-a-sign-off-from-a-step-owner-whose-lease-has-lapsed-closes-the-step)).
 **Evidence:** a blocking verdict names the executed check and the output it produced, or the mechanism
 that executed it; unexecuted reasoning is a non-blocking [finding](#finding), never a block
 ([`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges)).
@@ -497,6 +505,10 @@ mapping onto them, never the record's vocabulary.
 [sign-off](#sign-off) carries, and a write whose verdict contradicts them — a blocking finding under a
 non-blocking verdict — is **rejected at submission**, never swallowed; the step stays open until the step
 owner re-submits.
+**Stored, as a projection:** the verdict is a field of the sign-off, kept as its own [projection](#projection)
+of its findings and its author and reconciled at the write by that refusal; under a derivation a sign-off with
+no finding would read `signed`, and silence is not a [claim](#claim) (decision 32,
+[`gates_and_workflows.md#whether-the-verdict-is-a-stored-field-or-a-read-over-the-findings-and-the-author`](gates_and_workflows.md#whether-the-verdict-is-a-stored-field-or-a-read-over-the-findings-and-the-author)).
 **Terminal:** a verdict is never revised in place. A [step owner](#step-owner) reaching a different judgement writes a new
 sign-off, and the latest per step owner per [artifact](#artifact) head stands.
 **Unconditional:** a verdict carries no [condition](#condition); a requirement that must hold later is a
@@ -622,10 +634,12 @@ destroy rather than for where they go.
 through an [adapter](#adapter).
 The record is inside that boundary, not across it: the swarm's own state lives there, so writing to it
 crosses nothing. This is the boundary every use of "outside" in these documents means, and it is stated
-once in the [action](#action)'s home section. Whether a second instance of the record's own software, owned by
-another party, is one is open decision 55.
+once in the [action](#action)'s home section. The host a [daemon](#daemon) runs on is one: its processes and checkouts
+are [artifacts](#artifact), and process control is its adapter's action classes (decision 45). Whether a second
+instance of the record's own software, owned by another party, is one is open decision 55.
 **See:** [`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`](gates_and_workflows.md#actions-are-entities-only-actions-are-taken),
 [`adapters.md#the-two-invariants`](adapters.md#the-two-invariants),
+[`adapters.md#whether-the-host-a-daemon-runs-on-is-an-external-system`](adapters.md#whether-the-host-a-daemon-runs-on-is-an-external-system),
 [`adapters.md#whether-a-second-instance-of-the-record-is-an-external-system`](adapters.md#whether-a-second-instance-of-the-record-is-an-external-system).
 **Never:** —
 **Not for:** "the Ateles system" or "the Neotoma system" as the thing an effect is outside of (there is one
@@ -976,8 +990,12 @@ or key crosses.
 ### grant
 **Definition:** an `agent_grant` holding the domain and scope a [principal](#principal) may act in, matched on its
 [credential](#credential), as operation × entity types × repositories with parameter constraints and an expiry.
-Zero grants is deny.
-**See:** [`authority_model.md#grants`](authority_model.md#grants).
+Zero grants is deny. A capability also names the tools a principal may invoke, and a harness's own allowlist is
+one enforcement of that (decision 42); a budget — a bound on a resource a capability may consume — is a term
+of its parameter constraints, narrowing down a [delegation](#delegation) chain (decision 53).
+**See:** [`authority_model.md#grants`](authority_model.md#grants),
+[`migration.md#where-a-skills-harness-mechanics-live`](migration.md#where-a-skills-harness-mechanics-live),
+[`authority_model.md#budget-is-a-scope-term-that-attenuates`](authority_model.md#budget-is-a-scope-term-that-attenuates).
 **Never:** —
 **Not for:** permissions for a grant (a capability is one row of a grant); "allowlist" for a grant (one
 enforcement of it).
@@ -998,7 +1016,11 @@ enforcement of it).
 ### ownership
 **Definition:** named accountability for a [workflow](#workflow), domain, queue, or configuration entity, carried as an
 `ownership_grant` [edge](#edge) to a [principal](#principal).
-**See:** [`authority_model.md#principals`](authority_model.md#principals).
+Owning confers the required seat — the accountable principal is asked on any [checkpoint](#checkpoint) whose
+subject concerns the object — and nothing else; exclusivity in a domain is [grant](#grant) configuration
+(decision 46).
+**See:** [`authority_model.md#principals`](authority_model.md#principals),
+[`authority_model.md#what-owning-confers-the-required-seat`](authority_model.md#what-owning-confers-the-required-seat).
 **Never:** —
 **Not for:** owner alone for the accountable principal.
 
@@ -1027,6 +1049,9 @@ A timeout is a terminal state that never continues.
 
 ### quorum
 **Definition:** a structural check requiring m-of-n named [principals](#principal) on one [checkpoint](#checkpoint).
+Read over the checkpoint's `AWAITS` and `RESOLVED_BY` [edges](#edge), an [agent](#agent) counting as its bound
+principal (decisions 48 and 49); the count is the class's `quorum` on the `action_policy`, and every awaited
+principal where none is set (decision 50).
 **See:** [`authority_model.md#structural-checks-quorum-and-separation-of-duties`](authority_model.md#structural-checks-quorum-and-separation-of-duties).
 **Never:** —
 **Not for:** "required reviewers" for a quorum (1-of-n is not a quorum); sign-off for a quorum.
@@ -1034,15 +1059,21 @@ A timeout is a terminal state that never continues.
 ### separation of duties
 **Definition:** a structural check requiring disjointness between the roles on one [checkpoint](#checkpoint), such as
 raiser and resolver or proposer and approver.
+Read as disjointness over the checkpoint's principal [edges](#edge), an [agent](#agent) counting as its bound
+[principal](#principal) (decisions 48 and 49); the pairs a class requires are its `disjoint_roles[]` on the
+`action_policy` (decision 50).
 **See:** [`authority_model.md#structural-checks-quorum-and-separation-of-duties`](authority_model.md#structural-checks-quorum-and-separation-of-duties).
 **Never:** —
 **Not for:** "four eyes" for the check, unqualified; sign-off for the check.
 
 ### initiative
-**Definition:** a proposed change to what the organization pursues.
-**See:** [`authority_model.md#initiative-proposal-reprioritization`](authority_model.md#initiative-proposal-reprioritization).
+**Definition:** a proposed change to what the organization pursues, entering [intake](#intake) as a [task](#task) by
+class; its acceptance is the resolution of the [checkpoint](#checkpoint) on the [action](#action) it implies,
+and it has no entity type of its own (decision 51).
+**See:** [`authority_model.md#initiative-proposal-reprioritization`](authority_model.md#initiative-proposal-reprioritization),
+[`authority_model.md#initiative-approval-is-the-checkpoint`](authority_model.md#initiative-approval-is-the-checkpoint).
 **Never:** —
-**Not for:** project or "epic" for an initiative.
+**Not for:** project or "epic" for an initiative; an entity type for an initiative (it is a task by class).
 
 ### proposal
 **Definition:** the ask that an initiative be accepted, made under proposal rights that are distinct from
