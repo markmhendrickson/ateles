@@ -16,6 +16,8 @@ on:
       - "execution/daemons/phoenicurus-release/**"
       - "execution/daemons/monedula/**"
       - "execution/daemons/anthus/**"
+      - "execution/daemons/nyctea/**"
+      - "lib/neotoma_concurrency.py"
       - "execution/mcp/**"
       - "lib/daemon_runtime/**"
       - "lib/approval/**"
@@ -74,6 +76,11 @@ jobs:
       # ship a same-named top-level module today.
       - name: Run anthus daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/anthus/ -q
+      # ateles#635 (qa lens): Nyctea watchdog suite (22 tests in test_nyctea.py,
+      # including lib/neotoma_concurrency coverage) was committed but collected
+      # by no lane — same gap pattern as anthus (#584 / PR #596).
+      - name: Run nyctea daemon tests
+        run: uv run --extra dev python -m pytest execution/daemons/nyctea/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
       - name: Run transcript clarity lib tests
