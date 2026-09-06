@@ -9,7 +9,7 @@ cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 opera
 and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional [step](#step), and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14,
 16–18, 23–29: the hold verb, a condition a step holds on, the `dependency_cycle` reason class, the consent
 tolerance on `action_policy`, and an [artifact](#artifact) `PART_OF` its containing artifact), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the `intake rule` entry). Format
-follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives). Revised by the consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by role; `merge` as an action-class name retired for `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound as the task's `due_date` on the step entry; the `operator_only` step; a rule keying on a field a step wrote; no marker on a read for a special-category type; decision 55 on the [external-system](#external-system) entry). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a task status; the terminal set declared on the type; the `finding` and `sign_off` fields; `rounds_cap` and `none_permitted`). Revised by the rulings pass of 2026-09-06 (revision 38: the [verdict](#verdict) as the [sign-off](#sign-off)'s reconciled [projection](#projection); a `signed` or blocking sign-off written under a held [lease](#lease); what owning confers; the counting rule and the thresholds' home on the [quorum](#quorum) and separation entries; an initiative as a task by class; the host as an external system; a budget as a grant's and a [delegation](#delegation)'s scope term).
+follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives). Revised by the consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by role; `merge` as an action-class name retired for `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound as the task's `due_date` on the step entry; the `operator_only` step; a rule keying on a field a step wrote; no marker on a read for a special-category type; decision 55 on the [external-system](#external-system) entry). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a task status; the terminal set declared on the type; the `finding` and `sign_off` fields; `rounds_cap` and `none_permitted`). Revised by the rulings pass of 2026-09-06 (revision 38: the [verdict](#verdict) as the [sign-off](#sign-off)'s reconciled [projection](#projection); a `signed` or blocking sign-off written under a held [lease](#lease); what owning confers; the counting rule and the thresholds' home on the [quorum](#quorum) and separation entries; an initiative as a task by class; the host as an external system; a budget as a grant's and a [delegation](#delegation)'s scope term). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser never the resolver save the operator's marked self-resolution, on the [approval](#approval) entry; the right to propose as a grant capability and what stops as a task, on the proposal and [reprioritization](#reprioritization) entries; metered resources and the engine's sole governance grant, on the [grant](#grant) entry; a rule naming a work-model type refused at the write).
 
 ## Purpose
 
@@ -316,7 +316,7 @@ occurrence that passed closes its instance and creates the next).
 named change kind, matching a predicate over its fields and over its provenance — is work: the rule's
 evaluator, a [daemon](#daemon), writes one [task](#task) per matching change, entering [intake](#intake),
 with provenance naming the rule and the change, and nothing else.
-A rule keys on no record of the work model (open decision 36) but may key on a field a [step](#step) wrote on
+A rule keys on no record of the work model (decision 36; one naming a work-model type is refused at the write) but may key on a field a [step](#step) wrote on
 a type it may name — a classification recorded on an [artifact](#artifact) — with the writer in its provenance
 predicate; it opens no [batch](#batch), names no
 [workflow](#workflow), and takes no [action](#action); writing one is a governance write, reserved to the
@@ -992,8 +992,12 @@ or key crosses.
 [credential](#credential), as operation × entity types × repositories with parameter constraints and an expiry.
 Zero grants is deny. A capability also names the tools a principal may invoke, and a harness's own allowlist is
 one enforcement of that (decision 42); a budget — a bound on a resource a capability may consume — is a term
-of its parameter constraints, narrowing down a [delegation](#delegation) chain (decision 53).
+of its parameter constraints, narrowing down a [delegation](#delegation) chain, and which resources a class's
+[actions](#action) are counted in is the `action_policy`'s `metered_resources[]`, none until written (decision 53). The
+write capability on a governance type is held by the engine alone, and every other principal's write to one
+is refused at admission (decision 56).
 **See:** [`authority_model.md#grants`](authority_model.md#grants),
+[`gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits`](gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits),
 [`migration.md#where-a-skills-harness-mechanics-live`](migration.md#where-a-skills-harness-mechanics-live),
 [`authority_model.md#budget-is-a-scope-term-that-attenuates`](authority_model.md#budget-is-a-scope-term-that-attenuates).
 **Never:** —
@@ -1042,10 +1046,13 @@ gives the path from a [principal](#principal) through each delegation hop to the
 ### approval
 **Definition:** an explicit yes, no, or veto by a required [principal](#principal) on a [checkpoint](#checkpoint), ending in a terminal
 state.
-A timeout is a terminal state that never continues.
-**See:** [`authority_model.md#approval`](authority_model.md#approval).
+A timeout is a terminal state that never continues. The principal that raised a checkpoint does not
+resolve it; the one exception is the [operator](#operator) resolving a checkpoint the operator raised, admitted
+with the `self_resolved` mark and refused without it (decision 47).
+**See:** [`authority_model.md#approval`](authority_model.md#approval),
+[`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`](authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked).
 **Never:** "silent continuation".
-**Not for:** resolved without who; sign-off for an approval (that closes a step).
+**Not for:** resolved without who; sign-off for an approval (that closes a step); an unmarked self-resolution.
 
 ### quorum
 **Definition:** a structural check requiring m-of-n named [principals](#principal) on one [checkpoint](#checkpoint).
@@ -1078,14 +1085,21 @@ and it has no entity type of its own (decision 51).
 ### proposal
 **Definition:** the ask that an initiative be accepted, made under proposal rights that are distinct from
 execution rights.
-**See:** [`authority_model.md#initiative-proposal-reprioritization`](authority_model.md#initiative-proposal-reprioritization).
+The right is a capability of a [grant](#grant) — creating a [task](#task) of the initiative class — and is
+default-deny (decision 52).
+**See:** [`authority_model.md#initiative-proposal-reprioritization`](authority_model.md#initiative-proposal-reprioritization),
+[`authority_model.md#what-stops-is-a-task-the-owner-seat-confirms-it-through-the-checkpoint-and-proposing-is-a-grant-capability`](authority_model.md#what-stops-is-a-task-the-owner-seat-confirms-it-through-the-checkpoint-and-proposing-is-a-grant-capability).
 **Never:** —
 **Not for:** PR or RFC alone for a proposal.
 
 ### reprioritization
 **Definition:** the explicit "what stops?" recorded when an initiative is accepted, confirmed by a
 [principal](#principal).
-**See:** [`authority_model.md#initiative-proposal-reprioritization`](authority_model.md#initiative-proposal-reprioritization).
+What stops is a [task](#task) — a [batch](#batch) closing naming no [successor](#successor), or a `priority` correction — and
+the confirmation is the resolution of the [checkpoint](#checkpoint) whose subject concerns it, by the stopped
+task's owner seat or the [operator](#operator), with the stop [read back](#read-back) (decision 52).
+**See:** [`authority_model.md#initiative-proposal-reprioritization`](authority_model.md#initiative-proposal-reprioritization),
+[`authority_model.md#what-stops-is-a-task-the-owner-seat-confirms-it-through-the-checkpoint-and-proposing-is-a-grant-capability`](authority_model.md#what-stops-is-a-task-the-owner-seat-confirms-it-through-the-checkpoint-and-proposing-is-a-grant-capability).
 **Never:** "priority bump", "re-plan".
 **Not for:** —
 

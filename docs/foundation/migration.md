@@ -19,7 +19,7 @@ a read-only inventory of the production record taken 2026-09-05 through the Neot
 `status.md`), the operator's 2026-09-05 direction that the plan also cover the migration of skills into the swarm, the skill
 inventory at both harness roots read the same day and the recurring-work extraction over it (both in `status.md`,
 revision 32), and the two renderers' stated contracts (`render_agent_docs.py`, `sync_skills.py`). The bootstrap sequence this document orders against is the
-conformance suite's (`conformance_suite.md`); where the two disagree, this document says so. Revised by the simplification pass of 2026-09-05 (revision 29: gap G14 closed; `workflow policy` retired). Revised by the memo-gap pass of 2026-09-06 (revision 31: gaps G1 and G12 closed). Revised 2026-09-06 (revision 32: the skills leg — five classes of skill, the mapping of each to its target, stage 11, gaps G28–G31, and open decision 42). Revised by the testability pass of 2026-09-06 (revision 37: gaps G6, G7, G8, G11, G13, and G15 closed). Revised by the rulings pass of 2026-09-06 (revision 38: decisions 31 and 42 ruled — the merge form for a re-type, and a skill's harness mechanics split among the grant, a `vendor_binding`, and the harness's own configuration; gap G19 closed).
+conformance suite's (`conformance_suite.md`); where the two disagree, this document says so. Revised by the simplification pass of 2026-09-05 (revision 29: gap G14 closed; `workflow policy` retired). Revised by the memo-gap pass of 2026-09-06 (revision 31: gaps G1 and G12 closed). Revised 2026-09-06 (revision 32: the skills leg — five classes of skill, the mapping of each to its target, stage 11, gaps G28–G31, and open decision 42). Revised by the testability pass of 2026-09-06 (revision 37: gaps G6, G7, G8, G11, G13, and G15 closed). Revised by the rulings pass of 2026-09-06 (revision 38: decisions 31 and 42 ruled — the merge form for a re-type, and a skill's harness mechanics split among the grant, a `vendor_binding`, and the harness's own configuration; gap G19 closed). Revised by the second rulings pass of 2026-09-06 (revision 39: leg one grants the governance types to the engine alone, decision 56).
 
 ## Purpose
 
@@ -527,7 +527,9 @@ principal; the first `action_policy` for the project, which must list the classe
 writes carry — a registration, a re-typing merge, a bulk correction, a grant widening, a declaration —
 because without a value each is the unclassified case and resolves to `NEVER`, and the leg-two agent could
 take nothing; the `intake` declaration and the declaration of the migration's own workflow; the roster
-binding for the roles those two declarations name; and the grants those roles need to write the new types.
+binding for the roles those two declarations name; and the grants those roles need to write the new types —
+under decision 56 the sole grant over the governance types goes to the engine, and the roles' grants admit the
+ordinary types their steps write (`gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits`).
 Every write in this leg is enumerated in stage 1 and 2 below, carries an idempotency key built from the
 source's own stable identity, and is read back. It is an operator act because it cannot be anything else,
 and it is kept to this list because every write that could have gone through the gate and did not is a

@@ -7,7 +7,7 @@ undecided question **open** with its options, never resolving one to make the do
 section as decision; the swarm-spec section as proposal), synthesis `ent_b0ce322f768e4fc676b73139` (PR-20
 to PR-28, PR-34 to PR-38, C8, C9, C10, C13, C14, C17), prior art `ent_08460968e6f49dac21510f4a` (Track 2),
 the P4 brief `ent_683200acfb3ff5f03add966c`, `docs/multi_tenant.md`, and PR #745 operator review
-(2026-09-04). What is built, and where the substrate fails open, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 41 ruled here — write admission per entity type is default-deny, and the grant is the allowlist). Revised by the workflow-format pass of 2026-09-06 (revision 34: a required approver may be named by ownership of an entity the checkpoint's subject concerns). Revised by the consistency pass of 2026-09-06 (revision 35: the brief's Q1–Q8 and the raiser question registered as decisions 46 to 54; C13 marked settled by C9 and decision 37). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a resolution on an `operator_only` action is the operator's decision and never the confirmation; the shared-instance approver cites decision 55). Revised by the testability pass of 2026-09-06 (revision 37: a parameter constraint on a write capability as a field allowlist — the mechanical half of minimization at capture; `AWAITS` resolves a role to principals). Revised by the rulings pass of 2026-09-06 (revision 38: decisions 46, 48, 49, 51, and 54 ruled here, and 50 and 53 in one half each — what owning confers; the counting rule; structural checks as reads over the checkpoint's principal edges, with the thresholds' home on the `action_policy`; initiative approval as the checkpoint; budget as an attenuating scope term; credit as a read model).
+(2026-09-04). What is built, and where the substrate fails open, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 41 ruled here — write admission per entity type is default-deny, and the grant is the allowlist). Revised by the workflow-format pass of 2026-09-06 (revision 34: a required approver may be named by ownership of an entity the checkpoint's subject concerns). Revised by the consistency pass of 2026-09-06 (revision 35: the brief's Q1–Q8 and the raiser question registered as decisions 46 to 54; C13 marked settled by C9 and decision 37). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a resolution on an `operator_only` action is the operator's decision and never the confirmation; the shared-instance approver cites decision 55). Revised by the testability pass of 2026-09-06 (revision 37: a parameter constraint on a write capability as a field allowlist — the mechanical half of minimization at capture; `AWAITS` resolves a role to principals). Revised by the rulings pass of 2026-09-06 (revision 38: decisions 46, 48, 49, 51, and 54 ruled here, and 50 and 53 in one half each — what owning confers; the counting rule; structural checks as reads over the checkpoint's principal edges, with the thresholds' home on the `action_policy`; initiative approval as the checkpoint; budget as an attenuating scope term; credit as a read model). Revised by the second rulings pass of 2026-09-06 (revision 39: decisions 47 and 52 ruled here, and the second halves of 50 and 53 — the raiser does not resolve, the operator's self-resolution marked; what stops is a task, confirmed through the checkpoint by the owner seat, proposing a grant capability; which checks and which metered resources are `action_policy` values, fail-closed where unwritten).
 
 ## Purpose
 
@@ -291,10 +291,43 @@ the swarm may not reach; `approved` records that decision, and what confirms the
 the operator's report written as one (`gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`). Principle 2 holds for the operator as for
 any principal.
 
-**Open (decision 47).** Registered in `conformance.md#the-register-of-open-design-decisions`. Whether the raiser of a checkpoint may resolve it
-(the minimal separation of duties; prior art and brief Q2 and Q3 recommend forbidding it, and it applies
-at one operator between an agent and its human — and to the operator approving their own governance
-write, which decision 43 names as bearing on it).
+### The raiser of a checkpoint does not resolve it, and the operator's self-resolution is marked
+
+**Ruled (decision 47, 2026-09-06, with 43): the principal that raised a checkpoint may not resolve it, with
+one exception — the operator may resolve a checkpoint the operator raised, and the resolution is marked
+self-resolved on the record.** Registered as ruled in `conformance.md#the-register-of-open-design-decisions`.
+A resolution is authorized against `AWAITS` and refused where the resolver, under the counting rule
+(`#the-counting-rule-an-agent-counts-as-its-bound-principal`), is the principal `RAISED_BY` names — an agent
+bound to the operator raising a checkpoint the operator resolves is the operator resolving its own. The
+operator's resolution of the operator's own checkpoint is admitted only where it carries the `self_resolved`
+mark (`data_model.md#concepts`); a self-resolution written without the mark is refused, as every other
+principal's is refused with or without one.
+
+**Why.** Fail closed (principle 5): `gates_and_workflows.md#the-checkpoint` already makes the raiser and
+the resolver distinct roles on the object, and the payment's disjoint payer and verifier (AU-18) is the same
+check ruled for one class; the general rule is the one those two already are, and the prior art under
+`#prior-art` — prevent-self-review, dynamic separation of duty — is the smallest structural check for the
+same reason. The exception follows from decision 43 rather than softening it: the operator's own governance
+write after bootstrap is gated
+(`conformance_suite.md#what-the-bootstrap-set-is-and-whether-the-operators-later-governance-writes-are-gated`),
+so the operator raises checkpoints only the operator can resolve, and a rule with no exception would deadlock
+a solo operator on every change to the swarm. Clark-Wilson's caveat, named under prior art since this
+document's first revision, says why the exception is marked and not silent: one interest cannot be separated
+from itself, so the check is recorded as unsatisfied rather than pretended — a marked self-resolution is
+inspectable, a reader counting the operator's self-approvals reads the mark, and an unmarked one would be the
+side door 43 closes, reopened at the resolution. The mark is the resolver's own assertion at the write,
+reconciled against `RAISED_BY` and `RESOLVED_BY` by the refusal, in the shape decision 32 gave the `verdict`:
+not derived state a process keeps true, but a claim the record checks once, at the write.
+
+**Cost accepted.** For a solo operator the check is ceremony on the operator's own writes, made readable
+rather than blocking; every self-resolution is one more row a reader can count, which is the cost 43 accepted
+and the reason it is countable.
+
+**What would reopen it.** A second principal who must self-resolve — an owner seat that is the only awaited
+principal on a checkpoint it raised, and nobody else who could be — which would argue for the exception per
+seat rather than per operator, and would first have to say why `AWAITS` named nobody else.
+
+**Matrix.** AU-17 is mechanical; decision 43's governance cell reads the mark (`conformance_suite.md`).
 
 **C13, settled by rulings made since it was opened.** The question was which entities carry the routing
 table: `swarm_roster` with `channel_config` (`multi_tenant.md`), or `operator` with `team` (the swarm-spec
@@ -323,8 +356,7 @@ questions here are decisions 48, 49, and 50, each registered in
 counting rule (an agent counts as its bound principal for quorum and separation of duties, or as itself, or
 as itself for attribution only); **Q2, decision 49** — whether structural checks are count and disjointness
 over the one approval object above or a second mechanism; **Q3, decision 50** — which checks at a dozen
-principals, and the threshold's home (Safe's shape: on the governed object). 48 and 49 are ruled below, and 50
-in one of its two halves.
+principals, and the threshold's home (Safe's shape: on the governed object). 48, 49, and 50 are ruled below.
 
 ### The counting rule: an agent counts as its bound principal
 
@@ -373,13 +405,13 @@ who never resolved and were never awaited — which would first have to say what
 
 ### The threshold's home is the `action_policy`, per class
 
-**Ruled in part (decision 50, the brief's Q3, 2026-09-06): the thresholds a structural check reads live on
-the `action_policy`, per action class, beside `confidence_threshold` and `consent_tolerance` — `quorum`, the
+**Ruled (decision 50, the brief's Q3, 2026-09-06): the thresholds a structural check reads live on the
+`action_policy`, per action class, beside `confidence_threshold` and `consent_tolerance` — `quorum`, the
 count of awaited principals whose resolution the class needs, and `disjoint_roles[]`, the role pairs on one
 checkpoint that must resolve to distinct principals; absent a value the check is the fail-closed one, every
-awaited principal and every named pair.** Registered in `conformance.md#the-register-of-open-design-decisions`
-as ruled in that half and open in the other. **Which checks apply — an m-of-n on which classes, which role
-pairs beyond the payment's payer and verifier — stays open**, and is the operator's.
+awaited principal and every named pair; and which checks apply to which classes is a value of those two
+fields, policy data and not a rule of the design.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`.
 
 **Why the policy.** Ruled decision 28 gave the shape: a per-class policy value with a fail-closed default,
 written by the operator, and the strictest reading where absent. Principle 9 sends the tuple's `conditions`
@@ -389,22 +421,29 @@ the governed object — Safe's shape, which the brief named — would be a secon
 name an m-of-n. The payment workflow's disjoint payer and verifier (AU-18) is one value of `disjoint_roles[]`
 already ruled for one class, and this ruling gives it the field it was always a value of.
 
-**What stays open, and why it is the operator's.** How many interests a dozen principals should require on
-which classes, and which roles must never coincide beyond the pair the payment names, are organizational
-values — a judgement about how much of its own friction the organization wants — and the design's job is to
-make them expressible and enforceable, as
+**Why the values are policy data, and why that closes the question.** How many interests a dozen
+principals should require on which classes, and which roles must never coincide beyond the pair the payment
+names, are organizational values — a judgement about how much of its own friction an organization wants — and
+the design's job is to make them expressible and enforceable, as
 `work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other` says of the reserved
-classes, not to make them.
+classes, not to make them. So the design rules the shape and the default and no number. The default is ruled
+decision 18's `NEVER`-until-written, extended from a class's permission to a check's parameters: until a class
+carries a value it requires every awaited principal and every named pair, the strictest reading and the one an
+unmeasured project should be in; and every value is a governance write to the `action_policy` with an author
+and a date, class by class, the way every other value on that policy is set. A question whose whole residue is
+a policy value is not an open decision — the register would otherwise hold a row for every number an operator
+has yet to write, and it holds none for `confidence_threshold` or `consent_tolerance` — which is why the row
+closes without a number being supplied.
 
-**Cost accepted, for the ruled half.** The policy grows two per-class fields; an organization of a dozen
+**Cost accepted.** The policy grows two per-class fields; an organization of a dozen
 principals writes its thresholds or runs under the fail-closed default, which asks everyone.
 
-**What would reopen the ruled half.** A threshold that varies per object within one class — one repository
+**What would reopen it.** A threshold that varies per object within one class — one repository
 needing two approvers and another one — which would argue for the value on the object after all, and would
 have to say why the class was the wrong grain.
 
-**Matrix.** AU-19 is mechanical for 48, 49, and the home, and pending for the checks
-(`conformance_suite.md`).
+**Matrix.** AU-19 is mechanical for 48, 49, and 50; which checks a class carries is read from the
+`action_policy` under test, and the fail-closed default is the row's second case (`conformance_suite.md`).
 
 ## Initiative, proposal, reprioritization
 
@@ -419,10 +458,11 @@ questions here are decisions 51 to 54, each registered in
 `conformance.md#the-register-of-open-design-decisions` with the brief's options: **Q4, decision 51** — one
 approval object or two; **Q5, decision 52** — the unit that stops, who confirms it, who may propose; **Q6,
 decision 53** — budget as a scope term that attenuates or as a blast tier, and over which resources; **Q8,
-decision 54** — credit as a stored object or a read model. 51 and 54 are ruled below, 53 in one of its two
-halves; 52 stays open, since what displaces what, who has standing to propose, and whether an initiative may
-stop another principal's work are organizational values the operator holds, and the README's "what stops?
-confirmed by a principal" was his own decision.
+decision 54** — credit as a stored object or a read model. 51 to 54 are ruled below. 52 was held as the
+operator's — what displaces what, who has standing to propose, and whether an initiative may stop another
+principal's work read as organizational values — until each of its three parts was found to follow from a
+ruling already made (51, 46, and 41), and its section says how; the README's "what stops? confirmed by a
+principal" is kept as the operator's decision and given its mechanism.
 
 ### Initiative approval is the checkpoint
 
@@ -445,10 +485,10 @@ change to the swarm a task whose writes are actions — an initiative is that ru
 What the README decided — that initiative, proposal, and approval are first-class objects — is satisfied by
 entities the record already has: the task that carries the initiative, with its text, its priority, and its
 `REFERS_TO` edges; the checkpoint that carries its acceptance, with whom it awaited and who resolved it;
-and, for the "what stops", the writes decision 52 will name. The order of first moves above names "the
+and, for the "what stops", the writes decision 52 names. The order of first moves above names "the
 initiative, proposal, and reprioritization types"; under this ruling the entity-model delta those words
 anticipated is nil for the approval object, and the first move is the task class and the checkpoint the
-design has, with decision 52's residue still to rule. That reading of a decided sentence is recorded here
+design has, and decision 52 rules what stops. That reading of a decided sentence is recorded here
 rather than made silently.
 
 **Cost accepted.** "Initiative" is a class of task and a vocabulary entry, not an entity type; a reader who
@@ -458,15 +498,59 @@ wants every initiative reads tasks by class and checkpoints by subject, not a ta
 to what is pursued that changes no priority and writes no governance type — which would be a change the
 record cannot see, and the question would be what it changed.
 
+### What stops is a task, the owner seat confirms it through the checkpoint, and proposing is a grant capability
+
+**Ruled (decision 52, the brief's Q5, 2026-09-06): the unit that stops when an initiative is accepted is a
+task; what confirms it stopped is the owner seat on the stopped task, or the operator, through the checkpoint
+whose resolution is the confirmation, with the stop read back; and who may propose an initiative is a
+capability of a grant.** Registered as ruled in `conformance.md#the-register-of-open-design-decisions`.
+
+**What stops.** An initiative is a task (`#initiative-approval-is-the-checkpoint`), so what it displaces is a
+task, and there is no stop primitive beside the ones a task already has (principle 6): a batch closing naming
+no successor where its declaration permits that end, or otherwise a correction to the task's `priority` — its
+own field (`data_model.md#concepts`) — each an observation the initiative task `REFERS_TO`. "Stopped by
+initiative X" is a read over those edges and never a status: a stopped or reopened status would be a second
+held state (principle 11) and the lifecycle `work_model.md#there-is-no-task-lifecycle-there-are-batches` has
+none of.
+
+**Who confirms.** The initiative task `REFERS_TO` each task it would stop, so the checkpoint on the action it
+implies concerns those tasks, and the principal an `ownership_grant` names on each is a required approver on
+that checkpoint by decision 46 (`#what-owning-confers-the-required-seat`) — the seat is asked precisely
+because the object it owns is what the decision concerns — and the operator is that seat where nobody else
+holds it. The resolution is the confirmation: the README's "what stops? confirmed by a principal" is a
+resolver recorded on a checkpoint whose subject names the stops, and nothing else records it. What the
+resolution confirms is a decision; the stop is then made and read back (principle 2) — the closing sign-off
+or the priority correction retrieved and asserted before the initiative's own batch proceeds — so a stop
+asserted and not read back is not a stop, in the shape revision 36 gave the `operator_only` action
+(`#approval`).
+
+**Who may propose.** Creating a task of the initiative class is a capability — a parameter constraint on the
+write capability for `task`, naming the class (`data_model.md#concepts`, `param_constraints`) — and it is
+default-deny under decision 41 (`#grants`): a principal proposes only where a grant names it, and the grant is
+widened by a governance write like every other. Proposal rights are distinct from execution rights because
+they are distinct capabilities, and no second rights model is built.
+
+**Why.** Each of the three follows from a ruling already made rather than from a value the operator holds:
+51 makes the initiative a task, so the unit is a task's; 46 makes the owner the required seat on a decision
+about its object, so the confirming principal is the one the design already asks; 41 makes every right a
+grant, so standing to propose is a capability and not a role. What the question framed as organizational
+values is answered by the seat: an initiative stops another principal's work only where that principal's seat
+resolves the checkpoint that names the stop, and displacement is a priority correction that seat approved.
+
+**Cost accepted.** No new type; one read-back per stop before the initiative's batch proceeds; a grant per
+principal who may propose.
+
+**What would reopen it.** A stop that is neither the end of a task's chain nor a priority correction — a
+change to what is pursued that no task carries — which would first reopen 51.
+
 ### Budget is a scope term that attenuates
 
-**Ruled in part (decision 53, the brief's Q6, 2026-09-06): a budget is a scope term — a parameter
-constraint on a capability, or a term of a delegation's `scope` — that attenuates down the chain, a
-delegate's budget a subset of its delegator's; consumption against it is a derived read over confirmed
-actions and never a maintained balance.** Registered in `conformance.md#the-register-of-open-design-decisions`
-as ruled in that half and open in the other. **Which resources are budgeted stays open**, and is the
-operator's: money per class is already in reach through the payment classes; compute, tokens, and tasks per
-window are not in the design, and admitting any of them as a resource is his to want.
+**Ruled (decision 53, the brief's Q6, 2026-09-06): a budget is a scope term — a parameter constraint on a
+capability, or a term of a delegation's `scope` — that attenuates down the chain, a delegate's budget a
+subset of its delegator's; consumption against it is a derived read over confirmed actions and never a
+maintained balance; and which resources are metered is a value of the `action_policy`, per action class —
+`metered_resources[]` — with none metered until the operator writes one.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`.
 
 **Why a scope term.** Delegation attenuates — restrictions only added, enforced by reading the chain
 (`#delegation`) — and a budget is the canonical attenuating caveat (macaroons): "no more than *n* of *x*" is
@@ -478,10 +562,24 @@ reserved posture a resolution and not a fourth tier
 balance is an observation, never a held ledger, and what has been spent against a budget is read from the
 actions confirmed under it, so nothing decrements and nothing needs a process to stay true.
 
-**Cost accepted, for the ruled half.** `param_constraints` and `delegation_edge.scope` gain a budget shape
-(`data_model.md#concepts`); a check at the gate reads confirmed actions to answer it.
+**Why the resources are policy data, and why the default runs the other way from the tier's.** Money per
+class is in reach through the payment classes; compute, tokens, and tasks per window are resources the design
+can bound only where their consumption is read from confirmed actions, and whether a class's actions are
+counted in one of them is a fact about the class the operator sets, as `consent_tolerance` and `quorum` are
+set — a governance write with an author and a date, not a rule of the design, which is why the row closes
+without a resource being named. The default is fail-closed on the **limit** and not on the **permission**,
+and the asymmetry is the right one: an unmetered class is still gated — its every action is evaluated at the
+action gate under its tier, and a reserved class resolves to `NEVER` whether or not anything meters it — so
+leaving a resource unmetered loosens nothing; whereas a metered class whose budget term is written on no grant
+has a limit of nothing, and a capability carrying a budget of nothing is `NEVER` for that class until a term
+is written (`#grants`; ruled decision 18). Metering is the read a check needs, the permission is the gate's,
+and neither stands in for the other.
 
-**What would reopen the ruled half.** A resource whose consumption cannot be read from confirmed actions —
+**Cost accepted.** `param_constraints` and `delegation_edge.scope` gain a budget shape, and the
+`action_policy` a per-class list of what is metered (`data_model.md#concepts`); a check at the gate reads
+confirmed actions to answer it.
+
+**What would reopen it.** A resource whose consumption cannot be read from confirmed actions —
 one spent outside any action — which would be a resource the design cannot bound, and the question would be
 why it is spent off the record.
 
@@ -503,8 +601,8 @@ true by a process, or wrong.
 **What would reopen it.** A credit that is not a function of attribution — one assigned by a principal's
 judgement rather than read from who did what — which would be a decision, and would enter the record as one.
 
-**Matrix.** AU-20 is mechanical for 51, 53's shape, and 54, and pending for 52 and 53's resources; DM-19
-protects 54 (no `credit` type) as it protects 51 (no second approval type).
+**Matrix.** AU-20 is mechanical for 51, 52, 53, and 54; DM-19 protects 54 (no `credit` type) as it
+protects 51 (no second approval type).
 
 ## Contradictions this document settles
 

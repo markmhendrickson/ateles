@@ -10,7 +10,7 @@ checkpoint), `authority_model.md` (credential custody by revocability; separatio
 `workflows.md` (the payment workflow's five steps and its two disjoint roles), `failure_posture.md`
 (recovery per action class; the rules on read-back, unknown, and bounded deferral), and the published API
 surfaces of bank-transfer and crypto rails, read 2026-09-05, and PR #745 operator review (2026-09-05,
-rulings 13–14, 16–18, 23–29: decisions 27, 28, and 29 ruled here). What is built is `status.md`. Revised by the second workflow-format pass of 2026-09-06 (revision 36: a purchase or a booking with a merchant is out of scope here, being an effect on the merchant's system and not on a rail).
+rulings 13–14, 16–18, 23–29: decisions 27, 28, and 29 ruled here). What is built is `status.md`. Revised by the second workflow-format pass of 2026-09-06 (revision 36: a purchase or a booking with a merchant is out of scope here, being an effect on the merchant's system and not on a rail). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser-resolves and quorum pointers cite decisions 47 and 50 as ruled).
 
 ## Purpose
 
@@ -603,7 +603,9 @@ silently from both the record and the rail.
 The general adapter rules are `adapters.md`'s and are cited here, not restated. The payment workflow's step
 list, its two disjoint roles, and its stages are `workflows.md#payment`'s. The gate's decision function and
 the checkpoint's protocol are `gates_and_workflows.md`'s. Whether the raiser of a checkpoint may resolve it,
-and what quorum a payment might require, are `authority_model.md`'s open questions and bear directly here.
+and what quorum a payment might require, are `authority_model.md`'s, ruled 2026-09-06 and bearing directly here:
+the raiser does not resolve, the operator's self-resolution excepted and marked (decision 47, `authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`), and a
+payment class's quorum is a value of its `action_policy`, every awaited principal until written (decision 50).
 Open decision 15 (adapter packaging) is `adapters.md`'s and untouched; decision 16 (where inbound delivery
 lands) is ruled there, and for this system it means the process that receives a rail's notification may be
 shared plumbing while verifying the rail's signature against its published key, and extracting the

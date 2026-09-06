@@ -12,7 +12,7 @@ for changing the swarm's own operation), and PR #745 operator review (2026-09-05
 23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default),
 and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: one live instance,
 completion creates the next, `FOLLOWS` task to task), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the task-sources index, the intake rule, and open decision 36). Supersedes `docs/archive/task_execution_loop.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: an intake rule may key on a field a step wrote on a type it may name, with the writer in its provenance predicate; decision 36 untouched). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a status and claimability read from the checkpoint; the declared terminal set; two moments open a batch; `tasks_attached[]`; the next recurring instance created and read back before the closing sign-off; a terminal status only where the declaration permits none; the writer as the cross-type cycle check's enforcement point; C2 settled by the write contract). Revised by the rulings pass of 2026-09-06 (revision 38: a `signed` or blocking sign-off is written under a held lease, cited from decision 44's ruling; the bootstrap set as the closed list decision 43 rules).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: an intake rule may key on a field a step wrote on a type it may name, with the writer in its provenance predicate; decision 36 untouched). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a status and claimability read from the checkpoint; the declared terminal set; two moments open a batch; `tasks_attached[]`; the next recurring instance created and read back before the closing sign-off; a terminal status only where the declaration permits none; the writer as the cross-type cycle check's enforcement point; C2 settled by the write contract). Revised by the rulings pass of 2026-09-06 (revision 38: a `signed` or blocking sign-off is written under a held lease, cited from decision 44's ruling; the bootstrap set as the closed list decision 43 rules). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 36 ruled here — a rule keys on no work-model record type, the operator's lean toward every type considered and set aside; decision 43's second half cited as ruled; the C2 and `blocked` settlements marked reviewed and upheld).
 
 ## Purpose
 
@@ -97,7 +97,8 @@ registered type declares — below). The lease carries `held` / `lapsed` / `retu
 read, never a state, and so is held-from-claim: a task the swarm cannot advance is held by an open
 checkpoint on it (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`), read from that edge
 and never from a status a process would have to clear (principle 11) — `blocked` as a status is retired for
-that reason (`vocabulary.md#retired-names`). Each word names one thing: a
+that reason (`vocabulary.md#retired-names`; settled by the testability pass and reviewed and upheld by the
+operator 2026-09-06). Each word names one thing: a
 task whose lease holder died is a task with a lapsed lease, and a task its named principal has not taken is
 assigned-and-unclaimed. Definitions: `vocabulary.md`.
 
@@ -332,9 +333,11 @@ credential or widening a grant: provisioning is operator-only and out of band
 (`authority_model.md#grants`), an agent neither performs it nor is empowered to have it performed by
 raising a checkpoint. The set of such acts is closed and enumerated — the thirteen-record table of
 `conformance_suite.md#the-minimal-record-set-in-order`, each member read back — and a write to any of those
-kinds of record after the set exists is not provisioning (decision 43, ruled in its enumeration half;
-whether the operator's own later governance write is gated is its open half,
-`conformance_suite.md#what-the-bootstrap-set-is-and-whether-the-operators-later-governance-writes-are-gated`).
+kinds of record after the set exists is not provisioning, and the operator's own governance write after
+bootstrap is gated like any other — held, resolved by the operator, and marked as a self-resolution (decision 43,
+ruled in both halves,
+`conformance_suite.md#what-the-bootstrap-set-is-and-whether-the-operators-later-governance-writes-are-gated`;
+decision 47, `authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`).
 **A workflow too broken to open a step is an unreadable workflow**, which is a defined
 state: no step of it is opened or claimed, its batch's tasks are escalated with one checkpoint (reason
 `unreadable_workflow`), and nothing proceeds on an empty sequence
@@ -584,7 +587,8 @@ to its batch. So an edge from batch A to a task whose own batch already depends,
 edges, on a task attached to A is not written, and the step owner knows why. The writer is the enforcement
 point for the cross-type case, and the design says so rather than attributing the refusal to the record: it
 is the shape `gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits` names for
-governance writes (decision 56), and it takes whichever answer that decision does. A cycle can also arise **after** the writes, with no edge
+governance writes (decision 56, ruled 2026-09-06: the one writer that holds the grant is the enforcement
+point, and it checks before it writes), and the walk here is the same answer — the writer walks, then writes. A cycle can also arise **after** the writes, with no edge
 refused: a task attached to a batch part-way through
 (`#how-a-batch-is-formed-and-what-chooses-its-workflow`) can join two dependency chains into a loop, so the
 same walk runs at attach, and an attach that would close a cycle is refused too. Where a cycle is nonetheless
@@ -993,7 +997,7 @@ internal activity can create or update an entity that is itself motive for a tas
 rule's subject is any entity type — an artifact an adapter wrote, or an entity a batch wrote: an analysis
 persisted, a contact stored, a transcription ingested — and the record's subscriptions deliver both kinds
 of change alike. The hazard is the loop: a task the rule created is itself a created entity, and a rule on
-`task` would fire on its own output. What closes it is the exclusion argued in the open decision below: a
+`task` would fire on its own output. What closes it is the exclusion ruled in decision 36 below: a
 rule keys on no record of the work model — not `task`, `batch`, `lease`, `sign_off`, `action`,
 `checkpoint`, or `agent_session` — so a rule's output is never a rule's input. Chains through workflows
 remain possible and are not forbidden: a rule-created task whose batch writes an entity another rule
@@ -1004,8 +1008,8 @@ is not a runaway, and one that would be is stopped at the ceiling and announced.
 
 **A rule may key on a field a step wrote on a type it may name, and the writer is named in the rule's
 provenance predicate.** The exclusion above is over subject **types** — the seven records of the work model —
-and says nothing about who wrote the field a predicate reads; decision 36, below, is the question of the
-subject set, and this paragraph does not move it. So a classification a step owner recorded as an observation
+and says nothing about who wrote the field a predicate reads; decision 36, below, rules the
+subject set, and this paragraph is the form it leaves open. So a classification a step owner recorded as an observation
 on an artifact — a thread marked as an invoice, a notice, a stay request, at the `classify` step of a workflow that sorts a mailbox —
 is a change of kind `updated` on a type a rule may name, and a rule reading `thread_class = invoice` keys on
 it as it keys on any field. This is the division the rules-not-inference paragraph draws, made usable: "this
@@ -1052,36 +1056,49 @@ beneath them.
 
 ### Whether an intake rule may key on the work model's own records
 
-**Open decision 36.** Registered in `conformance.md#the-register-of-open-design-decisions`. The section
-above excludes the work model's own record types from a rule's subjects. The operator's stated lean runs
-the other way: the 22:10 memo asked for "a more general sort of listener", on entities in general, and a
-task, a batch, or a checkpoint changing is an entity changing.
+**Ruled (decision 36, 2026-09-06): an intake rule may not key on the work model's own record types —
+`task`, `batch`, `lease`, `sign_off`, `action`, `checkpoint`, `agent_session` — and may key on any other
+type, a field a step wrote on an ordinary entity included.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. The exclusion the section above is written under is
+the rule: a rule naming one of the seven in `subject_types[]` is refused at the write, as a write carrying a
+field the registered type does not declare is (`data_model.md#record-conventions`).
 
-**The options.** Exclude them, as above: a rule keys on artifacts and on the swarm's other entities, and
-never on `task`, `batch`, `lease`, `sign_off`, `action`, `checkpoint`, or `agent_session`. Or admit every
-type, with the ceiling and the dedup as the only bounds on the loop.
+**The operator's lean, considered and set aside.** The 22:10 memo asked for "a more general sort of
+listener", on entities in general, and a task, a batch, or a checkpoint changing is an entity changing. That
+lean was weighed, and it is set aside for one reason: what it asked for is met without the seven types. A
+listener on any ordinary entity — an artifact, a contact, a plan, a classification a step wrote at
+`classify` — is exactly what a rule is, and the field a step writes
+(`#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`) is how a judgement
+reaches a rule without opening the work model's types to it. The seven are the types on which every change
+already has a mechanism that answers it. The lean is recorded here so that it is not mistaken for an
+argument nobody made, and so that the ruling reads as the narrower form of what was asked and never as its
+refusal.
 
-**The case for excluding, which is why the section above is written that way.** Every change to a
-work-model record already has a mechanism that answers it, and a rule there is a second one (principle 6).
-A step nobody claimed raises `unclaimed_step`; a lease that keeps lapsing raises `repeated_lapse`; a batch
-that closes names its successor or none, and what follows is `workflow.successors`; a blocking sign-off
-opens the step `on_fail` names, and its remedy is a routed task; a checkpoint nobody answers reaches its
-terminal timeout, and it awaits whom it awaits; a task that should produce another does so from a step, by
-a principal's verdict (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`;
-`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`). A rule reading "when a task of one
-kind is created, create a task of another" is sequencing by a matcher, which
-`#how-a-batch-is-formed-and-what-chooses-its-workflow` closes; one reading "when a checkpoint has been open
-some days, create a task" is a second decision queue beside the one the design has. And the exclusion is
-what closes the tight loop by construction rather than by a counter: a rule's output is a `task` write, so
-with `task` excluded no rule is its own input in one hop.
+**Why.** The exclusion closes the tight self-trigger loop by construction: a rule's output is a `task`
+write, and with `task` excluded no rule is its own input in one hop, where admission would close the same
+loop by a counter — the ceiling — which is the weaker control, since a bound that must be maintained is
+state (principle 11) and the form that needs none is the closed one (principle 5). Every change to a
+work-model record already has the mechanism that answers it (principle 6) — `unclaimed_step`,
+`repeated_lapse`, `successors`, `on_fail`, the checkpoint's terminal timeout, a step creating a task — and
+each routes the change through a principal's recorded verdict, as rulings 13, 14, 17, 30, 37, and 38 do; a
+rule there would be a matcher standing in for that verdict, which
+`#how-a-batch-is-formed-and-what-chooses-its-workflow` closes for sequencing and
+`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol` closes for the queue. What stays permitted
+is what the operator asked for: chains through workflows — a rule-created task whose batch writes an entity
+another rule describes — are allowed, readable end to end through provenance, and bounded in rate by the
+ceiling, as the section above states.
 
-**The case for admitting, which is the operator's.** Generality is simpler to state, and there may be a
-motive on a work-model record that none of the existing mechanisms carries — a class of task that, once
-created, always owes a companion task, say — for which a rule is cheaper than a step. **What would decide
-it:** a motive on a work-model record that no existing mechanism — successor, `on_fail`, the checkpoint
-queue, a step creating a task — can carry. If one is named, the exclusion is wrong for that type, and the
-remedy is to admit the type with the ceiling and the dedup as its bounds; if none is, the exclusion stands
-and the loop stays closed by construction.
+**Cost accepted.** The listener is narrower by seven types. A motive on a work-model record — a class of
+task that always owes a companion task — is carried by a step of its workflow or by a successor, never by a
+rule; a rule that wants one is given the field a step writes, which the rule may then read.
+
+**What would reopen it.** A motive on a work-model record that no existing mechanism — successor,
+`on_fail`, the checkpoint queue, a step creating a task, a field a step writes — can carry. If one is named,
+the exclusion is wrong for that type, and the remedy is to admit that type with the ceiling and the dedup as
+its bounds; none has been named.
+
+**Matrix.** WM-41 is mechanical — a rule naming a work-model type refused at the write — and DM-26's "never
+a work-model record type" clause stands (`conformance_suite.md`).
 
 ## The four execution mechanisms
 
@@ -1137,10 +1154,12 @@ for pull: the third of those states asserts what it cannot back, and routing pla
 neither acts nor answers for it. That plan's state-machine criteria are superseded; the correction is a
 request to its maintainer. **C2.** `subscriptions_detect_tasks_authorize` is true of the task path and was false of the
 self-triggering daemons, whose effects were said to pass through no task. **Settled by the write contract**
-(`data_model.md#write-contract`; the testability pass of 2026-09-06): a daemon writes the tasks its poll
+(`data_model.md#write-contract`; the testability pass of 2026-09-06; reviewed and upheld by the operator
+2026-09-06): a daemon writes the tasks its poll
 produces and observations, and nothing else, so it takes no action of its own — every effect is an action
 `PRODUCES` from a task, and a daemon that wants one creates the task
-(`#a-task-is-executed-only-through-a-workflow`). Of the two options the open question named — unify the
+(`#a-task-is-executed-only-through-a-workflow`). The reason the review recorded: a daemon acting directly is a
+side door around the workflow — no step, no sign-off, no lease — and the gate checks policy, not the work. Of the two options the open question named — unify the
 daemon loop with the task path, or keep both under an explicit contract (digest
 `ent_e04244959daf92416597ce28`) — this is the second, the contract being the write contract's daemon row.
 The announcement path is the one exemption, and it is not an action.

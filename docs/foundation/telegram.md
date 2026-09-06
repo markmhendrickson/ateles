@@ -10,7 +10,7 @@ to principals; approval is authorized against the required approvers), `workflow
 workflow, and the consent step of every workflow that has one), `failure_posture.md` (the halt; the
 off-record announcement path; retry classification), and Telegram's own chat-platform API documentation, read
 2026-09-05, and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decisions 25 and 26 ruled
-here). What is built is `status.md`. Revised by the testability pass of 2026-09-06 (revision 37: every uncorrelated message from a bound principal is a task; the start-time binding is a cache with a declared staleness bound).
+here). What is built is `status.md`. Revised by the testability pass of 2026-09-06 (revision 37: every uncorrelated message from a bound principal is a task; the start-time binding is a cache with a declared staleness bound). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser-resolves pointer cites decision 47 as ruled).
 
 ## Purpose
 
@@ -663,7 +663,8 @@ other. Where inbound delivery lands is ruled there (decision 16), and *Delivery*
 channel's two mechanisms give that ruling. Whether adapters live in a repository of their own is **open
 decision 15**, untouched. The steps that take these operations are `workflows.md`'s; the gate's decision
 function and the checkpoint's protocol are `gates_and_workflows.md`'s; whom a checkpoint may await, and
-whether its raiser may resolve it, are `authority_model.md`'s open questions. Which rows have a built path is
+whether its raiser may resolve it, are `authority_model.md`'s — the second ruled 2026-09-06: the raiser does
+not resolve, the operator's self-resolution excepted and marked (decision 47, `authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`). Which rows have a built path is
 `status.md`'s — and every row marked **unhandled** above has one there. Two decisions this document opened
 are ruled in the two sections that follow.
 

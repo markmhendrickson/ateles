@@ -10,7 +10,7 @@ decisions `operator_only_is_never_auto_executable_not_merely_high_blast`,
 `gate_machinery_is_already_pr_independent`, PR #745 operator review (2026-09-04), and the operator
 memos of 2026-09-05 12:48 and 12:52 (operator input as a standing finding), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review (revision 18: batch formation, stated in `work_model.md` and cross-referenced here), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and the operator's request for visuals during review (revision 20: the checkpoint diagram), and the operator's 2026-09-05 12:52 memo (revision 21: the general claim about self-modification, stated in `work_model.md` and cross-referenced from decision 17), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: decision 17 ruled here; the `dependency_cycle` reason class), and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: the next instance is a created task and not a successor), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: `intake_rule` joins the governance list). Supersedes
 `docs/archive/swarm_orchestration.md` and `docs/archive/swarm_hitl_checkpoints_design.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding). Revised by the workflow-format pass of 2026-09-06 (revision 34: two declared intervals on every step, `unclaimed_after` and `hold_bound`; a planned wait as a step's own close condition held under decision 13; required coverage as the value of `freshness`; consent over several like actions as one presentation of several checkpoints; the governance class with no policy value named among what resolves to `NEVER`).consistency pass of 2026-09-06 (revision 35: when the checkpoint a `consent` step carries is written, and what the gate evaluates at the take; the merge action's class named `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a step's bound may be declared as the task's `due_date`; an `operator_only` action inside a workflow is taken by the operator and its step closes on the confirmation, never on the resolution; a read dependency on a special-category type carries no marker of its own). Revised by the testability pass of 2026-09-06 (revision 37: the finding as an entity the rules bind on; `rounds_cap`; the recorded amendment; an optional step's condition reads what exists; `none_permitted`; the floor-list sentence retired; open decision 56 — where the enforcement point for a governance write sits). Revised by the rulings pass of 2026-09-06 (revision 38: decision 32 ruled — the `verdict` stays a stored field, the sign-off's own projection of its findings and its author, reconciled at the write).
+is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `workflow policy` retired and its section renamed; `hot path` retired; the reason classes cited from their one home; open decision 32). Revised by the memo-gap pass of 2026-09-06 (revision 31: decisions 37, 38, and 40 ruled here — work reviewed on the record, closed work redone through intake, and what a step leaves at close; the governance types stated as one list in one home; the finding's `unknown` classification; the `task_policy` home for an operator-specific standing finding). Revised by the workflow-format pass of 2026-09-06 (revision 34: two declared intervals on every step, `unclaimed_after` and `hold_bound`; a planned wait as a step's own close condition held under decision 13; required coverage as the value of `freshness`; consent over several like actions as one presentation of several checkpoints; the governance class with no policy value named among what resolves to `NEVER`).consistency pass of 2026-09-06 (revision 35: when the checkpoint a `consent` step carries is written, and what the gate evaluates at the take; the merge action's class named `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a step's bound may be declared as the task's `due_date`; an `operator_only` action inside a workflow is taken by the operator and its step closes on the confirmation, never on the resolution; a read dependency on a special-category type carries no marker of its own). Revised by the testability pass of 2026-09-06 (revision 37: the finding as an entity the rules bind on; `rounds_cap`; the recorded amendment; an optional step's condition reads what exists; `none_permitted`; the floor-list sentence retired; open decision 56 — where the enforcement point for a governance write sits). Revised by the rulings pass of 2026-09-06 (revision 38: decision 32 ruled — the `verdict` stays a stored field, the sign-off's own projection of its findings and its author, reconciled at the write). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 56 ruled here — the sole-writer grant, the engine acting for the gate; the checkpoint's raiser and resolver never one principal save the operator's marked self-resolution, decision 47; the finding-as-entity settlement marked reviewed and upheld).
 
 ## Purpose
 
@@ -429,7 +429,8 @@ defect is a reason to look; it is not a reason to block, because a block asserts
 and a principal downstream will act on that assertion without re-deriving it. This is principle 2 at the
 verdict: a claim that was never read back is not evidence.
 
-**A finding is an entity, and the rules above bind on its fields.** A finding is recorded as a `finding`
+**A finding is an entity, and the rules above bind on its fields** (settled by the testability pass; reviewed
+and upheld by the operator 2026-09-06). A finding is recorded as a `finding`
 (`data_model.md#concepts`), carried by the sign-off that judges the batch — `PART_OF` it — and referring to
 the batch it judges; a hold's finding stands with no sign-off for as long as the hold does
 (`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`), and the operator's finding on
@@ -821,44 +822,52 @@ rather than a second path for record writes (principle 6).
 
 ### Where the enforcement point for a governance write sits
 
-**Open decision 56.** Registered in `conformance.md#the-register-of-open-design-decisions`. Two controls
-stand on a governance write, and only the first has a named enforcement point. Admission is the grant: a
-write to a governance type lands only where the writer's `agent_grant` names the type, checked by the record
-at the write (decision 41, `authority_model.md#grants`). The second control — that the write is an action,
-evaluated at the action gate and taken only on a permit — has no point named where it binds. A principal
-whose grant admits `workflow` may write a declaration with no `action` behind it, and the record knows
-nothing of the gate; the writer enforcing the rule on itself is a rule read once at start, which principle
-1's placement test says binds weakly; and what a reader can check afterwards is audit-shaped — an
-observation on a governance type that no permitted action names — which detects and refuses nothing.
+**Ruled (decision 56, 2026-09-06, with 43): an admitted governance write is tied to a permitted action by a
+sole-writer grant — for each governance type, exactly one principal holds the write capability, the engine
+acting for the gate, and it writes only on a permit; every other principal's write to a governance type is
+refused at the record's admission under decision 41.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. Two controls stand on a governance write — admission by
+grant, and the write being an action taken on a permit — and this ruling gives the second the enforcement
+point the first already has: the grant, read at the write. No step owner's grant admits a governance type; the
+one grant that does is held by the component that evaluates the action gate and makes the write as the
+action's effect (the engine, in the sense `#the-action-gate-is-pr-independent` and `adapters.md` use the
+word; its definition is decision 34's), so a governance write that lands is one the gate let through, and one
+with no permitted action behind it cannot land, because the only credential that could write it is the one
+that writes on nothing else.
 
-**The options.** The record's admission check reads the action: a write to a governance type carries the
-`action` it is taken under, and the record admits it only where that action is of the type's class,
-`PRODUCES` from a task in a live batch whose step owner is the writer, and either resolves low under the
-policy at threshold or carries a terminal `approved` resolution from an awaited principal — the take-time
-permit of `#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`,
-evaluated by the record from what the record already holds. Or a proxy in front of the record evaluates the
-gate for these eight types and passes nothing else through — the shape the adapter already is at the
-external boundary, turned inward. Or the grants: no step owner's grant admits a governance type directly,
-one component holds the only grant that does and evaluates the gate before it writes, and every other
-principal's write is denied at admission, which makes decision 41's check the enforcement point for both
-controls at once.
+**Why.** Principle 6 — the question was which existing mechanism to extend, and the grant is the one the
+design already has for who may write what. The record's admission check reading the action would ask the
+record's project to evaluate a permit, a dependency of the kind `migration.md` counts as G25 and a feature the
+record does not have; a proxy in front of the record would be a second gate on the write path to the swarm's
+own record, which principle 6 forbids by name; the grant is enforced at the write already, by the record, with
+no new feature on either side. Principle 1 places the check at the write, and this is the one option where the
+check at the write and the check on the permit are a single read. Decision 43 is what makes it whole: the
+operator's own governance write after bootstrap passes the same point
+(`conformance_suite.md#what-the-bootstrap-set-is-and-whether-the-operators-later-governance-writes-are-gated`),
+so the operator's path runs through the engine's grant and never around it — the operator's task produces
+the action, the gate holds it, the operator resolves it as a marked self-resolution (decision 47,
+`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`),
+and the engine writes. Had 43 gone the other way the operator's credential would hold a second grant over the
+governance types, and the sole writer would not be sole.
 
-**What shifts, and why this is opened rather than settled.** Principle 1 places the check at the write, and
-all three options do; principle 6 extends a mechanism that exists, and each extends a different one — the
-record's admission check, the adapter's shape, the grant. What separates them is whose capability the design
-then depends on. The first asks the record's project to evaluate a permit, a dependency of the same kind as
-the edge types (`migration.md`, G25). The second puts a component the swarm owns on the write path to its
-own record. The third changes who may write a governance type at all, and with it the operator's own writes
-after bootstrap, which decision 43 holds. **What would decide it:** whether the record can be asked to
-evaluate a permit at all, and whether the operator wants their own governance writes to pass the same point
-— the two questions decision 43 already puts to the operator, which is why this one is put beside it and
-not ruled here.
+**Cost accepted.** The engine is a single point: a governance write is possible only while the component
+holding the grant is alive, and its credential is the one whose compromise reaches every governance type at
+once — kept narrow and revocable under `authority_model.md#grants` (custody, rotation, and revocation's reach),
+and mitigated by the ruling that makes it whole, since the operator's path is through it and not a standing
+second key. The bootstrap set is written before the engine exists and is the enumerated exception (decision
+43); a fourteenth write by the operator's bare credential is not provisioning and is refused at admission like
+any other. For the migration, leg one grants the engine the governance types and grants the step-owner roles
+the ordinary types their steps write (`migration.md#how-the-migration-is-governed`).
 
-**Until it is taken**, the first control binds and the second is audited: a governance write with no
-permitted action naming it is a defect found by reading the record, never a write refused, and the
-conformance suite marks every row that tests the second control as pending this decision. The cross-type
-cycle walk of `work_model.md#a-batch-may-depend-on-a-task-it-created` has the same shape — the writer is
-its enforcement point — and takes whichever answer this decision does.
+**What would reopen it.** A governance type that must be written by a principal the engine cannot act for —
+a write the gate cannot hold because no action of any class carries it — which would first be a gap in the
+closed list of classes, and would reopen that list before it reopened this. The cross-type cycle walk of
+`work_model.md#a-batch-may-depend-on-a-task-it-created` keeps the shape this ruling names: the writer is its
+enforcement point, and the writer walks before it writes.
+
+**Matrix.** WM-22, GW-29, GW-33, GW-33a, WM-40b, AD-27, and MG-4 turn from audit to refusal: a governance
+write by any credential but the engine's is refused at admission, and the engine's is one a permitted action
+names (`conformance_suite.md`).
 
 ### Actions are entities; only actions are taken
 
@@ -1074,7 +1083,9 @@ options, whom it awaits, and who resolved it, and it ends in a terminal approval
 and a timeout is a terminal state that never continues
 (`deferral_must_be_bounded_and_escalate_off_neotoma`). Its subject is linked by edge, never named in a
 free-text field, so the queue is read from the record. The raiser and the resolver are distinct roles on
-the object; whether the same principal may hold both is `authority_model.md`. One decision queue, one
+the object, and the same principal does not hold both, save the operator resolving a checkpoint the operator
+raised, which is marked as a self-resolution (decision 47,
+`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`). One decision queue, one
 resolution protocol: a checkpoint on a task is presented and resolved exactly as a checkpoint on an
 action is (principle 6).
 
