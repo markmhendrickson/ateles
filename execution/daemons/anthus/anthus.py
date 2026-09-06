@@ -227,14 +227,43 @@ async def _orchestrate_workflow_for(event) -> None:
     _gate_states[event.entity_id] = state
 
     # Persist any newly-satisfied / newly-skipped gates discovered this tick.
+    #
+    # `agent` is a required field on participation_record. It is resolved from
+    # the workflow definition — the same source record_dispatched uses — since
+    # GateState does not carry it. Omitting it does not fail the write: Neotoma
+    # returns 200 with a MISSING_REQUIRED_FIELD warning and stores an
+    # incomplete row, which is how every terminal write was lost (ateles#682).
+    gate_owners = {g.gate_name: g.owner_agent for g in wf.gates}
     for gate_name, gs in state.items():
         prior = existing.get(gate_name)
-        if gs.status == "satisfied" and (not prior or prior.status != "satisfied"):
-            ref = gs.artifact_refs[-1] if gs.artifact_refs else ""
-            await participation.record_satisfied(event.entity_id, gate_name, ref)
-        elif gs.status == "skipped" and (not prior or prior.status != "skipped"):
-            reason = "fast_path" if gate_name not in unmet else "precondition_unmet"
-            await participation.record_skipped(event.entity_id, gate_name, reason)
+        agent = gate_owners.get(gate_name, "")
+        if not agent:
+            log.error(
+                f"[{DAEMON_NAME}] no owner_agent for gate {gate_name} in "
+                f"{wf.project}|{wf.workflow_type}; cannot record its terminal "
+                f"state for {event.entity_id}"
+            )
+            continue
+        try:
+            if gs.status == "satisfied" and (not prior or prior.status != "satisfied"):
+                ref = gs.artifact_refs[-1] if gs.artifact_refs else ""
+                await participation.record_satisfied(
+                    event.entity_id, gate_name, ref, agent
+                )
+            elif gs.status == "skipped" and (not prior or prior.status != "skipped"):
+                reason = "fast_path" if gate_name not in unmet else "precondition_unmet"
+                await participation.record_skipped(
+                    event.entity_id, gate_name, reason, agent
+                )
+        except participation.ParticipationWriteFailed as exc:
+            # Surface loudly, but do not abort the tick: the remaining gates
+            # still deserve their chance to record, and the next tick retries
+            # this one (the in-memory `prior` is per-process, and the write is
+            # idempotent by key).
+            log.error(
+                f"[{DAEMON_NAME}] failed to record {gs.status} for gate "
+                f"{gate_name} on {event.entity_id}: {exc}"
+            )
 
     for gate in ready:
         log.info(
@@ -244,14 +273,23 @@ async def _orchestrate_workflow_for(event) -> None:
         state[gate.gate_name].status = "dispatched"
         # Pin the exact agent_definition version at dispatch time (ateles#22).
         gate_agent_def = AgentLoader(gate.owner_agent).load()
-        await participation.record_dispatched(
-            work_entity_id=event.entity_id,
-            workflow_definition_id=wf.entity_id,
-            gate_name=gate.gate_name,
-            agent=gate.owner_agent,
-            agent_definition_ref=gate_agent_def.entity_id,
-            agent_definition_observation_id=gate_agent_def.last_observation_id,
-        )
+        try:
+            await participation.record_dispatched(
+                work_entity_id=event.entity_id,
+                workflow_definition_id=wf.entity_id,
+                gate_name=gate.gate_name,
+                agent=gate.owner_agent,
+                agent_definition_ref=gate_agent_def.entity_id,
+                agent_definition_observation_id=gate_agent_def.last_observation_id,
+            )
+        except participation.ParticipationWriteFailed as exc:
+            # The dispatch bookkeeping failed to land. Spawn anyway — the agent
+            # doing the work matters more than the record of it — but say so,
+            # rather than letting an unrecorded dispatch look like a clean one.
+            log.error(
+                f"[{DAEMON_NAME}] failed to record dispatch of gate "
+                f"{gate.gate_name} on {event.entity_id}: {exc}"
+            )
         # Spawn the agent via claude CLI. The `--skill` flag does not exist;
         # the working invocation is `--append-system-prompt` with the SKILL.md
         # content. Code-writing agents need `--dangerously-skip-permissions`
