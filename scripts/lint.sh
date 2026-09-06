@@ -100,6 +100,13 @@ if [ -n "$NEOTOMA_BASE_URL" ]; then
     # .github/workflows/agent-config-validation.yml for the tracking note).
     echo "  - Checking agent-doc mirrors are in sync with Neotoma (informational)..."
     python execution/scripts/render_agent_docs.py --check || true
+
+    # The shared plan page is rendered FROM the plan entity. This is
+    # informational because the page legitimately goes stale between plan
+    # corrections and the next refresh run — that is drift to republish, not a
+    # defect in the PR being linted.
+    echo "  - Checking the plan page is in sync with its plan entity (informational)..."
+    python execution/scripts/render_plan_page.py --check || true
 else
     echo "  - Skipping tool_allowlist + agent-doc-mirror checks (NEOTOMA_BASE_URL unset)"
 fi
