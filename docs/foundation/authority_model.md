@@ -133,7 +133,7 @@ An `agent_grant` is matched on the credential (`sub`, `iss`) and lists capabilit
 types × repositories with parameter constraints; a human's grant is bound to a principal and a tenant, never
 a wildcard. The per-agent pattern is the template a principal dimension extends: a loader keyed on the
 agent name, a grant checker and a tool proxy keyed on the `sub`, a per-agent keypair threaded into signed
-writes, a per-agent policy override, per-agent GitHub logins, a workflow resolved per project. A failed
+writes, a per-agent policy override, per-agent GitHub logins, a workflow resolved per declaration scope. A failed
 agent load is a stub: the loader marks it, and no caller starts a runner from one (principle
 5); a stub with a wildcard tool allowlist is the fail-open shape.
 
@@ -167,7 +167,7 @@ allowlist but the default-allow this rule rejects, written as a grant; it is the
 paragraph above names, and the migration counts the instance's wildcard grants as a hazard for the same
 reason. The read side has the same shape, stated where reads are: an agent reads only the types its
 definition names, within what its grant admits (`data_model.md#what-each-actor-reads-and-writes`). **What
-would reopen it:** a project whose grants prove to be ceremony — every role granted every type on its first
+would reopen it:** an instance whose grants prove to be ceremony — every role granted every type on its first
 day — which is the finding decision 18 names for its own default, and would argue for coarser capabilities,
 not for default-allow.
 
@@ -432,7 +432,7 @@ the design's job is to make them expressible and enforceable, as
 classes, not to make them. So the design rules the shape and the default and no number. The default is ruled
 decision 18's `NEVER`-until-written, extended from a class's permission to a check's parameters: until a class
 carries a value it requires every awaited principal and every named pair, the strictest reading and the one an
-unmeasured project should be in; and every value is a governance write to the `action_policy` with an author
+unmeasured instance should be in; and every value is a governance write to the `action_policy` with an author
 and a date, class by class, the way every other value on that policy is set. A question whose whole residue is
 a policy value is not an open decision — the register would otherwise hold a row for every number an operator
 has yet to write, and it holds none for `confidence_threshold` or `consent_tolerance` — which is why the row

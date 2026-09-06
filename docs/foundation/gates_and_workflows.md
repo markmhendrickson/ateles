@@ -32,14 +32,14 @@ and the adapters that reach them: `adapters.md`.
 
 ### Declaration, batch, projection
 
-`workflow` declares one entity per (project, workflow type): ordered `steps[]` (`step_name`,
+`workflow` declares one entity per (declaration scope, workflow type): ordered `steps[]` (`step_name`,
 `owner_role`, `parallel_group`, `join_step`, `required`, `applies_when` — the condition that decides
 whether an optional step opens at all, below — and `on_fail` — the earlier step a failing sign-off
 opens again, with `rounds_cap`, the rounds that loop may take, below — plus `reads_to_enter`, `reads_to_close`, and `freshness`, the read dependencies below, and
 `unclaimed_after` and `hold_bound`, the two intervals below), plus `fast_paths` and `successors`, with
 `none_permitted` (`#sequencing-is-data-successors-and-the-chain`). `owner_role` holds a **role**, never an agent name: the
 roster resolves it to a principal when the step is claimed (`vocabulary.md#step-owner`), so one
-declaration serves every project and a renamed agent leaves no stale name in it. Step names are data: a workflow may declare steps
+declaration serves every scope and a renamed agent leaves no stale name in it. Step names are data: a workflow may declare steps
 beyond the review sequence (a draft step, a deterministic lint, an operator preview). A contiguous named
 group of steps is a stage.
 
@@ -277,7 +277,7 @@ failing sign-off opens the earlier step `on_fail` names, and the loop between th
 every other, so rule 5 gives it a ceiling (`failure_posture.md#the-rules`): at the cap, one checkpoint on
 a task of the batch, reason `rounds_exhausted`, carrying the last blocking finding. The cap is declared on
 the step, beside the target, because a loop's tolerable length is a property of what the two steps judge
-and not of the project; an undeclared cap is treated as an undeclared interval is — nothing is raised, and
+and not of the declaration scope; an undeclared cap is treated as an undeclared interval is — nothing is raised, and
 the absence is visible in the declaration, a defect caught in the pull request that introduced it and never
 a default supplied at runtime. The cap does not close anything: a step in a loop is closed by a sign-off
 or it is open, and the checkpoint at the cap changes no verdict.
@@ -599,7 +599,7 @@ preferences, which the agent reads by type through its `context_entity_types`; t
 instruction to read the type, and the write to the `task_policy` is an internal operational write, not a
 governance one. A finding whose defect is a property of a
 workflow — a step's condition too weak, a step missing, a `reads_to_enter` unstated — is standing **on the
-workflow**, and the change is to the `workflow` declaration for that (project, workflow type). A finding
+workflow**, and the change is to the `workflow` declaration for that (declaration scope, workflow type). A finding
 whose defect belongs to one step of one workflow is standing **on that step**, and the change is scoped to
 it. The three are ordered narrowest-first: a defect statable about a step is not written into an agent's
 prompt, where it would bind that agent across every workflow it handles and thereby assert more than the
@@ -817,7 +817,7 @@ is the batch's closing sign-off and selects exactly one successor from the list,
 declaration permits it. None is the normal close of a task that needs no further workflow, and a
 declaration that permits it says so reviewably: a closing sign-off naming none under a declaration that does
 not permit it is refused at the write, so a security batch cannot end unreleased (`workflows.md#security`),
-and a feature declaration permits none only for a project that deploys its default branch on its own
+and a feature declaration permits none only for a declaration scope that deploys its default branch on its own
 cadence (`workflows.md#feature`) — which is what makes "landed" a derived read over the chain and not a
 status (`work_model.md#a-task-is-executed-only-through-a-workflow`). One: the tasks
 enter the successor, a new batch record opens for them, and it carries a `FOLLOWS` edge to the closed one.
@@ -848,7 +848,7 @@ be taken is the action policy's. Neither the declaration, the grants, nor the po
 writes to Neotoma, which are not actions — **except for three named classes, which are.**
 
 **Governance writes are actions, and the governance types are one closed list, stated here and nowhere
-else.** A write to any of these eight is an action, evaluated at the action gate under the project's
+else.** A write to any of these eight is an action, evaluated at the action gate under the instance's
 `action_policy`: `agent` (what a principal is), `agent_policy` (the behavioural rule an agent's prompt
 renders from), a `workflow` declaration (how every future batch of its type is executed), `action_policy`
 (which actions may be taken, and under what gate), `agent_grant` (which capabilities a principal holds),
@@ -907,7 +907,7 @@ that writes on nothing else.
 
 **Why.** Principle 6 — the question was which existing mechanism to extend, and the grant is the one the
 design already has for who may write what. The record's admission check reading the action would ask the
-record's project to evaluate a permit, a dependency of the kind `migration.md` counts as G25 and a feature the
+team that builds the record to evaluate a permit, a dependency of the kind `migration.md` counts as G25 and a feature the
 record does not have; a proxy in front of the record would be a second gate on the write path to the swarm's
 own record, which principle 6 forbids by name; the grant is enforced at the write already, by the record, with
 no new feature on either side. Principle 1 places the check at the write, and this is the one option where the
@@ -948,7 +948,7 @@ or 56 was stated with a synced write in mind — 18 reserves each governance cla
 operator grants it a policy value, 41 makes the `agent_grant` the allowlist a write is checked against, and
 56 gives the engine's grant the only write capability on a governance type — and a write whose
 `observation_source` is `sync` fits none of their examples, because it names no principal's credential at
-all: it lands the way the record's own replication surface lands any row, keyed to the local project and
+all: it lands the way the record's own replication surface lands any row, keyed to the local instance and
 carrying the producing peer on its provenance, not to a `sub` and `iss` `authority_model.md#grants` can check
 a capability against.
 

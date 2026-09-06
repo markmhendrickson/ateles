@@ -261,7 +261,7 @@ a re-claimed task is never replayed (`failure_posture.md`). The dedup key lives 
 ### Operator-only tasks are claimed by the operator-facing agent
 
 A task with `operator_only` actions is an ordinary task claimed by the operator-facing agent — the agent
-the roster resolves to that role for the batch's project (`vocabulary.md#operator-facing-agent`) — which
+the roster resolves to that role for the batch's declaration scope (`vocabulary.md#operator-facing-agent`) — which
 carries it to the operator and holds the lease while the operator decides. It is not itself a checkpoint: it raises one
 only when an action inside it reaches the action gate, which resolves `operator_only` to `NEVER`
 (`gates_and_workflows.md`). The task path stays pull; only the action waits on a human.
@@ -285,7 +285,7 @@ under a declaration that does not permit it is refused at the write, and the tas
 "landed" is therefore a derived read over the chain and not a status anyone writes: a task whose batch
 produced a `merge_pr` action is terminal when its chain ended under a declaration that permits its ending
 there — a `release` batch's `verify_deployed` signed, or a `feature` or `bug` declaration that permits none
-because the project deploys its default branch on its own cadence (`workflows.md#feature`) — and a terminal
+because the declaration scope deploys its default branch on its own cadence (`workflows.md#feature`) — and a terminal
 task whose last batch closed naming none under a declaration that permits no such end is the failing
 artefact. Which terminal value the sign-off writes is drawn from the set the registered type declares
 (`#what-a-claim-predicate-treats-as-claimable`).
@@ -372,12 +372,12 @@ and enforceable rather than to make it.
 **Ruled (decision 18, 2026-09-05): a governance write is reserved to the operator by default.** Registered
 in `conformance.md#the-register-of-open-design-decisions`. Each governance class (the closed list in
 `gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`) resolves to
-`NEVER` until the operator has written a policy value for it: a class with no value in the project's
+`NEVER` until the operator has written a policy value for it: a class with no value in the instance's
 `action_policy` is not the policy default and not a high tier, it is `operator_only`, and no confidence and
 no action series clears it. That is what the unclassified case already did — a declared class in neither set
 resolves to `NEVER` (`gates_and_workflows.md#confidence-and-three-blast-tiers`) — promoted from the accident
 of an absent value to the rule for this class of write, so that a reader no longer infers the posture from
-the fail-closed default, and a project no longer behaves as reserved only until someone writes a policy that
+the fail-closed default, and an instance no longer behaves as reserved only until someone writes a policy that
 forgets a class. The loosening is a **grant**, class by class: the operator lists the class in the policy
 with the tier they want, and from then on the gate resolves it as any other class. The operator reserves it
 again by removing the value.
@@ -386,13 +386,13 @@ again by removing the value.
 defaults are not symmetric in what they cost to undo. Reserved-then-loosened is reversible one class at a
 time, each loosening a deliberate write with an author and a date, and each undone by deleting what was
 written. Gated-then-reserved is not: a governance class held at a high tier is a class the swarm may change
-once a checkpoint is approved, and by the time a project decides the tier should have been a reservation the
+once a checkpoint is approved, and by the time an instance decides the tier should have been a reservation the
 swarm may already have changed itself under it — a rewritten agent, a widened grant, a workflow with a step
 removed — and undoing *those* is a set of recoveries through the gate, not a policy edit. The open question
 proposed to decide this on whether the checkpoint queue is actually consumed, a measured property. That
-measurement matters, and it decides something else: whether to **grant** a given class, for a project whose
-operator has watched the queue and trusts it. It cannot decide the default, because a default is what a
-project has before anyone has measured anything, and the safe direction to be unmeasured in is the reserved
+measurement matters, and it decides something else: whether to **grant** a given class, for an instance whose
+operator has watched the queue and trusts it. It cannot decide the default, because a default is what an
+instance has before anyone has measured anything, and the safe direction to be unmeasured in is the reserved
 one. The recursion is worth naming, because it is where the default does its work: `action_policy` is itself
 one of the governance classes, so the write that grants any class is a governance write, and the class covering it
 is reserved like the others. An operator therefore grants classes by writing the policy themselves, and the
@@ -403,7 +403,7 @@ it is granted by no one's forgetting.
 machinery sits unused until the operator grants a class, and an unexercised path is one nobody has tested
 (`failure_posture.md`). Accepted, because the alternative exercises the path by letting the swarm change
 itself before anyone decided it should, and a path tested that way is tested on the operator's swarm. What
-follows for a project that wants the swarm to institutionalize its own findings (decision 17,
+follows for an instance that wants the swarm to institutionalize its own findings (decision 17,
 `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`)
 is one explicit grant per governance class the institutionalization writes reach, before the first such
 batch can take its action — which is the price of knowing, by reading the policy, exactly which classes of
@@ -413,7 +413,7 @@ operator makes the change by hand (`#operator-only-tasks-are-claimed-by-the-oper
 
 **What would reopen it:** an operator finding that the grant friction on a specific class exceeds the value
 of reserving it — and the remedy is a grant on that class, which the ruling already provides, not a change of
-the default. The default itself would reopen only if the grants proved to be ceremony: if every project
+the default. The default itself would reopen only if the grants proved to be ceremony: if every instance
 wrote the same five grants on its first day, a default that everyone overrides identically is the wrong
 default.
 
@@ -427,7 +427,7 @@ sequencing between two batches when one of them produced the other. Neither depe
 both leaves the general rule here unchanged.
 
 **Bootstrapping: the first workflow is not created by a workflow, and this is a stated limitation.** If
-workflows are how workflows change, then the first declaration for a project has no workflow to come
+workflows are how workflows change, then the first declaration for a declaration scope has no workflow to come
 through, and a workflow broken badly enough that no step of it opens cannot be repaired by a batch going
 through it. The design does not resolve this, and inventing a mechanism for it would be inventing a side
 door — a privileged path that creates or repairs a declaration outside the model is exactly the thing the

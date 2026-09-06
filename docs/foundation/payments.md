@@ -671,7 +671,7 @@ per class, with a record of having written it, and reversible by deleting it. Th
 the operator owns the number, which is the same division `work_model.md` draws for the governance classes
 (decision 18) and `gates_and_workflows.md` draws for the bulk-mutation count. The open question feared that
 exact match makes routine payments unresolvable on a rail whose prices expire. It does not make them
-unresolvable; it makes each expiry a decision, and a project for which that is too many decisions writes a
+unresolvable; it makes each expiry a decision, and an instance for which that is too many decisions writes a
 tolerance, once, and has recorded that it did.
 
 **Where the value lives, and why not the other two candidates.** On the `action_policy`, keyed by action

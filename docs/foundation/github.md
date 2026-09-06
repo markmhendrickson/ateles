@@ -34,7 +34,7 @@ events the swarm's own operations produce or depend on. In scope: the inbound ma
 the outbound operation per step, and the two properties that make the mapping auditable. Out of scope: the
 general adapter rules (`adapters.md`), the workflows whose steps take these operations (`workflows.md`),
 the gate's decision function (`gates_and_workflows.md`), what the adapter is granted
-(`authority_model.md#grants`), and the per-instance binding of a repository to a project, which is a
+(`authority_model.md#grants`), and the per-instance binding of a repository to a declaration scope, which is a
 `vendor_binding` context entity resolved at runtime and never named here.
 
 Events outside those classes — the host's organization, membership, sponsorship, marketplace, project
@@ -412,7 +412,7 @@ host back** — never by the operation's return code.
 
 | Step or workflow | Operation on the host | Action class | What the action gate does with the class | What confirms it landed |
 |---|---|---|---|---|
-| `pm` (feature, bug, security, copy) | open an issue, where the task has none and the project keeps its specification on the host | `open_issue` | low blast under a policy that lists it; unlisted resolves to `NEVER` | the issue read back by number; artifact attached to the batch |
+| `pm` (feature, bug, security, copy) | open an issue, where the task has none and the declaration scope keeps its specification on the host | `open_issue` | low blast under a policy that lists it; unlisted resolves to `NEVER` | the issue read back by number; artifact attached to the batch |
 | `pm`, `impl` | edit an issue; apply or remove a label; request review from an account | `external_api_write` | as the policy lists it | the host reflects the change, read back |
 | `impl` | commits reach a branch | `git_push` | as the policy lists it | the branch head, read back, equals the commit the adapter sent |
 | `impl` | open a pull request | `open_pr` | as the policy lists it | the pull request read back by number; artifact attached |
