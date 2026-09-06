@@ -532,7 +532,7 @@ taken (`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`). Th
 principal's hands at the boundary: on permit it performs the operation, reads the result back from the
 external system, and writes the confirmation on the action (`taken_at`, `result_ref`); the record the
 effect left is an artifact `PRODUCES` from the batch. On a checkpoint it performs nothing. The class is
-resolved under the project's `action_policy`; a class in neither set resolves to `NEVER`
+resolved under the instance's `action_policy`; a class in neither set resolves to `NEVER`
 (`gates_and_workflows.md#confidence-and-three-blast-tiers`), so a policy that wants a low-blast comment
 lists the class the comment carries. The class names in the tables below are the policy's data, not a
 closed set: `open_issue` and `notify_operator` are this document's, beside the classes the workflows
@@ -941,9 +941,9 @@ that is already answered: a write to `agent_grant` is a **governance write**, wh
 at the action gate (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`). The operator
 resolves the checkpoint the gate raises. Nothing here needs a new approver class, and adding one would be
 the second gate. That governance class is *reserved* to the operator by default (**decision 18**, ruled:
-`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`): a project with no
+`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`): an instance with no
 policy value for the class resolves it to `NEVER`, so an adapter is never granted its credential by default,
-and a project that wants the swarm to admit its second adapter under a checkpoint grants the class explicitly
+and an instance that wants the swarm to admit its second adapter under a checkpoint grants the class explicitly
 first. The first adapter's grant is the operator's own write in every case.
 
 **Its outbound classes are `action_policy` data, and that write is governance too.** An adapter that can
