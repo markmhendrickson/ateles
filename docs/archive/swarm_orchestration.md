@@ -1,3 +1,5 @@
+> **Archived 2026-09-02. Superseded by [`docs/foundation/gates_and_workflows.md`](../../docs/foundation/gates_and_workflows.md).** It describes the gate-based model as one engine; the superseding document states the declaration/instance/projection model, the two mutually blind engines, and the one gate-set constant. Kept for history; not part of the active doc set, and nothing reads it at review time.
+
 # Swarm orchestration
 
 How the Ateles agent swarm decides which agents participate in which work.

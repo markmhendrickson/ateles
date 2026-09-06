@@ -8,7 +8,7 @@ Define the phased smoke-test suite that validates the Ateles agent swarm before 
 
 ## Scope
 
-Covers the operator-driven and Anthus-driven smoke-test procedures, the test issues and labels that drive each tier, pass criteria, and dependencies that gate each tier's start. Does not cover production workflows — see `swarm_orchestration.md` for those. The full lifecycle smoke run against `harness-sandbox` is documented in `smoke_test_runbook.md`; this plan supersedes it as a multi-tier programme.
+Covers the operator-driven and Anthus-driven smoke-test procedures, the test issues and labels that drive each tier, pass criteria, and dependencies that gate each tier's start. Does not cover production workflows — see `foundation/gates_and_workflows.md` for those. The full lifecycle smoke run against `harness-sandbox` is documented in `smoke_test_runbook.md`; this plan supersedes it as a multi-tier programme.
 
 ## Design principle
 
