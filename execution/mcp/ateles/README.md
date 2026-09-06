@@ -13,10 +13,63 @@ Registered in `~/.claude.json` as the `ateles` server, launched via
 | `get_swarm_roster` | no | Full roster: roles → agent names |
 | `route_task` | no | Resolve owning agent + definition + execution policy from a task description |
 | `list_checkpoints` | no | Pending `checkpoint_brief`s awaiting the operator |
-| `resolve_checkpoint` | **yes** | Approve/reject a checkpoint (the only mutating tool) |
+| `resolve_checkpoint` | **yes** (Neotoma) | Approve/reject a checkpoint |
 | `get_gate_status` | no | An issue's `gate_status`, `current_owner`, blocking gates, recent `owner_history`, and pipeline state |
 | `list_pipeline_queue` | no | What holds the issue-pipeline slot, what is queued, and how long each has waited |
 | `get_dispatch_health` | no | Dispatcher liveness, recent pipeline activity, recent dispatch failures |
+| `merge_pr` | **yes** (GitHub) | Evaluate the full merge gate and merge only if it passes; dry-run by default |
+
+### `merge_pr` — the merge gate
+
+`merge_pr` exists because of 2026-09-01, when eight PRs were merged by hand
+with `gh pr merge --squash`. **Seven of the eight carried
+`reviewDecision=CHANGES_REQUESTED` at the moment they were merged**, and five
+went through in a single shell loop that piped merge output to `/dev/null` and
+read back only `state`, so the blocking verdict was never displayed.
+
+Those merges were probably all defensible — in each case the blocking review
+sat on an *older commit* than the merged head, meaning the findings had been
+fixed by later pushes. But nothing checked, and `gh pr merge` gives you no way
+to tell a **superseded** `CHANGES_REQUESTED` from a **live** one: both print
+the same string. That distinction is a SHA comparison.
+
+The inverse error is worse. A PR with **no review at all** reports
+`reviewDecision=""` — indistinguishable from a PR with nothing to block it. So
+an unreviewed, pipeline-bypassing PR looks *safest* to a naive check. `merge_pr`
+refuses that reading: an unsigned gate is unsigned, never cleared.
+
+**All five conditions must hold**, and all are reported at once rather than
+short-circuited, so fixing one blocker does not reveal the next on the
+following call:
+
+1. Base is the repository **default branch** — never a stacked PR whose base is
+   another open PR's head, which would carry its parent's unreviewed commits.
+2. GitHub reports the PR mergeable (`mergeable=null` means *ask again*, not yes).
+3. Required checks are **green against the current head SHA**.
+4. A standing **APPROVE against that same head SHA**. An approval of earlier
+   code does not vouch for what was pushed since; `COMMENTED`/`PENDING` never
+   displace a standing verdict; latest review per reviewer wins.
+5. No `pipeline-bypass-notice` — the marker `swarm_dispatch` posts when a PR
+   skipped the gated issue → pm/arch → implementation path. The dispatcher
+   calls merge "operator-gated" there, which is inert unless something reads it.
+
+**Dry-run by default.** `merge_pr` reports whether a PR *may* be merged and why,
+without merging. Merging requires `dry_run: false` explicitly, so a merge is
+always something the caller asked for in as many words.
+
+**`acknowledge_stale_review`** retires *only* the stale-`CHANGES_REQUESTED`
+blocker, and only when it is the sole thing in the way. The stale case is common
+and usually legitimate; the flag forces the caller to say "I read that older
+verdict and its findings are fixed" rather than never seeing it. It cannot clear
+a live block, a failing check, a missing approval, or a bypass notice.
+
+**Fails closed everywhere.** Any signal that cannot be read blocks the merge. A
+403 on the reviews endpoint is not "no blocking reviews".
+
+**This does not breach the self-certification boundary below.** `merge_pr`
+writes no gate state and signs nothing off — it reads verdicts other agents
+wrote and either performs the mechanical merge or refuses. A session still
+cannot approve its own work; it can only act on an approval that already exists.
 
 ### Read-only by construction
 
@@ -60,7 +113,7 @@ and confirm the tool reports unknown-with-reason.
 
 | Variable | Used by | Notes |
 |---|---|---|
-| `APIS_GITHUB_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN` | `list_pipeline_queue`, `get_gate_status` pipeline leg | First match wins. Needs read access to issues + issue comments. **Missing or expired token → an explicit error, never an empty queue** — a missing token reads as *unconfigured*, not as *nothing queued* |
+| `APIS_GITHUB_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN` | `list_pipeline_queue`, `get_gate_status` pipeline leg, **all of `merge_pr`** | First match wins. Needs read access to issues + issue comments. **Missing or expired token → an explicit error, never an empty queue** — a missing token reads as *unconfigured*, not as *nothing queued* |
 
 ### Optional
 
