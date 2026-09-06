@@ -300,3 +300,187 @@ def test_drift_error_carries_the_report(remote_and_clone):
     assert isinstance(err.report, DriftReport)
     assert err.report.is_drifted
     assert "DIVERGED" in str(err)
+
+
+# ── escalation path ──────────────────────────────────────────────────────────
+#
+# An ERROR line in one of eighteen daemon logs is a write-only channel: nobody
+# tails it, so "advisory" degraded to "silent" (ateles#583, and the two months
+# Anthus stayed dead in ateles#573). These tests pin that drift reaches Neotoma,
+# and — just as important — that failing to file it never takes a daemon down.
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int = 200) -> None:
+        self.status_code = status_code
+
+
+class _FakeHttpx:
+    """Stands in for the httpx module imported inside escalate_drift."""
+
+    def __init__(self, status_code: int = 200, raises: Exception | None = None) -> None:
+        self.calls: list[dict] = []
+        self._status_code = status_code
+        self._raises = raises
+
+    def post(self, url, *, json, headers, timeout):  # noqa: A002
+        self.calls.append(
+            {"url": url, "json": json, "headers": headers, "timeout": timeout}
+        )
+        if self._raises is not None:
+            raise self._raises
+        return _FakeResponse(self._status_code)
+
+
+@pytest.fixture
+def fake_httpx(monkeypatch):
+    """Install a fake httpx and a token so escalate_drift takes the write path."""
+    import sys
+
+    fake = _FakeHttpx()
+    monkeypatch.setitem(sys.modules, "httpx", fake)
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.test")
+    monkeypatch.delenv("ATELES_CHECKOUT_DRIFT_NO_ESCALATE", raising=False)
+    return fake
+
+
+def test_drift_files_an_escalation(remote_and_clone, fake_httpx):
+    """Drift must reach Neotoma, not only the log."""
+    _origin, _work, clone = remote_and_clone
+    _commit(clone, "local_only.txt")
+
+    warn_on_drift("test-daemon", clone)
+
+    assert len(fake_httpx.calls) == 1, "drift should file exactly one escalation"
+    call = fake_httpx.calls[0]
+    assert call["url"] == "https://neotoma.test/store"
+    assert call["headers"]["Authorization"] == "Bearer test-token"
+
+    entity = call["json"]["entities"][0]
+    assert entity["entity_type"] == "escalation"
+    assert entity["escalation_type"] == "checkout_drift"
+    assert entity["source_agent"] == "test-daemon"
+    assert entity["status"] == "open"
+    # The operator must be able to act on it without opening a shell.
+    assert "fast-forward" in entity["detail"]
+
+
+def test_clean_checkout_files_nothing(remote_and_clone, fake_httpx):
+    """No drift, no escalation — otherwise the queue becomes noise."""
+    _origin, _work, clone = remote_and_clone
+
+    warn_on_drift("test-daemon", clone)
+
+    assert fake_httpx.calls == []
+
+
+def test_escalation_is_deduplicated_across_restarts(remote_and_clone, fake_httpx):
+    """
+    A daemon on a StartInterval relaunches every two minutes. The same daemon on
+    the same HEAD in the same state is one finding, so the idempotency key must
+    be stable — otherwise a stale checkout files ~700 escalations a day and the
+    operator learns to ignore the type.
+    """
+    _origin, _work, clone = remote_and_clone
+    _commit(clone, "local_only.txt")
+
+    warn_on_drift("test-daemon", clone)
+    warn_on_drift("test-daemon", clone)
+
+    keys = {c["json"]["idempotency_key"] for c in fake_httpx.calls}
+    assert len(keys) == 1, "same daemon+HEAD+state must reuse one idempotency key"
+
+
+def test_diverged_is_more_severe_than_behind(remote_and_clone, fake_httpx):
+    """
+    Being behind is routine deploy lag. Diverged means unreviewed commits exist
+    only on this host and are one power-cycle from being lost.
+    """
+    _origin, _work, clone = remote_and_clone
+    _commit(clone, "local_only.txt")
+
+    warn_on_drift("test-daemon", clone)
+
+    entity = fake_httpx.calls[0]["json"]["entities"][0]
+    assert entity["severity"] == "error"
+
+
+def test_escalation_failure_never_stops_the_daemon(remote_and_clone, monkeypatch):
+    """
+    Fail-open is the whole posture: a daemon must not die because Neotoma was
+    unreachable. A guard that takes down the swarm when its audit sink is down
+    is worse than the drift it reports.
+    """
+    import sys
+
+    fake = _FakeHttpx(raises=RuntimeError("connection refused"))
+    monkeypatch.setitem(sys.modules, "httpx", fake)
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-token")
+
+    _origin, _work, clone = remote_and_clone
+    _commit(clone, "local_only.txt")
+
+    report = warn_on_drift("test-daemon", clone)  # must not raise
+
+    assert report.is_drifted
+    assert fake.calls, "the write should have been attempted"
+
+
+def test_escalation_http_error_is_reported_false_not_raised(
+    remote_and_clone, monkeypatch
+):
+    """A 4xx/5xx from Neotoma is a failed filing, not a daemon-killing event."""
+    import sys
+
+    from checkout_drift import check_checkout_drift, escalate_drift
+
+    fake = _FakeHttpx(status_code=500)
+    monkeypatch.setitem(sys.modules, "httpx", fake)
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "test-token")
+
+    _origin, _work, clone = remote_and_clone
+    _commit(clone, "local_only.txt")
+
+    assert escalate_drift("test-daemon", check_checkout_drift(clone)) is False
+
+
+def test_no_token_skips_the_write_silently(remote_and_clone, monkeypatch):
+    """Without a token there is nowhere to file; the log line stands alone."""
+    import sys
+
+    fake = _FakeHttpx()
+    monkeypatch.setitem(sys.modules, "httpx", fake)
+    monkeypatch.delenv("NEOTOMA_BEARER_TOKEN", raising=False)
+
+    _origin, _work, clone = remote_and_clone
+    _commit(clone, "local_only.txt")
+
+    warn_on_drift("test-daemon", clone)
+
+    assert fake.calls == []
+
+
+def test_escalate_false_keeps_the_log_without_the_write(remote_and_clone, fake_httpx):
+    """Callers that manage their own reporting can opt out of the write."""
+    _origin, _work, clone = remote_and_clone
+    _commit(clone, "local_only.txt")
+
+    warn_on_drift("test-daemon", clone, escalate=False)
+
+    assert fake_httpx.calls == []
+
+
+def test_escalation_is_filed_even_under_enforcement(remote_and_clone, fake_httpx):
+    """
+    The escalation must be filed BEFORE the raise. Otherwise the daemons
+    configured to refuse stale code would be the ones that report nothing —
+    exactly backwards.
+    """
+    _origin, _work, clone = remote_and_clone
+    _commit(clone, "local_only.txt")
+
+    with pytest.raises(CheckoutDriftError):
+        warn_on_drift("test-daemon", clone, enforce=True)
+
+    assert len(fake_httpx.calls) == 1
