@@ -174,6 +174,61 @@ def test_agent_prompt_includes_email_step_when_configured(monkeypatch):
     assert "gws gmail +send" in p
     assert "op@example.com" in p
     assert "approve" in p.lower() and "skip" in p.lower()
+    # The swarm sender, when configured, is passed as --from.
+    assert '--from "swarm@example.com"' in p
+
+
+def test_agent_prompt_carries_html_email_contract(monkeypatch):
+    """The prompt must instruct the agent to send HTML, not raw markdown.
+
+    This is path-1 of ateles#336. The release notes are markdown; sent as a
+    plain --body they reach Gmail as a literal wall of `##` and `-`. The
+    agent is a black box driven only by this prompt, so the prompt IS the
+    contract — if these instructions drop out, the operator silently starts
+    receiving unreadable release mail again with every unit test still green.
+    """
+    monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(prepare, "SWARM_EMAIL", "")
+    p = prepare._build_agent_prompt("v0.20.0", 3)
+
+    # (a) The flag itself must be named, and named in the sample command.
+    assert "--html" in p
+    assert "--html" in _email_send_command(p), \
+        "the sample gws send command must carry --html"
+
+    # (b) The imperative must be unmissable, not merely implied.
+    assert "SEND AS HTML" in p
+    assert "ALWAYS include `--html`" in p
+
+    # (c) The markdown -> HTML conversion instruction, element by element.
+    assert "Convert markdown → HTML" in p
+    for markdown_token, html_tag in (
+        ("##", "<h2>"),
+        ("-", "<ul><li>"),
+        ("**bold**", "<strong>"),
+        ("backticks", "<code>"),
+    ):
+        assert markdown_token in p and html_tag in p, \
+            f"conversion rule for {markdown_token} -> {html_tag} is missing"
+
+    # (d) Do not pin a font size — the client default must apply.
+    assert "font-size" in p and "Do NOT inline" in p
+
+    # (e) The RC PR must be a real link, not a bare URL.
+    assert "<a href>" in p
+
+    # (f) The machine-parsed approval token Turdus greps out of the reply.
+    #     It must survive as plain text, so it may not live only in an href.
+    assert "release-approve: <TAG>" in p
+    assert "NOT only inside an href" in p
+
+
+def _email_send_command(prompt: str) -> str:
+    """The single `gws gmail +send ...` line out of the agent prompt."""
+    for line in prompt.splitlines():
+        if "gws gmail +send" in line:
+            return line
+    raise AssertionError("no `gws gmail +send` command found in the prompt")
 
 
 def test_agent_prompt_notes_skip_when_email_unconfigured(monkeypatch):
@@ -181,6 +236,9 @@ def test_agent_prompt_notes_skip_when_email_unconfigured(monkeypatch):
     p = prepare._build_agent_prompt("v0.19.0", 3)
     assert "Email notification skipped" in p
     assert "gws gmail +send" not in p
+    # No email step at all means no HTML contract to carry.
+    assert "SEND AS HTML" not in p
+    assert "--html" not in p
 
 
 def test_notify_operator_sends_both_channels(monkeypatch):
