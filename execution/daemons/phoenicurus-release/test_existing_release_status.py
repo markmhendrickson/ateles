@@ -395,3 +395,111 @@ def test_stale_block_escalates_again_once_the_blocker_changes(ready_to_prepare, 
     prepare.run_prepare(dry_run=False, force=False, on_merge=True)
 
     assert len(notices) == 2, "a newly-stale, different blocking entity must escalate"
+
+
+# ── Fail-open regression: an UNREADABLE in-flight check must not prepare ─────
+#
+# The in-flight `release_result` check is the guard this daemon's design leans
+# on: `_mark_ran(transient=True)` deliberately leaves the per-commit SHA lock
+# unstamped, so every merge and every scheduled sweep re-enters `run_prepare`.
+# When `existing_release_status` swallowed a Neotoma error and returned a bare
+# None, "the read failed" and "nothing is in flight" were the same value — so
+# an outage spawned one prepare agent per merge, each cutting a fresh RC on top
+# of a release already pending_approval. That is exactly the duplicate-RC state
+# `publish.py`'s `find_release` refuses to guess its way out of, hard-blocking
+# the operator at publish time.
+
+
+def _fake_urlopen_raising(exc: Exception):
+    def _open(*_a, **_k):
+        raise exc
+
+    return _open
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        OSError("connection reset by peer"),
+        ValueError("malformed response body"),
+    ],
+    ids=["transport-error", "malformed-body"],
+)
+def test_unreadable_inflight_check_does_not_spawn(ready_to_prepare, monkeypatch, exc):
+    """A failed read must NOT be treated as 'nothing in flight'."""
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_raising(exc))
+    monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: None)
+
+    rc = prepare.run_prepare(dry_run=False, force=False, on_merge=True)
+
+    assert rc == 0
+    assert ready_to_prepare == [], (
+        "an unreadable in-flight check must defer, never spawn a prepare agent "
+        "— that is the duplicate-RC failure"
+    )
+
+
+def test_unreadable_inflight_check_returns_the_unknown_sentinel(monkeypatch):
+    """The sentinel is distinguishable from a clean 'nothing in flight' None."""
+    monkeypatch.setattr(
+        prepare.urllib.request, "urlopen", _fake_urlopen_raising(OSError("boom"))
+    )
+
+    assert prepare.existing_release_status("v0.20.0") is prepare.UNKNOWN_RELEASE_STATUS
+    assert prepare.UNKNOWN_RELEASE_STATUS is not None, (
+        "the unknown sentinel must not be None — that collapse IS the defect"
+    )
+
+
+def test_unreadable_inflight_check_leaves_the_sha_lock_unstamped(
+    ready_to_prepare, monkeypatch, isolated_state
+):
+    """
+    Deferral must be retryable. Stamping the per-commit lock here would burn
+    the only attempt for this head on a run that did nothing, so the release
+    would wait for the next merge even after Neotoma recovered.
+    """
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_raising(OSError("boom")))
+    monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: None)
+
+    prepare.run_prepare(dry_run=False, force=False, on_merge=True)
+
+    assert not prepare._already_ran_for_sha(SHA), (
+        "a transient deferral must leave the SHA lock unstamped so the next "
+        "merge or sweep re-checks once Neotoma is reachable"
+    )
+
+
+def test_recovered_neotoma_prepares_normally_after_a_failed_check(
+    ready_to_prepare, monkeypatch
+):
+    """The deferral is temporary: once the read succeeds, prep proceeds."""
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_raising(OSError("boom")))
+    monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: None)
+    prepare.run_prepare(dry_run=False, force=False, on_merge=True)
+    assert ready_to_prepare == []
+
+    # Neotoma recovers; no blocking release_result exists.
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_returning([]))
+    prepare.run_prepare(dry_run=False, force=False, on_merge=True)
+
+    assert ready_to_prepare == ["v0.20.0"], (
+        "once the in-flight check is readable again, prep must proceed"
+    )
+
+
+def test_error_is_logged_at_error_not_warning(ready_to_prepare, monkeypatch, caplog):
+    """
+    A skipped release is an operational event, not a debug detail. The old
+    code logged this at WARNING and it went unnoticed.
+    """
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", _fake_urlopen_raising(OSError("boom")))
+    monkeypatch.setattr(prepare, "notify_operator", lambda *a, **k: None)
+
+    with caplog.at_level("WARNING"):
+        prepare.run_prepare(dry_run=False, force=False, on_merge=True)
+
+    assert any(r.levelname == "ERROR" for r in caplog.records), (
+        "an unreadable in-flight check must log at ERROR"
+    )
+    assert "in-flight" in caplog.text.lower()
