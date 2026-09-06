@@ -7,7 +7,7 @@ undecided question **open** with its options, never resolving one to make the do
 section as decision; the swarm-spec section as proposal), synthesis `ent_b0ce322f768e4fc676b73139` (PR-20
 to PR-28, PR-34 to PR-38, C8, C9, C10, C13, C14, C17), prior art `ent_08460968e6f49dac21510f4a` (Track 2),
 the P4 brief `ent_683200acfb3ff5f03add966c`, `docs/multi_tenant.md`, and PR #745 operator review
-(2026-09-04). What is built, and where the substrate fails open, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 41 ruled here — write admission per entity type is default-deny, and the grant is the allowlist). Revised by the workflow-format pass of 2026-09-06 (revision 34: a required approver may be named by ownership of an entity the checkpoint's subject concerns). Revised by the consistency pass of 2026-09-06 (revision 35: the brief's Q1–Q8 and the raiser question registered as decisions 46 to 54; C13 marked settled by C9 and decision 37). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a resolution on an `operator_only` action is the operator's decision and never the confirmation; the shared-instance approver cites decision 55). Revised by the testability pass of 2026-09-06 (revision 37: a parameter constraint on a write capability as a field allowlist — the mechanical half of minimization at capture; `AWAITS` resolves a role to principals). Revised by the rulings pass of 2026-09-06 (revision 38: decisions 46, 48, 49, 51, and 54 ruled here, and 50 and 53 in one half each — what owning confers; the counting rule; structural checks as reads over the checkpoint's principal edges, with the thresholds' home on the `action_policy`; initiative approval as the checkpoint; budget as an attenuating scope term; credit as a read model). Revised by the second rulings pass of 2026-09-06 (revision 39: decisions 47 and 52 ruled here, and the second halves of 50 and 53 — the raiser does not resolve, the operator's self-resolution marked; what stops is a task, confirmed through the checkpoint by the owner seat, proposing a grant capability; which checks and which metered resources are `action_policy` values, fail-closed where unwritten).
+(2026-09-04). What is built, and where the substrate fails open, is `status.md`. Amendment history: `revisions.md#authority_modelmd`.
 
 ## Purpose
 
@@ -45,6 +45,12 @@ for that tool; a policy check that raises is deny. `time` needs no engine: `now 
 read by the checker (OpenFGA's form).
 
 ## Principals
+
+**The rules in this section.**
+
+- The human principal is an `operator` entity (C9, settled).
+- What stays open, and it is not this document's to close.
+- [What owning confers: the required seat](#what-owning-confers-the-required-seat).
 
 A principal is any actor authority is attributed to: a human (an operator) or an agent. A principal is an
 entity in the record, so an ownership or delegation edge has somewhere to point (prior art: ReBAC as a data
@@ -128,6 +134,17 @@ taking should have asked the accountable principal — which would argue for the
 **Matrix.** AU-16 and the approver-by-ownership rows already test the seat; no row is added.
 
 ## Grants
+
+**The rules in this section.**
+
+- A degraded read never synthesizes a value more permissive than success would have returned.
+- Write admission per entity type is default-deny, and the grant is the allowlist (ruled, decision 41, 2026-09-06).
+- A parameter constraint on a write capability is a field allowlist.
+- The grant is read at every enforcement point.
+- The decision precedes the effect.
+- A denial raises a checkpoint, and the denied principal does not route around it.
+- Rotation is staged, never a flag day.
+- Revocation's reach is every grant that matched the credential, and it is only as fast as the check that reads it.
 
 An `agent_grant` is matched on the credential (`sub`, `iss`) and lists capabilities as operation × entity
 types × repositories with parameter constraints; a human's grant is bound to a principal and a tenant, never
@@ -260,6 +277,12 @@ using C's state under D's policy, and every hop is reconstructible.
 
 ## Approval
 
+**The rules in this section.**
+
+- A required approver is a principal, a role the roster resolves, or the principal an `ownership_grant` names on an entity the subject concerns.
+- A resolution on an `operator_only` action is the operator's decision, never the confirmation that the effect happened.
+- [The raiser of a checkpoint does not resolve it, and the operator's self-resolution is marked](#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked).
+
 An approval is an explicit yes, no, or veto by a required principal on a `checkpoint`, whose subject is
 an action held at the gate or a task the swarm cannot advance (`gates_and_workflows.md#the-checkpoint`),
 ending in a terminal state; a timeout is a terminal state that never continues. The checkpoint records
@@ -348,6 +371,12 @@ a field of it, the name deferred to a vocabulary pass under invariant 12
 (`adapters.md#whether-one-binding-type-or-two-names-an-external-systems-instance`).
 
 ## Structural checks: quorum and separation of duties
+
+**The rules in this section.**
+
+- [The counting rule: an agent counts as its bound principal](#the-counting-rule-an-agent-counts-as-its-bound-principal).
+- [Structural checks are reads over the checkpoint's principal edges](#structural-checks-are-reads-over-the-checkpoints-principal-edges).
+- [The threshold's home is the `action_policy`, per class](#the-thresholds-home-is-the-action_policy-per-class).
 
 Rights scope what a principal may do; structural checks make an outcome depend on more than one interest,
 and both are required (README). Decided: the design is multi-principal in earnest, with real separation of
@@ -449,6 +478,13 @@ have to say why the class was the wrong grain.
 `action_policy` under test, and the fail-closed default is the row's second case (`conformance_suite.md`).
 
 ## Initiative, proposal, reprioritization
+
+**The rules in this section.**
+
+- [Initiative approval is the checkpoint](#initiative-approval-is-the-checkpoint).
+- [What stops is a task, the owner seat confirms it through the checkpoint, and proposing is a grant capability](#what-stops-is-a-task-the-owner-seat-confirms-it-through-the-checkpoint-and-proposing-is-a-grant-capability).
+- [Budget is a scope term that attenuates](#budget-is-a-scope-term-that-attenuates).
+- [Credit is a read model over attribution](#credit-is-a-read-model-over-attribution).
 
 Decided (README; the operator-authored section of the issue the header cites): initiative, proposal,
 approval, ownership, and reprioritization
