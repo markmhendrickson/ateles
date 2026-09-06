@@ -27,6 +27,11 @@ from dataclasses import dataclass, field
 
 import httpx
 
+try:  # package import (production) and bare import (in-dir pytest) both work
+    from .neotoma_timeout import neotoma_timeout
+except ImportError:  # pragma: no cover
+    from neotoma_timeout import neotoma_timeout  # type: ignore
+
 log = logging.getLogger(__name__)
 
 NEOTOMA_BASE_URL = os.environ.get(
@@ -108,7 +113,7 @@ async def hydrate_snapshot(event: NeotomaEvent) -> NeotomaEvent:
 
     url = f"{NEOTOMA_BASE_URL}/entities/{event.entity_id}"
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=neotoma_timeout()) as client:
             resp = await client.get(url, headers=headers)
         resp.raise_for_status()
         data = resp.json()

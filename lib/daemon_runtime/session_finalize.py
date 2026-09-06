@@ -26,6 +26,11 @@ import os
 
 import httpx
 
+try:  # package import (production) and bare import (in-dir pytest) both work
+    from .neotoma_timeout import neotoma_timeout
+except ImportError:  # pragma: no cover
+    from neotoma_timeout import neotoma_timeout  # type: ignore
+
 log = logging.getLogger("daemon_runtime.finalize")
 
 NEOTOMA_BASE_URL = os.environ.get(
@@ -202,7 +207,7 @@ def _post_store(body: dict) -> dict | None:
             f"{NEOTOMA_BASE_URL}/store",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             json=body,
-            timeout=20,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         return resp.json()
@@ -259,7 +264,7 @@ def finalize_session(**kwargs) -> bool:
             f"{NEOTOMA_BASE_URL}/store",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             json=body,
-            timeout=20,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         return True
@@ -280,7 +285,7 @@ def load_end_skill() -> str | None:
         resp = httpx.get(
             f"{NEOTOMA_BASE_URL}/entities/{END_SKILL_ID}",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            timeout=10,
+            timeout=neotoma_timeout(),
         )
         resp.raise_for_status()
         data = resp.json()
