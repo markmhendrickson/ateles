@@ -414,8 +414,15 @@ def test_gate_owning_lens_skills_document_the_issue_writeback():
     it is *told* to — so that if a skill ever drops the writeback recipe, the
     grant assertion above does not silently pass over a lens whose sign-off no
     longer reaches the entity at all.
+
+    Cause #2 (ateles#762 / #769): a write without read-back is still a silent
+    failure. The Gate handoff recipe must (a) call retrieve_entity_snapshot or
+    retrieve_entity_by_identifier after correct(), (b) branch on mismatch to
+    **BLOCKED** (never SIGNED_OFF), and (c) show a conditional — not only the
+    happy-path correct() → store() sequence.
     """
     from pathlib import Path
+    import re
 
     skills_root = Path(__file__).resolve().parents[3] / ".claude" / "skills"
     for lens in LENSES:
@@ -427,3 +434,80 @@ def test_gate_owning_lens_skills_document_the_issue_writeback():
             f"longer references <issue_entity_id> — either restore the gate "
             f"writeback recipe or remove the gate from its lens."
         )
+        # Isolate the Gate handoff section (first match) so consultation-protocol
+        # retrieve calls elsewhere in the skill cannot satisfy this check.
+        m = re.search(
+            r"## Gate handoff.*?(?=\n## |\Z)", skill, flags=re.S | re.I
+        )
+        assert m, (
+            f"{lens.agent} owns the {lens.gate!r} gate but has no "
+            f"'## Gate handoff' section in SKILL.md"
+        )
+        handoff = m.group(0)
+        assert (
+            "retrieve_entity_snapshot" in handoff
+            or "retrieve_entity_by_identifier" in handoff
+        ), (
+            f"{lens.agent} Gate handoff must read-back the issue entity after "
+            f"correct() (retrieve_entity_snapshot / retrieve_entity_by_identifier)"
+        )
+        assert "**BLOCKED**" in handoff, (
+            f"{lens.agent} Gate handoff must route read-back failure to "
+            f"**BLOCKED**, never to SIGNED_OFF"
+        )
+        assert re.search(r"\bif\b", handoff), (
+            f"{lens.agent} Gate handoff must branch on read-back result "
+            f"(conditional), not only sequential correct() → store()"
+        )
+
+
+def test_gate_owning_lenses_have_agent_grant_admission_for_issue():
+    """Admission is agent_grant.capabilities, not operational_entity_types.
+
+    Mirrors can list `issue` while live grants still deny the write (ateles#769
+    round-1). This sibling asserts a checked-in fixture — derived from LENSES
+    with a non-empty gate — admits `issue` on retrieve+correct and never via
+    store_structured (pavo's pre-existing pm grant is the documented exception
+    for store_structured; it already stores issues as part of PM workflow).
+    """
+    import json
+    from pathlib import Path
+
+    fixture_path = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "agent_grants"
+        / "gate_lens_capabilities.json"
+    )
+    fixture = json.loads(fixture_path.read_text())
+    by_agent = {entry["agent"]: entry for entry in fixture["lenses"]}
+
+    for lens in LENSES:
+        if not lens.gate:
+            continue
+        entry = by_agent.get(lens.agent)
+        assert entry is not None, (
+            f"{lens.agent} owns the {lens.gate!r} gate but is missing from "
+            f"{fixture_path.name} — add its agent_grant row to the fixture"
+        )
+        assert entry.get("gate") == lens.gate, (
+            f"{lens.agent} fixture gate {entry.get('gate')!r} != LENSES gate "
+            f"{lens.gate!r}"
+        )
+        caps = {c["op"]: set(c.get("entity_types") or []) for c in entry["capabilities"]}
+        retrieve = caps.get("retrieve", set())
+        correct = caps.get("correct", set())
+        assert "issue" in retrieve or "*" in retrieve, (
+            f"{lens.agent} agent_grant {entry.get('entity_id')} must admit "
+            f"retrieve on issue (or *); got {sorted(retrieve)}"
+        )
+        assert "issue" in correct or "*" in correct, (
+            f"{lens.agent} agent_grant {entry.get('entity_id')} must admit "
+            f"correct on issue (or *); got {sorted(correct)}"
+        )
+        store_types = caps.get("store_structured", set())
+        if lens.agent != "pavo":
+            assert "issue" not in store_types, (
+                f"{lens.agent} agent_grant must NOT admit store_structured on "
+                f"issue (gate writeback is correct-only); got {sorted(store_types)}"
+            )

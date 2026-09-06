@@ -1,0 +1,184 @@
+{
+  "schema_version": "1",
+  "source": "ateles#769 live agent_grant read-back 2026-09-06",
+  "note": "Admission surface for gate writeback. Derived from LENSES with non-empty gate. issue must be on retrieve+correct and must NOT be on store_structured.",
+  "lenses": [
+    {
+      "agent": "pavo",
+      "gate": "pm",
+      "match_sub": "pavo@ateles-swarm",
+      "match_iss": "https://markmhendrickson.com",
+      "entity_id": "ent_7b15083353ac149909dc93b3",
+      "label": "pavo pm gate",
+      "capabilities": [
+        {
+          "op": "store_structured",
+          "entity_types": [
+            "plan_contribution",
+            "issue",
+            "conversation",
+            "conversation_message"
+          ]
+        },
+        {
+          "op": "correct",
+          "entity_types": [
+            "issue",
+            "plan_contribution"
+          ]
+        },
+        {
+          "op": "retrieve",
+          "entity_types": [
+            "*"
+          ]
+        },
+        {
+          "op": "create_relationship",
+          "entity_types": [
+            "*"
+          ]
+        }
+      ]
+    },
+    {
+      "agent": "waxwing",
+      "gate": "arch",
+      "match_sub": "waxwing@ateles-swarm",
+      "match_iss": "https://markmhendrickson.com",
+      "entity_id": "ent_de416b129a46781d6c7be285",
+      "label": "waxwing \u2014 Neotoma data scope (retrieve ctx, write operational)",
+      "capabilities": [
+        {
+          "op": "retrieve",
+          "entity_types": [
+            "agent_definition",
+            "agent_grant",
+            "agent_policy",
+            "agent_strategy",
+            "api_operation",
+            "api_reference",
+            "architectural_decision",
+            "breaking_change",
+            "data_migration_query",
+            "decision_record",
+            "doc_page",
+            "feature_spec",
+            "mcp_endpoint",
+            "mcp_server_status",
+            "mcp_tool",
+            "migration_result",
+            "repository",
+            "software_package",
+            "software_product",
+            "software_project",
+            "specification",
+            "standing_rule",
+            "technical_research",
+            "workflow_definition",
+            "issue"
+          ]
+        },
+        {
+          "op": "store_structured",
+          "entity_types": [
+            "api_reference",
+            "architectural_decision",
+            "decision_record",
+            "feature_spec",
+            "plan",
+            "specification",
+            "strategy_drift_signal"
+          ]
+        },
+        {
+          "op": "correct",
+          "entity_types": [
+            "api_reference",
+            "architectural_decision",
+            "decision_record",
+            "feature_spec",
+            "plan",
+            "specification",
+            "strategy_drift_signal",
+            "issue"
+          ]
+        }
+      ]
+    },
+    {
+      "agent": "accipiter",
+      "gate": "ux",
+      "match_sub": "accipiter@ateles-swarm",
+      "match_iss": "https://markmhendrickson.com",
+      "entity_id": "ent_a672fb393411936a76ed8c14",
+      "label": "accipiter ux gate",
+      "capabilities": [
+        {
+          "op": "retrieve",
+          "entity_types": [
+            "issue"
+          ]
+        },
+        {
+          "op": "correct",
+          "entity_types": [
+            "issue"
+          ]
+        }
+      ]
+    },
+    {
+      "agent": "buteo",
+      "gate": "legal",
+      "match_sub": "buteo@ateles-swarm",
+      "match_iss": "https://markmhendrickson.com",
+      "entity_id": "ent_f4fd2ae3e9dc3583dadb93ee",
+      "label": "buteo legal gate",
+      "capabilities": [
+        {
+          "op": "retrieve",
+          "entity_types": [
+            "issue"
+          ]
+        },
+        {
+          "op": "correct",
+          "entity_types": [
+            "issue"
+          ]
+        }
+      ]
+    },
+    {
+      "agent": "phoenicurus",
+      "gate": "qa",
+      "match_sub": "phoenicurus@ateles-swarm",
+      "match_iss": "https://markmhendrickson.com",
+      "entity_id": "ent_37f492a797237dd72549d684",
+      "label": "phoenicurus \u2014 release_result write",
+      "capabilities": [
+        {
+          "op": "retrieve",
+          "entity_types": [
+            "release_result",
+            "issue"
+          ]
+        },
+        {
+          "op": "store_structured",
+          "entity_types": [
+            "release_result"
+          ]
+        },
+        {
+          "op": "correct",
+          "entity_types": [
+            "release_result",
+            "issue"
+          ]
+        }
+      ]
+    }
+  ]
+}
