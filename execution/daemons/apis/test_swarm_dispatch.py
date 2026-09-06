@@ -3517,9 +3517,18 @@ class _FakeHttpxClient:
     async def __aexit__(self, *a):
         pass
 
+    async def get(self, url, **kwargs):
+        # Comment listing for edit-not-duplicate dedup: no existing comments, so
+        # every poster takes its "post new" branch and lands in post_calls.
+        return _FakeListResp([])
+
     async def post(self, url, **kwargs):
         self.post_calls.append({"url": url, "json": kwargs.get("json", {})})
         return _FakeResp(201)
+
+    async def patch(self, url, **kwargs):
+        self.post_calls.append({"url": url, "json": kwargs.get("json", {})})
+        return _FakeResp(200)
 
     async def request(self, method, url, **kwargs):
         if method == "DELETE":
@@ -4113,8 +4122,16 @@ def test_hold_acks_and_leaves_reviewer_in_place(monkeypatch):
     )
 
 
-def test_hold_from_non_operator_is_ignored(monkeypatch):
-    """/hold from a non-operator is silently ignored."""
+def test_hold_from_non_operator_takes_no_action(monkeypatch):
+    """/hold from a non-operator must change nothing — but IS answered.
+
+    ateles#732 deliberately changed one thing here: the decline is now reported
+    on GitHub, because a refusal indistinguishable from a dropped webhook is
+    the bug that fix closes. What must NOT change is the guard's effect — no
+    checkpoint is resolved, no Neotoma entity is written, and the operator is
+    not paged for somebody else's rejected command. Those are asserted below;
+    the single comment is the decline itself.
+    """
     stored: list = []
     http_client = _FakeHttpxClient()
 
@@ -4131,9 +4148,14 @@ def test_hold_from_non_operator_is_ignored(monkeypatch):
         )
     )
 
-    assert http_client.post_calls == []
+    # The guard still refuses the command: nothing is written, nobody is paged.
     assert stored == []
     assert notifier.sent == []
+    # The ONLY GitHub write is the decline comment — no verdict, no ack.
+    bodies = [c.get("json", {}).get("body", "") for c in http_client.post_calls]
+    assert all("swarm-command-declined" in b for b in bodies), (
+        f"a non-operator /hold must post nothing but its decline: {bodies!r}"
+    )
 
 
 # ── Merge boundary requests operator as reviewer ──────────────────────────────
@@ -7266,3 +7288,377 @@ def test_confirm_gates_clear_end_to_end_on_pr_waives_parent(monkeypatch):
 
     assert store.gates_for(50) == {g: "waived" for g in PRE_IMPL_GATES}
     assert 99 not in [n for _repo, n, _gates in store.waive_calls]
+
+
+# ── ateles#732: a declined operator command must ANSWER on GitHub ────────────
+#
+# Every guard in _handle_issue_comment used to decline with `log.debug` +
+# return, and apis.py configures INFO — so a declined command produced no
+# GitHub comment AND no log line. The operator could not tell a command the
+# dispatcher refused from one that never arrived.
+#
+# These tests assert the COMMENT, never the log line. A test asserting the log
+# would pass while the operator still gets silence, which is the whole bug.
+
+
+class _DeclineCapturingClient:
+    """httpx.AsyncClient stand-in recording every comment POST/PATCH.
+
+    Records the URL as well as the body so a test can prove the comment went to
+    the right issue, and returns an empty comment list from GET so the
+    edit-not-duplicate dedup takes the "post new" branch.
+    """
+
+    posted: list[tuple[str, str]] = []
+    patched: list[tuple[str, str]] = []
+    existing: list[dict] = []
+
+    def __init__(self, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def get(self, url, **kwargs):
+        return _FakeListResp(list(type(self).existing))
+
+    async def post(self, url, **kwargs):
+        type(self).posted.append((url, kwargs.get("json", {}).get("body", "")))
+        return _FakeResp(201)
+
+    async def patch(self, url, **kwargs):
+        type(self).patched.append((url, kwargs.get("json", {}).get("body", "")))
+        return _FakeResp(200)
+
+    async def request(self, method, url, **kwargs):
+        return _FakeResp(200)
+
+
+def _decline_capture(monkeypatch, existing=None):
+    """Install the capturing client and return it with its buffers cleared."""
+    _DeclineCapturingClient.posted = []
+    _DeclineCapturingClient.patched = []
+    _DeclineCapturingClient.existing = list(existing or [])
+    monkeypatch.setattr(httpx, "AsyncClient", _DeclineCapturingClient)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    return _DeclineCapturingClient
+
+
+def _decline_bodies(client):
+    """Only the bodies that are command-decline comments."""
+    return [
+        body
+        for _url, body in client.posted + client.patched
+        if "swarm-command-declined" in body
+    ]
+
+
+def test_non_operator_command_is_declined_ON_GITHUB(monkeypatch):
+    """A well-formed command from a non-operator must post a decline comment.
+
+    Before ateles#732 this path was `log.warning` + return with no GitHub
+    output: the commenter saw nothing and had no way to learn the command is
+    operator-only. Reverting the `_post_command_decline_comment` call in
+    Guard 2 makes this fail — nothing is posted.
+    """
+    client = _decline_capture(monkeypatch)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _comment_trigger(comment_author="some-contributor")
+        )
+    )
+
+    bodies = _decline_bodies(client)
+    assert bodies, (
+        "a command from a non-operator must be DECLINED ON GITHUB, not "
+        "silently dropped — the commenter cannot otherwise tell a refusal "
+        "from a dispatcher that never received the comment (ateles#732)"
+    )
+    body = bodies[0]
+    # The decline must be actionable: it names who may run the command, and
+    # says plainly that nothing happened.
+    assert _OPERATOR_LOGIN in body, (
+        f"the decline must name who may run the command: {body!r}"
+    )
+    assert "some-contributor" in body, (
+        f"the decline must name who actually commented: {body!r}"
+    )
+    assert "nothing was written" in body.lower(), (
+        f"the decline must state that nothing happened: {body!r}"
+    )
+
+
+def test_unrecognized_command_attempt_is_declined_ON_GITHUB(monkeypatch):
+    """A near-miss command (a typo) must post a decline naming the typo.
+
+    Reverting the `_looks_like_command_attempt` branch in Guard 1 makes this
+    fail — the handler returns at `log.debug` and posts nothing.
+    """
+    client = _decline_capture(monkeypatch)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _comment_trigger(comment_body="/confirm-gates")
+        )
+    )
+
+    bodies = _decline_bodies(client)
+    assert bodies, (
+        "a mistyped command must be DECLINED ON GITHUB — silence here is "
+        "indistinguishable from a dropped webhook (ateles#732)"
+    )
+    assert "/confirm-gates" in bodies[0], (
+        f"the decline must quote the token that was not recognised: {bodies[0]!r}"
+    )
+
+
+def test_decline_comment_is_posted_to_the_commented_issue(monkeypatch):
+    """The decline must land on the issue/PR that was commented on."""
+    client = _decline_capture(monkeypatch)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _comment_trigger(
+                number=711,
+                repository="owner/repo",
+                comment_author="some-contributor",
+            )
+        )
+    )
+
+    urls = [
+        url
+        for url, body in client.posted
+        if "swarm-command-declined" in body
+    ]
+    assert urls, "no decline comment was posted"
+    assert urls[0].endswith("/repos/owner/repo/issues/711/comments"), (
+        f"the decline must be posted to the commented issue: {urls[0]!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "ordinary_comment",
+    [
+        "LGTM, merging once CI is green.",
+        "This looks right to me. One nit: the docstring says 'gate' twice.",
+        "See https://example.com/a/b/c for the upstream discussion.",
+        "Run `make test` and/or `make lint` before pushing.",
+        "```\nif x:\n    return '/approve'\n```\nJust quoting the code here.",
+        "Nice catch on the /etc/hosts edge case.",
+        "",
+    ],
+)
+def test_ordinary_comments_are_still_answered_with_silence(
+    monkeypatch, ordinary_comment
+):
+    """The handler sees EVERY comment — it must not reply to ordinary ones.
+
+    This is the flood guard. If the decline path ever widens to "comment on
+    everything", these cases start posting and this test fails. A 131-page
+    comment flood is in this codebase's history; the near-miss test is what
+    keeps the dispatcher out of ordinary review discussion.
+
+    Note the code-fence case: it CONTAINS the literal approve token, but the
+    token is not at the start of a line as a bare command, so it must not be
+    treated as an attempt.
+    """
+    client = _decline_capture(monkeypatch)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _comment_trigger(comment_body=ordinary_comment)
+        )
+    )
+
+    assert _decline_bodies(client) == [], (
+        f"ordinary comment must NOT be answered: {ordinary_comment!r} → "
+        f"{_decline_bodies(client)!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "bot_login", ["ateles-agent", "neotoma-agent", "github-actions[bot]",
+                  "markmhendrickson-ateles-lanius"]
+)
+def test_bot_authored_command_is_declined_SILENTLY(monkeypatch, bot_login):
+    """Guard 0 is the ONE decline that must stay silent.
+
+    Lanius's own gate board quotes the gate-clear override verbatim in its
+    "operator override" instructions. If the dispatcher answered bot comments,
+    it would reply to every gate board it posts — the self-trigger feedback
+    loop Guard 0 exists to prevent (neotoma#1686). Silence here is correct, and
+    this test pins it so a later widening of the decline path cannot undo it.
+    """
+    client = _decline_capture(monkeypatch)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _comment_trigger(
+                comment_author=bot_login,
+                comment_body=_CONFIRM_GATES_CLEAR_CMD,
+            )
+        )
+    )
+
+    assert _decline_bodies(client) == [], (
+        f"a bot-authored command must be declined SILENTLY ({bot_login}) — "
+        "replying would re-trigger the handler via its own webhook"
+    )
+
+
+def test_decline_comment_carries_no_command_token(monkeypatch):
+    """The decline body must not contain any command token.
+
+    Same self-trigger defence the waive and swarm-run comments already honour
+    (neotoma#1686): a dispatcher comment naming a command re-fires the command
+    detector via its own issue_comment webhook.
+    """
+    client = _decline_capture(monkeypatch)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _comment_trigger(comment_author="some-contributor")
+        )
+    )
+
+    bodies = _decline_bodies(client)
+    assert bodies, "no decline comment was posted"
+    for body in bodies:
+        for token in (
+            _CONFIRM_GATES_CLEAR_CMD,
+            _SWARM_RUN_CMD,
+            _APPROVE_CMD,
+            _REJECT_CMD,
+            _HOLD_CMD,
+        ):
+            assert token not in body, (
+                f"decline comment must not contain {token!r}: {body!r}"
+            )
+
+
+def test_repeat_decline_edits_rather_than_stacking(monkeypatch):
+    """A retried bad command edits the existing decline, not a new comment.
+
+    Edit-not-duplicate (SWARM_GITHUB_CONTRACT): an operator retrying a typo
+    three times gets ONE comment, not three.
+    """
+    marker = "<!-- swarm-command-declined:not-operator -->"
+    client = _decline_capture(
+        monkeypatch, existing=[{"id": 4242, "body": marker + "\nold body"}]
+    )
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _comment_trigger(comment_author="some-contributor")
+        )
+    )
+
+    assert [b for _u, b in client.posted if "swarm-command-declined" in b] == [], (
+        "a repeat decline must EDIT the existing comment, not post another"
+    )
+    patched = [b for _u, b in client.patched if "swarm-command-declined" in b]
+    assert patched, "the existing decline comment should have been edited"
+
+
+def test_decline_reasons_use_distinct_markers(monkeypatch):
+    """Two different decline reasons must not overwrite one another."""
+    client = _decline_capture(monkeypatch)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _comment_trigger(comment_author="some-contributor")
+        )
+    )
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _comment_trigger(comment_body="/confirm-gates")
+        )
+    )
+
+    markers = {
+        line
+        for _u, body in client.posted
+        for line in body.split("\n")
+        if "swarm-command-declined" in line
+    }
+    assert len(markers) == 2, (
+        f"each decline reason needs its own marker so they do not overwrite "
+        f"one another: {markers!r}"
+    )
+
+
+def test_decline_comment_failure_never_raises(monkeypatch):
+    """A GitHub failure while reporting a decline must not crash the delivery."""
+
+    class _ExplodingClient(_DeclineCapturingClient):
+        async def post(self, url, **kwargs):
+            raise httpx.ConnectError("github is down")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _ExplodingClient)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "ghp_test")
+    _ExplodingClient.existing = []
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    # Must not raise.
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _comment_trigger(comment_author="some-contributor")
+        )
+    )
+
+
+def test_decline_comment_skipped_without_a_github_token(monkeypatch):
+    """No token → log the skip, do not crash trying to post."""
+    client = _decline_capture(monkeypatch)
+    monkeypatch.delenv("ATELES_AGENT_PAT", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+
+    asyncio.run(
+        dispatcher._handle_issue_comment(
+            _comment_trigger(comment_author="some-contributor")
+        )
+    )
+
+    assert _decline_bodies(client) == []
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        ("/confirm-gates", "/confirm-gates"),
+        ("/confirm-gates-cleared", "/confirm-gates-cleared"),
+        ("/aprove", ""),          # not a prefix of /approve in either direction
+        ("/approv", "/approv"),
+        ("/approved", "/approved"),
+        ("- /hold-on", "/hold-on"),
+        ("/swarm", "/swarm"),
+        ("/rejected please", "/rejected"),
+        ("/etc/hosts is the file", ""),
+        ("/usr", ""),
+        ("and/or", ""),
+        ("text before\n/confirm-gates", "/confirm-gates"),
+        ("/a", ""),               # too short to be a signal
+        ("", ""),
+    ],
+)
+def test_looks_like_command_attempt_boundary(body, expected):
+    """Pin the near-miss boundary directly — this is the flood guard.
+
+    It must fire on plausible typos of OUR commands and on nothing else.
+    """
+    assert swarm_dispatch._looks_like_command_attempt(body) == expected
