@@ -10,7 +10,7 @@ from:** synthesis `ent_b0ce322f768e4fc676b73139` (PR-12 to PR-15, C5, C17), prio
 `deferral_must_be_bounded_and_escalate_off_neotoma`, `unknown_must_stay_distinct_from_a_verdict`,
 `nyctea_635_becomes_load_bearing`, PR #745 operator review (2026-09-04), and the operator memos of
 2026-09-05 (the `undetermined_scope` reason class), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14, 16–18, 23–29: a hold on a discovered condition is a deferral under rule 5; the `dependency_cycle` reason class). What is built is `status.md`;Revised by the consistency pass of 2026-09-06 (revision 35: the merge action's class named `merge_pr` in the recovery table). What is built is `status.md`;
-how a checkpoint is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: a condition of a batch is raised on one of its tasks, never on the batch). Revised by the workflow-format pass of 2026-09-06 (revision 34: rule 5's ceiling for a holding step, and the unclaimed-step interval, each named as a field on the step). Revised by the testability pass of 2026-09-06 (revision 37: the announcement path's own outage and the capture of last resort; the window observation; `action_policy.recoveries`; recovery paths and their cadence on the binding; `lapse_cap`; which checkpoints hold a task from claim; `AWAITS` names principals). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: open decision 60 — a runner's lease-held step losing its model or harness mid-execution; the tier-eligibility half ruled as a consequence of decision 59). Revised by the rulings pass of 2026-09-06 (revision 44: decision 60 ruled in full — unavailability holds and raises under the existing `lapse_cap`, no second clock; `capability_unavailable` named as a reason class distinct from `capability_denied`).
+how a checkpoint is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: a condition of a batch is raised on one of its tasks, never on the batch). Revised by the workflow-format pass of 2026-09-06 (revision 34: rule 5's ceiling for a holding step, and the unclaimed-step interval, each named as a field on the step). Revised by the testability pass of 2026-09-06 (revision 37: the announcement path's own outage and the capture of last resort; the window observation; `action_policy.recoveries`; recovery paths and their cadence on the binding; `lapse_cap`; which checkpoints hold a task from claim; `AWAITS` names principals). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: open decision 60 — a runner's lease-held step losing its model or harness mid-execution; the tier-eligibility half ruled as a consequence of decision 59). Revised by the rulings pass of 2026-09-06 (revision 44: decision 60 ruled in full — unavailability holds and raises under the existing `lapse_cap`, no second clock; `capability_unavailable` named as a reason class distinct from `capability_denied`). Revised by the underdetermined-inputs pass of 2026-09-06 (revision 45: decision 71 ruled — a required read that resolved to no instance raises `underdetermined_inputs` at hydration, before the step opens, and an input found but too thin to act on stays the step owner's judgement under decision 13).
 
 ## Purpose
 
@@ -308,7 +308,10 @@ finding, so it is put to the operator rather than guessed —
 and `dependency_cycle` (two or more batches each holding on a task attached to another, found after the
 writes were made; each batch's tasks are escalated with one, naming the batches and edges in the loop, and
 every step owner in it holds until a principal breaks it —
-`work_model.md#a-batch-may-depend-on-a-task-it-created`);
+`work_model.md#a-batch-may-depend-on-a-task-it-created`), and `underdetermined_inputs` (a step's required
+read resolved to nothing — the record holds no instance and no adapter could import one — so the step
+cannot be entered on what the task states and what the record holds together, and the operator is asked
+for the missing input rather than an agent inventing it — below);
 a policy may declare more. A checkpoint on a task
 carries the reason, the needed input, the options, and whom it awaits, and is presented and resolved
 through the one decision queue, by the one resolution protocol, that checkpoints on actions use. Do not
@@ -340,7 +343,8 @@ been open, and stops there.
 
 **An open checkpoint whose subject is a task holds that task from claim, and `unclaimed_step` is the one
 class that does not.** A task with an open checkpoint on it — `repeated_lapse`, `rounds_exhausted`,
-`undeclared_dependency`, `capability_denied`, `undetermined_scope`, `dependency_cycle`, or a class a policy
+`undeclared_dependency`, `capability_denied`, `undetermined_scope`, `dependency_cycle`,
+`underdetermined_inputs`, or a class a policy
 declares — is not claimable until the checkpoint is terminal, because each of those is raised where a
 re-claim would restart the condition the checkpoint exists to stop; on resolution the task is re-claimed or
 closed (`gates_and_workflows.md#the-checkpoint`). `unclaimed_step` is the exception by its own rule above:
@@ -375,6 +379,99 @@ the workflow is **declared**, so the same check runs at declaration and the same
 there. A workflow naming a role no roster resolves is a defect in the declaration, caught in the pull
 request that introduces it, rather than a step that becomes permanently unsignable the first time someone
 tries to claim it and errors nowhere in between.
+
+## A task whose inputs cannot be resolved is put to the operator, not executed on a guess
+
+**Ruled (decision 71, 2026-09-06).** Registered in `conformance.md#the-register-of-open-design-decisions`.
+The operator asked what happens to a task that states what to do but not enough to do it, where the record
+does not supply the remainder either — the illustration was an instruction to buy a television, carrying
+neither which television nor what it must do, with nothing in the record that settles it. The design had the
+mechanism and not the name: a checkpoint carrying `needed_input` already asks the operator for something and
+holds the task, which is exactly the "sent back to the operator" the question describes; what no reason class
+said was *this*, so a task in this condition had no legible way to be raised and would be raised, if at all,
+under a class that means something else.
+
+**This is not `undetermined_scope`, and the two must not be collapsed.** `undetermined_scope` is about a
+[finding](vocabulary.md#finding): the swarm knows what the defect is and cannot tell how far the lesson
+reaches — the batch alone, one step, the workflow, or the agent
+(`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`).
+The question it puts to the operator is *how widely should this bind*. `underdetermined_inputs` is about a
+task: the swarm knows exactly how far the work reaches and cannot tell **what to do inside it**. Its question
+is *what am I acting on*. Run the swap test invariant 12 requires, on the corpus's own sentences rather than
+on invented ones, and every one changes meaning: "a finding whose scope is not determinable from the finding
+itself … is put to the operator as a checkpoint, reason `undetermined_scope`" becomes false under the
+substitution, because that finding's inputs were never in doubt — it was recorded, it is legible, and only
+its reach is open. In the other direction, a task whose required read resolved to nothing has a scope that is
+not in question at all: buy a television is a perfectly determinate scope, and no amount of settling it
+supplies the model. The two classes also hold different subjects in practice — one is raised on the
+classification of something the swarm already produced, the other before the work is entered — and a reader
+routing on the class needs them apart, because the operator answers them with different things: a scope, or a
+fact.
+
+**Sufficiency is judged at hydration, and what makes it mechanical is the declaration.** The phase that
+resolves a step's declared reads is the phase positioned to see they came back with nothing
+(`gates_and_workflows.md#declaration-batch-projection`), and it runs **before** the step opens, so the task
+is stopped before a runner claims it, holds a lease, and discovers at the end of its reasoning that it never
+had the inputs. That ordering is the reason for putting the judgement here rather than in the step owner: a
+step owner's discovery is a real path and stays available, but making it the *only* path spends a claim and a
+lease on work that was never enterable, and it makes the condition arrive as a runner's mid-step judgement
+rather than as a property of the declaration any reader can check.
+
+The crux is that hydration resolves reads mechanically, while "is this enough to buy the right television" is
+a judgement, and the design must not pretend the first can perform the second. It does not. **What hydration
+decides is not adequacy; it is presence.** A step declares the types it must read to enter, and hydration
+resolves them from the task's anchors and through adapters
+(`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`). A required read that resolves to no
+instance — nothing in the record, and no adapter able to import one — is mechanically detectable, needs no
+taste, and is the case the memo's illustration actually is: a task naming a purchase whose declared
+`purchase specification` read resolves to nothing is missing a stated input, not a subtle one. That, and only
+that, is what hydration raises this class on. Adequacy proper — the specification exists and is too thin to
+act on — is a judgement, it belongs to the principal doing the work, and it reaches the operator by the path
+the design already has: the step owner holds on a condition discovered mid-flight, records the finding naming
+what it cannot judge, and the hold ends at its `hold_bound` in a checkpoint
+(`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`, decision 13). So the answer is both
+cases, split on a line that is real rather than convenient: **hydration catches the absent input, the step
+owner catches the inadequate one**, and neither is asked to do the other's work.
+
+The distinction that makes this enforceable is one the design already insists on. An empty read and a failed
+read are different, and both are distinct from a read that returned something
+(`gates_and_workflows.md#declaration-batch-projection`). A required read that **could not be made** is
+`unknown`, holds the step bounded, and escalates as `undeclared_dependency` — the dependency is unreachable.
+A required read that **was made and returned nothing** is not a failure of the record; it is the record
+answering truthfully that the input does not exist, and no amount of retrying changes it. Routing the second
+into `undeclared_dependency` would tell the operator a dependency is broken when nothing is broken, and would
+attach a retry schedule to a condition no retry resolves. That is why this is its own class and not a
+widening of that one.
+
+**What the checkpoint carries, and what it must not do.** Its subject is the task, it holds it from claim
+(above), and its `needed_input` names the read that resolved to nothing, the step that declared it, and what
+would satisfy it. The options it offers are the operator's real ones — supply the input, narrow the task, or
+close it — and it offers no option that lets the swarm proceed on an assumption. **The class never resolves
+by an agent supplying the missing input from its own judgement.** An agent that infers which television the
+operator meant has not resolved an underdetermined input; it has substituted its own preference for the
+operator's and then acted on it with the operator's money, which is precisely the unaccountable work this
+posture exists to prevent — and it would be recorded as though the operator had specified it. Where the swarm
+can defensibly *propose*, it proposes: the checkpoint may carry candidate values as options, which the
+operator's resolution then selects among, and the record shows the operator chose. Proposing an option and
+taking it are different acts, and only the first is the swarm's here.
+
+**Marking a read required is what arms this, and that is deliberate.** A step that declares a read it can
+genuinely proceed without should not declare it required, and one that cannot should. The class therefore
+inherits the declaration's own discipline: an undeclared read is a declaration error caught in the pull
+request that introduced it, and a read declared required that turns out to be optional is a declaration
+defect of the same kind, visible in the same place. No default supplies a requirement at runtime, because a
+supplied default here would fail open — it would let a step enter with an input the declaration said it
+needed (principle 5).
+
+**The cost accepted** is that a task whose input the record does not hold reaches the operator, and the
+operator's attention is the scarce input this design protects
+(`principles.md#where-the-human-sits-what-it-protects-and-why-the-record-is-owned`). That is the right cost:
+the alternative spends it worse, because an agent that guesses produces an outcome the operator must then
+review, undo, or live with, and an action already taken is more expensive than a question asked. **What would
+reopen it:** a class of task whose required reads resolve to nothing routinely and whose missing inputs the
+operator answers the same way every time — which would argue for a `task_policy` the step declares as a read
+of its own, so the standing answer is on the record instead of asked again, and not for letting the step
+proceed without one.
 
 ## What a checkpoint does not absorb
 
