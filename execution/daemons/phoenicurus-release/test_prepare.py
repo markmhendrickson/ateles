@@ -151,6 +151,55 @@ def test_plain_to_html_escapes_quotes_in_url_no_attribute_injection():
     assert 'onmouseover="alert' not in out
 
 
+def test_plain_to_html_no_inline_styling():
+    # Semantic tags only — no font-family/font-size/color/style so mail inherits
+    # the client's own typography rather than fighting it.
+    out = prepare._plain_to_html(
+        "# Heading\n\n**bold** and `code` and a bullet:\n- one\n- two\n"
+        "[link](https://example.com)"
+    )
+    assert "font-family" not in out
+    assert "font-size" not in out
+    assert "color" not in out
+    assert "style=" not in out
+
+
+def test_email_send_body_is_html_not_raw_markdown(monkeypatch):
+    # Effect-level check: a realistic daemon notice sent through email_send()
+    # must arrive as converted HTML, not the raw markdown source. Asserting only
+    # "the input string appears in --body" (as the pre-existing test does) would
+    # also pass if --html conversion were silently dropped — this asserts the
+    # actual reported defect (literal `**`/`- ` markers reaching Gmail) cannot
+    # recur. Ports the #338 sibling coverage onto this branch for panel re-run.
+    monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
+    monkeypatch.setattr(prepare, "SWARM_EMAIL", "")
+    calls = {}
+
+    def fake_run(cmd, **kw):
+        calls["cmd"] = cmd
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    markdown_notice = (
+        "## Release blocked\n\n**CI is red** on `origin/main`.\n"
+        "- retry after fix\n- check the run"
+    )
+    with patch("shutil.which", return_value="/usr/bin/gws"), \
+         patch.object(prepare.subprocess, "run", side_effect=fake_run):
+        assert prepare.email_send("🔴 subj", markdown_notice) is True
+    cmd = calls["cmd"]
+    assert "--html" in cmd
+    body_arg = cmd[cmd.index("--body") + 1]
+    assert body_arg == prepare._plain_to_html(markdown_notice)
+    assert "<h2>Release blocked</h2>" in body_arg
+    assert "<strong>CI is red</strong>" in body_arg
+    assert "<code>origin/main</code>" in body_arg
+    assert "<ul>" in body_arg and "<li>retry after fix</li>" in body_arg
+    # The raw markdown markers must not survive into the sent body.
+    assert "**" not in body_arg
+    assert "\n- retry after fix" not in body_arg
+    assert "##" not in body_arg
+
+
 def test_email_send_fail_open_on_nonzero_rc(monkeypatch):
     monkeypatch.setattr(prepare, "OPERATOR_EMAIL", "op@example.com")
     monkeypatch.setattr(prepare, "SWARM_EMAIL", "")
