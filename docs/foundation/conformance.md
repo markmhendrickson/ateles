@@ -39,6 +39,11 @@ bind via `workflow` entities + `render_workflow_docs.py --check` (workflows), as
 Whether the first two are keyed is a budget decision recorded in `status.md`, not a design fact — a keying decision about the projection, since decision 66, and never a reason to shorten either document;
 `migration.md` is never keyed, because it governs no code path and its figures live in `status.md`.
 
+`docs/foundation/revisions.md` is a companion of a different kind: provenance, not argument. It carries
+the amendment history every document used to hold in its own front matter (decision 74). It is never keyed
+and never inlined — it states no rule, so no reviewer reads it to judge a change — and it is not shortened,
+because an append-only record of what changed is the one thing whose growth is the point.
+
 ## Always read
 
 The kernel: at most three documents, every review. Three is a budget, not a count of what matters:
@@ -445,6 +450,7 @@ so that they are not reused; see the two notes below.
 | 67 | whether "schema drift" is one phenomenon the operator's 2026-09-06 12:56 memo can be answered about, or several with different owners — and, per mode, whether the design or the substrate is the side that prevents it | `#schema-drift-is-four-failure-modes-not-one` | — | **ruled** (2026-09-06): four distinct modes — undeclared-field absorption, closed-registry enum copies, a description disagreeing with a snapshot, and a registered type with no design row. The first two are the substrate's (a correct Neotoma makes them impossible without a swarm-side rule); the fourth is the design's (the amendment obligation already exists for a decision and a term, and this ruling extends it to a registered type); the third is a substrate reliability defect with no design side to assign — `describe_entity_type` is read-only and the design already tells its callers to distrust it (`feedback_verify_schema_via_snapshot_not_describe`). The design states testable requirements for the first two regardless of which side is authoritative, so the conformance suite can hold them red until the substrate satisfies them (`#what-the-design-requires-of-the-substrate-regardless-of-who-builds-it`) |
 | 68 | whether registering an entity type needs an amendment obligation parallel to opening a decision or adding a vocabulary term | `#a-registered-type-is-amended-into-data_modelmd-in-the-same-change` | decision 67, whose fourth mode this rule closes | **ruled** (2026-09-06): yes — a PR that registers a type, or names one the swarm now depends on, adds its `data_model.md` row in the same change, the same obligation `#amending-a-foundation-document` already states for a decision and a term. `finding` (G15) and `conversation`/`conversation_message`/`session_digest` (decision 63) are the two prior instances this rule would have caught before a later pass had to supply the row |
 | 69 | whether a per-agent credential on an external system that issues them is an obligation or a preference, and what carries attribution where a system issues none | `adapters.md#a-per-agent-credential-is-an-obligation-where-the-system-issues-one` and `adapters.md#when-attribution-cannot-be-external-the-record-does-not-suffice-on-its-own` | — | **ruled** (2026-09-06): an obligation where the system issues one — a shared credential there loses external attribution, makes revocation all-or-nothing, and leaves the host unable to carry a sign-off at all, since a verdict-shaped delivery from it resolves to no single agent; where the system issues none, the shared credential is admitted and the outbound artifact carries a mark disclosing that an agent acted, its absence a refusal on the same footing as a credential-less operation, its wording the operator's policy; the binding is declared on the `vendor_binding` as a capability slot on decision 42's pattern, with the grant matched on the credential as before and no new home |
+| 74 | where a foundation document's amendment history lives, given that the front-matter chain had reached 28 clauses and 10,099 characters on this document alone — ahead of every rule it states, and inside the budget decision 66's reading projection is meant to protect | `#a-documents-amendment-history-lives-in-revisionsmd-not-in-its-front-matter` and `revisions.md` | decision 66, whose projection this competes with for the reader's first screen, and `#amending-a-foundation-document`, whose obligation this relocates without weakening | **ruled** (2026-09-06): a companion, `revisions.md`, one table per document, one row per revision — the obligation to record an amendment in the same change is unchanged, and only its location moves. A per-document collapsed section at the foot was rejected because it leaves twenty places to look for one corpus-wide question ("what changed in the foundation this week") and still grows the file the projection is extracted from; compressing the chains in place was rejected because it treats a placement problem as a length problem, and the chain would re-accrete at the same rate. `authority_model.md` is the pilot (2,702 -> 924 characters of front matter); the rollout is one document per PR, largest front matter first |
 
 **Every ruled decision now has a heading of its own.** 25 through 29 were opened as bold paragraphs inside
 their documents' *What this document does not decide* sections, and the register's pointers resolved to the
@@ -505,10 +511,7 @@ lines it concerns are written; the register rows above point at them.
 foundation document. They are the gaps left by several documents opening decisions concurrently on this
 branch and renumbering around each other, and they are recorded as gaps rather than closed up: renumbering
 would break every cross-reference the documents already carry, and silence would invite the next author to
-reuse the number for something unrelated. **Do not assign 19 or 22 to a new decision.** The next number is
-66 — the table above already carries 63, 64, and 65 as of the close-out pass, 2026-09-06; the self-awareness
-pass flagged this line as stale when it still read 63 with 64 already on the table, and the peering pass
-that opened 65 left it unfixed in turn. Corrected here rather than flagged again.
+reuse the number for something unrelated. **Do not assign 19 or 22 to a new decision.** The next free number is **74**, and it is free across every branch, not only this one. This line has been stale on four consecutive passes — it read 63 with 64 on the table, then 66 with 69 on the table — because each pass read the number off its own branch's table while concurrent branches were opening numbers of their own. The sweep that establishes it is over the remotes, not the file: the maximum row on any branch's copy of this table. As of 2026-09-06 that sweep gives 69 here, 70 on the `declaration_scope` ruling, 71 on the insufficient-context reason class, and 73 on the naming-decisions pair — so 74, and an author who assigns a number without repeating the sweep will collide the way this line's own history predicts.
 
 **20 and 21 were assigned, then renumbered, and two pointers were left behind.** Both were opened in
 `payments.md` and renumbered to 27 and 28 before that document was committed, to avoid colliding with 23
@@ -550,6 +553,42 @@ cannot is incomplete on review, the same way a PR opening a decision without reg
 need not be complete on the type's every field the day it lands — `#type-registration-is-an-owned-decision-write-read-back-tests-never-register-into-the-shared-registry`
 already treats the field-by-field shape as the owner's ongoing authoring — but the row, the owner, and what
 the design currently reads from the type must exist.
+
+**A revision is recorded in `revisions.md`, not in the document's front matter** (decision 74). The
+same in-the-same-change obligation as the three rules above; only the location differs, and the reason is
+argued at `#a-documents-amendment-history-lives-in-revisionsmd-not-in-its-front-matter`.
+
+## A document's amendment history lives in `revisions.md`, not in its front matter
+
+**A PR that amends a foundation document adds its revision row to `revisions.md`, in the same change**
+(decision 74). The obligation is the one `#amending-a-foundation-document` already states — a change
+records who made it, when, and what it changed — and nothing about it is weakened here. What moves is
+where the record sits.
+
+The front-matter form had stopped working. On this document the chain reached 28 "Revised by" clauses and
+10,099 characters standing between the title and the first rule; on `vocabulary.md`, 19 clauses and 8,297
+characters before the first term a reader came to resolve. That is provenance occupying the position an
+argument should hold, and it competes directly with decision 66: the reading projection exists to bound
+what a review reads, and a chain that grows by one clause per pass grows the document the projection is
+extracted from without adding a single rule to extract.
+
+**Two alternatives were weighed and rejected.** A per-document collapsed section at the foot fixes the
+first-screen problem but leaves twenty places to look when the question is corpus-wide — *what changed in
+the foundation this week* — and still grows each file. Compressing the chains in place treats a placement
+problem as a length problem: the clauses would re-accrete at the rate they always have, and the next pass
+would face the same measurement.
+
+The companion is not keyed, is not in the kernel, and is never inlined into a review prompt: nothing in it
+states a rule, so nothing in it is read to judge a change. A document's front matter carries one pointer to
+its table in its place.
+
+**A section that states three or more rules opens with the list of them.** The second half of decision 74,
+and the reason it is one decision rather than two: both are about what a reader hits first. A foundation
+section's rules are already written as bold lead sentences — the form is right at the paragraph level — but
+`authority_model.md#grants` stated eight of them as an undifferentiated run of paragraphs, so finding the
+one that governs a change meant reading all eight. The list is the existing lead sentences, verbatim,
+before the prose; the argument for each stays where it is, unmoved and unedited. Nothing is summarized —
+a summary would be a second statement of the rule, and two statements drift (principle 9).
 
 ## Schema drift is four failure modes, not one
 

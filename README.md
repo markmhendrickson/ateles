@@ -11,7 +11,7 @@ life end to end, with the governance substrate (identity, capability, gating, au
 against the vision.
 
 Ateles is a design and a working example of it. The design is
-[`docs/foundation/`](docs/foundation/): twenty documents that state how work is created, taken,
+[`docs/foundation/`](docs/foundation/): twenty-one documents that state how work is created, taken,
 executed, and approved, and what the swarm does when it cannot reach its own record. The example is what
 runs against that design — background daemons and skills that already automate code review, releases,
 issue triage, email, calendar, recurring payments (fiat + Bitcoin), meeting capture and recap, health
@@ -700,7 +700,8 @@ Full documentation lives in `docs/` — index at [docs/README.md](docs/README.md
 [Calendar](docs/foundation/calendar.md) · [Telegram](docs/foundation/telegram.md) ·
 [Payments](docs/foundation/payments.md) · [Conformance](docs/foundation/conformance.md) ·
 [Scenarios](docs/foundation/scenarios.md) · [Workflows](docs/foundation/workflows.md) ·
-[Migration](docs/foundation/migration.md) · [Status](docs/foundation/status.md)
+[Migration](docs/foundation/migration.md) · [Revisions](docs/foundation/revisions.md) ·
+[Status](docs/foundation/status.md)
 
 **Orientation:** [Who it's for (ICP)](docs/icp.md) · [Architecture](docs/architecture.md) ·
 [Taxonomy](docs/taxonomy.md) · [Phases](docs/phases.md) ·
