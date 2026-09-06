@@ -658,7 +658,7 @@ payee receives or to what the operator pays, relative to the figures the checkpo
 requires a new checkpoint. A re-quote that moves either figure by any amount is outside a zero tolerance and
 is not taken; the adapter records the re-quote as an observation, `consent`'s `on_fail` opens `verify` again
 on the new figures, and the operator decides again on what the verifier signed the second time. The operator
-may later set a non-zero tolerance for a class of action in the project's `action_policy`, and from then on a
+may later set a non-zero tolerance for a class of action in the instance's `action_policy`, and from then on a
 change within it is taken and one outside it is a new checkpoint. What the number is, per class, is policy
 data; that the shape is a per-class tolerance whose absence reads as zero is the design
 (`data_model.md#concepts`, the `action_policy` row).

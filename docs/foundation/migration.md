@@ -651,8 +651,9 @@ below it can start; it is the first dependency in the plan and it is not this re
 Additive: the retired engine reads none of these types.
 
 **Stage 2 — the first declarations and the first policy (operator act).** Declare `*|intake` and the
-project's `record_migration` workflow; write the project's `action_policy` with a tier for every class the
-migration's writes carry (the policy values section below); bind the roster's roles for `pm` step owner, analyst, arch and qa
+`<project>|record_migration` workflow, one declaration for the project; write the instance's
+`action_policy` with a tier for every class the migration's writes carry (the policy values section
+below); bind the roster's roles for `pm` step owner, analyst, arch and qa
 review steps, and implementer to agents that have credentials; write the grants those agents need for the
 new types, and widen the grants of every daemon that will write a new type alongside its retired one.
 **Depends on** stage 1. Additive. The declaration-time check runs here: every `owner_role` in both
@@ -688,7 +689,7 @@ escalations: a task per real one, entering intake; a bulk terminal correction fo
 the operator sees two queues). Derivations are reversible (the derived rows are new and the source stays);
 merges by split; the bulk correction by a further correction.
 
-**Stage 6 — the policies (workflow; governance writes).** Derive the project's `action_policy` content
+**Stage 6 — the policies (workflow; governance writes).** Derive the instance's `action_policy` content
 from the two retired policies that carry blast lists, merging population phase 5's values; retire the rest
 in place. **Depends on** stage 2 (the policy exists) and population phase 5 (its values). Reversible by
 correction.
@@ -804,7 +805,7 @@ the `verify` step of the migration's workflow re-reads independently of the `app
 | 3 | every grant that named a retired type now names both; a read of each grant lists the new type; the roster's unresolved roles are listed, and the list is what the operator expects |
 | 4 | (a) no task's retired liveness value changes and no step record is written over the window; (b) each `workflow` resolves by its new id, each retired id resolves with a merge pointer to it, and an as-of read on the retired id at a time before the merge returns the pre-merge content; the count of `workflow` equals the count of retired declarations less the retired smoke-test one; (c) the first claim under the design writes a `LEASE` edge whose `runner_id` the lease holder reads back as its own |
 | 5 | every open held decision with a subject has exactly one `checkpoint` whose `CHECKPOINTS` edge names an action or a task and whose `AWAITS` names the operator; the retired open count is zero for those with a subject and terminal for those without; the operator's queue lists them once, not twice |
-| 6 | the project's `action_policy` lists a tier for every class the two retired policies listed, and the retired policies' content is unchanged |
+| 6 | the instance's `action_policy` lists a tier for every class the two retired policies listed, and the retired policies' content is unchanged |
 | 7 | each `agent` resolves by its new id and by the retired id through the merge pointer; every roster role resolves to an `agent`; every `agent` has a `principal_binding` to the `operator`; a re-render of the mirrors changes nothing but the names |
 | 8 | `PART_OF` count equals the count of populated `parent_task_id` fields; each derived checkpoint's subject is a non-terminal task; no task's status changed |
 | 9 | the first adapter delivery after cutover produces an observation on an `artifact` keyed by the delivery id, and redelivery produces none |
@@ -1110,7 +1111,7 @@ from a skill file; the pending mark on MG-13 in `conformance_suite.md` resolves;
 ## The policy values leg two needs, and the two postures
 
 Not a design decision, by decision 18's ruling: which tier each class of migration write takes is a value
-in the project's `action_policy`, written by the operator class by class, and reserved — `NEVER` — until
+in the instance's `action_policy`, written by the operator class by class, and reserved — `NEVER` — until
 written. This section states the classes and the two postures so that the value is written knowingly,
 and chooses neither. The classes are a registration, a re-typing merge, a derivation, a bulk correction, a
 grant widening, and a declaration. **Every class left reserved** makes leg two a sequence of checkpoints

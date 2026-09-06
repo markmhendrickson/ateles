@@ -335,7 +335,7 @@ workflow, and the writes the work makes — to an `agent`, an `agent_policy`, a 
 `gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken` states once,
 and already actions at the action gate. So a batch may declare a new workflow, add a step,
 change a step's `owner_role`, or retire a declaration, and each such write is an action carrying its
-class, scored for confidence, resolved to a blast tier under the project's `action_policy`, and held as a
+class, scored for confidence, resolved to a blast tier under the instance's `action_policy`, and held as a
 checkpoint where the tier and the confidence say to hold it. The same holds for a change to what an agent
 is. A workflow that changes a workflow is not a special kind of workflow; it is a workflow whose steps
 produce governance writes.

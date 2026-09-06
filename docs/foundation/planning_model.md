@@ -30,7 +30,10 @@ per-level ancestry expectation is declared" to "where an intake class's default 
 the reframed question is left as revision 47 stated it, still open and still blocked on 57, since ruling on
 the superseded framing would rule a question that no longer exists in that shape). Revised by the
 rulings-61-62-64 pass of 2026-09-06 (decision 61 ruled — the default ancestor named on the `intake_rule`,
-unblocked now that decision 57 fixes the levels).
+unblocked now that decision 57 fixes the levels). Revised by the project-term pass of 2026-09-06 (revision 67:
+decision 70 opened — `project` names decision 57's planning level and is also the scoping key on `workflow`
+and `batch`, and nothing yet says whether the two are one thing; the possessives that read the key as
+ownership are resolved to the owners the rules name, in this document and across the corpus).
 
 ## Purpose
 
@@ -418,6 +421,40 @@ operator later finding objective-shaped content outgrowing what a strategy recor
 needing its own lifecycle, its own sign-off, independent of its parent strategy's amendment), which would
 be the same argument decision 51 already settled against a second `initiative`-shaped entity, re-litigated
 here.
+
+### `project` names a planning level; the scoping key on a declaration is the same word and not yet the same thing
+
+Decision 57 makes `project` a **planning level** — the tier above `plan`, an ancestry mark a task reaches
+by its `PART_OF` line, read for justification and for relative standing
+(`#the-hierarchy-is-edges-and-a-task-has-one-line-upward`). A level owns its own record, its own
+`planning` batch, and the child records its `amend` step creates, and it owns nothing else: no policy,
+no workflow declaration, no roster.
+
+The same word is also a **scoping key on two declarations**. `workflow` and `batch` each carry a `project`
+field (`data_model.md#concepts`), and `workflow` declares one entity per (project, workflow type)
+(`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`); the
+roster is described as binding per project (`workflows.md#roles-named-in-this-document`) while an
+instance's is one global map (`migration.md`, G20). Nothing states whether the key is the level's record
+or a separate scope that merely shares its name, and `conformance_suite.md#against-migrationmds-bootstrap-leg`
+already records the consequence: a task carries no `project`, no rule says how it acquires one, and so the
+intake batch opened at its creation has a `project` from nowhere.
+
+**What this pass settled, and what it did not.** The possessive "the project's `X`" was doing the work of
+an answer wherever it appeared — reading as though a project owned a policy, a workflow, or a criteria
+entity. Where the design already names an owner, the possessive is now that owner's: the `action_policy`
+is the **instance's**, since its row declares no `project` field and it is the one policy a principal
+evaluates the action gate against (`github.md#what-this-section-does-not-decide` already names it that way);
+`release_criteria` is a context entity **retrieved by type**, like `priority_rubric` and `brand_voice`,
+and carries no possessive; a `record_migration` declaration is named by its scoped id,
+`` `<project>|record_migration` ``, which states the scoping without asserting ownership. What stays
+undecided is the key itself.
+
+**The question, open.** Whether the `project` field on `workflow` and `batch` is a reference to the
+planning record at the `project` level — in which case a task acquires one from its ascent and the
+`*|intake` wildcard is a declaration that binds at every project — or a separate deployment-scope term
+that shares the word and should be renamed under invariant 12, which forbids one term carrying two senses.
+Registered as decision 70. Until it is ruled, no document should read the field as ownership: a scoping
+key selects which declaration applies, and selecting is not owning.
 
 ## Missing ancestry: whether the swarm derives an absent parent, or finds the gap
 

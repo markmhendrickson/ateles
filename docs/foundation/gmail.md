@@ -22,7 +22,7 @@ from this document and never restated in it (principle 9, one home).
 The mail system differs from the code host in three ways that shape everything below, and they are stated
 first because each one decides several rows.
 
-**Mail carries the operator's personal correspondence, not a project's public record.** Every artifact in
+**Mail carries the operator's personal correspondence, not the code host's public record.** Every artifact in
 this system is presumptively about identifiable people, some of it about people who never agreed to be
 processed by a swarm. Where `github.md` narrows one class of inbound event for disclosure reasons, this
 document narrows a different surface: capture itself is generous, on the broadened purpose the record
