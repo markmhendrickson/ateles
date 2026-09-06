@@ -154,20 +154,25 @@ Pass `--out` explicitly. The tailer also prints the JSONL path on stdout, but
 stdout is redirected to `/tmp/livetail.out` here — so naming the path yourself
 is what lets step 4 tail a path you already know, with nothing to parse back.
 
-```bash
-# auto-detect the growing recording
-cd "$ATELES_REPO" && nohup execution/venv/bin/python execution/scripts/live_transcript_tail.py \
-  --interval 30 --follow --out /tmp/livetail.jsonl > /tmp/livetail.out 2> /tmp/livetail.err &
+**Name the recording.** The tailer refuses to start against an unnamed
+recording — see [The capture gate](#the-capture-gate) below. Step 1 already
+resolved the path; pass it.
 
-# or name the recording explicitly, when auto-detect false-negatived (step 1)
+```bash
+# name the recording resolved in step 1 (the normal path)
 cd "$ATELES_REPO" && nohup execution/venv/bin/python execution/scripts/live_transcript_tail.py \
   --file "$HOME/Documents/data/recordings/<REC>.mp4" \
+  --interval 30 --follow --out /tmp/livetail.jsonl > /tmp/livetail.out 2> /tmp/livetail.err &
+
+# only when the operator knows what is recording and who can be heard
+cd "$ATELES_REPO" && nohup execution/venv/bin/python execution/scripts/live_transcript_tail.py \
+  --attach-growing \
   --interval 30 --follow --out /tmp/livetail.jsonl > /tmp/livetail.out 2> /tmp/livetail.err &
 ```
 
 `--file` skips detection altogether — the path is used as given, checked only
-for existence — so it is the recovery whenever the probe misses a live
-recording.
+for existence — so it is both the normal path and the recovery whenever the
+probe misses a live recording.
 
 `--interval 30` is a reasonable default: shorter means more, worse fragments;
 longer means staler context.
@@ -185,6 +190,44 @@ the Monitor against a path nothing is writing.
 Pass `--follow` (see [Pause and resume](#pause-and-resume-taking-a-break))
 whenever the operator might take a break. It is the difference between a break
 ending the stream and a break being a break.
+
+### 3a. The capture gate
+
+**The tailer will not attach to a recording nobody named.** Running it with
+neither `--file` nor `--attach-growing` exits 1 with an explanation.
+
+This closes a real incident: the tailer auto-attached to a long recording the
+operator had started for an unrelated reason, and transcribed a private
+conversation between the operator and another person — sending it to a
+transcription API, writing it to disk, and surfacing it into an agent session.
+Nothing in that path had any notion of "this speech is not for the agent."
+
+The gate sits at **capture** because that is the only point upstream of both the
+API call and the on-disk write. Anything downstream — filtering the text,
+classifying it at the agent boundary — arrives after the content has already
+left the machine, which is where most of the harm is.
+
+| Bound | Flag | Default |
+|---|---|---|
+| Explicit target | `--file <path>`, or `--attach-growing` to opt into detection | refuse |
+| Session duration | `--max-session-min` (`0` disables) | 90 min |
+| Re-attach on break | `--follow-timeout-min`, clamped to the session cap | 30 min |
+
+Three things follow that are worth knowing:
+
+- **Consent to record is not consent to stream.** The operator may be recording
+  for their own notes; that does not make the audio session input. Someone else
+  in the room agreed to neither.
+- **The session cap bounds the whole activity**, not each recording. A
+  `--follow` break cannot extend it, so the stream cannot roam onward into a
+  later, unrelated recording — which would be the same defect by another route.
+- **On the cap the JSONL gets `{"event": "session_cap_reached"}`.** Treat it
+  like a terminal state: say the cap ended the stream, and offer to restart it
+  if the meeting is still going. It is not a failure and not a pause.
+
+**Before passing `--attach-growing`, know who can be heard.** It is the right
+flag for a deliberate meeting on a mic the operator controls. It is the wrong
+flag for an always-on mic in a shared space.
 
 ### 3b. The silence gate
 
@@ -330,6 +373,7 @@ The tailer's stderr names what happened:
 | `recording appears to have stopped — exiting` | Operator stopped Audio Hijack (no `--follow`) | **Run the `stop` sequence automatically** |
 | `recording appears to have stopped — flushing final Ns slice` then `final slice written — exiting` | Same, with a trailing remnant shorter than one chunk | **Run the `stop` sequence automatically** — the last words are in the final chunk |
 | `could not probe duration — recording ended?` | File vanished or became unreadable | Run `stop`; note the anomaly. Under `--follow` this pauses instead |
+| `session cap of N min reached — stopping` | The capture gate's session bound elapsed | **Run the `stop` sequence**; say the cap ended it and offer to restart if the meeting continues |
 | `5 consecutive failures — stopping` | Transcription is genuinely broken | Do **not** treat as meeting-over; surface the errors — the recording may still be running |
 
 The first three lines only ever appear with `--follow`. **Only the lines marked
@@ -347,6 +391,7 @@ sequence without being asked:**
 - `recording appears to have stopped — flushing final Ns slice` → `final slice written — exiting`
 - `no resume within N min — exiting`
 - `could not probe duration — recording ended?` **without** `--follow`
+- `session cap of N min reached — stopping`
 
 **`paused` and `resumed` are explicitly NOT terminal.** Neither is
 `5 consecutive failures — stopping`: that is a broken transcription path, not a
