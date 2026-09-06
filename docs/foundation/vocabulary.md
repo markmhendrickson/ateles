@@ -746,9 +746,11 @@ policy declares none (`payments.md#tolerance-is-an-action_policy-value-and-its-d
 `data_model.md#concepts` row, and this file mints no term for any of them: `lapse_cap` (the per-task lapse
 count at which [`repeated_lapse`](#repeated_lapse) is raised, undeclared raising none), `min_tier` (the
 minimum model tier a class's [action](#action) may be taken at, evaluated at the same take as
-[blast radius](#blast-radius) and set by the [operator](#operator) only for irreversible classes), `recoveries`,
-`metered_resources[]`, `quorum`, and `disjoint_roles[]` are the policy's data. A reader meets each on the
-policy's row; naming one here would be a second home for a value that already has one (principle 9).
+[blast radius](#blast-radius) and set by the [operator](#operator) only for irreversible classes),
+`confidence_threshold` (the policy floor a scored [confidence](#confidence) is compared with — not a second
+term beside `confidence`), `recoveries`, `metered_resources[]`, `quorum`, and `disjoint_roles[]` are the
+policy's data. A reader meets each on the policy's row; naming one here would be a second home for a value
+that already has one (principle 9).
 **See:** [`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`](gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken),
 [`data_model.md#concepts`](data_model.md#concepts).
 **Never:** "execution_policy", "execution policy", "workflow policy" (retired: the step owners a workflow
