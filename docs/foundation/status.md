@@ -2120,6 +2120,56 @@ phrase-based advisory match changed; the new hits are caught by the scoped Never
 marker, unchanged). The branch head this pass was taken from is the planning pass (revision 40), after it
 had stood unchanged on the remote for ten minutes.
 
+## Revision 42 (2026-09-06): the self-contradiction pass — four found by re-reading, one confirmed already fixed
+
+A prior agent had read the foundation for internal self-contradictions and identified five, but ended its
+turn before acting; this revision redoes the reading against a later head and fixes the four still live.
+The branch head this pass was taken from is the planning pass (revision 40, `947bf0b`); the record-sense
+collision pass (revision 41) landed on the remote while this one was being written, and this pass was
+rebased onto it, both sides kept, after polling the remote for up to twelve minutes with no further push
+landing.
+
+**Fixed.** `vocabulary.md#daemon` said a daemon produces "tasks or actions", contradicting C2 (settled
+revision 37, upheld revision 39): a daemon takes no action of its own, writing only tasks and observations,
+the announcement path of last resort excepted. The entry now states the write contract directly and cites
+C2 (`work_model.md#contradictions-this-document-settles`); a `Never` line was added for an action
+`PRODUCES` from no task. The same phrasing had drifted into `work_model.md`'s own action-series paragraph
+("a daemon's self-triggered action of the same class"), which now reads "the task a daemon creates for the
+same class", with an inline citation back to C2 — the two other daemon-and-action mentions found by the
+sweep (`data_model.md`, `migration.md`) already stated the settled rule and needed no change.
+
+**Fixed.** `data_model.md`'s `task` row named "no open checkpoint holding it" among the claimable derived
+read but omitted the assignment clause `vocabulary.md#claimable` and `work_model.md` both carry
+(`assigned_to` unset or naming the claiming principal). The row now states it and cites both homes.
+
+**Fixed.** `principles.md#3-validate-the-instrument-before-believing-the-measurement` named "blocked claims
+per window" as an instrument, reading as the `blocked`
+task status revision 37 retired. The surviving sense — a claim the `claimable` predicate refuses, distinct
+from the retired status — is stated inline where the instrument is named, rather than renaming a term used
+consistently as "blocked claim" throughout `failure_posture.md`, `gates_and_workflows.md`, and `telegram.md`
+(renaming only the one citing occurrence would have created a new inconsistency with its own cited source,
+`failure_posture.md#the-rules` rule 2).
+
+**Fixed.** `workflows.md#operator-only`'s `await` step closed on "the operator's decision or the operator's
+report", while `gates_and_workflows.md`'s F22 ruling (revision 36) holds that the step closes on the
+confirmation — an adapter's read-back, an arriving artifact, or, only where declared, the operator's report
+written as a report attributed to the operator principal — and never on the resolution alone. `await`'s
+`Closes on` and the surrounding prose now name the confirmation as the close condition with `denied` as the
+one alternative (a failing verdict, not a wait); `record` is stated as where that confirmation or failing
+verdict is written onto the task; and the F22 section gained a closing sentence naming `await` and `record`
+by name, so the two sections now cite each other for the division.
+
+**Confirmed already fixed.** Decision 36's register row in `conformance.md` reads **ruled** as of revision
+39 (the fifth item the prior pass's analysis named); no correction was needed.
+
+**Checks.** `check_foundation_vocabulary.py`: 0 Never hits (one new `Never` line added, on the daemon
+entry, hits nothing). `check_foundation_anchors.py`: 0 broken links. `test_foundation.py`: 97 passed, 1
+xfailed (the budget marker, unchanged) — first run surfaced one unlinked first mention (`observation` in
+the rewritten daemon entry), fixed by linking it. Sizes (`wc -c`, this branch against revision 40):
+`vocabulary.md` 102.5k → 105.3k; `work_model.md` 103.4k → 105.4k; `workflows.md` 63.6k → 64.2k;
+`gates_and_workflows.md` 105.5k → 107.2k; `data_model.md` 55.5k → 57.4k; `principles.md` unchanged at
+16.2k net (a citation added, none removed). No document crossed a budget threshold it was not already over.
+
 ## Reading-list budget and keying, as of revision 6 (2026-09-04)
 
 Measured with `wc -c` on this branch; the caps are `foundation.py`'s `MAX_DOC_CHARS = 12_000` and

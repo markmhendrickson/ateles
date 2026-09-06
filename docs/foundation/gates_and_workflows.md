@@ -1026,7 +1026,11 @@ an observation on the action attributed to the operator principal, stating what 
 written as what it is — a report by the principal who acted, never a read-back — so that a reader asking what
 confirmed this action sees which of the two it was, which is principle 7's distinction applied to a
 confirmation's provenance. A declaration whose step may close on the report says so in its `Closes on`; a
-step whose declaration does not holds for the artifact and reaches its bound like any other.
+step whose declaration does not holds for the artifact and reaches its bound like any other. The
+operator-only workflow's own `await` and `record` divide this the same way: `await` closes on the
+confirmation under this rule, never on the resolution alone, and `record` is where that confirmation (or a
+`denied` resolution's failing verdict) is written onto the task
+(`workflows.md#operator-only`).
 
 **What this adds is nothing, and what it removes is the hop.** No field and no type: the action, the
 checkpoint, the planned wait, and the confirmation exist, and the report is an observation carrying the

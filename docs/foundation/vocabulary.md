@@ -341,10 +341,13 @@ carries them and their [checkpoints](#checkpoint) to the [operator](#operator), 
 **Not for:** the operator for the agent; concierge for the agent, unqualified.
 
 ### daemon
-**Definition:** a long-lived process that self-triggers on its own loop, producing [tasks](#task) or [actions](#action)
-without receiving a task.
-**See:** [`work_model.md#the-four-execution-mechanisms`](work_model.md#the-four-execution-mechanisms).
-**Never:** —
+**Definition:** a long-lived process that self-triggers on its own loop, without receiving a task, and takes
+no [action](#action) of its own: it writes the [tasks](#task) its poll produces and [observations](#observation),
+and nothing else — the announcement path of last resort
+([`failure_posture.md#the-rules`](failure_posture.md#the-rules), rule 2) is the sole exception.
+**See:** [`work_model.md#the-four-execution-mechanisms`](work_model.md#the-four-execution-mechanisms);
+[`work_model.md#contradictions-this-document-settles`](work_model.md#contradictions-this-document-settles) (C2).
+**Never:** an action `PRODUCES` from no task.
 **Not for:** service for a daemon, unqualified.
 
 ### pipeline

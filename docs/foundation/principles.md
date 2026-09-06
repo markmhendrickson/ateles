@@ -63,7 +63,9 @@ state the timezone of a search window. Sources: #727 rule 3; synthesis PR-16.
 are the counters and coverages the design already defines — drops per window, with the dispositions counted
 beside them (`adapters.md#what-the-adapter-does-with-every-event`); lapses per task
 (`failure_posture.md#repeated-lapse-raises-a-checkpoint`); blocked claims per window
-(`failure_posture.md#the-rules`, rule 2); and the coverage on every adapter observation
+(`failure_posture.md#the-rules`, rule 2 — a claim the [claimable](vocabulary.md#claimable) predicate refuses,
+not the `blocked` task status retired in revision 37, `work_model.md#the-transition-vocabulary`); and the
+coverage on every adapter observation
 (`data_model.md#record-conventions`) — and each is proved non-zero on a known-positive case before a zero
 read from it is believed. An instrument with no planted positive is one whose zero is not evidence; the
 conformance suite applies the same rule to its own three

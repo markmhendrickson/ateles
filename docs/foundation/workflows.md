@@ -704,16 +704,17 @@ an `operator_only` action with reason `gate_hold`; the checkpoint is what this w
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
 | 1 | `present` | operator-facing agent | yes | | the task, its context, and the exact operator action it needs are carried to the operator through the channel the `channel_config` entity names; where an action exists, its checkpoint is what is carried, through the one decision queue |
-| 2 | `await` | operator-facing agent | yes | | the operator's decision or the operator's report of the action taken is recorded; the lease is renewed throughout; the deferral is bounded and its exhaustion escalates the task with reason `rounds_exhausted` (`failure_posture.md#the-rules`, rule 5) |
-| 3 | `record` | operator-facing agent | yes | | the outcome is written on the task and read back; the sign-off closes the batch and names the successor the outcome calls for |
+| 2 | `await` | operator-facing agent | yes | | the confirmation, never the resolution alone, closes the step — an adapter's read-back, an arriving artifact, or, where declared, the operator's report of the action taken, written as a report attributed to the operator principal (`gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`); a `denied` resolution closes the step on its failing verdict instead, with no confirmation to wait for; the lease is renewed throughout; the deferral is bounded and its exhaustion escalates the task with reason `rounds_exhausted` (`failure_posture.md#the-rules`, rule 5) |
+| 3 | `record` | operator-facing agent | yes | | the confirmation `await` closed on, or the failing verdict, is where the outcome lands: written on the task and read back; the sign-off closes the batch and names the successor the outcome calls for |
 
 <!-- /rendered -->
 
 The workflow has three steps rather than one so that "presented and awaiting" is a readable state of the
 batch and not a notification's delivery status, and so that a task the operator never answers is
 visible as a batch whose `await` step has been open past its bound. That bound is `await`'s `hold_bound`, and
-because the step's close condition names no alternative to the operator's decision, reaching it is rule 5's
-ceiling (`gates_and_workflows.md#declaration-batch-projection`).
+because the step's close condition names no alternative to the confirmation but a `denied` resolution's
+failing verdict, reaching the bound with neither is rule 5's ceiling
+(`gates_and_workflows.md#declaration-batch-projection`).
 
 A single step of another workflow whose action is `operator_only` does not route here. It carries the
 checkpoint, holds for the confirmation, and closes on it in place — the three steps above are what its life

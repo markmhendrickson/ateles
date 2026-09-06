@@ -826,8 +826,10 @@ checkpointing (`gates_and_workflows.md#confidence-and-three-blast-tiers`); its m
 whatever produced them. A recurring task is a series of *tasks*, each going through a workflow. The
 relation is one-directional and simple: each instance's batch produces actions, each action carries its
 class, and each successful one is a member of that class's series — so a recurring task feeds an action
-series, but so does a daemon's self-triggered action of the same class, and the series counts the class
-without regard to which task or daemon produced the member. Graduation changes exactly one thing, and it
+series, but so does the task a daemon creates for the same class (`#contradictions-this-document-settles`,
+C2: a daemon takes no action of its own, so the action is the created task's, not the daemon's), and the
+series counts the class without regard to which task produced the member, recurring or daemon-created.
+Graduation changes exactly one thing, and it
 is at the gate: whether the next action of that class is held at a checkpoint. It never changes whether
 the task recurs, which workflow its instance enters, or which steps that workflow has — `workflows.md#payment`
 states this for the case where it matters most, a recurring payment's `consent` step existing whether or
