@@ -217,14 +217,21 @@ SUBSCRIBE_ENTITY_TYPES = ["task", "checkpoint_brief"]
 # (default policy ent_dfce6edecefe3eb7fc9e0337) or the gate mis-classifies blast
 # radius. PR open and merge both map to the policy's "open_or_merge_pr"; "release"
 # is treated as high blast via blast_radius_default + the policy's publish set.
+#
+# Writer-facing vocabulary: execution/daemons/apis/action_types.md
 _AGENT_ACTION_TYPE: dict[str, str] = {
-    "cicada": "open_or_merge_pr",
+    "cicada": "open_or_merge_pr",  # max capability; see _GENERALIST_AGENTS
     "vanellus": "open_or_merge_pr",
     "struthio": "publish",
     "monedula": "payment",
     "fringilla": "compute_only_analysis",
     "corvus": "send_external_comms",
 }
+
+# Generalist agents cover many domains; infer their LOW ceiling when the task
+# omits action_type. Specialists keep _AGENT_ACTION_TYPE as their typical max.
+_GENERALIST_AGENTS: frozenset[str] = frozenset({"cicada"})
+_GENERALIST_DEFAULT_ACTION_TYPE = "compute_only_analysis"
 
 
 def _infer_action_type(skill: str | None, snapshot: dict) -> str | None:
@@ -245,7 +252,10 @@ def _infer_action_type(skill: str | None, snapshot: dict) -> str | None:
     if explicit:
         return explicit
     if skill:
-        return _AGENT_ACTION_TYPE.get(skill.lower())
+        sk = skill.lower()
+        if sk in _GENERALIST_AGENTS:
+            return _GENERALIST_DEFAULT_ACTION_TYPE
+        return _AGENT_ACTION_TYPE.get(sk)
     return None
 
 
