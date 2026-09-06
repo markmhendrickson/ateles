@@ -2328,6 +2328,71 @@ xfailed (the budget marker, unchanged). The branch head this pass was taken from
 mapping pass (revision 44, `02c7e0e`), confirmed unchanged on the remote by three direct polls 60 seconds
 apart before the dedicated worktree was created.
 
+## Revision 46 (2026-09-06): the session-reconciliation pass — decision 40 against sanctioned practice, one proposal, one open question
+
+The operator asked, on PR #745, whether decision 40 stands against the swarm's own sanctioned practice of
+persisting every session turn to Neotoma — the operator's standing instruction, and the MCP server's own
+mandate, to store user and assistant rows every turn. Read against the record: `agent_session` (3,726 on
+prod, schema drifted to 0.2.0 with 33 fields — `holder`, `task_id`, a step name, a declaration reference,
+none of them content) carries exactly what decision 40 says and nothing else; the turn-by-turn content lives
+in `conversation`/`conversation_message` (10,793 / 59,263 on prod) and, summarized, in `session_digest` (369
+on prod), none of which is `agent_session` and none of which is a registered type in this design's own
+registry (`#revision-28-2026-09-05-the-record-inventory-the-migration-plan-starts-from`, the registry-holds paragraph). The reading that holds is (a): decision
+40 governs a sign-off's shape at close, not whether a session is stored; the essay-contradiction flag revision
+44 left on decision 40's register row named the wrong axis of disagreement, because it read "reasoning is not
+written" as "no session is persisted" when the ruling's own text already names `session_digest` as the
+licensed path for a session whose content is itself work input
+(`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`).
+Reading (c) — that the persisted sessions are unsanctioned drift — was tested and rejected: the persistence
+rule is the operator's own standing instruction and the MCP server's mandate, not an accident, and nothing in
+decision 40's text or its home section addresses `conversation`/`session_digest` at all.
+
+**Restated, not reopened.** Decision 40's register row (`conformance.md`) now poses the question revision 44's
+flag could not: not "is reasoning stored" but what a session-family entity is for, what may read it, and
+whether a sign-off may point at one. The ruling itself is untouched — no wording in
+`gates_and_workflows.md`'s decision-40 section was weakened or narrowed, because on inspection it already
+said what reading (a) needed it to say (the `session_digest` carve-out was written into the section at its
+original ruling, not added here); what changed is that the register row and the section both now state the
+carve-out as a first-class answer to the essay-contradiction flag rather than leaving a reader to find it
+three paragraphs later.
+
+**Proposed, not ruled.** Two new paragraphs in `gates_and_workflows.md`'s decision-40 section: first, an
+explicit statement that "no session is persisted" is not a fair paraphrase of the ruling, naming the two
+unregistered types that already carry the content the ruling is read as denying; second, that a sign-off may
+carry a `REFERS_TO` edge to the `agent_session` or `session_digest` that produced it, at the cost of one edge
+per sign-off and one `REFERS_TO` target the schema does not yet name — the same reference-never-value shape
+decision 40 already uses for every other read a sign-off names, extended to one more source. Neither is
+written as a rule; both are left for the operator to accept, decline, or fold into a future ruling.
+
+**Flagged, not settled: minimization once a session is task-reachable.** `session_digest` samples read from
+prod (schema 1.4.0) carry direct quotes, named counterparties, and project-identifying detail alongside
+their structured fields — not scrubbed to structure-only, despite the schema's own field description
+instructing "summarize, never transcribe sensitive content." Once a `REFERS_TO` edge (proposed above) makes
+a session reachable from a task, the special-category and reference-never-value rules
+`data_model.md#record-conventions` states for a *registered* type would, if extended, reach a session's
+content — but `conversation_message` and `session_digest` are not registered types this design's registry
+scan finds (`#revision-28-2026-09-05-the-record-inventory-the-migration-plan-starts-from`, the registry-holds paragraph), so the design's own minimization-at-
+write mechanism does not currently bind them, registered or not. Whether a session's content inherits the
+special-category mark F23 already states for a type, and whether the operator's RGPD minimization-at-capture
+rule for durable contact profiles has a counterpart for session content that names people incidentally, is
+not decided here — named as a gap for the operator, not resolved as a privacy rule, per the standing
+instruction against settling one silently.
+
+**No edge, no field, no type written.** This pass changes prose only: one register row, two new paragraphs
+in an existing section, and this revision's own record. `agent_session`, `conversation_message`, and
+`session_digest` are read, not registered or altered; the proposed sign-off `REFERS_TO` edge is not added to
+`data_model.md`'s relationship table, since it is offered as a cost estimate, not a decision.
+
+**Size.** Measured 2026-09-06 with `wc -c` against the ancestry pass (revision 45) as the predecessor.
+`gates_and_workflows.md` +2.1k (two paragraphs in the decision-40 section); `conformance.md` +1.0k (one
+register row, one header sentence). No other foundation document was edited.
+
+**Checks, on this tree.** `check_foundation_vocabulary.py`: 100 Never items, 73 Not-for items (unchanged),
+0 Never hits, advisory-hit count re-measured after this pass's prose (no new Never-listed term introduced).
+`check_foundation_anchors.py`: 0 broken links. `test_foundation.py`: 97 passed, 1 xfailed (the budget
+marker, unchanged). The branch head this pass was taken from is the ancestry pass (revision 45, `25aa4a9`),
+confirmed unchanged on the remote by three direct polls before the dedicated worktree was created.
+
 ## Reading-list budget and keying, as of revision 6 (2026-09-04)
 
 Measured with `wc -c` on this branch; the caps are `foundation.py`'s `MAX_DOC_CHARS = 12_000` and
