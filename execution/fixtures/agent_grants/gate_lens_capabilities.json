@@ -1,7 +1,7 @@
 {
   "schema_version": "1",
   "source": "ateles#769 live agent_grant read-back 2026-09-06",
-  "note": "Admission surface for gate writeback. Derived from LENSES with non-empty gate. issue must be on retrieve+correct and must NOT be on store_structured.",
+  "note": "Admission surface for gate writeback. Derived from LENSES with non-empty gate. issue must be on retrieve+correct and must NOT be on store_structured. This file is a SNAPSHOT of live agent_grant rows — verify it with `python3 execution/scripts/check_gate_lens_grants.py`, which fails on a missing/inactive grant or any drift from Neotoma. Editing this file does not change admission; correct the agent_grant entity in Neotoma, then re-snapshot here.",
   "lenses": [
     {
       "agent": "pavo",

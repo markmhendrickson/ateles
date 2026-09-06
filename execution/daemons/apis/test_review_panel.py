@@ -469,6 +469,13 @@ def test_gate_owning_lenses_have_agent_grant_admission_for_issue():
     with a non-empty gate — admits `issue` on retrieve+correct and never via
     store_structured (pavo's pre-existing pm grant is the documented exception
     for store_structured; it already stores issues as part of PM workflow).
+
+    The fixture is a snapshot, so it can only prove the *shape* of admission
+    offline. `execution/scripts/check_gate_lens_grants.py` is the other half:
+    it compares this fixture against the live `agent_grant` rows and fails on a
+    missing grant, an inactive one, or any capability drift. Keep both — this
+    test guards the invariant in CI with no network, the script guards the
+    fixture against becoming a comfortable fiction.
     """
     import json
     from pathlib import Path
@@ -493,6 +500,17 @@ def test_gate_owning_lenses_have_agent_grant_admission_for_issue():
         assert entry.get("gate") == lens.gate, (
             f"{lens.agent} fixture gate {entry.get('gate')!r} != LENSES gate "
             f"{lens.gate!r}"
+        )
+        # entity_id + match_sub are what check_gate_lens_grants.py joins on to
+        # reach the live grant. A row missing either is unverifiable against
+        # Neotoma — it would pass here forever while the real grant is absent.
+        assert entry.get("entity_id"), (
+            f"{lens.agent} fixture row has no entity_id — the live grant check "
+            f"cannot verify it against Neotoma"
+        )
+        assert entry.get("match_sub"), (
+            f"{lens.agent} fixture row has no match_sub — the live grant check "
+            f"cannot resolve its agent_grant in Neotoma"
         )
         caps = {c["op"]: set(c.get("entity_types") or []) for c in entry["capabilities"]}
         retrieve = caps.get("retrieve", set())
