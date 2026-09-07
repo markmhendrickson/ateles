@@ -39,6 +39,8 @@ on:
       - "execution/scripts/render_reading_projection.py"
       - "execution/daemons/apis/test_foundation*.py"
       - ".github/workflows/foundation-checks.yml"
+    # Synchronize only re-runs when a matching path is in the push delta;
+    # empty commits skip this filter (ateles#802 — head 392aee1a missed the lane).
   workflow_dispatch:
 
 permissions:
