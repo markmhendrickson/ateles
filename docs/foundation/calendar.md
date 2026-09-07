@@ -9,7 +9,7 @@ actions and the action gate), `workflows.md` (meeting processing, outreach, oper
 `failure_posture.md` (the halt, the recovery per action class), `gmail.md` (the sibling system, whose
 identity and minimization rules this document shares), and the Google Calendar REST API v3 surface as
 exposed by the `gws` CLI, read 2026-09-05, and PR #745 operator review (2026-09-05, rulings 13–14, 16–18,
-23–29: decision 24 ruled here). What is built, and which rows have no code path, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `calendar_routing_config` replaced by `channel_config`, the binding type `adapters.md` names). Revised by the testability pass of 2026-09-06 (revision 37: refusal 1's mechanical half, the field allowlist on the grant). Revised by the event/signal/delivery pass of 2026-09-06 (revision 38: "Every inbound signal, and what it becomes" and its table headers, Linkage, Identity, and the disposition sentence renamed to `event`, matching `github.md`'s and `gmail.md`'s precedent; `signal` kept only in its ordinary-English sense).
+23–29: decision 24 ruled here). What is built, and which rows have no code path, is `status.md`. Amendment history: `revisions.md#calendarmd`.
 
 ## Purpose
 
@@ -131,6 +131,12 @@ returns, and the operator's standing instruction is that the code is not establi
 
 ## Every inbound event, and what it becomes
 
+**The rules in this section.**
+
+- [Events](#events).
+- [Calendars, sharing, and settings](#calendars-sharing-and-settings).
+- [Everything else the calendar exposes](#everything-else-the-calendar-exposes).
+
 The calendar offers a **watch** on events, on the calendar list, on access rules, and on settings, which
 posts a notification when something in the watched collection changes. As in `gmail.md`, the notification is
 a wake-up rather than the event: it carries a resource identifier and a change token, not the changed
@@ -204,6 +210,12 @@ since last week. This is the same shape as the code host's stale-check problem a
 the value is re-read, and where it cannot be, the condition is `unknown` and unknown holds.
 
 ## Outbound: the operations the workflows take on the calendar
+
+**The rules in this section.**
+
+- The class depends on the attendees, and the adapter reads before it classifies.
+- The recovery rows divide in two, and the division is the point.
+- A calendar entry the swarm writes for its own bookkeeping is a smell, not a design.
 
 Every row is an `action`, created when the effect becomes known and evaluated at the action gate at the
 moment it would be taken (`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`). The
@@ -299,6 +311,17 @@ without "between these two instants, on these calendars", and the difference bet
 the whole of whether a later reader can trust it.
 
 ## What this adapter refuses
+
+**The rules in this section.**
+
+1. It does not build a profile of anyone from their presence on a meeting.
+2. It never creates, moves, or cancels an event with attendees outside a checkpoint.
+3. It never responds to an invitation on the operator's behalf without the gate.
+4. It never deletes a calendar, and never clears a primary calendar.
+5. It never adds, changes, or revokes an access rule, and never transfers ownership of a calendar.
+6. It never treats a calendar entry as step state, and never writes one to communicate one.
+7. It never reads a calendar the `channel_config` does not name.
+8. It never treats a calendar reminder as a trigger.
 
 **1. It does not build a profile of anyone from their presence on a meeting.** An attendee list is a list
 of people who have not consented to being recorded by a swarm, and the minimization rule `gmail.md` states

@@ -8,7 +8,7 @@ intake, the four execution mechanisms), `gates_and_workflows.md` (step state fro
 action gate; the three verdict values), `workflows.md` (the code workflows, release, and security),
 `failure_posture.md` (the halt, the recovery per action class, the checkpoint reason classes), and GitHub's
 own webhook event and payload documentation, read 2026-09-04, and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). What is built, and which rows have no code
-path, is `status.md`. Revised by the testability pass of 2026-09-06 (revision 37: the host's assignment never writes `assigned_to`; `impl` closes on a mergeable pull request, stated in `workflows.md`). Revised by the host-configuration pass of 2026-09-06 (revision 65: what the host must be configured to be, ruled an extension of obligations 1 and 6 rather than a seventh obligation — the subscription reconciliation obligation 1's drop counter structurally cannot perform, and the host's merge-permitting configuration as the standing form of the permit the gate never issued; the required state per repository, and the reporting-permission row that belongs to neither obligation; open decision 69, whether a difference at admission blocks the grant or is a finding on the review step).
+path, is `status.md`. Amendment history: `revisions.md#githubmd`.
 
 ## Purpose
 
@@ -436,6 +436,14 @@ recovery is an action a principal takes through the gate
 (`failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`).
 
 ## What the host must be configured to be, for this mapping to mean what it says
+
+**The rules in this section.**
+
+- [The argument that host configuration makes the mapping true, and why the design rejects it](#the-argument-that-host-configuration-makes-the-mapping-true-and-why-the-design-rejects-it).
+- [What it is instead: obligation 1's inbound half, and obligation 6's outbound half](#what-it-is-instead-obligation-1s-inbound-half-and-obligation-6s-outbound-half).
+- [The rule, stated once](#the-rule-stated-once).
+- [The required state, per repository](#the-required-state-per-repository).
+- [What this section does not decide](#what-this-section-does-not-decide).
 
 The operator's 2026-09-06 14:44 memo asked whether admitting the GitHub adapter should carry a plan to
 configure the host holistically, so the host is "compatible and appropriate for the adapter." It should,

@@ -22,7 +22,7 @@ stand rather than removed; and the testability pass (revision 37), which carried
 and fifteen open contradictions below back into the documents that own them — each row marked with what its
 home now says, or with why no wording could make it mechanical, and kept where it stands rather than
 removed. The operator's standing instruction
-that this document applies to itself: *the code is not established design guidance.* Revised by the rulings pass of 2026-09-06 (revision 38: decision 44 ruled — a `signed` or blocking sign-off requires a held lease by its signer; decision 43 ruled in its enumeration half — the bootstrap set is the thirteen-record table, every member read back; the rows that waited on decisions 31, 32, 35, 42, 43, 44, 48 to 51, 53, and 54 updated). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 43 ruled in its second half — the operator's later governance write gated, self-resolved and marked, with 47; the rows that waited on 36, 43, 47, 50, 52, 53, and 56 turned mechanical; U-14 closed by 56). Revised by the minimization-recalibration pass of 2026-09-06 (revision 50: WF-16 updated for `disclosure_lint`; U-34 opened and closed in the same pass). Revised by the sign-off-provenance pass of 2026-09-06 (revision 57: DM-28 added, the new `session_digest` edge decision 40 rules, required on an agent's sign-off). Revised by the schema-drift pass (revision 58, 2026-09-06, **derived from** the operator's 2026-09-06 12:56 memo, via `conformance.md`'s decision 67): DM-10b added — the substrate refuses a write naming an undeclared field, expected-failing until Neotoma satisfies it, distinct from DM-10's client-side read-back check. Revised by the agent-identity pass of 2026-09-06 (revision 66, **derived from** the operator's 2026-09-06 14:44 memo): AD-39, AD-40, and AD-41 added — decision 69's per-agent-credential obligation and the shared-credential verdict's disposition, the outbound mark and its refusal, and the credential's home on the `vendor_binding`.
+that this document applies to itself: *the code is not established design guidance.*. Amendment history: `revisions.md#conformance_suitemd`.
 
 ## Purpose
 
@@ -63,6 +63,15 @@ generator and check are `conformance.md`'s (decision 66) and whose content follo
 since revision 6 — this document is the projection's extraction key, never a target of it.
 
 ## How the suite judges, and what a row is
+
+**The rules in this section.**
+
+- [The method: every rule gets its failing artefact](#the-method-every-rule-gets-its-failing-artefact).
+- [Every mechanical row names its mutant](#every-mechanical-row-names-its-mutant).
+- [The suite validates its own instruments](#the-suite-validates-its-own-instruments).
+- [What the suite reads, and what it never asserts on](#what-the-suite-reads-and-what-it-never-asserts-on).
+- [What the rule-coverage check reads](#what-the-rule-coverage-check-reads).
+- [Named fixtures](#named-fixtures).
 
 ### The method: every rule gets its failing artefact
 
@@ -211,6 +220,13 @@ document states the requirement — empty, per run, nonce-identified, run-creden
 marks the provisioning as work for the branch that builds the suite.
 
 ## The bootstrap sequence: what must exist before a swarm exists
+
+**The rules in this section.**
+
+- [The circularities the documents leave](#the-circularities-the-documents-leave).
+- [The minimal record set, in order](#the-minimal-record-set-in-order).
+- [What the documents leave unspecified here, and how each is recorded](#what-the-documents-leave-unspecified-here-and-how-each-is-recorded).
+- [Against `migration.md`'s bootstrap leg](#against-migrationmds-bootstrap-leg).
 
 `work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other` settles that the
 first workflow declaration is an operator act, out of band, and states bootstrapping as a limitation rather

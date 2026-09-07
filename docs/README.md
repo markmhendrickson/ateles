@@ -107,6 +107,10 @@ Authored companions (design prose; **not** inlined into review prompts):
   retire, introduce), the record primitive that carries it, the order and its dependencies, what is
   reversible, how the carrying is itself governed, and the gaps the mapping exposed in the foundation.
 
+- [**Revisions**](foundation/revisions.md) — the amendment history of every foundation document, one
+  table per document, one row per revision (decision 74). Provenance, never argument: it states no rule,
+  so no reviewer reads it to judge a change, and it is never keyed or inlined.
+
 Companion report (not a foundation design document; not in the review reading list):
 
 - [**Status**](foundation/status.md) — dated, perishable measurement of the gap between the foundation and

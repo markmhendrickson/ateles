@@ -19,7 +19,7 @@ a read-only inventory of the production record taken 2026-09-05 through the Neot
 `status.md`), the operator's 2026-09-05 direction that the plan also cover the migration of skills into the swarm, the skill
 inventory at both harness roots read the same day and the recurring-work extraction over it (both in `status.md`,
 revision 32), and the two renderers' stated contracts (`render_agent_docs.py`, `sync_skills.py`). The bootstrap sequence this document orders against is the
-conformance suite's (`conformance_suite.md`); where the two disagree, this document says so. Revised by the simplification pass of 2026-09-05 (revision 29: gap G14 closed; `workflow policy` retired). Revised by the memo-gap pass of 2026-09-06 (revision 31: gaps G1 and G12 closed). Revised 2026-09-06 (revision 32: the skills leg — five classes of skill, the mapping of each to its target, stage 11, gaps G28–G31, and open decision 42). Revised by the testability pass of 2026-09-06 (revision 37: gaps G6, G7, G8, G11, G13, and G15 closed). Revised by the rulings pass of 2026-09-06 (revision 38: decisions 31 and 42 ruled — the merge form for a re-type, and a skill's harness mechanics split among the grant, a `vendor_binding`, and the harness's own configuration; gap G19 closed). Revised by the second rulings pass of 2026-09-06 (revision 39: leg one grants the governance types to the engine alone, decision 56). Revised by the planning pass of 2026-09-06 (revision 40: gaps G9, G10, and G31 closed by `planning_model.md`; the planning types' dispositions; the plan family mapped to `workflows.md#planning`). Revised by the minimization-recalibration pass of 2026-09-06 (revision 50: `conversation`, `conversation_message` introduced and registered, decision 63; `session_digest`'s row marked registered and drift-carrying). Revised by the close-out pass of 2026-09-06 (decision 64 closed in `conformance.md`; the `conversation`, `conversation_message` row repointed from decision 64 "still open" to its ruled writer/reader/mark and its authored remainder; a new subsection, *Session types: the field-by-field shape decision 64 left to the schema*, states what must be authored, who owns it, what constrains it, and the existing rows it carries forward without restating their figures). Revised by the sign-off-provenance pass of 2026-09-06 (revision 57: `session_digest`'s row carries the zero-existing-edges drift decision 40's new `REFERS_TO` ← sign-off edge leaves behind). Revised by the schema-drift pass (revision 58, 2026-09-06, **derived from** the operator's 2026-09-06 12:56 memo, via `conformance.md`'s decision 67): G25 cross-referenced as the design-side symptom of the same missing registry read neotoma#1972's diverging `relationship_type` copies show; no gap number added, no figure restated. Revised by the undefined-term pass of 2026-09-06 (revision 60: a new section, *Substrate field names the design reads and never adopts as terms*, records `user_id`, `sub`, `iss`, `conversation`, `raw_fragments`, and `reducer_config` — six names cited across five or more foundation documents whose concepts the design already names, kept out of `vocabulary.md` so the design outlives the substrate's field names; no gap number added, since none of the six is a place the foundation fails to say what the migration needs).
+conformance suite's (`conformance_suite.md`); where the two disagree, this document says so. Amendment history: `revisions.md#migrationmd`.
 
 ## Purpose
 
@@ -256,6 +256,16 @@ row exists. This is gap G2 in its second form: the tolerant-reader rule is writt
 design needs it stated for types.
 
 ## The skills: source state the harnesses hold, and where each kind goes
+
+**The rules in this section.**
+
+- [Five classes of skill](#five-classes-of-skill).
+- [Role skill → `agent`, and what the file becomes](#role-skill--agent-and-what-the-file-becomes).
+- [Procedure skill → `workflow` declaration, step, or adapter operation](#procedure-skill--workflow-declaration-step-or-adapter-operation).
+- [The format gap: where a skill's harness mechanics go](#the-format-gap-where-a-skills-harness-mechanics-go).
+- [Standing rules inside skills go to `task_policy`, by kind, and never by value](#standing-rules-inside-skills-go-to-task_policy-by-kind-and-never-by-value).
+- [The duplicated procedure, and what the roles collapse to](#the-duplicated-procedure-and-what-the-roles-collapse-to).
+- [Ordering and the cutover, for the skills](#ordering-and-the-cutover-for-the-skills).
 
 A skill is a file a harness loads by path — `SKILL.md` under a repository root or a user root — carrying
 what an agent or a session is to do when it is invoked by that name. The operator's direction of 2026-09-05
@@ -622,6 +632,15 @@ retired types the stage reads; its `reads_to_close` name the target types it wri
 target is a declaration error caught before any stage opens. The workflow's only successor is none.
 
 ## Ordering, dependencies, and what each stage depends on
+
+**The rules in this section.**
+
+- Stage 3 — bindings and grants (workflow; governance writes).
+- Stage 4 — the engines: halt, re-type the declarations, cut over (workflow; governance writes and merges).
+- Stage 6 — the policies (workflow; governance writes).
+- Stage 9 — the artifacts (adapter cutover; no migration writes).
+- Stage 10 — the freeze (workflow; registry writes where the registry admits them).
+- Where this order and the conformance suite's bootstrap may differ.
 
 Stages are ordered by dependency, not by preference, and each names the stage it cannot precede. The
 bootstrap sequence the conformance suite derives (`conformance_suite.md`) covers stages 1 and 2; this

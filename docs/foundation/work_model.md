@@ -12,7 +12,7 @@ for changing the swarm's own operation), and PR #745 operator review (2026-09-05
 23–29: a batch may hold and may depend on a task it created; governance writes are reserved by default),
 and the operator's 2026-09-05 proposal on recurring tasks (revision 27, decision 30: one live instance,
 completion creates the next, `FOLLOWS` task to task), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the task-sources index, the intake rule, and open decision 36). Supersedes `docs/archive/task_execution_loop.md`. What is built
-is `status.md`; how each concept is recorded is `data_model.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder; open decision 34). Revised by the memo-gap pass of 2026-09-06 (revision 31: the governance list cited from its one home rather than counted; pointers to the closed-work and intake-linkage rulings). Revised by the workflow-format pass of 2026-09-06 (revision 34: the declared case of decision 13, bounded by `hold_bound`; the unclaimed-step interval named as `unclaimed_after`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: an intake rule may key on a field a step wrote on a type it may name, with the writer in its provenance predicate; decision 36 untouched). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a status and claimability read from the checkpoint; the declared terminal set; two moments open a batch; `tasks_attached[]`; the next recurring instance created and read back before the closing sign-off; a terminal status only where the declaration permits none; the writer as the cross-type cycle check's enforcement point; C2 settled by the write contract). Revised by the rulings pass of 2026-09-06 (revision 38: a `signed` or blocking sign-off is written under a held lease, cited from decision 44's ruling; the bootstrap set as the closed list decision 43 rules). Revised by the second rulings pass of 2026-09-06 (revision 39: decision 36 ruled here — a rule keys on no work-model record type, the operator's lean toward every type considered and set aside; decision 43's second half cited as ruled; the C2 and `blocked` settlements marked reviewed and upheld). Revised by the planning pass of 2026-09-06 (revision 40: a task's one `PART_OF` edge targets its parent task or a planning record; the ascent as a derived read distinct from the chain; unplanned work admitted). Revised by the model-and-harness-routing pass of 2026-09-06 (revision 43: `runner`, already defined in `vocabulary.md`, settled as the seat a step's outcome depends on — no new type introduced). Revised by the priority pass of 2026-09-06 (revision 47: ordering within the claimable pool given a home beside `claimable`, argued as a derived read over the ascent, `due_date`, workflow urgency, and blast radius rather than a maintained field, on the operator's connection from the ancestry reversal; a principal's "may" rather than "must" toward the highest-standing task, with decision 62 opened on whether an instance may bind the stronger form). Revised by the rulings pass of 2026-09-06 (revision 48: decision 34 ruled — `engine` defined, `pipeline` retired for the step-path publisher; the count of four execution mechanisms unchanged). Revised by the event/signal/delivery pass of 2026-09-06 (revision 49: one `calendar.md` anchor updated to its renamed section). Revised by the rulings-61-62-64 pass of 2026-09-06 (decision 62 ruled — "must" per class as `action_policy` data, default "may", on the shape `min_tier` and `metered_resources[]` already carry).
+is `status.md`; how each concept is recorded is `data_model.md`. Amendment history: `revisions.md#work_modelmd`.
 
 ## Purpose
 
@@ -36,6 +36,36 @@ below; steps and gates are `gates_and_workflows.md`; core workflows (including i
 `vocabulary.md`; the record is `data_model.md`. Walkthroughs: `scenarios.md`.
 
 ## The invariants
+
+**The rules in this section.**
+
+- [Pull is the only delivery; assignment constrains eligibility](#pull-is-the-only-delivery-assignment-constrains-eligibility).
+- [Assignment restricts eligibility; it never creates a lease](#assignment-restricts-eligibility-it-never-creates-a-lease).
+- [The claim and the lease are one primitive](#the-claim-and-the-lease-are-one-primitive).
+- [The lease is a relationship, not a set of task fields](#the-lease-is-a-relationship-not-a-set-of-task-fields).
+- [Liveness is derived from activity at read time, never declared](#liveness-is-derived-from-activity-at-read-time-never-declared).
+- [No assignment log; history is the task's own observations](#no-assignment-log-history-is-the-tasks-own-observations).
+- [The transition vocabulary](#the-transition-vocabulary).
+- [There is no task lifecycle; there are batches](#there-is-no-task-lifecycle-there-are-batches).
+- [Intake is every task's first workflow](#intake-is-every-tasks-first-workflow).
+- [What a claim predicate treats as claimable](#what-a-claim-predicate-treats-as-claimable).
+- [Priority orders the claimable pool; it does not enter it](#priority-orders-the-claimable-pool-it-does-not-enter-it).
+- [A lapsed lease is not reaped; repeated lapse raises a checkpoint](#a-lapsed-lease-is-not-reaped-repeated-lapse-raises-a-checkpoint).
+- [At-least-once implies effect dedup](#at-least-once-implies-effect-dedup).
+- [Operator-only tasks are claimed by the operator-facing agent](#operator-only-tasks-are-claimed-by-the-operator-facing-agent).
+- [A task is executed only through a workflow](#a-task-is-executed-only-through-a-workflow).
+- [Changing the swarm is work, and it goes through a workflow like any other](#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other).
+- [What goes through a workflow is a batch of tasks](#what-goes-through-a-workflow-is-a-batch-of-tasks).
+- [How a batch is formed, and what chooses its workflow](#how-a-batch-is-formed-and-what-chooses-its-workflow).
+- [A batch may hold on a condition discovered mid-flight](#a-batch-may-hold-on-a-condition-discovered-mid-flight).
+- [A batch may depend on a task it created](#a-batch-may-depend-on-a-task-it-created).
+- [Artifacts are records a batch leaves, never its subject](#artifacts-are-records-a-batch-leaves-never-its-subject).
+- [A task is in at most one batch at a time](#a-task-is-in-at-most-one-batch-at-a-time).
+- [Parent and child tasks](#parent-and-child-tasks).
+- [A recurring task is one live instance, and its completion creates the next](#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next).
+- [Where tasks come from: every source, indexed](#where-tasks-come-from-every-source-indexed).
+- [An intake rule turns a described change in the record into a task, and nothing else](#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else).
+- [Whether an intake rule may key on the work model's own records](#whether-an-intake-rule-may-key-on-the-work-models-own-records).
 
 ### Pull is the only delivery; assignment constrains eligibility
 
