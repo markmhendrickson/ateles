@@ -36,7 +36,8 @@ documents adds a row to each document's table, under one number.
 the remotes — the maximum `revision N` on any open branch's copy of any document here — for the same reason
 `conformance.md`'s decision numbering states it: concurrent branches assign numbers the file on your own
 branch cannot see. As of 2026-09-07 that sweep over all 92 open pull-request branches gives 68, so the next
-free number is 69, which this pass takes.
+free number is 69, which the front-matter rollout takes; a later sweep the same day gives 69, and the
+several-instances pass takes 70.
 
 ## `authority_model.md`
 
@@ -51,6 +52,7 @@ free number is 69, which this pass takes.
 | 38 | the rulings pass of 2026-09-06 | decisions 46, 48, 49, 51, and 54 ruled here, and 50 and 53 in one half each — what owning confers; the counting rule; structural checks as reads over the checkpoint's principal edges, with the thresholds' home on the `action_policy`; initiative approval as the checkpoint; budget as an attenuating scope term; credit as a read model |
 | 39 | the second rulings pass of 2026-09-06 | decisions 47 and 52 ruled here, and the second halves of 50 and 53 — the raiser does not resolve, the operator's self-resolution marked; what stops is a task, confirmed through the checkpoint by the owner seat, proposing a grant capability; which checks and which metered resources are `action_policy` values, fail-closed where unwritten |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
+| 70 | the several-instances pass of 2026-09-07 | decision 76 opened here — whether one operator's several instances of the record are one record or several, with the three questions it holds and the dispositions the operator named; no mechanism proposed and no term introduced |
 
 
 ## `adapters.md`
@@ -118,6 +120,7 @@ free number is 69, which this pass takes.
 | 67 | the naming pass of 2026-09-06 | : decisions 72 and 73 opened and deliberately left **open** — 72, whether `sign-off` names its record neutrally when `signed` is one of its own three verdict values, argued in `vocabulary.md`; 73, whether a term should prefer a single word and what exception admits the qualified compounds invariant 12's no-overlap half depends on, argued under invariant 12 in `principles.md`. Both would execute as a corpus-wide rename of files PRs #766, #767, and #770 are amending, so both are to be ruled and executed as one pass after those merge; 70 and 71 are assigned on those branches and left unused here. The stale "next number" line, wrong on each of the four occasions it has been checked, is corrected to 74 and given a standing caveat to read the table instead. Open rows after this pass: 72 and 73. |
 | 68 | the decision-70 ruling of 2026-09-06 | decision 70 moved from open to ruled — the `project` scoping key on `workflow` and `batch` and the planning level of decision 57 are two concepts sharing one word; the planning level keeps `project`, the key is renamed `declaration_scope`, and **declaration scope** is added to `vocabulary.md` under invariant 12's overlap half, swap-tested against `instance`, `domain`, and `tenant`; a `project` entry added beside it stating the planning sense and its Never for the scoping sense; `migration.md`'s G20 restated — the word collision closed, the remaining question narrowed to whether an instance runs one declaration scope or several; the derivation of a task's scope left as a gap in `conformance_suite.md` with the ascent removed as a candidate answer |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
+| 70 | the several-instances pass of 2026-09-07 | decisions 76 and 77 registered; 77 argued here, in `#scope`'s neighbourhood — a document outside the directory that six documents in it cite and two defer live decisions to |
 
 
 ## `conformance_suite.md`
