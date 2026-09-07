@@ -698,7 +698,9 @@ Full documentation lives in `docs/` — index at [docs/README.md](docs/README.md
 [Vocabulary](docs/foundation/vocabulary.md) · [Adapters](docs/foundation/adapters.md) ·
 [GitHub](docs/foundation/github.md) · [Gmail](docs/foundation/gmail.md) ·
 [Calendar](docs/foundation/calendar.md) · [Telegram](docs/foundation/telegram.md) ·
-[Payments](docs/foundation/payments.md) · [Conformance](docs/foundation/conformance.md) ·
+[Payments](docs/foundation/payments.md) · [Planning model](docs/foundation/planning_model.md) ·
+[Conformance](docs/foundation/conformance.md) ·
+[Conformance suite](docs/foundation/conformance_suite.md) ·
 [Scenarios](docs/foundation/scenarios.md) · [Workflows](docs/foundation/workflows.md) ·
 [Migration](docs/foundation/migration.md) · [Status](docs/foundation/status.md)
 
