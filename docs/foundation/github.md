@@ -435,6 +435,71 @@ or a comment to make the record look clean — a superseded effect stays readabl
 recovery is an action a principal takes through the gate
 (`failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`).
 
+**Which of these rows a principal's own artifact takes — its own comment, or a merged body several
+principals rewrite — is open (decision 85, 2026-09-07, on the operator's question).** Registered in
+`conformance.md#the-register-of-open-design-decisions`, argued below.
+
+## Where an agent's artifact about an issue or a pull request lives
+
+**Open (decision 85, 2026-09-07, on the operator's question).** Registered in
+`conformance.md#the-register-of-open-design-decisions`. The outbound table above gives a step one row for
+editing an issue and one row for commenting on it, and says nothing about which of the two an agent's own
+contribution takes. Where several agents each produce something about the same issue, that silence decides
+itself: today they are merged into one block in the issue description, rewritten in full by whichever agent
+contributed last, and the merged text names the review step that produced each part but never the
+principal that wrote it.
+
+The question is general and not only about a specification: **where does an artifact a principal produces
+about an issue or a pull request live — in its own place on the host, or merged into a body several
+principals rewrite?** It applies equally to a specification section, a review verdict, and a triage summary.
+
+**What already bears on it, and does not settle it.** Five rules touch the shape without deciding it.
+
+- **Invariant 9, one source defined once.** A value the swarm reads has one home. A merged body is one
+  value with several writers rather than one value with several homes, which is the neighbouring fault and
+  not the one the invariant names; whether the invariant reaches it is part of the question.
+- **C1 and `work_model.md#there-is-no-task-lifecycle-there-are-batches`.** A task carries status and edges
+  only, because a fact about a batch or a sign-off written onto the task needs a process to keep it true.
+  A merged block is the same shape one level up — several principals' output on one field, kept correct by
+  each writer's discipline rather than by the record — but the rule is stated about a task's fields, and
+  extending it to an external system's body is an argument this section does not make for it.
+- **Attribution (`authority_model.md#attribution`).** Every write carries the agent that made it and the
+  principal it acted for. That rule binds writes to the record; whether the artifact rendered onto the host
+  must carry the same attribution is not stated, and the merged body is where the two come apart.
+- **The four outcomes (`adapters.md`).** They classify what arrives *inbound*, so they constrain how the
+  host's own comments and reviews are read, not where an agent's outbound artifact is put. The outbound
+  half is this document's table, which is where the silence is.
+- **Decision 69, ruled** (`adapters.md#a-per-agent-credential-is-an-obligation-where-the-system-issues-one`).
+  Where the host issues per-agent credentials, each agent holds its own, because a shared one leaves the
+  host unable to carry a sign-off at all. That ruling is about *who writes*; this question is about *what
+  is written into*, and the two meet here — a body several principals rewrite loses on the content side
+  what a shared credential loses on the identity side. Whether the same ground decides both is the
+  question, and 69 did not reach it.
+
+**The dispositions, none of them taken here.**
+
+- **One artifact, one home, per author.** Each agent's contribution is its own comment on the host and its
+  own record entity; nothing merges, and any combined reading is a projection derived at read time. The
+  cost is that a reader of the issue sees a sequence of comments rather than one document, and a
+  specification loses the single ordered text a later build step reads as its source.
+- **Merged body, attribution preserved.** Sections stay in one body, each carrying the principal that
+  wrote it, and only that principal may write its own. This keeps the assembled document and adds the
+  attribution the merge currently drops; the cost is that the body still has several writers, so the
+  ownership is a convention the writers keep rather than a property the host enforces.
+- **Record-first.** Each contribution is an entity in the record, which is the source; the host carries a
+  rendering, and a rendering may merge because merging a projection loses nothing. This is close to what
+  the specification mechanism already does — the per-agent field is corrected in the record and the body
+  rewritten from it — and the question it leaves is whether a rendering several agents rewrite is
+  distinguishable, to a reader on the host, from a source they share.
+- **Nothing.** A specification is one document with several authors, so a shared block is the right shape
+  for it, and the concern is answered by attribution rather than by separation. The cost is that the rule
+  stays unstated, and the next artifact class to arrive settles it again by whichever mechanism is built.
+
+**What is settled, and is not part of this question:** an artifact attaches to its task by an edge, every
+outbound operation is an `action` evaluated at the gate, and a superseded effect stays readable rather than
+being deleted. The question is which outbound row a principal's own artifact takes, and whether the answer
+is the same for every artifact class.
+
 ## What the host must be configured to be, for this mapping to mean what it says
 
 **The rules in this section.**

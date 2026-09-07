@@ -125,6 +125,7 @@ and 77 pass takes 73 — one number across all four documents it amends, per the
 | 70 | the several-instances pass of 2026-09-07 | decisions 76 and 77 registered; 77 argued here, in `#scope`'s neighbourhood — a document outside the directory that six documents in it cite and two defer live decisions to |
 | 73 | the decisions 76 and 77 pass of 2026-09-07 | decisions 76 and 77 ruled; `multi_tenant.md` recorded as in the set in `#scope`; `#a-document-the-foundation-defers-a-decision-to-and-does-not-contain` rewritten as the ruling; `multi_tenant.md` section 7's five open decisions registered as rows 79 to 83 |
 | 76 | the task-assembly pass of 2026-09-07 | decision 84 opened and registered as **open** — nothing distinguishes a task with no intake batch because it is being assembled from one intake has not reached; the number established by a sweep over every open pull-request branch, which gives 83 as the maximum assigned (PR #790) and 84 as the next free |
+| 78 | the artifact-homing pass of 2026-09-07 | decision 85 opened and registered as **open** — where an artifact a principal produces about an issue or a pull request lives, its own place on the host or a body several principals rewrite; the number established by a sweep over every open pull-request branch, which gives 84 as the maximum assigned and 85 as the next free |
 
 
 ## `conformance_suite.md`
@@ -206,8 +207,7 @@ and 77 pass takes 73 — one number across all four documents it amends, per the
 | 37 | the testability pass of 2026-09-06 | the host's assignment never writes `assigned_to`; `impl` closes on a mergeable pull request, stated in `workflows.md` |
 | 65 | the host-configuration pass of 2026-09-06 | what the host must be configured to be, ruled an extension of obligations 1 and 6 rather than a seventh obligation — the subscription reconciliation obligation 1's drop counter structurally cannot perform, and the host's merge-permitting configuration as the standing form of the permit the gate never issued; the required state per repository, and the reporting-permission row that belongs to neither obligation; open decision 69, whether a difference at admission blocks the grant or is a finding on the review step |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
-
-
+| 78 | the artifact-homing pass of 2026-09-07 | decision 85 opened and argued here, in the outbound section's neighbourhood — the outbound table gives a step a row for editing an issue and a row for commenting on it and never says which a principal's own artifact takes; the four rules that bear on the question and the four dispositions, none taken |
 ## `gmail.md`
 
 | Revision | Pass | What changed |
