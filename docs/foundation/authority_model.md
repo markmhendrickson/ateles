@@ -7,7 +7,7 @@ undecided question **open** with its options, never resolving one to make the do
 section as decision; the swarm-spec section as proposal), synthesis `ent_b0ce322f768e4fc676b73139` (PR-20
 to PR-28, PR-34 to PR-38, C8, C9, C10, C13, C14, C17), prior art `ent_08460968e6f49dac21510f4a` (Track 2),
 the P4 brief `ent_683200acfb3ff5f03add966c`, `docs/multi_tenant.md`, and PR #745 operator review
-(2026-09-04). What is built, and where the substrate fails open, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 41 ruled here — write admission per entity type is default-deny, and the grant is the allowlist). Revised by the workflow-format pass of 2026-09-06 (revision 34: a required approver may be named by ownership of an entity the checkpoint's subject concerns). Revised by the consistency pass of 2026-09-06 (revision 35: the brief's Q1–Q8 and the raiser question registered as decisions 46 to 54; C13 marked settled by C9 and decision 37). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a resolution on an `operator_only` action is the operator's decision and never the confirmation; the shared-instance approver cites decision 55). Revised by the testability pass of 2026-09-06 (revision 37: a parameter constraint on a write capability as a field allowlist — the mechanical half of minimization at capture; `AWAITS` resolves a role to principals). Revised by the rulings pass of 2026-09-06 (revision 38: decisions 46, 48, 49, 51, and 54 ruled here, and 50 and 53 in one half each — what owning confers; the counting rule; structural checks as reads over the checkpoint's principal edges, with the thresholds' home on the `action_policy`; initiative approval as the checkpoint; budget as an attenuating scope term; credit as a read model). Revised by the second rulings pass of 2026-09-06 (revision 39: decisions 47 and 52 ruled here, and the second halves of 50 and 53 — the raiser does not resolve, the operator's self-resolution marked; what stops is a task, confirmed through the checkpoint by the owner seat, proposing a grant capability; which checks and which metered resources are `action_policy` values, fail-closed where unwritten).
+(2026-09-04). What is built, and where the substrate fails open, is `status.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant` retired for lease holder). Revised by the memo-gap pass of 2026-09-06 (revision 31: decision 41 ruled here — write admission per entity type is default-deny, and the grant is the allowlist). Revised by the workflow-format pass of 2026-09-06 (revision 34: a required approver may be named by ownership of an entity the checkpoint's subject concerns). Revised by the consistency pass of 2026-09-06 (revision 35: the brief's Q1–Q8 and the raiser question registered as decisions 46 to 54; C13 marked settled by C9 and decision 37). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a resolution on an `operator_only` action is the operator's decision and never the confirmation; the shared-instance approver cites decision 55). Revised by the testability pass of 2026-09-06 (revision 37: a parameter constraint on a write capability as a field allowlist — the mechanical half of minimization at capture; `AWAITS` resolves a role to principals). Revised by the rulings pass of 2026-09-06 (revision 38: decisions 46, 48, 49, 51, and 54 ruled here, and 50 and 53 in one half each — what owning confers; the counting rule; structural checks as reads over the checkpoint's principal edges, with the thresholds' home on the `action_policy`; initiative approval as the checkpoint; budget as an attenuating scope term; credit as a read model). Revised by the second rulings pass of 2026-09-06 (revision 39: decisions 47 and 52 ruled here, and the second halves of 50 and 53 — the raiser does not resolve, the operator's self-resolution marked; what stops is a task, confirmed through the checkpoint by the owner seat, proposing a grant capability; which checks and which metered resources are `action_policy` values, fail-closed where unwritten). Revised by the identity-scoping pass of 2026-09-07 (revision 67, **derived from** the operator's 2026-09-07 question of whether the identity model needs foundational documentation of its own: decision 75 opened and ruled — identity is answered here and in `adapters.md`, and no `identity_model.md` is owed; provenance, idempotency, and signature established from their own definitions as not identity questions; the inbound/outbound asymmetry stated as deliberate. No new term, no new type, no matrix row).
 
 ## Purpose
 
@@ -84,6 +84,80 @@ and is unchanged by this ruling.
 **Tenant.** The isolation boundary; `tenant_id` and `user_id` are separate fields; default-deny tenant
 scoping at the access layer; per-tenant AAuth namespacing; no cross-tenant read, write, routing, or key
 reuse (`multi_tenant.md` sections 2 and 3). Open: section 7's five decisions.
+
+### Identity is answered here, and it is not a document of its own
+
+**Ruled (decision 75, 2026-09-07): the corpus needs no `identity_model.md`. Identity is one question —
+which principal an actor resolves to — and this document is where it is answered; the concepts that appear
+to want a document of their own are not asking it.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`.
+
+**The question.** Whether the design owes a keyed document for the identity model beside this one, on the
+argument that identity serves consumers this document does not cover: `provenance`, `idempotency`,
+`signature`, and `attribution` are each cited across nine or more foundation documents, and *who wrote this
+record*, *is this the same write twice*, and *did this arrive from where it claims* are not authorization
+questions.
+
+**Why not, and it turns on what those four concepts actually are.** Three of the four are not identity
+questions, and the corpus says so in its own definitions rather than by inference:
+
+- **Provenance names sources, not principals.** The record's provenance links an observation to the source
+  it was interpreted from, and where the value was extracted rather than transcribed, to the interpretation
+  that produced it (`adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`). What
+  the corpus writes into it is an adapter, an external system, a delivery id, a rule, a change, and a read's
+  coverage — never a principal. Its wide citation count measures how much of the design is auditable to what
+  was actually read, which is principle 2's reach, not identity's.
+- **An idempotency key is a write's identity, not an actor's.** It names the intent of a write so a retry
+  lands once (`data_model.md#record-conventions`), and an adapter's is the external system's delivery id.
+  Nothing resolves through it to a principal.
+- **A signature is a per-system authenticity check on a delivery**, performed by the adapter before a
+  disposition is decided (`vocabulary.md#signature`, decision 16). Its own vocabulary entry already states
+  it is **not** a substitute for identity: resolving the signed actor to a principal is "a separate step
+  after verification passes". The two are adjacent and deliberately distinct.
+
+Only **attribution** is genuinely identity's consumer, and `#attribution` is a section of this document.
+
+**What the boundary would have had to be, and why it does not hold.** The proposed line — identity answers
+*who is this*, authority answers *what may they do* — cannot be drawn against the actual text, because the
+statements it would move are the same statements the authority rules turn on. The credential-to-principal
+mapping is what `#grants` matches on and what `#attribution` requires; the `principal_binding` exists to
+carry one rule, and that rule is the counting rule for quorum and separation of duties
+(`#the-counting-rule-an-agent-counts-as-its-bound-principal`). A document that stated them would either
+restate those rules — the overlap invariant 12 forbids between two terms, applied to two documents — or
+state them once and leave this document citing outward for its own premises.
+
+**Where identity is already stated whole, across four homes with no gap between them.** This is the answer
+to "is it findable", which is the real force of the question:
+
+| The question | Where it is answered |
+|---|---|
+| what a principal is, and that a credential is never one | `#principals` |
+| which credential kind binds to which principal, including AAuth's `sub` | `#principals`; `adapters.md#aauth-is-the-internal-credential-not-a-second-identity-system` |
+| the agent→principal edge and the rule it carries | `#the-counting-rule-an-agent-counts-as-its-bound-principal` |
+| how identity reaches a write | `#attribution` |
+| how an inbound actor is resolved, and what an unresolved one yields | `adapters.md#what-the-adapter-does-with-every-event` |
+| an agent's identity across external systems, and the cardinality of each binding | `adapters.md#per-agent-credentials-where-the-system-issues-them-a-shared-credential-where-it-does-not` |
+
+**Cost accepted.** A reader asking "where is identity" finds no file named for it and follows
+`vocabulary.md`'s [principal](vocabulary.md#principal) and [credential](vocabulary.md#credential) entries
+to this section instead. That is the cost of every concept the design states where its rules are rather
+than where its name is, and the alternative was a keyed document owing a conformance-matrix row per
+rule-bearing heading, a reading-list key, a revision entry, and a row in five binding inventory
+assertions — paid for a document whose content is the pointer table above.
+
+**What would reopen it.** An identity rule with a consumer outside authority and outside the adapter
+boundary — one that resolved an actor to something other than a principal in the record, or matched a
+grant somewhere else. `adapters.md` names that shape as where a genuine second identity system would be,
+and the design has none.
+
+**The asymmetry inbound and outbound is deliberate, and is not a gap.** Outbound, an operation with no
+credential is a **denial** (`adapters.md#what-the-adapter-does-with-every-event`). Inbound, a verdict from
+a credential that binds to no principal is **an observation on the artifact, never a sign-off** — not a
+denial, because the delivery is still evidence about an artifact and dropping it would lose what the
+external system reported. Both are the same fail-closed rule (principle 5) applied to what each direction
+can safely fall back to: outbound has no safe fallback, inbound has one that claims less. Obligation 2
+tests exactly this fallthrough (`adapters.md#the-admission-contract`).
+
 
 **Ownership.** Named accountability for a workflow, [domain](vocabulary.md#domain), queue, or configuration
 entity, as an edge from
