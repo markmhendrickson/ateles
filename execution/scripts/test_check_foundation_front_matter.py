@@ -60,7 +60,11 @@ def test_front_matter_chain(tmp_path: Path) -> None:
 def test_missing_pointer(tmp_path: Path) -> None:
     """Case 2 — no Revised clause and no revisions.md# pointer → missing-pointer."""
     root = _foundation(tmp_path)
-    _write(root, "orphan.md", "Title\n\nSome front matter without history.\n\n## Section\n\nBody.\n")
+    _write(
+        root,
+        "orphan.md",
+        "Title\n\nSome front matter without history.\n\n## Section\n\nBody.\n",
+    )
     problems = cfm.check(root)
     assert len(problems) == 1
     assert "missing-pointer" in problems[0]
@@ -213,7 +217,9 @@ def test_missing_index_does_not_fire_for_short_term_subsections(tmp_path: Path) 
 # ---------------------------------------------------------------------------
 
 
-def test_main_error_path_non_directory(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_main_error_path_non_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """Case 9 — --root that is not a directory → exit 1 + stderr message."""
     not_a_dir = tmp_path / "not_a_dir"
     not_a_dir.write_text("file", encoding="utf-8")

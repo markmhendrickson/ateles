@@ -142,9 +142,9 @@ def is_rule(lead: str) -> bool:
         return False
     if t.rstrip(".").strip().lower() in _LABEL_WORDS:
         return False
-    if re.match(r"^(What|Which|Who|Whether|Why|How|Nothing|No)\b", t, re.I) and not re.search(
-        r"\b(is|are|must|never|always|may)\b", t, re.I
-    ):
+    if re.match(
+        r"^(What|Which|Who|Whether|Why|How|Nothing|No)\b", t, re.I
+    ) and not re.search(r"\b(is|are|must|never|always|may)\b", t, re.I):
         return False
     if len(re.findall(r"[\w'`-]+", t)) < 5:
         return False
@@ -165,7 +165,10 @@ def bold_leads(body: str) -> list[str]:
 
 def sections(text: str) -> list[tuple[str, int, str, list[str]]]:
     """``(title, heading_offset, body, level-3 subsection titles)`` per ``##``."""
-    heads = [(len(m.group(1)), m.group(2), m.start(), m.end()) for m in _HEADING_RE.finditer(text)]
+    heads = [
+        (len(m.group(1)), m.group(2), m.start(), m.end())
+        for m in _HEADING_RE.finditer(text)
+    ]
     out = []
     for i, (lvl, title, start, head_end) in enumerate(heads):
         if lvl != 2:
