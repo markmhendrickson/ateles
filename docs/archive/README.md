@@ -5,6 +5,14 @@ These files were relocated here during the documentation reconciliation
 the Ateles reference-architecture doc set**. They are preserved (not deleted) so nothing is lost and the moves
 are reversible; several should ultimately live elsewhere.
 
+## Superseded by `docs/foundation/` (2026-09-02)
+- `task_execution_loop.md` → [`../foundation/work_model.md`](../foundation/work_model.md). Described the push
+  model (Apis routing by assignee and keyword; `EXECUTING` as a stored liveness flag) retired on 2026-09-02.
+- `swarm_orchestration.md` → [`../foundation/gates_and_workflows.md`](../foundation/gates_and_workflows.md).
+- `swarm_hitl_checkpoints_design.md` → [`../foundation/gates_and_workflows.md`](../foundation/gates_and_workflows.md).
+
+Each file opens with a pointer to its superseding document. Plan `ent_533d4ec2f7bfb60f66fb3fce`, phase 2.
+
 ## Off-topic for this repo
 - `transcript_peter_thiel_sxsw_2013_*.md` — a 2013 public conference transcript. Belongs in Neotoma as a
   `transcription` / source entity.

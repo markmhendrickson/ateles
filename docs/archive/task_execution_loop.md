@@ -1,3 +1,5 @@
+> **Archived 2026-09-02. Superseded by [`docs/foundation/work_model.md`](../../docs/foundation/work_model.md).** It describes the push model (Apis routing by assignee and keyword, `EXECUTING` as a stored status) that the operator retired on 2026-09-02 in favour of pull with a claim and lease. Kept for history; not part of the active doc set, and nothing reads it at review time.
+
 # Task Execution Loop — Design
 
 **Status:** design (2026-06-23) · **Plan:** Task-spine loop + cloud-hosted swarm (`ent_aff87747b49e338790568af6`) · **Scope:** ateles (`daemon_runtime`, `execution/daemons`) + Neotoma (`task`, `conversation`, `task_readiness_assessment`).

@@ -6,7 +6,7 @@ Help a reader decide whether to build a multi-agent fleet on a Neotoma-canonical
 
 ## Scope
 
-Covers the cross-cutting guarantees any always-on multi-agent fleet eventually needs — shared coordination state, provenance/audit, per-agent identity and authorization, event-driven coordination, externalized prompt/config, and idempotency — and how mainstream frameworks, memory layers, durable-execution engines, and identity systems satisfy each. Does not cover Ateles' agent inventory (see `taxonomy.md`), the orchestration model (`swarm_orchestration.md`), or Neotoma's API surface. Complements the "Build vs. adopt decisions" and "Why Neotoma instead of {LangSmith, PromptLayer, custom DB}?" sections in `architecture.md`.
+Covers the cross-cutting guarantees any always-on multi-agent fleet eventually needs — shared coordination state, provenance/audit, per-agent identity and authorization, event-driven coordination, externalized prompt/config, and idempotency — and how mainstream frameworks, memory layers, durable-execution engines, and identity systems satisfy each. Does not cover Ateles' agent inventory (see `taxonomy.md`), the orchestration model (`foundation/gates_and_workflows.md`), or Neotoma's API surface. Complements the "Build vs. adopt decisions" and "Why Neotoma instead of {LangSmith, PromptLayer, custom DB}?" sections in `architecture.md`.
 
 ---
 

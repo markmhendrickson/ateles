@@ -2865,3 +2865,196 @@ class TestRequestedModelFromArgv:
 
     def test_handles_trailing_flag_without_value(self) -> None:
         assert skill_runner._requested_model("cursor", ["cursor-agent", "--model"]) is None
+# ── Prior-art contract (check existing context before building) ───────────────
+#
+# The contract exists because dispatched agents rebuilt work that already
+# existed (provider load balancing already in harness_router.py; an issue filed
+# against a clone 139 commits behind main). It rides the same injection path as
+# SWARM_GITHUB_CONTRACT deliberately — no separate flag, because a second flag
+# would just relocate the forgetting it exists to prevent.
+
+
+class TestPriorArtContract:
+    def test_absent_by_default(self) -> None:
+        """Default path must not carry the contract — the non-GitHub/SSE task
+        path stays byte-identical to before."""
+        prompt, degraded = skill_runner.build_system_prompt(
+            _make_def(prompt_markdown="Agent identity."), "Do the task."
+        )
+        assert not degraded
+        assert skill_runner.SWARM_PRIOR_ART_CONTRACT not in prompt
+
+    def test_present_when_contract_flag_true(self) -> None:
+        """Rides the SAME flag as the GitHub contract: one flag, both contracts.
+
+        This is the load-bearing assertion of the whole change. If someone later
+        gives the prior-art contract its own opt-in flag, this test fails — and
+        it should, because an opt-in prior-art check is one a brief author can
+        forget to request, which is the exact failure being fixed.
+        """
+        prompt, degraded = skill_runner.build_system_prompt(
+            _make_def(prompt_markdown="Agent identity."),
+            "Do the task.",
+            include_github_contract=True,
+        )
+        assert not degraded
+        assert skill_runner.SWARM_PRIOR_ART_CONTRACT in prompt
+        assert skill_runner.SWARM_GITHUB_CONTRACT in prompt
+        assert "Agent identity." in prompt
+        assert "Do the task." in prompt
+
+    def test_order_definition_then_contracts_then_skill(self) -> None:
+        """Order: definition → github contract → prior-art contract → skill_md."""
+        prompt, _ = skill_runner.build_system_prompt(
+            _make_def(prompt_markdown="DEFINITION_ANCHOR"),
+            "SKILL_ANCHOR",
+            include_github_contract=True,
+        )
+        assert (
+            prompt.index("DEFINITION_ANCHOR")
+            < prompt.index(skill_runner.SWARM_GITHUB_CONTRACT)
+            < prompt.index(skill_runner.SWARM_PRIOR_ART_CONTRACT)
+            < prompt.index("SKILL_ANCHOR")
+        )
+
+    def test_present_when_degraded(self) -> None:
+        """Degraded (no definition loaded) still gets the contract: checking for
+        existing work is useful regardless of which definition loaded."""
+        prompt, degraded = skill_runner.build_system_prompt(
+            _stub_def(), "Fallback instructions.", include_github_contract=True
+        )
+        assert degraded
+        assert skill_runner.SWARM_PRIOR_ART_CONTRACT in prompt
+        assert "Fallback instructions." in prompt
+
+    def test_names_all_three_checks_and_asks_for_a_report(self) -> None:
+        """Content assertions on the three checks that each caught a wasted run.
+
+        Asserted by substance rather than by exact wording so the prose can be
+        edited, but the checks themselves cannot be silently dropped.
+        """
+        contract = skill_runner.SWARM_PRIOR_ART_CONTRACT.lower()
+        assert "gh issue list" in contract and "gh pr list" in contract
+        assert "grep" in contract
+        assert "task" in contract and "plan" in contract
+        # The reporting requirement is what makes a skipped check visible in the
+        # transcript, and is what the measurement task samples for.
+        assert "report what you found" in contract
+        # Correcting a wrong brief must read as success, or an agent told to
+        # build something will build the duplicate anyway.
+        assert "premise is wrong" in contract
+
+
+# ── Design-basis contract (docs/foundation/conformance.md) ────────────────────
+#
+# Rides the same flag and injection point as SWARM_PRIOR_ART_CONTRACT (#686).
+# The load-bearing assertion is that the DISPATCHED PROMPT changes when a
+# kernel document lands in docs/foundation/: the binding is built against an
+# empty directory and the documents land into a slot that already fires.
+
+
+_FOUNDATION_FIXTURE = """\
+# Conformance
+
+## Always read
+
+| Doc | What it states |
+|-----|----------------|
+| `docs/foundation/principles.md` | The invariants. |
+| `docs/foundation/work_model.md` | How work moves. |
+
+## Read when these paths changed
+
+| Changed path | Read |
+|---|---|
+| `skill_runner` | `docs/foundation/work_model.md` |
+"""
+
+
+@pytest.fixture
+def foundation_root(tmp_path, monkeypatch):
+    fdir = tmp_path / "docs" / "foundation"
+    fdir.mkdir(parents=True)
+    (fdir / "conformance.md").write_text(_FOUNDATION_FIXTURE)
+    monkeypatch.setenv("ATELES_FOUNDATION_ROOT", str(tmp_path))
+    return tmp_path
+
+
+class TestFoundationContract:
+    def test_absent_by_default(self, foundation_root) -> None:
+        """Default path stays byte-identical: no contracts at all."""
+        prompt, _ = skill_runner.build_system_prompt(
+            _make_def(prompt_markdown="Agent identity."), "Do the task."
+        )
+        assert skill_runner.SWARM_FOUNDATION_CONTRACT not in prompt
+        assert "Kernel documents on this checkout" not in prompt
+
+    def test_present_on_the_same_flag_after_prior_art(self, foundation_root) -> None:
+        prompt, degraded = skill_runner.build_system_prompt(
+            _make_def(prompt_markdown="DEFINITION_ANCHOR"),
+            "SKILL_ANCHOR",
+            include_github_contract=True,
+        )
+        assert not degraded
+        assert skill_runner.SWARM_FOUNDATION_CONTRACT in prompt
+        assert (
+            prompt.index("DEFINITION_ANCHOR")
+            < prompt.index(skill_runner.SWARM_GITHUB_CONTRACT)
+            < prompt.index(skill_runner.SWARM_PRIOR_ART_CONTRACT)
+            < prompt.index(skill_runner.SWARM_FOUNDATION_CONTRACT)
+            < prompt.index("SKILL_ANCHOR")
+        )
+        # The dynamic half names what is actually on the checkout.
+        assert "`docs/foundation/principles.md` — not yet written" in prompt
+        assert "`docs/foundation/work_model.md` — not yet written" in prompt
+
+    def test_fires_when_a_kernel_doc_lands(self, foundation_root) -> None:
+        """THE test: same call, before and after a document appears."""
+        (foundation_root / "docs" / "foundation" / "principles.md").write_text(
+            "# Principles\n\n## Purpose\n\nSENTINEL-PRINCIPLES-PURPOSE.\n"
+        )
+        prompt, _ = skill_runner.build_system_prompt(
+            _make_def(prompt_markdown="Agent identity."),
+            "Do the task.",
+            include_github_contract=True,
+        )
+        assert "`docs/foundation/principles.md` — SENTINEL-PRINCIPLES-PURPOSE." in prompt
+        assert "`docs/foundation/work_model.md` — not yet written" in prompt
+
+    def test_present_when_degraded(self, foundation_root) -> None:
+        prompt, degraded = skill_runner.build_system_prompt(
+            _stub_def(), "Fallback instructions.", include_github_contract=True
+        )
+        assert degraded
+        assert skill_runner.SWARM_FOUNDATION_CONTRACT in prompt
+
+    def test_absent_on_a_checkout_with_no_reading_list(self, tmp_path, monkeypatch) -> None:
+        """No conformance.md → nothing to bind to → the contract is not
+        injected, and the prior-art contract is unaffected."""
+        monkeypatch.setenv("ATELES_FOUNDATION_ROOT", str(tmp_path))
+        prompt, _ = skill_runner.build_system_prompt(
+            _make_def(prompt_markdown="Agent identity."),
+            "Do the task.",
+            include_github_contract=True,
+        )
+        assert skill_runner.SWARM_FOUNDATION_CONTRACT not in prompt
+        assert skill_runner.SWARM_PRIOR_ART_CONTRACT in prompt
+
+    def test_real_checkout_carries_the_contract(self, monkeypatch) -> None:
+        """This repo now has the reading list, so a real dispatch carries the
+        contract naming it (the kernel documents are not yet written, and the
+        prompt says so rather than pretending)."""
+        monkeypatch.delenv("ATELES_FOUNDATION_ROOT", raising=False)
+        prompt, _ = skill_runner.build_system_prompt(
+            _make_def(prompt_markdown="Agent identity."),
+            "Do the task.",
+            include_github_contract=True,
+        )
+        assert "docs/foundation/conformance.md" in prompt
+        assert "Kernel documents on this checkout" in prompt
+
+    def test_contract_states_the_rule(self) -> None:
+        text = skill_runner.SWARM_FOUNDATION_CONTRACT
+        assert "Design basis:" in text
+        assert "no design applies" in text
+        assert "docs/foundation/conformance.md" in text
