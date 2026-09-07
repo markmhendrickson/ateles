@@ -161,7 +161,7 @@ and never *prevented*, and a report only binds a reader who acts on it. What bin
 read-back, which fails on a release that did not reach its terminal state. A PR's path from open to
 deployed has one tracker, the task's chain: "landed" is a derived read — the chain ended under a declaration
 that permits its ending there, a `release` batch's `verify_deployed` signed or a code workflow whose
-declaration permits closing with none because the project deploys its default branch
+declaration permits closing with none because the declaration scope deploys its default branch
 (`work_model.md#a-task-is-executed-only-through-a-workflow`) — and a task that reads terminal after a
 `merge_pr` under a declaration that permits no such end is the failing artefact. The owning session is still
 who acts on that read; it is not what makes it true.
