@@ -829,7 +829,9 @@ never an entity, while every read and write of the record remains inside the bou
 **See:** [`gates_and_workflows.md#actions-are-entities-only-actions-are-taken`](gates_and_workflows.md#actions-are-entities-only-actions-are-taken),
 [`adapters.md#the-two-invariants`](adapters.md#the-two-invariants),
 [`adapters.md#whether-the-host-a-daemon-runs-on-is-an-external-system`](adapters.md#whether-the-host-a-daemon-runs-on-is-an-external-system),
-[`adapters.md#whether-a-second-instance-of-the-record-is-an-external-system`](adapters.md#whether-a-second-instance-of-the-record-is-an-external-system).
+[`adapters.md#whether-a-second-instance-of-the-record-is-an-external-system`](adapters.md#whether-a-second-instance-of-the-record-is-an-external-system),
+[`adapters.md#whether-the-instance-of-the-record-serving-a-swarm-is-an-external-system-when-the-swarm-operates-it`](adapters.md#whether-the-instance-of-the-record-serving-a-swarm-is-an-external-system-when-the-swarm-operates-it)
+(decision 78: the serving instance is an external system only while the swarm operates it).
 **Never:** —
 **Not for:** "the Ateles system" or "the Neotoma system" as the thing an effect is outside of (there is one
 boundary, and the record is inside it); external for a component the swarm runs.
