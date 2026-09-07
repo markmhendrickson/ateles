@@ -41,4 +41,4 @@ Every rule `planning_model.md` owns, one entry each: the rule's own statement fr
 
 ## [Which levels an instance declares, and what it calls them](../planning_model.md#which-levels-an-instance-declares-and-what-it-calls-them)
 
-- **PM-12** — the rule this heading states *[P (open decision 57; the design reads the mark and never a level by name, so no row goes red under any answer); decision 58 is ruled and tested under PM-9's operator case]*
+- **PM-12** — the rule this heading states *[P (decision 57, ruled; the design reads the mark and never a level by name, so no row goes red under any answer); decision 58 is ruled and tested under PM-9's operator case]*

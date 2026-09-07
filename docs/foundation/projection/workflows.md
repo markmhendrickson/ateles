@@ -83,7 +83,7 @@ Every rule `workflows.md` owns, one entry each: the rule's own statement from `c
 
 ## [Whether a stage names anything a step does not](../workflows.md#whether-a-stage-names-anything-a-step-does-not)
 
-- **WF-24** — the rule this heading states *[P (open decision 33; finding U-30 points at it, and the matrix observes nothing under either option)]*
+- **WF-24** — the rule this heading states *[P (decision 33, ruled; finding U-30 points at it, and the matrix observes nothing under either option)]*
 
 ## [What `link` attaches, and what it leaves to hydration](../workflows.md#what-link-attaches-and-what-it-leaves-to-hydration)
 

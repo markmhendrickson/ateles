@@ -128,7 +128,7 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 
 ## [Whether the step path is a mechanism of its own, and what the engine is called](../work_model.md#whether-the-step-path-is-a-mechanism-of-its-own-and-what-the-engine-is-called)
 
-- **WM-38** — the rule this heading states *[P (open decision 34; WM-36's observables are per credential and do not depend on the count or the name, so no row changes under either option)]*
+- **WM-38** — the rule this heading states *[P (decision 34, ruled; WM-36's observables are per credential and do not depend on the count or the name, so no row changes under either option)]*
 
 ## [Where tasks come from: every source, indexed](../work_model.md#where-tasks-come-from-every-source-indexed)
 

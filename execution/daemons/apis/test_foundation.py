@@ -1222,3 +1222,137 @@ class TestDocsIndexMatchesInventory:
         m = re.search(r"`foundation/\*` \((\d+) authored documents", text)
         assert m, "documentation_plan.md no longer states the foundation's authored document count"
         assert int(m.group(1)) == len(self._inventory()), m.group(1)
+
+
+class TestCitationCheck:
+    """check_foundation_citations.py is registered in conformance.md#mechanical-checks-on-this-directory.
+
+    The row registers two clauses, both given a syntactic form by
+    conformance.md#phases-and-implementation-state so that a lint can read the rule rather than a
+    reviewer sensing it: a commit hash appears in no document here but status.md, and an issue or
+    pull-request number appears only where a document names what it derived from.
+
+    A check registered in a document but run by no test is the "reports without binding" defect the
+    foundation names, so this runs it against the real documents and proves it fails on a planted
+    violation of each clause, and on a missing corpus.
+    """
+
+    def _citations(self):
+        import importlib.util
+
+        script = _REPO_ROOT / "execution" / "scripts" / "check_foundation_citations.py"
+        spec = importlib.util.spec_from_file_location("check_foundation_citations", script)
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    @staticmethod
+    def _corpus(tmp_path: Path, **files: str) -> Path:
+        fdir = tmp_path / "docs" / "foundation"
+        fdir.mkdir(parents=True)
+        for name, body in files.items():
+            (fdir / f"{name}.md").write_text(body, encoding="utf-8")
+        return tmp_path
+
+    def test_real_documents_carry_no_citation_as_state(self) -> None:
+        mod = self._citations()
+        violations = mod.check(_REPO_ROOT)
+        assert violations == [], violations
+        assert mod.main(["--root", str(_REPO_ROOT)]) == 0
+
+    def test_a_planted_commit_hash_is_reported(self, tmp_path: Path) -> None:
+        """Revert-the-fix check: a hash outside status.md fails, naming file and line."""
+        mod = self._citations()
+        root = self._corpus(tmp_path, a="# A\n\n## The rule\n\nFixed on `main` in a1b2c3d.\n")
+        violations = mod.check(root)
+        assert len(violations) == 1, violations
+        assert "docs/foundation/a.md:5" in violations[0]
+        assert "commit hash a1b2c3d" in violations[0]
+        assert mod.main(["--root", str(root)]) == 1
+
+    def test_status_md_may_carry_a_commit_hash(self, tmp_path: Path) -> None:
+        """status.md is the one document that records what a checkout implements; both clauses exempt it."""
+        mod = self._citations()
+        root = self._corpus(tmp_path, status="# S\n\n## State\n\nFixed on `main` in a1b2c3d, see #801.\n")
+        assert mod.check(root) == []
+
+    def test_a_planted_issue_number_in_the_body_is_reported(self, tmp_path: Path) -> None:
+        mod = self._citations()
+        root = self._corpus(tmp_path, a="# A\n\n## The rule\n\nStill broken; see #801 on main.\n")
+        violations = mod.check(root)
+        assert len(violations) == 1, violations
+        assert "docs/foundation/a.md:5" in violations[0]
+        assert "#801" in violations[0]
+
+    def test_the_four_source_sections_and_the_header_allow_a_number(self, tmp_path: Path) -> None:
+        """The positions conformance.md#phases-and-implementation-state names must not fail."""
+        mod = self._citations()
+        for section in (
+            "Scope",
+            "Contradictions this document settles",
+            "Prior art",
+            "Beyond the sources",
+        ):
+            root = self._corpus(
+                tmp_path / section.replace(" ", "_"),
+                a=f"# A\n\n**Derived from:** PR #745.\n\n## {section}\n\nRaised in #801.\n",
+            )
+            assert mod.check(root) == [], section
+
+    def test_a_wrapped_sources_clause_allows_a_number_on_a_later_line(self, tmp_path: Path) -> None:
+        """The corpus hard-wraps, so a Sources: clause routinely carries its number onto the next line.
+
+        principles.md invariant 12 is the real instance: the clause opens "Sources: operator memo,"
+        and "PR #745" lands on the following line. Judging only the line the word appears on would
+        fail every wrapped citation in the corpus.
+        """
+        mod = self._citations()
+        root = self._corpus(
+            tmp_path,
+            a="# A\n\n## The rule\n\nA step closes. Sources: operator memo,\nPR #745 (2026-09-06).\n",
+        )
+        assert mod.check(root) == []
+
+    def test_a_blank_line_ends_the_sources_clause(self, tmp_path: Path) -> None:
+        """The clause runs to the end of its paragraph, not to the end of the section."""
+        mod = self._citations()
+        root = self._corpus(
+            tmp_path,
+            a="# A\n\n## The rule\n\nA step closes. Sources: #727 rule 1.\n\nStill broken; see #801.\n",
+        )
+        violations = mod.check(root)
+        assert len(violations) == 1, violations
+        assert "#801" in violations[0]
+
+    def test_fenced_code_is_not_scanned(self, tmp_path: Path) -> None:
+        mod = self._citations()
+        root = self._corpus(
+            tmp_path, a="# A\n\n## The rule\n\n```\ngit show a1b2c3d  # see #801\n```\n"
+        )
+        assert mod.check(root) == []
+
+    def test_anchors_and_entity_ids_are_not_citations(self, tmp_path: Path) -> None:
+        """An anchor fragment and an ent_ id both contain hex runs; neither is a commit hash."""
+        mod = self._citations()
+        root = self._corpus(
+            tmp_path,
+            a="# A\n\n## The rule\n\nSee `b.md#the-adapter-and-the-engine` and `ent_8104c890c581ccf9094eab25`.\n",
+            b="# B\n",
+        )
+        assert mod.check(root) == []
+
+    def test_missing_corpus_fails_closed(self, tmp_path: Path) -> None:
+        """An absent docs/foundation/ must not report a pass for a check that never ran."""
+        mod = self._citations()
+        with pytest.raises(mod.MissingCorpus) as exc:
+            mod.check(tmp_path)
+        assert str(tmp_path) in str(exc.value)
+        assert mod.main(["--root", str(tmp_path)]) == 1
+
+    def test_empty_corpus_fails_closed(self, tmp_path: Path) -> None:
+        mod = self._citations()
+        (tmp_path / "docs" / "foundation").mkdir(parents=True)
+        with pytest.raises(mod.MissingCorpus):
+            mod.check(tmp_path)

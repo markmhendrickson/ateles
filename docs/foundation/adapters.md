@@ -1387,8 +1387,9 @@ boundary means — which would have to be stated once, in the action's home sect
 inside for every rule at once.
 
 **Matrix.** A sixth adapter's admission rows (AD-21 to AD-26) apply to the host's adapter when it is
-declared, and its action classes take their gate rows with it. Decision 55, beside this one, stays open: it
-shares this boundary reasoning and differs on the record's peering, which is the operator's.
+declared, and its action classes take their gate rows with it. Decision 55, beside this one, is ruled below:
+it shares this boundary reasoning and differs on the record's peering, and a peer instance was ruled to be
+the record extended by replication rather than an external system.
 
 ### Whether a second instance of the record is an external system
 

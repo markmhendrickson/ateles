@@ -1007,8 +1007,8 @@ some batch (no batch is in question) — it is new information the operator did 
 sending governance-shaped rows that never take effect, and the honest place for new information with no
 existing subject to attach to is the operator's own attention, not a manufactured task or action. This is
 named here as the gap rather than resolved with an invented entity: **what mechanism carries "the operator
-should know a peer replicated an inert governance row" is not yet stated**, and is decision 65 below, opened
-rather than guessed at.
+should know a peer replicated an inert governance row"** was opened rather than guessed at, and is ruled as
+decision 65 below — the engine's existing write-back read extended by one field, no carrier invented.
 
 **The same reasoning holds for a synced `intake_rule`, and it is the sharpest case.** An `intake_rule`
 (`vocabulary.md#intake-rule`) is one of the eight governance types, and it is the one whose entire purpose

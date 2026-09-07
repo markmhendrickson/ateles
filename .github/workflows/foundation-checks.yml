@@ -1,0 +1,165 @@
+name: foundation checks
+
+# ateles#795 (acceptance criterion 4): docs/foundation/** changes were checked
+# by nothing. Every foundation PR opened on 2026-09-07 (#788, #790, #791, #794)
+# ran the corpus checkers BY HAND in the authoring agent's worktree and reported
+# them clean; statusCheckRollup on those PRs showed only gitleaks and a skipped
+# Loxia review. A PR whose author skipped the checkers was indistinguishable
+# from one whose author ran them — the "reports without binding" defect class the
+# foundation corpus keeps finding in itself, applied to its own CI.
+#
+# The checks below are the ones conformance.md#mechanical-checks-on-this-directory
+# lists as EXISTING scripts. The rows it marks "(contract; status.md says whether
+# it exists)" — check_foundation_rule_coverage.py, render_workflow_docs.py,
+# render_data_model.py — have no script yet and are deliberately not wired; they
+# join this lane when they land. check_foundation_citations.py was one of those
+# rows until ateles#801 wrote it, and is wired below.
+#
+# Why each checker is its own step: a red lane must name WHICH control failed,
+# not just that the lane failed. Same attributability reason as the per-daemon
+# steps in ateles-tests.yml.
+#
+# Branch-tolerance: the foundation corpus and its checkers live on a stack of
+# branches (feat/foundation-p1-docs and the PRs stacked onto it), and the
+# checkers landed on different branches at different times — e.g.
+# check_foundation_front_matter.py exists on the decision-74 branch but not on
+# the integration branch below it. A step whose script is absent on the branch
+# under test SKIPS with a printed notice rather than failing: a checker that
+# does not exist there is not a violated one. A checker that DOES exist always
+# runs and always binds. The corpus itself states this hazard in
+# conformance.md ("A check merged to `main` binds only branches descended from
+# that merge").
+
+on:
+  pull_request:
+    paths:
+      - "docs/foundation/**"
+      - "execution/scripts/check_foundation_*.py"
+      - "execution/scripts/link_vocabulary_terms.py"
+      - "execution/scripts/render_reading_projection.py"
+      - "execution/daemons/apis/test_foundation*.py"
+      - ".github/workflows/foundation-checks.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checkers:
+    name: foundation corpus checkers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The checkers are stdlib-only by design (each says so in its docstring),
+      # so they need an interpreter and nothing else. setup-python provides
+      # `python` AND `python3`; the harness shell that runs scripts/lint.sh has
+      # only `python3`, which is why that script reports 14 errors on an
+      # untouched tree. Do not reproduce that here: every step below calls
+      # `python3` explicitly regardless.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Corpus present
+        id: corpus
+        run: |
+          if [ -d docs/foundation ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "docs/foundation/: $(find docs/foundation -name '*.md' | wc -l) markdown file(s)"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::error::docs/foundation/ is absent on this branch, but the path filter matched it."
+            exit 1
+          fi
+
+      # Anchors: any link or backticked citation naming a file or heading in
+      # docs/foundation/ that does not exist.
+      - name: Anchors — every intra-foundation link resolves
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_anchors.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
+      # Vocabulary: any Never item from vocabulary.md in foundation prose.
+      # Not-for items print as advisory and never fail — that is the script's
+      # own contract, not a softening applied here.
+      - name: Vocabulary — no banned Never term in the prose
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_vocabulary.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
+      # Term links: a first mention of a defined term in vocabulary.md that
+      # carries no link to its definition. --check writes nothing.
+      - name: Term links — every first mention links its definition
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/link_vocabulary_terms.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f" --check
+
+      # Decision citations: a commit hash in any document here but status.md, or
+      # an issue/PR number outside the positions a document names its sources in.
+      # conformance.md#phases-and-implementation-state gives both clauses their
+      # syntactic form precisely so this lint can read them. It does NOT check a
+      # decision's status against the register — the register spans branches this
+      # checkout cannot read, so an unseen row would be either a false positive on
+      # every unlanded decision or silence on the rows most likely to be wrong.
+      - name: Decision citations — no commit, issue, or PR cited as state
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_citations.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
+      # Reading projection: the copy a review actually reads, regenerated from
+      # conformance_suite.md's matrix and held equal to the canonical text.
+      - name: Reading projection — matches the canonical text at each anchor
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/render_reading_projection.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f" --check
+
+      # Front matter and rule indexes: decision 74's two halves — no revision
+      # chain in front matter, and a section stating 3+ rules opens with the
+      # index of them.
+      - name: Front matter — no residual revision chain, rule sections indexed
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_front_matter.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
+  foundation-tests:
+    name: foundation binding tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      # test_foundation.py holds the reading-list budget (a projected kernel or
+      # keyed document over MAX_DOC_CHARS, a reading block over MAX_BLOCK_CHARS)
+      # and asserts the vocabulary/term-link checks at zero. Sibling job rather
+      # than a step: it needs the uv-resolved dev environment, the checkers above
+      # need nothing but an interpreter, and a red suite should be attributable
+      # on its own.
+      - name: Run foundation tests
+        run: |
+          set -e
+          found=0
+          for t in execution/daemons/apis/test_foundation.py \
+                   execution/daemons/apis/test_foundation_binding.py; do
+            if [ -f "$t" ]; then found=1; fi
+          done
+          if [ "$found" = "0" ]; then
+            echo "::notice::no test_foundation*.py on this branch — skipped"
+            exit 0
+          fi
+          uv run --extra dev python -m pytest \
+            execution/daemons/apis/test_foundation.py \
+            execution/daemons/apis/test_foundation_binding.py -q

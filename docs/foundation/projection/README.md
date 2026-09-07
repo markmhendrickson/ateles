@@ -30,11 +30,11 @@ Generated from `conformance_suite.md`'s conformance matrix by `execution/scripts
 | `lenses.md` | — | 4,179 | n/a — an index, never a selected reading |
 | `migration.md` | 13 | 6,131 | under |
 | `payments.md` | 17 | 6,117 | under |
-| `planning_model.md` | 12 | 3,980 | under |
+| `planning_model.md` | 12 | 3,982 | under |
 | `principles.md` | 11 | 3,011 | under |
 | `telegram.md` | 17 | 4,779 | under |
 | `vocabulary.md` | 4 | 939 | under |
-| `work_model.md` | 53 | 10,156 | under |
-| `workflows.md` | 26 | 5,866 | under |
+| `work_model.md` | 53 | 10,158 | under |
+| `workflows.md` | 26 | 5,868 | under |
 
-372 rules projected, 90,918 chars in total across the set. `MAX_DOC_CHARS` = 12,000 bounds each file above; `MAX_BLOCK_CHARS` = 40,000 bounds one review's block, which is the kernel plus the documents keyed to the changed paths — never the whole set.
+372 rules projected, 90,924 chars in total across the set. `MAX_DOC_CHARS` = 12,000 bounds each file above; `MAX_BLOCK_CHARS` = 40,000 bounds one review's block, which is the kernel plus the documents keyed to the changed paths — never the whole set.

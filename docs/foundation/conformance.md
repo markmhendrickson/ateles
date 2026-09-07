@@ -292,8 +292,8 @@ is `status.md`.
 script or a `.claude/hooks/` registration living in this tree, not from a service outside it — so a
 long-lived branch forked before the commit that added or wired one of these checks carries neither the
 file nor the registration, and the guarantee it names is silently absent there until the branch merges
-`main` back in. `status.md`'s revision recording the `git_stash_guard.py` hook (merged in `main` PR #753,
-absent from `feat/foundation-p1-docs` until this branch's own merge of `main`) states the general form of
+`main` back in. `status.md`'s revision recording the `git_stash_guard.py` hook — which names the merge that
+carried it and the branches it had not reached — states the general form of
 this and the daemon-checkout instance `CLAUDE.md` already names; the remedy is the same for both — merge
 `main` on a cadence and re-verify the check fires through its real invocation path, not by confirming the
 file exists.
@@ -308,7 +308,7 @@ file exists.
 | Workflow tables | `execution/scripts/render_workflow_docs.py --check` (contract; `status.md` says whether it exists) | a step table in `workflows.md` that differs from its `workflow` entity |
 | Data-model tables | `execution/scripts/render_data_model.py --check` (contract; `status.md` says whether it exists) | a concept or relationship table in `data_model.md` that differs from the schema registry |
 | Rule coverage | `execution/scripts/check_foundation_rule_coverage.py` (contract; `status.md` says whether it exists) | a rule-bearing heading in a kernel or keyed document (`conformance_suite.md#what-the-rule-coverage-check-reads` says which headings those are) with no row in `conformance_suite.md` whose pointer resolves to it; a row whose pointer resolves to nothing; or a decision opened in a document and absent from the register below |
-| Decision citations | `execution/scripts/check_foundation_citations.py` (contract; `status.md` says whether it exists) | a commit hash in any document here but `status.md`; an issue or pull-request number outside the positions `#phases-and-implementation-state` names |
+| Decision citations | `execution/scripts/check_foundation_citations.py`; asserted zero in `test_foundation.py` | a commit hash in any document here but `status.md`; an issue or pull-request number outside the positions `#phases-and-implementation-state` names |
 | Reading projection | `execution/scripts/render_reading_projection.py --check`, in `scripts/lint.sh` | a projected rule that differs from the canonical text at its anchor, a projected entry whose anchor resolves to nothing, or a matrix rule with no entry in the projection — the three ways the copy a review reads can stop matching the design it is asked to enforce (`#what-a-review-reads-is-a-projection-of-these-documents-not-a-shortened-copy-of-them`) |
 
 ## Direction of truth per class of record

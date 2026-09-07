@@ -301,8 +301,8 @@ rules, corrections — is exactly the compounding judgement Part 6 describes, an
 cannot be relocated is not fully owned. This is the reason for mechanisms already built; it adds no new
 one. Where the series also argues for routing commodity execution to a frontier vendor and reserving
 locally-run inference for the judgement that defines the firm, this design ties the two only at the gate,
-not at the vendor: open decision 59 (`gates_and_workflows.md#blast-radius-selects-the-gate-nothing-yet-selects-the-model-a-step-runs-at`)
-would bind a step's minimum model strength to the blast tier of the action it is about to take, evaluated
+not at the vendor: decision 59 (`gates_and_workflows.md#blast-radius-selects-the-gate-nothing-yet-selects-the-model-a-step-runs-at`),
+ruled 2026-09-06, binds a step's minimum model strength to the blast tier of the action it is about to take, evaluated
 at the same take as blast and never chosen by the step itself — the mechanism the series' routing argument
 needs, independent of whether an instance also chooses to route the highest tier to a locally-run binding.
 

@@ -423,9 +423,11 @@ matching, and the unconfirmed write.
 
 The general adapter rules are `adapters.md`'s and are cited here, not restated. The step lists that take
 these operations are `workflows.md`'s. The gate's decision function is `gates_and_workflows.md`'s. The
-identity rules for email addresses are `gmail.md`'s, shared by both systems and written once there. Open
-decision 15 (`adapters.md`) applies to this adapter as to every other, and nothing above depends on its
-resolution; decision 16 is ruled there, and for this system it means the process receiving the calendar
+identity rules for email addresses are `gmail.md`'s, shared by both systems and written once there.
+Decision 15 (`adapters.md#the-adapter-and-the-engine-are-two-roles`) is ruled — adapters are bundled in this
+repository until a second consumer of them exists — and applies to this adapter as to every other, though
+nothing above depends on which way it went; decision 16 is ruled there too, and for this system it means
+the process receiving the calendar
 watch's notification may be shared plumbing while verifying it and reading the sync token from it are this
 adapter's. Which rows have a built path is `status.md`'s — and every row marked **unhandled** above has one
 there.
