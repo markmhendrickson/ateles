@@ -564,7 +564,7 @@ the exact files three open PRs (#766, #767, #770) are amending, so ruling either
 three; they were to be ruled and executed as one pass after those merge, which is also why they were recorded
 then, while the evidence was gathered, rather than left to be re-derived later. **73 was ruled on 2026-09-07**
 and turned out to need no rename at all: the ruling states a test and changes no term's form, so the
-sequencing behind those PRs bound only 72. **The open row: 72.**
+sequencing behind those PRs bound only 72. **Of the naming-pass pair, only 72 remains open; the assembly's full open set is stated below.**
 
 **Decisions 37 to 41 were ruled by derivation on 2026-09-06 and held for the operator's veto; the operator reviewed all five the same day and upheld them.** Nothing in those rows or in their rulings changed; the review is recorded here so that the window is known to have closed by a decision rather than to have lapsed.
 

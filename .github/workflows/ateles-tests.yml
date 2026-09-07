@@ -29,6 +29,7 @@ on:
       - "scripts/linters/test_claude_verification_discipline.py"
       - "scripts/linters/test_*.py"
       - "docs/agents/**"
+      - "docs/foundation/**"
       - ".github/workflows/ateles-tests.yml"
   workflow_dispatch:
 
@@ -88,6 +89,13 @@ jobs:
       # roster-in-lint.sh-only, anthus (#584/#596), execution/scripts (#524/#527).
       - name: Run CLAUDE.md verification-discipline effect tests
         run: uv run --extra dev python -m pytest scripts/linters/test_claude_verification_discipline.py -q
+      - name: Run foundation document checks
+        run: |
+          python3 execution/scripts/check_foundation_anchors.py
+          python3 execution/scripts/check_foundation_vocabulary.py
+          python3 execution/scripts/link_vocabulary_terms.py --check
+          python3 execution/scripts/check_foundation_front_matter.py
+          python3 execution/scripts/render_reading_projection.py --check
 
   mcp-server-tests:
     runs-on: ubuntu-latest
