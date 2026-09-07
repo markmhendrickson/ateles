@@ -663,5 +663,3 @@ document's `**Derived from:**` header, in a `Sources:` clause, or in its *Scope*
 document settles*, *Prior art*, or *Beyond the sources* section — the positions where a document names what
 it derived from — and a number anywhere else is a state claim and fails. A decision cited elsewhere in a
 document is cited by its register number, or by the header's source in words.
-
-See [nothing](work_model.md#this-anchor-does-not-exist-at-all).
