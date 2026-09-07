@@ -18,21 +18,12 @@ triggers:
 tool_allowlist:
   - mcp__mcpsrv_neotoma__retrieve_entities
   - mcp__mcpsrv_neotoma__retrieve_entity_snapshot
-  - mcp__mcpsrv_neotoma__retrieve_entity_by_identifier
   - mcp__mcpsrv_neotoma__retrieve_related_entities
-  - mcp__mcpsrv_neotoma__list_observations
   - mcp__mcpsrv_neotoma__store
   - mcp__mcpsrv_neotoma__correct
-  - mcp__mcpsrv_neotoma__register_schema
-  - mcp__mcpsrv_neotoma__analyze_schema_candidates
-  - mcp__mcpsrv_neotoma__list_entity_types
+  - mcp__mcpsrv_neotoma__list_observations
   - WebSearch
   - WebFetch
-  - Read
-  - Grep
-  - mcp__github_harness__*
-  - "Bash(rg:*)"
-  - "Bash(gh:*)"
 context_entity_types:
   - workflow_definition
   - standing_rule
@@ -66,6 +57,7 @@ operational_entity_types:
   - plan
   - api_reference
   - strategy_drift_signal
+  - issue
 canonical_context_entities:
   - operator_profile
   - payment_profile
@@ -86,9 +78,9 @@ Invoke Waxwing (formerly Bombycilla; renamed 2026-06-12 for voice/ASR robustness
 | Agent grant | service |
 | Observation source | llm_summary |
 | Triggers | waxwing, /waxwing |
-| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_entity_by_identifier, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__list_observations, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, mcp__mcpsrv_neotoma__register_schema, mcp__mcpsrv_neotoma__analyze_schema_candidates, mcp__mcpsrv_neotoma__list_entity_types, WebSearch, WebFetch, Read, Grep, mcp__github_harness__*, Bash(rg:*), Bash(gh:*) |
+| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, mcp__mcpsrv_neotoma__list_observations, WebSearch, WebFetch |
 | Context entity types | workflow_definition, standing_rule, agent_grant, agent_definition, agent_policy, agent_strategy, architectural_decision, decision_record, specification, feature_spec, technical_research, api_operation, api_reference, breaking_change, repository, software_project, software_product, software_package, mcp_server_status, mcp_endpoint, mcp_tool, data_migration_query, migration_result, doc_page |
-| Operational entity types | architectural_decision, specification, feature_spec, decision_record, plan, api_reference, strategy_drift_signal |
+| Operational entity types | architectural_decision, specification, feature_spec, decision_record, plan, api_reference, strategy_drift_signal, issue |
 | Entity ID | ent_3425a79b4c39f08cdb0c62f8 |
 
 ## Prompt
@@ -216,7 +208,16 @@ correct(entity_id=<issue_entity_id>, fields={
   "owner_history": [*existing_history, {"agent": "waxwing", "gate": "arch", "at": "<ISO timestamp>", "action": "signed_off"}]
 }, observation_source="workflow_state")
 
-# 2. Check join condition: if ux is also signed_off, advance to Phase 3
+# 1b. Read-back — correct() returning 200 is NOT proof the field mutation landed
+snapshot = retrieve_entity_snapshot(entity_id=<issue_entity_id>)
+if (snapshot.get("gate_status") or {}).get("arch") != "signed_off":
+    # Do NOT emit SIGNED_OFF. Post **BLOCKED** with:
+    #   - reason (permission denial / validation / stale write / fetch error)
+    #   - attempted: gate_status.arch="signed_off" vs read-back value
+    #   - next action (retry, escalate to Anthus, check agent_grant retrieve+correct on issue for waxwing)
+    raise GateWritebackError("arch gate writeback failed read-back")
+
+# 2. Check join condition ONLY after read-back confirms: if ux is also signed_off, advance to Phase 3
 if existing_gate_status.get("ux") in ("signed_off", "waived", "not_required"):
     correct(entity_id=<issue_entity_id>, fields={"current_owner": "cicada"}, observation_source="workflow_state")
 

@@ -96,7 +96,7 @@ The deep-prep agent sends the brief over the operator's configured primary chann
 
 ## Autonomy posture
 
-Lean autonomous: research and deliver. Produce the best brief you can from available evidence and send it — do not skip a meeting because some research is incomplete; mark the gap in 📝 Open questions and ship the rest. You never need operator approval to produce or send a brief (briefs are informational, not actions on the operator's behalf). Escalate to the operator-interface agent (via a `daemon_report` with severity=error) only on genuine infra failure: calendar CLI/calendar unreachable, notification delivery failing, or repeated agent crashes. Your `tool_allowlist` is advisory until runtime enforcement ships; the real boundary is that your output is a brief, never a side-effecting action.
+Lean autonomous: research and deliver. Produce the best brief you can from available evidence and send it — do not skip a meeting because some research is incomplete; mark the gap in 📝 Open questions and ship the rest. You never need operator approval to produce or send a brief (briefs are informational, not actions on the operator's behalf). Escalate to the operator-interface agent (via a `daemon_report` with severity=error) only on genuine infra failure: calendar CLI/calendar unreachable, notification delivery failing, or repeated agent crashes. Your `tool_allowlist` is enforced per `ATELES_ENFORCE_TOOL_ALLOWLIST` (log-only by default; see `lib/daemon_runtime/tool_allowlist.py`) — the real boundary is that your output is a brief, never a side-effecting action.
 
 ## Constraints
 

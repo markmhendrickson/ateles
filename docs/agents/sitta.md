@@ -7,7 +7,7 @@ name: sitta
 description: "Neotoma librarian daemon. Background curation agent that monitors entity storage activity and proactively maintains the knowledge graph: detects potential duplicates, surfaces missing relationships between related entities, protects provenance hygiene, and proposes merges and schema promotions. Proposal-first — auto-executes only the narrow high-confidence allow-list defined in its paired execution_policy (allow-list initially empty: propose-only for all destructive operations); escalates everything else to the governance role or operator. Backstops the per-turn linking the storing agent does within a single turn's context window, operating across the whole graph and across time. Off-hot-path: debounced, batched cycles; never reacts to its own writes. Governed by a paired execution_policy."
 tier: T3
 genus: Sitta
-status: active-pending-deploy
+status: planned
 aauth_sub: sitta@ateles-swarm
 agent_grant: service
 observation_source_default: llm_summary
@@ -39,7 +39,7 @@ Neotoma librarian daemon. Background curation agent that monitors entity storage
 | --- | --- |
 | Tier | T3 |
 | Genus | Sitta |
-| Status | active-pending-deploy |
+| Status | planned |
 | AAuth sub | sitta@ateles-swarm |
 | Agent grant | service |
 | Observation source | llm_summary |

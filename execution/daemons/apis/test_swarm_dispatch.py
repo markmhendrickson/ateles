@@ -1756,6 +1756,23 @@ def test_panelist_prompt_gate_writeback_when_owns_pending_gate():
     assert "ONLY if" in prompt
     assert "MERGE the existing map" in prompt
     assert "gate-signoff-arch-" in prompt  # idempotency key stem
+    # Effect chrome (ateles#769): read-back + BLOCKED on mismatch, never
+    # trust correct() 200 alone.
+    assert "READ-BACK" in prompt
+    assert "retrieve_entity_snapshot" in prompt
+    assert "**BLOCKED**" in prompt
+    assert "SIGNED_OFF" in prompt  # only after confirm
+
+
+def test_panelist_prompt_gate_writeback_blocks_signed_off_without_readback():
+    """Failure path must be present: BLOCKED when read-back does not confirm."""
+    t = _trigger()
+    prompt = SwarmDispatcher._panelist_prompt(
+        t, _arch_lens(), "- [ ] x\n", parent=80, owns_pending_gate=True
+    )
+    assert "If read-back fails" in prompt or "read-back fails" in prompt.lower()
+    assert "do NOT emit SIGNED_OFF" in prompt or "Do NOT emit SIGNED_OFF" in prompt
+    assert "attempted vs read-back" in prompt
 
 
 def test_panelist_prompt_no_gate_writeback_when_not_owner():

@@ -22,10 +22,6 @@ tool_allowlist:
   - mcp__mcpsrv_neotoma__correct
   - WebSearch
   - WebFetch
-  - mcp__mcpsrv_neotoma__retrieve_entity_by_identifier
-  - Read
-  - Edit
-  - Write
 context_entity_types:
   - workflow_definition
   - standing_rule
@@ -85,7 +81,7 @@ Copy and positioning agent (formerly Paradisaea; renamed 2026-06-12 for voice/AS
 | Agent grant | service |
 | Observation source | llm_summary |
 | Triggers | manucode, /manucode |
-| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, WebSearch, WebFetch, mcp__mcpsrv_neotoma__retrieve_entity_by_identifier, Read, Edit, Write |
+| Allowed tools | mcp__mcpsrv_neotoma__retrieve_entities, mcp__mcpsrv_neotoma__retrieve_entity_snapshot, mcp__mcpsrv_neotoma__retrieve_related_entities, mcp__mcpsrv_neotoma__store, mcp__mcpsrv_neotoma__correct, WebSearch, WebFetch |
 | Context entity types | workflow_definition, standing_rule, agent_grant, agent_definition, agent_policy, agent_strategy, brand_voice, copy_requirement, post, blog_post, blog_post_draft, social_post, social_post_draft, social_share_draft, target_persona, user_persona_insight, ui_change_request, ui_copy_feedback, ui_copy_bug, ui_feedback, ui_message_example, cta, website_page, page, topic, talking_points, customer_development_note, naming_decision |
 | Operational entity types | copy_requirement, ui_change_request, post, blog_post, blog_post_draft, social_post_draft, social_share_draft, cta, naming_decision, strategy_drift_signal |
 | Entity ID | ent_c842afe3e816aa2d762a6221 |
