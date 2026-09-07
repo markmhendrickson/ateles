@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
@@ -87,3 +89,19 @@ def test_fails_when_adapters_section_is_absent(tmp_path: Path) -> None:
     assert len(problems) == 1
     assert "decision-78-adapters" in problems[0]
     assert "missing section" in problems[0]
+
+
+def test_raises_when_conformance_file_is_absent(tmp_path: Path) -> None:
+    write_corpus(tmp_path)
+    (tmp_path / "docs" / "foundation" / "conformance.md").unlink()
+
+    with pytest.raises(decision_78.CorpusProblem, match="conformance.md"):
+        decision_78.check(tmp_path)
+
+
+def test_raises_when_adapters_file_is_absent(tmp_path: Path) -> None:
+    write_corpus(tmp_path)
+    (tmp_path / "docs" / "foundation" / "adapters.md").unlink()
+
+    with pytest.raises(decision_78.CorpusProblem, match="adapters.md"):
+        decision_78.check(tmp_path)
