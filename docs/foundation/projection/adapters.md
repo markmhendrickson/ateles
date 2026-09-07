@@ -90,7 +90,7 @@ Every rule `adapters.md` owns, one entry each: the rule's own statement from `co
 
 - **AD-33** — no trust level on the adapter; scope is the grant, risk is the class *[M]*
 
-## [The relationship to decision 15, which this section did not resolve](../adapters.md#the-relationship-to-decision-15-which-this-section-did-not-resolve)
+## [The relationship to decision 15, which rules adapter packaging](../adapters.md#the-relationship-to-decision-15-which-rules-adapter-packaging)
 
 - **AD-34** — and [`adapters.md#the-adapter-and-the-engine-are-two-roles`](../adapters.md#the-adapter-and-the-engine-are-two-roles) (ruling 15): the obligations hold wherever the code lives; the roles meet only in the record *[M (ruling 15 changes no observable, which is what the ruling says of itself)]*
 

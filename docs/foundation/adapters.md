@@ -30,7 +30,7 @@ identity, linkage, dedup, unknown, and provenance rules every adapter applies, w
 demonstrate before the record trusts it and who admits one, where inbound delivery lands and which part of
 receiving it is the adapter's, and where the adapters' own code lives, which decision 15 rules: bundled
 in this repository until a second consumer of them exists
-(`#the-relationship-to-decision-15-which-this-section-did-not-resolve`). Out of scope: the workflows themselves (`workflows.md`), the
+(`#the-relationship-to-decision-15-which-rules-adapter-packaging`). Out of scope: the workflows themselves (`workflows.md`), the
 gate's decision function (`gates_and_workflows.md`), what an adapter is granted
 (`authority_model.md#grants`), the per-system mapping in full for the five systems that have their own
 documents (`github.md`, `gmail.md`, `calendar.md`, `telegram.md`, `payments.md`, each applying these
@@ -1196,7 +1196,7 @@ grant is read, which is at every enforcement point rather than from a cache. Not
 an adapter off, and the reach of doing so is a reason to keep an adapter's grant narrow at admission —
 which is obligation 6's other half, read from the far end.
 
-### The relationship to decision 15, which this section did not resolve
+### The relationship to decision 15, which rules adapter packaging
 
 Decision 15 asked **where an adapter's code lives** — bundled beside the engine, or a shared adapter
 repository this system consumes. This section asks **what an adapter must satisfy to be trusted, and who

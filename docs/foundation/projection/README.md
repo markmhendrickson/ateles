@@ -17,7 +17,7 @@ Generated from `conformance_suite.md`'s conformance matrix by `execution/scripts
 
 | Projected document | Rules | Chars | Against `MAX_DOC_CHARS` |
 |---|---|---|---|
-| `adapters.md` | 42 | 9,721 | under |
+| `adapters.md` | 42 | 9,711 | under |
 | `authority_model.md` | 21 | 4,099 | under |
 | `calendar.md` | 8 | 2,688 | under |
 | `conformance.md` | 8 | 7,774 | under |
@@ -37,4 +37,4 @@ Generated from `conformance_suite.md`'s conformance matrix by `execution/scripts
 | `work_model.md` | 53 | 10,156 | under |
 | `workflows.md` | 26 | 5,866 | under |
 
-372 rules projected, 90,928 chars in total across the set. `MAX_DOC_CHARS` = 12,000 bounds each file above; `MAX_BLOCK_CHARS` = 40,000 bounds one review's block, which is the kernel plus the documents keyed to the changed paths — never the whole set.
+372 rules projected, 90,918 chars in total across the set. `MAX_DOC_CHARS` = 12,000 bounds each file above; `MAX_BLOCK_CHARS` = 40,000 bounds one review's block, which is the kernel plus the documents keyed to the changed paths — never the whole set.
