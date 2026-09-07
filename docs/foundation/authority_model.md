@@ -1,8 +1,8 @@
 # Authority model: who may act, on what, under which conditions
 
 **Keyed document:** read when the loader, grant checker, signer, approval, notify, checkpoint, grant proxy,
-or A2A paths change (`conformance.md`). **Kind:** foundation; defines the model whole and marks each
-undecided question **open** with its options, never resolving one to make the document complete.
+or A2A paths change (`conformance.md`). **Kind:** foundation; covers the authority model in full and marks each
+undecided question **open** with its options, rather than resolving one to make the document look complete.
 **Derived from:** the README's Vision section (the tuple, the object set), ateles#378 (the operator-authored
 section as decision; the swarm-spec section as proposal), synthesis `ent_b0ce322f768e4fc676b73139` (PR-20
 to PR-28, PR-34 to PR-38, C8, C9, C10, C13, C14, C17), prior art `ent_08460968e6f49dac21510f4a` (Track 2),
@@ -11,9 +11,9 @@ the P4 brief `ent_683200acfb3ff5f03add966c`, `docs/multi_tenant.md`, and PR #745
 
 ## Purpose
 
-Define authority whole: the tuple, what a principal is, how capability is granted, how it is delegated,
-how an action is approved, and the structural checks and initiative objects above them. One design, so the
-roadmap in `status.md` is a roadmap over it rather than a partition of it.
+Define the authority model in full: the tuple, what a principal is, how capability is granted, how it is
+delegated, how an action is approved, and the structural checks and initiative objects above them. One
+design, so the roadmap in `status.md` is a roadmap over it rather than a partition of it.
 
 ## Scope
 
