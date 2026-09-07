@@ -38,7 +38,9 @@ the remotes — the maximum `revision N` on any open branch's copy of any docume
 branch cannot see. As of 2026-09-07 that sweep over all 92 open pull-request branches gives 68, so the next
 free number is 69, which the front-matter rollout takes; a later sweep the same day gives 69, and the
 several-instances pass takes 70. A sweep over the remotes on 2026-09-07 gives 72, so the decisions 76
-and 77 pass takes 73 — one number across all four documents it amends, per the rule above.
+and 77 pass takes 73 — one number across all four documents it amends, per the rule above. A later sweep
+over every remote branch the same day gives 79, so the decision-80 ruling takes 80, one number across the
+three documents it amends.
 
 ## `authority_model.md`
 
@@ -55,6 +57,7 @@ and 77 pass takes 73 — one number across all four documents it amends, per the
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
 | 70 | the several-instances pass of 2026-09-07 | decision 76 opened here — whether one operator's several instances of the record are one record or several, with the three questions it holds and the dispositions the operator named; no mechanism proposed and no term introduced |
 | 73 | the decisions 76 and 77 pass of 2026-09-07 | decision 76 ruled here — one operator's several instances are several records, not one, on the accountability ground; one identity per instance; an explicit binding whose ambiguity fails closed; the non-merge rule stated rather than left to a component's discipline |
+| 80 | the decision-80 ruling of 2026-09-07 | the tenant stated as a term of the grant for every principal in `#grants`, added to that section's rule list, with the ground and a pointer to the argument; the two places reserving decisions 79 and 80 to the operator narrowed to 79 alone, in `#principals` and in the several-instances ruling; the Tenant bullet's open set corrected from five decisions to four |
 
 
 ## `adapters.md`
@@ -124,6 +127,7 @@ and 77 pass takes 73 — one number across all four documents it amends, per the
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
 | 70 | the several-instances pass of 2026-09-07 | decisions 76 and 77 registered; 77 argued here, in `#scope`'s neighbourhood — a document outside the directory that six documents in it cite and two defer live decisions to |
 | 73 | the decisions 76 and 77 pass of 2026-09-07 | decisions 76 and 77 ruled; `multi_tenant.md` recorded as in the set in `#scope`; `#a-document-the-foundation-defers-a-decision-to-and-does-not-contain` rewritten as the ruling; `multi_tenant.md` section 7's five open decisions registered as rows 79 to 83 |
+| 80 | the decision-80 ruling of 2026-09-07 | decision 80 moved from open to ruled — the tenant is matched on the grant as `match_tenant` and never derived from the credential's subject; the row states the two grounds (invariant 9's one home for an authorization value, and a grant's tool half carrying no subject to derive from), why decision 76 does not settle it the other way, the rejected subject-derived alternative with its cheapness explicitly refused as a ground, the sequencing behind decision 86, and the migration verdict on the already-minted subjects |
 
 
 ## `conformance_suite.md`
@@ -241,6 +245,7 @@ and 77 pass takes 73 — one number across all four documents it amends, per the
 | Revision | Pass | What changed |
 |---|---|---|
 | 73 | the decisions 76 and 77 pass of 2026-09-07 | moved into the foundation set by decision 77 (`docs/multi_tenant.md` → `docs/foundation/multi_tenant.md`, with history); given the decision-74 front-matter form and a pointer to this table; section 1's "current state" row and section 6.2's deferral trigger annotated against decision 76's ruling, with neither claim edited; section 7 noted as registered at `conformance.md` rows 79 to 83. Amendments before this one were made outside the set and are not reconstructed here |
+| 80 | the decision-80 ruling of 2026-09-07 | section 7 item 2 ruled and its argument added as `#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject` — the grant as the whole statement of what a principal may do, the tool half that carries no subject, decision 76 tested and found not to settle it, the rejected alternative and why its cheapness is not a ground, what decision 79 still governs, the sequencing behind decision 86, and the backfill verdict; section 3.2's parenthetical alternative closed; section 7's header note corrected from five open to four |
 
 ## `payments.md`
 
