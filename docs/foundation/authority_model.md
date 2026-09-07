@@ -369,6 +369,47 @@ answering confidently from stale data. Grants are read at every check, or from a
 bound is declared and whose expiry resolves to `Indeterminate` — which denies — rather than to the last
 value it held.
 
+### How a capability names a tool, and what a harness allowlist is compared against
+
+**Open.** Decision 42 made the tools a principal may invoke a dimension of its `agent_grant`, and made a
+harness's own list a copy "derived from the grant at load, or held equal to it by a parity test, and never
+a second home". Neither obtains until one question is answered: **by what grammar a capability names a
+tool**, and therefore what the two sides of that parity test compare. The measurement that found no agent
+holding parity named this as its blocker rather than a finding — a copy cannot be held equal to an original
+that has no way to state what it holds.
+
+**What is already fixed, and is not the question.** The capability op form `tool:<surface>:<operation>` with
+`param_constraints` is what the grant checker parses and what the tool proxy enforces, and the harness's own
+four recognized entry forms — a wildcard, a bare tool name, an `mcp__<server>__<tool>` reference, and a
+scoped shell grant — are already validated in the lint that guards the allowlist. Both grammars exist. What
+does not exist is the declared mapping between them, and it is the mapping, not either grammar, that the
+parity test needs.
+
+**Four questions the mapping has to settle, each with a cost.** *The bijection*: whether the grant's
+`<surface>` half is the MCP server alone, which leaves the harness's non-MCP entries unnameable, or a
+capability surface that also admits reserved names for the harness's own tools and for the shell — the cost
+of the first is that shell and filesystem reach stays outside the record, which is the reach that most needs
+bounding; the cost of the second is two surface names whose membership the design must then say how to
+enumerate. *Wildcards*: whether a wildcard is expressible at all, and if so at which tier — a wildcard over
+every surface is the fail-open shape this section already names, and the same shape decision 41 rejects for
+entity types; a wildcard over one surface is a domain with an enumerable membership, and the harder question
+is the shell, whose reachable commands are not a list anyone can read back. *A non-enumerable harness*: a
+provider that receives no allowlist at all has a reach that is the ambient configuration, and where the
+provider is chosen at dispatch by capacity, the same grant yields different reach on different days — which
+makes the divergence a question about what a grant *means*, not only about what a test can see; principle 7
+keeps that third value distinct from a verdict and principle 5 keeps it out of the permissive branch.
+*Direction of derivation*: whether the allowlist is eventually derived from the grant at load, which removes
+the drift class, or held equal by a test, which is cheaper and leaves the copy in place — decision 42 permits
+either and the sequencing between them is unruled.
+
+**What decides it.** Whether the record is meant to answer "under what reach did this principal execute" for
+every principal and every harness, or only for the harnesses that can enforce a bound. The first requires a
+grammar that can express reach a harness cannot enforce, and accepts that some capabilities are recorded and
+reporting-only; the second lets the grammar stop where enforcement stops, and accepts that a sign-off against
+a non-enforcing harness attests a prompt and not a reach. Decision 42 leaned toward the first in its cost
+clause — naming the reporting-only case rather than hiding it — without ruling the grammar that would make it
+writable.
+
 ## Attribution
 
 Every write carries the agent that made it (a per-agent signature) and the principal it acted for; a shared
