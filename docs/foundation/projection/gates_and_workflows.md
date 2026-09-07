@@ -9,7 +9,7 @@ Every rule `gates_and_workflows.md` owns, one entry each: the rule's own stateme
 
 ## [Declaration, batch, projection](../gates_and_workflows.md#declaration-batch-projection)
 
-- **GW-1** — one `workflow` per (project, type) *[M]*
+- **GW-1** — one `workflow` per (declaration_scope, type) *[M]*
 - **GW-2** — the same: `owner_role` holds a role, never an agent name *[M]*
 - **GW-3** — the same: step state is derived; no step entity *[M]*
 - **GW-3a** — the same: `step_status` is the projection of the batch's sign-offs, proved equal to them by a reconciler; neither is deleted, neither is a second source of truth; no transition event type *[M]*

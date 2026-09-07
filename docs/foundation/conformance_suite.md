@@ -526,7 +526,7 @@ above. **M / R / U / P / D** is the class.
 
 | # | Rule | Setup | Action | Red when | Class |
 |---|---|---|---|---|---|
-| GW-1 | `gates_and_workflows.md#declaration-batch-projection`: one `workflow` per (project, type) | `B0` | declare a second `(project, feature)` | it lands | M |
+| GW-1 | `gates_and_workflows.md#declaration-batch-projection`: one `workflow` per (declaration_scope, type) | `B0` | declare a second `(declaration_scope, feature)` | it lands | M |
 | GW-2 | the same: `owner_role` holds a role, never an agent name | declare a workflow with an agent's name as `owner_role` | — | it lands; or a claim resolves it without the roster | M |
 | GW-3 | the same: step state is derived; no step entity | `T-at(feature, arch)` | census; read step state | a per-step entity or status row; state that does not change when the lease or sign-off does | M |
 | GW-3a | the same: `step_status` is the projection of the batch's sign-offs, proved equal to them by a reconciler; neither is deleted, neither is a second source of truth; no transition event type | `T-at(feature, arch)` signed; the projection mutated to disagree | read both; run the reconciler | the reconciler reports agreement, or nothing runs it; a reader takes the projection where it disagrees with the sign-offs; a transition-event type in the census | M |
