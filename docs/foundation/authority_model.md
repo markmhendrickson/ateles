@@ -11,9 +11,9 @@ the P4 brief `ent_683200acfb3ff5f03add966c`, `docs/multi_tenant.md`, and PR #745
 
 ## Purpose
 
-Define authority whole: the tuple, what a principal is, how capability is granted, how it is delegated,
-how an action is approved, and the structural checks and initiative objects above them. One design, so the
-roadmap in `status.md` is a roadmap over it rather than a partition of it.
+Define the authority model in full: the tuple, what a principal is, how capability is granted, how it is
+delegated, how an action is approved, and the structural checks and initiative objects above them. One
+design, so the roadmap in `status.md` is a roadmap over it rather than a partition of it.
 
 ## Scope
 
