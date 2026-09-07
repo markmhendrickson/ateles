@@ -1,6 +1,14 @@
-# Multi-Tenancy Design
+# Multi-tenancy: the isolation boundary, and going from one operator to many
 
-**Status: Design** (task #6 of plan `ent_aff87747b49e338790568af6` — "Task-spine loop + cloud-hosted swarm")
+**Keyed document:** read when tenant partitioning, per-tenant AAuth subject namespacing, grant
+admission's tenant match, per-human routing, or beneficiary ownership changes (`conformance.md`).
+**Kind:** foundation; states the tenancy axis whole and marks each undecided question **open** with its
+options, never resolving one to make the document complete. **Derived from:** the governing decision
+`multi_tenant_org_readiness`; Goal 6 of the swarm-architecture plan; task #6 of plan
+`ent_aff87747b49e338790568af6` ("Task-spine loop + cloud-hosted swarm"); the tenant/partition-now,
+isolation-later precedent of `docs/durable_execution_substrate.md`; and the decision-77 pass of
+2026-09-07, which moved this document into the foundation set. What is built is `status.md`.
+Amendment history: `revisions.md#multi_tenantmd`.
 
 Realizes Goal 6 of the swarm-architecture plan: *public ateles can be forked by a third party and deployed against their own Neotoma instance.* This document specifies how the Ateles swarm goes from one operator to many operators under one tenant (org/team), and what to build **now** vs **defer**.
 
@@ -19,6 +27,19 @@ The swarm must support a spectrum, not a binary. Three shapes matter:
 | **Single-operator** (launch) | one | one | Current state. One `operator_profile`, one pager (Ateles), one `swarm_roster`. No isolation work needed beyond what already exists. |
 | **Fork** (Goal 6) | one (a *different* operator) | one (theirs) | Zero hardcoded operator identity. Everything operator-specific resolved from context entities at runtime: `operator_profile`, `locale_profile`, `swarm_roster`, `channel_config`, `payment_profile`, etc. A forker stands up their own Neotoma, supplies their own context entities, mints their own AAuth keys. **Mostly already true** — agent prompts are operator-agnostic by policy. |
 | **Org / team** | many | one (shared) | Multiple humans collaborate under one tenant: shared entity graph, but per-human routing, per-human identity, per-human capability scope, and per-customer ("for whom") visibility. This is the shape that, if not designed for now, forces a painful retrofit. |
+
+**The single-operator row's "current state" no longer describes the operator's own setup.** As of
+2026-09-07 the operator runs two instances of the record — a personal one and a second shared with a
+client engagement — kept apart by sensitivity, and expects more as further engagements arrive. That is
+neither of the two multiplications this section names: it does not multiply humans within a tenant, and
+it does not multiply tenants under separate forkers. It is one operator holding several instances that
+must not merge, which is decision 76's subject and is ruled at
+`authority_model.md#whether-one-operators-several-instances-of-the-record-are-one-record-or-several`:
+several records, not one, on the accountability ground. The table's "no isolation work needed beyond
+what already exists" is therefore true only of the axis this document partitions on, and section 6.2's
+deferral trigger is discussed below in the same light. Neither claim is edited here — a move is not the
+place to change a document's content — and both are read against decision 76's ruling until the pass
+that reworks this document for it.
 
 **Single-operator** and **fork** are the same code path with different context entities — the fork case is the validation that nothing operator-specific is baked into code (enforced today by `scripts/linters/check_hardcoded_config.py`). The genuinely new axis is **org/team**: more than one human acting inside one tenant.
 
@@ -144,6 +165,16 @@ These are the items that are impossible or painful to backfill once data and tru
 
 ### 6.2 DEFER until a second operator/org exists (expensive — operational)
 
+**On this section's trigger.** The trigger stated above is "*a second operator or a multi-forker hosted
+deployment exists*", and the deferrals below are keyed to it. Neither limb has fired: the operator's
+several instances are one operator, and each instance is its own deployment rather than one serving many
+forkers. What has fired is a third condition this document does not name — one principal holding several
+instances that must not merge — and the deferrals below are silent on it because the axis is not theirs.
+Decision 76 rules that case at
+`authority_model.md#whether-one-operators-several-instances-of-the-record-are-one-record-or-several`;
+what this document defers is unchanged by it.
+
+
 - **Team UX**: invite flow, per-operator onboarding, book-of-business assignment screens, shared-vs-private toggles.
 - **Soft-wall enforcement** of within-tenant beneficiary visibility (the owner-ref *gate*, as opposed to the owner-ref *field*).
 - **Per-tenant quotas, fairness, noisy-neighbor protection** (mirrors the deferred list in `docs/durable_execution_substrate.md`).
@@ -157,6 +188,13 @@ If only the cheapest possible subset is done, it must be: **(1) `tenant_id` part
 ---
 
 ## 7. Open decisions (require the operator)
+
+**Registered.** All five are rows 79 to 83 of `conformance.md#the-register-of-open-design-decisions`,
+in that order, since the decision-77 pass of 2026-09-07 brought this document into the foundation set and
+with it the obligation that every question a foundation document marks open is indexed there once. The
+register row states each question in one line and points here; the argument stays below, which is where a
+reader resolves it (principle 9). None is ruled by that pass — they are the operator's.
+
 
 1. **Tenant slug scheme.** Is `tenant_id` a UUID (opaque, stable) or a human slug (`acme`, readable in `sub` like `monedula@acme-swarm`)? Slug reads better in AAuth subjects and logs; UUID avoids rename pain. Recommendation leans slug-with-immutable-UUID-backing, but this is the operator's call.
 

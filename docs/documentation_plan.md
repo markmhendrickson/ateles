@@ -82,7 +82,7 @@ deep reference consulted occasionally. "Status" = does an adequate doc exist tod
 | --- | --- | --- | --- |
 | 24 | **QA evals design** (`swarm_qa_evals_design.md`, `swarm_qa_evals_qe3_design.md`) | Agents-as-users eval framework | ✅ exists (design) |
 | 25 | **Durable execution** (`durable_execution_substrate.md`) | Neotoma as a durable-execution substrate | ✅ exists |
-| 26 | **Multi-tenant** (`multi_tenant.md`) | The (out-of-scope today) multi-operator path | ✅ exists |
+| 26 | **Multi-tenant** (`foundation/multi_tenant.md`) | The tenancy axis; moved into the foundation set by decision 77 | ✅ exists |
 | 27 | **Data publishing** (`data_publishing_transformation.md`, `data_publishing_privacy_guidelines.md`) | How operator data is transformed/published | ✅ exists |
 | 28 | **Operator runbooks** (`runbooks/`, `developer/`) | Operator-specific operational notes | ✅ exists (see Part 2 caveats) |
 
@@ -114,7 +114,7 @@ not counted here), `swarm_smoke_test_plan.md`, `smoke_test_runbook.md`,
 `swarm_qa_evals_design.md`, `swarm_qa_evals_qe3_design.md`, `durable_execution_substrate.md`, `aauth.md`,
 `aauth/keys.md`, `secrets_management.md`, `credential_management.md`, `credential_health.md`,
 `session_integrity.md`, `setup.md`, `cloud_hosting.md`, `daemon_rc_autodeploy.md`,
-`mcp_server_development_guide.md`, `linting-guide.md`, `test-setup-guide.md`, `testing/*`, `multi_tenant.md`,
+`mcp_server_development_guide.md`, `linting-guide.md`, `test-setup-guide.md`, `testing/*`,
 `data_publishing_transformation.md`, `data_publishing_privacy_guidelines.md`, `agents/*` (generated),
 `runbooks/agent-rename-and-isolation.md`.
 

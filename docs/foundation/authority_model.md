@@ -6,7 +6,7 @@ undecided question **open** with its options, never resolving one to make the do
 **Derived from:** the README's Vision section (the tuple, the object set), ateles#378 (the operator-authored
 section as decision; the swarm-spec section as proposal), synthesis `ent_b0ce322f768e4fc676b73139` (PR-20
 to PR-28, PR-34 to PR-38, C8, C9, C10, C13, C14, C17), prior art `ent_08460968e6f49dac21510f4a` (Track 2),
-the P4 brief `ent_683200acfb3ff5f03add966c`, `docs/multi_tenant.md`, and PR #745 operator review
+the P4 brief `ent_683200acfb3ff5f03add966c`, `multi_tenant.md`, and PR #745 operator review
 (2026-09-04), and PR #745 operator review (2026-09-07: the several-instances
 topology registered as decision 76). What is built, and where the substrate fails open, is `status.md`. Amendment history: `revisions.md#authority_modelmd`.
 
@@ -97,7 +97,7 @@ could not read is the same record the swarm's every other decision needs.
 - The human principal is an `operator` entity (C9, settled).
 - What stays open, and it is not this document's to close.
 - [What owning confers: the required seat](#what-owning-confers-the-required-seat).
-- [Whether one operator's several instances of the record are one record or several](#whether-one-operators-several-instances-of-the-record-are-one-record-or-several) — open, decision 76.
+- [Whether one operator's several instances of the record are one record or several](#whether-one-operators-several-instances-of-the-record-are-one-record-or-several) — ruled, decision 76: several records, one identity per instance, an explicit binding that fails closed when ambiguous, and a stated non-merge rule.
 
 A principal is any actor authority is attributed to: a human (an operator) or an agent. A principal is an
 entity in the record, so an ownership or delegation edge has somewhere to point (prior art: ReBAC as a data
@@ -129,14 +129,15 @@ missing while no type sat above them.
 
 **What stays open, and it is not this document's to close.** The shape of the identifier on the `operator`
 entity, and whether a tenant is derived from the `sub` or matched on the grant, are `multi_tenant.md`
-section 7's decisions 1 and 2. They are the operator's and are not settled here. Until they are, the
+section 7's decisions 1 and 2, registered as decisions 79 and 80 in `conformance.md`. They are the operator's and are not settled here. Until they are, the
 mapping above states which credential binds to which principal, and does not state the identifier's form
 or the tenant derivation. Every other statement in this document is written against "the principal entity"
 and is unchanged by this ruling.
 
 **Tenant.** The isolation boundary; `tenant_id` and `user_id` are separate fields; default-deny tenant
 scoping at the access layer; per-tenant AAuth namespacing; no cross-tenant read, write, routing, or key
-reuse (`multi_tenant.md` sections 2 and 3). Open: section 7's five decisions.
+reuse (`multi_tenant.md` sections 2 and 3). Open: section 7's five decisions, registered as decisions 79
+to 83 in `conformance.md` since that document joined the set (decision 77).
 
 **Ownership.** Named accountability for a workflow, [domain](vocabulary.md#domain), queue, or configuration
 entity, as an edge from
@@ -182,65 +183,67 @@ taking should have asked the accountable principal — which would argue for the
 
 ### Whether one operator's several instances of the record are one record or several
 
-**Open (decision 76).** Registered in `conformance.md#the-register-of-open-design-decisions`. One operator,
-one tenant, several instances of the record kept apart deliberately — separated by sensitivity rather than
-by tenancy, so that a work store, a client store, a personal store, and one that never leaves the machine
-are held in parallel by one swarm and must not merge. The question is whether the design says anything about
-that shape at all, and if it does, what.
+**Ruled (decision 76, 2026-09-07, on the operator's answer).** **Several records, not one.** One operator
+holding several instances of the record — a personal one, and a second shared with a client engagement,
+kept apart by sensitivity rather than by tenancy — holds several records, and they must not merge. The
+ground is **accountability**: not sensitivity, which is why they are separated in practice, and not
+transport, which is what would make it an adapter question. It is the same ground decision 55 was ruled
+on, and reading the two together is what keeps them from arguing one question twice (invariant 12):
 
-**Why this is not already answered.** Two neighbours cover the adjacent cases and neither covers this one.
-`multi_tenant.md` partitions on `tenant_id` — its axis is many humans under one boundary, or many forkers
-each with their own — and every guarantee it states (default-deny tenant scoping, per-tenant `sub`
-namespacing, no cross-tenant read) is keyed to a boundary that here has exactly one value on all four
-stores; one tenant cannot separate stores it does not distinguish. Decision 55 is nearer and rules the other
-direction: a second instance owned by **another party** is the record, extended by replication, reached
-through the record's own peer-sync substrate and not an `#external-system`. The case here is one party's own
-instances that must not replicate into each other, and it inherits 55's premise rather than its ruling —
-"the record" is defined in the singular (`vocabulary.md#record`), and four stores that must not merge is the
-first case that puts weight on the article.
+- **Peering (decision 55)** — instances that share an accountable principal. Replication. One record,
+  extended. A synced entity carries no `external_id`, has no adapter, and enters through the same
+  observation machinery as a local write.
+- **Several records (this decision)** — instances whose accountable principals *differ*. Not replication.
+  They must not merge.
 
-**Three questions it holds, none of which the documents above answer.**
+The operator is a different principal in an instance he shares with a client engagement than in his own,
+which is what puts his case on this side of the line rather than 55's. `multi_tenant.md` does not reach
+it either: its axis is `tenant_id`, and every guarantee it states is keyed to a boundary that here has one
+value across all the stores — one tenant cannot separate stores it does not distinguish.
 
-1. **Whether a principal holds one identity or one per instance.** `#principals` binds a credential to a
-principal many-to-one and rules that a shared instance's `user_id` collapses writers and resolves to no
-principal. What is unstated is an agent legitimately holding a **distinct** identity per instance, with the
-reads and writes under each staying separate — which reads as an extension of that mapping rather than a new
-mechanism, but is not written.
+**Why a non-goal was not available.** The row offered "an explicit non-goal for P1–P2, revisited at P3" as
+a disposition, and it was the right offer while the several-instance case was anticipated rather than
+actual. It is actual: the operator answered that he already runs two instances separated by high
+sensitivity and expects more as further engagements arrive. A non-goal would rest the design on a premise
+his own setup contradicts, and the cutover would be planned against a fiction. That the question turned
+on a fact rather than on a preference is why it was his to answer and not a reviewer's to derive.
 
-2. **What declares which instance a task's reads and writes belong to, and what happens when nothing
-does.** Today an instance is a property of where a session was launched, which is not a declaration and
-cannot be reviewed. If a principal spans instances, a task or a step must carry the binding, and an
-ambiguous binding must fail closed rather than resolve to whichever instance is configured first — the
-posture `failure_posture.md#a-task-whose-inputs-cannot-be-resolved-is-put-to-the-operator-not-executed-on-a-guess`
-already takes for a read that resolves to no instance, asked here of the store the read is of rather than of
-the value read. ateles#624 is
-the same ambiguity one layer down: the same operation resolved differently depending on which configured
-server carried it, and the divergence taught routing around a denial rather than surfacing it.
+**One identity per instance.** A principal holds a distinct identity in each instance, with the reads and
+writes under each staying separate. This extends `#principals`' credential-to-principal mapping rather
+than replacing it: that mapping is many-to-one and rules that a shared instance's `user_id` collapses
+writers and resolves to no principal. A distinct identity per instance is the legitimate case the mapping
+did not state — the collapse it forbids is many *writers* behind one credential, not one writer holding
+one credential per record he is accountable in.
 
-3. **Whether the rule against merging is stated or left to a component's discipline.** An orchestrator that
-reads across two of the stores to write one brief has crossed the separation without any rule refusing it —
-the separation would then be guaranteed by that component's own care, which principle 1 treats as reporting
-without binding. Either that is acceptable and the design says so, naming the orchestrator as the first
-place to look when something crosses, or the reads are partitioned in the model the way the writes would be.
+**The binding is explicit, and an ambiguous binding fails closed.** Which instance a task's reads and
+writes belong to is carried by the task or the step, declared. Today an instance is a property of where a
+session happened to be launched, which is not a declaration and cannot be reviewed. Where the binding is
+absent or ambiguous, the resolution **fails closed** — the work is put to the operator, and never resolved
+to whichever instance is configured first. This is not a new posture: it is principle 5 (fail closed on
+the field that carries the safety meaning) at the enforcement point this document's `#scope` owns, and it
+is the posture
+`failure_posture.md#a-task-whose-inputs-cannot-be-resolved-is-put-to-the-operator-not-executed-on-a-guess`
+already takes for a read that resolves to no instance — asked here of the store the read is *of* rather
+than of the value read. What a default would cost is specific: a read bound by configuration order rather
+than by declaration crosses between the operator's personal data and a client's, which is the exact
+boundary the sensitivity separation exists to hold. ateles#624 is the same ambiguity one layer down — the
+same operation resolved differently depending on which configured server carried it, and the divergence
+taught routing around a denial rather than surfacing it.
 
-**Candidate dispositions, all the operator's.** A section in `multi_tenant.md`, since the isolation
-vocabulary is already there and a second axis beside `tenant_id` could be argued beside the first; a
-document of its own, if the axis proves to carry rules that the tenancy document's own scope would distort;
-or an explicit non-goal — out of scope for P1–P2, revisit at P3 — which is a disposition and not a gap,
-because the register carrying the row is what makes the silence deliberate rather than an absence a reader
-reads as coverage.
+**The rule against merging is stated, not left to a component's discipline.** An orchestrator that reads
+across two of the stores to write one brief has crossed the separation, and the design refuses it here
+rather than relying on that orchestrator's care. Principle 1 is what settles the form: a mechanism that
+does not bind is not a control, and a separation guaranteed by a component's own diligence is reporting
+without binding — the defect class this corpus has repeatedly found in itself. The reads are partitioned
+the way the writes are.
 
-**Why it is argued here.** The first of the three is a statement about the credential-to-principal mapping
-this section owns; the second is about what an enforcement point resolves and what it does when the
-resolution is ambiguous, which is this document's `#scope`; and the third is about which reads a principal's
-authority reaches. All three are authority questions before they are storage questions, which is the same
-reason the operator gives for the shape landing in this repository at all: each instance already serves an
-authenticated caller against its own graph, so a second instance is another URL and another token and the
-store has no stake in it. What must hold several at once is the swarm.
+**What is still open.** The mechanism is not chosen here. A binding field's name and where it sits on a
+task or a step, the form of a per-instance credential, and how the read partition is enforced are each a
+mechanism, and none is named in this ruling (invariant 12). What is ruled is the shape the mechanism must
+satisfy: several records, one identity per instance, an explicit binding, a fail-closed ambiguity, and a
+stated non-merge rule. `multi_tenant.md#7-open-decisions-require-the-operator` decisions 1 and 2 —
+registered as decisions 79 and 80 — bear on the credential form and are the operator's.
 
-**No mechanism is proposed here** (invariant 12: no term is introduced, and none of the three questions is
-answered by naming one). A binding field, a per-instance credential form, and a partition rule over reads
-would each be a mechanism, and choosing among them is what makes this a decision rather than a gap to fill.
 
 ## Grants
 

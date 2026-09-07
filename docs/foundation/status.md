@@ -1587,7 +1587,7 @@ scope term or tier; credit as object or read) as **51–54**. Each register row 
 section, as the open rows of 25–29 once did; none was folded, because no existing open row duplicates one.
 `conformance_suite.md`'s three pending cells (AU-17, AU-19, AU-20) and its two prose pointers now cite the
 numbers. The next free number is 55. Not touched: the tenant questions `authority_model.md#principals`
-defers to `docs/multi_tenant.md` section 7, which are argued outside this directory and were outside this
+defers to `multi_tenant.md` section 7, which were argued outside this directory until decision 77 moved that document in, and were outside this
 pass's list.
 
 **Gate timing.** `consent` precedes `send`, `pay`, and `post`, yet the gate was stated as evaluated "at the
@@ -1996,7 +1996,7 @@ half" read as ruled.
 **What the matrix measures about itself now**, counted 2026-09-06 on this branch by parsing the table rows of
 `conformance_suite.md` whose first cell is a two-letter document code and a number: **354 rows** (unchanged) —
 344 mechanical (341 on `ba8377f`), 3 pending an open decision (WM-38 and WF-24 on 33 and 34, and AU-6 on the
-tenant section of `docs/multi_tenant.md`), 2 review-only, 1 definitional, and the pointer rows. The rows that
+tenant section of `multi_tenant.md`), 2 review-only, 1 definitional, and the pointer rows. The rows that
 waited on 36, 43, 47, 50, 52, 53, and 56 — WM-22, WM-25, WM-40b, WM-41, GW-29, GW-33, GW-33a, AU-17, AU-19,
 AU-20, AD-27, and MG-4 — are mechanical, each with the set-up and the failing artefact its ruling names; U-14
 closes.

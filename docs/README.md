@@ -182,7 +182,7 @@ Companion report (not a foundation design document; not in the review reading li
 *Consult as needed.*
 
 - [**QA evals design**](swarm_qa_evals_design.md) · [**QE3 eval authoring**](swarm_qa_evals_qe3_design.md)
-- [**Multi-tenancy**](multi_tenant.md) — the out-of-scope-today multi-operator path.
+- [**Multi-tenancy**](foundation/multi_tenant.md) — the tenancy axis; in the foundation set since decision 77.
 - [**Data publishing transformation**](data_publishing_transformation.md) ·
   [**Privacy guidelines**](data_publishing_privacy_guidelines.md)
 - [**Operator runbooks**](runbooks/) — operator-specific operational notes.

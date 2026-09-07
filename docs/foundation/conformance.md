@@ -39,6 +39,11 @@ bind via `workflow` entities + `render_workflow_docs.py --check` (workflows), as
 Whether the first two are keyed is a budget decision recorded in `status.md`, not a design fact — a keying decision about the projection, since decision 66, and never a reason to shorten either document;
 `migration.md` is never keyed, because it governs no code path and its figures live in `status.md`.
 
+`docs/foundation/multi_tenant.md` is in the set as of decision 77 (2026-09-07), keyed: read when tenant
+partitioning, per-tenant AAuth subject namespacing, grant admission's tenant match, per-human routing, or
+beneficiary ownership changes. It was authored outside this directory and moved in whole, so its
+argument predates the set's conventions and its five open decisions are registered like any other's.
+
 `docs/foundation/revisions.md` is a companion of a different kind: provenance, not argument. It carries
 the amendment history every document used to hold in its own front matter (decision 74). It is never keyed
 and never inlined — it states no rule, so no reviewer reads it to judge a change — and it is not shortened,
@@ -46,37 +51,64 @@ because an append-only record of what changed is the one thing whose growth is t
 
 ## A document the foundation defers a decision to, and does not contain
 
-**Open (decision 77).** Registered in `#the-register-of-open-design-decisions`, and argued here because
-`#scope` is where this directory says what belongs to it. `docs/multi_tenant.md` sits outside
-`docs/foundation/` and is cited by six documents in it — `authority_model.md` four times, and
-`data_model.md`, `vocabulary.md`, `status.md`, `conformance_suite.md`, and the reading projection once each.
-Two of those citations are not references but deferrals: `authority_model.md#principals` leaves the shape of
-the `operator` identifier and the derivation of a tenant to that document's section 7, and
-`conformance_suite.md` marks AU-6 pending on the same section. A reviewer who reads everything this document
-tells them to read cannot resolve either question from what they read.
+**Ruled (decision 77, 2026-09-07).** `docs/multi_tenant.md` is now `docs/foundation/multi_tenant.md`.
+The question was whether a document six documents here cite, and two defer live decisions to, belongs to
+the set or is governed by a rule in `#scope` for citing outside it. It belongs to the set.
 
-**What the scope above does and does not already settle.** It names three documents as out of scope by path,
-with a reason for each — they are render targets corrected through a plan — and it rules on four colocated
-companions, saying for each whether it is keyed, inlined, or shortened. Both passes are about documents
-inside or beside the directory. Neither states a rule for a document outside it that a foundation document
-cites as authority, and no reading-list rule covers one: the *Always read* kernel and the keyed table below
-both enumerate paths in this directory, so an out-of-set citation is neither included nor excluded — it is
-unaddressed. The rules that would otherwise decide it point in opposite directions, which is why this is a
-question rather than an omission: principle 9's one-home rule is satisfied by a single citation of a single
-argument wherever it lives, while decision 66's reading budget is computed over a set that a deferral
-silently escapes.
+**What was true when the question was opened.** The document sat outside `docs/foundation/` and was cited
+by six documents in it — `authority_model.md` six times, and `data_model.md`, `vocabulary.md`,
+`status.md`, and `conformance_suite.md` once each, with the generated reading projection carrying
+`authority_model.md`'s citation forward. Two of those citations were not references but deferrals:
+`authority_model.md#principals` left the shape of the `operator` identifier and the derivation of a
+tenant to that document's section 7, and `conformance_suite.md` marked AU-6 pending on the same section.
+A reviewer who read everything this document told them to read could resolve neither question from what
+they read.
 
-**The dispositions.** The set is self-contained, and the argument moves in — as a document here, or as the
-part of it the deferrals need, folded into `authority_model.md` and `multi_tenant.md` reduced to the
-non-foundation remainder. Or the placement is deliberate, and `#scope` gains a line saying which documents
-outside the directory a foundation document may defer to and what obligations follow — whether such a
-document is read on review, whether it may hold an open decision the register indexes, and whether its
-length counts against the budget. Or a narrower third: citation is allowed, deferral is not, so the two
-decisions of section 7 are re-registered here and the document stays where it is as background.
+**Why it moves rather than being governed from outside.** Three grounds, and the second is the strongest.
+It was already foundation-load-bearing, which the citation count and the two deferrals establish on their
+own. Its own framing had been falsified and nothing noticed: section 1's table describes single-operator
+as the current state, needing "*No isolation work needed beyond what already exists*", and section 6.2
+defers the expensive isolation work until "*a second operator/org exists*" — while the operator already
+runs several instances of the record, which is decision 76's subject. That went unobserved precisely
+because the document sat where no foundation obligation audits it; a document the set relies on and does
+not police is how a stale premise survives. And its section 7 held five open decisions marked as
+requiring the operator and registered nowhere, two of them time-critical for the cutover — the tenant-slug
+scheme and whether a tenant derives from `sub` or from a separate `match_tenant`, the latter saying
+"decide before more keys are minted" while the cutover mints keys.
 
-**Not ruled by derivation.** The corpus does not imply an answer. Every other placement question in this
-directory was argued rather than inferred, and the one line this document could gain is a rule about what
-the foundation set is — which is the operator's, not a reviewer's.
+**What was rejected, and why.** Stating an out-of-set rule in `#scope` — which documents outside the
+directory a foundation document may defer to, and what obligations follow — answers the placement
+question while leaving the audit gap that produced the falsification: a document read on review but not
+obliged to the set's own rules is still a document nothing audits. The narrower third disposition,
+allowing citation and forbidding deferral by re-registering section 7's decisions here, was rejected
+because it puts the register's pointers outside the set the register indexes, and because the deferrals
+are not the defect — the absence of an obligation over the document they point into is.
+
+**What the move obliges, and what was done in the same pass.** The document takes the front-matter form
+of decision 74, with a pointer to its own table in `revisions.md` and no revision chain ahead of its
+first claim; its five open decisions are registered as rows 79 to 83 of
+`#the-register-of-open-design-decisions`, open and attributed to it, none ruled — they are the operator's,
+and ruling them is a separate pass. Its two falsified readings are annotated in place against decision
+76's ruling and are **not** edited: a move is not the occasion to change a document's content, and
+trimming or rewriting under cover of one is how a relocation becomes an unreviewed amendment.
+
+**One consequence the move surfaces immediately, left unfixed here.** With the document in the directory,
+`check_foundation_vocabulary.py` reads it for the first time and reports nine **Never** hits in prose
+authored outside the set — `admin` and `story` where the vocabulary has entries, `agent_definition` used
+as a bare noun, `running`, `side effect`, and a bare `split`. Every one is a term the vocabulary already
+governs, and none was caught before because no checker looked. That is the audit gap this ruling is
+about, demonstrated on the first run. They are **not** fixed in this pass: a move that also rewrites the
+document's terms is an unreviewed amendment wearing a relocation's diff, and the substitutions are a
+vocabulary pass's under invariant 12, on the same reasoning decision 35 gave for leaving two names
+standing in the text until that pass lands. The checker reports them from now on, which is the change
+that matters.
+
+**What it costs decision 66's reading budget: nothing.** The document is 18,792 bytes, which would have
+been a real objection under the pre-66 reading of the caps. Since decision 66, `MAX_DOC_CHARS` and
+`MAX_BLOCK_CHARS` bound the **generated projection** and never these documents, which are bounded by
+nothing mechanical — so a document entering the set costs the projection only what a matrix row citing
+one of its anchors costs, and no row cites one today. AU-6 is the row that would, when section 7's
+decisions 1 and 2 are ruled.
 
 ## Always read
 
@@ -498,8 +530,13 @@ so that they are not reused; see the two notes below.
 | 72 | whether `sign-off` is the right name for the record — it carries three verdict values of which only one is an approval, and `signed` is itself one of them — and, if it is renamed to `verdict` on the operator's proposal, what the current `verdict` field is then called | `vocabulary.md#whether-sign-off-names-the-record-neutrally-or-asserts-one-of-its-own-outcomes` | nothing in the design; a rename of 865 `sign-off` and 41 `sign_off` occurrences, which must land as one pass after PRs #766, #767, and #770 merge | **open** (2026-09-06) |
 | 73 | whether a vocabulary term should prefer a single word, and what exception admits the qualified compounds the no-overlap half of invariant 12 currently depends on | `principles.md#12-as-few-terms-as-the-design-needs-and-no-fewer-no-term-overlaps-another` | the form of any future term; a rename of whichever of the 37 multi-word terms collapse, on the same sequencing as 72 | **open** (2026-09-06) |
 | 74 | where a foundation document's amendment history lives, given that the front-matter chain had reached 28 clauses and 9,462 characters on this document alone — ahead of every rule it states, and inside the budget decision 66's reading projection is meant to protect | `#a-documents-amendment-history-lives-in-revisionsmd-not-in-its-front-matter` and `revisions.md` | decision 66, whose projection this competes with for the reader's first screen, and `#amending-a-foundation-document`, whose obligation this relocates without weakening | **ruled** (2026-09-06): a companion, `revisions.md`, one table per document, one row per revision — the obligation to record an amendment in the same change is unchanged, and only its location moves. A per-document collapsed section at the foot was rejected because it leaves twenty places to look for one corpus-wide question ("what changed in the foundation this week") and still grows the file the projection is extracted from; compressing the chains in place was rejected because it treats a placement problem as a length problem, and the chain would re-accrete at the same rate. `authority_model.md` is the pilot (2,702 -> 924 characters of front matter); the rollout is one document per PR, largest front matter first |
-| 76 | whether one operator's several instances of the record — kept apart by sensitivity rather than by tenancy, one tenant, several stores that must not merge — are one record or several, and what the design says about the shape at all: whether a principal holds one identity or one per instance; what declares which instance a task's reads and writes belong to, and what an ambiguous binding does; and whether the rule against merging is stated or left to a component's discipline | `authority_model.md#whether-one-operators-several-instances-of-the-record-are-one-record-or-several` | — | **open** (2026-09-07): dispositions are a section in `multi_tenant.md` beside the tenancy axis, a document of its own, or an explicit non-goal for P1–P2 revisited at P3; the operator's, and a non-goal is an answer |
-| 77 | whether `docs/multi_tenant.md` moves into the foundation set, or `#scope` states the rule for a document outside the directory that six documents here cite and two defer live decisions to | `#a-document-the-foundation-defers-a-decision-to-and-does-not-contain` | decision 66, whose reading budget a deferral out of the set escapes | **open** (2026-09-07): dispositions are move the argument in, state the out-of-set rule in `#scope` with the obligations that follow, or allow citation and forbid deferral by re-registering section 7's two decisions here |
+| 76 | whether one operator's several instances of the record — kept apart by sensitivity rather than by tenancy, one tenant, several stores that must not merge — are one record or several, and what the design says about the shape at all: whether a principal holds one identity or one per instance; what declares which instance a task's reads and writes belong to, and what an ambiguous binding does; and whether the rule against merging is stated or left to a component's discipline | `authority_model.md#whether-one-operators-several-instances-of-the-record-are-one-record-or-several` | — | **ruled** (2026-09-07, on the operator's answer to the factual question the row turned on): **several records, not one**, on the accountability ground decision 55 was ruled on — peering is instances sharing an accountable principal, and several records is instances with different ones, which is what keeps the two rows from arguing one question (invariant 12). One identity **per instance**, as an extension of `#principals`' many-to-one mapping and not a new mechanism; the instance a task's reads and writes belong to is carried by an **explicit binding**, and an ambiguous one **fails closed** rather than resolving to whichever instance is configured first — the posture `failure_posture.md#a-task-whose-inputs-cannot-be-resolved-is-put-to-the-operator-not-executed-on-a-guess` already takes for a read that resolves to no instance, under principle 5; and the rule against merging is **stated**, not left to an orchestrator's discipline, which principle 1 treats as reporting without binding. The explicit non-goal for P1–P2 revisited at P3 was rejected because the operator answered that the several-instance case is live today and not anticipated — a personal instance and a second shared with a client engagement, separated by sensitivity, with more expected — so a non-goal would rest the design on a premise his own setup contradicts and plan the cutover against a fiction |
+| 77 | whether `docs/multi_tenant.md` moves into the foundation set, or `#scope` states the rule for a document outside the directory that six documents here cite and two defer live decisions to | `#a-document-the-foundation-defers-a-decision-to-and-does-not-contain` | decision 66, whose reading budget a deferral out of the set escapes | **ruled** (2026-09-07, the same pass as 76 and on the same answer): **it moves in**, as `docs/foundation/multi_tenant.md`, and takes the set's obligations with it — the front-matter form of decision 74, its own table in `revisions.md`, and section 7's five decisions registered as rows 79 to 83 below. Three grounds: it is already foundation-load-bearing (six documents here cite it, `authority_model.md` six times, and two of those citations are deferrals rather than references — `authority_model.md#principals` and `conformance_suite.md`'s AU-6); its own framing is falsified by the operator's setup, since section 1's table calls single-operator the current state needing "no isolation work beyond what already exists" while he already runs several instances, and nothing noticed because the document sat where no foundation obligation audits it; and section 7's five open decisions bound nowhere, two of them time-critical for the cutover. Stating an out-of-set rule in `#scope` was rejected because it answers the placement question while leaving the audit gap that produced the falsification, and the narrower "citation allowed, deferral forbidden" was rejected because re-registering the decisions here without the argument they index would put the register's pointer outside the set it indexes. Decision 66's projection is unaffected: since 66, the two caps bound the generated projection and never these documents, so the document's 18,792 bytes cost the reading budget nothing until a matrix row cites one of its anchors |
+| 79 | whether `tenant_id` is an opaque UUID or a human slug readable in an AAuth subject (`monedula@acme-swarm`) and in logs — the document leans slug with immutable UUID backing, and records the lean as the operator's to take | `multi_tenant.md#7-open-decisions-require-the-operator` (decision 1) | the subject form every key is minted under, which decision 80 shares | **open** (2026-09-07, registered by the decision-77 pass from this document's section 7, unruled there and unruled here) |
+| 80 | whether a tenant derives from the AAuth `sub` (`<name>@<tenant>-swarm`, self-describing, no extra field) or from a separate `match_tenant` on the grant (flexible if one identity ever spans tenants) | `multi_tenant.md#7-open-decisions-require-the-operator` (decision 2) | every key already minted as `<name>@ateles-swarm`; the document states "decide before more keys are minted", and a cutover mints keys | **open** (2026-09-07, registered by the decision-77 pass; time-critical on its own terms) |
+| 81 | whether within-tenant default visibility is private-first ("see only my own book") or shared-first ("see everything in the tenant") when the org case arrives — a product and RGPD posture question, not a technical one | `multi_tenant.md#7-open-decisions-require-the-operator` (decision 3) | the soft-wall of that document's section 5 | **open** (2026-09-07, registered by the decision-77 pass) |
+| 82 | whether the fork case is a single hosted instance serving many forkers or one instance per forker — Goal 6 says their own, which makes tenant isolation deployment-level; a hosted multi-forker offering would move it to row level and make section 3 load-bearing rather than belt-and-suspenders | `multi_tenant.md#7-open-decisions-require-the-operator` (decision 4) | whether that document's section 3 is a hedge or a requirement | **open** (2026-09-07, registered by the decision-77 pass) |
+| 83 | the capability ceiling of a non-owner operator within a tenant: whether minting agent keys, amending an agent's definition, or changing the `priority_rubric` tenant-wide are theirs or the owner's — the enforcement is deferred, but the intended ceiling is to be recorded now so grants are shaped consistently | `multi_tenant.md#7-open-decisions-require-the-operator` (decision 5) | the shape of grants minted before the org's own ceiling is enforced | **open** (2026-09-07, registered by the decision-77 pass) |
 
 **Every ruled decision now has a heading of its own.** 25 through 29 were opened as bold paragraphs inside
 their documents' *What this document does not decide* sections, and the register's pointers resolved to the

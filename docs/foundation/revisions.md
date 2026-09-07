@@ -37,7 +37,8 @@ the remotes — the maximum `revision N` on any open branch's copy of any docume
 `conformance.md`'s decision numbering states it: concurrent branches assign numbers the file on your own
 branch cannot see. As of 2026-09-07 that sweep over all 92 open pull-request branches gives 68, so the next
 free number is 69, which the front-matter rollout takes; a later sweep the same day gives 69, and the
-several-instances pass takes 70.
+several-instances pass takes 70. A sweep over the remotes on 2026-09-07 gives 72, so the decisions 76
+and 77 pass takes 73 — one number across all four documents it amends, per the rule above.
 
 ## `authority_model.md`
 
@@ -53,6 +54,7 @@ several-instances pass takes 70.
 | 39 | the second rulings pass of 2026-09-06 | decisions 47 and 52 ruled here, and the second halves of 50 and 53 — the raiser does not resolve, the operator's self-resolution marked; what stops is a task, confirmed through the checkpoint by the owner seat, proposing a grant capability; which checks and which metered resources are `action_policy` values, fail-closed where unwritten |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
 | 70 | the several-instances pass of 2026-09-07 | decision 76 opened here — whether one operator's several instances of the record are one record or several, with the three questions it holds and the dispositions the operator named; no mechanism proposed and no term introduced |
+| 73 | the decisions 76 and 77 pass of 2026-09-07 | decision 76 ruled here — one operator's several instances are several records, not one, on the accountability ground; one identity per instance; an explicit binding whose ambiguity fails closed; the non-merge rule stated rather than left to a component's discipline |
 
 
 ## `adapters.md`
@@ -121,6 +123,7 @@ several-instances pass takes 70.
 | 68 | the decision-70 ruling of 2026-09-06 | decision 70 moved from open to ruled — the `project` scoping key on `workflow` and `batch` and the planning level of decision 57 are two concepts sharing one word; the planning level keeps `project`, the key is renamed `declaration_scope`, and **declaration scope** is added to `vocabulary.md` under invariant 12's overlap half, swap-tested against `instance`, `domain`, and `tenant`; a `project` entry added beside it stating the planning sense and its Never for the scoping sense; `migration.md`'s G20 restated — the word collision closed, the remaining question narrowed to whether an instance runs one declaration scope or several; the derivation of a task's scope left as a gap in `conformance_suite.md` with the ascent removed as a candidate answer |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
 | 70 | the several-instances pass of 2026-09-07 | decisions 76 and 77 registered; 77 argued here, in `#scope`'s neighbourhood — a document outside the directory that six documents in it cite and two defer live decisions to |
+| 73 | the decisions 76 and 77 pass of 2026-09-07 | decisions 76 and 77 ruled; `multi_tenant.md` recorded as in the set in `#scope`; `#a-document-the-foundation-defers-a-decision-to-and-does-not-contain` rewritten as the ruling; `multi_tenant.md` section 7's five open decisions registered as rows 79 to 83 |
 
 
 ## `conformance_suite.md`
@@ -233,6 +236,12 @@ several-instances pass takes 70.
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
 
 
+## `multi_tenant.md`
+
+| Revision | Pass | What changed |
+|---|---|---|
+| 73 | the decisions 76 and 77 pass of 2026-09-07 | moved into the foundation set by decision 77 (`docs/multi_tenant.md` → `docs/foundation/multi_tenant.md`, with history); given the decision-74 front-matter form and a pointer to this table; section 1's "current state" row and section 6.2's deferral trigger annotated against decision 76's ruling, with neither claim edited; section 7 noted as registered at `conformance.md` rows 79 to 83. Amendments before this one were made outside the set and are not reconstructed here |
+
 ## `payments.md`
 
 | Revision | Pass | What changed |
@@ -313,6 +322,7 @@ several-instances pass takes 70.
 | 60 | the undefined-term pass of 2026-09-06 | [reason class](vocabulary.md#reason-class) added as the category entry a reader meeting `repeated_lapse` had no way to resolve, with [`repeated_lapse`](vocabulary.md#repeated_lapse), [`rounds_exhausted`](vocabulary.md#rounds_exhausted), [`unreadable_workflow`](vocabulary.md#unreadable_workflow), [`capability_denied`](vocabulary.md#capability_denied), and [`capability_unavailable`](vocabulary.md#capability_unavailable) defined beneath it; [principal binding](vocabulary.md#principal-binding) and [session_digest](vocabulary.md#session_digest) added, each carrying a rule no existing term could hold — the counting rule and the agent sign-off's required reference; `lapse_cap`, `min_tier`, `confidence_threshold`, `external_api_write`, and `verify_deployed` deliberately NOT given entries, each named instead on the entry that already owns its set — [`action_policy`](vocabulary.md#action_policy), [`action_type`](vocabulary.md#action_type), and [`step`](vocabulary.md#step) — since a value is not a term (principle 9); the drop reason named on the [dropped](vocabulary.md#dropped) entry as the [adapter](vocabulary.md#adapter)'s, not the design's; six substrate field names recorded in `migration.md#substrate-field-names-the-design-reads-and-never-adopts-as-terms` rather than promoted |
 | 68 | the decision-70 ruling of 2026-09-06 | [declaration scope](vocabulary.md#declaration-scope) added — the key that selects which [workflow](vocabulary.md#workflow) declaration a [batch](vocabulary.md#batch) runs under, swap-tested against `instance`, [domain](vocabulary.md#domain), and [tenant](vocabulary.md#tenant) and distinguished from the planning level; [project](vocabulary.md#project) added beside it, defining the planning sense and banning the scoping sense; `project` retired as the name of the scoping key |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
+| 73 | the decisions 76 and 77 pass of 2026-09-07 | the `multi_tenant.md` citation repointed inside the directory after decision 77 moved that document into the set |
 
 
 ## `work_model.md`
