@@ -81,6 +81,64 @@ DEFAULT_SILENCE_THRESHOLD_DB = float(
 RMS_PERCENTILE = 0.95
 _RMS_RE = re.compile(r"RMS_level=(-?[\d.]+)")
 
+# --- Confidence gate (ateles#777) -------------------------------------------
+# The level gate above is necessary but NOT sufficient. It answers "was this
+# loud", and on a noisy microphone that is not the same question as "was this
+# speech". Measured on the 2026-09-07 fixture session (mic track, ten chunks):
+# a hallucination sat at -39.0 dB while real speech sat at -36.4 dB — a 2.6 dB
+# separation. No threshold splits those populations, so raising the level gate
+# cannot fix it; it would only start dropping real speech.
+#
+# So we ask Whisper what IT thinks, using the per-segment fields the
+# ``verbose_json`` response format carries. This is the model's own judgement
+# rather than a proxy measured outside it, and it is language-independent —
+# which output-side phrase matching can never be, since the fabrications are
+# open-ended across arbitrary languages (this fixture alone produced English,
+# Chinese, Japanese and Ukrainian).
+#
+# A chunk is emitted as transcript when AT LEAST ONE segment looks like real
+# speech on all three axes at once. No single axis separates the fixture:
+#
+#   no_speech_prob  Whisper's own "this is not speech" estimate, and the most
+#                   run-to-run stable of the three. Alone it fails: real speech
+#                   reached 0.370 while a fabrication sat at 0.297, so the
+#                   populations overlap on this axis.
+#   avg_logprob     How confident the decode was. Alone it fails too — a
+#                   fabrication decoded at -0.331, better than real speech at
+#                   -1.050 — but it catches the degenerate markup/garbage case,
+#                   which decoded around -3.5.
+#   char rate       Characters of text per second of segment. Fabricating on
+#                   silence, Whisper stretches a few tokens across the whole
+#                   window. This is a structural property of padding silence,
+#                   not a phrase list: it never inspects WHAT was said, only how
+#                   much text was claimed for how much time.
+#
+# Thresholds are fitted over FOUR transcriptions of each of the ten fixture
+# chunks (40 samples), not one — Whisper's decode is non-deterministic, and a
+# rule fitted to a single draw overfits badly. Re-transcribing one fabricated
+# chunk five times produced five different fabrications in five different
+# languages, with no_speech_prob ranging 0.03-0.60 and avg_logprob -0.33 to
+# -4.15 on the SAME audio. Real speech, by contrast, was near-identical across
+# trials — which is itself part of the signal.
+#
+# Over those 40 samples the defaults below keep 24/24 real-speech transcriptions
+# and suppress 16/16 fabricated ones. The binding constraint is char rate: real
+# speech never fell below 3.59 chars/s, while no fabrication passing the other
+# two axes exceeded 2.87. Margins: nsp +0.26/-0.02, alp +0.40/-20.0,
+# rate +0.55/-0.10.
+DEFAULT_MAX_NO_SPEECH_PROB = float(
+    os.environ.get("LIVE_TRANSCRIPT_MAX_NO_SPEECH_PROB", "0.40")
+)
+DEFAULT_MIN_AVG_LOGPROB = float(
+    os.environ.get("LIVE_TRANSCRIPT_MIN_AVG_LOGPROB", "-1.0")
+)
+DEFAULT_MIN_CHAR_RATE = float(
+    os.environ.get("LIVE_TRANSCRIPT_MIN_CHAR_RATE", "3.0")
+)
+# Set to "0" to log the verdict without acting on it — useful when calibrating
+# the thresholds on a new mic or room before trusting them to suppress.
+CONFIDENCE_GATE_ENABLED = os.environ.get("LIVE_TRANSCRIPT_CONFIDENCE_GATE", "1") != "0"
+
 # --- Follow mode ------------------------------------------------------------
 DEFAULT_FOLLOW = os.environ.get("LIVE_TRANSCRIPT_FOLLOW", "") == "1"
 DEFAULT_FOLLOW_TIMEOUT_MIN = float(
@@ -196,6 +254,91 @@ def measure_slice_rms_db(wav_path: Path) -> float | None:
     if level is None:
         log("RMS measurement returned no usable values — transcribing anyway")
     return level
+
+
+def segment_char_rate(segment: dict) -> float:
+    """Characters of transcript per second of segment wall-clock.
+
+    Whisper hallucinating on near-silence stretches a handful of tokens across
+    the whole window, so this collapses toward zero; real speech bursts well
+    above it. Measures only how much text was claimed for how much time — it
+    never looks at what the text says, in any language.
+    """
+    span = float(segment.get("end", 0.0)) - float(segment.get("start", 0.0))
+    if span <= 0:
+        return 0.0
+    return len((segment.get("text") or "").strip()) / span
+
+
+def segment_is_speech(
+    segment: dict,
+    *,
+    max_no_speech_prob: float = DEFAULT_MAX_NO_SPEECH_PROB,
+    min_avg_logprob: float = DEFAULT_MIN_AVG_LOGPROB,
+    min_char_rate: float = DEFAULT_MIN_CHAR_RATE,
+) -> bool:
+    """True when one segment clears all three confidence axes at once."""
+    return (
+        float(segment.get("no_speech_prob", 0.0)) <= max_no_speech_prob
+        and float(segment.get("avg_logprob", 0.0)) >= min_avg_logprob
+        and segment_char_rate(segment) >= min_char_rate
+    )
+
+
+def classify_transcription(
+    segments: list[dict] | None,
+    *,
+    max_no_speech_prob: float = DEFAULT_MAX_NO_SPEECH_PROB,
+    min_avg_logprob: float = DEFAULT_MIN_AVG_LOGPROB,
+    min_char_rate: float = DEFAULT_MIN_CHAR_RATE,
+) -> tuple[str, dict]:
+    """Judge a transcribed chunk from Whisper's own per-segment confidence.
+
+    Returns ``(verdict, evidence)`` where verdict is one of:
+
+      - ``"speech"``      — at least one segment clears all three axes; emit it
+      - ``"hallucinated"``— segments exist but none does; suppress it
+      - ``"unknown"``     — no segments came back at all, so there is no signal
+                            to judge on. Emitted rather than suppressed: a
+                            missing measurement must never silently discard
+                            audio, exactly as a failed RMS read falls through
+                            to transcription.
+
+    ``evidence`` carries the best segment's three numbers so the JSONL records
+    WHY a chunk was suppressed, and so thresholds can be re-derived later from
+    the log alone without re-billing the API.
+    """
+    if not segments:
+        return "unknown", {}
+
+    scored = [
+        (
+            float(s.get("no_speech_prob", 0.0)),
+            float(s.get("avg_logprob", 0.0)),
+            segment_char_rate(s),
+            s,
+        )
+        for s in segments
+    ]
+    speechy = [
+        t for t in scored
+        if segment_is_speech(
+            t[3],
+            max_no_speech_prob=max_no_speech_prob,
+            min_avg_logprob=min_avg_logprob,
+            min_char_rate=min_char_rate,
+        )
+    ]
+    # Report the segment that carried the decision: the best speech-looking one
+    # when we keep, the closest near-miss (densest) when we suppress.
+    ref = max(speechy or scored, key=lambda t: t[2])
+    evidence = {
+        "no_speech_prob": round(ref[0], 4),
+        "avg_logprob": round(ref[1], 4),
+        "char_rate": round(ref[2], 2),
+        "segments": len(segments),
+    }
+    return ("speech" if speechy else "hallucinated"), evidence
 
 
 def track_kind(path: Path) -> str:
@@ -367,30 +510,51 @@ def build_subprocess_env(
     return env
 
 
-def transcribe_slice(wav_path: Path, env: dict) -> tuple[bool, str]:
+def transcribe_slice(wav_path: Path, env: dict) -> tuple[bool, str, list[dict]]:
     """Transcribe one slice.
 
-    Returns (ok, payload). On failure the payload is an error string, EXCEPT for
-    an empty transcript, which returns SILENCE_SENTINEL so the caller can tell a
-    quiet interval apart from a broken transcription path.
+    Returns ``(ok, payload, segments)``. On failure the payload is an error
+    string, EXCEPT for an empty transcript, which returns SILENCE_SENTINEL so
+    the caller can tell a quiet interval apart from a broken transcription path.
+
+    ``segments`` carries Whisper's per-segment ``no_speech_prob`` /
+    ``avg_logprob`` for the confidence gate, and is empty whenever that sidecar
+    could not be read — which the gate reads as "no signal", never as silence.
     """
     python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
+    seg_path = wav_path.with_suffix(".segments.json")
     try:
         result = subprocess.run(
             [
                 python_bin, str(TRANSCRIBE), str(wav_path),
                 "--no-store", "--no-diarize",
+                "--segments-json", str(seg_path),
             ],
             capture_output=True, text=True, env=env, timeout=300,
         )
     except subprocess.TimeoutExpired:
-        return False, "transcription timed out after 300s"
+        return False, "transcription timed out after 300s", []
     except OSError as exc:
-        return False, f"failed to run transcribe_audio.py: {exc}"
+        return False, f"failed to run transcribe_audio.py: {exc}", []
+    finally:
+        pass
+
+    segments: list[dict] = []
+    try:
+        if seg_path.exists():
+            payload = json.loads(seg_path.read_text(encoding="utf-8"))
+            segments = payload.get("segments") or []
+    except (OSError, ValueError, AttributeError) as exc:
+        # A missing or malformed sidecar disables the confidence gate for this
+        # chunk rather than suppressing it. Never drop audio because a
+        # measurement broke.
+        log(f"could not read segment confidences ({exc}) — gate skipped for this chunk")
+    finally:
+        seg_path.unlink(missing_ok=True)
 
     if result.returncode != 0:
         tail = (result.stderr or "").strip().splitlines()
-        return False, tail[-1] if tail else f"exit {result.returncode}"
+        return False, (tail[-1] if tail else f"exit {result.returncode}"), segments
 
     # transcribe_audio.py prints a "Transcribing audio file: ..." banner ahead of
     # the transcript; drop it so the JSONL carries only spoken text.
@@ -398,8 +562,8 @@ def transcribe_slice(wav_path: Path, env: dict) -> tuple[bool, str]:
              if ln.strip() and not ln.startswith("Transcribing audio file:")]
     text = " ".join(ln.strip() for ln in lines).strip()
     if not text:
-        return False, SILENCE_SENTINEL
-    return True, text
+        return False, SILENCE_SENTINEL, segments
+    return True, text, segments
 
 
 def main(argv: list[str]) -> int:
@@ -426,6 +590,26 @@ def main(argv: list[str]) -> int:
                     default=DEFAULT_SILENCE_THRESHOLD_DB,
                     help=f"Skip transcription below this sustained RMS in dB "
                          f"(default: {DEFAULT_SILENCE_THRESHOLD_DB:g})")
+    ap.add_argument("--max-no-speech-prob", type=float,
+                    default=DEFAULT_MAX_NO_SPEECH_PROB,
+                    help=f"Confidence gate: a segment counts as speech only at or "
+                         f"below this Whisper no_speech_prob "
+                         f"(default: {DEFAULT_MAX_NO_SPEECH_PROB:g})")
+    ap.add_argument("--min-avg-logprob", type=float,
+                    default=DEFAULT_MIN_AVG_LOGPROB,
+                    help=f"Confidence gate: a segment counts as speech only at or "
+                         f"above this Whisper avg_logprob "
+                         f"(default: {DEFAULT_MIN_AVG_LOGPROB:g})")
+    ap.add_argument("--min-char-rate", type=float,
+                    default=DEFAULT_MIN_CHAR_RATE,
+                    help=f"Confidence gate: a segment counts as speech only at or "
+                         f"above this many transcript characters per second "
+                         f"(default: {DEFAULT_MIN_CHAR_RATE:g})")
+    ap.add_argument("--no-confidence-gate", dest="confidence_gate",
+                    action="store_false", default=CONFIDENCE_GATE_ENABLED,
+                    help="Report the confidence verdict in the JSONL but do not "
+                         "suppress — for calibrating on a new mic or room "
+                         "(env LIVE_TRANSCRIPT_CONFIDENCE_GATE=0)")
     args = ap.parse_args(argv)
 
     if not TRANSCRIBE.exists():
@@ -457,6 +641,10 @@ def main(argv: list[str]) -> int:
     log(f"tailing: {recording.name}")
     log(f"chunk interval: {args.interval}s   starting at: {cursor:.0f}s")
     log(f"silence gate: skip below {args.silence_threshold_db:g} dB sustained RMS")
+    log(f"confidence gate: {'on' if args.confidence_gate else 'report-only'} — "
+        f"segment must have no_speech_prob <= {args.max_no_speech_prob:g}, "
+        f"avg_logprob >= {args.min_avg_logprob:g}, "
+        f"chars/s >= {args.min_char_rate:g}")
     if args.follow:
         log(f"follow mode: on — pausing (not exiting) on stop, up to "
             f"{args.follow_timeout_min:g} min per break")
@@ -564,6 +752,7 @@ def main(argv: list[str]) -> int:
 
             rms_db: float | None = None
             skipped_silent = False
+            segments: list[dict] = []
             try:
                 proc = subprocess.run(
                     [
@@ -586,7 +775,7 @@ def main(argv: list[str]) -> int:
                         skipped_silent = True
                         ok, payload = True, ""
                     else:
-                        ok, payload = transcribe_slice(tmp_path, env)
+                        ok, payload, segments = transcribe_slice(tmp_path, env)
             except subprocess.TimeoutExpired:
                 ok, payload = False, "ffmpeg slice timed out"
             finally:
@@ -612,6 +801,36 @@ def main(argv: list[str]) -> int:
                 consecutive_failures = apply_transcription_result(
                     record, ok, payload, consecutive_failures
                 )
+                # Confidence gate — only meaningful on a chunk that actually
+                # produced text. A silent or failed chunk has nothing to judge.
+                if ok and record.get("text"):
+                    verdict, evidence = classify_transcription(
+                        segments,
+                        max_no_speech_prob=args.max_no_speech_prob,
+                        min_avg_logprob=args.min_avg_logprob,
+                        min_char_rate=args.min_char_rate,
+                    )
+                    if evidence:
+                        record["confidence"] = evidence
+                    if verdict == "hallucinated":
+                        # Deliberately distinct from the level gate's
+                        # "below_threshold": the two mechanisms suppress
+                        # different populations and must be measurable apart.
+                        record["suppressed"] = "low_confidence"
+                        if args.confidence_gate:
+                            # Keep the text under a separate key so the chunk
+                            # is auditable, but never under "text" — a consumer
+                            # reading "text" must never see a fabrication.
+                            record["suppressed_text"] = record.pop("text")
+                            record["text"] = ""
+                        else:
+                            # Report-only calibration mode: flag it, emit it.
+                            record["suppressed"] = "low_confidence_reported_only"
+                    elif verdict == "unknown":
+                        # No confidence signal came back. Emit, but say so, so a
+                        # consumer can render it with the uncertainty visible
+                        # rather than as vouched-for transcript.
+                        record["confidence_unavailable"] = True
 
             append(record)
 
