@@ -1246,6 +1246,7 @@ adapter's wherever the socket is.
 - [Whether one binding type or two names an external system's instance](#whether-one-binding-type-or-two-names-an-external-systems-instance).
 - [Whether the host a daemon runs on is an external system](#whether-the-host-a-daemon-runs-on-is-an-external-system).
 - [Whether a second instance of the record is an external system](#whether-a-second-instance-of-the-record-is-an-external-system).
+- [Whether the instance of the record serving a swarm is an external system when the swarm operates it](#whether-the-instance-of-the-record-serving-a-swarm-is-an-external-system-when-the-swarm-operates-it) — open decision 78.
 
 Whether one process hosts both is an implementation choice; the design's requirement is that they meet
 only in the record. An adapter is a daemon in the sense of `work_model.md#the-four-execution-mechanisms`:
