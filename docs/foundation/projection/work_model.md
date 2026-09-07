@@ -85,19 +85,19 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 
 ## [How a batch is formed, and what chooses its workflow](../work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow)
 
-- **WM-27** — opened only by a closing sign-off *[M]*
-- **WM-28** — the same: attach part-way is a step owner's judgement in a sign-off; the task inherits the sign-offs *[M (U-25 closed)]*
+- **WM-27** — opened only by a closing verdict *[M]*
+- **WM-28** — the same: attach part-way is a step owner's judgement in a verdict; the task inherits the verdicts *[M (U-25 closed)]*
 - **WM-29** — the same: the workflow is fixed at open *[M]*
 - **WM-30** — the same: a daemon noticing eligible tasks, an adapter on an event, a sweeper, a label — none opens a batch or chooses a workflow *[M]*
 
 ## [A batch may hold on a condition discovered mid-flight](../work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight)
 
-- **WM-31** — a hold is a finding naming the condition, no sign-off, the lease renewed; no held state and no field *[M (X-14 closed)]*
-- **WM-31a** — the same: a hold ends by sign-off, checkpoint, or lapse, never by elapsed time into a pass; a hold owing nobody a decision is a rule-5 deferral *[M (`hold_bound`; U-20 closed)]*
+- **WM-31** — a hold is a finding naming the condition, no verdict, the lease renewed; no held state and no field *[M (X-14 closed)]*
+- **WM-31a** — the same: a hold ends by verdict, checkpoint, or lapse, never by elapsed time into a pass; a hold owing nobody a decision is a rule-5 deferral *[M (`hold_bound`; U-20 closed)]*
 
 ## [A batch may depend on a task it created](../work_model.md#a-batch-may-depend-on-a-task-it-created)
 
-- **WM-32** — a `DEPENDS_ON` edge, never a field; the sign-off is refused while it is unended and the task non-terminal; ending it is a recorded act *[M]*
+- **WM-32** — a `DEPENDS_ON` edge, never a field; the verdict is refused while it is unended and the task non-terminal; ending it is a recorded act *[M]*
 - **WM-32a** — the same: a cycle is refused at write and at attach; one found later escalates every batch in it as `dependency_cycle` *[M — the cross-type walk is the writer's (X-15), so the mutant is a writer that skips it]*
 - **WM-32b** — the same: `DEPENDS_ON` is not on the chain; the created task is a peer with its own intake and its own priority *[M]*
 
@@ -115,7 +115,7 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 
 ## [A recurring task is one live instance, and its completion creates the next](../work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next)
 
-- **WM-35a** — one live instance, never zero and never two; the closing sign-off creates the next, `FOLLOWS` task to task, the rule copied *[M]*
+- **WM-35a** — one live instance, never zero and never two; the closing verdict creates the next, `FOLLOWS` task to task, the rule copied *[M]*
 - **WM-35b** — the same: `due_date` is computed from the schedule, never from completion; a missed point is owed unless the rule says otherwise *[M]*
 - **WM-35c** — the same: no series entity, count, or live marker; the rule lives on the instance; ending the series is a correction to the live instance's rule; postponing is a `due_date` correction and creates nothing *[M]*
 - **WM-35d** — the same: a stopped series is one overdue instance, and its batch reaches the queue *[M]*

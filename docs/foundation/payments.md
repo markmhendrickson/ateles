@@ -197,7 +197,7 @@ external id already known, or it is not minted.
 **The `reconcile` step does not close.** `reconcile` closes on the transfer being read back from the rail at
 its terminal status (`workflows.md#payment`); an unconfirmed action does not satisfy that, so the step stays
 open and the batch is visibly incomplete. This is the design working: a payment whose outcome nobody knows
-is a batch missing a sign-off, which is a readable state, rather than a task marked done.
+is a batch missing a verdict, which is a readable state, rather than a task marked done.
 
 **The unknown holds, and the hold is bounded.** `failure_posture.md` rule 5's shape applies: the condition
 is announced on the off-record path while it may be transient, and the bound raises one checkpoint. What
@@ -338,7 +338,7 @@ something specific and unusually important:
 **A balance is never a permit.** It is a condition a step owner reads before signing — the same relationship
 a CI result has to a review step (`adapters.md#no-external-event-advances-a-step-by-itself`). A sufficient
 balance does not authorize a payment and an insufficient one does not by itself block a step; a step owner
-reads it and, ordinarily, blocks with a verdict that names what it read. This is worth stating because the
+reads it and, ordinarily, blocks with a conclusion that names what it read. This is worth stating because the
 inverse is tempting: a balance check *feels* like a safety mechanism, and building it as one would put a
 gate in the adapter, which is the second gate principle 6 forbids and the wrong place besides.
 
@@ -487,7 +487,7 @@ first. It never constructs a second transaction for an obligation whose signed t
 It never attaches metadata a policy suppressed. It never widens an amount, a payee, or a rail beyond what
 the checkpoint named. It never takes a payment because a balance was sufficient, a schedule came due, or a
 previous payment in a series succeeded. It never supplies identity or compliance documentation to a rail —
-that is operator-only. And it never writes the `reconcile` sign-off, whatever it read: the adapter that took
+that is operator-only. And it never writes the `reconcile` verdict, whatever it read: the adapter that took
 the `pay` action is on the payer's side of a separation of duties the workflow declares, and a confirmation
 it wrote is an observation for the verifier to read, not the verifier's judgement.
 
@@ -495,10 +495,10 @@ it wrote is an observation for the verifier to read, not the verifier's judgemen
 places `verify` and `reconcile` with a principal disjoint from the payer, so that one principal never both
 proposes and confirms a movement of money. An adapter is the principal's hands at the boundary
 (`adapters.md#outbound-steps-produce-actions-adapters-take-them`), so an adapter that submitted the transfer
-and then wrote the sign-off saying it settled would have collapsed the two roles into one process — the
+and then wrote the verdict saying it settled would have collapsed the two roles into one process — the
 structural check defeated not by anyone deciding to defeat it, but by the boundary having only one component
 in it. What the adapter writes is the **confirmation**, which is an observation on the action; what closes
-the step is the verifier's **sign-off**, which cites it. A confirmation is not a sign-off
+the step is the verifier's **verdict**, which cites it. A confirmation is not a verdict
 (`vocabulary.md`), and this is the boundary where the distinction earns its keep.
 
 ## Recovery: what undoes a payment
@@ -584,7 +584,7 @@ duplicate the operator was instructed to make, against a transfer that may still
 **It refuses to attach metadata a policy suppressed, or a neutral placeholder in its stead.** Breaks
 otherwise: a permanent public disclosure that cannot be corrected.
 
-**It refuses to write the `reconcile` sign-off.** It writes confirmations; the verifier signs. Breaks
+**It refuses to write the `reconcile` verdict.** It writes confirmations; the verifier signs. Breaks
 otherwise: the separation of duties collapsed into a single component, silently.
 
 **It refuses to take a payment on any signal that is not a resolved checkpoint.** Not a due date, not a
@@ -615,12 +615,12 @@ this document opened are ruled in the three sections that follow.
 ## A payment's approver is shown exactly what the verifier signed
 
 **Ruled (decision 27, 2026-09-05): yes.** Registered in `conformance.md#the-register-of-open-design-decisions`.
-The checkpoint the `consent` step carries to the operator carries the obligation **as the `verify` sign-off
+The checkpoint the `consent` step carries to the operator carries the obligation **as the `verify` verdict
 recorded it** — the payee as the profile names it, the amount, the currency, the period or instance being
 settled, and the rail — together with the verifier's identity and the fact that these are the figures it
 matched against the profile. Not a summary, not the payer's restatement, not a rounded figure: the values the
-verifier signed, carried verbatim from that sign-off into the checkpoint's `needed_input`, with the checkpoint
-referring to the sign-off it carries them from. And the consent is **bound** to them: the `pay` action is
+verifier signed, carried verbatim from that verdict into the checkpoint's `needed_input`, with the checkpoint
+referring to the verdict it carries them from. And the consent is **bound** to them: the `pay` action is
 taken only on parameters equal to what the checkpoint carried, and a difference between the two — a re-quote,
 a corrected payee, a changed period — is a new decision, which is decision 28's rule with its tolerance at
 zero by default.
@@ -630,10 +630,10 @@ will be taken is approval of a different thing, and the action then goes out on 
 fabricated authority, on the least reversible action in the system, at the one boundary where the design has
 said the gate is the only control (`#recovery-what-undoes-a-payment`). Principle 2 is the shape: an approver
 reading a summary is reading a write's report of itself, and a report is not evidence; what the approver must
-read is the thing that was checked, which is the sign-off. `authority_model.md#approval` says an approval is
+read is the thing that was checked, which is the verdict. `authority_model.md#approval` says an approval is
 authorized against the required approvers and attributed; this adds that it is authorized *on* a stated
 subject, and states the subject. The open question asked whether the existing pinning rule already covered
-this, since a sign-off is pinned to the artifact state it judged. It does not, and the reason is worth being
+this, since a verdict is pinned to the artifact state it judged. It does not, and the reason is worth being
 precise about: at `consent` there is no artifact — the transfer does not exist until `pay` is confirmed
 (`#what-the-rails-hold-and-what-an-artifact-is-here`) — so the pinning rule has nothing to pin the verifier's
 judgement to. What `verify` judged is the **action's parameters**, and this ruling pins those: the checkpoint

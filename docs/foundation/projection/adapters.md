@@ -14,7 +14,7 @@ Every rule `adapters.md` owns, one entry each: the rule's own statement from `co
 ## [No external event advances a step by itself](../adapters.md#no-external-event-advances-a-step-by-itself)
 
 - **AD-2** — the four outcomes and nothing else *[M]*
-- **AD-3** — the same: a verdict from `cred-owner` on its open step is a sign-off; from `cred-other` or `cred-none` an observation; a CI result is never a sign-off *[M]*
+- **AD-3** — the same: a conclusion from `cred-owner` on its open step is a verdict; from `cred-other` or `cred-none` an observation; a CI result is never a verdict *[M]*
 - **AD-4** — the same: the adapter never invents a binding or resolves an unrecognized credential to the operator *[M]*
 
 ## [The adapter runs before and after a step, never during it](../adapters.md#the-adapter-runs-before-and-after-a-step-never-during-it)
@@ -72,7 +72,7 @@ Every rule `adapters.md` owns, one entry each: the rule's own statement from `co
 
 ## [When an adapter is wrong](../adapters.md#when-an-adapter-is-wrong)
 
-- **AD-29** — a wrong sign-off is findable by provenance; corrected by a new sign-off, never deleted; withdrawal is revocation *[M]*
+- **AD-29** — a wrong verdict is findable by provenance; corrected by a new verdict, never deleted; withdrawal is revocation *[M]*
 
 ## [The adapter and the engine are two roles](../adapters.md#the-adapter-and-the-engine-are-two-roles)
 
@@ -108,7 +108,7 @@ Every rule `adapters.md` owns, one entry each: the rule's own statement from `co
 
 ## [Per-agent credentials where the system issues them, a shared credential where it does not](../adapters.md#per-agent-credentials-where-the-system-issues-them-a-shared-credential-where-it-does-not)
 
-- **AD-39** — and [`adapters.md#a-per-agent-credential-is-an-obligation-where-the-system-issues-one`](../adapters.md#a-per-agent-credential-is-an-obligation-where-the-system-issues-one) (decision 69): where an external system issues per-agent credentials, each agent acting on it holds its own; a verdict-shaped delivery from a shared credential on such a system resolves to no single agent and is an **observation**, never a sign-off *[M]*
+- **AD-39** — and [`adapters.md#a-per-agent-credential-is-an-obligation-where-the-system-issues-one`](../adapters.md#a-per-agent-credential-is-an-obligation-where-the-system-issues-one) (decision 69): where an external system issues per-agent credentials, each agent acting on it holds its own; a conclusion-shaped delivery from a shared credential on such a system resolves to no single agent and is an **observation**, never a verdict *[M]*
 
 ## [When attribution cannot be external, the record does not suffice on its own](../adapters.md#when-attribution-cannot-be-external-the-record-does-not-suffice-on-its-own)
 

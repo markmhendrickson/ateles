@@ -40,9 +40,9 @@ Every rule `conformance.md` owns, one entry each: the rule's own statement from 
 
 | Doc | What it states |
 |-----|----------------|
-| `docs/foundation/principles.md` | Invariants: a mechanism that does not bind is not a control; a write that reports success has not necessarily happened; a test that cannot fail on the thing it watches is decoration; fail closed on the safety field; unknown stays distinct from a verdict. |
+| `docs/foundation/principles.md` | Invariants: a mechanism that does not bind is not a control; a write that reports success has not necessarily happened; a test that cannot fail on the thing it watches is decoration; fail closed on the safety field; unknown stays distinct from a conclusion. |
 | `docs/foundation/work_model.md` | Pull-only delivery; assignment as eligibility; claim=lease (lease as relationship); liveness derived at read; task = status + edges; intake first; tasks go through workflows in batches; artifacts ≠ subjects. |
-| `docs/foundation/gates_and_workflows.md` | `workflow` declares; a batch is the tasks going through it and the record of that; step state from batch + lease + `sign-off`; `step_status` projects; one step set; successors + `FOLLOWS`; actions are entities and are taken through the action gate; the checkpoint. |
+| `docs/foundation/gates_and_workflows.md` | `workflow` declares; a batch is the tasks going through it and the record of that; step state from batch + lease + `verdict`; `step_status` projects; one step set; successors + `FOLLOWS`; actions are entities and are taken through the action gate; the checkpoint. |
 
 ### The kernel read as self-description, not only for review
 

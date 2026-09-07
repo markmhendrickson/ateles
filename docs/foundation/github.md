@@ -5,7 +5,7 @@ summarising roles, or this document changes (`conformance.md`). **Kind:** founda
 never the state of a checkout. **Derived from:** `adapters.md` (the two invariants, the four outcomes, and
 the five adapter rules, which this document applies and does not restate), `work_model.md` (artifacts,
 intake, the four execution mechanisms), `gates_and_workflows.md` (step state from edges; actions and the
-action gate; the three verdict values), `workflows.md` (the code workflows, release, and security),
+action gate; the three conclusion values), `workflows.md` (the code workflows, release, and security),
 `failure_posture.md` (the halt, the recovery per action class, the checkpoint reason classes), and GitHub's
 own webhook event and payload documentation, read 2026-09-04, and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional step, and two terms retired in favour of `review step`). What is built, and which rows have no code
 path, is `status.md`. Revised by the testability pass of 2026-09-06 (revision 37: the host's assignment never writes `assigned_to`; `impl` closes on a mergeable pull request, stated in `workflows.md`). Revised by the host-configuration pass of 2026-09-06 (revision 65: what the host must be configured to be, ruled an extension of obligations 1 and 6 rather than a seventh obligation — the subscription reconciliation obligation 1's drop counter structurally cannot perform, and the host's merge-permitting configuration as the standing form of the permit the gate never issued; the required state per repository, and the reporting-permission row that belongs to neither obligation; open decision 69, whether a difference at admission blocks the grant or is a finding on the review step).
@@ -66,7 +66,7 @@ decision on the record rather than an omission that looks like one.
 
 ## What the outcomes are, and the rule against a fifth
 
-Every inbound row below resolves to exactly one of the four outcomes `adapters.md` names — **a sign-off by
+Every inbound row below resolves to exactly one of the four outcomes `adapters.md` names — **a verdict by
 a named principal**, **an observation on an artifact**, **an action confirmation**, or **a task for
 intake** — or to **`dropped`** with a reason. The vocabulary is closed on purpose: an adapter that may
 invent a fifth outcome has become an engine, deciding what an event *means* rather than what it *is*.
@@ -82,8 +82,8 @@ with an existing mechanism doing the work instead:
   the sourcing and coverage every observation carries. See *Conditions that are not events*.
 - **An event that invalidates a decision already made** — a force-update of the head after a review step signed, a
   review dismissed after a step closed — looks like it needs an outcome that *retracts* something. It does
-  not get one. It is an observation, and the retraction is already the record's: a sign-off is pinned to
-  the artifact state it judged, so an observation moving the head makes the pinned sign-off readable as
+  not get one. It is an observation, and the retraction is already the record's: a verdict is pinned to
+  the artifact state it judged, so an observation moving the head makes the pinned verdict readable as
   stale by a derived read (`data_model.md#record-conventions`), and no adapter unsigns anything. See *The
   transitions the mining found unhandled*.
 
@@ -97,7 +97,7 @@ issue is an artifact of kind `issue`, found by `system` and `external_id`.
 | `issues.opened`, by a person | handled | a task with the issue as its artifact (`REFERS_TO`), entering intake; the opener's credential is recorded, resolved to a principal where one binds |
 | `issues.opened`, by the swarm's own account | handled | an action confirmation on the batch's `open_issue`-class action; the issue is `PRODUCES` from the batch |
 | `issues.edited` | handled | an observation on the artifact (title, body); the `changes` object says which field moved |
-| `issues.closed` by a person | handled | an observation (`state: closed`); the task's status is written by the batch's sign-offs, never by the host |
+| `issues.closed` by a person | handled | an observation (`state: closed`); the task's status is written by the batch's verdicts, never by the host |
 | `issues.closed` by the host on a merge | handled | an observation; the merge confirmation already covers the effect |
 | `issues.reopened` | handled | an observation (`state: open`); it opens no step and re-enters no workflow — a task needing further work is created and enters its own intake |
 | `issues.assigned`, `issues.unassigned` | handled | an observation on the artifact; the host's assignment is never written to `assigned_to`, which is a principal's write in the record — at intake's `classify`, or by a principal later — and never an adapter's (`work_model.md#assignment-restricts-eligibility-it-never-creates-a-lease`) |
@@ -109,8 +109,8 @@ issue is an artifact of kind `issue`, found by `system` and `external_id`.
 | `issues.transferred` | **unhandled** | the artifact's `external_id` and repository both change, and the record's `system`/`external_id` pair no longer resolves. Until built, `dropped` with reason `identity_moved`. See *The transitions the mining found unhandled* |
 | `issues.deleted` | **unhandled** | the artifact ceases to exist at the host while the record still refers to it. Until built, `dropped` with reason `artifact_deleted` |
 | `issues.field_added`, `issues.field_removed` | deliberately ignored | `dropped`, reason `host_project_field`: these are the host's project-field surface, which the record does not mirror |
-| `issue_comment.created` | handled | an observation on the artifact; a comment **from the step owner of an open step, carrying a verdict in the declared form**, may be that step owner's sign-off, by the identity rule (`adapters.md#what-the-adapter-does-with-every-event`) |
-| `issue_comment.edited`, `issue_comment.deleted` | handled | an observation; an edited or deleted comment **never revises a sign-off already written** — a verdict is terminal and a new judgement is a new sign-off (`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`) |
+| `issue_comment.created` | handled | an observation on the artifact; a comment **from the step owner of an open step, carrying a conclusion in the declared form**, may be that step owner's verdict, by the identity rule (`adapters.md#what-the-adapter-does-with-every-event`) |
+| `issue_comment.edited`, `issue_comment.deleted` | handled | an observation; an edited or deleted comment **never revises a verdict already written** — a conclusion is terminal and a new judgement is a new verdict (`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`) |
 | `issue_comment.pinned`, `issue_comment.unpinned` | deliberately ignored | `dropped`, reason `presentation_only` |
 | `sub_issues.sub_issue_added`, `sub_issues.sub_issue_removed` | **unhandled** | the host's sub-issue edge is a second parent/child structure beside the record's `PART_OF`, and which is authoritative is undecided. Until decided, an observation on the artifact and never a `PART_OF` write. See `status.md` |
 | `sub_issues.parent_issue_added`, `sub_issues.parent_issue_removed` | **unhandled** | the same, from the child's side |
@@ -121,7 +121,7 @@ issue is an artifact of kind `issue`, found by `system` and `external_id`.
 arrives as `issues.closed` carrying that reason. It is an observation, and it is the third row of the
 table above: the record's duplicate determination is intake's `dedupe` step, whose close writes the
 terminal status and the edge to the task it duplicates (`workflows.md#intake`). Reading the host's reason
-as the record's verdict would let an external actor close a task by closing an issue, which the second
+as the record's conclusion would let an external actor close a task by closing an issue, which the second
 invariant forbids.
 
 ## Pull requests
@@ -131,11 +131,11 @@ The `pull_request` event carries twenty-three actions. The pull request is an ar
 
 | Event and action | Status | Outcome in the record |
 |---|---|---|
-| `pull_request.opened` | handled | the artifact is linked to the batch whose tasks it addresses; the implementer's sign-off on `impl` cites it in `artifact_refs[]`. A pull request naming no batch is an artifact with no batch and yields a task for intake |
-| `pull_request.synchronize` | handled | an observation on `head`. Open sign-offs are unaffected; a workflow wanting review to open again on a new head declares that on the step. The **pinned-head** consequence is below |
+| `pull_request.opened` | handled | the artifact is linked to the batch whose tasks it addresses; the implementer's verdict on `impl` cites it in `artifact_refs[]`. A pull request naming no batch is an artifact with no batch and yields a task for intake |
+| `pull_request.synchronize` | handled | an observation on `head`. Open verdicts are unaffected; a workflow wanting review to open again on a new head declares that on the step. The **pinned-head** consequence is below |
 | `pull_request.edited` | handled | an observation on title, body, or **base**. A base change is the retargeting case and carries its own rule, below |
-| `pull_request.ready_for_review` | handled | an observation on the artifact's draft state, and **the condition the `impl` step owner reads before signing**. It opens no step: a draft marked ready is the implementer saying the artifact is judgeable, and the judgement is still a sign-off |
-| `pull_request.converted_to_draft` | handled | an observation on draft state; sign-offs already written stand, pinned to the head they judged |
+| `pull_request.ready_for_review` | handled | an observation on the artifact's draft state, and **the condition the `impl` step owner reads before signing**. It opens no step: a draft marked ready is the implementer saying the artifact is judgeable, and the judgement is still a verdict |
+| `pull_request.converted_to_draft` | handled | an observation on draft state; verdicts already written stand, pinned to the head they judged |
 | `pull_request.closed`, unmerged | handled | an observation (`state: closed`); the batch's open step stays open until a principal signs it |
 | `pull_request.closed`, merged | handled | an action confirmation on the batch's `merge_pr`-class action (`taken_at`, `result_ref` naming the merge commit); the merge commit is an artifact `PRODUCES` from the batch. **A merge the record has no action for is an observation and a defect to surface**, never a confirmation |
 | `pull_request.reopened` | handled | an observation (`state: open`) |
@@ -163,23 +163,23 @@ than a convenience. It is marked unhandled because reading it as blocking is a r
 
 | Event and action | Status | Outcome in the record |
 |---|---|---|
-| `pull_request_review.submitted`, `APPROVE`, by a review step's principal on that step of the batch linked to this pull request | handled | **that step owner's sign-off on its review step**, verdict `signed`. The host's token is a signal the adapter maps to one of the record's three verdict values (`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`) |
-| `pull_request_review.submitted`, `REQUEST_CHANGES`, by a review step's principal | handled | that step owner's sign-off with a blocking verdict; the step's `on_fail` names the earlier step that opens again |
-| `pull_request_review.submitted`, `COMMENT`, by anyone | handled | an observation only; no sign-off |
+| `pull_request_review.submitted`, `APPROVE`, by a review step's principal on that step of the batch linked to this pull request | handled | **that step owner's verdict on its review step**, conclusion `signed`. The host's token is a signal the adapter maps to one of the record's three conclusion values (`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`) |
+| `pull_request_review.submitted`, `REQUEST_CHANGES`, by a review step's principal | handled | that step owner's verdict with a blocking conclusion; the step's `on_fail` names the earlier step that opens again |
+| `pull_request_review.submitted`, `COMMENT`, by anyone | handled | an observation only; no verdict |
 | `pull_request_review.submitted` by a credential binding to no principal, or to a principal owning no open step | handled | an observation. **An automated account's `APPROVE` never stands in for a review step's owner** |
-| `pull_request_review.submitted`, `APPROVE`, by the operator's credential while a checkpoint on this batch's merge action awaits the operator | handled | resolution of that checkpoint by the operator principal (`authority_model.md#approval`), recorded and read back; **not** a sign-off |
-| `pull_request_review.dismissed` | **unhandled** | the host retracts a review after a step may already be signed. Until built, an observation — and never an unsigning, because no adapter revises a sign-off. See below |
-| `pull_request_review.edited` | handled | an observation; an edited review body never revises a sign-off already written |
-| `pull_request_review_comment.created` | handled | an observation on the artifact; a line comment is a remark and carries no verdict |
+| `pull_request_review.submitted`, `APPROVE`, by the operator's credential while a checkpoint on this batch's merge action awaits the operator | handled | resolution of that checkpoint by the operator principal (`authority_model.md#approval`), recorded and read back; **not** a verdict |
+| `pull_request_review.dismissed` | **unhandled** | the host retracts a review after a step may already be signed. Until built, an observation — and never an unsigning, because no adapter revises a verdict. See below |
+| `pull_request_review.edited` | handled | an observation; an edited review body never revises a verdict already written |
+| `pull_request_review_comment.created` | handled | an observation on the artifact; a line comment is a remark and carries no conclusion |
 | `pull_request_review_comment.edited`, `.deleted` | handled | an observation |
-| `pull_request_review_thread.resolved`, `.unresolved` | handled | an observation on the artifact. **A resolved thread is not a satisfied finding**: findings live on the sign-off and bind by their severity, and a thread resolved at the host closes nothing |
+| `pull_request_review_thread.resolved`, `.unresolved` | handled | an observation on the artifact. **A resolved thread is not a satisfied finding**: findings live on the verdict and bind by their severity, and a thread resolved at the host closes nothing |
 
 **A dismissed review does not unsign a step.** The record's rule is already sufficient and this row applies
-rather than extends it: a verdict is terminal and never revised in place, and a step owner reaching a
-different judgement writes a **new** sign-off, the latest per step owner per artifact head being the one
-that stands (`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`). So a dismissal
-at the host is an observation, and if the step owner genuinely no longer stands behind its verdict, that owner
-writes a new sign-off. What is unhandled is the **surfacing**: a dismissal that silently leaves a signed
+rather than extends it: a conclusion is terminal and never revised in place, and a step owner reaching a
+different judgement writes a **new** verdict, the latest per step owner per artifact head being the one
+that stands (`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`). So a dismissal
+at the host is an observation, and if the step owner genuinely no longer stands behind its conclusion, that owner
+writes a new verdict. What is unhandled is the **surfacing**: a dismissal that silently leaves a signed
 step signed is exactly the state a reader should be told about, and the design's answer is that the
 observation is a condition the steward reads before taking the merge. That is a rule with no built path,
 so it is a `status.md` row.
@@ -242,8 +242,8 @@ rather than a workflow rule:
    facts about the record.
 
 **How this interacts with `workflows.md#security`.** The two rules compose and neither substitutes for the
-other. The workflow's is a **sign-off condition**: `pm` closes on the public artifacts carrying no exploit
-detail, `pr_review` closes on the fix being complete for the stated surface, and the closing sign-off's only
+other. The workflow's is a **verdict condition**: `pm` closes on the public artifacts carrying no exploit
+detail, `pr_review` closes on the fix being complete for the stated surface, and the closing verdict's only
 permitted successor is `release`, because a security fix merged and not released is not fixed. The
 adapter's is an **input constraint**: the material is not in the record for those artifacts to be built
 from. A workflow rule alone leaves the detail one careless render away from a public surface; an adapter
@@ -267,13 +267,13 @@ is upgrade-available, taken as its own action, and never a default of the adapte
 | `status` (commit status set) | handled | an observation on `checks`, the same as a check run |
 | `workflow_job.*` (four actions) | deliberately ignored | `dropped`, reason `subsumed_by_check_suite`: job-grain events multiply per head and say nothing the suite rollup does not |
 
-**A CI result is a condition a step owner reads before signing; it is never a sign-off.** This is
+**A CI result is a condition a step owner reads before signing; it is never a verdict.** This is
 `adapters.md`'s rule and it is the one most often eroded in practice, because a green check *looks* like a
-verdict and arrives without anyone doing anything. The distinction is load-bearing in both directions. A
-green check does not close `impl` or `qa` — those steps close on their owners' sign-offs, which cite the
-check as evidence (`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`). And a
+conclusion and arrives without anyone doing anything. The distinction is load-bearing in both directions. A
+green check does not close `impl` or `qa` — those steps close on their owners' verdicts, which cite the
+check as evidence (`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`). And a
 red check does not block a step by itself; it is a condition the owner reads and, ordinarily, blocks on
-with a verdict that names the run and the output it produced.
+with a conclusion that names the run and the output it produced.
 
 `unknown` is the third value and it holds: a CI state the adapter cannot read is `unknown` on the artifact,
 and unknown holds the step
@@ -335,12 +335,12 @@ fifth outcome was invented for it.
 | A pull request's mergeability, and whether it conflicts | an observation on the artifact, written by a read the adapter makes when a step owner needs it | the host computes it asynchronously after a change and delivers no event when it settles |
 | Which checks a branch's rules **require**, versus which ran | an observation on the artifact | the rules are configuration; only their changes are delivered, and the applied set is a read |
 | Whether a required check's result was produced against the current base | an observation on the artifact, comparing the check's head and base to the artifact's | nothing announces that a previously green check is now stale — the retargeting case |
-| Whether a sign-off's pinned head is still the artifact's head | a **derived read**, never an observation and never a stored flag | `data_model.md#record-conventions`; a stored freshness flag needs a process to keep it true (principle 11) |
+| Whether a verdict's pinned head is still the artifact's head | a **derived read**, never an observation and never a stored flag | `data_model.md#record-conventions`; a stored freshness flag needs a process to keep it true (principle 11) |
 
 **A conflict has no step owner, and that is the gap.** A pull request becoming unmergeable is a condition
 on the artifact with no step whose closing condition it violates: `impl` may already be signed, and
 `merge`'s owner discovers it only when the merge action fails. The condition belongs to the `impl` step
-owner, whose sign-off closes on a pull request existing, its CI green at the pinned head, **and it being
+owner, whose verdict closes on a pull request existing, its CI green at the pinned head, **and it being
 mergeable as read** (`workflows.md#feature`), so a conflict opens `impl` again by the step's `on_fail`
 rather than surfacing at the merge. Whether that path is built is a `status.md` row.
 
@@ -353,7 +353,7 @@ occurred, nothing in the adapter matched it, and the absence looked like an adap
 **A draft pull request marked ready.** `pull_request.ready_for_review` had no inbound mapping. Response: an
 observation on the artifact's draft state, and the condition the `impl` step owner reads before signing.
 It opens no step — the implementer marking a pull request ready is the implementer saying it is judgeable,
-which is a fact about the artifact, and the judgement is still a sign-off by a named principal.
+which is a fact about the artifact, and the judgement is still a verdict by a named principal.
 
 **Base retargeting leaving a stale required check.** `pull_request.edited` fires when the base changes, and
 a check that ran against the old base stays green at the host. Response: the base change is an observation
@@ -367,14 +367,14 @@ read; where it cannot be distinguished, the safe reading is to treat an `edited`
 base as a base change and any ambiguity as `unknown` — which fails toward holding the step.
 
 **A pull request becoming unmergeable with no step owning the conflict.** Above, under *Conditions that
-are not events*: the condition belongs to `impl`, whose sign-off closes on the artifact being mergeable,
+are not events*: the condition belongs to `impl`, whose verdict closes on the artifact being mergeable,
 and whose `on_fail` opens it again. Unhandled.
 
-**A force-update after a sign-off.** Revision 12 ruled that sign-offs pin the artifact state they judged,
+**A force-update after a verdict.** Revision 12 ruled that verdicts pin the artifact state they judged,
 and this row applies that ruling rather than adding to it. A force-update arrives as the host's ref-update event and is an
-observation moving the artifact's `head`. Every sign-off whose `artifact_refs[]` pinned the old head is
+observation moving the artifact's `head`. Every verdict whose `artifact_refs[]` pinned the old head is
 **readable as stale by a derived read** — the pinned head no longer equals the artifact's — and no adapter
-unsigns anything, because a verdict is terminal and only its author writes a new one. The steward reads the
+unsigns anything, because a conclusion is terminal and only its author writes a new one. The steward reads the
 staleness before taking the merge; a workflow wanting review to open again on a new head declares that on
 the step. What makes this handled rather than unhandled is that the mechanism is entirely the record's:
 the adapter writes one observation, and the pinning does the rest.
@@ -383,11 +383,11 @@ the adapter writes one observation, and the pinning does the rest.
 unhandled in its surfacing.
 
 **An automated account approving where a review step's owner should.** Handled, and it is the identity rule doing the
-work: a verdict from a credential that binds to no principal, or to a principal who does not own the step,
+work: a conclusion from a credential that binds to no principal, or to a principal who does not own the step,
 is an observation. Nothing in the payload changes that — the same `APPROVE` from the same host, on the
-same pull request, is a sign-off or an observation depending only on whom the login resolves to. This is
+same pull request, is a verdict or an observation depending only on whom the login resolves to. This is
 worth restating as its own line because it is the row that fails silently when it fails: an automated
-approval that was read as a review step's verdict produces a batch that looks fully reviewed.
+approval that was read as a review step's conclusion produces a batch that looks fully reviewed.
 
 **An issue transferred, or closed as duplicate.** The duplicate half is handled: an observation, and the
 record's dedupe is intake's `dedupe` step. The transfer half is unhandled: the artifact's identity moves,
@@ -420,7 +420,7 @@ host back** — never by the operation's return code.
 | `merge` (feature, bug, security, copy) | merge the pull request | `merge_pr` | ordinarily a checkpoint; the operator resolves it, and a `pull_request_review` `APPROVE` from the operator's credential is that resolution | the pull request reads `merged` with a merge commit; the commit is an artifact of the batch |
 | `release` | create the tag; publish the release | `release` | high blast; checkpoint unless an action series has graduated | the tag and the release read back **at their terminal state** |
 | `release` (security) | publish release notes | `release` | the same, **and narrowed**: the notes name the advisory identifier and the fixed version, never exploit detail. Widening is an operator decision taken as its own action | the release read back, and the published notes read back as published |
-| `dedupe`, `record`, a closing sign-off | close the issue, with the reason | `external_api_write` | as the policy lists it | the issue reads `closed`; **the task's own status was written by the sign-off, before the action** |
+| `dedupe`, `record`, a closing verdict | close the issue, with the reason | `external_api_write` | as the policy lists it | the issue reads `closed`; **the task's own status was written by the verdict, before the action** |
 | recovery of a merge | open and merge the inverse change | `revert_merge` | evaluated on its own; there is no privileged undo path around the gate | the revert commit on the branch, read back; both the merge and its revert stay readable |
 | recovery of a release tag | delete the tag and retag | `retag_release` | the same | the tag resolves to the intended commit, read back; a tag consumers may hold is superseded rather than silently moved |
 | recovery of a deploy | roll back to the prior release | `rollback_deploy` | the same | the deployed version equals the prior release, **read from the deployment target** rather than from the operation's exit |
@@ -429,7 +429,7 @@ host back** — never by the operation's return code.
 **What the adapter never does outbound, at this host specifically.** It never enables auto-merge, which
 would grant the host a permit the gate did not issue. It never approves a review under its own credential
 to satisfy a branch rule, which would be an automated account standing in for a review step's owner from the other
-direction. It never force-updates a branch a sign-off has pinned. It never deletes an issue, a pull request,
+direction. It never force-updates a branch a verdict has pinned. It never deletes an issue, a pull request,
 or a comment to make the record look clean — a superseded effect stays readable, which is the same rule the
 `publish` recovery states. And it never takes any of these because it judged an earlier effect wrong: a
 recovery is an action a principal takes through the gate
@@ -444,23 +444,23 @@ configuration is, because the obvious argument for it is wrong in a way that mat
 
 ### The argument that host configuration makes the mapping true, and why the design rejects it
 
-The argument runs: this document maps a `pull_request_review` `APPROVE` to a sign-off, a merge to a gated
-action, and a check verdict to a step's evidence — and none of those hold if the repository lets anything
+The argument runs: this document maps a `pull_request_review` `APPROVE` to a verdict, a merge to a gated
+action, and a check conclusion to a step's evidence — and none of those hold if the repository lets anything
 merge without review, so the adapter would be reporting a guarantee the host does not enforce, which is
 invariant 1's reporting-without-binding defect one level up from the adapter's own code.
 
 **The design already answered this, and answered it the other way.** Two rows above rule it directly. The
 `branch_protection_rule.*` row states that *a required check configured at the host is not a step, and a
-change here never alters what a batch requires*. The `pull_request_review` rows attach a sign-off to the
+change here never alters what a batch requires*. The `pull_request_review` rows attach a verdict to the
 **review step's principal**, resolved through the credential binding — not to the host's required-approvals
 count, which is a different object the host maintains for its own purposes. And obligation 2's negative
-test is precisely that a verdict-shaped delivery from an unbound credential becomes an observation, which
+test is precisely that a conclusion-shaped delivery from an unbound credential becomes an observation, which
 is a rule about the record's own reading of the delivery and holds no matter how the repository is
 configured.
 
 So the mapping does not rest on host protection state and cannot be falsified by it. A repository with no
-protection at all still produces sign-offs that are the step owners' own, gated merges that are still
-actions, and check verdicts that are still evidence a step owner cites rather than a verdict. Making host
+protection at all still produces verdicts that are the step owners' own, gated merges that are still
+actions, and check conclusions that are still evidence a step owner cites rather than a conclusion. Making host
 configuration a **seventh obligation** on that reasoning would state, as a rule, a dependency the design
 deliberately does not have — and would put the host's settings inside the contract that decides whether the
 adapter's *mapping* is fit to be believed, where they do not belong. The mapping is fit or unfit on its own
@@ -556,13 +556,13 @@ is `status.md`'s, and the drift is measured there.
 
 | Setting | What the design requires | Which claim it serves |
 |---|---|---|
-| **Required approving reviews on the default branch** | at least 1 | The `pull_request_review` `APPROVE` row and `workflows.md`'s review steps. Not because the count *is* the sign-off — it is not — but because a branch that permits an unreviewed merge produces merges with no action entity, which obligation 6's extension names |
-| **Dismiss stale reviews** | on | The pinned-head rule: a sign-off is pinned to the artifact state it judged, and a host approval carried silently across a new head is the host asserting something the record does not |
+| **Required approving reviews on the default branch** | at least 1 | The `pull_request_review` `APPROVE` row and `workflows.md`'s review steps. Not because the count *is* the verdict — it is not — but because a branch that permits an unreviewed merge produces merges with no action entity, which obligation 6's extension names |
+| **Dismiss stale reviews** | on | The pinned-head rule: a verdict is pinned to the artifact state it judged, and a host approval carried silently across a new head is the host asserting something the record does not |
 | **Enforce the rules for accounts holding the host's highest role** | on | Obligation 6's extension in its sharpest form. An exemption for that role is precisely "a path by which the host takes the effect the gate never sees," and it is the path that produced the unreviewed merge named in `status.md` |
-| **Required status checks** | every check the workflows' sign-offs cite as evidence, named explicitly; strict (up-to-date-before-merge) **off** | The `check_run` / `check_suite` rows. A check a step owner cites as evidence but that the branch does not require can be absent at merge without anything noticing, and the sign-off then cites a run that never happened for that head. Strict is off deliberately: requiring the branch be current before merge is a sequencing rule, and sequencing is the engine's, not the host's |
-| **Rewriting or deleting the default branch** | both blocked | The pinned-head rule again. A sign-off pins a head; a rewritten or deleted default branch makes a pinned sign-off unreadable, and `#the-transitions-the-mining-found-unhandled` names identity moving as the case the design has no built path for |
+| **Required status checks** | every check the workflows' verdicts cite as evidence, named explicitly; strict (up-to-date-before-merge) **off** | The `check_run` / `check_suite` rows. A check a step owner cites as evidence but that the branch does not require can be absent at merge without anything noticing, and the verdict then cites a run that never happened for that head. Strict is off deliberately: requiring the branch be current before merge is a sequencing rule, and sequencing is the engine's, not the host's |
+| **Rewriting or deleting the default branch** | both blocked | The pinned-head rule again. A verdict pins a head; a rewritten or deleted default branch makes a pinned verdict unreadable, and `#the-transitions-the-mining-found-unhandled` names identity moving as the case the design has no built path for |
 | **Auto-merge at the repository** | disabled | Stated already, in the pull-request table: the swarm never enables auto-merge, and the host being *able* to arm it is the standing form of the same permit |
-| **Delete branch on merge** | off | The standing operator rule, and the design's own: a superseded effect stays readable. A merged branch is the artifact a sign-off pinned; deleting it on merge destroys the state the sign-off judged |
+| **Delete branch on merge** | off | The standing operator rule, and the design's own: a superseded effect stays readable. A merged branch is the artifact a verdict pinned; deleting it on merge destroys the state the verdict judged |
 | **Environment protection, where a deployment step exists** | the policy admits every ref the deploying workflow can be triggered on, **including tag refs where the trigger is a release** | The `deployment` and `deployment_status` rows, and `workflows.md`'s `release` step. An environment whose policy admits branches only, on a workflow that runs at a tag, fails every release in about a second — and the failure is a deployment that never happened rather than one that failed, which reads as quiet |
 | **Environment reviewers** | none, where the action gate already gates the deploy | The `deployment_review.*` rows: the host's environment protection is a second approval surface beside the action gate, and a second gate is what principle 6 forbids. Marked unhandled in the table; the configuration answer is to not create the second surface |
 | **Webhook subscription** | exactly the event types the inbound tables mark *handled* — no more, no less | Obligation 1's extension. Fewer is the silent gap; more is deliveries the mapping drops as `out_of_scope_class`, which is noisy but honest, so the asymmetry is deliberate: a missing subscription is a defect, a surplus one is a count |
@@ -601,8 +601,8 @@ GitHub's own webhook event and payload reference is the source of the enumeratio
 event types and their action values are the host's, and the `status`/`disposition` columns are this
 document's. GitHub's distinction between a review's state and a branch protection rule's required
 approvals is the distinction the identity rule draws, stated by the host itself. The anti-corruption layer
-(Evans) is the shape of the whole: the host's model — labels as state, checks as verdicts, required
-approvals as sign-offs — never becomes the domain's.
+(Evans) is the shape of the whole: the host's model — labels as state, checks as conclusions, required
+approvals as verdicts — never becomes the domain's.
 
 ## Beyond the sources
 

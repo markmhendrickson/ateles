@@ -5,7 +5,7 @@ the send path, or this document changes (`conformance.md`). **Kind:** foundation
 never the state of a checkout. **Derived from:** `adapters.md` (the two invariants, the four outcomes, and
 the five adapter rules, which this document applies and does not restate), `work_model.md` (artifacts,
 intake, the four execution mechanisms), `gates_and_workflows.md` (step state from edges; actions and the
-action gate; the three verdict values), `workflows.md` (outreach, intake, operator-only),
+action gate; the three conclusion values), `workflows.md` (outreach, intake, operator-only),
 `failure_posture.md` (the halt, the recovery per action class, the checkpoint reason classes), and the
 Gmail REST API v1 surface as exposed by the `gws` CLI, read 2026-09-05, and PR #745 operator review
 (2026-09-05, rulings 13–14, 16–18, 23–29: decision 23 ruled here). What is built, and which rows have
@@ -142,7 +142,7 @@ and not a silent omission here.
 | Event | Status | Outcome in the record |
 |---|---|---|
 | a label added to, or removed from, a message or thread | handled | an observation on `labels[]`. **A label naming a step is not that step's state**, and no label opens, claims, or closes anything. This is `adapters.md`'s rule and the mail system erodes it harder than the code host does, because a mailbox's labels are the operator's own working vocabulary and read as status to a human eye |
-| a thread archived (the inbox label removed) | handled | an observation. Archiving is a label change and is not a completion: a task's status is written by its batch's sign-offs |
+| a thread archived (the inbox label removed) | handled | an observation. Archiving is a label change and is not a completion: a task's status is written by its batch's verdicts |
 | a thread's read/unread state changed | deliberately ignored | `dropped`, reason `presentation_only`: read state is the reader's, changes without anyone acting on the work, and belongs to whichever client happened to render the thread |
 | a thread marked important, or starred | deliberately ignored | `dropped`, reason `presentation_only`. **Priority is the `priority_rubric` entity's**, set at intake's `prioritize`, and a star is an external actor's opinion that the second invariant forbids reading as the record's |
 | a message reported as spam, or as not-spam, by the operator | handled | an observation. It changes what later messages the adapter will see and is worth holding for that reason |
@@ -219,10 +219,10 @@ step owner reading either reaches the other along the edge. So `follow_up`'s clo
 linked as an artifact" (`workflows.md#outreach`), names exactly what the record holds: a message artifact,
 from the party the batch addresses, `PART_OF` the thread the batch attached.
 
-**What a sign-off pins.** The pinning rule (`data_model.md#record-conventions`) relies on each unit pinning
-what it is. A message is immutable, and a sign-off that judged one pins it outright. A thread's state is its
-membership, and a sign-off that judged a thread pins the message set the read returned, with the coverage of
-that read — so "what did this sign-off judge" resolves to a named set of messages, and a thread that has
+**What a verdict pins.** The pinning rule (`data_model.md#record-conventions`) relies on each unit pinning
+what it is. A message is immutable, and a verdict that judged one pins it outright. A thread's state is its
+membership, and a verdict that judged a thread pins the message set the read returned, with the coverage of
+that read — so "what did this verdict judge" resolves to a named set of messages, and a thread that has
 since gained one reads as changed by the same derived comparison a moved head does. The weakness the open
 question feared — a container whose membership changes without notice — is real, and it is answered by
 coverage rather than by choosing the message as the only artifact: the record states which messages the
@@ -236,7 +236,7 @@ the read found it in, and both stay readable — an observation about containmen
 
 **Why both, rather than one.** The message alone would have made a correspondence many artifacts with no
 single one a batch is about, and `follow_up` watching a relationship among messages rather than a thing; the
-thread alone would have made every sign-off pin a set and every send's confirmation mint nothing with an id
+thread alone would have made every verdict pin a set and every send's confirmation mint nothing with an id
 of its own. Each answer was right about the level it chose and wrong to exclude the other, and the same rule
 serves every future system with nesting — a pull request and its review threads, a channel and the messages
 in it — so the record's readers carry one rule rather than one per system. **The cost accepted** is two
@@ -415,7 +415,7 @@ leave the inbox, the operation is archive, which is a label change and is revers
 covered by the tables; the writing half is stated here because it is the tempting error. A swarm that
 labels a thread `awaiting-reply` has built a second place where step state lives
 (`gates_and_workflows.md#declaration-batch-projection`), one that an external actor can edit and that no
-sign-off backs. The small closed set of labels the design does write are the operator's own filing
+verdict backs. The small closed set of labels the design does write are the operator's own filing
 conventions, applied at `persist` or `record`, and nothing derives from them.
 
 **7. It never adds a delegate, a send-as alias, or a forwarding address.** Each widens the set of
@@ -491,7 +491,7 @@ Read 2026-09-05 on this branch by enumerating every `gws gmail` and `gws calenda
 |---|---|---|
 | a send is confirmed by reading the sent message back by its message id | **four send call sites, zero read-backs.** Each returns success on the subprocess exit code and captures no message id — the "a response code is not evidence" shape principle 2 names. One module compensates for the system rewriting the outgoing header id by never reading it back at all, deriving threading from a synthetic deterministic id plus a subject token instead | `lib/approval/email_channel.py` (two sites), `lib/notify/notifier.py`, `execution/daemons/phoenicurus-release/prepare.py`, `lib/daemon_runtime/run_email.py` |
 | the artifact is minted from the confirmation, with its `external_id` already known | there is no id to mint one from, and **no `artifact` entity type exists on the branch** — the migration cost the revision 8 rows already carry | as above |
-| a label is never step state | **two daemons read a processed-label as the done condition.** One excludes `-label:<name>/processed` in its poll query and writes the label to stop re-notification, mutating the unread flag in the same write; the other refuses a message carrying its own processed label. Each is a second place step state lives, editable by any external actor and backed by no sign-off | `execution/daemons/turdus/turdus.py`, `execution/daemons/riparia/riparia.py` |
+| a label is never step state | **two daemons read a processed-label as the done condition.** One excludes `-label:<name>/processed` in its poll query and writes the label to stop re-notification, mutating the unread flag in the same write; the other refuses a message carrying its own processed label. Each is a second place step state lives, editable by any external actor and backed by no verdict | `execution/daemons/turdus/turdus.py`, `execution/daemons/riparia/riparia.py` |
 | an adapter keeps no history of its own | **three adapter-local state files.** One holds a `last_message_id` cursor, a 500-entry dedup set, a processed count, and a last-poll timestamp; a second holds a once-per-day marker gating the calendar leg; a third holds a chat cursor | `execution/daemons/turdus/.turdus_state.json`, `execution/daemons/monedula/.monedula_last_run`, `.monedula_tg_offset` |
 | every delivery resolves to an outcome or to `dropped` with a counted reason | **four silent branches.** An inbound message failing the process test is skipped with no counter, log, or record; a partially matched message is logged and abandoned; a message classified as noise is marked handled and dropped uncounted; an informational message is stored with no task, no label, and no notification. Each is the receipt-without-disposition shape the disposition rule exists to close | `riparia.py`, `turdus.py` |
 | inbound arrives by the mailbox watch, and the history log is the event | **neither is used.** Zero occurrences of the watch, of Pub/Sub, or of the history log repo-wide; inbound is six polling sites issuing list-and-read queries. This is not a defect against a built design — it is the built path having chosen the other of the two the vendor offers, and it means the expired-marker reasoning above has no code it corresponds to | `turdus.py`, `riparia.py`, `email_channel.py` |

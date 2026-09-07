@@ -9,7 +9,7 @@ cited as [proposal](#proposal)), `docs/multi_tenant.md` section 5, PR #745 opera
 and the operator memos of 2026-09-05 (the standing axis on a [finding](#finding)), and the operator's 2026-09-05 terminology review (revision 17: the one boundary and the term `external system`, the `action series` rename, `subject` defined, and the two-part `checkpoint`), and the operator's 2026-09-05 review of review relevance (revision 19: the `applies_when` condition on an optional [step](#step), and two terms retired in favour of `review step`), and PR #745 operator review (2026-09-05, rulings 13–14,
 16–18, 23–29: the hold verb, a condition a step holds on, the `dependency_cycle` reason class, the consent
 tolerance on `action_policy`, and an [artifact](#artifact) `PART_OF` its containing artifact), and the operator's 2026-09-05 22:02–22:13 memos on how tasks come into existence (revision 30, 2026-09-06: the `intake rule` entry). Format
-follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives). Revised by the consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by [role](#role); `merge` as an action-class name retired for `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound as the task's `due_date` on the step entry; the `operator_only` step; a rule keying on a field a step wrote; no marker on a read for a special-category type; decision 55 on the [external-system](#external-system) entry). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a task status; the terminal set declared on the type; the `finding` and `sign_off` fields; `rounds_cap` and `none_permitted`). Revised by the rulings pass of 2026-09-06 (revision 38: the [verdict](#verdict) as the [sign-off](#sign-off)'s reconciled [projection](#projection); a `signed` or blocking sign-off written under a held [lease](#lease); what owning confers; the counting rule and the thresholds' home on the [quorum](#quorum) and separation entries; an initiative as a task by class; the host as an external system; a budget as a grant's and a [delegation](#delegation)'s scope term). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser never the resolver save the operator's marked self-resolution, on the [approval](#approval) entry; the right to propose as a grant capability and what stops as a task, on the proposal and [reprioritization](#reprioritization) entries; metered resources and the engine's sole governance grant, on the [grant](#grant) entry; a rule naming a work-model type refused at the write). Revised by the planning pass of 2026-09-06 (revision 40: the planning-model section — [planning record](#planning-record), [planning level](#planning-level), [ascent](#ascent), [unplanned](#unplanned), [planning decision](#planning-decision), [planner](#planner), and the [amend](#amend-a-planning-record) verb). Revised by the record-sense pass of 2026-09-06 (revision 41: the [artifact](#artifact) definition and five other sentences that read "record" against an external system rephrased to "an entry an external system holds," closing the [record](#record) Not-for collision; the Not-for scoped to a Never for `docs/foundation/adapters.md` and the five per-system [adapter](#adapter) documents). Revised by the Human Inversion mapping pass of 2026-09-06 (revision 44: two term collisions with a public essay series disambiguated — [reconciler](#reconciler) as this design's projection-parity check, never the essay's adjudicating role, and [replay](#replay) as the essay's [as-of-read](#as-of-read) sense, never this design's refused re-execution sense). Revised by the priority pass of 2026-09-06 (revision 47: the [`priority`](#priority) entry added, giving the term a home beside [`claimable`](#claimable) as a [derived read](#derived-read) a [principal](#principal) consults and is never bound to obey). Revised by the rulings pass of 2026-09-06 (revision 48: decision 34 ruled — the [pipeline](#retired-names) entry replaced by [engine](#engine), defined once; decision 33 ruled — the [stage](#stage) entry rewritten to authored prose only, with no `steps[].phase` field). Revised by the event/signal/delivery pass of 2026-09-06 (revision 49: the [event](#event) entry added — the delivery's payload, distinct from the [delivery](#delivery) that carried it and the [signal](#signal) the adapter reads it into — and the [delivery](#delivery) and [signal](#signal) entries cross-referenced against it; the operator's question of whether events, signals, and deliveries are properly distinguished). Revised by the transport-and-delivery pass of 2026-09-06 (revision 50: [mapping](#mapping), [receiver](#receiver), [signature](#signature), and [idempotency key](#idempotency-key) entries added; [effect dedup](#effect-dedup) tightened to name the key by reference; [cursor](#freshness) and capability left as prose on the [grant](#grant) entry, the latter checked for collision and found none). Revised by the operator's 2026-09-06 terminology review of role, domain, and scope (revision 52: the [role](#role) entry added, beside [step owner](#step-owner); the [domain](#domain) and [permission scope](#permission-scope) entries added for the [authority](#authority) tuple's second and third terms; [finding scope](#finding-scope) and [waiver scope](#waiver-scope) added as qualified compounds rather than one entry for bare `scope`'s four senses, with bare scope left to the author and the `## Scope` heading untouched). Revised by the adversarial term audit of 2026-09-06 (revision 53: the [governance write](#governance-write) entry added — cited by name across six documents with no entry of its own, its definition already stated verbatim in `gates_and_workflows.md`; ten Not-for/Never violations fixed by unambiguous rephrasing, the `record`-for-external-system pattern found again in three new sites and a stale `steps[].phase` field removed from `data_model.md`). Revised by the checker-mechanism pass of 2026-09-06 (revision 54: `check_foundation_vocabulary.py`'s `record` ban rebuilt as a structural, corpus-wide check — a bound term possessed by, or governed by a preposition or relative clause pointing at, a foreign-system noun — after the literal-phrase, six-document-scoped version missed two more rounds of paraphrase; 28 further Not-for/Never violations this rebuilt check found across `adapters.md`, `calendar.md`, `conformance.md`, `data_model.md`, `gmail.md`, `migration.md`, `payments.md`, `work_model.md`, and `workflows.md` fixed by the same unambiguous rephrasing; one `adapters.md` heading renamed with its four cross-references, its anchor confirmed unused outside `docs/foundation`; `as_read` extended to strip `**bold**`/`*italic*` emphasis, closing a second escape the fix found live in `data_model.md`). Revised by the peering pass of 2026-09-06 (revision 56, rebased onto the checker-mechanism and self-awareness passes: decision 55 ruled on the [external system](#external-system) entry — a second instance of the record is not one; the [governance write](#governance-write) entry's admission sentence extended to name a synced write's own, unattributed shape). Revised by the naming pass of 2026-09-06 (revision 57, on the operator's voice memo: decision 72 opened — whether `sign-off` names its record neutrally, given that the record carries three [verdict](#verdict) values of which only `signed` is an approval and `signed` is itself one of them; argued in a section of its own beside the [Owner](#owner-five-meanings-one-word-forbidden-alone) section, which records the same kind of finding about a different word. Opened, not ruled: the rename is the operator's and would touch files three open PRs are amending).
+follows Neotoma's `docs/vocabulary/canonical_terms.md`. Revised by the simplification pass of 2026-09-05 (revision 29: `claimant`, `workflow policy`, and `hot path` retired; the [checkpoint](#checkpoint) reason classes cited from their one home; a code-era field removed from the Owner table). Revised by the memo-gap pass of 2026-09-06 (revision 31: the finding's `unknown` scope; what an `agent_session` is not for). Revised by the workflow-format pass of 2026-09-06 (revision 34: the two intervals on the step entry; where the set of `action_type` values lives). Revised by the consistency pass of 2026-09-06 (revision 35: the [operator-facing agent](#operator-facing-agent) defined by [role](#role); `merge` as an action-class name retired for `merge_pr`). Revised by the second workflow-format pass of 2026-09-06 (revision 36: a bound as the task's `due_date` on the step entry; the `operator_only` step; a rule keying on a field a step wrote; no marker on a read for a special-category type; decision 55 on the [external-system](#external-system) entry). Revised by the testability pass of 2026-09-06 (revision 37: `blocked` retired as a task status; the terminal set declared on the type; the `finding` and `verdict` fields; `rounds_cap` and `none_permitted`). Revised by the rulings pass of 2026-09-06 (revision 38: the [conclusion](#conclusion) as the [verdict](#verdict)'s reconciled [projection](#projection); a `signed` or blocking verdict written under a held [lease](#lease); what owning confers; the counting rule and the thresholds' home on the [quorum](#quorum) and separation entries; an initiative as a task by class; the host as an external system; a budget as a grant's and a [delegation](#delegation)'s scope term). Revised by the second rulings pass of 2026-09-06 (revision 39: the raiser never the resolver save the operator's marked self-resolution, on the [approval](#approval) entry; the right to propose as a grant capability and what stops as a task, on the proposal and [reprioritization](#reprioritization) entries; metered resources and the engine's sole governance grant, on the [grant](#grant) entry; a rule naming a work-model type refused at the write). Revised by the planning pass of 2026-09-06 (revision 40: the planning-model section — [planning record](#planning-record), [planning level](#planning-level), [ascent](#ascent), [unplanned](#unplanned), [planning decision](#planning-decision), [planner](#planner), and the [amend](#amend-a-planning-record) verb). Revised by the record-sense pass of 2026-09-06 (revision 41: the [artifact](#artifact) definition and five other sentences that read "record" against an external system rephrased to "an entry an external system holds," closing the [record](#record) Not-for collision; the Not-for scoped to a Never for `docs/foundation/adapters.md` and the five per-system [adapter](#adapter) documents). Revised by the Human Inversion mapping pass of 2026-09-06 (revision 44: two term collisions with a public essay series disambiguated — [reconciler](#reconciler) as this design's projection-parity check, never the essay's adjudicating role, and [replay](#replay) as the essay's [as-of-read](#as-of-read) sense, never this design's refused re-execution sense). Revised by the priority pass of 2026-09-06 (revision 47: the [`priority`](#priority) entry added, giving the term a home beside [`claimable`](#claimable) as a [derived read](#derived-read) a [principal](#principal) consults and is never bound to obey). Revised by the rulings pass of 2026-09-06 (revision 48: decision 34 ruled — the [pipeline](#retired-names) entry replaced by [engine](#engine), defined once; decision 33 ruled — the [stage](#stage) entry rewritten to authored prose only, with no `steps[].phase` field). Revised by the event/signal/delivery pass of 2026-09-06 (revision 49: the [event](#event) entry added — the delivery's payload, distinct from the [delivery](#delivery) that carried it and the [signal](#signal) the adapter reads it into — and the [delivery](#delivery) and [signal](#signal) entries cross-referenced against it; the operator's question of whether events, signals, and deliveries are properly distinguished). Revised by the transport-and-delivery pass of 2026-09-06 (revision 50: [mapping](#mapping), [receiver](#receiver), [signature](#signature), and [idempotency key](#idempotency-key) entries added; [effect dedup](#effect-dedup) tightened to name the key by reference; [cursor](#freshness) and capability left as prose on the [grant](#grant) entry, the latter checked for collision and found none). Revised by the operator's 2026-09-06 terminology review of role, domain, and scope (revision 52: the [role](#role) entry added, beside [step owner](#step-owner); the [domain](#domain) and [permission scope](#permission-scope) entries added for the [authority](#authority) tuple's second and third terms; [finding scope](#finding-scope) and [waiver scope](#waiver-scope) added as qualified compounds rather than one entry for bare `scope`'s four senses, with bare scope left to the author and the `## Scope` heading untouched). Revised by the adversarial term audit of 2026-09-06 (revision 53: the [governance write](#governance-write) entry added — cited by name across six documents with no entry of its own, its definition already stated verbatim in `gates_and_workflows.md`; ten Not-for/Never violations fixed by unambiguous rephrasing, the `record`-for-external-system pattern found again in three new sites and a stale `steps[].phase` field removed from `data_model.md`). Revised by the checker-mechanism pass of 2026-09-06 (revision 54: `check_foundation_vocabulary.py`'s `record` ban rebuilt as a structural, corpus-wide check — a bound term possessed by, or governed by a preposition or relative clause pointing at, a foreign-system noun — after the literal-phrase, six-document-scoped version missed two more rounds of paraphrase; 28 further Not-for/Never violations this rebuilt check found across `adapters.md`, `calendar.md`, `conformance.md`, `data_model.md`, `gmail.md`, `migration.md`, `payments.md`, `work_model.md`, and `workflows.md` fixed by the same unambiguous rephrasing; one `adapters.md` heading renamed with its four cross-references, its anchor confirmed unused outside `docs/foundation`; `as_read` extended to strip `**bold**`/`*italic*` emphasis, closing a second escape the fix found live in `data_model.md`). Revised by the peering pass of 2026-09-06 (revision 56, rebased onto the checker-mechanism and self-awareness passes: decision 55 ruled on the [external system](#external-system) entry — a second instance of the record is not one; the [governance write](#governance-write) entry's admission sentence extended to name a synced write's own, unattributed shape). Revised by the naming pass of 2026-09-06 (revision 57, on the operator's voice memo: decision 72 opened — whether `verdict` names its record neutrally, given that the record carries three [conclusion](#conclusion) values of which only `signed` is an approval and `signed` is itself one of them; argued in a section of its own beside the [Owner](#owner-five-meanings-one-word-forbidden-alone) section, which records the same kind of finding about a different word. Opened, not ruled: the rename is the operator's and would touch files three open PRs are amending).
 
 ## Purpose
 
@@ -32,7 +32,7 @@ stay predictable rather than accumulating by taste:
   entry that links the same word three times is noisier than one that links it once.
 - **A term is never linked inside its own entry.** A self-link says nothing.
 - **The word is linked as it appears**, in whatever form the sentence needs — [task](#task) or tasks,
-  [claim](#claim) or claimed, [sign-off](#sign-off) or sign-offs.
+  [claim](#claim) or claimed, [verdict](#verdict) or verdicts.
 - **A multi-word term is linked whole, never as its parts**: [step owner](#step-owner), not [step](#step)
   followed by a bare owner.
 - **Ban lists are never linked.** A `**Never:**` or `**Not for:**` line names words the foundation
@@ -62,17 +62,17 @@ dangling.
 This file names concepts; the record names rows and fields. The two are written differently on purpose,
 so that a reader always knows which one is in front of them.
 
-**A vocabulary term is written in plain words, with spaces:** [step](#step) status, [sign off](#sign-off), [action gate](#action-gate), blast
+**A vocabulary term is written in plain words, with spaces:** [step](#step) status, [action gate](#action-gate), blast
 radius, [step owner](#step-owner), [fast path](#fast-path). It is prose and it is set as prose. Two consequences worth stating, because
 this file previously mixed all three forms. First, no underscores: the concept is "step status", never
-`step_status`, whatever the field is called. Second, a hyphen only where the term is a compound noun that
-reads wrongly without one — **sign-off** as a noun (the thing a step owner writes) keeps its hyphen,
-because "a sign off" reads as a verb phrase and misparses on first reading; the verb is always **to sign
-off**, two words. That is the one hyphen this file keeps for readability, and it is applied consistently:
-every other multi-word term is spaced.
+`step_status`, whatever the field is called. Second, no hyphens: every multi-word term is spaced. The one
+hyphen this file used to keep belonged to the name now retired for [verdict](#verdict), `sign-off`, held
+because "a sign off" read as a verb phrase and misparsed; decision 72 renamed that record, one word, which
+removes both the hyphen and the reason for it. The verb is still **to sign off**, two words, and the record it writes is the
+verdict.
 
 **An entity type or a field name keeps its record spelling and is set in code font:** `step_status`,
-`action_type`, `agent_grant`, `sign_off`, `dedup_key`, `owner_role`. That is the record's name for a row
+`action_type`, `agent_grant`, `verdict`, `dedup_key`, `owner_role`. That is the record's name for a row
 or a column, not the vocabulary's name for a concept, and it is quoted exactly as the record spells it —
 underscores included — because a reader who sees it needs to be able to write it into a query. Where a
 concept and its recorded form differ only in spelling, both appear: the concept is step status, the
@@ -125,7 +125,7 @@ produces or references — a GitHub [issue](#issue), a pull request, a release, 
 the batch and its [tasks](#task) by [edge](#edge) and never the subject of a [step](#step).
 An [action](#action) is the intended effect; the artifact is the record the effect leaves.
 **The word is bound; it is not a catch-all for outputs.** Anything the swarm produces that lives in the
-record is an **entity**, not an artifact: a [sign-off](#sign-off), a [checkpoint](#checkpoint), an
+record is an **entity**, not an artifact: a [verdict](#verdict), a [checkpoint](#checkpoint), an
 analysis, a draft, a page rendered into the record. The test is where the thing lives and how it is
 reached — an external system through an adapter, or a retrieval from the record — never how
 output-shaped it feels.
@@ -172,10 +172,10 @@ claim).
 The [claim](#claim) and the lease are one primitive; renewal is the heartbeat; the task carries no lease fields.
 Its **lease holder** is the principal the persisted lease names, [read back](#read-back) from the lease and never
 from a task field; it is the only [role](#role) the lease has, and it needs no term of its own. A held lease is also
-what makes a [sign-off](#sign-off) the current step owner's: a `signed` or blocking sign-off from a lease not
+what makes a [verdict](#verdict) the current step owner's: a `signed` or blocking verdict from a lease not
 held is refused at the write (decision 44).
 **See:** [`work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields`](work_model.md#the-lease-is-a-relationship-not-a-set-of-task-fields),
-[`conformance_suite.md#whether-a-sign-off-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`](conformance_suite.md#whether-a-sign-off-from-a-step-owner-whose-lease-has-lapsed-closes-the-step).
+[`conformance_suite.md#whether-a-verdict-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`](conformance_suite.md#whether-a-verdict-from-a-step-owner-whose-lease-has-lapsed-closes-the-step).
 **Never:** "claimant" (retired: say lease holder).
 **Not for:** "claim fields" for the lease (the task carries none); "lock" for a lease (a lock outlives its holder); "heartbeat" for the lease (the heartbeat
 renews the lease; it is not the lease); owner standing alone, for the lease holder or for anything else — the word carries five meanings
@@ -275,7 +275,7 @@ branch, and head, related to the [task](#task) it executes.
 **See:** [`work_model.md#no-assignment-log-history-is-the-tasks-own-observations`](work_model.md#no-assignment-log-history-is-the-tasks-own-observations),
 [`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`](gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read).
 **Never:** "run history", "dispatch record".
-**Not for:** the session's transcript or reasoning as a field on it; a copy of what the step read (the sign-off names it, and an as-of read returns it).
+**Not for:** the session's transcript or reasoning as a field on it; a copy of what the step read (the verdict names it, and an as-of read returns it).
 
 ### observation
 **Definition:** one append-only, timestamped, provenance-bearing write to an entity in the record, from
@@ -296,7 +296,7 @@ its cap, holding no [authority](#authority) over any [lease](#lease).
 **Definition:** one or more [tasks](#task) going through a [workflow](#workflow) together, and the record of that.
 A single task is a batch of one; only batches go through workflows, so there is no separate single-task
 path. Tasks are attached to and detached from a batch; batches chain along `FOLLOWS`. A batch is opened by a
-closing [sign-off](#sign-off) naming a [successor](#successor), carries the tasks that sign-off carried, and goes through
+closing [verdict](#verdict) naming a [successor](#successor), carries the tasks that verdict carried, and goes through
 exactly one [workflow](#workflow) for its whole life.
 Reads: "the tasks entered the feature workflow", "the batch is at `qa`", "the batch advances to `impl`",
 "a task attached to the batch", "a task detached from the batch", "the batch records who signed off
@@ -325,7 +325,7 @@ of its siblings.
 
 ### recurring task
 **Definition:** a [task](#task) carrying a recurrence rule, of which exactly one instance is non-terminal at a time, and whose
-closing [sign-off](#sign-off) creates the next instance — a new task copying the rule, entering [intake](#intake), and linked
+closing [verdict](#verdict) creates the next instance — a new task copying the rule, entering [intake](#intake), and linked
 `FOLLOWS` to the instance whose completion created it.
 Each instance is an ordinary task with its own [chain](#chain) and [terminal](#terminal) status; the next instance's `due_date` is
 computed from the rule's schedule, never from the completion time; the history of the recurring task is
@@ -357,7 +357,7 @@ that word for the socket a delivery lands on.
 **Never:** —
 **Not for:** "listener" for an intake rule (the transport listener is the shared socket a delivery lands on —
 [`adapters.md#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it`](adapters.md#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it));
-"trigger" for an intake rule (a rule creates a task; nothing but a sign-off opens a step); "task type" for a
+"trigger" for an intake rule (a rule creates a task; nothing but a verdict opens a step); "task type" for a
 rule, or "template" (the rule authors the created task's text; classification is intake's).
 
 ### operator-facing agent
@@ -381,7 +381,7 @@ and nothing else — the announcement path of last resort
 ### engine
 **Definition:** the execution mechanism that opens each [step](#step) of a [workflow](#workflow) for a [batch](#batch) as
 [claimable](#claimable) step work, which the [step owner](#step-owner) [claims](#claim), and reads the
-[sign-offs](#sign-off) that close them; it never writes a [task](#task) status.
+[verdicts](#verdict) that close them; it never writes a [task](#task) status.
 It delivers nothing; it is the same pull, over steps. Decision 34
 (`work_model.md#whether-the-step-path-is-a-mechanism-of-its-own-and-what-the-engine-is-called`) is where
 `pipeline` was retired for this sense: "GitHub-hosted" named a fact about the checkout, not a design
@@ -408,7 +408,7 @@ declared [workflow](#workflow) with an owning [role](#role) rather than an emerg
 
 ### workflow
 **Definition:** the declaration, per (project, workflow type), of an ordered list of [steps](#step), the [fast paths](#fast-path)
-a [batch](#batch) may take, and the [successors](#successor) a closing [sign-off](#sign-off) may name.
+a [batch](#batch) may take, and the [successors](#successor) a closing [verdict](#verdict) may name.
 **See:** [`workflows.md`](workflows.md),
 [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
 **Never:** "workflow_definition".
@@ -421,7 +421,7 @@ a [batch](#batch) may take, and the [successors](#successor) a closing [sign-off
 `gates_and_workflows.md#declaration-batch-projection`), and
 parallel-group and join fields, [claimed](#claim) by its step owner on a [batch](#batch) and closed by that
 step owner's
-[sign-off](#sign-off).
+[verdict](#verdict).
 Step names are data (`pm`, `ux`, `arch`, `impl`, `pr_review`, `qa`, `legal`, `release`, and any a workflow
 declares).
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
@@ -432,7 +432,7 @@ checkpoint for a step, in either order.
 
 ### read dependency
 **Definition:** an entity type a [step](#step) declares it must be able to read — `reads_to_enter` before
-the step opens, `reads_to_close` before its [sign-off](#sign-off) is written — with a required
+the step opens, `reads_to_close` before its [verdict](#verdict) is written — with a required
 [freshness](#freshness) for [adapter](#adapter)-sourced types.
 A step that cannot read a type it declared does not proceed: the read returns `unknown`, the step holds,
 the condition is announced off-record, and when the bounded hold reaches its bound one
@@ -452,7 +452,7 @@ type marked special-category (the mark is the type's — `data_model.md#record-c
 **Definition:** authored prose only — a named group of contiguous [steps](#step) in a [workflow](#workflow)'s
 **Stages** line, such as the review stage or the release stage. No `steps[].phase` field exists (decision
 33, `workflows.md#whether-a-stage-names-anything-a-step-does-not`): a stage names a reporting grain no [gate](#gate),
-[verdict](#verdict), [fast path](#fast-path), `applies_when`, [successor](#successor), or [checkpoint](#checkpoint) keys on, and where a [batch](#batch) is is its current
+[conclusion](#conclusion), [fast path](#fast-path), `applies_when`, [successor](#successor), or [checkpoint](#checkpoint) keys on, and where a [batch](#batch) is is its current
 [step](#step).
 **See:** [`workflows.md#whether-a-stage-names-anything-a-step-does-not`](workflows.md#whether-a-stage-names-anything-a-step-does-not).
 **Never:** a `phase` field on a declared step.
@@ -460,7 +460,7 @@ type marked special-category (the mark is the type's — `data_model.md#record-c
 
 ### step owner
 **Definition:** the **role** declared on a [step](#step), which the roster resolves to a [principal](#principal) at [claim](#claim) time;
-that principal claims the step on a [batch](#batch) and its [sign-off](#sign-off) closes it. The declaration names a [role](#role) so that
+that principal claims the step on a [batch](#batch) and its [verdict](#verdict) closes it. The declaration names a [role](#role) so that
 one [workflow](#workflow) serves every project and a renamed or replaced [agent](#agent) leaves no stale name in it; the
 resolution to a principal happens when the step is claimed, against `swarm_roster` for the batch's
 project, and a step whose role resolves to no principal raises a [checkpoint](#checkpoint) (reason
@@ -494,44 +494,46 @@ states this for proposal rights: "standing to propose is a capability and not a 
 [ownership](#ownership) [edge](#edge) names for a role (ownership resolves straight to the principal the
 `ownership_grant` points at; nothing is looked up by name).
 
-### sign-off
+### verdict
 **Definition:** the record a [step owner](#step-owner) writes to close a [step](#step) on a
-[batch](#batch), carrying the [verdict](#verdict), the [findings](#finding) that produced it, timestamps,
+[batch](#batch), carrying the [conclusion](#conclusion), the [findings](#finding) that produced it, timestamps,
 the [agent](#agent), [artifact](#artifact) refs, and the pinned `agent` version.
 A terminal write that supplies every field the schema requires; a rejected write is an error, never
-swallowed. Written as a hyphenated noun (a sign-off); the act is to sign off, two words.
-**Verdict values:** `signed` (the step's [condition](#condition) is met), a blocking verdict (it is not,
+swallowed. Written as one word (a verdict); the act of writing one is to sign off, two words, and the
+`signed` [conclusion](#conclusion) is one of the three a verdict may carry, never the record's own name
+(decision 72, [`#whether-the-record-that-closes-a-step-is-named-for-one-of-its-own-outcomes`](#whether-the-record-that-closes-a-step-is-named-for-one-of-its-own-outcomes)).
+**Conclusion values:** `signed` (the step's [condition](#condition) is met), a blocking conclusion (it is not,
 and the step's `on_fail` says which earlier step opens again), and `waived` (the [operator](#operator) [principal](#principal) closed
-an unsigned required step, carrying the reason). `waived` is the only verdict a principal other than the
+an unsigned required step, carrying the reason). `waived` is the only conclusion a principal other than the
 step owner may write, and only the operator principal may write it — the right is not delegable
 ([`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection)).
-**[Waiver scope](#waiver-scope):** one [batch](#batch)'s unsigned required steps, one `waived` sign-off **per step**, each
+**[Waiver scope](#waiver-scope):** one [batch](#batch)'s unsigned required steps, one `waived` verdict **per step**, each
 naming its step and carrying its reason — so a waived step is queryable as waived rather than recorded as a
 batch-level flag or as prose on an artifact.
-**Terminal, and never revised in place:** a later judgement is a new sign-off, and the latest per step
+**Terminal, and never revised in place:** a later judgement is a new verdict, and the latest per step
 owner per artifact head is the one that stands; the superseded one stays readable.
-**Under a held lease:** a sign-off carrying `signed` or a blocking verdict is written by a signer whose
+**Under a held lease:** a verdict carrying `signed` or a blocking conclusion is written by a signer whose
 [lease](#lease) on the step is held at the write; one from a [lapsed](#lapsed) or [returned](#returned) lease, or from a [runner](#runner) that
 does not hold it, is refused at submission, and the current lease holder's stands. `waived` is the operator
 principal's and needs none (decision 44,
-[`conformance_suite.md#whether-a-sign-off-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`](conformance_suite.md#whether-a-sign-off-from-a-step-owner-whose-lease-has-lapsed-closes-the-step)).
-**Evidence:** a blocking verdict names the executed check and the output it produced, or the mechanism
+[`conformance_suite.md#whether-a-verdict-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`](conformance_suite.md#whether-a-verdict-from-a-step-owner-whose-lease-has-lapsed-closes-the-step)).
+**Evidence:** a blocking conclusion names the executed check and the output it produced, or the mechanism
 that executed it; unexecuted reasoning is a non-blocking [finding](#finding), never a block
-([`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges)).
-**Field:** `sign_off`; its findings are `finding` entities `PART_OF` it, `SIGNED_BY` names the principal —
+([`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges)).
+**Field:** `verdict`; its findings are `finding` entities `PART_OF` it, `SIGNED_BY` names the principal —
 the step owner's agent, or the operator on `waived` — `artifact_refs[]` carries each artifact's pinned
 state by kind, and `tasks_attached[]` names the [tasks](#task) it attached part-way (`data_model.md#concepts`).
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection),
 [`adapters.md#no-external-event-advances-a-step-by-itself`](adapters.md#no-external-event-advances-a-step-by-itself).
-**Never:** "participation_record", "step_run", "LGTM", "audit row".
-**Not for:** approval for a sign-off (an approval is on a [checkpoint](#checkpoint)); "green" without the
-record.
+**Never:** "participation_record", "step_run", "LGTM", "audit row", "sign-off", "sign_off".
+**Not for:** approval for a verdict (an approval is on a [checkpoint](#checkpoint)); "green" without the
+record; the verdict for the [conclusion](#conclusion) it carries (the conclusion is one field of it).
 
 ### waiver scope
-**Definition:** the reach of one `waived` [sign-off](#sign-off) — exactly one [batch](#batch)'s one
+**Definition:** the reach of one `waived` [verdict](#verdict) — exactly one [batch](#batch)'s one
 unsigned required [step](#step) — never a whole batch's every unsigned step at once and never a standing
 exemption carried past the batch that needed it.
-A batch with more than one unsigned required step needing a waiver takes one `waived` sign-off per step,
+A batch with more than one unsigned required step needing a waiver takes one `waived` verdict per step,
 each naming its own step and reason, so a waived step is queryable as waived rather than recorded as a
 batch-level flag or as prose on an [artifact](#artifact).
 Not a [domain](#domain) or [permission scope](#permission-scope): a waiver scope names which step one
@@ -545,15 +547,15 @@ belongs to a standing [finding](#finding), not to a waiver); [permission scope](
 ### finding
 **Definition:** one defect or objection a [step owner](#step-owner) records when judging a
 [batch](#batch), carrying its own severity.
-The severity of the finding, not the summary token of the [sign-off](#sign-off) that carries it, is what
-blocks: a blocking finding filed under a non-blocking [verdict](#verdict) is still a blocking finding. A
+The severity of the finding, not the summary token of the [verdict](#verdict) that carries it, is what
+blocks: a blocking finding filed under a non-blocking [conclusion](#conclusion) is still a blocking finding. A
 blocking finding is either **implementation-only** — a named defect with a determinate fix, which may be
-routed to an implementer, though the step owner still holds the terminal sign-off — or **decision or
+routed to an implementer, though the step owner still holds the terminal verdict — or **decision or
 attestation**, needing a judgement only a [principal](#principal) can make, which is not routable at all. A blocking
 finding cites an executed command and its output; one reasoned about but not reproduced is filed as
 non-blocking, stating what could not be verified. A finding may also record a **hold**: it names a
 [condition](#condition) the step must satisfy and cannot yet judge, what would resolve it, and when it was
-recorded; it is non-blocking, because it asserts no defect, and no sign-off is written while it stands
+recorded; it is non-blocking, because it asserts no defect, and no verdict is written while it stands
 (`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`).
 **One-off or standing:** a second axis, judged separately from severity. A **one-off** finding is
 discharged when the [batch](#batch)'s work is corrected; a **standing** finding names a defect that will
@@ -563,13 +565,13 @@ input on reviewed work is a finding and is judged on both axes. The [finding sco
 finding lands on is one of four, narrowest first — the batch (one-off), the step, the workflow, the agent —
 or `unknown`, which raises a [checkpoint](#checkpoint) (reason `undetermined_scope`) and is never coerced to
 one-off.
-**Field:** `finding` — an entity of its own, `PART_OF` the sign-off that carries it and `REFERS_TO` the batch
-it judges; a hold's finding stands with no sign-off while the hold does; its severity, kind, scope, and
+**Field:** `finding` — an entity of its own, `PART_OF` the verdict that carries it and `REFERS_TO` the batch
+it judges; a hold's finding stands with no verdict while the hold does; its severity, kind, scope, and
 evidence are the fields the rules bind on (`data_model.md#concepts`).
-**See:** [`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges),
+**See:** [`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges),
 [`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`](gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it).
 **Never:** —
-**Not for:** a finding as the thing that closes a step (the [sign-off](#sign-off) closes it); a comment on
+**Not for:** a finding as the thing that closes a step (the [verdict](#verdict) closes it); a comment on
 an [artifact](#artifact) as a finding (a remark carries no severity and reaches no step); a blocking
 finding that names no executed check; a standing finding discharged by correcting only the work it was
 filed against.
@@ -588,42 +590,47 @@ wrong about, never what a [principal](#principal) may act on or do.
 a finding scope coerced to the batch when it cannot be determined (that is `undetermined_scope`, held for
 the operator).
 
-### verdict
-**Definition:** the summary a [sign-off](#sign-off) carries, stating whether the [step](#step)'s
+### conclusion
+**Definition:** the summary a [verdict](#verdict) carries, stating whether the [step](#step)'s
 [condition](#condition) is met: `signed`, a blocking value, or `waived`.
 Those three are the only values, and a host's own review tokens are the [adapter](#adapter)'s [inbound](#inbound)
 [mapping](#mapping) onto them, never the record's vocabulary.
-**Against its findings:** the [findings](#finding) bind. A verdict must agree with the findings its
-[sign-off](#sign-off) carries, and a write whose verdict contradicts them — a blocking finding under a
-non-blocking verdict — is **rejected at submission**, never swallowed; the step stays open until the step
+**Against its findings:** the [findings](#finding) bind. A conclusion must agree with the findings its
+[verdict](#verdict) carries, and a write whose conclusion contradicts them — a blocking finding under a
+non-blocking conclusion — is **rejected at submission**, never swallowed; the step stays open until the step
 owner re-submits.
-**Stored, as a projection:** the verdict is a field of the sign-off, kept as its own [projection](#projection)
-of its findings and its author and reconciled at the write by that refusal; under a derivation a sign-off with
+**Stored, as a projection:** the conclusion is a field of the verdict, kept as its own [projection](#projection)
+of its findings and its author and reconciled at the write by that refusal; under a derivation a verdict with
 no finding would read `signed`, and silence is not a [claim](#claim) (decision 32,
-[`gates_and_workflows.md#whether-the-verdict-is-a-stored-field-or-a-read-over-the-findings-and-the-author`](gates_and_workflows.md#whether-the-verdict-is-a-stored-field-or-a-read-over-the-findings-and-the-author)).
-**Terminal:** a verdict is never revised in place. A [step owner](#step-owner) reaching a different judgement writes a new
-sign-off, and the latest per step owner per [artifact](#artifact) head stands.
-**Unconditional:** a verdict carries no [condition](#condition); a requirement that must hold later is a
-[task](#task) or an acceptance criterion, not a clause in a verdict.
-**See:** [`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges),
+[`gates_and_workflows.md#whether-the-conclusion-is-a-stored-field-or-a-read-over-the-findings-and-the-author`](gates_and_workflows.md#whether-the-conclusion-is-a-stored-field-or-a-read-over-the-findings-and-the-author)).
+**Terminal:** a conclusion is never revised in place. A [step owner](#step-owner) reaching a different judgement writes a new
+verdict, and the latest per step owner per [artifact](#artifact) head stands.
+**Unconditional:** a conclusion carries no [condition](#condition); a requirement that must hold later is a
+[task](#task) or an acceptance criterion, not a clause in a conclusion.
+**Field:** `verdict.conclusion` — the field, on the record named for neither of them. The record is the
+[verdict](#verdict) and this is one field of it, so that no value the field ranges over is also the record's
+name (decision 72, [`#whether-the-record-that-closes-a-step-is-named-for-one-of-its-own-outcomes`](#whether-the-record-that-closes-a-step-is-named-for-one-of-its-own-outcomes)).
+**See:** [`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges),
 [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
 **Never:** —
-**Not for:** verdict for a whole [sign-off](#sign-off) (the verdict is one field of it); a verdict on an
-[artifact](#artifact) (the subject is the batch's tasks); a verdict as what resolves a
-[checkpoint](#checkpoint) (that is an [approval](#approval)).
+**Not for:** conclusion for a whole [verdict](#verdict) (the conclusion is one field of it); a conclusion on an
+[artifact](#artifact) (the subject is the batch's tasks); a conclusion as what resolves a
+[checkpoint](#checkpoint) (that is an [approval](#approval)); "verdict outcome", "verdict resolution", or
+"verdict type" for this field — each was swap-tested and failed, and why is decision 72's section
+([`#whether-the-record-that-closes-a-step-is-named-for-one-of-its-own-outcomes`](#whether-the-record-that-closes-a-step-is-named-for-one-of-its-own-outcomes)).
 
 ### condition
-**Definition:** a stated requirement that a [step](#step) must satisfy — its own, which its [verdict](#verdict)
-states is met or not, or a later step's, which a verdict may not impose.
-A verdict may **not** carry one. A [sign-off](#sign-off) that closed its step while binding
+**Definition:** a stated requirement that a [step](#step) must satisfy — its own, which its [conclusion](#conclusion)
+states is met or not, or a later step's, which a conclusion may not impose.
+A conclusion may **not** carry one. A [verdict](#verdict) that closed its step while binding
 what follows would hand its own judgement to the party it was binding, and the guarantee that a closed step
 was judged unconditionally is what makes a signed step readable. A requirement that must hold later is a
 [task](#task) or an acceptance criterion of the [batch](#batch). A step's own condition may be **discovered
 mid-flight** — a re-quote pending, a read returning `unknown`, a task the batch created still open — and
-then the step **holds**: its owner records a [finding](#finding) naming the condition, writes no sign-off, and
+then the step **holds**: its owner records a [finding](#finding) naming the condition, writes no verdict, and
 renews its [lease](#lease); a hold is not a state and needs no field
 (`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`).
-**See:** [`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges),
+**See:** [`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`](gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges),
 [`work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight`](work_model.md#a-batch-may-hold-on-a-condition-discovered-mid-flight).
 **Never:** —
 **Not for:** condition for a [gate](#gate)'s inputs (those are the action's class, blast radius, and
@@ -632,7 +639,7 @@ confidence); "requirement" for an acceptance criterion of a [batch](#batch).
 ### step state
 **Definition:** the state of one [step](#step) within one [batch](#batch), derived at read time from [edges](#edge)
 and never stored: open (the batch and the step), [claimed](#claim) (a [lease](#lease) from the
-[step owner](#step-owner) to the step on that batch), or signed (a [sign-off](#sign-off)).
+[step owner](#step-owner) to the step on that batch), or signed (a [verdict](#verdict)).
 The concept is written in spaced words, "step state"; the map that projects it onto the [task](#task) is the field
 [`step_status`](#step_status), and the two are not the same thing.
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
@@ -643,7 +650,7 @@ other the projection of it).
 ### step_status
 **Definition:** the map on the [task](#task) projecting each [step](#step)'s
 [step state](#step-state) on its [batch](#batch) so that it is read in one retrieval, derived from the
-[sign-offs](#sign-off) and proved equal to them by a [reconciler](#reconciler).
+[verdicts](#verdict) and proved equal to them by a [reconciler](#reconciler).
 Written as the field the record names, in code font, because that is what a reader queries; the state it
 projects is the spaced concept step state.
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection).
@@ -653,7 +660,7 @@ concept.
 
 ### reconciler
 **Definition:** in this design, the mechanical check that proves a stored [projection](#projection) —
-chiefly [step_status](#step_status) — agrees with the [sign-offs](#sign-off) it is derived from; not a [role](#role)
+chiefly [step_status](#step_status) — agrees with the [verdicts](#verdict) it is derived from; not a [role](#role)
 and not a [principal](#principal).
 **Not for:** the sense of a public essay series (*The Human Inversion*, Part 4: a person, "often the most
 senior cross-functional person on the team or the founder," who adjudicates cross-disciplinary tension
@@ -676,13 +683,13 @@ owning principal" is this design's term, never "reconciler."
 
 ### successor
 **Definition:** a [workflow](#workflow) that a `workflow` declares in `successors` as one a [batch](#batch) of it may enter on
-closing, of which the closing [sign-off](#sign-off) selects exactly one, or none where the declaration
+closing, of which the closing [verdict](#verdict) selects exactly one, or none where the declaration
 permits it (`none_permitted`).
-The closing sign-off is the sign-off on the workflow's last [step](#step), which is always a single step.
+The closing verdict is the verdict on the workflow's last [step](#step), which is always a single step.
 **See:** [`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`](gates_and_workflows.md#sequencing-is-data-successors-and-the-chain).
 **Never:** "downstream workflow", "handoff".
 **Not for:** next stage for a successor (a stage is within a workflow); two successors at once (that is a
-detach); a successor named by anything but the closing sign-off.
+detach); a successor named by anything but the closing verdict.
 
 ### chain
 **Definition:** the derived, never stored, sequence of [batches](#batch) a [task](#task) has gone through, read along
@@ -885,7 +892,7 @@ the [action gate](#action-gate) permits the `merge_pr` [action](#action).
 
 ### review step
 **Definition:** a [step](#step) whose work is a judgement of the [batch](#batch)'s change rather than a
-change to it, closed by its [step owner](#step-owner)'s [sign-off](#sign-off) like any other step. `pm`,
+change to it, closed by its [step owner](#step-owner)'s [verdict](#verdict) like any other step. `pm`,
 `ux`, `arch`, `pr_review`, `qa`, and `legal` are review steps; nothing distinguishes one from a working
 step but what its owner does, and no separate review concept exists in the design.
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection),
@@ -930,7 +937,7 @@ effect that already happened, and decision 40 refuses the adjacent shape — a s
 reader replays to reconstruct a step's judgement
 (`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`).
 **Not for:** the sense of a public essay series (*The Human Inversion*, Part 4: reading a session's
-reasoning chain months later). That sense is an as-of read over what a [sign-off](#sign-off) names it
+reasoning chain months later). That sense is an as-of read over what a [verdict](#verdict) names it
 read, resolved at its `signed_at` (decision 40) — never a stored trace and never a second doing. Where
 "replay" is meant in that reading sense, "as-of read" is this design's term.
 **See:** [`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`](gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read).
@@ -942,14 +949,14 @@ which this design also refuses in favour of explicit persisted state machines).
 
 ### intake
 **Definition:** the [workflow](#workflow) every [task](#task) enters first, whose [steps](#step) classify, link, dedupe, prioritize, and
-route the task, and whose closing [sign-off](#sign-off) names the [successor](#successor) workflow, or none, or operator-only.
+route the task, and whose closing [verdict](#verdict) names the [successor](#successor) workflow, or none, or operator-only.
 A task with no intake [batch](#batch) is unrouted by that fact; no unrouted state is stored.
 **See:** [`workflows.md#intake`](workflows.md#intake),
 [`work_model.md#intake-is-every-tasks-first-workflow`](work_model.md#intake-is-every-tasks-first-workflow),
 [`adapters.md#no-external-event-advances-a-step-by-itself`](adapters.md#no-external-event-advances-a-step-by-itself).
 **Never:** "undispatched".
 **Not for:** "triage" for the whole workflow (its first stage); unrouted as a stored status; routing by
-a router (the `route` step is a sign-off by a step owner).
+a router (the `route` step is a verdict by a step owner).
 
 ## Adapters (`adapters.md`)
 
@@ -1002,7 +1009,7 @@ events).
 
 ### signal
 **Definition:** what an [inbound](#inbound) external [event](#event) is to the record: information about an [artifact](#artifact), which an
-[adapter](#adapter) translates into a [sign-off](#sign-off) by a named [principal](#principal), an [observation](#observation) on an artifact, an [action](#action)
+[adapter](#adapter) translates into a [verdict](#verdict) by a named [principal](#principal), an [observation](#observation) on an artifact, an [action](#action)
 confirmation, or a new [task](#task) for [intake](#intake), and never into an instruction to a [workflow](#workflow).
 **See:** [`adapters.md#no-external-event-advances-a-step-by-itself`](adapters.md#no-external-event-advances-a-step-by-itself).
 **Never:** —
@@ -1016,7 +1023,7 @@ system, carrying `taken_at` and `result_ref`, [read back](#read-back) from that 
 operation's return.
 **See:** [`adapters.md#outbound-steps-produce-actions-adapters-take-them`](adapters.md#outbound-steps-produce-actions-adapters-take-them).
 **Never:** —
-**Not for:** sign-off for a confirmation (a confirmation closes no step); a success response for a
+**Not for:** verdict for a confirmation (a confirmation closes no step); a success response for a
 confirmation.
 
 ### receiver
@@ -1134,7 +1141,7 @@ Without it a cut-short page and a system with nothing to report produce the same
 [`data_model.md#record-conventions`](data_model.md#record-conventions).
 **Never:** —
 **Not for:** coverage for test coverage; coverage as a completeness flag (it states the window asked and
-returned, not a verdict on completeness).
+returned, not a conclusion on completeness).
 
 ### freshness
 **Definition:** how current the record's picture of an [external system](#external-system) is, and whether an interval was
@@ -1148,7 +1155,7 @@ confident-looking value at the moment that process stops.
 **Not for:** `last_synced_at` or "sync status" as a field the record keeps (the documents name them only
 to forbid them); a last-seen **cursor table** standing in for coverage (the concrete shape the sync-log
 ban takes at every system — `gmail.md`, `payments.md`, `telegram.md` — named here so "cursor" has one
-home instead of a per-system restatement); freshness of a [sign-off](#sign-off) against an artifact's
+home instead of a per-system restatement); freshness of a [verdict](#verdict) against an artifact's
 head (that is its own derived read); a stored freshness flag.
 
 ### hydration
@@ -1156,7 +1163,7 @@ head (that is its own derived read); a stored freshness flag.
 before the step runs — reading from the record what the record holds, and importing through an
 [adapter](#adapter) what an [external system](#external-system) holds, as [observations](#observation) on
 [artifacts](#artifact) — so that the step begins only once every declared type is readable.
-It runs before a step opens against `reads_to_enter`, and again before a [sign-off](#sign-off) is written
+It runs before a step opens against `reads_to_enter`, and again before a [verdict](#verdict) is written
 against `reads_to_close`; nothing is imported during the step itself. A read hydration cannot fulfil is
 `unknown`, and the step holds, bounded, then [escalates](#escalate).
 **See:** [`adapters.md#the-adapter-runs-before-and-after-a-step-never-during-it`](adapters.md#the-adapter-runs-before-and-after-a-step-never-during-it),
@@ -1172,7 +1179,7 @@ either of two axes: **event time**, the state implied by what had happened by th
 time**, the state that was actually readable then — which excludes [observations](#observation) describing
 an earlier moment that arrived later.
 Ingestion time is the axis that answers what a [step](#step) knew when it signed; event time answers what
-was true. [Freshness](#freshness), the state a [sign-off](#sign-off) judged, and the reconstruction of a
+was true. [Freshness](#freshness), the state a [verdict](#verdict) judged, and the reconstruction of a
 past [drop](#dropped) or hold are all derived through it, which is why none of them is stored.
 **See:** [`adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`](adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds).
 **Never:** —
@@ -1357,7 +1364,7 @@ operation or a parameter.
 **Never:** —
 **Not for:** "permission" alone for the whole tuple (permission scope is one term of it, paired with
 [domain](#domain)); a [finding](#finding)'s one-off-versus-standing reach ([finding scope](#finding-scope));
-a `waived` [sign-off](#sign-off)'s reach ([waiver scope](#waiver-scope)); the `## Scope` section heading
+a `waived` [verdict](#verdict)'s reach ([waiver scope](#waiver-scope)); the `## Scope` section heading
 these documents use to bound a document's own subject matter, which names no tuple term at all.
 
 ### decision point
@@ -1408,7 +1415,7 @@ with the `self_resolved` mark and refused without it (decision 47).
 **See:** [`authority_model.md#approval`](authority_model.md#approval),
 [`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`](authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked).
 **Never:** "silent continuation".
-**Not for:** resolved without who; sign-off for an approval (that closes a step); an unmarked self-resolution.
+**Not for:** resolved without who; verdict for an approval (that closes a step); an unmarked self-resolution.
 
 ### quorum
 **Definition:** a structural check requiring m-of-n named [principals](#principal) on one [checkpoint](#checkpoint).
@@ -1417,7 +1424,7 @@ principal (decisions 48 and 49); the count is the class's `quorum` on the `actio
 principal where none is set (decision 50).
 **See:** [`authority_model.md#structural-checks-quorum-and-separation-of-duties`](authority_model.md#structural-checks-quorum-and-separation-of-duties).
 **Never:** —
-**Not for:** "required reviewers" for a quorum (1-of-n is not a quorum); sign-off for a quorum.
+**Not for:** "required reviewers" for a quorum (1-of-n is not a quorum); verdict for a quorum.
 
 ### separation of duties
 **Definition:** a structural check requiring disjointness between the [roles](#role) on one [checkpoint](#checkpoint), such as
@@ -1427,7 +1434,7 @@ Read as disjointness over the checkpoint's principal [edges](#edge), an [agent](
 `action_policy` (decision 50).
 **See:** [`authority_model.md#structural-checks-quorum-and-separation-of-duties`](authority_model.md#structural-checks-quorum-and-separation-of-duties).
 **Never:** —
-**Not for:** "four eyes" for the check, unqualified; sign-off for the check.
+**Not for:** "four eyes" for the check, unqualified; verdict for the check.
 
 ### initiative
 **Definition:** a proposed change to what the organization pursues, entering [intake](#intake) as a [task](#task) by
@@ -1594,12 +1601,12 @@ they appear in a document, a schema, a prompt, or an error message.
 | tasks, or a batch, with respect to a workflow | **enter** it (which opens a batch record if none exists), **go through** it, and **leave** it when its last step is signed off | "run through", "flow through", "are carried through" |
 | a batch, from step to step | **advances** | "moves", "progresses", "transitions" |
 | a task, with respect to a batch | is **attached** to it, is **detached** from it; to **split** a task is to detach it and open a new batch for it | "aggregated into", "bundled", "forked", "re-run" |
-| a step, within a batch | **opens**; **closes** by sign-off | "fires", "clears", "is satisfied", "goes green" |
+| a step, within a batch | **opens**; **closes** by verdict | "fires", "clears", "is satisfied", "goes green" |
 | a lease | is **claimed**, **renewed**, **returned**; it **lapses** on its own | "acquired", "freed", "expired and released" |
 | a task | is **executed** (plain: done, worked on) | "run", "processed" |
 | an action | is **taken** | "fired", "run", "performed" |
 | a subject that must wait | is **checkpointed**; a task the swarm cannot advance is **escalated** | "paused", "parked", "paged" |
-| a step, on a condition its owner cannot yet judge | **holds**, under a held lease, with a finding naming the condition; the hold **ends** by sign-off, checkpoint, or lapse | "is paused", "is waiting", "is blocked" (a task with an open checkpoint on it is held by it; `blocked` as a status is retired) |
+| a step, on a condition its owner cannot yet judge | **holds**, under a held lease, with a finding naming the condition; the hold **ends** by verdict, checkpoint, or lapse | "is paused", "is waiting", "is blocked" (a task with an open checkpoint on it is held by it; `blocked` as a status is retired) |
 | a batch, on closing | its tasks **enter** one successor, or the batch closes with none | "flows into", "triggers" the next workflow |
 
 ## Owner: five meanings, one word forbidden alone
@@ -1608,61 +1615,85 @@ they appear in a document, a schema, a prompt, or an error message.
 
 | Meaning | Term | Field |
 |---|---|---|
-| the role the roster resolves to the principal whose sign-off closes a step | **step owner** | `workflow.steps[].owner_role` |
+| the role the roster resolves to the principal whose verdict closes a step | **step owner** | `workflow.steps[].owner_role` |
 | the step a batch is at | **current step** | derived from the batch's step states; projected as `current_owner` |
-| the implementer a blocking finding's remedy is routed to | **routed agent** | none; the remedy is a task entering intake, and the step owner keeps the sign-off (`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`) |
+| the implementer a blocking finding's remedy is routed to | **routed agent** | none; the remedy is a task entering intake, and the step owner keeps the verdict (`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`) |
 | the operator with the book of business for a customer | **book-of-business owner** | `multi_tenant.md` section 5 |
 | named accountability for a workflow, domain, or queue | **ownership** (above) | `ownership_grant` |
 
 The [principal](#principal) holding a [task](#task)'s [lease](#lease) is its lease holder, never its owner; the principal an
 assignment names holds no lease until it [claims](#claim).
 
-## Whether `sign-off` names the record neutrally, or asserts one of its own outcomes
+## Whether the record that closes a step is named for one of its own outcomes
 
-**The operator's question (2026-09-06):** whether "sign-off" could be "confused with always being a
-positive approval [action](#action)," and whether "a better name for sign-off that's more neutral and less indicative
+**Ruled (decision 72, 2026-09-07, on the operator's 2026-09-06 memo).** The record is the
+[verdict](#verdict); the field it carries is the [conclusion](#conclusion). `sign-off` and `sign_off` are
+retired names (see [Retired names](#retired-names)). The rename is executed in this pass.
+
+**The operator's question (2026-09-06):** whether the old name could be "confused with always being a
+positive approval [action](#action)," and whether "a better name ... that's more neutral and less indicative
 of a positive outcome" exists.
 
-**The record is neutral; the name is not.** A [sign-off](#sign-off) carries three
-[verdict](#verdict) values — `signed`, a blocking value, and `waived` — and only the first is an approval.
-A blocking sign-off is a rejection, and a `waived` one records that the [operator](#operator)
-[principal](#principal) closed a [step](#step) nobody signed. So the record names *how a step closed*, which is as
-often a refusal as an assent, while the word names one of the three outcomes and reads as though the other
-two were exceptions to it.
+**The record is neutral; the old name was not.** The record carries three
+[conclusion](#conclusion) values — `signed`, a blocking value, and `waived` — and only the first is an
+approval. A blocking one is a rejection, and a `waived` one records that the [operator](#operator)
+[principal](#principal) closed a [step](#step) nobody signed. So the record names *how a step closed*, which
+is as often a refusal as an assent, while the now-retired `sign-off` named one of the three and read as
+though the other two were exceptions to it.
 
-**The tell is that `signed` is one of `sign-off`'s own verdict values.** A term whose name is also the
-name of one of its values invites reading the term *as* that value. This is not the ordinary case invariant
-12 leaves to the author — a bound term that is also an ordinary English word — because the collision is
-inside the design, between a record and its own field value, not between the design and English.
+**The tell was that `signed` was one of the retired `sign-off`'s own conclusion values.** A term whose name is also the
+name of one of its values invites reading the term *as* that value. This was not the ordinary case invariant
+12 leaves to the author — a bound term that is also an ordinary English word — because the collision was
+inside the design, between a record and its own field value, not between the design and English. The
+confusion had already been anticipated and handled by prohibition rather than by naming: the entry carried a
+**Not for:** line banning the misreading, and a ban on a misreading is evidence the misreading is available.
 
-**The confusion was already anticipated, and handled by prohibition rather than by naming.** The
-[sign-off](#sign-off) entry carries a **Not for:** line reading "approval for a sign-off (an approval is on
-a [checkpoint](#checkpoint))". A ban on the misreading is evidence that the misreading is available; a name
-that did not suggest approval would not need the ban.
+**`verdict` for the record.** It already named the neutral thing — the summary stating whether the step's
+condition is met — and it names none of the values it now ranges over. Taking it for the record leaves the
+field needing a name, which is the harder half.
 
-**The candidates.** The operator's [proposal](#proposal) is to rename the record to **`verdict`** — which already names
-the neutral thing, "the summary a sign-off carries, stating whether the step's condition is met" — and to
-rename the current `verdict` **field** to something else. Two candidates for that field, both to be
-swap-tested under invariant 12 before either is taken:
+**Why `outcome` failed the swap test, twice.** `outcome` was the first choice on both the operator's side and
+the argument's, and it fails on two independent grounds found in the corpus:
 
-- **`type`**, the operator's. Likely fails invariant 12: bare `type` appears 858 times in these documents
-  and `<x>_type` 58 times, consistently meaning *what kind of thing this is* — `action_type`,
-  `entity_type`, `task_type`, `workflow_type`. The field means *what this judgment concluded*, which is not
-  a kind at all, so `type` would carry two unrelated senses at once — the overlap invariant 12 forbids,
-  on the corpus's most heavily used word.
-- **`outcome`**, with **`result`** as its alternate. `outcome` reads neutrally across all three values,
-  carries no entry of its own in this file, and does not name any of the values it ranges over — the
-  defect that opened this question. **`disposition` was considered and is disqualified:** it is already a
-  bound term for what an [adapter](#adapter) resolved one [delivery](#delivery) to, so reusing it would be
-  the very overlap this question is about.
+1. **A verdict *is* one of the four outcomes.** `data_model.md#concepts` enumerates them — "one of the four
+   [inbound](#inbound) outcomes (an [observation](#observation), an [artifact](#artifact), a verdict, or a [task](#task))" — and `adapters.md` calls the same
+   four "the [adapter](#adapter)'s whole vocabulary." So `verdict.outcome` would put a field named `outcome` on the
+   record that is itself an outcome, reproducing one level out the exact recursive defect this decision
+   exists to remove.
+2. **`outcome` is already a field the design forbids.** `data_model.md#concepts` lists "a stored `status`,
+   `outcome`, or progress" among what a [planning record](#planning-record) must **not** carry. The same word
+   would sit on a forbidden-field list and a required-field list at once.
 
-**What ruling this costs.** `sign-off` appears 865 times in these documents and `sign_off` 41 times as the
-field and entity-type spelling, plus the `SIGNED_BY` [edge](#edge), the `signed_at` timestamp, and the `signed`
-verdict value itself — which a rename must *not* touch, since `signed` is the value and stays one. Every
-occurrence is a mechanical substitution, but the volume is why this is registered rather than executed:
-three open PRs (#766, #767, #770) are [amending](#amend-a-planning-record) the exact files a rename would rewrite, and a rename
-landing before they merge would conflict with all three. Registered as decision 72, to be ruled and executed as one pass
-after they merge.
+Besides those two: 22 adapter table headers read `| Event | Status | Outcome in the record |`, a legacy
+`outcome` entity type survives in imported planning data, and `github.md` carries an explicit rule against
+inventing a fifth outcome.
+
+**`resolution` and `type` also failed.** `resolution` carries three bound senses across 220 uses, and
+[`disposition`](#disposition) already occupies the noun slot downstream of *resolve*. `type` failed earlier on
+volume: bare `type` appears ~858 times meaning *what kind of thing this is*, which is not what the field
+means.
+
+**`conclusion` passes.** Before this pass it occurred once corpus-wide, in generic prose in
+`workflows.md#research-and-analysis` (reworded here, since that use was pejorative — "a task that states a
+conclusion to confirm" — and a word must not carry two opposed senses). It had no entry, no anchor, no field,
+and no plural uses; `conclude` and `concluded` appear only in generic senses. It reads neutrally across all
+three values and names none of them.
+
+**The test that settled this, stated so the next rename does not repeat the trap.** The reasoning this
+section previously carried argued for `outcome` on the ground that it "carries no entry of its own in this
+file." **That test is unsound.** Having no `###` entry is not what makes a word free. A term is **bound** if
+the corpus enumerates it, numbers it, anchors it, or forbids it — whether or not it has an entry. `outcome`
+had no entry and was bound three ways over: enumerated as one of four, forbidden by name on the planning
+record, and fixed in 22 table headers. The sound test is the swap test against all four of those surfaces,
+not an entry lookup.
+
+**What ruling this cost.** Roughly 970 sites carrying the retired spellings: 734 hyphenated, 67 plural, 39
+underscored as the field, 34 anchors, and 13 uses of the verb phrase. Four headings changed anchors, and every citation of
+them was updated with them. Deliberately **not** renamed: the `signed` [conclusion](#conclusion) value, which
+stays one; the `SIGNED_BY` [edge](#edge); the `signed_at` timestamp; and the verb phrase *to sign off*, which
+is still what a [step owner](#step-owner) does when writing a verdict. `status.md`'s historical revision log
+is likewise left verbatim: it records what past passes said at the time, and rewriting it would falsify the
+record.
 
 ## Retired names
 
@@ -1676,12 +1707,12 @@ foundation prose only on a line that says it is retired.
 | `execution gate`, `execution_policy` | [action gate](#action-gate), [action_policy](#action_policy) | tasks are executed and actions are taken, so the gate on actions is the action gate |
 | `checkpoint_brief` | [checkpoint](#checkpoint) | "brief" described the content, not the identity, like `_record` and `_definition` |
 | `escalation` (entity) | [checkpoint](#checkpoint) with a reason class; verb [escalate](#escalate) | one decision queue, one resolution protocol (principle 6) |
-| `workflow_definition`, `participation_record`, `workflow_run`, `step_run` | [workflow](#workflow), [sign-off](#sign-off), [batch](#batch), [step state](#step-state) | redundant qualifiers; `run` collided with the liveness vocabulary |
+| `workflow_definition`, `participation_record`, `workflow_run`, `step_run` | [workflow](#workflow), [verdict](#verdict), [batch](#batch), [step state](#step-state) | redundant qualifiers; `run` collided with the liveness vocabulary |
 | `gate owner`, `gate_status` | [step owner](#step-owner), [step_status](#step_status) | `gate` names one decision |
 | `work item`, `work entity` | [task](#task) (subject), [artifact](#artifact) (record) | the subject of a workflow is the task |
 | `dispatch` | [assign](#assign), [claim](#claim), [intake](#intake) | it once named publication, claim, assignment, and execution at once |
 | `recurring series` | [action series](#action-series) | "recurring" restated what a series already is, and named nothing about the members; the series is made of actions of one class, and that is what graduates |
-| `lens` | [review step](#review-step), whose owner is a [step owner](#step-owner) | on owner, sequence, verdict and blocking a lens was identical to a step; a second term for one thing (principle 9) |
+| `lens` | [review step](#review-step), whose owner is a [step owner](#step-owner) | on owner, sequence, conclusion and blocking a lens was identical to a step; a second term for one thing (principle 9) |
 | `review panel` | the [review steps](#review-step) a [workflow](#workflow) declares | the set of steps a workflow declares is the panel; naming it separately implied a second sequencing mechanism beside the declaration |
 | `reaper` | nothing | a lapsed lease already does not count; there is nothing to release |
 | `executing`, `running` (as states) | [active](#active) (derived) | a stored liveness flag fails when the process that would clear it dies |
@@ -1692,4 +1723,5 @@ foundation prose only on a line that says it is retired.
 | `merge` (as an action class) | `merge_pr` | the step is `merge` and the action it takes is `merge_pr`, as `github.md` and the code workflows already named it; one word for the step and the class made the class read as the step, and the lint's step rules treat `merge` as a step name |
 | `calendar_routing_config` (a binding type) | `channel_config` | `adapters.md#scope` names the per-instance binding types once; a third name for the same binding was a second home |
 | `blocked` (as a task status) | an open [checkpoint](#checkpoint) on the task, from which [claimable](#claimable) is derived | nothing wrote it and nothing cleared it; a task the swarm cannot advance is held by a checkpoint, and a status beside the checkpoint was a second held state (principle 6) that needed a process to keep true (principle 11) |
+| `sign-off`, `sign_off` | [verdict](#verdict), whose field is the [conclusion](#conclusion) | decision 72, [`#whether-the-record-that-closes-a-step-is-named-for-one-of-its-own-outcomes`](#whether-the-record-that-closes-a-step-is-named-for-one-of-its-own-outcomes): the record carries three conclusion values and `signed` was one of them, so the record was named for one of its own outcomes; the verb *to sign off* and the `signed` value are unchanged |
 | `pipeline` (the step-path publisher) | [engine](#engine) | decision 34, `work_model.md#whether-the-step-path-is-a-mechanism-of-its-own-and-what-the-engine-is-called`: "GitHub-hosted" named a fact about a checkout, not a design property, and `engine` was already used in three documents and defined in none |

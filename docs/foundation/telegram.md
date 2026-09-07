@@ -58,7 +58,7 @@ what the swarm does.
 
 **The rule.** A message arriving in the operator's chat is a delivery like any other. It resolves to one of
 the four outcomes or to `dropped` with a reason, and the outcomes are the same four everywhere:
-a sign-off by a named principal, an observation on an artifact, an action confirmation, or a task for
+a verdict by a named principal, an observation on an artifact, an action confirmation, or a task for
 intake. There is no fifth outcome for "the operator asked for something", because a chat message asking for
 something **is** the fourth outcome: it becomes a task, and the task enters intake like every other task.
 
@@ -135,7 +135,7 @@ principal, is the fourth outcome — a task entering intake — whether or not i
 a message asks nothing is the intent read this document refuses, made by the component that answers for
 nothing, and the design's answer for every other surface is the same: a stranger's issue and a stranger's
 mail are tasks (`adapters.md#what-the-adapter-does-with-every-event`). Where the message asked nothing,
-intake says so — its closing sign-off names no successor and the task ends there, recorded by a step owner
+intake says so — its closing verdict names no successor and the task ends there, recorded by a step owner
 (`workflows.md#intake`). It is never a resolution.
 
 **A reply that correlates to a checkpoint but carries no readable decision is `unknown`, and unknown
@@ -252,8 +252,8 @@ window and surfaced on the off-record announcement path.
 | `message`, text, from a chat credential bound to a principal, correlated to an open checkpoint that principal is a required approver on, carrying a readable option | handled | **resolution of that checkpoint by that principal**, authorized against the required approvers and read back on the checkpoint (`authority_model.md#approval`) |
 | `message`, text, correlated to an open checkpoint, from a principal who is **not** a required approver on it | handled | an observation on the artifact. The checkpoint stays open, awaiting whoever it awaits |
 | `message`, text, correlated to an open checkpoint, content matching none of its options | handled | an observation recording what was said; the checkpoint stays open and **no option is selected as a nearest match** |
-| `message`, text, from a bound principal, correlated to nothing | handled | **a task**, with the message as its artifact, entering intake — always, whatever the text asks or does not ask: whether it asks anything is intake's judgement, and intake's closing sign-off names no successor where it asks nothing (`workflows.md#intake`); the adapter reads no intent, and classification is never the message's phrasing |
-| `message`, text, from a bound principal, correlated by reply to the presentation of an operator-only task's `present` step | handled | an observation on the task's artifact that the `record` step owner reads and signs on (`workflows.md#operator-only`); the sign-off is the step owner's, not the message's, and an uncorrelated report is the task row above |
+| `message`, text, from a bound principal, correlated to nothing | handled | **a task**, with the message as its artifact, entering intake — always, whatever the text asks or does not ask: whether it asks anything is intake's judgement, and intake's closing verdict names no successor where it asks nothing (`workflows.md#intake`); the adapter reads no intent, and classification is never the message's phrasing |
+| `message`, text, from a bound principal, correlated by reply to the presentation of an operator-only task's `present` step | handled | an observation on the task's artifact that the `record` step owner reads and signs on (`workflows.md#operator-only`); the verdict is the step owner's, not the message's, and an uncorrelated report is the task row above |
 | `message`, from a chat credential bound to **no** principal | handled | an observation where it names a tracked artifact; otherwise `dropped`, reason `unbound_credential`. **Never a task, never a resolution** |
 | `message` carrying a platform command | handled | see *Commands*, below |
 | `message` carrying media (photo, document, audio, video, voice, video note, animation, sticker) | handled | an observation on the artifact, recording that media of that kind arrived, its identifier at the channel, and its stated type and size. See *What the adapter does not fetch* |
@@ -683,7 +683,7 @@ can be silently removed.** Removing one is not destroying evidence of a statemen
 is; it is the reaction's ordinary use — the channel treats a reaction as a toggled state and delivers its
 removal as a new state, not as an event about a decision. A resolution taken from one would be a resolution
 whose evidence the approver can withdraw as a matter of routine, with no record of having decided and no
-record of having reversed, and an approval that can be retracted without a record is not a verdict
+record of having reversed, and an approval that can be retracted without a record is not a conclusion
 (`authority_model.md#approval`: an approval is explicit and terminal). The design's answer to a *deleted*
 resolving message — the resolution stands, the observation is the durable half — does not carry over,
 because it depends on the message having been a statement the principal made; a reaction is a state the
@@ -799,7 +799,7 @@ capability of the chat API that no workflow in this design reaches for.
 
 | Capability | Why it is unused |
 |---|---|
-| inline mode (answering a query as the user types elsewhere) | it asks the swarm to author content on a keystroke; no workflow produces content without a step and a sign-off |
+| inline mode (answering a query as the user types elsewhere) | it asks the swarm to author content on a keystroke; no workflow produces content without a step and a verdict |
 | the payments surface (invoices, checkout queries, paid media) | a second payment rail beside `payments.md`'s, and its checkout queries are synchronous, which the action gate's timing cannot accommodate. Marked unhandled above rather than ignored, because a decision is owed |
 | polls and quizzes | a second decision queue beside the checkpoint (principle 6) |
 | games | nothing in the work model |

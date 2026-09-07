@@ -107,7 +107,7 @@ instances read over a window states the window. Occurrence artifacts being unbou
 departure from how artifacts come to exist; it is the ordinary condition of every artifact kind, made visible
 by a system that manufactures records on demand.
 
-**What a sign-off pins.** A sign-off on an occurrence pins a dated fact; a sign-off on the series pins the
+**What a verdict pins.** A verdict on an occurrence pins a dated fact; a verdict on the series pins the
 declaration as read — its rule and the fields the read returned. A task created against one occurrence keeps
 referring to that occurrence when the series' rule changes; whether the occurrence still exists under the new
 rule is what the re-read the hydration phase makes will say, and until it is re-read its stored time is a
@@ -148,7 +148,7 @@ Rows are marked **handled**, **deliberately ignored**, or **unhandled** — the 
 | an invitation received (an event created on the operator's calendar by someone else) | handled | an artifact, and a task for intake. It is distinguished from the row above by the organizer not being the operator, and the distinction matters because the response is an outward-facing act — see the outbound table |
 | an event updated: title, description, location | handled | an observation on the artifact |
 | an event moved in time | handled | an observation on the artifact's start and end. **A task whose due date follows the event reads it at `prioritize` or at claim, never through the event** — no event rewrites a task's priority, which is the `priority_rubric` entity's (`workflows.md#intake`) |
-| an event cancelled | handled | an observation (`state: cancelled`). It closes no step and completes no task: a batch's steps close on sign-offs, and a meeting that will not happen is a fact its step owner reads |
+| an event cancelled | handled | an observation (`state: cancelled`). It closes no step and completes no task: a batch's steps close on verdicts, and a meeting that will not happen is a fact its step owner reads |
 | an event deleted outright | handled | an observation (`state: deleted`). The record keeps the artifact and its observations |
 | an occurrence of a recurring series modified or cancelled independently | handled | an observation on that occurrence's artifact, minted `PART_OF` the series where the record does not yet hold it (decision 24, above). The series artifact is unchanged by it: an occurrence edited independently is the calendar's own one-plus-N, and the record mirrors it with an edge rather than folding it into the series |
 | a recurrence rule changed on a series | handled | an observation on the series artifact. Every future occurrence moved at once with no signal per occurrence, so each occurrence artifact the record holds is re-read against the new rule before any step depends on its time — a declared read with a stated freshness, as the clock rule below requires — and an occurrence the new rule no longer produces reads as cancelled by that read. A task created against one occurrence keeps referring to it; what changed is what a read of it returns |
@@ -331,7 +331,7 @@ an adapter's to infer. The adapter observes such changes and announces them.
 
 **6. It never treats a calendar entry as step state, and never writes one to communicate one.** The mirror
 of `gmail.md`'s label refusal: a swarm that writes a "blocked" event onto a calendar has built a second
-place step state lives, editable by anyone with write access and backed by no sign-off.
+place step state lives, editable by anyone with write access and backed by no verdict.
 
 **7. It never reads a calendar the `channel_config` does not name.** The operator's calendar list may include
 calendars belonging to other people and organizations; being able to read one is not authority to.

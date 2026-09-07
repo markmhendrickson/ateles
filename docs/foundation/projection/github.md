@@ -9,8 +9,8 @@ Every rule `github.md` owns, one entry each: the rule's own statement from `conf
 
 ## [Reviews, review comments, and threads](../github.md#reviews-review-comments-and-threads)
 
-- **GH-1** — `APPROVE` is a sign-off only through identity; an automated account's never stands in *[M]*
-- **GH-2** — the same: the operator's `APPROVE` while a merge checkpoint awaits is a resolution, not a sign-off *[M (X-7)]*
+- **GH-1** — `APPROVE` is a verdict only through identity; an automated account's never stands in *[M]*
+- **GH-2** — the same: the operator's `APPROVE` while a merge checkpoint awaits is a resolution, not a verdict *[M (X-7)]*
 
 ## [Pull requests](../github.md#pull-requests)
 
@@ -24,7 +24,7 @@ Every rule `github.md` owns, one entry each: the rule's own statement from `conf
 ## [The transitions the mining found unhandled](../github.md#the-transitions-the-mining-found-unhandled)
 
 - **GH-6** — base retargeting sets `checks` to `unknown`; ambiguity fails toward `unknown` *[M]*
-- **GH-7** — the same: a force-update leaves sign-offs pinned and readable as stale; nothing unsigns *[M]*
+- **GH-7** — the same: a force-update leaves verdicts pinned and readable as stale; nothing unsigns *[M]*
 - **GH-8** — the same: a dismissed review is an observation, never an unsigning *[M]*
 
 ## [Security advisories, and what the adapter does not surface](../github.md#security-advisories-and-what-the-adapter-does-not-surface)
@@ -51,7 +51,7 @@ Every rule `github.md` owns, one entry each: the rule's own statement from `conf
 
 ## [The property that makes this a control and not a list](../github.md#the-property-that-makes-this-a-control-and-not-a-list)
 
-- **GH-16** — [`github.md#what-the-outcomes-are-and-the-rule-against-a-fifth`](../github.md#what-the-outcomes-are-and-the-rule-against-a-fifth): an event outside the tables is `dropped` with reason `unmapped` and counted; no fifth outcome; an event that invalidates a decision is an observation, and the pinned sign-off reads stale *[M (AD-21 and GH-7 at this host; kept because the document states it as its own control)]*
+- **GH-16** — [`github.md#what-the-outcomes-are-and-the-rule-against-a-fifth`](../github.md#what-the-outcomes-are-and-the-rule-against-a-fifth): an event outside the tables is `dropped` with reason `unmapped` and counted; no fifth outcome; an event that invalidates a decision is an observation, and the pinned verdict reads stale *[M (AD-21 and GH-7 at this host; kept because the document states it as its own control)]*
 
 ## [Releases and tags](../github.md#releases-and-tags)
 

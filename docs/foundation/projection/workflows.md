@@ -9,7 +9,7 @@ Every rule `workflows.md` owns, one entry each: the rule's own statement from `c
 
 ## [How to read a workflow section](../workflows.md#how-to-read-a-workflow-section)
 
-- **WF-1** — a failing verdict does not advance; `on_fail` reopens; the cap escalates *[M]*
+- **WF-1** — a failing conclusion does not advance; `on_fail` reopens; the cap escalates *[M]*
 
 ## [Roles named in this document](../workflows.md#roles-named-in-this-document)
 
@@ -91,4 +91,4 @@ Every rule `workflows.md` owns, one entry each: the rule's own statement from `c
 
 ## [planning](../workflows.md#planning)
 
-- **WF-26** — entry by the record's one live instance; `survey` names its reads; `judge` writes only findings; `amend` writes through `amend_<level>` actions, creates tasks under the record and the parent, creates the next instance before its sign-off, and names no successor; optional review steps by `applies_when` carry a role's findings *[M for structure; R for judgements]*
+- **WF-26** — entry by the record's one live instance; `survey` names its reads; `judge` writes only findings; `amend` writes through `amend_<level>` actions, creates tasks under the record and the parent, creates the next instance before its verdict, and names no successor; optional review steps by `applies_when` carry a role's findings *[M for structure; R for judgements]*
