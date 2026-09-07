@@ -85,6 +85,24 @@ python scripts/linters/check_neotoma_rest_paths.py || ERRORS=$((ERRORS + 1))
 echo "  - Checking agent roster (no retired agent names)..."
 python scripts/linters/check_agent_roster.py || ERRORS=$((ERRORS + 1))
 
+# Foundation documents (docs/foundation/). Registered in
+# conformance.md#mechanical-checks-on-this-directory. All stdlib-only, no Neotoma needed.
+echo "  - Checking foundation anchors (every intra-foundation link resolves)..."
+python execution/scripts/check_foundation_anchors.py || ERRORS=$((ERRORS + 1))
+
+echo "  - Checking foundation vocabulary (no Never word in the prose)..."
+python execution/scripts/check_foundation_vocabulary.py || ERRORS=$((ERRORS + 1))
+
+echo "  - Checking vocabulary term links (first mentions link their definition)..."
+python execution/scripts/link_vocabulary_terms.py --check || ERRORS=$((ERRORS + 1))
+
+# Reading projection (decision 66): docs/foundation/projection/ is generated from
+# conformance_suite.md's matrix and is what a review prompt inlines. A rule edited in its
+# canonical document without regenerating is caught here and in CI, in the same run that
+# catches a broken anchor. Regenerate with the same script and no flag.
+echo "  - Checking reading projection is in sync with the conformance matrix..."
+python execution/scripts/render_reading_projection.py --check || ERRORS=$((ERRORS + 1))
+
 # tool_allowlist grant grammar (ateles#255 — bash: prefix is silently dropped
 # by the CLI's --allowedTools parser; only Bash(<command>:*) is honored).
 # Requires live Neotoma; skipped (not failed) when NEOTOMA_BASE_URL is unset

@@ -1,6 +1,15 @@
 # Email Execution Loop — Staged Live Rollout Runbook
 
-**Status:** runbook (2026-06-24) · **Plan:** Task-spine loop (`ent_aff87747b49e338790568af6`) · **Spec:** [task_execution_loop.md](task_execution_loop.md)
+**Status:** runbook (2026-06-24) · **Plan:** Task-spine loop (`ent_aff87747b49e338790568af6`) · **Spec:** [archive/task_execution_loop.md](archive/task_execution_loop.md) (archived 2026-09-02; the work model is now [foundation/work_model.md](foundation/work_model.md))
+
+## Purpose
+
+Turn the email-driven execution loop (E1–E6) on safely on the live Apis daemon, one flag at a time.
+
+## Scope
+
+The three global rollout flags, the readiness gate's parking behaviour, and the widening cadence. The loop's
+design note is archived; the current work model is `foundation/work_model.md`.
 
 The email-driven execution loop (E1–E6) is built, tested (122), and live-validated in a contained run. This runbook turns it on **safely** on the live Apis daemon. The core risk: the three flags are **global** (every dispatched task is affected, no per-task selector), and the readiness gate can **park real tasks** in `awaiting_input`. So enable additive behavior first, the gating behavior second, and only widen after repeated clean cycles.
 

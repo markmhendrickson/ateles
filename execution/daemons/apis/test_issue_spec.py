@@ -27,7 +27,39 @@ from issue_spec import (
 
 def test_sections_are_in_canonical_order():
     keys = [s.key for s in SECTIONS]
-    assert keys == ["pm", "design", "eng", "qa", "security", "legal"]
+    assert keys == ["basis", "pm", "design", "eng", "qa", "security", "legal"]
+
+
+def test_design_basis_is_first_and_not_its_own_dispatch():
+    """The design basis is stated by Pavo INSIDE the pm turn, so it is first in
+    the mirrored spec but never a section the pipeline dispatches on its own
+    (an extra agent run per issue is the cost this avoids)."""
+    from issue_spec import DESIGN_BASIS, DISPATCHED_SECTIONS
+
+    assert SECTIONS[0] is DESIGN_BASIS
+    assert DESIGN_BASIS.agent == "pavo" and DESIGN_BASIS.lens == "pm"
+    assert not DESIGN_BASIS.dispatched
+    assert DESIGN_BASIS not in DISPATCHED_SECTIONS
+    assert [s.key for s in DISPATCHED_SECTIONS] == [
+        "pm", "design", "eng", "qa", "security", "legal"
+    ]
+    # The by-agent / by-lens maps must still resolve pavo / pm to the pm
+    # SECTION — the basis shares both keys and must not shadow it.
+    assert SECTION_BY_AGENT["pavo"].key == "pm"
+
+
+def test_extract_design_basis_fenced_and_no_fallback():
+    from issue_spec import extract_design_basis
+
+    out = extract_design_basis(
+        "narration\n<<<DESIGN_BASIS>>>\nDesign basis: docs/foundation/"
+        "work_model.md#claim-and-lease\n<<<END_DESIGN_BASIS>>>\nmore"
+    )
+    assert out == "Design basis: docs/foundation/work_model.md#claim-and-lease"
+    # No fences → '' (never inferred from prose), unlike the spec extractor.
+    assert extract_design_basis("Design basis: docs/foundation/x.md") == ""
+    assert extract_design_basis("") == "" and extract_design_basis(None) == ""
+    assert extract_design_basis("<<<END_DESIGN_BASIS>>> x <<<DESIGN_BASIS>>>") == ""
 
 
 def test_always_keys_are_pm_eng_qa():

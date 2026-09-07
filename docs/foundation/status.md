@@ -1,0 +1,4156 @@
+# Foundation status: the gap between the design and the checkout
+
+**As of 2026-09-03.** Measured against `origin/main` at `285a873` (2026-09-03) and Neotoma prod read the
+same day; figures carried from the phase-0 synthesis (`ent_b0ce322f768e4fc676b73139`, measured 2026-09-02
+against `496bab3`) are marked with that date and were not re-measured unless the entry says so. The
+vocabulary renames of 2026-09-04 (PR #745 operator review) are recorded in their own section below; every
+other entry still uses the names the checkout uses, which are the old ones. The additions of revision 5
+(2026-09-04: intake, successors, the chain, and the core-workflow document) are measured in their own
+section below, against prod read the same day through the Neotoma MCP. Revision 6 (2026-09-04: batch,
+action gate, checkpoint, the vocabulary lint, `data_model.md`) adds three sections at the end: the
+revision-6 renames, the schemas the design needs, and the reading-list budget as measured on that
+revision; nothing else was re-measured for it. Revision 7 (2026-09-04: `adapters.md`) adds one section
+on the built adapters, read from the code on this branch the same day, and a revision-7 row set to the
+budget table; nothing else was re-measured for it. Revision 21 (2026-09-05: `gmail.md` and
+`calendar.md`) adds one section, measured on this branch the same day; nothing else was re-measured for
+it. Revision 26 (2026-09-05: the twelve rulings of the operator's second review — decisions 13–14, 16–18,
+and 23–29) adds one section in the revision series below, read from the drift tables the adapter documents
+already carry and from the branch the same day; nothing else was re-measured for it. Revision 28 (2026-09-05: `migration.md`, the migration plan as the population
+plan's second leg) adds the record inventory that plan starts from, measured against prod the same day;
+nothing else was re-measured for it. Revision 30 (2026-09-06: how tasks come into existence — the
+task-sources index, the intake rule, and decision 36) adds one section in the revision series, read from the
+code on this branch the same day; nothing else was re-measured for it. Revision 32 (2026-09-06: the skills leg of `migration.md`) adds the skill inventory that leg
+starts from, read from both harness roots and from prod on 2026-09-05; nothing else was re-measured for it. Revision 33 (2026-09-06: the conformance-suite design,
+`conformance_suite.md`) adds one section in the revision series, measured on this branch the same day by the
+instruments its section names; nothing else was re-measured for it. Revision 34 (2026-09-06: the
+workflow-format gaps — two declared intervals on a step, the planned wait, coverage as the value of `freshness`,
+and decision 45) adds one section in the revision series, read from this branch the same day; nothing else was
+re-measured for it. Revision 36 (2026-09-06: the second set of workflow-format gaps — a step's bound as the
+task's `due_date`, the `operator_only` step, the special-category mark on a type, the matter as a record entity,
+a rule keying on a step's write, and decision 55) adds one section in the revision series, read from this
+branch the same day; nothing else was re-measured for it. Revision 37 (2026-09-06: the testability pass — the conformance suite's thirty open
+findings and fifteen open contradictions carried back into the documents that own them, and decision 56) adds
+one section in the revision series, read from this branch the same day; nothing else was re-measured for it.
+Revision 38 (2026-09-06: the rulings pass — eleven open decisions ruled whole and three in part, on the
+operator's standing instruction to apply the recommended side of each decision the design's own logic settles)
+adds one section in the revision series, read from this branch the same day; nothing else was re-measured for it.
+Revision 39 (2026-09-06: the second rulings pass — the seven decisions the first had left, ruled as derivable
+from principles already in the documents, and the operator's review of the testability pass's three settlements
+and of the veto window on 37 to 41, recorded) adds one section in the revision series, read from this branch the
+same day; nothing else was re-measured for it.
+Revision 40 (2026-09-06: the planning pass — `planning_model.md`, the `planning` workflow, and decisions 57
+and 58) adds one section in the revision series, with the planning inventory of the operator's instance read
+from prod through the Neotoma MCP the same day and the drift read from this branch; nothing else was
+re-measured for it. Revision 48 (2026-09-06: five rulings on the operator's word — decisions 57, 59, 60,
+33, and 34; decision 61's drafted ruling superseded before landing by the concurrent priority pass's
+reframing, revision 47, and not applied) adds one section in the revision series, read from this branch the
+same day; nothing else was re-measured for it. Revision 65 (2026-09-06: host configuration ruled an
+extension of obligations 1 and 6 rather than a seventh, and the drift measured) adds one section in the
+revision series, with both repositories' settings read the same day through `gh api` — read only, no
+setting changed — and the design side read from this branch; nothing else was re-measured for it. Revision 66 (2026-09-06: agent identity across external systems — the
+credential asymmetry, decision 69, and the outbound mark) adds one section in the revision series, with the
+credential inventory measured on this branch the same day by the instruments its table names; nothing else
+was re-measured for it.
+
+**This document is perishable.** It is regenerated by re-running the measurements in the last section,
+never edited to keep up; a figure without a date and an instrument is a defect in it (principle 8). It is
+deliberately not in the reading list (`conformance.md`): the review lenses never receive it. Foundation
+documents may name this file as the state home; they must not copy its figures into design text. Read the
+as-of line before trusting anything below.
+
+## Purpose
+
+Report, for each foundation document, which of its stated mechanisms exist on the checkout, which fail
+open, and which are unbuilt; place the README's vision phases over the foundation as a roadmap; and hold
+every contradiction between stored sources whose resolution is a matter of state rather than design.
+
+## Scope
+
+`origin/main`, the entities on Neotoma prod, and the open issues and PRs that carry the gap. The deployed
+daemon checkout was not inspected; a merged fix does nothing until that checkout moves (principle 10).
+
+## Roadmap: the vision phases over the foundation
+
+| Phase (README) | Foundation sections | State as of 2026-09-03 |
+|---|---|---|
+| P1 governed execution for one principal | `principles.md`; `work_model.md`; `gates_and_workflows.md`; `failure_posture.md`; `authority_model.md` (tuple, grants, attribution); `conformance.md` | binding built (#744); the rest partial, per document below |
+| P2 multi-operator identity and ownership | `authority_model.md` (principals, tenant, ownership) | designed, including the identity decision (C9, settled on an `operator` entity), except `multi_tenant.md` section 7; nothing built; no principal entity has a runtime reader |
+| P3 delegation and approval | `authority_model.md` (delegation, approval) | design stated; nothing built; the checkpoint records no resolver and has no timeout |
+| P4 distributed authority and initiative | `authority_model.md` (structural checks, initiative objects) | object set decided; eight questions open in the brief `ent_683200acfb3ff5f03add966c`, awaiting the operator |
+| P5 organizational operating system | none | requirements listed in the brief's closing table; no design until P4 is designed |
+
+The implementation axis (`docs/phases.md`, Phase 0 to 9) is separate and is a render target of plan
+`ent_99ace4dd6673aa36ed08b1fe`; the request that it gain a design-basis column is recorded on plan
+`ent_533d4ec2f7bfb60f66fb3fce`.
+
+## Renames of 2026-09-04: the design's names versus the checkout's
+
+PR #745's operator review renamed the design's terms. What is built still uses the old names everywhere;
+the rename is the gap. Read the old name in the entries below as the built thing and the new name as its
+design.
+
+| Design term (2026-09-04) | Built name on `285a873` and on prod | Where the old name lives |
+|---|---|---|
+| `workflow` | `workflow_definition` (8 entities on prod) | `lib/daemon_runtime/workflow_resolver`, Anthus, the gate-state plan's `keep_the_name_workflow_definition` |
+| `step`, `steps[]`, `step_name`, `join_step` | `gates[]`, `gate_name`, `join_gate` | the same entities and resolver |
+| `sign-off` (the one record a step owner writes) | `participation_record` | Anthus writer; the stranded rows under C15 |
+| step state derived from edges (open / claimed / signed) | none; `participation_record` rows hold a per-step status | Anthus writer |
+| `passage` (one passage of tasks through a workflow) | none | no entity records one passage; the issue stands in for it |
+| the passage's subject is the task; issues and PRs are `artifact`s attached by edge | the pipeline sequences issues and PRs, not tasks; `gate_status` lives on the issue | `swarm_dispatch.py`, `lib/issue_labels.py`; the task dashboard's task-to-issue and task-to-PR links are the artifact edges, unnamed as such |
+| `step_status` on the task; "all required steps signed off" | `gate_status` on the issue; `_gates_green()` | `swarm_dispatch.py`, `lib/issue_labels.py`, `server.py` |
+| step owner | gate owner, `owner_agent` | `workflow_definition.gates[].owner_agent` |
+| `assign`, assignment (an eligibility field; pull is the only delivery) | `dispatch`, dispatcher, `route_task` | `swarm_dispatch.py`, `routing.py`, the MCP server's `route_task` |
+| a step opening is published and its owner claims it (a lease on the step) | the pipeline spawns a runner by role name per gate | `swarm_dispatch.py`, `skill_runner.py` |
+| lease as an edge with `held / lapsed / returned` | none; `executing` status and `updated_at` age | `task_lifecycle.py:61`; `task_watchdog.py:268` |
+| `active` (derived) | `executing` written by the dispatcher | `task_lifecycle.py` |
+| watchdog counts lapses and escalates; no reaper | watchdog requeues on `updated_at` age | `task_watchdog.py` |
+| `action` entity; `execute` reserved for actions | no entity; `action_type` on the task only; tasks are "executed" in code and prompts | `gating.py`, `swarm_dispatch.py`, agent prompts |
+| workflow policy versus execution policy | `execution_policy` only; step-claim rights are implicit in `owner_agent` | `gating.py`, `workflow_resolver` |
+| operator-only tasks claimed by the operator-facing agent | pushed to the operator by notification; no claim | `notifier.py`, `email_channel.py` |
+| `ADDRESSED_BY`, `PART_OF` edges for aggregation and parents | no `ADDRESSED_BY` relationship type in use; `PART_OF` exists for plan membership | relationship types on prod |
+| `successors` on a `workflow`; the closing sign-off names one or none | none built; no `workflow_definition` carries a `successors` field (prod, 2026-09-04); the built pipeline hardcodes issue → PR → merge, and the `feature` declarations carry `release` as an in-line final step rather than a successor | `swarm_dispatch.py`, `workflow_definition.gates[]` |
+| intake as every task's first passage | none built; tasks are created directly into assignee routing, `assigned_to` read by `routing.py`, with no classify, link, dedupe, prioritize, or route record | `routing.py`, `task_lifecycle.py`, the MCP server's `route_task` |
+| `FOLLOWS` edge between passages; the chain derived | none; no passage entity exists to carry one, and `FOLLOWS` is not a relationship type in use (prod, 2026-09-04) | relationship types on prod |
+| `on_fail` on a step (the earlier step a failing sign-off reopens) | one declaration carries it: `ateles|social_content`'s `draft_lint` (`on_fail: revision_requested`); no engine reads it | `workflow_definition.gates[]` |
+
+The agent prompts and skills rendered from `agent_policy` entities still say "dispatch" and "gate owner";
+the correction is to the entities (`conformance.md`, direction of truth), then a re-render. The terms
+`work item` and `work entity`, retired on 2026-09-04, appear in no code identifier; they were the
+foundation's own earlier wording for what is now the task (subject) and the artifact (record).
+
+## `principles.md`: what fires
+
+| Invariant | On `285a873` | Gap |
+|---|---|---|
+| 1. a mechanism that does not bind is not a control | `check_agent_roster.py` blocks in `ateles-tests.yml`; the foundation binding reports an absent document as not yet written | two `continue-on-error: true` steps in `agent-config-validation.yml` (counted 2026-09-03); nothing catches a new one; 151 of 301 `checkpoint_brief`s are at status `open` (prod, 2026-09-03), and the synthesis's sample found 49 of 49 merge-approval briefs from June and July never consumed (2026-09-02) |
+| 2. read it back | `check_neotoma_rest_paths.py` (#606) | the undeclared-field case (`/store` returns 200 and routes the field to `raw_fragments`) has no linter and no runtime check |
+| 3. validate the instrument | nothing | review only |
+| 4. a test that cannot fail is decoration | nothing mechanical | #744 recorded its revert results; the practice, not a mechanism |
+| 5. fail closed | `gating.py` `blast_radius_for()` (#724, merged): `operator_only` to `NEVER` ahead of policy; unclassified to `NEVER`; never-set parity test against `server.py` | the five fail-open paths under `authority_model.md` below |
+| 6. extend, do not parallel | none merged | `SWARM_PRIOR_ART_CONTRACT` is #686, open |
+| 7. unknown stays distinct | `checkout_drift.py` `unknown` on failed fetch; `_required_ci_state` returns `"unknown"`; `foundation.py` distinguishes listed-but-absent | the three grant paths that map an unreachable policy source to allow |
+| 8. every figure carries its date | this document | none while it is regenerated |
+| 9. one source | `check_hardcoded_config.py` in `scripts/lint.sh`; the #724 never-set parity test | the four gate-set copies (below) |
+| 10. handing off is not completion | `checkout_drift.py` at daemon start, advisory unless `ATELES_ENFORCE_CHECKOUT_FRESHNESS=1` | nothing tracks a PR from open to deployed |
+
+## `work_model.md`
+
+- **No claim, lease, or queue primitive exists** under `lib/` or `execution/daemons/` on `285a873`
+  (`git ls-tree` for `task_claim`, `task_lease`: none). `TaskReconciler.claim()` is an in-process set.
+  The primitive is #733, open.
+- **`executing` is still a status value**: `task_lifecycle.py:61` `EXECUTING = "executing"`; the
+  dispatcher writes it before the spawn with no `finally` (synthesis, 2026-09-02). The design's `active` is
+  a derived read with no writer; nothing on the checkout derives it.
+- **The misroute is fixed**: #702 closed 2026-09-03 by #732; `routing.py:586` on `285a873` states an
+  unrecognized `assigned_to` is "a HARD STOP, never a fallthrough". The foundation's pull-only
+  reasoning cites the class of defect, not this instance.
+- **The watchdog's signal is still `updated_at`**: `task_watchdog.py:268` infers age from
+  `updated_at`, `last_observation_at`, `updated_date`, `computed_at`, `created_at`, so any write resets it.
+  It also requeues, which under the design (no reaper; a lapsed lease simply does not count) it would not
+  do; the lapse counter and its escalation cap are unbuilt.
+- **Status vocabulary on prod** (500-row sample, 2026-09-02): `completed` 329, `pending` 87, `open` 31,
+  unset 19, `done` 7, `in_progress` 6, `canceled` 6, `todo` 5, `blocked` 4, `queued` 1. `normalize()` does
+  not map `completed` onto `done`; `assigned_to` unset on 492 of 500.
+- **Reachability by mechanism** (2026-09-02): of 37 roster roles, 12 have a daemon; 25 are reachable by
+  none of the three mechanisms automatically.
+
+## `gates_and_workflows.md`
+
+- **Four copies of the gate set, two wrong**, all live on `285a873`: `swarm_dispatch.py:271`
+  `PRE_IMPL_GATES = ("pm", "ux", "arch")`; `lib/issue_labels.py:100` `PRE_IMPL_GATE_NAMES = ("pm",
+  "arch")` under a comment claiming it mirrors the former, so `blocked/gates` can read clear while `ux` is
+  pending (the #285 class); `execution/mcp/ateles/server.py:609` `_GATE_ORDER` omitting `qa`, `legal`,
+  `release`; and 8 `workflow_definition` entities (prod, 2026-09-03), advisory only, of which `ateles|bug`
+  and `ateles|security` declare `pm` alone before `impl`. #719 (drive sequences from the entities) is open.
+- **Two blind engines**: Apis sequences from the literal and writes `gate_status`; Anthus sequences from
+  the entities and writes `participation_record`; neither reads the other. Zero records reach `satisfied`
+  because the terminal writes never supplied the schema's required `agent` and the writer swallowed the
+  rejection; #736 is open; stranded rows (129, 143, and 163 across three sources, C15) were not backfilled.
+- **Retired agent names in workflow data (C4)**, prod 2026-09-03: `gryllus` (retired 2026-06-12) is
+  `impl` owner on `ateles|copy`, `ateles|security`, and `neotoma|feature`; `paradisaea` (renamed) is
+  `copy` owner on `ateles|copy`; `neotoma|feature` raw fragments still list `bombycilla`; agent_policy
+  `ent_bf7732d200868ea64d5e8182` names Bombycilla for the arch gate. The data correction is under the
+  gate-state plan and has not been made.
+- **Merge authority is in three states (C6)**: stored policy says operator-gated (`execution_policy`
+  `ent_e3ea122f7dc286fc0868e4a1`, `ent_dfce6edecefe3eb7fc9e0337`, ratified 2026-07-07); the code default
+  agrees (`APIS_AUTONOMY_AUTO_MERGE` defaults off, `swarm_dispatch.py:35-39`); the running configuration
+  had the flag on (`analysis_finding` `ent_ca1a3f3c0dea2d9b583249fe`) and the steward merged with it on
+  twice on 2026-09-02. The flag is per-checkout runtime state and its current value is read from the
+  running process, not from here. The operator decision (policy to flag, or flag to policy) is open.
+- **The gate is blast-only in practice (C11)**: 14 of 20 sampled PLAN briefs carry confidence 0 against a
+  threshold of 0.85 with empty `proposed_alternatives` (2026-09-02); blast radius is inferred from the
+  handling agent (#682, open); #688 (declare `action_type` at creation) and #689 (blast from what the
+  task does) are open PRs.
+- **The approval object**: `write_checkpoint_brief()` (`gating.py:539`) takes no principal;
+  `resolve_checkpoint` on the MCP server checks status only; nothing records who resolved; no timeout
+  exists. The checkpoint's designed fields (`awaiting`, `resolved_by`, terminal timeout) are unbuilt.
+- **`_FALLBACK_LOW_BLAST`** still exists because the fallback policy carried an empty low set; transitional
+  under the failure posture.
+
+## `workflows.md`
+
+Read on prod through the Neotoma MCP on 2026-09-04 (`retrieve_entities`, `entity_type:
+workflow_definition`, 8 entities; the `neotoma` CLI on this host binds to a local API that is not
+running, so it was not used). The document states each workflow's design; the table records what the
+record holds and where each step list in the document came from.
+
+| Workflow (document section) | Declaration on prod | Step list in the document | Gap between design and declaration |
+|---|---|---|---|
+| intake | none | envisioned; no entity yet | no intake passage is recorded anywhere; `classify`'s work is partly done by `routing.py` at claim time and by #688/#689 (open) at creation |
+| feature | `ateles\|feature` `ent_1d20d557828ecd080b654367`; `neotoma\|feature` `ent_d120dc0542a985ae3552f184`; `swarm-smoke\|feature` `ent_5dba38a5236a4a8d5d360160` | from the entities (`pm`, `ux`+`arch` parallel, `impl`, `pr_review`, `qa`+`legal` parallel), plus a `merge` step the design adds | the declarations end with an in-line `release` step and have no `merge` step; the design makes `merge` the closing step and `release` a successor workflow (scenario d); `neotoma\|feature` names `gryllus` (retired) as `impl` owner and its raw fragments still list `bombycilla` (C4); `swarm-smoke\|feature` adds `internal-only` and `docs-only` fast paths |
+| bug | `ateles\|bug` `ent_1b6d0acbdc436d3f0dad5a0d` | from the entity (`pm`, `impl`, `pr_review`, `qa`) plus `merge` | the declaration ends with an in-line `release` step |
+| security | `ateles\|security` `ent_f3050e3e150f0dee8f6da72e` | from the entity (`pm`, `impl`, `pr_review`) plus `merge` | in-line `release` step; `impl` owner is `gryllus` (retired, C4); the design's `release`-only successor rule is not declared |
+| copy | `ateles\|copy` `ent_6da4d55a19b4b149e3376b57` | from the entity (`pm`, `copy`, `ux` optional, `impl`, `pr_review`, `legal` optional) plus `merge` | in-line `release` step; `copy` owner is `paradisaea` (renamed) and `impl` owner `gryllus` (retired), C4; its one fast path (`copy` skips `arch`) names a step the workflow does not declare |
+| social content | `ateles\|social_content` `ent_38ab0119e528d021c51d46a1` | from the entity (`draft`, `draft_lint`, `operator_preview`, `post`) | the declaration's description says the workflow triggers on `assigned_to` and a `domain` field, which the design replaces with intake's `route`; `operator_preview`'s owner is named as a notification agent rather than the operator-facing agent |
+| release | `ateles\|release` `ent_23ddc9cdc4d37045ccf7ab3e` | design: `criteria`, `release`, `verify_deployed`; the entity declares `release` alone | the declaration's one step folds the criteria read and the deployed-checkout read-back into the release step; nothing on the checkout verifies the deployed checkout after a release (principle 10 row above) |
+| outreach | none | envisioned; no entity yet | the email agent's hourly sweep drafts and never sends (`email-triage-auto`), which is the `draft` step without a passage; the Gmail send gate is the `consent` step's enforcement, outside any workflow |
+| payment | none | envisioned; no entity yet | payments run as skills against `payment_profile` entities with a checkpoint on the `payment` class; no `verify` by a disjoint principal and no `reconcile` record exist |
+| research and analysis | none | envisioned; no entity yet | the `analyze` skill persists `analysis` entities; no `brief` or `gather` record |
+| meeting processing | none | envisioned; no entity yet | `analyze-meeting` performs `ingest` through `persist` as one skill run with no passage or sign-offs |
+| operator-only | none | envisioned; no entity yet | operator-only work is pushed by notification (`notifier.py`, `email_channel.py`); no claim, no `await` bound |
+
+**Unbuilt, named by the document:** `execution/scripts/render_workflow_docs.py` (`--check`), the step
+tables' render contract; no file by that name exists on `origin/main` (`git ls-tree`, 2026-09-04). No
+`workflow_definition` carries `successors`; only `social_content` carries an `on_fail`. No entity of
+type `workflow`, `passage`, or `sign-off` exists (the renames table above). The design's `merge` step
+has no built counterpart: the steward's merge is `_gates_green()` plus code in `swarm_dispatch.py`,
+with no sign-off written.
+
+## `failure_posture.md`
+
+- On `285a873`: `lib/neotoma_forensics.py` (rule 1's local-disk capture) and
+  `lib/daemon_runtime/checkout_drift.py` exist. The halt, the reachability probe
+  (`lib/daemon_runtime/neotoma_reachability.py`), and the off-Neotoma announcement are #714, open; the
+  file does not exist on main. #635 (judge Neotoma by a real read) is an open PR. `lib/notify` has no
+  rate limiting of its own (#645).
+- The grant paths in C17 are unchanged (below).
+
+## `authority_model.md`
+
+**The tuple as implemented** (`285a873`):
+
+| Term | Implemented as |
+|---|---|
+| principal | the AAuth `(sub, iss)` pair for agents, realm literal `@ateles-swarm`; one operator as a GitHub login (`_OPERATOR_LOGIN`, env with a literal default), one email (`OPERATOR_EMAIL`), one chat id (`TELEGRAM_CHAT_ID`), and the magic value `agent_grant == "operator"` |
+| domain, scope | `agent_grant.capabilities` matched on `sub` and `iss`; 20 of 29 grants auto-derived 2026-06-17; two human-device grants are full wildcards; `execution_policy.permission_scope` |
+| action | `action_type` to `LOW`, `HIGH`, or `NEVER` (#724) |
+| conditions | `confidence_threshold`, recurrence graduation, per-boundary checkpoints, `operator_only` |
+| time | not implemented: no `expir`, `valid_until`, or `ttl` token in `grant_checker.py` (0 matches, 2026-09-03); the lease is not on main either |
+
+**Fail-open paths**, each an enforcement point mapping `Indeterminate` to `Permit`:
+
+1. **#560, open.** `grant_checker.py` documents itself "permissive (allows all)" when Neotoma is
+   unreachable and "advisory in Phase 5"; permissive on no grants; `check_tool()` allows when no grant
+   declares any tool.
+2. **#561, open.** Delegation does not attenuate: the delegate runs on its own full standing grant;
+   `agent_grant` has no `scope`, `expiry`, or `delegated_by`; the chain is prose,
+   `a2a_executor.py:190` appending `— delegated via A2A by: <caller>` to the task description.
+3. **#669, open; fixed at the loader, not at the caller.** `agent_loader.py` marks a failed load
+   `is_stub=True` and still returns `tool_allowlist="*"`, its docstring saying callers must check. No
+   dispatch caller does: `git grep '\.is_stub'` under `execution/daemons/apis` and `lib/daemon_runtime`
+   finds only `signer.is_stub` (2026-09-03). A timed-out load still dispatches an agent with no
+   instructions and wildcard tools, cached for the process lifetime.
+4. **`a2a_gateway.authorize_caller()`, no issue.** Returns `(True, "grant_check_unavailable_advisory")`
+   when the checker raises (`a2a_gateway.py:280`).
+5. **`mcp_tool_grant_proxy/proxy.py`, no issue.** `enforce()` returns `(True, "")` when `agent_sub` is
+   empty ("No identity configured → advisory passthrough"); the proxy is otherwise the nearest thing to a
+   real enforcement point, which is why this branch matters.
+
+**The single principal, measured** (synthesis section 4, `496bab3`, 2026-09-02; not re-swept): 138 sites
+across `lib/`, `execution/daemons/`, `execution/mcp/`, `.claude/hooks/`, and daemon-imported
+`execution/scripts/`; 60 hardcoded literals or magic values; 63 single-valued parameters; 15 per-principal,
+every one keyed on an agent, none on a human. `operator_profile` has one instance and zero runtime readers
+under `lib/` and `execution/daemons/`; 26 of 40 prompts mention it, 3 of 40 declare it. Three chokepoints
+answer most of the 123 human-assuming sites at once: `notifier.py:116-118` (who to notify);
+`email_channel.py:62-64` with `swarm_dispatch.py:4781/4981` (who may approve); `gating.py` with
+`server.py` (a checkpoint has no owner). #487 and #423 are two of these sites filed as bugs.
+
+**Extension points, judged against the inventory.** A second `operator_profile`: changes nothing, zero
+readers. Agent-to-principal binding: `agent_grant` keys on the agent's `sub` with no principal or tenant
+dimension; a second human today is another wildcard grant. Ownership edges: no principal entity exists to
+draw one to. Attenuating delegation: #561. **Verdict:** the README's extension-not-rewrite claim is true
+of the entity model (the per-agent pattern is a real template) and false of the substrate (123 of 138 sites
+resolve "the operator" without asking, concentrated in the notify, approve, and checkpoint paths); the
+first change is a principal that is an entity.
+
+**Attribution (C8): unverified.** The AAuth signing audit (`ent_eaa198482b7bbe4c965eeed0`, 2026-08-06)
+found daemons loaded signers but attributed writes to the operator bearer; the fallback strings remain at
+`aauth_signer.py` and six daemon sites; the ateles MCP server holds one bearer and never identifies its
+caller. Not re-tested since 2026-08-06.
+
+**C19.** #378 shows pm, ux, and arch signed off with a build checklist for seven new and five delta
+schemas; plan `ent_533d4ec2f7bfb60f66fb3fce` records that no P2 design exists and that the design work is
+blocked on the operator's `multi_tenant.md` section 7 decisions and the proving-ground pick. One must
+yield before a schema PR opens; recorded for #378's owner.
+
+## `vocabulary.md`
+
+`executing` is still a status value (above). `dispatch`, retired from the vocabulary on 2026-09-04, still
+names the GitHub pipeline's spawn-by-role and the notification path throughout the code and the rendered
+agent prompts; the design has no delivery but the claim, and its word for the eligibility field is
+assignment (the renames table above). `gate owner`, `workflow_definition`, `participation_record`, and
+`gate_status` are likewise the checkout's names for the design's step owner, `workflow`, `sign-off`, and
+`step_status`; the design's `passage` and derived step state have no built counterpart. Retired agent
+names persist in design entities (C4, above).
+`docs/aauth.md` is to be rewritten against verified state (#471, open).
+
+## `conformance.md`
+
+The binding is built (#744, open; stacked on #686): `foundation.py` inlines the kernel and the keyed
+documents into the arch gate and every reviewing lens, the dispatched-prompt contract names the kernel,
+and the issue spec's design-basis section is checked mechanically. The reading-list budget as measured
+on revision 6 is in its own section at the end of this document; the budget was the operator's call and he
+made it on 2026-09-06 (decision 66): the caps constrain a generated projection, and the canonical documents
+these figures measure are bounded by nothing mechanical, so every over-cap row below is a measurement of the
+wrong artefact and is kept only as the dated record it is. Code comments in `apis.py`, `swarm_dispatch.py`, `run_email.py`, `notifier.py`, and
+`readiness.py` still cite the archived `docs/task_execution_loop.md` and
+`docs/swarm_hitl_checkpoints_design.md` paths.
+
+Of the five checks `conformance.md#mechanical-checks-on-this-directory` names, three exist on this
+branch (2026-09-04): the reading-list budget test (`test_foundation.py::TestRealDocumentBudget`, added
+by the review panel on 2026-09-04 and marked expected-to-fail on revision 6 until the operator's budget
+pass, below), `execution/scripts/check_foundation_anchors.py`, and
+`execution/scripts/check_foundation_vocabulary.py` (asserted zero Never hits by
+`test_foundation.py::TestVocabularyLint`). Neither renderer exists: `render_workflow_docs.py` (revision
+5's contract) and `render_data_model.py` (revision 6's) are absent from `origin/main` and from this
+branch (`ls execution/scripts`, 2026-09-04).
+
+## Renames of revision 6 (2026-09-04): batch, action gate, checkpoint
+
+Applied on 2026-09-04 from the operator's seven settled decisions on PR #745. As with the earlier renames,
+what is built keeps the old names; the rename is the gap.
+
+| Design term (revision 6) | Replaces | Built name on `285a873` and on prod | Where the old name lives |
+|---|---|---|---|
+| batch (one or more tasks going through a workflow, and the record of that; a task is a batch of one) | `passage` (revision 4–5, never built) | none; the issue stands in for the record | `swarm_dispatch.py` sequences issues; no `ADDRESSED_BY` or `FOLLOWS` relationship type in use (prod, 2026-09-04) |
+| attach / detach (verbs; split = detach and open a new batch) | `aggregation`, `split` (nouns) | none | — |
+| tasks are executed; actions are taken | tasks worked; actions executed (revision 3–5) | tasks are "executed" in code and prompts; no `action` entity | `gating.py`, `swarm_dispatch.py`, agent prompts (the built verb happens to match the new design for tasks) |
+| action gate; `action_policy` | execution gate; `execution_policy` | `execution_policy` (entities on prod, schema `0e61f23f-b1bd-46a3-8824-9dde710db9e6`); `evaluate_gate()`, `NEVER_AUTO_EXECUTE_ACTION_TYPES` | `lib/daemon_runtime/gating.py`, `execution/mcp/ateles/server.py`, the seven `execution_policy` entities in `CLAUDE.md`'s key-entity table |
+| `checkpoint` (entity; subject an action or a task; reason class) | `checkpoint_brief` (revision 1–5); `escalation` (entity) | `checkpoint_brief` schema `b0bfcfab-1f07-4526-8fa5-d5ace343b004`, `write_checkpoint_brief()` and `evaluate_gate()` (`gating.py`), `list_checkpoints` / `resolve_checkpoint` on the MCP server; `escalation` schema `c005dcb3-d9fb-4791-a154-fdb09ab9da12`, consumed by Anthus (`anthus.py` subscribes to `escalation` events); the watchdog raises none (`git grep escalation execution/daemons/apis/task_watchdog.py`: 0 hits, 2026-09-04) | `gating.py`, `server.py`, `execution/daemons/anthus/anthus.py`, `lib/daemon_runtime/checkpoint_posture.py` |
+| escalate = raise a checkpoint on a task; reason classes `gate_hold`, `repeated_lapse`, `unreadable_workflow`, `rounds_exhausted`, `unspawnable_assignee` | `escalation` entity with free-text reason | the built `escalation` carries `reason`, `needed_input`, `options`, `status` as free text; no subject edge; no reason class | same |
+| payment workflow steps `consent`, `pay` | `checkpoint`, `execute` (revision 5) | no payment `workflow_definition` exists (prod, 2026-09-04), so nothing built changes | — |
+| operator-only tasks are ordinary tasks; they raise a checkpoint only at the action gate | operator-only work as its own escalation path (revision 5's `await` bound "escalates") | operator-only work is pushed by notification (`notifier.py`, `email_channel.py`) | same |
+
+## Revision 8 (2026-09-04): the rename and what the newly written rules do not yet have
+
+One rename and the built-state divergences of the rules revision 8 wrote. As with every earlier revision,
+what is built keeps the old name and lacks the new mechanism; that gap is what these rows record.
+
+| Design term / rule (revision 8) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| `workflow.steps[].owner_role`, a role the roster resolves to a principal at claim time | `owner_agent`, whose name said agent while every declaration held a role and `vocabulary.md` called it a principal | the field is `owner_agent` on all 8 `workflow_definition` entities and holds a role; nothing resolves it through the roster at claim time — the pipeline spawns a runner by role name when it opens the step | `workflow_definition.gates[].owner_agent`; `swarm_dispatch.py`, `skill_runner.py`; a role name in an owner field has been treated as a data-quality defect to be "fixed" to an agent name |
+| verdict `waived` on a `sign_off`, written by the operator principal, closing an unsigned required step with its reason | no design term; the mechanism existed only as an operator command | an operator comment command clears every unsigned pre-implementation step and re-triggers the pipeline, writing no record of who cleared what or why; the token `waived` appears in no schema | the PR pipeline's comment handling; no `sign_off` (built: `participation_record`) carries a verdict field admitting it |
+| every delivery resolves to an outcome or to `dropped` with a reason, counted per window and announced off-record | `adapters.md`'s "or nothing" branch (revision 7) | deliveries are dropped at log level with no disposition written and no count surfaced; a refused command and a delivery that never arrived are indistinguishable from the external system | the adapter daemons' event handlers |
+| no step state on an artifact with no batch | the same rule, stated only positively (a PR with no batch yields a task for intake) | pre-implementation steps are back-filled on PRs no batch addresses, as `not_applicable`, `waived`, or "legacy clear", and the review panel then runs | `swarm_dispatch.py`, `lib/issue_labels.py` |
+| `artifact_refs[]` carry the head each sign-off judged | nothing; refs named the artifact only | no head is recorded with a verdict, so a verdict against a superseded head reads as current; the merge path pins its own head SHA independently | Anthus writer (`participation_record`); the merge tool |
+| a credential that is the asset is loaded only in the subprocess taking the action; grants read at every check | nothing stated | grants load once at daemon startup and are never re-polled, so a revocation waits for a restart | the grant loader and checker |
+| one `ownership_grant` per registered entity type; tests never register into the shared registry | nothing stated | the production registry holds timestamped throwaway types from test runs, and no entity type carries an `ownership_grant` | the schema registry on prod |
+| the record-usage contract (`data_model.md`, "What each actor reads and writes") | nothing; retrieval and write boundaries were stated per-document | no mechanism reads or enforces the contract; `context_entity_types[]` exists on `agent_definition` but nothing bounds a runtime read to it | `agent_definition` entities; the Neotoma client |
+| principle 10's checkout-drift check named as reporting, not enforcement | "**Enforced by:** the checkout-drift check" | `checkout_drift.py` logs at ERROR and continues unless `ATELES_ENFORCE_CHECKOUT_FRESHNESS=1`; the flag is unset in every deployment checkout | `lib/daemon_runtime/checkout_drift.py` |
+| a richer mirror is merged upward as a correction, then re-rendered | `conformance.md`'s "wrong until corrected" read as licence to regenerate | the render `--check` scripts report a difference without saying which side is ahead, and the habitual response is to regenerate | `render_agent_docs.py`, `render_plan_docs.py`, `render_workflow_docs.py` |
+
+## Revision 9 (2026-09-04): the settled-but-unwritten rules and the review corrections
+
+The built-state divergences of the rules revision 9 wrote — the six settled-but-unwritten rules and the
+corrections from the PR #745 operator review. Read from the code on this branch by reading the modules
+named below; nothing on prod and no deployed checkout was inspected, so a row saying "no mechanism" means
+none was found on this branch, not that none exists anywhere.
+
+| Design term / rule (revision 9) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| escalation reorders and never signs; no step is closed by elapsed time | nothing stated; the rule lived only in an issue comment | no mechanism ages an open step at all, so nothing closes one on a timer and nothing surfaces one either — the ten-day stall the rule is written against is invisible rather than mis-resolved; whether an interval raises a checkpoint is an open decision | the watchdog, which counts lapses on claimed tasks only and has no notion of a step nobody claimed |
+| scope amendment versus scope creep: disclosed, escalated, and defended against an existing acceptance criterion, else the batch splits | nothing stated | acceptance criteria appear as free-text `[pavo] acceptance_criteria:` comments the orchestrator parses; no mechanism records an amendment, tests the three conditions, or splits a batch, and a scope change leaves no record distinguishing it from the original criterion | `execution/daemons/anthus/orchestrator.py` and its comment parsing |
+| a blocking finding is implementation-only or decision/attestation, and routing the remedy never transfers the verdict | nothing stated; findings carried severity but no kind | `review_learning.py` parses `[BLOCKING]`/`[NON-BLOCKING]` headers and classifies findings as **systemic versus one-off**, which is a different axis (does this generalize to the agent's prompt) and not the routability axis the design names; nothing marks a finding as needing a principal's judgement, so nothing prevents one being routed to an implementer | `execution/daemons/apis/review_learning.py` (`classify_finding`, `_FINDING_HEADER`) |
+| a blocking verdict cites an executed command and its output; unexecuted reasoning is filed non-blocking | nothing stated | the finding parser reads a severity token out of review prose and carries no evidence field at all, so a blocking finding that executed nothing is indistinguishable from one that executed a check; the corpus measured 0 of 11 blocking findings citing executed evidence | `review_learning.py`'s `ReviewFinding`, which has `category`, `summary`, `detail`, `blocking`, `lens` and no evidence |
+| tolerant readers, canonical writers | nothing stated | not assessed on this branch: no reader was inspected for whether it checks historical spellings, and the rule is written against a failure the corpus reports rather than one measured here | wherever a field's name has drifted across writers; unenumerated |
+| a registered type declares its per-field merge policy (`reducer_config`) at registration | nothing stated | the token `reducer_config` appears nowhere in this checkout; types are registered without a declared merge policy, so concurrent writers to one field resolve by whatever the store does by default | the schema registry and `register_schema` call sites |
+| `finding`, `verdict`, and `condition` as canonical terms | used across the documents, defined nowhere | `verdict` is a field on no built entity (the built `participation_record` carries no verdict field — revision 8's row above); `finding` exists as a parsed shape in one module; `condition` names nothing built | as above |
+| a vocabulary term is spaced; an entity type or field keeps its record spelling in code font | the file mixed `step state`, `step_status`, and `sign-off` without stating which was which | a documentation convention with no runtime counterpart; the vocabulary checker enforces banned words, not term form, so the rule is held by authorship rather than mechanically | `execution/scripts/check_foundation_vocabulary.py` checks Never and Not-for lists only |
+| `artifact` bound to an entry an external system holds, reached through an adapter, identified by `system` and `external_id` | the term was used loosely enough to cover anything a batch produced | not assessed as a data question on this branch; the design's narrowing is new, and whether any built writer has minted an `artifact` for something the record already holds was not measured | the adapter daemons and any writer creating `artifact` rows |
+| an adapter records sourcing through the record's provenance, carrying source, sourced-at, and coverage; freshness is derived | nothing stated | no freshness or last-synced field was found on this branch, which is the right absence, but neither is coverage recorded: an adapter that reads a page writes what it got with no statement of what it asked for, so a truncated read is indistinguishable from a complete one | the adapter daemons' read paths |
+| adapter vocabulary: `inbound`, `outbound`, `delivery`, `disposition`, `dropped`, `sourcing`, `coverage`, `freshness` | used in `adapters.md`, defined nowhere | `dropped` and `disposition` have the revision 8 row above (deliveries drop at log level with no disposition written); the remaining terms name design concepts with no built counterpart | the adapter daemons' event handlers |
+| a task is executed only through a workflow; a daemon's tasks enter intake like any other | implied by "intake is every task's first workflow", never stated as a prohibition | not assessed as a whole; the known divergence is the one revision 8 already records — pre-implementation steps back-filled on artifacts no batch addresses — which is the same shape as work advancing outside a workflow | `swarm_dispatch.py`, `lib/issue_labels.py` |
+
+## Revision 12 (2026-09-04): the twelve rulings, and the one rename they imply
+
+The twelve open decisions were ruled and written into the design this revision. Every one of them is
+**designed and not built**: each row below names a mechanism, a verdict rule, or a type that now exists in
+`docs/foundation/` and has no counterpart in this checkout. Read from the code on this branch by grepping
+the tokens named; nothing on prod and no deployed checkout was inspected, so "no mechanism" means none was
+found on this branch, not that none exists anywhere. As with every earlier revision, what is built keeps
+the old name and lacks the new mechanism; that gap is what these rows record.
+
+| Design term / rule (revision 12) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| `agent`, the entity type for a non-human principal, pairing with `operator` | `agent_definition`, whose "definition" said nothing that "every entity is one" does not already say — the same rule that retired `workflow_definition` | the built name is `agent_definition` everywhere: 22 files under `execution/`, 5 under `lib/`, 40 under `.claude/skills/`, and 41 under `docs/agents/`. The last two are generated mirrors that a re-render fixes; the first two are code. **Designed and not built** — no entity of type `agent` exists and nothing reads one | `agent_definition` entities on prod; the loader, the grant checker, the skill and agent-doc renderers |
+| `operator`, the human principal, whose only job is to be a principal; `operator_profile` stays descriptive and carries no authority edges | C9, settled in `authority_model.md`'s own voice | **designed and not built.** `operator_profile` is referenced once in this checkout and carries no `ownership_grant` or `delegation_edge`; no entity of type `operator` exists, so no write resolves to a human principal and the two credential systems are still joined by nothing. The fallback to a shared per-repo identity on an unprovisioned agent credential is unchanged | the identity resolver; `operator_profile` entities on prod |
+| `reads_to_enter`, `reads_to_close`, and `freshness` on `workflow.steps[]`; a required read returning `unknown` holds the step, bounded, then raises `undeclared_dependency` | nothing; a step's read dependencies were unstated, and each call site chose its own posture | **designed and not built.** The tokens `reads_to_enter` and `reads_to_close` appear nowhere in this checkout; no step declares a dependency and no read is checked against one. The per-site postures the design replaces are unchanged, including the sites where a failed read returns a value indistinguishable from an empty result | `workflow_definition.gates[]`; every read path a step depends on |
+| the operator-invoked halt, confirmed stopped by a read-back | nothing; the only halt was the automatic one, on an unreachable record | **designed and not built.** No operator-invoked halt exists: the two `kill_switch` hits on this branch are a transcript tailer's own retry streak in `execution/scripts/test_live_transcript_tail.py` and are unrelated. There is no command to stop the swarm and nothing to read back | unbuilt; no module owns it |
+| a named recovery per action class — revert, deprecate-and-supersede, delete-and-retag, rollback — each an action through the gate | nothing; no document said what undoes an action already taken | **designed and not built.** The action classes `revert_merge`, `retag_release`, `rollback_deploy`, and `deprecate_publication` appear nowhere in this checkout; no recovery is modelled as an action and none reaches the gate | the adapter outbound paths; `action_policy` entities |
+| a restore obligation with a stated cadence | nothing; both backup paths existed and neither had been exercised | **designed and not built.** No restore drill is scheduled or recorded on this branch, so both recovery paths remain unexercised — which under principle 4 makes them indistinguishable from absent | unbuilt; no module owns it |
+| findings bind; a verdict contradicting its own findings is rejected at submission; three verdict values, a host's review tokens mapped inbound | nothing; the disagreement was an open decision in `vocabulary.md` and `gates_and_workflows.md` | **designed and not built.** Nothing validates a verdict against its findings, so a blocking finding under a non-blocking token still closes a step. The review perspectives still emit two vocabularies onto one projection, with no declared mapping between the host's tokens and the design's three | `review_learning.py`'s finding parser; the review posting path |
+| a verdict is terminal and never revised in place; latest per step owner per head stands; no conditional verdicts | `data_model.md` stated the latest-per-lens read; terminality and conditions were open | **designed and not built.** No mechanism prevents a verdict being rewritten in place, and none rejects a conditional one; the latest-per-head read exists in the design and was not found implemented as a general rule on this branch | the sign-off writer (built: `participation_record`) |
+| waiver: operator principal only, one batch's unsigned required steps, one `waived` sign-off **per step** | the open marker in `gates_and_workflows.md`, and an operator command that wrote no record | partially built, and the built half diverges. `gate_waive.py` waives batch-scoped as the design rules, but writes `waived` into a `gate_status` map plus an `owner_history` entry and a host comment reading "Gates waived by operator override" — **not** one sign-off per step. So a waived step is not queryable as a sign-off, and the reason is prose | `execution/daemons/apis/gate_waive.py`; `swarm_dispatch.py`; `lib/issue_labels.py` |
+| governance writes and lossy record mutations are actions, reason class `lossy_record_mutation` | "neither policy governs internal operational writes to Neotoma, which are not actions" | **designed and not built.** No write to `agent_definition`, `agent_grant`, `swarm_roster`, `execution_policy`, or the schema registry reaches the action gate, and no blast count is declared for a record write. The token `lossy_record_mutation` appears nowhere on this branch | `lib/daemon_runtime/gating.py`; every governance write path |
+| the interactive session as a fourth execution mechanism, and `session_digestion` as its declared workflow | three mechanisms; the sessions-to-tasks sequence ran in practice with no counterpart in any document | **designed and not built** as a workflow. The seven-stage sequence exists as user-level skills that an operator invokes by hand; no `workflow` entity declares `session_digestion`, no role owns it, and nothing files its output as a batch | the session-pipeline skills; no `workflow_definition` for it |
+| an unclaimed open step raises `unclaimed_step` against its owner role after a declared interval; a role resolving to no principal is a declaration-time defect | the open marker revision 9 left in `failure_posture.md` | **designed and not built.** The tokens `unclaimed_step` and `unspawnable_assignee` appear nowhere in this checkout; the watchdog counts lapses on claimed tasks only and has no notion of a step nobody claimed. No parity check runs at declaration time | the watchdog; the workflow declaration path |
+| a rule binds where it is read at the moment of the action it governs (C7's axis) | four homes named as equivalent audiences | not a mechanism, so not buildable as one — but its consequence is measurable and unmeasured: no inventory exists of which rules live on which surface, so how many rules are written to a surface nobody reads at the action is unknown | `CLAUDE.md`, the agent prompts, the hooks, the point-of-use hints |
+| a failure that left no effect retries with backoff; one stating its own retry time defers to that time; exhaustion escalates | nothing; rule 5 bounded a task's deferral and not the runner's failure to start | **designed and not built.** A provider misconfiguration, a transport reset, and a rate limit that names its own reset time are each still recorded as an ordinary task failure, and the stated reset time is discarded rather than used as the deferral | the runner-start path; the provider selection |
+| a denial raises `capability_denied` on the task; the denied principal does not route around the denial | nothing; a denial was terminal with no successor | **designed and not built.** The token `capability_denied` appears nowhere in this checkout, so a denied agent still has nowhere designated to put the need, and nothing prevents the three forbidden repairs (asking a peer to write, parking the verdict on an artifact, acting under another principal's credential) | the grant checker; the tool proxy |
+
+## `adapters.md`: the adapter and the engine are one process (revision 7, 2026-09-04)
+
+Read from the code on this branch (`c221ff2` plus revision 7) on 2026-09-04 by reading the module
+docstrings and the handlers named below; nothing on prod and no deployed checkout was inspected. The
+design separates the adapter (touches the external system, writes signals about artifacts) from the
+engine (reads the record, opens steps). What is built merges them: the event drives the step, with no
+write to the record in between that the engine then reads. Daemons are named by role.
+
+**GitHub.** The webhook receiver is `execution/daemons/apis/github_gateway.py`, mounted inside the swarm
+daemon (Apis) rather than in a daemon of its own; it verifies the signature, normalizes `issues`,
+`pull_request`, `issue_comment`, `pull_request_review`, and `check_suite` payloads into a trigger, and
+hands the trigger in-process to `swarm_dispatch.py`. From there:
+
+- `issues.opened` starts the triage role (Lanius) by name, which initializes `gate_status` on the issue
+  entity and labels the issue; the product role (Pavo) is then started for the pm gate, and the
+  implementer role (Cicada) for the build. The issue is the subject the steps are taken on; no task is
+  created for intake, and no artifact edge is written (the task dashboard's issue links are the nearest
+  thing).
+- `pull_request.*` starts the triage role for gate inheritance, then the review panel, then the
+  aggregation role (Vanellus), whose aggregated verdict token in its own stdout and comment drives the
+  merge path. The lenses' verdicts are read from GitHub review state and comment bodies, not from
+  sign-offs on a batch; a lens's approval and the aggregator's summary are the same kind of thing to the
+  code, whereas the design makes one a sign-off and the other an observation.
+- `pull_request_review` with state `approved` from the operator's login (`_OPERATOR_LOGIN`, an env
+  literal) is routed to the shared approval path and, flag-gated (`APIS_AUTONOMY_AUTO_MERGE`), merges.
+  This is the design's "operator's `APPROVE` resolves the checkpoint on the merge action" row, built as a
+  credential compared to one literal rather than resolved to a principal, and with no checkpoint entity
+  resolved or read back.
+- `issue_comment` carrying `/approve` or `/confirm-gates-clear` from the operator is an operator
+  override on the pipeline: a comment that advances a step directly, which the design's second
+  invariant forbids.
+- `check_suite.completed` on the release repository's default branch is used as the retry that lets a
+  deferred release prepare run: a CI event driving an effect on its own, where the design makes CI an
+  observation on the artifact (`checks`) that the `release` step owner reads.
+- Email approvals reach the same daemon on loopback routes (`/approve-email`, `/approve-release`) that
+  the mail daemon posts to after verifying the operator's reply; the approval is an HTTP call between
+  two daemons, not a resolution on a checkpoint entity.
+
+A second inbound path, the issue-processing daemon (Formica), subscribes to the record's SSE events and
+starts the implementer or the aggregation role from there: two engines reacting to the same issue, one
+from the host's webhook and one from the record, neither reading the other (the "two blind engines"
+entry under `gates_and_workflows.md` above, seen from the adapter side). Outbound, the mirror daemon
+(Apus) receives the record's webhooks and commits rendered agent and architecture documents to the
+repositories under the agent's GitHub identity: an outbound adapter from record to host with no `action`
+entity, no gate evaluation, and no confirmation written back. The GitHub harness under
+`execution/mcp/github_harness` and the `gh` calls in the skill runner are the operations the outbound
+table names, taken without an `action` row.
+
+**Gmail.** The mail poller (Turdus) reads the inbox on an interval, stores `email_message` entities, and
+creates an agent-audience task for each actionable message: this is the design's inbound row for a new
+thread, minus the artifact edge and minus intake (the task is created directly into assignment
+routing). The reply-routing daemon (Riparia) polls a dedicated swarm inbox for the operator's replies on
+a run's thread and appends them to that run's conversation entity, keyed on the thread's stable
+`Message-ID` derived from (task id, run key) by `lib/daemon_runtime/run_email.py`; a reply that answers
+a checkpoint is routed to a conversation, not to a checkpoint. Outbound, `run_email.py` sends kickoff,
+progress, and outcome mail on that thread without an `action` entity or a gate evaluation; the interactive
+send gate is the `gmail_send_gate.py` hook (`CLAUDE.md`), a session mechanism that binds no daemon.
+
+**Telegram.** Outbound only, in effect: `lib/notify/notifier.py` routes notifications by priority through
+Apprise with Telegram primary, reading a `priority_rubric` entity for silence windows and digest collapse;
+`execution/lib/telegram/send.mjs` is the raw send. Neither writes an `action` or a confirmation; a
+delivered notification is the swarm's record of having asked. The inbound reply router (Cyphorhinus) is
+deprecated in favour of email (`decision:email_replaces_telegram_as_transport`, in its docstring), so the
+design's inbound Telegram rows (a message resolving a checkpoint; a message becoming a task) have no
+built path; the morning digest daemon reads `checkpoint_brief` entities and sends a digest, one direction.
+
+**Calendar.** Two daemons read the calendar directly through the `gws` CLI: the event-prep daemon
+(Cotinga) writes briefs from the next day's events, and the payment daemon (Monedula) matches
+yesterday's events against its handlers. No `event` artifact is written; the calendar read is the
+trigger, which is the adapter and the engine in one function.
+
+**Payments.** The payment daemon's handlers (`execution/daemons/monedula/handlers/`) preview a transfer to
+Telegram, wait for the operator's reply, take the transfer on the rail, and send a confirmation message.
+The preview-and-wait is the design's `consent` checkpoint built as a chat exchange with no checkpoint
+entity; the transfer is taken with no `action` row and its dedup lives in the handler; the rail's
+terminal state is not read back as a confirmation observation, and no `reconcile` step or `transaction`
+write by a disjoint principal exists (the `workflows.md` table above). Incoming payments have no inbound
+path.
+
+**Summary of the gap, per design element.** No adapter writes an artifact entity, because no `artifact`
+type exists (the schemas table below); no inbound event yields a sign-off, because no `sign_off` type
+exists and lenses' verdicts live in GitHub review state; no outbound operation is an `action`, because
+no `action` type exists; the operator's approvals are credential-literal comparisons (`_OPERATOR_LOGIN`,
+`OPERATOR_EMAIL`, `TELEGRAM_CHAT_ID`) rather than resolutions by a principal (the single-principal sweep
+under `authority_model.md` above); and every inbound path except the mail poller's task creation
+drives a step or an effect directly. The first separable piece is the GitHub receiver: it already
+normalizes events into one shape and hands them on in-process, so writing that shape to the record as an
+observation on an artifact, and having the pipeline read it from there, is the design's cut applied to
+the code that exists.
+
+## Revision 14 (2026-09-05): hydration, the adapter's read retry, and the as-of read
+
+Three rules from the operator's 2026-09-05 voice memos, written into `gates_and_workflows.md`,
+`adapters.md`, and `failure_posture.md`. Each is **designed and not built**. Read by grepping the tokens
+named on this branch; nothing on prod or on any deployed checkout was inspected.
+
+| Design rule (revision 14) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| hydration: a phase before a step resolves its declared reads, local reads and adapter imports together, and the step does not begin until they do; nothing hydrates during a step | nothing; revision 12 declared *what* a step must read and said nothing about when or how it is resolved | **designed and not built.** `reads_to_enter` and `reads_to_close` appear nowhere on this branch, so there is no declaration for a phase to resolve. The one built token that reads similarly is unrelated: `hydrate_snapshot` in `lib/daemon_runtime/sse_client.py` re-fetches an entity snapshot the SSE stream omits, per event, for daemon routing — it answers to no step and to no declaration. Steps still read whatever they read, whenever they read it | the step-execution path; `workflow_definition.gates[]` |
+| an adapter's failed read of an external system is retried with backoff, or deferred to the reset time the system states; the schedule is per external system, not per waiting step | nothing; rule 8 classified the runner's failure to start, and no rule covered an adapter's read | **designed and not built** at the boundary. Backoff exists on this branch only for task re-dispatch (`task_watchdog.py`, exponential, capped), which is rule 5's path and not this one. No adapter read path applies backoff, none reads a stated reset time, and `github_gateway.py`'s only sleep is a fixed hourly loop — so a failing external read is re-requested on the next tick at a constant rate | the adapter read paths; `github_gateway.py`; the mail poller |
+| the as-of read along two axes — event time and ingestion time — as the derivation behind freshness, what a sign-off judged, and the reconstruction of a past drop or hold | nothing; the foundation derived freshness from provenance and never named the reconstruction that derivation needs | **designed and not built.** The record supplies the capability (`at` for event time, `at_ingested` for ingestion time), and nothing in this checkout calls it: neither token appears on this branch. Every reader that asks what was known at a past moment reads current state instead, so a backfilled observation is indistinguishable from one that was available at the time | every freshness read; the sign-off review path; forensic capture |
+
+## Revision 16 (2026-09-05): the standing finding and where a lesson lands
+
+One rule from the operator's 2026-09-05 12:48 and 12:52 voice memos, written into
+`gates_and_workflows.md` and `vocabulary.md`, with one reason class added in `failure_posture.md` and
+`data_model.md`. Read on this branch by reading the module named below; nothing on prod or on any deployed
+checkout was inspected. The *review* half of those memos — that the operator sees the swarm's work,
+reviews it, and that input reopens the work — was already stated across `gates_and_workflows.md#the-checkpoint`,
+`workflows.md` (`operator_preview`, `consent`, `present`/`await`/`record`, and `on_fail`), and
+`adapters.md#telegram` (a notification is an action; its delivery is never the checkpoint's resolution), so
+nothing was added for it (principle 9).
+
+| Design rule (revision 16) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| a finding is one-off or standing on a second axis; a standing one is not discharged by correcting the work alone; an operator's input on reviewed work is a finding judged on both axes | nothing; a finding carried severity and the routability kind, and no document said that a defect which will recur obliges a change to what produced it | **partially built, on a narrower source and a narrower scope.** `review_learning.py` already classifies a PR-review finding as `systemic` or `one_off` and turns a systemic one into an operator-gated `proposed_skill_update` with provenance — the same loop this rule names, arrived at from ateles#82. It diverges on three counts: its only source is a panelist's review text parsed for `[BLOCKING]` headers, so an operator's input on reviewed work never enters it; its classifier is a citation heuristic over five regexes rather than a judgement recorded on the finding; and its only landing scope is an agent (`owning_agent`, defaulted by lens to one of two hardcoded names), so the workflow and step scopes have no counterpart at all | `execution/daemons/apis/review_learning.py` (`classify_finding`, `SYSTEMIC_CITATION_PATTERNS`, `propose_skill_updates`, `OWNER_BY_LENS`, `DEFAULT_OWNER`); `swarm_dispatch.py`'s call of it |
+| a standing finding whose scope cannot be determined raises a checkpoint, reason `undetermined_scope` | nothing | **designed and not built.** The token `undetermined_scope` appears nowhere on this branch. `classify_finding` returns `one_off` for anything its heuristic does not match, which coerces "cannot tell" to "not standing" — the collapse principle 7 forbids | `review_learning.py:classify_finding` |
+| open decision 17: whether institutionalizing a standing finding is itself a workflow | nothing | not a mechanism, so not buildable as one. What is measurable is that no `workflow` entity declares anything of the kind, and the built loop's output is a `proposed_skill_update` payload the operator approves out of band rather than a task entering intake | no `workflow_definition` for it |
+
+## Revision 17 (2026-09-05): the one boundary, and three terms sharpened
+
+Four terminology defects the operator found reading the documents, from the 2026-09-05 review. Three were
+wording; the first was a real ambiguity in what `action` is defined against. Read on this branch by reading
+the modules named below; nothing on prod or on any deployed checkout was inspected.
+
+| Design rule (revision 17) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| there is **one** boundary, and the record is inside it: an `action` is an intended effect on an **external system**, one the swarm does not own. `external system` and `record` are terms; the boundary is stated once, in `gates_and_workflows.md#actions-are-entities-only-actions-are-taken` | `action` defined as an effect "outside the Ateles system" while the same entry excepted "an internal operational write to Neotoma" — two different notions of the system in one definition | **not a built-state question.** The wording bound nothing mechanically; what it changed is what a reader concludes the gate is for. The gate's own inputs are unchanged (class, blast, confidence, recurrences), so no code path moves. The two named exceptions — governance writes and lossy record mutations — keep their revision 12 built state, which is still nothing | `gating.py` (unchanged by this revision); the `action_policy` entities |
+| `recurring series` renamed **`action series`** | `recurring series` (revision 12) | **designed and not built,** unchanged by the rename: no recurrence graduation is implemented, so no token moves. `action_policy.recurrence_count` is the field the design names, and the vocabulary lint carries no keyed rule for either name | `gating.py`; `action_policy` entities |
+| `subject` is a defined term: the one entity a `checkpoint` holds, an action or a task, named by its `CHECKPOINTS` edge and never by free text | the word was used across five documents and defined in none | **designed and not built.** The built `checkpoint_brief` has no subject edge at all (revision 8 row above), so nothing yet enforces "exactly one, by edge" | `gating.py`; `lib/daemon_runtime/checkpoint_posture.py` |
+| `checkpoint` is **two**-part, not three, and the document says why one term covers both cases | a definition read as a three-part "or" | same as the row above | same |
+
+**`outbound` was kept, and the reason is recorded** rather than the term being removed. The operator's
+reading — that every action is outbound, so the qualifier carries nothing — is correct about actions and
+does not settle the term, because `outbound` also qualifies things that are not actions: the *operation* an
+adapter performs to take one, the *effect* it leaves, and an outbound *credential* (`authority_model.md`).
+Each has an `inbound` counterpart it must be told apart from, and the pair is the axis `adapters.md` is
+organized on. The phrase "outbound action" is redundant and appears nowhere.
+
+**Size.** `gates_and_workflows.md` grew 2.2k (36.2k → 38.4k) and `vocabulary.md` 4.7k (74.9k → 79.6k),
+measured 2026-09-05 with `wc -c` on this branch. `vocabulary.md` is keyed, not kernel. The kernel is
+therefore **67.9k**, up from 65.7k on revision 16. Nothing was trimmed to fit: the reading-budget decision
+below is the operator's and is untouched by this revision.
+
+## Revision 18 (2026-09-05): artifacts with no external id, and how a batch is formed
+
+Two foundational questions the operator raised on PR #745. Both were genuine gaps rather than wording:
+the first was settleable from the definitions already written and is settled here; the second was a
+central concept with one clause standing in for three answers. Read on this branch by reading the modules
+named below; nothing on prod or on any deployed checkout was inspected.
+
+| Design rule (revision 18) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| a thing with no `external_id` is not an artifact but an entity; an artifact is minted by the adapter from the confirmation read-back, with its id already known, and there is never an artifact with a null or pending id | nothing stated either way. `work_model.md` and `data_model.md` both said an artifact is identified by `system` + `external_id` and that a draft is an entity, but no document said when the artifact comes into existence, so a reader reaching the unsent-draft case had to guess between a nulled-id row and a rule they could not find | **designed and not built,** and the built shape is the one this rule forbids on at least one path — see the drift finding below | the senders' own id handling; there is no `artifact` entity type on this branch to carry the rule (revision 8 rows) |
+| the interval between an effect's submission and its confirmation is held by the `action` and its `dedup_key`, never by a provisional artifact; an unconfirmed effect reads as `unknown` | nothing; the dedup rule already placed `dedup_key` on the action, but no document said that this placement is what makes the unconfirmed-effect case answerable | **designed and not built.** No `action` entity type exists on this branch, so the dedup key still lives as ad-hoc idempotency keys in the senders (revision 8 rows), and no path distinguishes an unconfirmed effect from a failed one | the senders; `gating.py` |
+| a batch is opened by exactly one cause — a closing sign-off naming a successor — and by nothing else: no daemon, adapter, scheduler, or sweeper opens one | one clause, "a batch record is opened if none exists", which named no cause and no author | **designed and not built.** No `batch` entity type exists on this branch, so nothing opens a batch at all; the built dispatch path moves work by writing task fields | `swarm_dispatch.py`; no `batch` entity type |
+| a batch carries the tasks its closing sign-off carried; attaching a task to an already-open batch is a step owner's judgement recorded in that step's sign-off, never an adapter's or a matcher's inference | nothing; attach and detach were defined as edges with no statement of who may write them or on what basis | **designed and not built,** same reason | same |
+| the workflow is chosen once, by the closing sign-off, from the declared `successors` list; a batch goes through exactly one workflow for its whole life and never switches | nothing said a batch's workflow is fixed at open, though `workflow_type` was already a batch field and `successors` already bounded the choice | **designed and not built,** same reason | same |
+
+**What was already settled, and was therefore not written again.** The workflow-selection half of the
+operator's second question was largely answered by
+`gates_and_workflows.md#sequencing-is-data-successors-and-the-chain`, which already stated that the closing
+sign-off selects exactly one successor from the declared list or none, that parallel successors are
+forbidden, and that the chain is derived along `FOLLOWS`. What that section did not say is that the
+selection is also the *cause* of the batch and that the choice is not revisited, so revision 18 states
+formation in `work_model.md` and cross-references it from the sequencing section rather than restating
+either half twice (principle 9). Likewise the one-batch-at-a-time rule and parent/child grouping were
+already written and are cited, not repeated.
+
+**Open decisions 13 and 14 are untouched and remain unruled.** Whether a batch may hold on a condition
+discovered mid-flight, and whether a batch may depend on a task it created, are questions about a batch's
+lifetime once it is open; revision 25 below writes them up as sections of `work_model.md` and leaves both
+unruled; formation and workflow choice are settled whichever way they go, and the new
+section says so explicitly rather than leaving a reader to wonder whether it pre-empted them. Decisions 15,
+16, and 17 are likewise untouched.
+
+**Drift, not design justification: the built send path never learns the external id at all.**
+Noted here because it is measurable and because the rules above bear on it, not because it argues for
+anything. The design says the artifact is minted from the read-back that confirms the effect, which is
+where the `external_id` comes from. On this branch `lib/approval/email_channel.py:send_request` shells out
+to the mail CLI's send helper and returns `True` on exit code 0, capturing no message id and reading
+nothing back — so there is no id to mint an artifact from, and no confirmation distinguishable from a
+submission, which is the "a response code is not evidence" shape principle 2 names. `reply_in_thread` in
+the same module is the same shape. Read 2026-09-05 by grepping for `send_external_comms|def send_` under
+`execution/` and `lib/` (five modules) and reading the module; no `artifact` entity type exists anywhere
+on the branch. The migration cost is the one the revision 8 rows already carry — no `artifact` and no
+`action` entity type — so these rules add no new cost of their own; they name which behaviour has to
+change when those types are built.
+
+**Size.** `work_model.md` grew 6.0k (16.1k → 22.1k), `adapters.md` 4.3k (36.2k → 40.5k),
+`gates_and_workflows.md` 0.4k (38.4k → 38.8k), and `vocabulary.md` 1.0k (79.6k → 80.6k), measured
+2026-09-05 with `wc -c` on this branch. `adapters.md` and `vocabulary.md` are keyed, not kernel. The
+kernel is therefore **74.3k**, up from 67.9k on revision 17 — the largest single-revision growth of the
+kernel so far, and all of it in `work_model.md`, which had not grown since revision 12. Nothing was
+trimmed to fit: the reading-budget decision below is the operator's, is now exceeded by 34.3k rather than
+27.9k, and the budget pass that follows is a cut, a split, or an amendment of the caps.
+
+## Revision 19 (2026-09-05): review relevance, and the retirement of `lens`
+
+Two design questions the operator's memos raised and the earlier analysis left unsettled. Read on this
+branch by reading `review_panel.py` and the vocabulary lint; nothing on prod or on any deployed checkout
+was inspected.
+
+| Design rule (revision 19) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| an optional step declares `applies_when`, a condition evaluated against what the batch's tasks are and what their change touches, which decides whether the step opens; three values, and an unevaluable condition **opens** the step | nothing. `required` was a declared field whose false branch had no stated semantics anywhere: every step table carried steps marked `no` and no rule said who skipped one, on what, or where that was recorded | **designed and not built.** No `workflow` declaration carries an `applies_when` field, and nothing evaluates one. What exists instead seats reviewers by a hardcoded registry of path regexes (drift row below) | `execution/daemons/apis/review_panel.py`; the `workflow` entities |
+| a step the condition rules out is recorded **inapplicable** on the batch, and inapplicable never reads as signed | nothing; the design had two step outcomes (signed, waived) and no third | **designed and not built.** `step_status` has no inapplicable value, so a step that never opened and a step that passed are the same absence to every reader | `step_status`; the sign-off writer |
+| `lens` and `review panel` are retired; a **review step** is a step whose owner judges rather than changes, and no separate review concept exists | `lens` defined as "one reviewing perspective on the review panel, run by its step owner" — which on owner, sequence, verdict and blocking named nothing a step does not | **not a built-state question for the design, and a live divergence for the code.** The built panel is a distinct mechanism with its own registry, seating rule, and cap, not a set of declared steps | `review_panel.py` (`Lens`, `LENSES`, `_matches_diff`) |
+
+**Drift, recorded as drift and not as design.** `review_panel.py` seats reviewers by matching **46 path
+regexes** across four `Lens` entries (`arch` 6, `ux` 4, `legal` 6, `security` 30), plus issue-text regexes
+for pre-registration, an `always` flag on two lenses, a `min_changed_files` threshold of 5, and an ordered
+registry that doubles as priority when the panel is capped. Counted 2026-09-05 by reading the module on
+this branch. None of that is declared on a `workflow` entity, so the sequencing the design says is data
+lives in a code literal — the two-blind-engines defect `gates_and_workflows.md` names, and principle 9's
+one-home rule broken at the same point. The design ruling above does **not** ratify it: `applies_when` is
+a condition on a declaration, authored where changing it is a governance write, and a hardcoded regex
+registry is neither. What the drift shows is only that the question is real, not how it should be answered.
+
+**Size.** `gates_and_workflows.md` grew 4.7k (38.8k → 43.5k), `workflows.md` 1.7k (39.5k → 41.2k),
+`vocabulary.md` 0.7k (80.6k → 81.3k), and `principles.md` 0.2k (13.4k → 13.5k), measured 2026-09-05 with
+`wc -c` on this branch, against revision 18 as the predecessor. The kernel is therefore **79.1k**, up from
+74.3k on revision 18. Nothing was trimmed to fit: the reading-budget decision is the operator's and is
+untouched by this revision, and
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure that
+records it.
+
+**Both documents satisfy the adapter document contract revision 22 landed** (`adapters.md#what-an-adapters-document-must-contain`), which was written concurrently on this branch and merged in before this
+revision was committed: each carries a scope with its enumeration boundary, an inbound table with the
+three-way status marking, an identity section, a linkage section, an outbound table stating what confirms
+each operation on read-back, recoveries per action class (including the two classes that have none), a
+what-this-adapter-refuses section, and a what-this-document-does-not-decide section. Neither restates a
+general rule; both cite `adapters.md` for the five rules and the four outcomes (principle 9).
+
+**What this revision does not rule.** Open decisions 13, 14, 15, 16, 17, and 18 stay unruled. Decision 17
+(whether institutionalizing a standing finding is itself a workflow) is the nearest neighbour and is
+untouched: `applies_when` decides whether a declared step opens, and says nothing about whether a
+workflow may hold on a condition discovered mid-flight, which is the sequencing question 17 leaves open.
+
+## Revision 20 (2026-09-05): four diagrams, and three existing ones that did not render
+
+Diagrams added during review rather than after it, on the operator's request for visuals while the
+concepts are still being read. This revision states **no new design rule**: every diagram depicts prose
+that revisions 12 through 19 already wrote, and each sits beside the prose it illustrates rather than in a
+gallery of its own (principle 9). Nothing was trimmed to make room.
+
+| Diagram (revision 20) | Where | Why it earns a place |
+|---|---|---|
+| how a batch is formed: the one cause, the task set, the fixed workflow, and the four paths that open no batch | `work_model.md#how-a-batch-is-formed-and-what-chooses-its-workflow` | revision 18 answered three questions in one section, and the negative half — daemon, adapter, sweeper, external label, none of which opens a batch — is a set a reader otherwise assembles from four scattered sentences |
+| the four outcomes an inbound event can produce, and the fifth disposition, `dropped` | `adapters.md#no-external-event-advances-a-step-by-itself` | a five-way branch whose first arm is decided by a credential resolution two paragraphs away; the awkward case in prose is that one outcome advances a step and four cannot |
+| the adapter at the step boundary: hydration before, nothing during, actions and read-back after | `adapters.md#the-adapter-runs-before-and-after-a-step-never-during-it` | the rule is about *time*, and the empty middle is the point; prose states the absence, a picture shows it |
+| the checkpoint: two subjects, one queue, and the subject edge deciding what resumes | `gates_and_workflows.md#the-checkpoint` | two entry paths converge on one protocol and then diverge again by subject — a converge-and-rediverge structure prose has to state twice |
+
+**Three existing diagrams did not render, and now do.** `scenarios.md` and `scenarios_extended.md` carried
+ten Mermaid blocks before this revision; three of them — scenario (a), scenario (c), and scenario (g) —
+failed to parse and rendered on GitHub as a wall of source rather than as a diagram. The cause is
+mechanical and had nothing to do with their content: in a `sequenceDiagram`, `;` separates statements, so
+a message line reading `read task; claimable?` parses as a message followed by an invalid fragment. Seven
+such lines existed. Each semicolon inside a message was replaced with a comma; no wording, participant, or
+arrow changed. Verified by parsing all fourteen blocks with the `mermaid` package's own parser (v11, the
+major version GitHub renders with): fourteen parse, none fail, where before the change three failed.
+
+**Size.** `work_model.md` grew 1.5k (22.1k → 23.6k), `gates_and_workflows.md` 1.6k (43.5k → 45.1k), and
+`adapters.md` 3.3k (40.7k → 44.0k), measured 2026-09-05 with `wc -c` on this branch against revision 19 as
+the predecessor; `scenarios.md` and `scenarios_extended.md` are unchanged in size, the semicolon fix being
+byte-for-byte neutral. The kernel is therefore **82.3k**, up from 79.1k on revision 19, exceeding the 40k
+reading block by 42.3k. Diagrams are not cheap in characters, and this revision deliberately spends 3.1k of
+a budget already over — the operator asked for visuals during review, and the budget pass that follows is
+the operator's, run last and separately, as it has been since revision 6. Nothing was trimmed to make room.
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure that
+records it.
+
+## Revision 21 (2026-09-05): the swarm changing itself is work, and it goes through a workflow
+
+The general half of the operator's 2026-09-05 12:52 memo, which revision 16 folded in only in its narrow
+reading. Revision 16 answered what a *standing finding* obliges and opened decision 17 on the sequencing of
+institutionalizing one; the memo's closing sentence — that workflows are the mechanism for improving or
+modifying the swarm's operations in general, and not only for doing outward work — was never addressed on
+its own terms. It is answered in `work_model.md`, beside the no-side-door rule it follows from, rather than
+in `gates_and_workflows.md` beside the standing-finding rule, because it is true of every change to the
+swarm and not only of the ones a finding raises (principle 9); decision 17's paragraph now points at it.
+Read on this branch by reading the modules named below; nothing on prod or on any deployed checkout was
+inspected.
+
+| Design rule (revision 21) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| a change to the swarm's own operation — a workflow declared, a step added, a step's owner changed, a workflow retired, an agent changed — is a task like any other: it enters intake, is claimed, and is executed inside a batch; the no-side-door rule covers it whoever initiated it | nothing stated generally; revision 16 stated it for a standing finding's proposed change, and decision 17's closing clause asserted the general case in passing without a rule anywhere owning it | **designed and not built**, and the two paths that exist today both bypass it. No `workflow` entity declares a workflow for changing a workflow or an agent, and no such change is filed as a task entering intake. `review_learning.py` emits a `proposed_skill_update` the operator approves out of band (revision 16 row above); `generalizer.py` writes agent-scoped policy entities directly | `execution/daemons/apis/review_learning.py`; `lib/daemon_runtime/generalizer.py`; no `workflow_definition` for a governance change |
+| a workflow may create a workflow and may modify an agent; what governs it is the action gate the governance writes already reach, not a new permission and not a second gate | nothing; the design named governance writes as actions (revision 12) and never said a workflow may be the thing that makes one | **designed and not built**, unchanged from the revision 12 row: no write to `agent_definition`, `agent_grant`, `swarm_roster`, `action_policy`, or the schema registry reaches the action gate on this branch | `lib/daemon_runtime/gating.py`; every governance write path |
+| open decision 18: whether a governance write is reserved to the operator by default, or gated at a high blast tier | nothing; no default was stated either way | not a mechanism, so not buildable as one. What is measurable is that no `action_policy` entity on this branch declares a blast tier for any governance class, so every such class is currently the unclassified case, which `blast_radius_for()` resolves to `NEVER` — the reserved posture by accident of absence rather than by decision | the `action_policy` entities |
+| bootstrapping is a stated limitation, not a mechanism: the first declaration is an operator act, and a workflow too broken to open a step is an unreadable workflow, escalated and repaired the same way | nothing; the recursion was unaddressed | **partially built, on the second half only.** The `unreadable_workflow` reason class is the design's, and `status.md`'s `gates_and_workflows.md` section already records that no engine reads a `workflow` entity to open steps, so there is nothing yet that can find one unreadable. The first-declaration half is an operator act by design and has no built counterpart to lack | `workflow_resolver.py`; `swarm_dispatch.py` |
+
+**Drift worth naming, because it is the hazard this revision describes, running.**
+`lib/daemon_runtime/generalizer.py` on this branch turns clustered `strategy_drift_signal` evidence into
+`agent_policy` entities **without a per-change human gate**, by its own module docstring, writing them
+through plain `/store` and `/correct` calls. It is a self-modification path that reaches no action gate:
+under the design every one of those writes is a governance write and therefore an action, evaluated at the
+gate under the project's `action_policy`. The module carries its own safety apparatus instead — a
+confidence threshold, agent-local scope only, `provisional` status graduating by exposure, a per-agent cap,
+and a refusal to supersede an operator-authored policy — which is a thoughtful set of controls and is not
+the gate. It is a second mechanism answering the question the gate exists to ask (principle 6), it is
+readable only by reading that module rather than by reading a policy (principle 9), and its scope test is a
+heuristic over the policy's own text rather than a declared class. Whether the controls are individually
+adequate is not the point being made here: the design's answer is that this write is an action, and on this
+branch it is not one. The narrower shape of the same divergence is already recorded in the revision 16 rows
+for `review_learning.py`.
+
+**Size.** `work_model.md` grew 10.2k (23.6k → 33.8k) and `gates_and_workflows.md` 0.6k (45.1k → 45.7k),
+measured 2026-09-05 with `wc -c` on this branch against revision 20 as the predecessor. The kernel is
+therefore **93.0k**, up from 82.3k on revision 20, exceeding the 40k reading block by 53.0k. Nothing was
+trimmed: the reading-budget decision below is the operator's, run last and separately, as it has been since
+revision 6, and this revision follows the same instruction every revision since has followed — content
+settles before budget. This is the largest single-revision addition to the kernel to date, and it is worth
+saying why rather than leaving it to the budget pass to discover: the section answers five questions the
+memo raised, three of which needed their own statement (the general rule, what governs it, the
+bootstrapping limitation), and one of which opens a decision that has to carry both its options and their
+costs to be rulable. `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the
+expected failure that records the overrun.
+
+## Revision 22 (2026-09-05): admitting a new adapter
+
+The operator asked whether the foundation anticipates the swarm's addition of adapters. It did not: across
+all fourteen documents, "new adapter", "adding an adapter", "onboard", and "admission" returned nothing on
+this branch, and `conformance.md`'s Adapters rows are a *reading* table — which document to read when an
+adapter path changes — which presumes the adapter and its document already exist. The material landed as
+`adapters.md#admitting-a-new-adapter` rather than as a new keyed document: it governs adapters, which is
+that document's subject and the one `conformance.md` already keys to every adapter path, and a new keyed
+document would add to a reading budget already over its block (principle 9, one home).
+
+This revision states **no new rule and no new mechanism**. What it adds is the statement, which did not
+exist, of what a new adapter must demonstrate and how each item fails rather than being asserted.
+
+| Design statement (revision 21) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| the **admission contract**: six obligations, each naming what fails when it is not met — coverage by the drop counter, identity by a negative test that must go red, dedup by a redelivery read back, no maintained freshness state by the absence of a sync log or cursor table, read-back-before-acknowledge exercised against an unreachable record, and outbound classes by the gate resolving an unlisted class to `NEVER` | nothing. The five rules were stated as what an adapter *does*, which an author conforms to by assertion | **designed and not built.** Whether any adapter's drop disposition is counted and announced per window is the adapter row below; nothing today checks an adapter against the six obligations at admission, because admission was not a reviewed event | the adapter daemons; the arch review step |
+| the **adapter document contract**: eight required parts (scope and enumeration boundary, inbound table, identity, linkage, outbound table with what confirms it landed, recoveries, what this adapter never does at this system, what the document does not decide), derived from `github.md`'s structure and from the obligations | nothing. `github.md` was the only example, so a sixth adapter's document would have been artisanal | **not a built-state question**; it governs documents, and `github.md` satisfies it | — |
+| **who admits an adapter**: three existing mechanisms, none new — the admission task enters intake and goes through a workflow (no side door), its credential is an `agent_grant` whose write is a governance write evaluated at the action gate, and its outbound classes are `action_policy` data. The one addition is that the arch review step checks the six obligations before the grant's governance write is permitted, which is the existing design-basis check applied to a class of change that had no section to cite | nothing stated. The question had no answer in any document | **designed and not built.** Governance writes reaching the action gate is itself designed and unbuilt (revision 12), so the mechanism this leans on is not yet a control | the action gate; `action_policy` |
+| **degrees of trust** are already expressed and nothing is added: what an adapter may reach is its `agent_grant`, what it may do outward is the action class under the `action_policy`, resolved to a blast tier per action rather than per adapter. All six obligations bind every adapter including a read-only one; what scales with risk is the review's scrutiny and the gate's tier | nothing. A reader could have concluded the design treated every adapter alike | **designed and not built** on the grant side for adapters specifically; the grant machinery exists and its per-adapter scoping is `status.md`'s grants row | `agent_grant` |
+| **when an adapter is wrong**: four properties bound the blast radius — three of the four outcomes are informational so a mis-map is a wrong fact rather than a false verdict; every write is attributed so a false sign-off is findable; a sign-off is pinned to the artifact state it judged so the damage does not grow; and outward effects meet the action gate independently. Recovery is the ordinary one, and withdrawal is revocation with the reach `authority_model.md` already states | nothing; the failure mode was named nowhere | **designed and not built** in the same places the properties themselves are: attribution per agent is `status.md`'s C8 row | the signer; the gate |
+
+**What it builds on.** Revision 21 landed while this was being written and settles the general case: a
+change to the swarm's own operation is a task that goes through a workflow, and the governance writes it
+makes reach the action gate. Adapter admission is a specific instance and inherits that answer rather than
+restating it; the "who may admit" section cites
+`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other` and carries only
+the two consequences an adapter reader will look for. **Open decision 18** (whether a governance write is
+reserved to the operator by default) is noted and not needed: with no policy value the class is
+unclassified and fails closed to `NEVER`, so no adapter is granted its credential by default under either
+candidate default.
+
+**What this revision does not rule.** Open decisions 13, 14, 15, 16, 17, and 18 stay unruled. **Decision 15**
+is the nearest neighbour and the section is explicit about the boundary: 15 asks where an adapter's *code*
+lives, this asks what an adapter must satisfy and who admits it. The contract is unaffected either way —
+no obligation mentions a repository — but the section records one consequence for 15's ledger without
+ruling it: a bundled adapter's document is reviewed under this repository's design-basis check, while a
+shared repository's adapter is reviewed under that repository's own review across two release cadences.
+**Decision 17** is the other neighbour: adapter admission is a specific case of the general question of
+whether workflows govern the swarm's changes to itself, which `gates_and_workflows.md` already answers yes
+by the no-side-door rule. The section inherits that answer and does not wait on 17, because what 17 leaves
+open is the sequencing of an institutionalization task a batch created mid-flight, and an adapter admission
+task is not created that way. No new decision was opened; the highest in use is 18, opened by revision 21.
+
+**Size.** `adapters.md` grew 20.9k (44.0k → 64.9k), measured 2026-09-05 with `wc -c` on this branch against
+revision 20 as the predecessor. The **kernel is unchanged at 82.3k**: `adapters.md` is keyed, not kernel,
+so the reading block is neither improved nor worsened by this revision. `adapters.md` is now the largest
+keyed document, over `MAX_DOC_CHARS` as it already was, and it is a candidate the operator's budget pass
+should consider splitting — the admission material is a self-contained subject with its own audience,
+which is the natural seam. Nothing was trimmed to make room; content settles before budget, as it has since
+revision 6, and `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected
+failure that records the decision.
+## Revision 23 (2026-09-05): the Gmail and Calendar adapters, in full
+
+Two per-system adapter documents in the manner of `github.md`, and the corresponding sections of
+`adapters.md` cut to pointers (principle 9, one home). Written from first principles: the codebase and the
+vendor API were consulted to establish **what capabilities exist** and to notice drift, never as design
+guidance. Read on this branch and against the `gws` CLI's own help output, 2026-09-05.
+
+| Design rule (revision 23) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| `gmail.md`: every signal the mail system can deliver or a read can discover, mapped to one of the four outcomes or to `dropped` with a reason; every outbound operation with its class, `dedup_key`, and confirmation | `adapters.md`'s five-row inbound table and three-row outbound table | **designed and not built.** No `artifact` or `action` entity type exists on the branch, so no row has a record to land in | the drift table in `gmail.md` |
+| the mail system's notification is a **wake-up**, not an event: it carries a history marker and no content, so nearly everything the adapter knows comes from a read whose coverage is what makes it checkable | nothing; `adapters.md` implied an event stream that does not exist | **not built, and the branch took the other path**: zero uses of the watch, of Pub/Sub, or of the history log; inbound is six polling sites | `turdus.py`, `riparia.py`, `email_channel.py` |
+| a staged mail-system draft is never updated in place, the update operation being able to send; where a draft must change, a new one is created | `workflows.md#outreach`'s one-clause statement of the same rule, now given its mechanism: the operation's class cannot be determined at the gate | **true by absence** — zero production call sites for any draft method. The send-gate hook blocks the shape at the tool boundary, but the daemons' own send paths run as launchd subprocesses and are not subject to it | `.claude/hooks/gmail_send_gate.py` |
+| `send_external_comms` at the mail system has **no recovery row**: a sent message has no undo, no revert, and no supersession, so the gate is the only control | nothing. `failure_posture.md` names a recovery per action class and this is the class that has none at this system | not a built-state question; it is a statement about the external system | — |
+| `calendar.md`: the same enumeration for the calendar, with the same three-way marking | `adapters.md`'s three-row inbound table and one-row outbound table | **designed and not built**, on the same missing entity types | the drift table in `calendar.md` |
+| an operation's action class **depends on the attendees**: the same write is `external_api_write` on a solo event and `send_external_comms` on one with attendees, because it mails them; an unreadable attendee set takes the higher class | nothing; `adapters.md` gave one row with both classes and no rule for choosing | **not built, and never faced**: zero uses of the attendee-notification parameter and of the response-status field, so no code path has had to classify | `cotinga.py`; the one write site in `sylvia.py` |
+| a calendar event's **beginning and ending are delivered by nothing** and are derived from a stored time against a clock, so a step depending on one declares a read with a stated freshness | nothing | not built | — |
+| **open decision 23**: whether a mail `thread` or a `message` is the unit a batch addresses | nothing; both appeared in `adapters.md` with no rule for which a batch is about | not a built-state question | — |
+| **open decision 24**: whether a recurring calendar series is one artifact or many | nothing | **the branch has a de facto answer it never stated**: every calendar read expands the series server-side, at three sites, so no code path sees a recurrence rule | `sylvia.py`, `monedula.py`, `cotinga.py` |
+
+**Drift, recorded as drift and not as design justification.** Both documents carry a drift table; the
+counts there are actual, taken 2026-09-05 by enumerating every `gws gmail` and `gws calendar` call site
+under `execution/` and `lib/` and reading each module. The four findings that bear hardest on the design:
+**four Gmail send sites and one calendar write site, none of which reads its result back** — success is the
+subprocess exit code, the "a response code is not evidence" shape principle 2 names, and there is therefore
+no external id to mint an artifact from; **two daemons treat a processed-label as the done condition**,
+which is a second place step state lives, editable by any external actor and backed by no sign-off;
+**three adapter-local state files**, one holding a message cursor and a 500-entry dedup set, where the
+design says an adapter keeps no history of its own; and **four silent inbound branches** that skip, log, or
+mark-handled a delivery with no counter and no record, which is the receipt-without-disposition shape the
+disposition rule exists to close. Calendar event matching is by title and date proximity rather than by
+identity. None of this argues for changing a ruling; it names which behaviour has to change when the
+`artifact` and `action` types are built.
+
+**What this revision does not rule.** Open decisions 13, 14, 15, 16, and 17 stay unruled. Decision 16
+(where inbound delivery lands) is the nearest neighbour and is untouched: both documents describe a vendor
+watch as one of the deliveries whose landing place that decision names, and every row in both stands
+whichever way it goes. Decisions 23 and 24 are **new and open**, and the documents state that they should
+be decided together, both being the same question about a thing with internal multiplicity.
+
+**Size.** `gmail.md` is **47.2k** new and `calendar.md` **41.9k** new; `adapters.md` grew 0.5k (44.0k →
+44.5k) — the two new pointer sections are slightly longer than the tables they replace, the Gmail section
+falling 1,957 → 1,815 chars and the Calendar section rising 1,000 → 1,343 — and `conformance.md` 0.8k
+(15.8k → 16.7k) for four registration rows. Measured 2026-09-05 with `wc -c` on this branch against
+revision 22 as the predecessor. Both new documents are **keyed, not kernel**, so the kernel is unchanged at
+**82.3k** and this revision adds nothing to the reading block's overrun; both exceed `MAX_DOC_CHARS=12,000`
+as every kernel and keyed document already does, and
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure that
+records it. Nothing was trimmed to fit: the operator directed that comprehensive foundational material
+comes first and the condensed reading set follows, which is why both documents carry an explicit
+what-the-design-uses-versus-what-the-API-offers table for that set to be generated from. Decision 66
+(2026-09-06) has since ruled that the set is a generated projection and that these documents are never
+trimmed at all.
+
+## Revision 24 (2026-09-05): the Telegram and Payments adapters, in full
+
+The last two per-system adapter documents in the manner of `github.md`, and the corresponding sections of
+`adapters.md` cut to pointers (principle 9, one home). Written from first principles: the codebase and the
+vendor APIs were consulted to establish **what capabilities exist** and to notice drift, never as design
+guidance. Read on this branch, against Telegram's published chat-platform API and against the published
+surfaces of bank-transfer and crypto rails, 2026-09-05. These are the two highest-sensitivity systems in the
+design, and neither document names a chat, a payee, an account, an address, an amount, or an obligation.
+
+| Design rule (revision 24) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| `telegram.md`: every kind of update the channel can deliver, mapped to one of the four outcomes or to `dropped` with a reason; every outbound operation with its class and confirmation | `adapters.md`'s four-row inbound table and two-row outbound table | **designed and not built.** No `artifact` or `action` entity type exists on the branch, so no row has a record to land in | the drift table in `telegram.md` |
+| **a chat message is not an instruction**, stated at length: a reply resolves a checkpoint only through a credential resolved to a principal who is a required approver, and a reply resolving to neither is an observation; an ask is a task for intake and nothing else | `adapters.md`'s general rule, which this applies at the boundary where it is under the most pressure | **not built, and the branch has no mechanism to build it on**: inbound authorization is literal equality against a configured chat identifier, with no credential binding and no principal lookup anywhere | the two inbound pollers |
+| an inline-keyboard callback carries a payload the swarm authored, which removes the interpretation problem and **licenses nothing about who pressed it** | nothing; the distinction was not drawn | **not built, and never faced**: zero occurrences repo-wide of an inline keyboard, a callback payload, or a callback acknowledgement. Every interaction is free text | as above |
+| the channel offers **no read receipt**, and the design would decline one if it existed: acknowledgement is always something a principal did | nothing | not a built-state question; it is a statement about the external system and about what the design consumes | — |
+| inbound dedup is a **membership test over a window of update identifiers**, never a high-water-mark comparison, the channel's identifier being sequential but not permanently monotonic | nothing; `adapters.md` said only that the delivery id is the key | **not built**; both pollers persist a single offset cursor, which is the high-water-mark shape | the two inbound pollers |
+| `payments.md`: every signal the rail classes can produce, mapped the same way; every outbound operation with its class and confirmation | `adapters.md`'s four-row inbound table and one-row outbound table | **designed and not built**, on the same missing entity types | the drift table in `payments.md` |
+| **the unknown case**: a timeout is neither failure nor success. The adapter reads the rail for the action's key before submitting anything again — by the transaction it holds on a crypto rail, by the key or a window on a bank rail — adopts what it finds rather than re-issuing, and where the read cannot resolve it raises one checkpoint reporting what is known | nothing. This was the design's largest unstated gap at this boundary | **not built, and the branch's default on a mid-flow failure is the outcome the design names as most dangerous**: an exception after the transfer was instructed becomes advice to the operator to pay by hand | `handlers/wise_transfer.py` |
+| `dedup_key` is derived from the **obligation** and written before the first attempt — not from the artifact, not per attempt, not from the rail's own mechanism alone, not from the reference field | `work_model.md`'s general placement of the key on the action, now given its content at this boundary | **not built**: the rail is given a freshly generated identifier per attempt, which protects one retried call and not a second attempt at the same obligation | as above |
+| a payment needs **no second gate**: the never-set, the checkpoint, the disjoint verifier, and the workflow's ordering already compose into something stronger, and no series of successful payments graduates into an unattended one | nothing was stated either way | **not built**: the payment path does not reach the action gate at all, and the consent is a chat exchange with no checkpoint entity | `monedula.py` |
+| a **balance is not an artifact**; it is an observation on the account's artifact, carrying the point it was read at and confirmed-versus-pending separately | `adapters.md`'s one row, which left its kind unstated | **not built, and nothing reads a balance at all** | the two rail handlers |
+| **terminal is not permanent** on either class, so the terminal condition is declared rather than assumed, and a later reversal is an observation and a defect to surface | nothing | **not built**: no depth or terminal state is declared anywhere, and two non-terminal rail states are folded into "sent" | as above |
+| a policy must be able to **suppress a payment's metadata entirely** — omission, never a neutral placeholder — and the suppression is a property of what the adapter submits, verified on read-back | the operator's standing rule for one payee, generalized to its principle with no payee, purpose, or detail named | **not built to that standard**: on one rail the suppression is an instruction in a prompt to a subprocess and nothing validates what was submitted; on the other there is no suppression and two fixed strings are attached to every transfer | the two rail handlers |
+| `payment`'s recovery is **forward-only or absent**: a genuine cancel exists only before funding, a dispatched bank transfer's recall is a request the receiving side may refuse, and a confirmed crypto transfer has no recovery at all | `failure_posture.md` names a recovery per class; this is the row for `payment`, and it is the class whose recovery mostly does not exist | not a built-state question; it is a statement about the external systems | — |
+| **open decisions 25 and 26** (whether a chat reaction may carry a decision; whether a read command is answered during a halt) | nothing | not built-state questions | — |
+| **open decisions 27, 28, and 29** (whether a payment's approver must be shown what the verifier signed; what tolerance a consent carries; where the terminal condition is declared) | nothing | 29 has a de facto answer by absence: nothing declares one, so nothing can be assumed | `handlers/btc_transfer.py` |
+
+**Drift, recorded as drift and not as design justification.** Both documents carry a drift table; the counts
+there are actual, taken 2026-09-05 by enumerating every chat call site under `execution/` and `lib/` and by
+reading the payment daemon and its two rail handlers. The findings that bear hardest: **twelve chat send
+sites and one captured message identifier**, with no read-back anywhere; **four independent chat clients**
+that do not share a credential, the channel admitting one polling consumer per credential — a conflict the
+code records having hit; **no dedup key on a payment**, a per-attempt identifier standing in for one, with
+the last protection against paying an invoice twice being the operator noticing, which the code says in as
+many words; **no read-back of a transfer's status on either rail**, so a pending transfer is reported
+complete and a returned one is recorded as sent permanently; **submitter and reconciler in one process under
+one identity**, so the separation of duties the payment workflow declares is collapsed not by anyone
+deciding to collapse it but by the boundary having one component in it; and **a mid-flow failure advising a
+manual payment** against a transfer that may still be moving. Separately, an argument-name mismatch means
+two chat callers' thread routing is silently dropped, and the shared send helper injects every key it finds
+in several hard-coded sibling paths into its process environment. None of this argues for changing a ruling.
+
+**What this revision does not rule.** Open decisions 13, 14, 15, 16, and 17 stay unruled. Decision 16 (where
+inbound delivery lands) is the nearest neighbour and is untouched: `telegram.md` states what the channel's
+two delivery mechanisms give the dedup rule, which are the terms that decision should be taken on, and
+settles nothing. Decisions 23 and 24 are the previous revision's and are untouched. Decisions 25 through 29
+are **new and open**.
+
+**Size.** `telegram.md` is **73.8k** new and `payments.md` **65.1k** new; `adapters.md` grew 0.6k (65.4k →
+66.0k) — the two new pointer sections are longer than the tables they replace, the Telegram section rising
+1,735 → 1,792 chars and the Payments section 1,511 → 1,946, both carrying the two-rules-to-take-with-you
+paragraph the Gmail pointer established — and `conformance.md` 0.8k (16.8k → 17.6k) for four registration
+rows. Measured 2026-09-05 with `wc -c` on this branch against revision 23 as the predecessor. Both new
+documents are **keyed, not kernel**, so the kernel is unchanged and this revision adds nothing to the
+reading block's overrun; both exceed `MAX_DOC_CHARS=12,000` as every kernel and keyed document already does,
+and `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure that
+records it. Nothing was trimmed to fit: the operator directed that comprehensive foundational material comes
+first and the condensed reading set follows, and both documents carry an explicit
+what-the-design-uses-versus-what-the-API-offers table plus a load-bearing note in their
+freshness sections for that set to be generated from. Decision 66 (2026-09-06) has since ruled that the set
+is a generated projection and that these documents are never trimmed at all.
+
+## Revision 25 (2026-09-05): the open decisions get a register, and the numbering is reconciled
+
+Before this revision no document listed what was open. The register now lives in
+`conformance.md#the-register-of-open-design-decisions`, and this section records only what is measurable
+about the numbering — the design content is the register's and the arguments are the owning documents'.
+
+**Where the register went, and why not here.** An open decision is a design record, and
+`conformance.md#direction-of-truth-per-class-of-record` puts design in this directory and state in this
+file. This file is out of the reading list by design, is regenerated rather than edited, and carries a
+perishability warning at the top: a register here would be rewritten by the next regeneration and would
+never reach a reviewer. What stays here is what a checkout measurably does, which is the row below.
+
+**The numbering, as counted on this branch 2026-09-05 by grepping every revision of every file in
+`docs/foundation/` for `decisions? (1[0-9]|2[0-9])`:**
+
+| Finding | Measured |
+|---|---|
+| decisions 13 and 14 appeared in no document | named in prose in this file and in `gates_and_workflows.md` and `work_model.md`, with no section stating either. Both now have titled sections in `work_model.md` |
+| decisions 19 and 22 appear in no revision of any file | never assigned. The numbers stay unused and are recorded as gaps in the register so the next author does not reuse them |
+| decisions 20 and 21 appeared only as two prose pointers in `payments.md`, resolving to nothing | assigned, then renumbered to 27 and 28 before that document's commit to avoid colliding with 23 through 26, which other documents opened concurrently. The two pointers now cite 27 and 28 |
+| decisions 25 through 29 have no heading of their own | written as bold paragraphs inside their documents' *What this document does not decide* sections. Register pointers resolve to the enclosing heading, which is the closest anchor that exists |
+
+**What this revision does not rule.** Nothing. Every decision in the register stays open, including the two
+recovered ones: 13 and 14 are written up in full and unruled, and the sections state what a reader should
+assume until each is taken.
+
+**Size.** `conformance.md` grew 7.2k (17.6k → 24.9k) for the register, and `work_model.md` 8.3k
+(33.8k → 42.1k) for the two recovered decisions written up in full. The eleven register pointers add
+between 0.07k and 0.14k each: `adapters.md` 66.0k → 66.2k, `gates_and_workflows.md` 45.7k → 45.8k,
+`gmail.md` 47.2k → 47.3k, `calendar.md` 41.9k → 42.0k, `telegram.md` 73.8k → 74.0k, `payments.md`
+65.1k → 65.3k. Measured 2026-09-05 with `wc -c` on this branch against revision 24 as the predecessor.
+`work_model.md` and `gates_and_workflows.md` are kernel, so the kernel rises to **101.4k** from 93.0k on
+revision 24, against `MAX_BLOCK_CHARS=40,000`; `conformance.md` is keyed. Nothing was trimmed to fit, on
+the standing direction that content settles before budget, and
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure that
+records the overrun.
+
+## Revision 26 (2026-09-05): twelve rulings, and decision 15 left open
+
+The operator delegated twelve of the thirteen open decisions in the register and kept decision 15 (whether
+adapters live in a repository of their own). Each ruling is written into the document that argued it —
+`work_model.md` (13, 14, 18), `gates_and_workflows.md` (17), `adapters.md` (16, and the two-level artifact
+rule under linkage), `gmail.md` (23), `calendar.md` (24), `telegram.md` (25, 26), `payments.md` (27, 28,
+29) — with its reason, the cost accepted, and what would reopen it, in the idiom of revision 12; the register
+in `conformance.md` carries each as one line with its date and pointer. Decisions 25 through 29 gained
+headings of their own so the pointers land on the ruling. Built state below is read from the drift tables the
+adapter documents already carry (revisions 23 and 24) and from the revision 12, 14, 16, and 21 rows above;
+**no new code was read for this revision**, and nothing on prod or on a deployed checkout was inspected.
+
+| Design rule (revision 26) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| **13.** a step may **hold** on a condition discovered mid-flight: a non-blocking finding names the condition, no sign-off is written, the lease is renewed; there is no held state and no field; the hold ends by sign-off, checkpoint, or lapse, and a hold owing nobody a decision is a rule-5 deferral (`rounds_exhausted` at the ceiling) | the open decision's interim reading (raise a checkpoint or sign `unknown`, a verdict the design does not have) | **designed and not built.** No `LEASE` relationship exists to renew (the claim primitive is #733, open), no `finding` entity carries a condition, and the three places the design says already hold — a declared read returning `unknown`, the unconfirmed payment, the operator-only `await` step — are the revision 14 and 24 rows above and have no code | `lib/daemon_runtime/task_claim`; the step-execution path |
+| **14.** a batch may depend on a task it created: a `DEPENDS_ON` edge from the batch to the task, `created_at` and `ended_at` on the edge; the step's sign-off is refused while it is unended and the task non-terminal; a cycle is refused at write and at attach, and one found later escalates every batch in it as `dependency_cycle` | the open decision's interim reading (peers only, provenance the only link) | **the edge type exists and nothing writes it.** `DEPENDS_ON` is one of the record's relationship types and the record cycle-checks its hierarchical types at write, so the refusal the ruling leans on is the record's; but no `batch` entity type exists on this branch (revision 6 schemas table), so there is no source for the edge, and `dependency_cycle` appears nowhere | the `batch` type (unregistered); the sign-off writer |
+| **16.** the adapter owns signature verification, delivery-id extraction, and acknowledgement; the transport listener may be shared plumbing that verifies, deduplicates, acknowledges, and parses nothing | the open decision's interim reading (each adapter's receiver is its own) | **consistent by shape, and no shared listener exists.** The GitHub receiver verifies and extracts the delivery id in the process that maps; the two chat pollers each hold their own offset (`telegram.md`, drift); no component receives for more than one system. What the ruling forbids a listener to do is not yet a thing any listener could do | `execution/daemons/apis/github_gateway`; the two chat pollers |
+| **17.** institutionalizing a standing finding is a workflow, and the raising batch does not wait: the task enters intake on its own with provenance to the finding | the interim reading, now the rule | **designed and not built**, unchanged from the revision 16 and 21 rows: no workflow entity declares an institutionalization workflow, `review_learning.py` emits a `proposed_skill_update` approved out of band, and `generalizer.py` writes `agent_policy` entities without a gate | `execution/daemons/apis/review_learning.py`; `lib/daemon_runtime/generalizer.py` |
+| **18.** a governance write is **reserved** by default: each of the five classes resolves to `NEVER` until the operator grants it a policy value, class by class | "the absence of a decision behaves as the reserved posture, which is not the same as having ruled" | **the default is met by absence and violated by one path.** No `action_policy` on this branch declares a tier for any governance class, so `blast_radius_for()` resolves each to `NEVER` (revision 21 row) — now by rule rather than by accident. `generalizer.py` writes `agent_policy` entities through plain store and correct calls and reaches no gate, which under the ruling is a reserved-class write taken by an agent | `lib/daemon_runtime/gating.py`; `lib/daemon_runtime/generalizer.py`; the `action_policy` entities |
+| **23.** a mail thread and each message in it are each artifacts, the message `PART_OF` its thread; an event links to the unit whose id it carries, an action to the unit its operation needs, a task to the unit it names | the open decision (one or the other) | **designed and not built.** No `artifact` type exists (revision 8 rows); the mail pollers key on message ids and thread ids ad hoc and write no `PART_OF` between them | the drift table in `gmail.md` |
+| **24.** a recurring series and each occurrence the record holds are each artifacts, the occurrence `PART_OF` its series; the two formerly unhandled occurrence rows are handled | the open decision, and two unhandled rows | **half by accident.** Every calendar read expands a series into occurrences server-side at three sites, so the built path sees only the occurrence half and never reads a series or its rule (revision 23 row); nothing writes `PART_OF` | `sylvia.py`, `monedula.py`, `cotinga.py` |
+| **25.** a chat reaction never carries a decision; the `message_reaction` row is handled as an observation | an unhandled row and an open decision | **consistent by absence.** No poller requests the reaction update kind, so none arrives (a coverage fact); every built resolution is parsed free text, which is the revision 24 row | the two chat pollers |
+| **26.** during a halt a read on the channel is answered with the halt itself — since when, and why — on the announcement path, in the chat it already reaches, and with no data | the interim reading, now the rule | **not built on either side.** No read command exists — the general poller ignores every message that is not a reply to one of its own (`telegram.md`, drift) — and the operator-invoked halt is unbuilt (revision 12 row), so there is neither a question nor a halt state to answer it with | `execution/daemons/cyphorhinus/cyphorhinus.py` |
+| **27.** a payment's approver is shown exactly what the verifier signed — payee, amount, currency, period, rail — and `pay` is taken only on those parameters | the open decision | **the built path is the shape the ruling forbids.** The payment daemon sends the payer's own preview and parses the reply as a string; there is no `verify` step, no `sign_off`, and no checkpoint entity, so what the operator reads is the payer's restatement of itself (revision 24 row) | `execution/daemons/monedula/monedula.py` |
+| **28.** consent tolerance is a per-class `action_policy` value, zero where absent; any change to what the payee receives or the operator pays is a new checkpoint | the open decision | **designed and not built.** No `action_policy` carries a tolerance field, no fee or re-quote is read, and the built path has no consented figures to compare a submission against (revision 24 row) | `handlers/wise_transfer.py`; the `action_policy` entities |
+| **29.** terminal is *settled*, never *sent*, on a bank rail and *N* confirmations on a chain, stated in `payments.md`; the value is bound per instance in the `vendor_binding`; a profile may deepen and never shallow | "declared where the obligation is" (the sentence this revision corrected) and the open decision | **designed and not built, and the built path reads the wrong state.** No depth or terminal state is declared anywhere; the bank handler treats two non-terminal statuses as sent and the crypto handler treats a printed identifier as the end (revision 24 row); no `vendor_binding` carries a terminal value | the two rail handlers; the `vendor_binding` entities |
+
+**What this revision does not rule.** Decision 15 stays open, its section and its register row untouched,
+and the operator's lean recorded there is still a lean. No new decision was opened; the next number is still
+30. One document the rulings bear on was deliberately not edited: `workflows.md`'s payment table still reads
+"carrying payee, amount, and reference" at `consent`, which is narrower than ruling 27 and not contradictory
+to it; the table is a mirror of a `workflow` entity that does not yet exist, so the correction belongs in the
+entity and the render, not in the mirror (`conformance.md#direction-of-truth-per-class-of-record`).
+
+**Size.** Measured 2026-09-05 with `wc -c` on this branch against revision 25 as the predecessor:
+`work_model.md` 42.1k → 51.4k (+9.3k, the two rulings written as sections and the reserved default),
+`gates_and_workflows.md` 45.8k → 48.7k (+2.9k), `adapters.md` 66.2k → 72.0k (+5.8k), `payments.md`
+65.3k → 73.9k (+8.5k), `telegram.md` 74.0k → 79.7k (+5.8k), `gmail.md` 47.3k → 49.5k (+2.2k),
+`calendar.md` 42.0k → 43.6k (+1.7k), `vocabulary.md` 81.3k → 83.8k (+2.5k), `data_model.md`
+31.0k → 32.8k (+1.8k), `failure_posture.md` 22.6k → 23.4k (+0.9k), `conformance.md` 25.2k → 27.1k
+(+1.9k); `principles.md` is unchanged at 13.5k. The kernel is therefore **113.6k**, up from 101.4k on
+revision 25, against `MAX_BLOCK_CHARS=40,000`. Nothing was trimmed to fit: the operator directed that
+complete rulings come first and the condensed reading set follows (decision 66 has since ruled that set a
+generated projection, and these documents never trimmed), and
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure that
+records the overrun.
+
+## Revision 27 (2026-09-05): decision 15 ruled, and the recurring task
+
+Two follow-ups to the operator's review of PR #745, both design: the adapter-packaging question is ruled
+(bundled, for now), and recurring work gets a section of `work_model.md`, a vocabulary entry, a task-level
+meaning for `FOLLOWS`, and a ruled entry in the register as decision 30. This section records what is
+measurable about each against this branch; the arguments are the owning documents'.
+
+**Decision 15.** Ruled as bundled with a named trigger for revisiting (a second consumer of the adapters).
+Built state is unchanged by the ruling and already matches it: every adapter daemon on this branch lives
+under `execution/daemons/` in this repository, and no adapter is consumed from, or published to, any other
+repository. The register row moved from open to ruled; `adapters.md#the-adapter-and-the-engine-are-two-roles`
+holds the ruling, and the admission section's pointer now cites it rather than declining to rule.
+
+**Decision 30, the recurring task.** Read 2026-09-05 on this branch by enumerating every module under
+`execution/` and `lib/` that names a recurrence rule, a due date, or a reschedule, and reading each hit.
+
+| Design rule (revision 27) | Replaces | Built state | Where the gap lives |
+|---|---|---|---|
+| a recurring task is one live instance; completion creates the next, linked task-to-task by `FOLLOWS` | a completed task reset to open with its `due_date` moved | **the reset pattern is built and running.** One daemon scans tasks carrying a `recurrence` field and, for each one whose status is done and whose `due_date` has passed, corrects `due_date` forward by one interval and corrects `status` back to pending on the **same entity**. No new task is created; the completed occurrence survives only as superseded observations of two fields | `execution/daemons/sylvia/sylvia.py` (`process_recurring_tasks`, `_roll_due_date`) |
+| the next instance's `due_date` is computed from the schedule, never from the completion time | — | **consistent on this one point**: the roll computes the next date from the prior `due_date` and the rule, not from the completion time, so the built path does not drift. It does lose the occurrence (row above) | `_roll_due_date` |
+| `FOLLOWS` task → task is a registered edge meaning | `FOLLOWS` batch → batch only | **no task-to-task `FOLLOWS` edge exists in the record**, and neither the schema registry nor any writer on this branch produces one. Nor does a batch → batch one: the batch entity itself is unbuilt (the schemas table below), so both meanings are declared and neither is written | the schema registry; `data_model.md#relationships` |
+| a recurring task's silent stop is loud because one overdue instance is always present and a stuck batch reaches the checkpoint queue | a daemon that runs daily and, if it stops, leaves nothing that says so | **the reset daemon's stopping is silent.** It runs on a daily calendar trigger, holds no lease, raises no checkpoint, and its absence is not distinguishable from a series that is up to date; the `unclaimed_step` interval the design conditions the guarantee on cannot be declared because no workflow declaration exists to declare it on | `sylvia.py`; the unbuilt `workflow` entity |
+| moving `due_date` instead of completing is retired; postponing a live instance by correcting `due_date` is not | a standing rule that one class of recurring task is never completed, only rescheduled | **the standing rule is in force** as a session instruction and a `task_policy`, and the built daemon depends on the opposite behaviour for other tasks (it acts only on tasks marked done). Neither side is the design's: the rule is superseded for tasks modelled as recurring tasks, and the daemon's roll is the reset the design replaces | `CLAUDE.md` standing constraints; `task_policy` entities; `sylvia.py` |
+| an action series and a recurring task meet only at the gate | — | the gate reads `successful_recurrences` from the policy snapshot and graduates a class on it; no code path relates that count to any task's recurrence, which is consistent with the design | `execution/daemons/apis/apis.py` (`_successful_recurrences`) |
+
+**What this revision does not rule.** Nothing beyond 15 and 30. Decision 30 is recorded as ruled on the
+operator's proposal as its basis; the spelling of a recurrence rule, the terminal values an occurrence may
+close with, and which class of task keeps a postponement practice are `task_policy` and schema matters
+the section names as outside it.
+
+**Size.** Measured 2026-09-05 with `wc -c` on this branch against revision 26 as the predecessor: `work_model.md` 51.4k → 67.3k (+15.9k, the recurring-task section written in full), `gates_and_workflows.md` 48.7k → 49.2k (+0.5k, the one-sentence extension of the successor rule), `adapters.md` 72.0k → 74.3k (+2.4k, the ruling of 15 replacing the lean), `data_model.md` 32.8k → 33.7k (+0.9k, the task row and the `FOLLOWS` row), `vocabulary.md` 83.8k → 85.3k (+1.5k, the `recurring task` entry), `conformance.md` 27.1k → 28.3k (+1.2k, two register rows); `principles.md` is unchanged at 13.5k. The kernel is therefore **130.0k**, up from 113.6k on revision 26, against `MAX_BLOCK_CHARS=40,000`. Nothing was trimmed to fit, on the standing direction that content settles before budget, and `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure that records the overrun. Checks on this revision: the vocabulary check reports 0 Never hits (95 Never items, three of them new with the `recurring task` entry), the anchor check 0 broken links, and `test_foundation.py` 51 passed and 1 expected failure.
+
+## Revision 28 (2026-09-05): the record inventory the migration plan starts from
+
+`migration.md` (this revision) designs the second leg of the population plan (`ent_0916804d07280d1751106d82`):
+how the record an instance already holds is carried into the design's types. That document names no count;
+every figure it relies on is here. Measured 2026-09-05 against Neotoma prod through the Neotoma MCP:
+`get_entity_type_counts` for the counts by type (total entities 175,778 at read time); `retrieve_entities`
+for the shape samples (the sample size and sort are stated per row; a sample is of the entities the call
+returned, not the type); `describe_entity_type` and `list_entity_types` for the registry; `list_relationships`
+for the edge readings. Nothing was written. Types, counts, and which fields are populated are reported; no
+entity's contents are.
+
+**Types the design renames, retires, or absorbs (the retired names, as the checkout uses them):**
+
+| Type on prod | Count | Shape, as sampled | Disposition in `migration.md` |
+|---|---|---|---|
+| `agent_definition` | 43 (40 not merged; 3 merged) | status active 21 / planned 19; 26 carry a credential (`aauth_sub`); all 40 carry `prompt_markdown`; 31 carry `context_entity_types` and `operational_entity_types`; 18 carry `raw_fragments`; 1 stores its tool allowlist as a string rather than an array; 38 have more than one observation (max 69) | re-type → `agent` (decision 31 open) |
+| `workflow_definition` | 8 (7 across the two production projects, 1 for a smoke-test project) | every step list keyed `gates[]` with `owner_agent`; 5 of 8 carry `fast_paths` and every condition is a label or a workflow-type name; 1 carries `on_fail` (one step); 0 carry `successors`; retired agent names as step owners on 3 (the revision-9 C4 row above); one declaration carries 192 inbound `REFERS_TO` edges, from triage records and from issue slugs used as entity ids | re-type → `workflow`; the smoke-test one retired |
+| `participation_record` | 188 (186 not merged) | status dispatched 183 / satisfied 3; step `pm` on 182, `pr_review` 2, `ux` 1, `arch` 1; 4 distinct agents; 182 distinct work entities; 183 carry a declaration reference; 0 carry `artifact_ref`, 0 carry `version`, 0 carry a token id | satisfied rows kept as history; dispatched rows frozen |
+| `checkpoint_brief` | 312 (309 not merged; 310 sampled) | status open 151, awaiting_operator 119, pending_review 6, pending 3, prepared 2, approved 2, rejected 2, five singleton values, unset 22 — so about 305 are not terminal; `checkpoint_name` unset on 174, `PLAN` on 121; `task_entity_id` on 121; `pr_number` on 14; `blocking` on 288; `confidence` on 131; `blast_radius` on 129; `gate_action` on 123; `policy_entity_id` on 123; `plan_entity_id` on 10; `proceed` on 1; `operator_instruction` on 0; 4 empty snapshots; 26 carry `raw_fragments` | derive `action` + `checkpoint` where a subject exists (121 by task, 14 by pull request); terminal correction for the rest |
+| `escalation` | 21 (20 not merged) | 5 open and real, all from one payment daemon about payment configuration entities; 16 written by a test process (`source_agent` a test daemon), one of them with an empty snapshot and zero observations | real ones → task for intake; test rows → terminal |
+| `execution_policy` | 13 | status ready 11 / draft 1 / active 1; 12 carry `plan_entity_id`; 12 carry `checkpoints[]`, `quality_criteria`, `assigned_agents`, `fallback_instruction`; 2 carry `low_blast_action_types` and `high_blast_action_types`; 2 carry `confidence_threshold`; 1 carries the recurrence count | derive one `action_policy` per project from the 2 that carry blast lists; the rest kept, not re-typed |
+| `gate_status` | 3 | per-artifact step maps | retire (freeze) |
+| `workflow_state` | 112 (110 sampled) | 98 carry `pr_number`, 91 `gate_status`, 77 `current_owner`, 60 `owner_history`, 55 `pending_gates`; the rest are inheritance-check results | retire (freeze) |
+| `workflow_run` 3, `workflow_gate` 1, `release_gate` 6, `task_action` 2 | as stated | the retired engines' state | retire (freeze) |
+| `claim` | not present in the counts on 2026-09-05 (revision 6 counted 7) | — | — |
+
+**Types the design keeps, and their shape where the migration depends on it:**
+
+| Type on prod | Count | Shape, as sampled | Note for the migration |
+|---|---|---|---|
+| `task` | 21,510 | 500 most recently observed (sorted `last_observation_at` desc): status pending 119, blocked 79, awaiting_approval 75, done 39, open 26, todo 13, in_progress 10, queued 2, seven singleton values (among them in_review, approved, completed, backlog, superseded, awaiting_input), unset 131 — fifteen live values against the design's three classes; `assigned_to` on 75; `action_type` on 151; `blocked_reason` on 190; `confidence` on 143; `priority` on 322; `parent_task_id` on 2; `project_id` on 8; `raw_fragments` on 82; all at one schema version. The 2026-09-02 sample above (default order) read `completed` 329, so the two samples measure different slices of the population | keep; tolerant claim predicate; `awaiting_approval` and `awaiting_input` are held-for-a-principal states the design carries as checkpoints |
+| `agent_grant` | 29 | 1 revoked; 15 name at least one retired type in a capability (`agent_definition`, `workflow_definition`, `checkpoint_brief`, `participation_record`, `escalation`, `execution_policy`, `workflow_run`); 3 active grants carry a wildcard capability, 2 of them human-device grants; 20 auto-derived 2026-06-17 (revision-3 reading above); 2 carry a linked host login | keep; widen the 15 before any holder writes a new type |
+| the swarm's roster | 1 | 37 roles in one global role-to-agent map; no project dimension | keep; correct |
+| `agent_policy` | 25 | `rule_kind` mandatory 9, recommended 6, operating_discipline 5, unset 3, two others; `scope` global 12, swarm 8, five others; status active 24 | keep |
+| `task_policy` | 19 | 18 carry `policy_key`; visibility private 15 / public 2 / unset 2 | keep |
+| `feedback` | 31 (28 not merged) | third-party product feedback: `source` on 27, `sentiment` on 19; 20 carry `raw_fragments`; all at schema 1.0 | keep (gap G14) |
+| `agent_strategy` 37, `finding` 66, `operator_profile` 1 (empty snapshot), `proposed_skill_update` 148, `strategy_drift_signal` 17, `agent_improvement_proposal` 16 | as stated | — | keep; open proposals derive a task each |
+| `transcription` | 890 (883 not merged) | 300 sampled: schema 1.1.0 on 298, 1.0 on 2; 1 with an empty snapshot whose canonical name is its own id; 280 have exactly one observation; every populated one carries a local file path and the transcript text | keep; an entity in the record, not an artifact |
+| `meeting_transcription` 36 (34 not merged; the 2 sampled have empty snapshots), `transcription_run` 9 | as stated | — | keep |
+| `session_digest` | 369 | all at schema 1.4.0; `tasks_claimed`, `decisions`, `open_questions`, `watermark`, `lineage_files` populated on the 6 sampled | keep |
+| `agent_session` | 3,726 | schema 0.1.0 on the 2 sampled (registry is at 0.2.0 with 33 fields, among them `holder`, `task_id`, a step name, a declaration reference) | keep; tolerant reader |
+| `harness_event` | 13,723 | the 12 sampled all carry a code-host event type (`github.*`) and nothing else in the snapshot | delivery rows retire at adapter cutover; session rows keep |
+| `daemon_report` | 15 (13 not merged) | `summary` on 13, `resolution` on 12, `findings` on 9; two naming conventions for the daemon field | keep, and hold (gap G13) |
+| `plan` 552, `plan_contribution` 1,082 | as stated | the population plan itself carries `body`, `decisions` (5), `next_steps`, `status`, `title`, and 2 `raw_fragments`; 0 relationships point at it | keep; not touched |
+| external-record types the adapters already write: `issue` 4,525; `pull_request` 177; `github_pull_request` 29; `github_issue` 25; `email_message` 1,804; `email` 498; `email_thread` 16; `calendar_event` 1; `event` 135; `post` 378; `transaction` 584; `bank_transaction` 4,090; `payment_event` 7 | as stated | — | keep; tolerant reader keyed on system and identifier; `artifact` minted by adapters from cutover |
+
+**What the registry holds of the design's types and edges (2026-09-05):** no entity type named `agent`,
+`operator`, `workflow`, `batch`, `sign_off`, `action`, `artifact`, `checkpoint`, or `action_policy` exists
+(`list_entity_types` by keyword; the matches are the retired names and unrelated types such as
+`agent_definition_override`, `agent_artifact`, `agent_task`, `agent_attempt`, `agent_outcome`,
+`gmail_search_batch`, `import_artifact`, `code_artifact`, `shared_artifact`). The relationship-type
+vocabulary the MCP exposes is a closed list of 28 values; of the design's edges it contains `DEPENDS_ON`,
+`PART_OF`, `REFERS_TO`, `DUPLICATE_OF`, and `SUPERSEDES`, and none of `LEASE`, `ADDRESSED_BY`, `FOLLOWS`,
+`CLOSES`, `SIGNED_BY`, `PRODUCES`, `CHECKPOINTS`, `AWAITS`, `RESOLVED_BY`, `RAISED_BY`, `principal_binding`,
+`ownership_grant`, `delegation_edge`; no MCP tool registers a relationship type (gap G25 in `migration.md`).
+The primitives the plan relies on and their observed semantics: `merge_entities` rewrites the source's
+observations onto the target and marks the source merged; `split_entity` re-points a predicate-selected
+subset of observations onto a new or existing entity and is documented as the inverse of merge;
+`create_interpretation` writes observations linked to a source and an interpretation; `correct` writes a
+field-level correction and takes no entity-type change; `update_schema_incremental` adds or removes fields
+and can migrate `raw_fragments` into observations; `register_schema` registers a type with `reducer_config`;
+no primitive retires or aliases a type (gaps G2 and G26).
+
+**Size.** `migration.md` is a new authored companion, never keyed, so it adds nothing to the reading block;
+measured 2026-09-05 with `wc -c` on this branch it is 70.1k, and the kernel is unchanged by it at 129.6k.
+`conformance.md` gained the register row for decision 31 and the companion entry.
+
+## Revision 29 (2026-09-05): the simplification pass — redundant terms and mechanisms removed, four removals proposed
+
+The operator asked whether the foundation could be simplified further without losing capabilities or
+guarantees, by removing redundant mechanisms or terms. This revision is that pass: it removes, it does not
+shorten; the condensed reading set is separate and follows, and since decision 66 is generated from these
+documents rather than cut out of them. Two tests were used, both mechanical. A **term** is
+redundant if every use can be replaced by an existing term without a sentence changing meaning (the `lens`
+retirement of revision 19 is the model). A **mechanism** is redundant if removing it changes no row's failing
+artefact in the conformance matrix. **The matrix was not available**: `conformance_suite.md` had not landed
+on this branch when the pass's 150-minute wait for a stable head expired (the head was stable from 19:21 UTC
+for 139 minutes; the suite never appeared), so the mechanism test fell back to principles 6 and 9 alone, and
+**every removal below is marked unverified against the matrix.** The pass ran from head `70d0d14`.
+
+**Applied**, each passing the substitution test with zero loss, or stating one rule in one home where it had
+two or more:
+
+| Removed | Replaced by | Uses replaced | Test |
+|---|---|---|---|
+| `claimant` (term and vocabulary entry) | lease holder, under `lease`; its bans moved to `lease` and `assign`, and the checker's `PATTERNS` key with them | 27 uses across 10 documents; two sentences rewritten where the lease did not yet exist ("concurrent claims"; "the principal about to claim") | substitution: the claim and the lease are one primitive, so the principal that claimed is the principal the lease names — one referent, two nouns (principle 9) |
+| `workflow policy` (term and entry) | the step owners a workflow declares, with the grants in force | 8 uses; the `gates_and_workflows.md` section renamed from *Two policies* to *Two questions: who may claim a step, and whether an action may be taken*, and its 10 anchors updated | substitution: no entity, field, or rule carried the name; it was a collective noun for two mechanisms that already answer the question |
+| `hot path` (term and entry) | `projection`, whose definition now states the one-read purpose itself | 9 uses | substitution: the term named the reason a projection exists and nothing the projection does not |
+| the checkpoint reason-class list, stated in four places | one enumeration, in `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`; `vocabulary.md`, `data_model.md`, and the `gates_and_workflows.md` diagram cite it | three copies removed; the `data_model.md` copy had drifted (it lacked `unclaimed_step`, `capability_denied`, `lossy_record_mutation`, `dependency_cycle`) | principle 9: one home; the drift was the signature |
+| the `feedback` entity as a home in the direction-of-truth table | the finding (`gates_and_workflows.md`, the standing-finding section) for the operator's input on reviewed work; `task_policy` alone for preferences | 1 row; `migration.md`'s row and its gap G14 updated to record the closure | the standing-finding ruling of revision 16 already said no feedback entity stands beside the finding; the table row was the second home |
+| `operator_preview` (a step name) | `consent` | 5 uses in `workflows.md` and `gates_and_workflows.md` | substitution: identical owner, `on_fail`, and work to the `consent` step of outreach and payment — three step names for one step kind, now two (`consent`, and `present`, whose work differs) |
+| `calendar_routing_config` (a binding type name) | `channel_config`, the binding type `adapters.md#scope` names | 3 uses in `calendar.md` | principle 9: `adapters.md` names the per-instance binding types once |
+| `scenarios_extended.md` (a document) | merged back into `scenarios.md`, which now carries walkthroughs (a)–(j) | the file deleted; `conformance.md`'s companion list and direction-of-truth row updated | the split's only stated reason was the reading-block budget, and neither file is on the reading list (`test_real_keyed_rows_match_conformance_contracts` asserts it), so the reason was void |
+| `proposed_skill_update.owning_agent` in the Owner table | the routed remedy as a task entering intake, with the step owner keeping the sign-off | 1 row | a checkout's field name in a design table, superseded by the standing-finding ruling |
+
+**Proposed, not applied**, as open decisions 32–35 in `conformance.md#the-register-of-open-design-decisions`,
+each argued under a heading naming its subject: **32**, whether the sign-off's `verdict` is a stored field or a
+read over its findings and its author (`gates_and_workflows.md`) — the field is held equal to a derivation by a
+refusal at the write, which is a projection's shape, but retiring it moves the guarantee from a refusal to a
+construction and rests on a finding type `data_model.md` has no row for (`migration.md` G15); **33**, whether a
+stage and the step's `phase` field name anything a step does not (`workflows.md`) — no rule reads either, but
+the Stages lines can only be deleted, not substituted, and `migration.md` uses the word in another sense;
+**34**, whether the step path is an execution mechanism of its own and whether the component that opens steps
+is `pipeline` or `engine` (`work_model.md`) — "the same pull, over steps" is the design's own phrase, and
+`engine` is used across three documents and defined nowhere, but the count of four is load-bearing here and
+cited from a recorded decision; **35**, whether one binding type or two names an external system's instance
+(`adapters.md`) — nothing states what separates `channel_config` from `vendor_binding`, but both are context
+entities whose shape is the record's.
+
+**Examined and kept**, with what keeps each: `hydration` (the only name for the moment declared reads are
+resolved; `gates_and_workflows.md#declaration-batch-projection` needs a noun to say nothing crosses the boundary
+*during* a step); `condition`, `applies_when`, the hold, and the checkpoint (three outcomes — inapplicable and
+never opened, open and waiting on nobody, held awaiting a principal — not one mechanism with three triggers;
+decision 13 already argues the hold is not a second waiting mechanism); `intake` (the one batch with no
+predecessor, which is what gives every chain a first link and replaces the router); `action series` against the
+recurring task (decision 30 states the distinction once); `agent_policy` against `agent` (a behavioural rule
+binding several agents cannot live in one prompt without copies — though the foundation nowhere states this,
+and the direction-of-truth table names the rendered skill as the mirror of both, which is a gap and not a
+redundancy); `task_policy` (the operator-specific home a public, generic prompt cannot be; `work_model.md`'s
+recurring-task ruling now leans on it); `sign-off` against `verdict` (whole against part; see 32);
+`execution_policy` and `checkpoint_brief` (already retired in revision 6, superseded by `action_policy` and
+`checkpoint`); `sourcing` (its substitute, provenance, is not a defined term); `step_status` (a ruled projection);
+`conformance.md`'s three roles (one subject — how work binds — with the register an index whose duplication is
+bounded by its own rule); the `workflows.md` / `gates_and_workflows.md` name overlap (a naming matter for a vocabulary pass under invariant 12; the one content overlap is `workflows.md`'s applicability bullet restating the
+`applies_when` argument, which is prose to shorten, not a mechanism to remove).
+
+**Defects noticed and not fixed here**, because they are corrections rather than removals: the governance list
+is stated three ways (`migration.md` G1); `failure_posture.md`'s `unclaimed_step` paragraph names the batch as the
+checkpoint's subject where `gates_and_workflows.md#the-checkpoint` admits only an action or a task; the
+standing-finding ruling routes an operator-specific preference to an agent's prompt, which the public-prompt
+constraint forbids, leaving `task_policy` as the home the ruling does not name.
+
+**Size.** Measured 2026-09-05 with `wc -c` on this branch against head `70d0d14` as the predecessor. The pass
+is **net +11.1k** across the foundation excluding `status.md` (822.1k → 833.2k), of which
+the four argued proposals and their register rows are +9.2k, the bookkeeping that records the removals — the
+`Derived from` notes on twelve documents and the five retired-table rows — is +2.9k, and the removals
+themselves are -1.0k. Per document: `adapters.md` 74.4k → 76.3k (+1.9k); `authority_model.md` 18.6k → 18.7k (+0.1k); `calendar.md` 43.6k → 43.9k (+0.2k); `conformance.md` 29.8k → 31.7k (+1.8k); `data_model.md` 33.7k → 33.9k (+0.2k); `failure_posture.md` 23.4k → 23.6k (+0.1k); `gates_and_workflows.md` 49.2k → 51.9k (+2.7k); `migration.md` 70.4k → 70.8k (+0.4k); `scenarios.md` 10.4k → 21.4k (+11.0k); `vocabulary.md` 85.3k → 85.4k (+0.2k); `work_model.md` 67.3k → 69.5k (+2.2k); `workflows.md` 41.1k → 43.1k (+2.0k); `scenarios_extended.md` 11.8k → 0.0k (-11.8k). The kernel is
+**134.9k**, up from 130.0k, all of it the two proposals argued in kernel documents (32 in
+`gates_and_workflows.md`, 34 in `work_model.md`); a ruling on either removes its argument to a register line.
+Nothing was trimmed to fit, on the standing direction that content settles before budget, and
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure.
+
+**Checks.** `check_foundation_vocabulary.py`: 98 Never items (95 before; `claimant`, `workflow policy`, and
+`hot path` added as retired names), 59 Not-for items, 0 Never hits, 431 advisory hits (432 before).
+`check_foundation_anchors.py`: 0 broken links after the section rename and the file merge.
+`link_vocabulary_terms.py --check`: clean, after relinking 5 first mentions in 4 blocks. `test_foundation.py`:
+51 passed, 1 xfailed (the budget marker), unchanged from the predecessor. The `PATTERNS` key `claimant` moved to
+`lease`, and `test_every_pattern_key_still_names_an_entry` holds. This revision's own row and the rows above
+that still name `scenarios_extended.md` are history: the file is gone, and the next regeneration re-measures.
+
+## Revision 30 (2026-09-06): how tasks come into existence — the sources indexed, the intake rule, and decision 36
+
+The operator's 2026-09-05 22:02–22:13 voice memos asked five things: whether adapters should bring
+artifacts into the record continually, beside pre-step hydration, so that the record stays current and so
+that arrivals can be motive for work; whether "listeners" on particular kinds of artifact from particular
+systems should create tasks, and whether by rules or by inference; whether such listeners should fire on
+entities in general and not only on artifacts; whether tasks need types, as templates; and, as the general
+topic, all the ways tasks get created. Four hypotheses were checked against the documents before anything
+was written (principle 9: three false gap claims had been made the day before), and three of the five asks
+were found already covered in whole or in part.
+
+| Asked | Found | Written |
+|---|---|---|
+| continual inbound beside hydration | **already covered.** `adapters.md#the-adapter-and-the-engine-are-two-roles` ("it self-triggers on the external system's events, produces writes to the record, and receives no task"); the four outcomes keep a tracked artifact current on every event and send an untracked new record to intake; `vocabulary.md#hydration` already separates hydration from "an adapter's own scheduled polling (that produces signals, and answers to no step's declaration)" | one section in `adapters.md` naming the memo's "continual hydration" as the inbound side, stating that what is kept current is the inbound table intersected with the per-instance binding, that a poll interval is a binding value (decision 35 decides which type), and that freshness is never a policy — the only requirement on it is a step's declaration |
+| listeners on artifacts, and on entities in general | **partly covered.** The record's subscriptions were found in revision 14 unable to receive an external system's events (`adapters.md#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it`); that negative is the positive answer to the 22:10 memo — they watch every entity change alike, artifact or not. What did not exist: the rule as data on the record | `work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`: what a rule keys on (entity types, change kinds, a field predicate, a provenance predicate), what it produces (one task entering intake per rule per change, provenance naming both), who writes it (a governance write; reserved by default under decision 18), how it is bounded (dedup on the change id, intake's own `dedupe` and `route`, a ceiling whose overflow is `dropped` and counted, provenance); the `intake_rule` row in `data_model.md`; the `intake rule` entry in `vocabulary.md`; `intake_rule` added to the governance list in `gates_and_workflows.md` (five types become six; the counts in `work_model.md` and `migration.md` follow) |
+| rules or inference | **already answered, for two neighbours.** `work_model.md#pull-is-the-only-delivery-assignment-constrains-eligibility` (a router's inference sits in an actor that answers for nothing), `telegram.md#a-chat-message-is-not-an-instruction` (an intent parse is inference, and inference is where authority leaks), and the standing-finding rule (the standing axis "does not become an inference engine") | stated as following from those three, not opened as a decision: rules fire; intake judges; inference proposes rules through a workflow to a gate (decision 17). An unevaluable predicate does not fire and resolves to `dropped`, reason `unevaluable`, counted |
+| task types as templates | **collapses into what intake already sets.** `workflows.md#intake` (`classify` declares `action_type`; `route` names the successor); `gates_and_workflows.md#declaration-batch-projection` (a fast path is judged on a property intake fixed); `work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next` (a template beside the instances refused as a second thing supplying nothing) | one paragraph in the intake-rule section: the type is the successor and the declared classes; the residue the operator sensed is the task's own text, which for a rule-created task the rule authors. No `task_type` |
+| all the ways tasks get created | **stated in eight documents and indexed nowhere** | `work_model.md#where-tasks-come-from-every-source-indexed`: nine sources, one line each, pointing at the home — the operator; an ask on a channel; an untracked new record; a daemon's poll; a step of a batch (eight cases); a batch depending on a task it created; a standing finding; a recurring completion; an intake rule |
+
+**Decision 36 opened** (`conformance.md#the-register-of-open-design-decisions`): whether an intake rule
+may key on the work model's own records — `task`, `batch`, `lease`, `sign_off`, `action`, `checkpoint`,
+`agent_session` — or only on artifacts and the swarm's other entities. The document proposes the exclusion
+(each such change already has a mechanism, and the exclusion closes the rule-creates-task-fires-rule loop
+by construction); the operator's stated lean is toward every type. The next free number is 37.
+
+**Drift.** Read 2026-09-06 on this branch by grepping the tokens named; nothing on prod or on any deployed
+checkout was inspected. Code is not design authority; these rows say what would have to change.
+
+| Design rule (revision 30) | Built state | Where the gap lives |
+|---|---|---|
+| an intake rule is data on the record, and a predicate in a daemon's code that creates a task on an entity change is a rule with no home | **the predicates are all in code.** Four daemons subscribe to the record's entity-change stream through `SSEClient(entity_types=…)`, each with its subject types as a module constant and its reaction in its handler — and two of the four subscribe to `task` itself, the type decision 36 proposes to exclude; three polling daemons write `task` entities from predicates in their own loops (`cotinga.py:556`, `sylvia.py:589`, `turdus.py:610`), through the shared writer `lib/daemon_runtime/task_lifecycle.py:193`; two more import the stream client and poll instead. No `intake_rule` type is registered and the token appears nowhere on this branch; no component reads a rule from the record | `execution/daemons/anthus`, `apis`, `formica`, `neotoma-agent` (subscribers); `cotinga`, `sylvia`, `turdus` (pollers); `lib/daemon_runtime/sse_client.py` |
+| one task per rule per change, provenance naming the rule and the change; a redelivered change fires once | **not built**; the pollers' dedup is the adapter-local state `gmail.md` and `telegram.md` already record as drift (cursor files, a bounded dedup set) | the same daemons |
+| every change a rule evaluates resolves to fired, unmatched, or `dropped` with a reason, counted per window; a ceiling stops a runaway rule | **not built**, and the counter it extends is not built either: revision 7 recorded that no adapter counts its drops | the disposition path, unbuilt |
+| a write to `intake_rule` is a governance write, `NEVER` until the operator grants the class | `gating.py`'s `blast_radius_for()` already resolves a class with no policy value to `NEVER` (revision 12), so the class would take the reserved default the day it is declared — but no write to the record is an action on this checkout (the `action` entity is unbuilt, revision 6), so the rule binds nothing yet | `lib/daemon_runtime/gating.py`; the unbuilt `action` path |
+| the created task refers to the entity that fired it, by `REFERS_TO` for an artifact and by an edge the design has not named for an entity in the record | **gap G12 of `migration.md`, unchanged and now load-bearing** | `data_model.md#relationships` |
+
+**Not decided, and where each waits.** The grammar of a rule's predicates and the registered shape of the
+type (the schema's); the ceiling's window (a value on the rule); whether a rule-created task takes a fast
+path through intake (the intake declaration's); what carries a window in which the evaluator matched
+nothing (gap G13, shared with every self-triggering daemon).
+
+**Size.** Measured 2026-09-06 with `wc -c` on this branch against head `f485439` as the predecessor. The
+revision is **net +32.5k** across the foundation excluding `status.md` (833.2k → 865.7k). Per document:
+`work_model.md` 69.5k → 91.1k (+21.7k: the index, the intake-rule section, and decision 36);
+`adapters.md` 76.3k → 81.6k (+5.4k); `vocabulary.md` 85.4k → 87.5k (+2.0k); `data_model.md` 33.9k →
+35.3k (+1.4k); `conformance.md` 31.7k → 32.8k (+1.2k); `migration.md` 70.8k → 71.3k (+0.5k);
+`gates_and_workflows.md` 51.9k → 52.3k (+0.4k). The kernel is **156.9k**, up from 134.9k, all of it
+`work_model.md`; a ruling on 36 removes its argument to a register line, and the index is the one part
+written to be read rather than argued. Nothing was trimmed to fit, on the standing direction that content
+settles before budget, and `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains
+the expected failure.
+
+**Checks.** `check_foundation_vocabulary.py`: 98 Never items, 62 Not-for items (59 before; the `intake rule`
+entry adds three advisory senses — "listener", "trigger", and "task type" for a rule), 0 Never hits, 467
+Not-for advisory hits (431 before; the rise is the three new senses matching existing prose that uses the
+words in their permitted senses, plus this revision's own uses of "fire" of a rule, which the ban reserves
+for an action). `check_foundation_anchors.py`: 0 broken links. `link_vocabulary_terms.py --check`: every
+linkable first mention linked. `test_foundation.py`: 51 passed, 1 xfailed (the budget marker), unchanged
+from the predecessor.
+## Revision 31 (2026-09-06): the memo gaps — five rulings, two rule extensions, four corrections
+
+The operator's voice memos of 2026-09-05 were audited against the branch at head `f485439` (revision 29),
+topic by topic. Seven design gaps remained, and the simplification pass had noticed three consistency
+defects and left them as corrections. This revision closes them. Nothing here was removed; every ruling is
+argued under a heading naming its subject in the document that owns it, and the register carries a row per
+decision. Numbers 37 to 41 were free at `f485439` and are taken here; the next is 42.
+
+**Rulings.** Decision 37 (`gates_and_workflows.md`): the operator's view of work is a read of the record —
+a dashboard is that read rendered for a principal, under the operator's grant; not an adapter, not an actor
+with a write contract — and a channel carries a declared subset: a checkpoint awaiting the operator, the
+announcement path, and a `deliver` step whose brief named a channel; completed work is read, never carried
+by default, and which classes are carried is data on the `channel_config` binding. Decision 38
+(`gates_and_workflows.md`): a closed batch is never reopened; the operator's input on it is a finding, and
+the redo is a new task through intake referring to the closed batch's artifacts, argued from *no task
+lifecycle*, *sequencing is data*, and the pinned sign-off. Decision 39 (`workflows.md`, the intake section):
+the operator's inclination — a task linked at intake to everything it is contextually related to — was
+interrogated as he asked, and the answer is the hybrid: `link` attaches what the task **names**, records in
+the record and external records alike, by `REFERS_TO` (closing `migration.md` gap G12), and nothing on
+relevance alone, because a general pull has no stopping rule, goes stale before the step that reads it, and
+is purpose-blind under the people-data rule; hydration resolves each step's declared reads from those
+anchors, and context a step discovers is written back as the same edge. Decision 40
+(`gates_and_workflows.md`): a step's close writes what it produced as the entities it is, names what it read
+on the sign-off (`REFERS_TO` sign-off → entity), and copies nothing — an as-of read along ingestion time at
+`signed_at` reproduces the read set, which was verified against the two rules it rests on (hydration writes
+every external read before the step; the sign-off names the rest with a time); reasoning is not written,
+and `agent_session` stays the identity-and-liveness half. Decision 41 (`authority_model.md#grants`): write
+admission per entity type is default-deny; the `agent_grant` is the allowlist, read at every enforcement
+point and widened by a governance write; attribution is required besides and prevents nothing.
+
+**Rule extensions.** The finding's one-off/standing classification has an `unknown` value that raises
+`undetermined_scope` and is never coerced to one-off: the scopes are ordered narrowest-first with the batch
+(one-off) as the narrowest, so "does this generalize" and "to which scope" are one question and one reason
+class serves both (`gates_and_workflows.md`, the standing-finding section; `vocabulary.md#finding`). And the
+source is kept, not only named: the raw thing an adapter read is stored as itself, so an observation can be
+re-interpreted, a write audited to what was returned, and an as-of state traced to the raw things read at
+the time (`adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`;
+`data_model.md#record-conventions`).
+
+**Corrections.** The governance-type list is one list in one home,
+`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`: eight types —
+the six it named after revision 30 added `intake_rule`, plus `agent_policy` and the `workflow` declaration, which
+`work_model.md` and the standing-finding section already treated as governance writes — each admitted by the stated test; every
+other mention now cites the section without counting (`work_model.md` ×4, `migration.md` ×3, the
+standing-finding section), and `migration.md` gap G1 records the closure. A condition of a batch is raised on
+one of its tasks, never on the batch (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`): the
+`unclaimed_step` paragraph named the batch as the subject against the two-subject rule, and now names one
+task, with one checkpoint per stopped batch and a refusal of a second with the same reason. The
+standing-finding ruling names `task_policy` as the home for an operator-specific standing finding, since a
+prompt and an `agent_policy` are public and generic (`conformance.md`'s direction-of-truth row updated to
+match). And `workflows.md`'s payment `consent` row now carries what decision 27 rules — payee, amount,
+currency, period, and rail as the `verify` sign-off recorded them, referring to that sign-off — where it
+read "payee, amount, and reference".
+
+**Already covered, found by grep before writing.** Provenance's link from an observation to its source and
+interpretation (`adapters.md`, revision 14) and the two as-of axes were in place; only the keeping of the
+source was missing. `issues.reopened` → a new task through intake (`github.md`, revision 13) already
+instantiated decision 38 for one system, and the `task` row's "a reopened status" under *deliberately not a
+field* already implied it. The retrieval contract's "another step owner's in-progress reasoning (there is
+none in the record — only sign-offs)" already stated decision 40's third part from the reader's side.
+
+**Drift, read on this branch 2026-09-06.**
+
+| Design rule (revision 31) | Built state | Where the gap lives |
+|---|---|---|
+| a finding whose classification cannot be determined is `unknown` and raises `undetermined_scope`; it is never coerced to one-off | **`classify_finding` returns `one_off` for anything its two heuristics do not match** (a cited rule, or a category recurrence at the threshold), which is the coercion the rule forbids; nothing it returns is a third value and nothing raises a checkpoint | `execution/daemons/apis/review_learning.py` (`classify_finding`) |
+| a closed batch is never reopened; a redo is a new task through intake | the batch entity is unbuilt (the schemas table above), so nothing on this branch reopens or refuses to reopen one; the reset-and-move-`due_date` pattern revision 27 records is the nearest built analogue of a reopen, and is superseded there | the unbuilt `batch` type; `execution/daemons/sylvia/sylvia.py` |
+| `REFERS_TO` task → record entity; sign-off → record entity | no relationship type but `DEPENDS_ON`, `PART_OF`, `REFERS_TO`, and `DUPLICATE_OF` can be written on the instance (`migration.md` G25); `REFERS_TO` exists, so the task → entity edge is writable today, and the sign-off → entity edge waits on the `sign_off` type | the schema registry; the unbuilt `sign_off` type |
+| write admission per entity type is default-deny by grant | 3 active grants on the instance carry a wildcard capability, 2 of them human-device grants (the record inventory, revision 28); the grant checker's fail-closed posture is `status.md`'s authority-model section | `agent_grant` rows on the instance; `lib/daemon_runtime/grant_checker` |
+| the operator's view of work is a read of the record; a channel carries a declared subset | not measured here: the built console lives on `origin/main`, not on this branch, and which classes the notifier carries was not re-read for this revision; `telegram.md`'s drift table (revision 24) records four independent chat clients, which is the shape the rule would consolidate | `telegram.md#drift-what-the-built-path-does-that-this-design-does-not-say` |
+
+**Size.** Measured 2026-09-06 with `wc -c` on this branch against head `a2d11b0` (revision 30, which landed
+while this pass was being written and was rebased onto; the two passes' edits to the governance list were merged
+into one list of eight) as the predecessor. The pass is **net +35.4k** across the foundation excluding
+`status.md` (865.7k → 901.1k). Per document: `gates_and_workflows.md` 52.3k → 69.2k (+17.0k); `workflows.md` 43.1k → 48.9k (+5.7k); `authority_model.md` 18.7k → 21.6k (+2.9k); `conformance.md` 32.8k → 35.6k (+2.8k); `adapters.md` 81.6k → 83.5k (+1.8k); `failure_posture.md` 23.6k → 24.9k (+1.4k); `data_model.md` 35.3k → 36.6k (+1.3k); `work_model.md` 91.1k → 92.1k (+1.0k); `migration.md` 71.3k → 72.2k (+0.9k); `vocabulary.md` 87.5k → 88.2k (+0.7k). The kernel is
+**174.9k**, up from 156.9k, almost all of it `gates_and_workflows.md`; three of the five rulings are argued in a
+kernel document because the checkpoint queue, the sign-off, and the standing finding are its subjects. Nothing
+was trimmed to fit, on the standing direction that content settles before budget, and
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure.
+
+**Checks**, on the rebased tree. `check_foundation_vocabulary.py`: 98 Never items, 62 Not-for items, 0 Never
+hits, 474 advisory hits. `check_foundation_anchors.py`: 0 broken links. `link_vocabulary_terms.py --check`:
+clean. `test_foundation.py`: 97 passed, 1 xfailed (the budget marker) — the count rose from 51 with the
+checker tests revision 30's companion commit added, not with this pass.
+
+## `github.md`: the events with no defined response (revision 13, 2026-09-04)
+
+`docs/foundation/github.md` enumerates every event GitHub can deliver, from GitHub's own webhook event and
+payload reference read 2026-09-04, and marks each row handled, deliberately ignored, or unhandled. The
+enumeration is complete against the host's published list; the *handled* marking states the design, not the
+checkout. What the checkout actually receives is five event types (`issues`, `pull_request`,
+`issue_comment`, `pull_request_review`, `check_suite`) plus the ref-update event, and within those only
+these actions: `issues.opened`; `pull_request` opened, reopened, and synchronize; `issue_comment.created`;
+`pull_request_review.submitted`; `check_suite.completed`. Every other row in that document has no code path
+on this branch, which the adapter entry below already states in general terms.
+
+**The unhandled rows.** These are gaps in the *design*, not merely in the build — each is an event whose
+response the foundation does not yet state, and each needs a decision before it can be built.
+
+| Event or condition | Why it is unhandled | What it needs |
+|---|---|---|
+| `issues.transferred`; `repository.renamed`; `repository.transferred` | the artifact's `system`/`external_id` pair stops resolving, and the record has no re-identification rule | a decision on whether an artifact's external identity may be corrected in place, or whether a moved record is a new artifact with an edge to the old |
+| `issues.deleted` | the artifact ceases to exist at the host while the record still refers to it | a rule for an artifact whose external record is gone: tombstone, or `unknown` on every field the adapter maintained |
+| `sub_issues.*` (four actions) | the host's sub-issue edge is a second parent/child structure beside `PART_OF` | a decision on which is authoritative; the design's position is that `PART_OF` is, and the host's edge is an observation |
+| `pull_request.auto_merge_enabled` / `_disabled` | the host holds a permit the action gate did not issue | the design says the swarm never enables it and a steward reads a person's auto-merge as blocking; the blocking read has no built path |
+| `pull_request.enqueued` / `.dequeued`; `merge_group.*` | the host's merge queue is a second sequencer over the same merge | a decision on whether the queue may be used at all, given the merge is an action through the gate |
+| `pull_request.stacked` | a stacked pull request's base is another pull request, so "the change this batch shipped" is not the diff against the default branch | a rule for what a lens judges and what a sign-off pins on a stacked head |
+| `pull_request_review.dismissed` after a step was signed | the observation is defined; the *surfacing* is not | the steward reading the dismissal before taking the merge, which no step declares as a read |
+| a pull request becoming unmergeable | no step owns the conflict | the design's position is that `impl`'s sign-off closes on the artifact being mergeable and `on_fail` opens it again; the condition is a read, not an event, and neither is declared |
+| base retargeting leaving a stale required check | the response is stated (`checks` set to `unknown`, which holds the step) but nothing implements it, and the host's `changes` payload was not confirmed to distinguish a base change from a title edit in every case | confirmation of the payload shape, then the implementation |
+| `deployment_review.*`; `deployment_protection_rule` | the host's environment protection is a second approval surface beside the action gate | a decision on whether it may be configured at all; an approval there is never a checkpoint resolution |
+
+**The drop that was not counted.** The failure this document is written against is an early return at a
+debug log level behind a label test, discarding issue deliveries with no recorded disposition — receipt
+indistinguishable from handling, which is `failure_posture.md` rule 2's signature failure at the boundary.
+The count of deliveries discarded that way on this checkout is not measured here; measuring it requires the
+disposition rule to be built, which is the point. Under the rule the branch does not exist: every delivery
+resolves to an outcome or to `dropped` with a reason, counted per window and announced. Nothing on this
+branch counts drops, so the invariant that makes `github.md`'s table auditable is designed and unbuilt.
+
+**Security narrowing.** `github.md` states what the adapter withholds from an inbound advisory (exploit
+detail, proofs of concept, reproduction steps, matched secret values) and that a narrowed observation's
+coverage says fields were withheld by policy. No advisory, alert, or scanning event has an inbound path on
+this checkout at all, so the narrowing is a rule with nothing yet to apply it to — and the release notes it
+protects are still built by hand.
+
+## Schemas the design needs and the registry lacks (prod, read 2026-09-04)
+
+`data_model.md` names each. Entity types read from prod through the Neotoma MCP on 2026-09-04
+(`get_entity_type_counts`, counts by canonical type); relationship types carry the revision-5 reading
+above (no `ADDRESSED_BY`, no `FOLLOWS` in use) and were not re-read. None of the following exists as a
+type:
+
+| To register | Kind | Notes |
+|---|---|---|
+| `batch` | entity type | replaces the issue as the record of tasks going through a workflow; `ADDRESSED_BY` and `FOLLOWS` with it |
+| `sign_off` | entity type | replaces `participation_record`; `CLOSES` and `SIGNED_BY` with it |
+| `action` | entity type | the gate's subject; `PRODUCES` (task → action) with it; the dedup key moves here from ad-hoc idempotency keys in the senders |
+| `artifact` | entity type | the task dashboard's task-to-issue and task-to-PR links are the edges, unnamed as such; no `artifact` type exists |
+| `checkpoint` with a subject edge and a reason class | entity type + `CHECKPOINTS`, `AWAITS`, `RESOLVED_BY`, `RAISED_BY` | the built `checkpoint_brief` has no subject edge, no `awaiting`, no `resolved_by`, no timeout (above, "The approval object") |
+| `LEASE` | relationship type | `claimed_at`, `expires_at`, `returned_at`, `runner_id`, `step_name`; #733 (open) is the claim primitive |
+| `successors[]` on `workflow` | field | no `workflow_definition` carries it (revision-5 table above) |
+| `on_fail` on every step | field | one declaration carries it (`ateles\|social_content`); no engine reads it |
+| the principal entity (`operator`, C9 settled) | entity type | no entity of this type exists |
+| `state`, `labels[]`, `head`, `checks` on `artifact`; delivery-id idempotency keys and adapter provenance on inbound writes; `open_issue` and `notify_operator` as action classes in the policy | fields and policy values (`adapters.md`, revision 7) | nothing to add to until `artifact` and `action` exist; the built receivers hold this state in `gate_status` on the issue and in process memory |
+
+| Retired by the renames | Built as | Disposition |
+|---|---|---|
+| `checkpoint_brief` | schema `b0bfcfab-1f07-4526-8fa5-d5ace343b004`, 305 entities (prod, 2026-09-04) | superseded by `checkpoint`; the migration of open briefs is unplanned |
+| `escalation` | schema `c005dcb3-d9fb-4791-a154-fdb09ab9da12`, 20 entities (prod, 2026-09-04); Anthus subscribes to it | merged into `checkpoint` with reason classes; Anthus would subscribe to `checkpoint` events with a task subject instead |
+| `participation_record` | 188 entities (prod, 2026-09-04); Anthus writer; stranded rows (C15) | superseded by `sign_off` |
+| `workflow_definition` | 8 entities (prod, 2026-09-04) | renamed to `workflow`; gains `successors` and per-step `on_fail` |
+| `execution_policy` | schema `0e61f23f-b1bd-46a3-8824-9dde710db9e6`, 13 entities (prod, 2026-09-04) | renamed to `action_policy` |
+
+Also on prod under names the design does not use, each a candidate for the same retirement once read:
+`workflow_run` (3), `gate_status` (3), `workflow_state` (112), `workflow_gate` (1), `release_gate` (6),
+`claim` (7), `task_action` (2). `agent_session` exists (3,726) under the design's own name.
+
+## Revision 32 (2026-09-06): the skill inventory the skills leg starts from
+
+`migration.md`'s skills section (this revision) maps every skill the harnesses hold to a target the design has,
+and names no count; every figure it relies on is here. Measured 2026-09-05: the repository root's skills on this
+branch at head `f485439` (`.claude/skills/*/SKILL.md`, read with `git ls-tree` and a stdlib scan of each file's
+front matter and body), the user root's skills (`~/.claude/skills/*/SKILL.md`, the same scan), the recurring-work
+extraction of the same day over both roots (its candidate pool and skill index, 118 candidates, 121 files indexed),
+and Neotoma prod through the Neotoma MCP (`retrieve_entities` by type for `agent_definition` and `skill`, snapshots
+included for the first and omitted for the second). Nothing was written. Files, entities, classes, and shapes are
+reported; no skill's content is.
+
+**The files and their classes:**
+
+| Measure | Value | Instrument |
+|---|---|---|
+| skill files at the repository root | 94 | `git ls-tree` on `f485439` |
+| skill files at the user root | 27 | directory listing |
+| unique skills across both roots | 118 (3 are present at both roots under one name: the interactive mail triage, the unattended mail sweep, the calendar sync) | name join |
+| role skills (front matter carries an agent entity id and the do-not-edit header) | 40, all at the repository root | front-matter scan |
+| procedure skills | 75 (48 repository, 27 user) | the extraction's skill index, `kind: operator_procedure`; the three duplicates counted once |
+| utility skills the extraction produced no candidate for | 3 (disk cleanup, language check, editor-copy sync) | the extraction's skill index, `kind: utility` |
+| role skills that also carry a procedure verbatim (the mixed class, first form) | 13 | heading scan: the consultation protocol on 13, the plan-participation protocol on 12 (accipiter, aythya, buteo, ciconia, columba, corvus, hirundo, manucode, pavo, phoenicurus, regulus, waxwing), the per-step sign-off section on 7 (accipiter, buteo, cicada, pavo, phoenicurus, vanellus, waxwing) |
+| plumbing skills (the migration keeps them as skills) | 13 | classified per `migration.md`'s test: install/connectivity, memory query, generic store, session store, local-store recovery, secret sync, editor rule, editor-copy sync, watcher control, disk cleanup, language, website scaffold, present-tense orientation |
+| obsolete files | 3 duplicates at the second root; 1 near-duplicate pair (the two error-report skills); 3 agent-loop skills | name join; body comparison; the extraction's notes |
+
+**The entities behind the files (prod, 2026-09-05):**
+
+| Measure | Value | Instrument |
+|---|---|---|
+| `agent_definition` (retired name) | 40 not merged: status active 21 / planned 19; 26 carry a credential (`aauth_sub`); tiers T2 2, T3 14, T4 24 | `retrieve_entities`, snapshots included |
+| role skill files whose front-matter entity id resolves to one of those 40, and whose name matches it | 40 of 40; no prod entity lacks a file, no file lacks an entity | id and name join |
+| planned roles among the 40 | 19: aquila, aythya, ciconia, columba, concierge, fringilla, gorilla, hirundo, manucode, menura, nucifraga, ops, picus, ploceus, regulus, robin, sitta, struthio, sturnus | snapshot `status` |
+| planned roles that carry one of the three duplicated procedures | 7 of the 19 (aythya, ciconia, columba, hirundo, manucode, regulus, robin) — the seven the skills section names | heading scan against the status list |
+| `skill` | 72 (65 not merged); 6 of the 65 are probe or test rows by name; 6 name a skill with no file at either root | `retrieve_entities`, snapshots omitted; name join |
+| repository procedure files with a `skill` entity (front-matter id, or a name match to an entity) | 50 of 54; the 4 without are the three agent-loop skills and the live-transcript stream | front-matter and name join |
+| user-root files with a `skill` entity | 6 of 27 (the status read-out, the session resumption, the session-end audit, the two mail skills, the calendar sync); 21 have none | name join |
+
+**The shapes the skills section relies on:**
+
+| Measure | Value | Instrument |
+|---|---|---|
+| role prompts naming a retired type or field (`gate_status`, `owner_history`, `plan_contribution`, `checkpoint_brief`, `workflow_definition`, `participation_record`, `execution_policy`, `escalation`) | 37 of 40 | regex over the body |
+| role prompts carrying a harness call shape (an MCP tool name, a mail or code-host client, `correct(`, `store(`, a retrieval call) | 28 of 40 | regex over the body |
+| repository procedure files carrying a harness call shape | 22 of 54 | same regex |
+| user-root files carrying a harness call shape | 19 of 27 | same regex |
+| the runner's read of the role file | `execution/daemons/apis/skill_runner.py` resolves `.claude/skills/<skill>/SKILL.md` under the repository root at claim time and prepends the entity's `prompt_markdown` to it; a missing file is a dispatch failure | module docstring and the path resolution in the module, read on this branch |
+| the renderers | `render_agent_docs.py` renders `docs/agents/<name>.md` and the role `SKILL.md` from the agent entity, with `--check`; `sync_skills.py` renders a procedure `SKILL.md` from a `skill` entity's `content`, with `--check`, across both roots (the user root through a symlink into a separate checkout) | module docstrings, read on this branch |
+| the extraction's candidate that cites the most roles | one candidate for the plan-participation pattern cites eight roles as frequency evidence (six verbatim in one batch, two more in another); one candidate per review role describes the per-step sign-off | `final_candidates.json`, entries 0 and 1 |
+
+**Size.** `migration.md` is an authored companion, never keyed, so it adds nothing to the reading block; measured
+2026-09-05 with `wc -c` (bytes; the budget table counts characters) on this branch against `77d2186` as the predecessor it is 109.2k, up from 72.2k (+36.9k, the
+skills section, gaps G28–G31, decision 42, stage 11, and its rows in the reversibility and verification tables).
+`conformance.md` is 36.2k, up from 35.6k (the register row for 42, the anchor for 31, and the direction-of-truth
+row). The kernel is unchanged by this revision. Nothing was trimmed to fit, on the standing direction that content settles
+before budget, and `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure.
+
+**Checks.** `check_foundation_vocabulary.py`: 98 Never items, 62 Not-for items, 0 Never hits, 499 advisory hits (474 on
+`77d2186`; the 25 new are in the skills section and the register row, chiefly `owner`, `command`, and `allowlist` in the
+senses the vocabulary permits). `check_foundation_anchors.py`: 0 broken links after decision 31's heading gained its own
+anchor. `link_vocabulary_terms.py --check`: clean. `test_foundation.py`: 97 passed, 1 xfailed (the budget marker), on the head that carries revisions 30 and 31, which landed while this section was being written and took the numbers it was drafted under.
+
+## Revision 33 (2026-09-06): the conformance suite, designed and not built
+
+The operator asked for the design of a conformance suite — a swarm instantiated from zero in a disposable
+record instance, populated through records, and exercised across a permutation of cases — whose present
+purpose is to surface gaps and contradictions in the foundation and whose later purpose is to be the
+acceptance suite a code branch is written against. It landed as `docs/foundation/conformance_suite.md`, keyed
+to itself and to the suite's future paths (`conformance.md`, *The conformance suite*), with a rule-coverage
+check named as a contract in `conformance.md#mechanical-checks-on-this-directory` and a row in the
+direction-of-truth table. Two decisions were opened (43, the bootstrap set and the operator's later governance
+writes; 44, a sign-off from a lease holder whose lease has lapsed) and registered; the next free number is 45.
+The design was begun against revision 27 and never landed; this revision re-derived it against `70d0d14`
+(the migration plan), `f485439` (the simplification pass, whose eight removals it verifies against the
+matrix), `77d2186` (revisions 30 and 31, whose rulings close five of its findings and contradictions), and
+`22343f7` (the skills leg, which gains one row on the legacy fixture).
+
+**What the design measured about itself**, counted 2026-09-06 on this branch at `22343f7` by parsing the
+table rows of `conformance_suite.md` whose first cell is a two-letter document code and a number:
+**352 rows** — 314 mechanical, 6 mechanical once a named
+schema gap closes (the finding's shape, the attach field, the duplicate edge), 7 mechanical
+for structure and review-only for the judgement they carry, 2 review-only, 13 untestable as written, 9 pending a
+decision that is open, and one pointer row over the migration's gaps. Per document: AD 39, AU 21, CA 8, CF 8, DM 26, FP 24, GH 18, GM 11, GW 57, MG 13, PR 11, PY 17, TG 17, VO 4, WF 25, WM 53.
+**33 rules with no failing artefact** were found (U-1 to U-33), of which 3 are marked closed by the
+rulings of revision 31 (the `link` attachment, the operator-specific standing finding, the task-to-entity
+edge) and 30 stand; **18 pairs of rules whose observables contradict** (X-1 to X-18), of which 3 are marked
+closed — X-2 by revision 29 (the one enumeration of reason classes), X-1 and X-16 by revision 31 (the
+checkpoint's subject on a task of the batch; the governance list stated once) — and 15 stand. Closed rows keep their
+numbers so that none is reused. The largest single cause among the open findings is unchanged from the
+design's first revision: a `finding` has no recorded shape in `data_model.md` (`migration.md`, G15) — six rules
+and one ruling (13) rest on fields it does not declare. Ten of the migration's gaps (G1, G7, G8, G11, G12, G13,
+G15, G17, G21, G25) are hit independently by rows and cross-referenced by number; G1 and G12 are now closed on
+both sides.
+
+**The simplification pass, verified.** All eight removals of revision 29 are lossless against the matrix
+(the suite's section *The simplification pass, verified against the matrix* gives the row-by-row reading).
+Two removals closed contradictions: the one enumeration of reason classes closed X-2, and removing the
+`feedback` row closed a pair the matrix's first revision had not listed (GW-26 against the direction-of-truth
+table). One removal exposed a missing row: no row had tested the `step_status` reconciler, and GW-3a is
+added. Of the four proposals, 32 is found blocked on the finding's shape (G15) rather than on the field, 33
+is confirmed decoration by the matrix (U-30), 34 and 35 change no observable.
+
+**The bootstrap, against `migration.md`.** Same record set, same two-stage division, same first dependency
+(G25). One ordering the migration leaves loose is fixed by the suite — the roster and the agents it resolves
+to before the first declaration, which the migration's own stage-2 verification implies — and two ordering
+constraints the migration derives from a live instance (grant widening before the first new-type write; the
+halt before the first declaration merge) do not arise from zero and are tested on the suite's legacy fixture.
+Intake rules (revision 30) are not in the set: none is needed for the first task, and the class is reserved.
+
+**Where the current code most obviously cannot pass, recorded as drift and not as design.** The suite is
+all red against this branch by construction, so the rows below are the ones a reader would check first, each
+with its instrument. Read 2026-09-06 on this branch at `22343f7`.
+
+| What the design's suite reads for | What the branch has | Instrument |
+|---|---|---|
+| the entity types `action`, `batch`, `artifact`, `sign_off`, and a `checkpoint` with a subject edge — every outbound row, every step row, and every adapter row lands on one of them | none registered (the schemas table below; the revision-28 inventory above), and **zero call sites** on this branch write any of the five as an entity type | `grep -rlE "entity_type.{0,4}[\"']<type>[\"']" lib execution` → 0 files for each of the five |
+| every daemon's outbound effect an `action` through the gate (GW-44, GW-45, AD-18) | of 18 daemon directories, **3** name the gate module (`apis`, `neotoma-agent`, `turdus`) and **15** reference an outbound surface and no gate; the instrument over-counts, since its outbound pattern includes any subprocess call, and the per-daemon disposition is the adapter documents' drift tables | `ls execution/daemons`; per directory `grep -rqE 'gating\|evaluate_gate'` and `grep -rqE 'notify\|telegram\|gws\|send_message\|subprocess\|\bgh\b\|transfer\|smtp'` |
+| a payment's `dedup_key` derived from the obligation and written before the first attempt (PY-1) | the bank handler sends a **fresh `uuid4()` per attempt** as the rail's transaction id; no key exists on the record and none is derived from the obligation | `execution/daemons/monedula/handlers/wise_transfer.py`, the `customerTransactionId` field |
+| a standing finding whose scope cannot be determined is classified `unknown` and raises `undetermined_scope`, never the one-off default (GW-27) | `classify_finding` returns `one_off` for anything its heuristics do not match — exactly the coercion revision 31 forbids by name; the token `undetermined_scope` appears nowhere under `lib/` or `execution/` | `execution/daemons/apis/review_learning.py`, `classify_finding`; `grep -rn undetermined_scope lib execution` → 0 |
+| the design's edge types writable on the record (bootstrap step 1; `LEASE`, `ADDRESSED_BY`, `FOLLOWS`, `CLOSES`, `SIGNED_BY`, `PRODUCES`, `CHECKPOINTS`, `AWAITS`, `RESOLVED_BY`, `RAISED_BY`, `principal_binding`, `ownership_grant`, `delegation_edge`) | the record's relationship-type vocabulary is a closed list that holds none of the thirteen and no primitive registers one (the revision-28 reading above; `migration.md`, G25) — the first dependency of the suite and of the migration alike, and the record project's to resolve (neotoma#1972) | `list_relationships` and the MCP's relationship-type enum, prod, 2026-09-05 (not re-read) |
+| an `intake_rule` entity type, and an evaluator fed by the record's subscriptions (WM-40) | no such type; the predicates that create a task on an entity change live in daemon code, which `migration.md`'s new row names as the type's drift | `grep -rn intake_rule lib execution` → 0 |
+| the isolation layers (a run-minted credential the production instance does not know; a nonce-identified empty instance; a refusal on a non-empty store; no other record credential in the environment) | no disposable-instance provisioning exists; every test on this branch that touches a record touches the one the environment names | `test_foundation.py` reads only files; no test provisions an instance |
+
+**What this revision does not rule.** Nothing; it opens 43 and 44. Every other row of the register is
+unchanged. The contradictions the suite records and that stand are corrections to their owning documents,
+each made through its own PR that says so; the suite reports them and resolves none.
+
+**Size.** `conformance_suite.md` is **203.9k**, keyed and not kernel, so the kernel is unchanged at
+174.9k; `conformance.md` grew 2.2k (36.2k → 38.4k) for the keyed row, the
+check row, the direction-of-truth row, and the two register rows. Measured 2026-09-06 with `wc -c` on this
+branch against `22343f7` as the predecessor. Nothing was trimmed to fit, on the standing direction that
+content settles before budget; `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget`
+remains the expected failure that records the overrun, and this revision adds the largest keyed document
+to it. `docs/README.md`, the root README, and `docs/documentation_plan.md` index the nineteenth document,
+which `TestDocsIndexMatchesInventory` requires.
+
+**Checks.** `check_foundation_vocabulary.py`: 98 Never items, 62 Not-for items, 0 Never hits,
+570 advisory hits. `check_foundation_anchors.py`: 0 broken link(s). `link_vocabulary_terms.py --check`: clean.
+`test_foundation.py`: 97 passed, 1 xfailed (the budget marker). The rule-coverage check
+`conformance.md` now names is a contract and does not exist on this branch; the measurement of headings
+with no row was made by hand with the anchor checker's own heading parser, and found none outside the
+classes the suite excludes by name.
+## Revision 34 (2026-09-06): the workflow-format gaps — what ten real declarations could not say
+
+Ten workflows drawn from the session corpus were written in the declaration format at `f485439` (revision 29)
+to find what the format cannot express; the writing found twenty gaps, fourteen of them the format's and six
+the workflows' own. This revision takes the fourteen against the branch at `3ad9ee6` (revision 33). Each was
+re-checked against every revision since 29 before anything was written, and six of the fourteen were already
+covered: reserved governance writes resolve to `NEVER` by rule (decision 18); a rendered page's staleness against
+the record is the pinned-read derived read decision 40 states; the operator's standing rules are `task_policy`
+by kind and behavioural rules `agent_policy` (revision 32), and neither is a step's read but an agent's context
+type; the set of action classes is `action_policy` data, tabled per adapter document (the admission contract);
+the operator's presence is a property of the task's source, fixed at intake, so a fast path and not a
+condition; a missing capability is `capability_denied` or `unspawnable_assignee`, never a condition; and a
+context entity's field shape is the schema's, not the foundation's. Seven are settled here and one is opened.
+
+**Settled.** Two intervals on every step, `unclaimed_after` and `hold_bound`
+(`gates_and_workflows.md#declaration-batch-projection`; the `workflow` row of `data_model.md`;
+`vocabulary.md#step`; cited from `failure_posture.md`, `work_model.md`, and `workflows.md`) — which is also the
+hold-bound half of the suite's finding U-20, and the whole of its contradiction X-11 (`conformance_suite.md`: the
+data-model row lacked `applies_when`, the read dependencies, and `freshness`, and now carries them). A planned
+wait — a reply, a confirmation, the operator's decision — is a step's own close condition, held under decision 13
+and ended by `hold_bound`: by the step's declared alternative close where it has one, by `rounds_exhausted` where
+it has none (`gates_and_workflows.md#declaration-batch-projection`, cross-referenced from the ruling in
+`work_model.md`). Required coverage is the value of `freshness`, and a read short of it is `unknown` for the step
+(`gates_and_workflows.md#declaration-batch-projection`). Consent over several like actions is one presentation
+of several checkpoints and never one checkpoint over several subjects (`gates_and_workflows.md#the-checkpoint`).
+A required approver may be named by ownership of an entity the subject concerns, resolved through
+`ownership_grant` when the checkpoint is raised (`authority_model.md#approval`). A standing constraint on an
+entity a task names — a person's objection to further processing — is an observation on that entity, attached at
+intake's `link` and refused at `route` with a finding (`workflows.md#intake`). A system whose delivery surface is
+a local filesystem is admitted through the existing contract, with the listing as coverage and the file's
+modification time as the sourced time (`adapters.md#admitting-a-new-adapter`).
+
+**Opened.** Decision 45 (`adapters.md#whether-the-host-a-daemon-runs-on-is-an-external-system`): whether the
+host a daemon runs on is an external system reached through an adapter — its processes and checkouts artifacts,
+process control that adapter's outbound classes — or inside the boundary, with the runner's `agent_session` as
+its only record and process control an operator act. The boundary definition leans to the first; the cost of an
+adapter for a system with no event API is why the choice is the operator's. Until it is taken, no declaration
+reads host state and a process-control effect is `operator_only`.
+
+**Reconciled without a rule change.** `gates_and_workflows.md#confidence-and-three-blast-tiers` now names the
+governance class with no policy value among what resolves to `NEVER`, citing decision 18, so a reader of the
+tiers finds "reserved" there rather than inferring it from the unclassified case.
+
+**Drift, read on this branch 2026-09-06.**
+
+| Design rule (revision 34) | Built state | Where the gap lives |
+|---|---|---|
+| every step declares `unclaimed_after` and `hold_bound` | the `workflow` type is unbuilt as designed (the schemas table above); no module under `lib/` or `execution/` names either interval, and nothing raises `unclaimed_step` — the reason class exists in the design only | the unbuilt `workflow` and `checkpoint` types |
+| a governance class with no policy value resolves to `NEVER` by rule | unchanged from revision 21's row: no `action_policy` on this branch declares a tier for any governance class, so each is the unclassified case `blast_radius_for()` resolves to `NEVER` | `lib/daemon_runtime/gating.py`; the `action_policy` entities |
+| a required approver may be resolved through `ownership_grant` | no module under `lib/` or `execution/` reads or writes an `ownership_grant`; the edge is designed and unbuilt | `data_model.md#relationships`; the unbuilt edge |
+| host state is a declared read only once decision 45 is taken | `lib/daemon_runtime/checkout_drift.py` reads a checkout's ahead, behind, and dirty state at daemon start and logs it — a read of the host by the runner itself, written nowhere in the record, which is the second option's shape by default | `lib/daemon_runtime/checkout_drift.py` |
+
+**Size.** Measured 2026-09-06 with `wc -c` on this branch against `3ad9ee6` as the predecessor. The pass is **net +19.9k** across the foundation excluding `status.md` (1,144.7k → 1,164.7k). Per document: `gates_and_workflows.md` 69.2k → 75.7k (+6.5k); `adapters.md` 83.5k → 89.2k (+5.7k); `workflows.md` 48.9k → 52.0k (+3.1k); `authority_model.md` 21.7k → 23.4k (+1.7k); `conformance.md` 38.4k → 39.1k (+0.7k); `vocabulary.md` 88.2k → 88.9k (+0.7k); `work_model.md` 92.1k → 92.8k (+0.6k); `failure_posture.md` 24.9k → 25.5k (+0.5k); `data_model.md` 36.6k → 37.0k (+0.4k). The kernel is **182.0k**, up from 174.9k, most of it the two interval paragraphs and the consent paragraph in `gates_and_workflows.md`, which are argued in a kernel document because the declaration and the checkpoint are its subjects. Nothing
+was trimmed to fit, on the standing direction that content settles before budget, and
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure.
+
+**Checks**, on this tree. `check_foundation_vocabulary.py`: 98 Never items, 62 Not-for items, 0 Never hits, 569 advisory hits (570 on `3ad9ee6`; the pass added none — every bare `owner` its drafts introduced was rephrased to the specific term before landing, and one pre-existing `owner's` in the `step` entry became `step owner's`). `check_foundation_anchors.py`: 0 broken links. `link_vocabulary_terms.py --check`: clean, after the linker added one link (`outbound`, in the `action_type` entry). `test_foundation.py`: 97 passed, 1 xfailed (the budget marker).
+
+## Revision 35 (2026-09-06): the consistency pass — five defects the scenario walk exposed
+
+Walking the scenarios end-to-end for the illustrated page series turned up five places where the documents
+disagreed with each other or with themselves. This revision corrects them; it rules nothing new, and every
+question it registers was already marked open in the document that argues it. Read on this branch at
+`f50b2df` (revision 34) as the predecessor.
+
+**Open questions outside the register.** `authority_model.md` had carried the brief's Q1–Q8, C13, and the
+raiser-may-resolve question as **open** since its first revision, and none had a row in
+`conformance.md#the-register-of-open-design-decisions`, whose own amendment rule says opening a decision
+registers it in the same change — the document predates the register (revision 25) and was never reconciled
+to it. Disposition, question by question. C13 (which entities carry the routing table) is **settled** by two
+rulings made since: C9 leaves the `operator` entity nothing descriptive to carry a table on, and decision 37
+puts what is carried and to which chat on the `channel_config` binding, with `swarm_roster` the type that
+fills a role; it is marked settled in place with the quotes, and the residual — the binding type's name — is
+open decision 35. The other nine are genuinely open and are **registered**, keeping the brief's labels:
+Q7 (what owning confers) as **46**; the raiser question as **47**, with decision 43 noted as bearing on it;
+Q1–Q3 (the counting rule; count-and-disjointness over the checkpoint or a second mechanism; which checks at a
+dozen principals) as **48–50**; Q4, Q5, Q6, Q8 (one approval object or two; the unit that stops; budget as
+scope term or tier; credit as object or read) as **51–54**. Each register row points at the enclosing
+section, as the open rows of 25–29 once did; none was folded, because no existing open row duplicates one.
+`conformance_suite.md`'s three pending cells (AU-17, AU-19, AU-20) and its two prose pointers now cite the
+numbers. The next free number is 55. Not touched: the tenant questions `authority_model.md#principals`
+defers to `docs/multi_tenant.md` section 7, which are argued outside this directory and were outside this
+pass's list.
+
+**Gate timing.** `consent` precedes `send`, `pay`, and `post`, yet the gate was stated as evaluated "at the
+moment the action would be taken", and nothing said when the checkpoint `consent` carries is written or what
+the gate evaluates at the take. Settled in the gate's home,
+`gates_and_workflows.md#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`,
+from principle 2 and decisions 27 and 28: the checkpoint is written when `consent` opens and the gate first
+holds the action; the resolution is not the permit but an input to a second evaluation at the take, which
+permits only when the resolution is terminal `approved` from an awaited principal, the parameters equal what
+the checkpoint carried within the class's tolerance, the policy as read then still resolves the class the
+same, and no confirmation exists for the key. A hold may be decided early; a permit only at the take. No
+clock is supplied — a time bound is a policy value with the tolerance's shape, and no default is invented.
+`workflows.md`'s three `consent`-carrying workflows cite it. No decision was opened.
+
+**`merge` versus `merge_pr`.** The merge action's class was `merge_pr` in `github.md` and every code
+workflow's action-class line, `merge` in `failure_posture.md`'s recovery table, and unnamed in
+`gates_and_workflows.md`. One name: `merge_pr`, because `merge` is the step and the vocabulary lint's `step`
+rules already treat it as one. The recovery row is renamed, `gates_and_workflows.md` names the class at C6
+and in *Two questions*, `vocabulary.md` adds `merge_pr` to the `action_type` values and the `steward` entry,
+and `merge` as an action-class name joins the retired table, qualified as `operator_preview (a step name)`
+is.
+
+**Scenario (j).** "a batch record opens for it, and the product its step owner claims each step in turn"
+was the residue of two renames over "the product lens claims each step in turn" (revision 19 retired
+`lens`; the intake steps are the `pm` step owner's, `workflows.md#roles-named-in-this-document`). It now
+reads "the `pm` step owner claims each step in turn — a lease on the step, and a sign-off to close it".
+
+**A named agent in generic definitions.** `vocabulary.md#operator-facing-agent` and
+`work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent` named the `ateles` agent inside
+definitions that describe a role. Both now state the role — the agent the roster resolves to the
+operator-facing role, bound per project in `swarm_roster` — per the standing rule that definitions describe
+a role and specifics come from context entities. A grep of the directory found no third instance outside
+`status.md` (the two `execution/mcp/ateles/` cells in `conformance.md` are code paths).
+
+**Renumbered on rebase.** Revision 34 (the workflow-format gaps) landed while this pass was being written and took decision 45 and the revision number; this pass was rebased onto it, its nine rows moved up by one, and the register's two paragraphs were merged so both passes' rows and notes stand.
+
+**Confirmed, not changed.** The two findings of the same walk that revision 31 already fixed hold at this
+head: `failure_posture.md`'s `unclaimed_step` paragraph names one task of the step's batch as the subject,
+and `workflows.md`'s payment `consent` row carries decision 27's figures and refers to the `verify`
+sign-off.
+
+**Size.** Measured 2026-09-06 with `wc -c` against `f50b2df` (revision 34, onto which this pass was rebased). Net
+**+13.0k** across the foundation excluding `status.md` (1,164.7k → 1,177.8k): `gates_and_workflows.md` 75.7k →
+81.8k (+6.1k, the gate-timing section); `conformance.md` 39.1k → 41.8k (+2.7k, nine register rows);
+`authority_model.md` 23.4k → 25.3k (+1.9k, the C13 settlement and the decision numbers); `workflows.md` 52.0k →
+53.2k (+1.2k, three citations); `vocabulary.md` +0.6k; `failure_posture.md`, `scenarios.md`, `work_model.md`,
+`conformance_suite.md` under 0.2k each. The kernel is **188.2k**, up from 182.0k, all of it the gate-timing
+section. Nothing was trimmed to fit, on the standing direction that content settles before budget;
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure.
+
+**Checks**, on the rebased tree. `check_foundation_vocabulary.py`: 98 Never items, 62 Not-for items, 0 Never
+hits, 570 advisory hits. `check_foundation_anchors.py`: 0 broken link(s). `link_vocabulary_terms.py --check`:
+clean, after the linker linked the one new first mention in `vocabulary.md`'s header. `test_foundation.py`:
+97 passed, 1 xfailed (the budget marker).
+
+## Revision 36 (2026-09-06): the workflow-format gaps, second set — what nine declarations of the operator's personal administration could not say
+
+Revision 34 took the fourteen format gaps that ten declarations from the session corpus exposed. Nine more
+declarations were then written for the operator's personal-administration work — lead graph grooming, invoice
+reconciliation, household procurement, exposure disclosure, case correspondence, guest stay coordination,
+administrative filing, health appointment, document lookup — and hit seven gaps the first set had not, F21 to
+F27 in the proposals' numbering, because the file recording them did not exist when revision 34 was written.
+This revision takes the seven against the branch at `822fb49` (revision 35). Each was re-checked against every
+revision since 34 before anything was written; none was already covered whole, and two were covered in part —
+the operator-only workflow's `await` step already names "the operator's report of the action taken" (F22), and
+the intake-rule section already admits an entity a batch wrote as a rule's subject (F25) — so those two are
+stated as the rule they were nearly, in the home that nearly stated it. Six are settled here and one is opened.
+
+**Settled.** A step's bound may be declared as the task's `due_date` in place of an interval, for a date fixed
+outside the swarm and known at formation; reaching it takes the path an interval's end takes, and it closes
+nothing in either direction — a step closed as failed by a clock is a verdict no principal made
+(`gates_and_workflows.md#declaration-batch-projection`; the `workflow` row of `data_model.md`;
+`vocabulary.md#step`; cited from `workflows.md#how-to-read-a-workflow-section`) (F26). A step of any workflow
+whose action is `operator_only` is the operator-only workflow's three steps in one and does not route there:
+it carries the gate's checkpoint as a `consent` step does, holds for the confirmation as a planned wait, and
+closes on the confirmation — the adapter's read-back where the system has one, an artifact arriving through a
+system that has one where it does not, or the operator's report written as a report and never as a read-back
+where the declaration says so — and never on the resolution, which is the operator's decision that the effect
+should happen and not the fact that it did (`gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`; cited from `workflows.md#operator-only`,
+`authority_model.md#approval`, and `vocabulary.md#operator_only`) (F22). A type holding special-category data
+is marked at registration, on the type and never on a step's read or per subject, and the mark is read by three
+mechanisms that already exist: admission by grant (decision 41), reference-never-value on every surface that
+travels (decision 40 extended from the sign-off to the task's title and description, a rule's task text, a
+checkpoint's fields, a finding, a digest, and a channel), and minimization at write
+(`data_model.md#record-conventions`; `gates_and_workflows.md#declaration-batch-projection` says why the read
+carries no marker) (F23). A matter, a case, or a filing is a context entity of the operator's — retrieved by
+type, shaped by the registry, named by role — that the task names, `link` attaches, and hydration bounds reads
+from; not a `plan` (G10 stands), not a batch (decisions 13 and 14 stand), not a parent task, not a work-model
+type (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`) (F24). A merchant is a system of its
+own, and a purchase or a booking is that system's class, admitted with its adapter under obligation 6 and never
+`payment` or `transfer`; until a merchant has an adapter the effect is `operator_only`, in the shape F22 gives it
+(`adapters.md#admitting-a-new-adapter`; `payments.md#scope`) (F21). An intake rule may key on a field a step
+wrote on a type it may name — a thread's classification, recorded by a step owner — with the writer in its
+`provenance_predicate`; decision 36 is over subject types and is not moved
+(`work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`;
+`vocabulary.md#intake-rule`) (F25).
+
+**Opened.** Decision 55 (`adapters.md#whether-a-second-instance-of-the-record-is-an-external-system`): whether a second instance of the record's own software, owned by another
+party, is an external system reached through an adapter — its entities artifacts, writes to it actions
+approved by the principal accountable for the data — or the same record extended by peering, with a write to it
+an internal write. The boundary definition leans to the first, as it did for decision 45, and
+`authority_model.md#principals` has reasoned the same way about `user_id` on a shared instance; what holds it
+open is that the record's own peering puts the second reading within reach with nothing built, and that an
+adapter for the record's software is cheaper than 45's. Until it is taken, no declaration reads or writes a
+second instance and a write to one is `operator_only`. Registered; the next free number is 56 (F27).
+
+**Corrected in passing.** Four header paragraphs (`authority_model.md`, `conformance.md`, `vocabulary.md`,
+`workflows.md`) ran revision 35's note onto revision 34's as ".consistency pass" with no "Revised by the";
+the words are restored.
+
+**Drift, read on this branch 2026-09-06.**
+
+| Design rule (revision 36) | Built state | Where the gap lives |
+|---|---|---|
+| a step's bound may be the task's `due_date` | the `workflow` type is unbuilt as designed (revision 34's row); `due_date` on this branch is read by daemons that move it forward on a recurring task (`execution/daemons/monedula/monedula.py`, `execution/daemons/apis/apis.py`) — the retired reschedule pattern revision 27 names — and by nothing as a step's bound | the unbuilt `workflow` type; `execution/daemons/monedula/monedula.py` |
+| an `operator_only` action's step closes on the confirmation, never on the resolution | `lib/daemon_runtime/gating.py` `read_checkpoint_resolution()` classifies a `checkpoint_brief` as approved or rejected and the dispatcher re-runs the held task on approval (`fetch_task_snapshot()`, `stamp_checkpoint_dispatched()`): the resolution is what resumes, and no confirmation observation exists on the branch for anyone to close on | `lib/daemon_runtime/gating.py`; the unbuilt `action` confirmation |
+| a special-category mark on a registered type, read by admission, reference-never-value, and minimization | no module under `lib/` or `execution/` reads a mark on a type, and no registered type on this branch's schemas carries one; the one built reader of the category is `execution/scripts/loxia_review.py`, a review prompt that flags a health datum committed to the repository — a repository-hygiene check, not a rule over the record | the registry; `execution/scripts/loxia_review.py` |
+| a matter is a context entity the task names | not measured against prod for this revision; `migration.md`'s G9 row records that the instance relates a task to a plan by `PART_OF`, which is the edge a matter's tasks would not use | prod; gap G9 |
+| a purchase is a merchant's class, never the rail's | no adapter for any merchant exists on the branch and no `action_policy` lists such a class (revision 21's row: no `action_policy` on the branch declares a tier for any non-code class); the corpus's orders were placed by hand in interactive sessions | the absent adapter; the `action_policy` entities |
+| a rule may key on a field a step wrote, with the writer in `provenance_predicate` | no intake-rule evaluator exists (revision 30's row); no module under `lib/` or `execution/` writes a `thread_class` or any classification as a field on an artifact | the unbuilt evaluator |
+| no declaration reads a second instance; a write to one is `operator_only` (decision 55 interim) | no module under `lib/` or `execution/` reads or writes a second instance of the record; the grooming the corpus shows was done by hand in interactive sessions through the record's own client, which is the interim rule's shape by default and the second option's by accident | interactive sessions |
+
+**Size.** Measured 2026-09-06 with `wc -c` on this branch against `822fb49` (revision 35) as the predecessor. The
+pass is **net +26.0k** across the foundation excluding `status.md` (1,177.8k → 1,203.8k). Per document:
+`gates_and_workflows.md` 81.8k → 89.2k (+7.4k, the `operator_only` step section and the `due_date` bound);
+`adapters.md` 89.2k → 95.7k (+6.5k, the merchant paragraph and decision 55); `workflows.md` 53.2k → 56.5k
+(+3.3k, the matter paragraph and two citations); `data_model.md` 37.0k → 39.8k (+2.9k, the special-category
+bullet); `work_model.md` 92.9k → 95.0k (+2.1k); `vocabulary.md` 89.4k → 91.0k (+1.6k); `authority_model.md`
+25.3k → 26.3k (+0.9k); `conformance.md` 41.8k → 42.7k (+0.9k, one register row); `payments.md` 73.9k → 74.3k
+(+0.5k). The kernel is **197.8k**, up from 188.2k, most of it the `operator_only` step section, argued in a
+kernel document because the gate and the checkpoint are its subjects. Nothing was trimmed to fit, on the
+standing direction that content settles before budget, and
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure.
+
+**Checks**, on this tree. `check_foundation_vocabulary.py`: 98 Never items, 62 Not-for items, 0 Never hits,
+572 advisory hits (570 on `822fb49`; the two added are both "special-category", the Article 9 term of art, in
+`data_model.md` and `gates_and_workflows.md` — the advisory is for "category" as the action class, and the
+author judged the sense; every bare `owner` and the one "available" the drafts introduced were rephrased before
+landing). `check_foundation_anchors.py`: 0 broken links. `link_vocabulary_terms.py --check`: clean, after the
+linker linked four first mentions across three blocks of `vocabulary.md`. `test_foundation.py`: 97 passed,
+1 xfailed (the budget marker).
+
+## Revision 37 (2026-09-06): the testability pass — the suite's findings carried back into their homes
+
+Revision 33 designed the conformance suite and reported its most valuable output as the list of rules with no
+failing artefact: thirty findings that stood open (U-1 to U-33, three already closed) and fifteen
+contradictions (X-1 to X-18, three already closed). This revision takes each one to the document that owns the
+rule and changes what the rule says, per the suite's own "what it would need to say" note — or records why no
+wording could — and updates the suite's rows so the matrix stays true. Begun against `822fb49` (revision 35) and rebased onto `3f90a1f` (revision 36, the second
+workflow-format pass), which took decision 55 and the revision number while this pass was being written; this
+pass's decision is 56 and its predecessor for the size table is `3f90a1f`. The method was the operator's standing one: first principles and the
+documents, never the code, which is judged below as drift.
+
+**Per finding.** The disposition, and the home that now carries the rule.
+
+| Finding | Disposition | Where it now lives |
+|---|---|---|
+| U-1 (validate the instrument) | closed — the swarm's instruments named, each with a planted positive | `principles.md#3-validate-the-instrument-before-believing-the-measurement` |
+| U-2 (no parallel mechanism) | closed — the singletons listed once; the registry census is the check | `principles.md#6-extend-the-mechanism-that-already-generalizes-do-not-build-a-parallel-one` |
+| U-3 (a figure's date; state in a foundation doc) | closed — a syntactic rule the lint reads: no hash outside `status.md`; issue and PR numbers only where a document names its sources; three citations rephrased | `conformance.md#phases-and-implementation-state`; the *Decision citations* contract row |
+| U-4 (handing work over is not completion) | closed — "landed" is a derived read: the chain ended under a declaration that permits its ending there | `work_model.md#a-task-is-executed-only-through-a-workflow` |
+| U-5 (a verdict carries no condition) | closed for shape, review-only for prose, and the rule now says which is which | `gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges` |
+| U-6 (a blocking verdict names its evidence; the finding's shape, G15) | closed — the `finding` row: severity, kind, scope, evidence, text; `PART_OF` the sign-off, `REFERS_TO` the batch | `data_model.md#concepts` |
+| U-7 (where a standing finding lands) | closed for attribution, review-only for the judgement — the chosen scope is the finding's `scope`, and the change `REFERS_TO` it | `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it` |
+| U-8 (amendment versus creep) | closed — an amendment is a finding plus a correction to `acceptance_criteria[]` whose key names the finding (G6 closed) | `gates_and_workflows.md#declaration-batch-projection` |
+| U-9 (an undeclared read at runtime) | **D**, definitional — the grant is the runtime bound; the design keeps no read log | the suite's row |
+| U-10 (every class names its recovery) | closed — `action_policy.recoveries`, refused at the policy write where a class has none | `failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken` |
+| U-11 (the restore obligation's cadence) | closed — `recovery_paths[]` with a cadence on the system's binding; exercises are dated observations; overdue is derived | the same |
+| U-12 (the session holds no lease) | **D**, definitional — the recovery half is tested (WF-21) | the suite's row |
+| U-13 (the first declaration is an operator act) | stands — open decision 43 | `conformance_suite.md` |
+| U-14 (the point tying an admitted governance write to a permitted action) | **open decision 56** — the record's admission check reading the action, a proxy, or a sole-writer grant | `gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits` |
+| U-15 (minimization at capture) | closed for shape, review-only for content — a parameter constraint on a write capability is a field allowlist, denied at admission | `authority_model.md#grants`; cited from `gmail.md`, `calendar.md`, `workflows.md` |
+| U-16 (a chat message "reading as an ask") | closed — every uncorrelated message from a bound principal is a task; intake decides whether it asked anything | `telegram.md#messages` |
+| U-18 (the announcement path itself down) | closed — rule 1's capture is the announcement of last resort; on return every window is announced with its original time | `failure_posture.md#the-rules`, rule 2 |
+| U-19 (drops per window) | closed — the window declared on `channel_config`; one observation per window on the adapter's `agent_session` | `adapters.md#what-the-adapter-does-with-every-event` |
+| U-20 (the undeclared bounds) | closed — `hold_bound` by revision 34; `rounds_cap` on the step and `lapse_cap` on the policy here | `gates_and_workflows.md#declaration-batch-projection`; `failure_posture.md#repeated-lapse-raises-a-checkpoint` |
+| U-21 (pinned state for non-code kinds) | closed — a per-kind pinned state, listed once | `data_model.md#record-conventions` |
+| U-22 (security's only successor) | closed — `none_permitted` on `successors`; a closing sign-off naming none under a declaration that forbids it is refused | `gates_and_workflows.md#sequencing-is-data-successors-and-the-chain` |
+| U-23 (the duplicate's edge) | closed — `DUPLICATE_OF` task → task | `data_model.md#relationships` |
+| U-24 (a lapsed holder's sign-off) | stands — open decision 44 | `conformance_suite.md` |
+| U-25 (attach part-way) | closed — `tasks_attached[]` on `sign_off` | `data_model.md#concepts` |
+| U-26 (an optional step before any artifact) | closed — a condition reads what exists when the step would open; the other placement is refused at declaration | `gates_and_workflows.md#declaration-batch-projection` |
+| U-27 (the start-time chat binding) | closed — a cache with the bound the binding declares, `Indeterminate` past it | `telegram.md#during-a-halt-a-read-on-the-channel-is-answered-with-the-halt-and-never-with-data` |
+| U-28 (the next instance atomic with the close) | closed — create, read back, then sign; the closing interval is the one moment two are live | `work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next` |
+| U-30 (the stage and `phase`) | stands — open decision 33 | `workflows.md` |
+| U-31 (the canonical terminal spelling, G7) | closed — the registered `task` type declares its terminal set; the writer writes from it, the reader stays tolerant | `work_model.md#what-a-claim-predicate-treats-as-claimable` |
+| U-32 (the empty poll, G13) | closed — the window observation is what a successful empty poll writes | `data_model.md#write-contract` |
+
+**Per contradiction.** Every one of the fifteen is closed in the document that owns the rule and cited from
+the other: X-3 (`SIGNED_BY` → principal), X-4 (two moments open a batch), X-5 (the bug that needs a design
+choice is a new task, under ruling 38), X-6 (`assigned_to` is a principal's write, never an adapter's), X-7
+(the adapter's write contract names the resolution it carries, A-for-B), X-8 (C2 settled — a daemon takes no
+action of its own; every effect is a task's), X-9 (a credential-less outbound operation is a denial, never a
+drop), X-10 (the floor-list sentence retired), X-11 (closed by revision 34's fields and this revision's
+sign-off edges), X-12 (`impl` closes on existing, CI green at the pinned head, and mergeable as read), X-13
+(`AWAITS` names the operator principal; the role is in `needed_input`), X-14 (the finding is an entity, so a
+hold's finding has a home with no sign-off), X-15 (the writer is the enforcement point for the cross-type
+cycle walk, said so), X-17 (`blocked` retired as a status; an open task-subject checkpoint holds from claim,
+`unclaimed_step` excepted — G8 closed), X-18 (the transcript is a source, not an artifact — G11 closed).
+
+**Settled here, and reversible by the operator — reviewed and upheld by the operator 2026-09-06 (revision 39).**
+Three of the settlements change a rule rather than a
+wording, and each is marked in its home so that a reader finds the ruling and not only the result; the review
+is marked at each of the three in place. `blocked`
+is retired as a task status (principles 4, 6, and 11: nothing wrote it, nothing cleared it, and the checkpoint
+is the held state); the migration's tolerant reader keeps reading the live value. C2 is settled by the write
+contract: a self-triggering daemon takes no action of its own. And the finding is an **entity**, `PART_OF` the
+sign-off that carries it, rather than the `findings[]` field the suite's note proposed — because a hold's
+finding (decision 13) and the operator's finding on closed work (decision 38) exist with no sign-off, which a
+field on the sign-off could not hold.
+
+**Opened.** Decision 56 (`gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits`),
+registered; put beside decision 43, whose two questions decide it. The next free number is 57. Decision 32
+is not ruled: the blocker the matrix named on it — the finding had no shape — is gone, and its home says so.
+
+**What the matrix measures about itself now**, counted 2026-09-06 on this branch by parsing the table rows of
+`conformance_suite.md` whose first cell is a two-letter document code and a number: **354 rows** (352 on
+`822fb49`; GW-33a and DM-27 added) — 338 mechanical, 12 pending an open decision (seven of them on 56, where
+they were audit-shaped before), 2 review-only, 1 definitional (WM-37; GW-6 is definitional for its runtime
+half), and one pointer row over the migration's gaps. Per document: AD 39, AU 21, CA 8, CF 8, DM 27, FP 24,
+GH 18, GM 11, GW 58, MG 13, PR 11, PY 17, TG 17, VO 4, WF 25, WM 53. Of the thirty findings that stood open:
+24 closed, 3 pointing at open decisions (13 → 43, 24 → 44, 30 → 33), 2 definitional, 1 now decision 56. Of
+the fifteen contradictions that stood open: 15 closed. The migration's gaps closed on both sides: G6, G7, G8,
+G11, G13, and G15 join G1 and G12.
+
+**Drift, read on this branch 2026-09-06.** Recorded here and not in the design.
+
+| Design rule (revision 36) | Built state | Instrument |
+|---|---|---|
+| a `finding` entity with severity, kind, scope, evidence, `PART_OF` its sign-off | no such type is written by any daemon; the literal appears as an entity type only in a proxy test fixture, and the review-learning module still parses findings from review prose with no evidence field (revision 16's row) | `grep -rnE "entity_type.{0,6}[\"']finding[\"']" lib execution` → 2 sites, both in one test file under `execution/mcp/` |
+| `blocked` retired as a status; claimability read from the open checkpoint | the lifecycle module declares `BLOCKED = "blocked"` and checks the transitions `failed → blocked` and `blocked → routed`; the literal appears at 39 sites in 13 files | `grep -rnE "[\"']blocked[\"']" lib execution --include='*.py'`; `lib/daemon_runtime/task_lifecycle.py:65,289,290` |
+| `DUPLICATE_OF` task → task, written at intake's `dedupe` | no code site writes the edge | `grep -rln DUPLICATE_OF lib execution` → 0 |
+| `none_permitted`, `rounds_cap`, `lapse_cap`, `tasks_attached`, `recoveries`, `recovery_paths`, the binding's staleness bound | none exists under any of these names; `acceptance_criteria` exists in code, but as a field of the issue specification the readiness check and the orchestrator read, not of a task entity | `grep -rnE "none_permitted\|rounds_cap\|lapse_cap\|tasks_attached\|recoveries\|recovery_paths\|staleness_bound" lib execution` → 0; `acceptance_criteria` → 25 sites in `lib/daemon_runtime/readiness.py`, `execution/daemons/anthus/orchestrator.py`, and their tests |
+| one observation per declared window on a daemon's `agent_session`, carrying the dispositions counted | no drop counter per window exists under any name, and nothing writes a window observation | `grep -rnE "per_window\|drop_count\|dropped_count\|window_observation" lib execution` → 0 |
+| the decision-citations lint | a contract; the script does not exist | `ls execution/scripts` |
+
+**Renumbered on rebase.** Revision 36 (the second set of workflow-format gaps) landed while this pass was being
+written and took decision 55 and the revision number; this pass was rebased onto it, its decision moved to 56,
+its revision to 37, and the register's next free number to 57. Both passes' header sentences, register rows,
+and notes stand; the two conflicts of substance — the `workflow` row's field list and the `step` entry, where
+revision 36 added the `due_date` form of a bound and this pass added `rounds_cap` and `none_permitted` — carry
+both.
+
+**Size.** Measured 2026-09-06 with `wc -c` on this branch against `3f90a1f` (revision 36) as the predecessor.
+Net **+56.0k** across the foundation excluding `status.md` (1,203.8k → 1,259.8k): `conformance_suite.md`
+204.0k → 214.6k (+10.6k, the closed rows saying what their homes now say); `gates_and_workflows.md` 89.2k →
+99.6k (+10.3k, the finding paragraph, `rounds_cap`, the recorded amendment, the optional-step placement,
+`none_permitted`, and decision 56); `data_model.md` 39.8k → 48.7k (+8.9k, the `finding` row and the per-kind
+pinned state); `work_model.md` 95.0k → 101.1k (+6.1k); `failure_posture.md` 25.6k → 30.0k (+4.4k);
+`principles.md` 13.5k → 16.0k (+2.5k); `migration.md`, `workflows.md`, `conformance.md`, `telegram.md`,
+`vocabulary.md`, `authority_model.md`, and `adapters.md` between +1.5k and +1.9k each; `gmail.md`,
+`calendar.md`, and `github.md` +0.4k each. The kernel is **216.7k**, up from 197.8k, most of it
+`gates_and_workflows.md`. Nothing was trimmed to fit, on the standing direction that content settles before
+budget; `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure.
+
+**Checks**, on this tree. `check_foundation_vocabulary.py`: 98 Never items, 62 Not-for items, 0 Never hits,
+593 advisory hits (572 on `3f90a1f`; the rise is mostly `allowlist`, which the field-allowlist paragraphs use
+in the sense the `grant` entry allows — one enforcement of a grant — beside ruling 41's own use of the word;
+one Never word this pass introduced, and one banned inflection, were caught by the check and rephrased before
+landing). `check_foundation_anchors.py`: 0 broken links. `link_vocabulary_terms.py --check`: clean, after the
+linker linked one new first mention. `test_foundation.py`: 97 passed, 1 xfailed (the budget marker).
+
+## Revision 38 (2026-09-06): the rulings pass — eleven decisions ruled whole, three in part
+
+The operator's standing instruction was to apply the recommended side of each open decision an analysis pass
+had classified as settled by the design's own logic, and to leave to him every decision, or half of one, that
+turns on his values, strategy, or appetite. This revision does that against the branch at `7d8333a` (revision
+37, the testability pass), which landed while the analysis was being written and whose `finding` row was the
+one blocker the conformance matrix had named on decision 32; the pass was held until that head had stood for
+three minutes before the tree it edits was taken from it. Each ruling is written into the document that
+argued it, in the idiom of revisions 12, 26, 27, and 31 — the ruling, its reason grounded in named principles
+or ruled decisions, the cost accepted, and what would reopen it — and the register in `conformance.md`
+carries each as one line with its date and pointer; three rows take a new status value, **ruled in part**,
+stating the half ruled and the half that stays the operator's in one row. Code was consulted for no ruling;
+it is read below as drift.
+
+**Ruled whole.** Decision 31 (`migration.md`): a type is renamed on a live record by the merge form —
+register, interpret over the same source, merge — with the retired id redirecting and the tolerant reader
+kept permanently; stages 4 and 7 of the migration unblock. Decision 32 (`gates_and_workflows.md`): the
+`verdict` stays a stored field, as the sign-off's own projection of its findings and its author, reconciled
+at the write by the refusal at submission — under derivation a sign-off with no finding would be `signed`,
+and silence is not a claim. Decision 35 (`adapters.md`): one binding type per external system, closed as
+settled by revision 33's reading of the matrix, with the name and the substitution deferred to the
+vocabulary pass under invariant 12. Decision 42 (`migration.md`): the tools a principal may invoke are a dimension of its
+`agent_grant`; harness preference and model tier are a `vendor_binding` for the harness as a vendor; hook
+wiring and environment stay the harness's; gap G19 closes. Decision 44 (`conformance_suite.md`): a `signed`
+or blocking sign-off requires a held lease by its signer at the write. Decision 45 (`adapters.md`): the host
+a daemon runs on is an external system, its processes and checkouts artifacts and process control its
+adapter's action classes; nothing is built until a declaration reads host state. Decisions 46, 48, 49, 51,
+and 54 (`authority_model.md`): owning confers the required seat and nothing else; an agent counts as its
+bound principal for structural checks and as itself for attribution; the checks are reads over the
+checkpoint's principal edges; initiative approval is the checkpoint, an initiative entering intake as a
+task; credit is a read model over attribution.
+
+**Ruled in part.** Decision 43: the bootstrap set is the thirteen-record table of
+`conformance_suite.md#the-minimal-record-set-in-order`; whether the operator's own governance write after
+bootstrap is gated stays his, to be ruled with 47. Decision 50: the thresholds live on the `action_policy`
+per class as `quorum` and `disjoint_roles[]`; which checks apply to which classes stays his. Decision 53: a
+budget is an attenuating scope term with consumption a derived read; which resources are budgeted stays his.
+
+**Left as they were.** 33 and 34 are deferred to what was then called the condensation pass, as their homes said at the time (both ruled by revision 48; decision 66 has since retired that name); 36, 47, 52, and
+55 turn on the operator's lean, appetite, or product stance and were not touched; 56, opened by revision 37
+beside 43, stands. The register's open rows after this revision are seven — 33, 34, 36, 47, 52, 55, 56 —
+and the three open halves of 43, 50, and 53. The next free number is unchanged at 57.
+
+**One reading recorded rather than made silently.** `authority_model.md#initiative-proposal-reprioritization`
+carries, as decided, an order of first moves that names "the initiative, proposal, and reprioritization
+types"; decision 51's ruling reads those as the task class and the checkpoint the design already has and
+says so in place, with decision 52's residue still open. The sentence is the operator's, and the reading is
+flagged here so that he sees it. Two decisions the analysis classified as the design's had been framed by
+their homes as the operator's on cost rather than on a lean — 42's residue and 45's want-question — and each
+ruling says so where it stands.
+
+**Corrected in passing.** Revision 37's *Opened* paragraph above and `gates_and_workflows.md`'s header both
+named the decision that pass opened as 55; it is 56, as its register row and section heading say, and both
+mentions now read 56.
+
+**Drift, read on this branch 2026-09-06.** Recorded here and not in the design.
+
+| Design rule (revision 38) | Built state | Instrument |
+|---|---|---|
+| a re-type is register, interpret, merge; the retired id redirects | no module under `lib/` or `execution/` calls the record's merge or interpretation primitives; the retired agent type name is read and written by 26 Python files | `grep -rln "merge_entities\|create_interpretation" lib execution` → 0; `grep -rl agent_definition execution lib --include='*.py'` → 26 |
+| the `verdict` is a field of the `sign_off`, reconciled against its findings at the write | the `sign_off` type is unbuilt (the schemas table above); the literal `"verdict"` appears in one module, and nothing validates a verdict against a finding (revision 12's row) | `grep -rlE '"verdict"' lib execution --include='*.py'` → 1 |
+| the tools a principal may invoke are a dimension of its grant | **already grant-shaped on this branch**: the grant checker builds a `tool_grants` map from capability entries whose operation starts with `tool:`, keyed `<server>:<tool>`, with a per-server wildcard — the shape the ruling names, under the built field names; whether each runner's harness allowlist is derived from it or held equal by a parity test was not measured | `lib/daemon_runtime/grant_checker.py` (`tool_grants`, `tool_constraints`) |
+| a `signed` or blocking sign-off requires a held lease | no sign-off writer exists to check a lease: the `sign_off` and `LEASE` types are unbuilt, and the claim primitive is designed and not built (revision 26's row) | the schemas table above |
+| the host is an external system; process control is its adapter's action classes, `operator_only` until declared | unchanged from revision 34's row: `checkout_drift.py` reads the checkout at daemon start and logs it — a read of the host by the runner itself, written nowhere in the record; no host adapter exists and no `action_policy` lists a process-control class | `lib/daemon_runtime/checkout_drift.py` |
+| structural checks are reads over `AWAITS`, `RESOLVED_BY`, and `RAISED_BY`; the thresholds on the `action_policy` | no module under `lib/` or `execution/` names a quorum, an ownership grant, or an `AWAITS` edge; the built checkpoint records no resolver (revision 6's row) | `grep -rlE "quorum\|ownership_grant\|AWAITS" lib execution --include='*.py'` → 0 |
+| an initiative is a task by class; a budget is a scope term; credit is a read model | the literal `initiative` appears in one file; `budget` names reading-block and time budgets, never a term on a grant or a delegation; `credit` names a provider's billing credits and nothing of the design's | `grep -rlE "initiative" lib execution --include='*.py'` → 1; `grep -rhoE "\b\w*budget\w*\b" lib execution --include='*.py' \| sort \| uniq -c`; `grep -rnwE "credits?" lib execution --include='*.py'` |
+
+**Size.** Measured 2026-09-06 with `wc -c` on this branch against `7d8333a` (revision 37) as the predecessor.
+Net **+58.4k** across the foundation excluding `status.md` (1,259.8k → 1,318.2k): `authority_model.md` 27.8k →
+43.8k (+15.9k, seven rulings and their reasons); `conformance_suite.md` 214.6k → 225.8k (+11.2k, decisions 43
+and 44 and the rows that waited on the rulings); `migration.md` 111.1k → 119.3k (+8.2k, decisions 31 and 42);
+`adapters.md` 97.2k → 103.6k (+6.4k, decisions 35 and 45); `gates_and_workflows.md` 99.6k → 103.7k (+4.1k,
+decision 32); `conformance.md` 44.5k → 48.6k (+4.1k, fourteen register rows and the **ruled in part** status
+value); `vocabulary.md` 92.6k → 96.7k (+4.1k); `data_model.md` 48.7k → 52.0k (+3.3k); `work_model.md` 101.1k
+→ 102.2k (+1.1k). The kernel is **221.9k**, up from 216.7k, all of it `gates_and_workflows.md` and
+`work_model.md`. Nothing was trimmed to fit, on the standing direction that content settles before budget;
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure.
+
+**Checks**, on this tree. `check_foundation_vocabulary.py`: 98 Never items, 62 Not-for items, 0 Never hits,
+613 advisory hits (593 on `7d8333a`; the rise is mostly `allowlist` in the grant sense the `grant` entry
+allows — one enforcement of a grant — in the decision 42 ruling and the rows that cite it, and bare
+`owner` in the ownership ruling's quoted option text; two Never words this pass introduced, `running` and a
+bare `split`, were caught by the check and rephrased before landing). `check_foundation_anchors.py`: 0 broken
+links. `link_vocabulary_terms.py --check`: clean, after the linker linked fourteen first mentions across seven
+blocks. `test_foundation.py`: 97 passed, 1 xfailed (the budget marker).
+
+## Revision 39 (2026-09-06): the second rulings pass — the seven the first left, ruled as derivable
+
+Revision 38 had left seven decisions, or halves of decisions, as the operator's — 36, 47, 52, 56, and the second
+halves of 43, 50, and 53 — on the reading that each turned on a lean, an appetite, or an organizational value.
+Each was re-examined against the documents and found derivable from principles already in them, and this
+revision rules them on the operator's standing instruction to apply recommendations with confidence. Two stay as
+they were: 33 and 34 are the then-named condensation pass's, and 55 — whether a second instance of the record is an external
+system — is the operator's, since it is a stance on the record's peering as a product and no document settles
+that. Begun against `ba8377f` (revision 38) after that head had stood for three minutes. Each ruling is written into
+the document that argued it, in the idiom of revisions 12, 26, 31, and 38 — the ruling, its reason on named
+principles or ruled decisions, the cost accepted, and what would reopen it — and the register in `conformance.md`
+carries each as one line; the three **ruled in part** rows are now **ruled**, the completing half stated. Code was
+consulted for no ruling; it is read below as drift.
+
+**Ruled.** Decision 36 (`work_model.md`): an intake rule may not key on the work model's own record types and may
+key on any other, a field a step wrote on an ordinary entity included; the operator's lean toward every type is
+recorded as considered and set aside, because the listener it asked for is met on every ordinary entity, and the
+seven types are the ones on which every change already has a mechanism that answers it. Decision 43, second half
+(`conformance_suite.md`): the operator's own governance write after bootstrap is gated like any other — the
+no-side-door rule is not conditioned on who wrote, and the operator writing governance directly is the side
+door; the gate's checkpoint on such a write is resolved by the operator and marked self-resolved, so the result
+is an audit trail and not a block. Decision 47 (`authority_model.md`): the raiser of a checkpoint may not resolve
+it, with one exception — the operator may resolve a checkpoint the operator raised, and the resolution carries
+the `self_resolved` mark; a marked self-resolution is inspectable, an unmarked one is a side door. 43 and 47 are
+ruled together and each row names the other. Decision 50, second half: which structural checks apply to a class
+is a value of `quorum` and `disjoint_roles[]` on the `action_policy`, and the default where no value is written
+is fail-closed — every required approver, no threshold — ruling 18's `NEVER`-until-written extended to a check's
+parameters; the values are policy data, not foundation, which is why the row closes with no number supplied.
+Decision 52 (`authority_model.md`): what stops when an initiative is accepted is a task — an initiative is a
+task, so no stop primitive is added — what confirms it is the seat the stopped task's `ownership_grant` names,
+or the operator, through the checkpoint whose resolution is the confirmation with the stop read back, and who
+may propose is a grant capability under 41. Decision 53, second half: which resources are metered is
+`metered_resources[]` on the `action_policy` per class, none until written — fail-closed on the limit and not on
+the permission, since an unmetered class is still gated and a metered class with no budget term written is
+`NEVER`. Decision 56 (`gates_and_workflows.md`): an admitted governance write is tied to a permitted action by a
+sole-writer grant — for each governance type one principal, the engine acting for the gate, holds the write
+capability and writes on a permit, every other write refused at the record under 41; no second gate and no new
+record feature; the engine is a single point, mitigated by 43's second half, which sends the operator's own path
+through the same grant and not around it.
+
+**The operator's review, recorded.** Revision 37 flagged three settlements for the operator's review; all three
+are upheld, and marked "reviewed and upheld 2026-09-06" in that revision's paragraph above and in each home: C2
+(`work_model.md`, a daemon takes no action of its own — daemons produce tasks, steps take actions through the
+gate, and the sole pre-authorized exception is the announcement path of last resort; the reason recorded is that a
+daemon acting directly is a side door around the workflow, no step, no sign-off, no lease, and the gate checks
+policy, not the work); `blocked` retired as a task status (`work_model.md#the-transition-vocabulary`); and the
+finding as an entity (`gates_and_workflows.md#findings-verdicts-and-what-a-blocking-finding-obliges`). The veto
+window on decisions 37 to 41, ruled by derivation in revision 31, is closed the same way: the operator reviewed
+all five and upheld them, recorded in one line under the register in `conformance.md`, and nothing in those
+rulings changed.
+
+**The register after this revision.** Open rows: 33, 34 (both deferred to what was then called the condensation pass), and 55. Ruled:
+every other assigned number. The next free number is unchanged at 57. Two things corrected in passing: revision
+31's *Rulings* paragraph above had numbered its five rulings 36 to 40 while its own first sentence, the register,
+and every home say 37 to 41, and it now reads 37 to 41; and `conformance_suite.md`'s three pointers to "43's open
+half" read as ruled.
+
+**What the matrix measures about itself now**, counted 2026-09-06 on this branch by parsing the table rows of
+`conformance_suite.md` whose first cell is a two-letter document code and a number: **354 rows** (unchanged) —
+344 mechanical (341 on `ba8377f`), 3 pending an open decision (WM-38 and WF-24 on 33 and 34, and AU-6 on the
+tenant section of `docs/multi_tenant.md`), 2 review-only, 1 definitional, and the pointer rows. The rows that
+waited on 36, 43, 47, 50, 52, 53, and 56 — WM-22, WM-25, WM-40b, WM-41, GW-29, GW-33, GW-33a, AU-17, AU-19,
+AU-20, AD-27, and MG-4 — are mechanical, each with the set-up and the failing artefact its ruling names; U-14
+closes.
+
+**Drift, read on this branch 2026-09-06.** Recorded here and not in the design.
+
+| Design rule (revision 39) | Built state | Instrument |
+|---|---|---|
+| a rule naming a work-model type in `subject_types[]` is refused at the write | no `intake_rule` type is written or read by any module (revision 30's row: the predicates are all in code); five non-test modules both subscribe to the record's change stream and name the `task` type, which is the shape the ruling refuses for a rule and permits for the mechanisms that answer a task's changes | `grep -rnE "subject_types" lib execution --include='*.py'` → 0; `grep -rlE "subscri" lib execution --include='*.py' \| xargs grep -lE "\"task\"\|'task'"` → 5 |
+| the operator's governance write after bootstrap is held, self-resolved, and marked; the raiser does not resolve | the built checkpoint records no resolver and no raiser edge (revision 6's row), so neither the refusal nor the mark has anything to read; no module names `RAISED_BY`, `RESOLVED_BY`, or `self_resolved` | `grep -rlE "RAISED_BY\|RESOLVED_BY\|self_resolved" lib execution --include='*.py'` → 0; `grep -rnE "resolved_by\|resolver" lib execution --include='*.py'` (non-test) → 0 |
+| `quorum`, `disjoint_roles[]`, and `metered_resources[]` per class on the `action_policy`, fail-closed where unwritten | no module names any of the three, and no module names `action_policy` at all — the checkout's policy type is still the retired `execution_policy` name (the revision-6 renames) | `grep -rlE "quorum\|disjoint_roles\|metered_resources" lib execution --include='*.py'` → 0; `grep -rl action_policy lib execution --include='*.py'` (non-test) → 0 |
+| what stops is a task; the confirmation is a checkpoint's resolution by the seat the `ownership_grant` names, read back; proposing is a grant capability | the literal `initiative` appears in one file; no module corrects a task's `priority`; no `ownership_grant` is read anywhere (revision 38's row) | `grep -rl initiative lib execution --include='*.py'` → 1; `grep -rlE "correct.*priority\|priority.*correct" lib execution --include='*.py'` → 0 |
+| the write capability on a governance type is held by the engine alone, and it writes on a permit | the grant checker knows no governance type — it builds tool grants and constraints and carries no notion of a type reserved to one writer — and `generalizer.py` still writes `agent_policy` entities through plain store and correct calls with no gate (revision 26's row); six non-test modules name `agent_policy` | `grep -rnE "governance" lib/daemon_runtime/grant_checker.py` → 0; `grep -rl agent_policy lib execution --include='*.py'` (non-test) → 6; `lib/daemon_runtime/generalizer.py` |
+
+**Size.** Measured 2026-09-06 with `wc -c` on this branch against `ba8377f` (revision 38) as the predecessor.
+Net **+23.5k** across the foundation excluding `status.md` (1,318.2k → 1,341.6k): `authority_model.md` 43.8k → 52.6k (+8.8k); `conformance_suite.md` 225.8k → 230.4k (+4.6k); `vocabulary.md` 96.7k → 99.1k (+2.4k); `work_model.md` 102.2k → 104.1k (+1.9k); `data_model.md` 52.0k → 53.7k (+1.7k); `conformance.md` 48.6k → 50.2k (+1.6k); `gates_and_workflows.md` 103.7k → 105.0k (+1.3k); `payments.md` 74.3k → 74.8k (+0.5k); `migration.md` 119.3k → 119.6k (+0.4k); `telegram.md` 81.4k → 81.8k (+0.3k). The kernel is
+**225.1k**, up from 221.9k, all of it `work_model.md` and `gates_and_workflows.md`. Nothing was trimmed to fit, on the
+standing direction that content settles before budget; `TestRealDocumentBudget::test_real_documents_fit_reading_block_budget`
+remains the expected failure.
+
+**Checks**, on this tree. `check_foundation_vocabulary.py`: 98 Never items, 62 Not-for items, 0 Never hits,
+635 advisory hits (613 on `ba8377f`; the rise is bare `owner` in "owner seat", which decision 52's ruling and
+its rows use for the seat an `ownership_grant` names, and the word `action` in the grant entry's new sentence).
+`check_foundation_anchors.py`: 0 broken links. `link_vocabulary_terms.py --check`: clean, after the linker linked
+four first mentions across three blocks. `test_foundation.py`: 97 passed, 1 xfailed (the budget marker).
+
+## Revision 40 (2026-09-06): the planning pass — the layered planning records, and the inventory they start from
+
+The operator asked whether the swarm should maintain, per the foundation, an explicit hierarchy of planning
+materials — tasks, plans, projects, objectives, strategies, a mission — so that a step leverages the context
+above and below its task while executing and keeps both cohesive. This revision answers it with a keyed
+document, `planning_model.md`, a thirteenth core workflow (`workflows.md#planning`), rows in `data_model.md`,
+a section of `vocabulary.md`, twelve suite rows, the closing of gaps G9, G10, and G31 in `migration.md`, and
+one decision opened for the operator (57) and one opened and ruled in the same pass as derivable from 43,
+47, and 56 (58); the next free number is 59. The `CLAUDE.md` plan-and-task
+maintenance section and the operator's own instance were read as the requirements already stated and as
+evidence of need, never as the target; code was read as drift only. The branch head this pass was taken from
+is the rulings pass (revision 38), after it had stood unchanged on the remote for ten minutes; the second
+rulings pass (revision 39) landed while this one was being written, and this pass was rebased onto it, both
+sides kept, with its rulings of 36, 43, 47, 52, and 56 carried into `planning_model.md` — the enforcement
+point for an amendment is the engine's sole-writer grant, and decision 58 is ruled with them rather than
+left open.
+
+**The planning inventory the design starts from.** Read from prod on 2026-09-06 through the Neotoma MCP
+(`get_entity_type_counts`, `describe_entity_type`, `retrieve_entities` with `include_snapshots=false`,
+`list_relationships`); types, counts, field names, and edges only — no record's text is reproduced here or
+anywhere in the foundation.
+
+| Type | Count | Fields that bear on the model | Edges observed |
+|---|---|---|---|
+| `task` | 21,513 | `parent_task_id`; `project_id`, `project_ids` (95 populated), `outcome_ids`; `status`, `priority`, `due_date`, `recurrence` | `PART_OF` → plan (the swarm-architecture plan alone carries 892 inbound edges, tasks and plans among them; two sampled tasks carry exactly one `PART_OF` each, beside `REFERS_TO` and `DEPENDS_ON`) |
+| `plan` (schema 1.33.0, 99 fields) | 552; 29 with `is_project`; 20 with `parent_plan_entity_id` | stored progress: `status`, `outcome`, `todos_pending`, `todos_completed`, `next_steps`, `decision_required`, `decision_blockers`; authored: `body`, `overview`, `goals`, `completion_criteria`, `success_criteria`, `out_of_scope`, `decisions` (a map), `todos` (an array of `{id, content, status}`); `parent_plan_entity_id`, `is_project`; the three `*_markdown` render sources | `PART_OF` plan → plan (the population plan under the architecture plan, with 19 tasks `PART_OF` it) |
+| `project` (an import from a task tool, 27 fields) | 74 | `status`, `priority`, `archived`, `goals`, `outcome_id` | none sampled to a plan; the chain to an outcome is the field |
+| `outcome`; `goal` | 9; 1 | `outcome.goal_id`, `status`; `goal.status`, `priority` | by field only |
+| `objective` | 1 | `name`, `status`, `content` | — |
+| `strategy` (16 fields) | 25 (26 by the count endpoint) | `altitude` (its values on the sampled rows name a mission, a domain strategy, a tactic, and a tenet), `role`, `status`, `content`, `phase` | `PART_OF` strategy → strategy (two observed on the row whose `altitude` is the mission: a domain strategy and a financial strategy); `REFERS_TO` inbound from plans and analyses (62 on that row) |
+| `business_strategy`; `domain_strategy`; `growth_strategy`; `content_strategy`; `agent_strategy` | 6; 5; 2; 1; 37 | `agent_strategy.domain_strategy_ref`, `evaluation_schedule`, `drift_signal_threshold`, `success_criteria` | by field |
+| `release_objective`; `release_phase`; `release_gate` | 15; 2; 6 | `objective_key`, `gate_key`, `phase_key`, `status`, `completed_at` | by field |
+| `decision`; `decision_record`; `architectural_decision` | 32 (34 by the count endpoint); 22; 80 | `decision`: `name`, `description`, `status`, `idempotency_key` | none to a plan sampled; a plan's decisions live in its `decisions` map |
+| `plan_contribution` | 1,092 | `plan_entity_id`, `contributing_agent`, `contribution_type` (review, concern, question, sign_off, amendment, tag_normalisation), `blocking`, `invalidates_prior_sign_off` | by field |
+| `plan_prioritization`; `metric_contract`; `strategy_drift_signal` | 1; 4; 17 | `ranked_plans[]`, `plans_evaluated_count`; `plan_entity_id`, `verdict`; `emitting_agent`, `relates_to_assumption` | by field |
+| `core_principle`; `life_tenets`; `constitution` | 4; 1; 1 | — | — |
+
+Three readings. **Two hierarchies coexist**: an edge-based one (`PART_OF` from tasks to plans, plans to
+plans, and strategies to strategies) and a field-based one carried in from a task tool (`project_ids` →
+`project.outcome_id` → `outcome.goal_id`), with no edge between the two. **The top is one type discriminated
+by a field**: the mission is a `strategy` whose `altitude` says so, not a `mission` type, and four sibling
+strategy types stand beside it. **Progress is stored at every level** — `status` on plans, projects,
+outcomes, goals, and strategies; `todos_pending` and `todos_completed` on plans — which is the shape principle
+11 forbids and the shape the maintenance convention's June corruption occurred in. The record's relationship
+vocabulary already exposes `SUPERSEDES` (the MCP's `list_relationships` enum), so the one edge the planning
+model adds beside `PART_OF` and `REFERS_TO` needs no registration, unlike the edges G25 lists.
+
+**Drift, read on this branch 2026-09-06.** Recorded here and not in the design.
+
+| Design rule (revision 40) | Built state | Instrument |
+|---|---|---|
+| a session binds no plan; a task's `PART_OF` to its planning record is written at `classify` | `.claude/hooks/_session_integrity.py` binds every session to one default plan id at start; `stop_finalizer.py` classifies a session as violated when its transcript touched no plan; `CLAUDE.md` asks each session to bind one plan and correct its fields each turn | `grep -rl bound_plan_id .claude/hooks` → 2; `DEFAULT_PLAN_ID` in `_session_integrity.py` |
+| a decision is a `decision` entity `PART_OF` the record; a todo is a task; nothing is merged | the `update-plan` and `update-tasks` skills correct `todos`, `decisions`, and `next_steps` as whole fields after a re-read-and-merge; 552 plans carry a `decisions` map and a `todos` array | `grep -lE "decisions\|todos" .claude/skills/update-plan/SKILL.md .claude/skills/update-tasks/SKILL.md` → 2 |
+| progress at every level is a derived read | `status`, `outcome`, `todos_pending`, `todos_completed`, `next_steps` are stored fields on `plan`; `status` on `project`, `outcome`, `goal`, `strategy` | `describe_entity_type` on each, 2026-09-06 |
+| an amendment is an `amend_<level>` action; the `planning` workflow's `amend` step takes it | no module under `lib/` or `execution/` names an `amend_` class or a `planning` workflow type; no `workflow` entity of that type exists on prod | `grep -rlE "amend_(plan\|level\|<level>)" lib execution --include='*.py'` → 0; the workflow-type grep → 0 |
+| a rendered document is a render target of a statement, held equal by `--check` | `execution/scripts/render_plan_docs.py` renders three fields of one plan to three documents and can push a local edit back as a correction (`--push`), which under the model is an amendment made outside the `planning` workflow | the script's docstring |
+| a decision reversed is a new `decision` `SUPERSEDES` the old | `SUPERSEDES` is in the record's relationship enum and no module under `lib/` or `execution/` writes it | `grep -rl SUPERSEDES lib execution --include='*.py'` → 0 |
+| a role's plan predicate is an `applies_when` on an optional review step of the `planning` declaration | the plan-participation protocol stands in the role prompts (revision 32's count), writing `plan_contribution` rows | revision 32, the role-prompt regex |
+
+**Size.** Measured 2026-09-06 with `wc -c` on this branch against the rulings pass (revision 38) as the
+predecessor. Net **+70.9k** across the foundation excluding `status.md` (1,318.2k → 1,389.1k):
+`planning_model.md` new at 37.7k; `migration.md` 119.3k → 126.2k (+6.9k, seven disposition rows and three
+gaps closed); `conformance_suite.md` 225.8k → 231.9k (+6.1k, twelve PM rows and WF-26); `vocabulary.md`
+96.7k → 102.5k (+5.8k, seven entries); `workflows.md` 58.3k → 63.6k (+5.3k, the `planning` section);
+`data_model.md` 52.0k → 55.5k (+3.5k, two rows and three edge rows); `conformance.md` 48.6k → 51.2k (+2.7k,
+the keyed row, the direction-of-truth row, two register rows); `gates_and_workflows.md` 103.7k → 105.5k
+(+1.8k, the third class of internal write that is an action); `work_model.md` 102.2k → 103.4k (+1.2k, the
+ascent under the parent-task rule). The kernel is **224.9k**, up from 221.9k. Nothing was trimmed to fit,
+on the standing direction that content settles before budget;
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure, and
+`planning_model.md` is a fourth keyed document over `MAX_DOC_CHARS` by a wide margin.
+
+**Checks**, on this tree. `check_foundation_vocabulary.py`: 98 Never items, 70 Not-for items, 0 Never
+hits, 680 advisory hits (617 on the rulings pass; the rise is `tier` in the blast-tier sense the new
+`planning level` entry's Not-for names as advisory, and the seven new entries' own Not-for items; two Never
+hits this pass introduced — a bare `split` and a retired name outside a line saying so — were caught by the
+check and rephrased before landing). `check_foundation_anchors.py`: 0 broken links.
+`link_vocabulary_terms.py --check`: clean, after the linker linked thirty-six first mentions across eight
+blocks. `test_foundation.py`: 97 passed, 1 xfailed (the budget marker); the two index tests pass with the
+document listed in `docs/README.md` and the root README's count at twenty.
+
+## Revision 41 (2026-09-06): the record-sense collision — six sentences reading "record" against an external system
+
+The operator found the collision directly: `vocabulary.md#record` binds `record` to Neotoma and its
+Not-for line reads "the record for an external system," yet the [artifact](vocabulary.md#artifact)
+definition itself, two sentences in `adapters.md`, one in `conformance.md`, one in `payments.md`, and this
+document's own revision-40-era row all read "record" as if it belonged to or lived inside an external
+system — backwards from the boundary the term defines. Six hits, not the four named at the start: the
+phrase-based Not-for never actually caught any of them as an advisory, because none used the literal quoted
+phrase; they passed completely silently on every prior run, which the 680-hit count above did not surface.
+All six are rephrased to "an entry an external system holds" — chosen over "a thing living in" because it
+keeps `system` + `external_id` as identity legible in the very next clause, and over "the external
+system's own record of it" because that phrasing was judged to reintroduce the same word this pass exists
+to stop reusing.
+
+The scoped Not-for on `record` is escalated to a **Never for `adapters.md` and the five per-system adapter
+documents** (`github.md`, `gmail.md`, `calendar.md`, `telegram.md`, `payments.md`) only, added to
+`check_foundation_vocabulary.py`'s `PATTERNS` table with a new `files` field on `Ban` and a matching filter
+in `scan()`; `test_foundation.py`'s pattern-reachability test was updated for the item shape change. Not a
+global Never: the ordinary-English sense stands elsewhere in the corpus (`workflows.md`'s "deliverable for
+the record," `conformance_suite.md`'s "green without the record") exactly as `record`'s own Not-for already
+permits, and a global ban would fire on that legitimate prose. The sibling check for `subject` (same bound
+term, ordinary-sense shape) found no violation in the adapter documents.
+
+**Checks, on this branch after the fix.** `check_foundation_vocabulary.py`: 99 Never items (was 98), 70
+Not-for items, 0 Never hits, 704 Not-for advisory hits both before and after this pass's phrase edits (the
+six collision sentences were never among them, per above — the count is unchanged because nothing about the
+phrase-based advisory match changed; the new hits are caught by the scoped Never, not the advisory).
+`check_foundation_anchors.py`: 0 broken links. `test_foundation.py`: 97 passed, 1 xfailed (the budget
+marker, unchanged). The branch head this pass was taken from is the planning pass (revision 40), after it
+had stood unchanged on the remote for ten minutes.
+
+## Revision 42 (2026-09-06): the self-contradiction pass — four found by re-reading, one confirmed already fixed
+
+A prior agent had read the foundation for internal self-contradictions and identified five, but ended its
+turn before acting; this revision redoes the reading against a later head and fixes the four still live.
+The branch head this pass was taken from is the planning pass (revision 40, `947bf0b`); the record-sense
+collision pass (revision 41) landed on the remote while this one was being written, and this pass was
+rebased onto it, both sides kept, after polling the remote for up to twelve minutes with no further push
+landing.
+
+**Fixed.** `vocabulary.md#daemon` said a daemon produces "tasks or actions", contradicting C2 (settled
+revision 37, upheld revision 39): a daemon takes no action of its own, writing only tasks and observations,
+the announcement path of last resort excepted. The entry now states the write contract directly and cites
+C2 (`work_model.md#contradictions-this-document-settles`); a `Never` line was added for an action
+`PRODUCES` from no task. The same phrasing had drifted into `work_model.md`'s own action-series paragraph
+("a daemon's self-triggered action of the same class"), which now reads "the task a daemon creates for the
+same class", with an inline citation back to C2 — the two other daemon-and-action mentions found by the
+sweep (`data_model.md`, `migration.md`) already stated the settled rule and needed no change.
+
+**Fixed.** `data_model.md`'s `task` row named "no open checkpoint holding it" among the claimable derived
+read but omitted the assignment clause `vocabulary.md#claimable` and `work_model.md` both carry
+(`assigned_to` unset or naming the claiming principal). The row now states it and cites both homes.
+
+**Fixed.** `principles.md#3-validate-the-instrument-before-believing-the-measurement` named "blocked claims
+per window" as an instrument, reading as the `blocked`
+task status revision 37 retired. The surviving sense — a claim the `claimable` predicate refuses, distinct
+from the retired status — is stated inline where the instrument is named, rather than renaming a term used
+consistently as "blocked claim" throughout `failure_posture.md`, `gates_and_workflows.md`, and `telegram.md`
+(renaming only the one citing occurrence would have created a new inconsistency with its own cited source,
+`failure_posture.md#the-rules` rule 2).
+
+**Fixed.** `workflows.md#operator-only`'s `await` step closed on "the operator's decision or the operator's
+report", while `gates_and_workflows.md`'s F22 ruling (revision 36) holds that the step closes on the
+confirmation — an adapter's read-back, an arriving artifact, or, only where declared, the operator's report
+written as a report attributed to the operator principal — and never on the resolution alone. `await`'s
+`Closes on` and the surrounding prose now name the confirmation as the close condition with `denied` as the
+one alternative (a failing verdict, not a wait); `record` is stated as where that confirmation or failing
+verdict is written onto the task; and the F22 section gained a closing sentence naming `await` and `record`
+by name, so the two sections now cite each other for the division.
+
+**Confirmed already fixed.** Decision 36's register row in `conformance.md` reads **ruled** as of revision
+39 (the fifth item the prior pass's analysis named); no correction was needed.
+
+**Checks.** `check_foundation_vocabulary.py`: 0 Never hits (one new `Never` line added, on the daemon
+entry, hits nothing). `check_foundation_anchors.py`: 0 broken links. `test_foundation.py`: 97 passed, 1
+xfailed (the budget marker, unchanged) — first run surfaced one unlinked first mention (`observation` in
+the rewritten daemon entry), fixed by linking it. Sizes (`wc -c`, this branch against revision 40):
+`vocabulary.md` 102.5k → 105.3k; `work_model.md` 103.4k → 105.4k; `workflows.md` 63.6k → 64.2k;
+`gates_and_workflows.md` 105.5k → 107.2k; `data_model.md` 55.5k → 57.4k; `principles.md` unchanged at
+16.2k net (a citation added, none removed). No document crossed a budget threshold it was not already over.
+## Revision 43 (2026-09-06): model and harness routing — what executes a step, at what tier, and what happens when that choice is unavailable
+
+The operator asked whether the foundational docs capture model and harness routing needs per the runner.
+Checked first against a concurrent Human Inversion pass's item 5 (whether gate tiers plus `vendor_binding`
+already express routing by blast radius): as of this pass's branch head, no such rule had landed in
+`status.md` or `gates_and_workflows.md` — `grep`-checked directly rather than assumed — so all three gaps
+below were argued fresh rather than cited from it. This revision opens decision 59 (where a minimum model
+tier per action class would live, `gates_and_workflows.md#blast-radius-selects-the-gate-nothing-yet-selects-the-model-a-step-runs-at`)
+and decision 60 (a runner's lease-held step losing its model or harness mid-execution,
+`failure_posture.md#a-runners-model-or-harness-going-unavailable-mid-step`), and settles without opening a
+decision that `runner` (`vocabulary.md#runner`, already registered, retired-`claimant`'s replacement) names
+the seat a step's outcome depends on — no new entity (`work_model.md#a-steps-outcome-depends-on-which-runner-ran-it-and-runner-already-names-that-seat`).
+Decision 42 (harness preference and model tier are a `vendor_binding`'s; the tool allowlist is a dimension
+of the `agent_grant`) was already settled by the rulings pass and is cited, not restated.
+
+**Drift, read on this branch 2026-09-06. Recorded here and not in the design.**
+
+| Design rule | Built state | Instrument |
+|---|---|---|
+| a skill's harness mechanics — the tool allowlist, harness preference, model tier — are read from the `agent_grant` and the `vendor_binding` at claim time (decision 42); the skills leg (revision 32, `migration.md#the-skills-source-state-the-harnesses-hold-and-where-each-kind-goes`) retires the on-disk `SKILL.md` as a load path | `execution/daemons/apis/skill_runner.py` resolves `.claude/skills/<skill>/SKILL.md` under the repository root at claim time and prepends the entity's `prompt_markdown` to it, rather than resolving the prompt from the record; a missing file is a dispatch failure | `status.md`'s own revision-32-era row above (`the runner's read of the role file`), re-cited here because it is precisely the mechanism gap 2 and decision 42 bear on |
+| which model a runner executes at is a `vendor_binding`'s, bound to the role a runner fills, read fresh at claim (decision 42) | the current harness spawns a child agent inheriting its parent's model by default; no claim-time read of a per-role `vendor_binding` selects it | three agents observed hitting one provider rate limit simultaneously the night of 2026-09-05→06 because all three had inherited the same parent's model choice rather than each resolving its own binding |
+
+Neither row is cited as justification for a design choice (first principles: code is not design authority)
+— both are the gap between what decision 42 already rules and what a checkout does today, and the second
+is the mechanism gap 3's open decision (60) exists to give a stated outcome to.
+
+**Checks**, on this tree. `check_foundation_vocabulary.py`: 0 Never hits (unchanged). `check_foundation_anchors.py`: 0 broken links. `pytest execution/daemons/apis/test_foundation.py`: 97 passed, 1 xfailed (the budget marker, unchanged).
+
+## Revision 44 (2026-09-06): the Human Inversion mapping — three stances, two term collisions, a workflow, and one flag
+
+The operator asked what a public essay series (*The Human Inversion*, markmhendrickson.com, six parts, the
+sixth unpublished) says the foundation does not yet, applied against PR #745. A prior mapping pass (read in
+full, in the scratchpad, not re-derived here) found nineteen of forty-five claims represented, fourteen
+partial, seven absent, and five contradicted; this revision applies the seven items the operator's
+instructions named, all to documents in this directory.
+
+**`principles.md`.** A new section, "Where the human sits, what it protects, and why the record is owned,"
+states three stances beside the invariants, each citing its part: where the human sits (the foundation end
+is the operator's, the review end is agents', and the human's presence at review is the checkpoint and the
+finding); operator attention as the constraint the channel's declared subset, `draft_lint`'s ordering, and
+checkpoint grouping already protect; and the sovereignty reason for the owned record (Neotoma as the hard
+dependency, public prompts with runtime context entities, named as an architectural reason rather than a
+new mechanism). The same section states, in one paragraph, that a cross-disciplinary rubric is out of
+scope here by name — `priority_rubric` and `confidence_rubric` are narrow policy inputs, and the README's
+own P5 deferral ("no design until P4 is designed") is restated rather than pre-empted — and connects the
+sovereignty stance to the model-and-harness-routing pass's open decision 59 with one sentence, citing it by
+number rather than restating its argument.
+
+**`vocabulary.md`.** Two term-collision entries. `reconciler`: this design's sense (the mechanical check
+that proves a projection agrees with its sign-offs, already used informally at `step_status` and
+`projection`) against the essay's sense (an adjudicating role); the README's "a topology … not a single
+human bottleneck" is quoted as the design's own statement of the divergence. `replay`: this design's
+refused sense (re-doing a prior action or step from a stored trace, the shape decision 40 refuses for
+session reasoning) against the essay's sense (reading a reasoning chain later, which this design already
+has as the as-of read decision 40 names) — cross-linked to `effect dedup`'s existing "replay is refused
+outright" Never.
+
+**`workflows.md`.** One sentence added to `feature`'s prose answering the legal-placement question from
+principles rather than from tone: `applies_when` seating `legal` by relevance, after `impl`, is the design's
+form of "not exiled to a gate of last resort," the same principle that fails an unclassified action type
+closed rather than open by default; a project needing legal judged before implementation seats it in its
+own workflow's design stage, which the design does not preclude and does not declare here. A new workflow,
+`postmortem` (the fourteenth core workflow, `## Scope` updated), entered by an `intake_rule` on a halt's
+read-back, a checkpoint reaching a terminal state in `repeated_lapse`/`rounds_exhausted`/`dependency_cycle`,
+or a landed institutionalization task (decision 17); its steps scope the incident, investigate and record a
+finding naming the observations that should have caught the drift, review the finding's evidence, and route
+the remedy exactly as any other finding is routed — an implementation task, or decision 17's
+institutionalization task — writing no fix itself. Relates explicitly to the essay's Part 5: "publish
+postmortems when drift happened anyway, with links to the observations that should have prevented it."
+
+**`data_model.md`.** One bullet in *Record conventions*, beside the existing sign-off pinning bullet:
+`sign_off.agent_version` pins the agent and its version, and `artifact_refs[]` names what was judged, but
+neither pins the model or harness observed at the write — that is a `vendor_binding`'s, per decision 42,
+resolved by role rather than recorded per sign-off. Stated as an absence and why (adding the field is a
+schema question, not a docs correction), with open decision 59 named as the adjacent, already-open question
+this would be the attribution-side counterpart to.
+
+**`conformance.md`.** Decision 40's register row carries one added sentence: flagged, not reopened, against
+the essay's Part 4 claim that "the reasoning chain of the agent … [is] available months later," which
+decision 40 contradicts by design. No decision opened, no decision ruled, no argument added to either
+document.
+
+**What was found already done.** Item 5 (model routing bound per class, never chosen by the step) was
+settled independently by the model-and-harness-routing pass (revision 43, decision 59) while this pass was
+being written — both passes checked for the other and neither found it in time; this pass adds one
+connecting sentence in `principles.md` citing decision 59 by number and touches neither
+`gates_and_workflows.md` nor `failure_posture.md`, leaving that pass's open decisions exactly as it left
+them.
+
+**Size.** Measured 2026-09-06 with `wc -c` on this branch against the model-and-harness-routing pass
+(revision 43) as the predecessor. `principles.md` +2.6k (three stances and the rubric deferral);
+`vocabulary.md` +1.6k (two entries); `workflows.md` +3.1k (the `postmortem` section and one sentence on
+`feature`); `data_model.md` +0.7k (one bullet); `conformance.md` +0.2k (one sentence on decision 40's row).
+Net **+8.2k** across the five files touched; no other foundation document was edited.
+
+**Checks, on this tree.** `check_foundation_vocabulary.py`: 100 Never items (was 99, `replay` added), 73
+Not-for items (was 70, `reconciler` and `replay` added), 0 Never hits, 749 Not-for advisory hits (up from
+733 at the start of this pass — legitimate uses of already-advisory words in the new prose, mainly `tier`
+in the blast-tier sense). `check_foundation_anchors.py`: 0 broken links. `link_vocabulary_terms.py --check`:
+clean, after the linker linked four first mentions across four blocks, two of them retroactive
+(`step_status` and `projection`'s existing informal "reconciler" became linkable once the term entry
+existed). `test_foundation.py`: 97 passed, 1 xfailed (the budget marker, unchanged). The branch head this
+pass was taken from is the model-and-harness-routing pass (revision 43, `49c04e1`), confirmed unchanged on
+the remote by repeated direct polling for over twelve minutes before the dedicated worktree was created —
+during which three other passes landed in sequence (the record-sense collision, the self-contradiction
+pass, and the model-and-harness-routing pass itself), each re-read fresh before this pass began.
+
+## Revision 45 (2026-09-06): missing ancestry — deriving a parent refused, a finding in its place, and one open decision
+
+The operator asked, verbatim, whether the swarm should derive higher-level planning materials when lower
+ones lack them — a task serving no plan, a plan serving no project, a project with no strategy above it,
+transitively — or report the discrepancy with a proposal, before or after resolving it. A new section of
+`planning_model.md`, "Missing ancestry: whether the swarm derives an absent parent, or finds the gap,"
+settles four of the five sub-questions and opens one decision.
+
+**Settled.** The swarm may not derive a missing ancestor: doing so is an amendment to a planning record's
+statement under another name, and every amendment is an `amend_<level>` action, reserved to `NEVER` until
+the operator lists it — the existing gate refuses it already, and this section states the refusal in
+prose rather than leaving it implied. What happens instead is a `finding`, kind `decision_or_attestation`,
+scope `unknown` on the finding's own standing axis (the gap is not one of the axis's four existing
+kinds), recorded at the record's own `survey` for a plan-with-no-project case and at intake's `route` for a
+task-with-no-plan case, since an unplanned task has no `planning` batch to raise it in; a proposal for the
+missing record's shape rides beside the finding as a task `REFERS_TO` it, on the same footing decision 17's
+institutionalization task already has, and reusing decision 52's reading that proposing is a grant
+capability distinct from the write it would confirm. Before-or-after is answered by whether a step declared
+the ascent as a read it needed: a declared read that resolves to nothing is `unknown` and holds the step
+(principle 7); an undeclared gap is a finding that rides alongside the work and never holds it. Whether an
+orphan is a defect at all is answered permissively: no expectation declared, no finding — argued from the
+existing unplanned-work admission and from decision 57 already reserving the hierarchy's shape to the
+operator, against the usual fail-closed instinct, which here would assert by finding-volume that the
+operator's own instance is wrong to have chores. Transitivity is judged edge by edge, never over the whole
+chain to a root, because "root" is `#the-hierarchy-is-edges-and-a-task-has-one-line-upward`'s description of
+wherever a chain ends and not a level every instance must register — judging "reaches a strategy" would name
+a level, which no rule above does, and decision 57 is exactly the reservation against naming one.
+
+**Opened.** Decision 61: where the ancestry expectation is declared — a field on the level's registered
+type, an `intake_rule` condition, or a `completion_criteria[]`/`applies_when` entry on the `planning`
+workflow's declaration. Registered in `conformance.md#the-register-of-open-design-decisions`, blocked on
+decision 57 fixing what the levels are before a per-level field has anything to attach to.
+
+**Extends, adds no step or type.** `judge`'s defect list (`workflows.md#planning`) gains one item — no
+record above, where the instance's registered levels say one belongs — beside the existing "a child record
+with no live `planning` task." Intake's `route` gains the same finding shape it already uses for a
+standing constraint read at `link` (`workflows.md#intake`). No new entity type, no new workflow step.
+
+**Size.** Measured 2026-09-06 with `wc -c` against the Human Inversion mapping pass (revision 44) as the
+predecessor. `planning_model.md` +14.2k (one new `##` section, five `###` subsections, and one header
+sentence); `conformance.md` +0.8k (one register row, one header sentence). No other foundation document was
+edited.
+
+**Checks, on this tree.** `check_foundation_vocabulary.py`: 100 Never items, 73 Not-for items (unchanged),
+0 Never hits (one hit found and fixed — "worked as a project" rephrased to "executed as a project"), 756
+Not-for advisory hits (up from 749 at the start of this pass, seven new hits from the added prose, all
+already-advisory words used in their ordinary sense). `check_foundation_anchors.py`: 0 broken links.
+`link_vocabulary_terms.py --check`: clean, no unlinked first mention. `test_foundation.py`: 97 passed, 1
+xfailed (the budget marker, unchanged). The branch head this pass was taken from is the Human Inversion
+mapping pass (revision 44, `02c7e0e`), confirmed unchanged on the remote by three direct polls 60 seconds
+apart before the dedicated worktree was created.
+
+## Revision 46 (2026-09-06): the session-reconciliation pass — decision 40 against sanctioned practice, one proposal, one open question
+
+The operator asked, on PR #745, whether decision 40 stands against the swarm's own sanctioned practice of
+persisting every session turn to Neotoma — the operator's standing instruction, and the MCP server's own
+mandate, to store user and assistant rows every turn. Read against the record: `agent_session` (3,726 on
+prod, schema drifted to 0.2.0 with 33 fields — `holder`, `task_id`, a step name, a declaration reference,
+none of them content) carries exactly what decision 40 says and nothing else; the turn-by-turn content lives
+in `conversation`/`conversation_message` (10,793 / 59,263 on prod) and, summarized, in `session_digest` (369
+on prod), none of which is `agent_session` and none of which is a registered type in this design's own
+registry (`#revision-28-2026-09-05-the-record-inventory-the-migration-plan-starts-from`, the registry-holds paragraph). The reading that holds is (a): decision
+40 governs a sign-off's shape at close, not whether a session is stored; the essay-contradiction flag revision
+44 left on decision 40's register row named the wrong axis of disagreement, because it read "reasoning is not
+written" as "no session is persisted" when the ruling's own text already names `session_digest` as the
+licensed path for a session whose content is itself work input
+(`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`).
+Reading (c) — that the persisted sessions are unsanctioned drift — was tested and rejected: the persistence
+rule is the operator's own standing instruction and the MCP server's mandate, not an accident, and nothing in
+decision 40's text or its home section addresses `conversation`/`session_digest` at all.
+
+**Restated, not reopened.** Decision 40's register row (`conformance.md`) now poses the question revision 44's
+flag could not: not "is reasoning stored" but what a session-family entity is for, what may read it, and
+whether a sign-off may point at one. The ruling itself is untouched — no wording in
+`gates_and_workflows.md`'s decision-40 section was weakened or narrowed, because on inspection it already
+said what reading (a) needed it to say (the `session_digest` carve-out was written into the section at its
+original ruling, not added here); what changed is that the register row and the section both now state the
+carve-out as a first-class answer to the essay-contradiction flag rather than leaving a reader to find it
+three paragraphs later.
+
+**Proposed, not ruled.** Two new paragraphs in `gates_and_workflows.md`'s decision-40 section: first, an
+explicit statement that "no session is persisted" is not a fair paraphrase of the ruling, naming the two
+unregistered types that already carry the content the ruling is read as denying; second, that a sign-off may
+carry a `REFERS_TO` edge to the `agent_session` or `session_digest` that produced it, at the cost of one edge
+per sign-off and one `REFERS_TO` target the schema does not yet name — the same reference-never-value shape
+decision 40 already uses for every other read a sign-off names, extended to one more source. Neither is
+written as a rule; both are left for the operator to accept, decline, or fold into a future ruling.
+
+**Flagged, not settled: minimization once a session is task-reachable.** `session_digest` samples read from
+prod (schema 1.4.0) carry direct quotes, named counterparties, and project-identifying detail alongside
+their structured fields — not scrubbed to structure-only, despite the schema's own field description
+instructing "summarize, never transcribe sensitive content." Once a `REFERS_TO` edge (proposed above) makes
+a session reachable from a task, the special-category and reference-never-value rules
+`data_model.md#record-conventions` states for a *registered* type would, if extended, reach a session's
+content — but `conversation_message` and `session_digest` are not registered types this design's registry
+scan finds (`#revision-28-2026-09-05-the-record-inventory-the-migration-plan-starts-from`, the registry-holds paragraph), so the design's own minimization-at-
+write mechanism does not currently bind them, registered or not. Whether a session's content inherits the
+special-category mark F23 already states for a type, and whether the operator's RGPD minimization-at-capture
+rule for durable contact profiles has a counterpart for session content that names people incidentally, is
+not decided here — named as a gap for the operator, not resolved as a privacy rule, per the standing
+instruction against settling one silently.
+
+**No edge, no field, no type written.** This pass changes prose only: one register row, two new paragraphs
+in an existing section, and this revision's own record. `agent_session`, `conversation_message`, and
+`session_digest` are read, not registered or altered; the proposed sign-off `REFERS_TO` edge is not added to
+`data_model.md`'s relationship table, since it is offered as a cost estimate, not a decision.
+
+**Size.** Measured 2026-09-06 with `wc -c` against the ancestry pass (revision 45) as the predecessor.
+`gates_and_workflows.md` +2.1k (two paragraphs in the decision-40 section); `conformance.md` +1.0k (one
+register row, one header sentence). No other foundation document was edited.
+
+**Checks, on this tree.** `check_foundation_vocabulary.py`: 100 Never items, 73 Not-for items (unchanged),
+0 Never hits, advisory-hit count re-measured after this pass's prose (no new Never-listed term introduced).
+`check_foundation_anchors.py`: 0 broken links. `test_foundation.py`: 97 passed, 1 xfailed (the budget
+marker, unchanged). The branch head this pass was taken from is the ancestry pass (revision 45, `25aa4a9`),
+confirmed unchanged on the remote by three direct polls before the dedicated worktree was created.
+## Revision 47 (2026-09-06): the orphan default reversed, and priority given a home beside `claimable`
+
+The operator connected two questions: whether the swarm should derive higher-level planning materials from
+their own argument that explicitness helps both execution and prioritization, and — separately — where task
+prioritization lives, since `work_model.md` already states that pull answers "is this mine" but nothing
+says which of several legitimately-mine tasks comes first.
+
+**Part 1 — the permissive default of revision 45 reversed.** The operator's argument — quoted in full in
+`planning_model.md#whether-an-orphan-is-a-defect-at-all` — is that even household and correspondence work
+should be taken in light of higher-level justification, made explicit rather than left implicit, both to
+execute with a clearer idea of success and to help prioritize. The default is now **every task has an
+ancestor**; an unplanned task is the gap, not the tolerated shape. The finding-volume objection revision 45
+raised is answered, not retracted: two readings were weighed — a finding on every orphan, or a **default
+ancestor per intake class** written at `classify` the same way a named parent is written today — and the
+second carries this pass as the near-zero-noise reading, evaluated against the first on the operator's own
+terms rather than assumed. Intake's behaviour: `classify` resolves the task's own naming first, then a
+registered class default, and only a task in an undefaulted or unclassifiable class reaches `route` still
+unplanned, where the existing revision-45 mechanism applies unchanged — a `decision_or_attestation` finding,
+`scope: unknown`, a proposal riding beside it, and the task still routed to its successor on the same batch;
+the finding never holds ordinary work. The no-authoring refusal from revision 45
+(`#the-swarm-may-not-author-a-missing-ancestor`) is restated and made explicit against the new default: a
+class default is a record the operator pre-authored once, before any orphan of that class existed, and
+`classify` writing `PART_OF` to it is the identical write it makes today when a task names its own parent —
+never a write to the plan's statement, `completion_criteria[]`, or existence. Decision 61 is reframed from a
+per-level ancestry expectation to a per-class default's storage location, with a lean toward `intake_rule` as
+the site that does not wait on decision 57 (unlike a per-level field or workflow declaration, which need the
+levels registered first); still open, still registered in
+`conformance.md#the-register-of-open-design-decisions`.
+
+**Part 2 — priority.** Prior art existed but was scattered and unconnected: `data_model.md`'s task row
+already lists `priority` as a field, `workflows.md#intake`'s `prioritize` step already sets it from
+`priority_rubric`, `authority_model.md`'s decision 52 already permits a `priority` correction as a
+governance-scale "stop," and `planning_model.md` already derives a plan's `next_steps` as "the open
+descendants in priority order" — but no vocabulary entry existed, and nothing connected any of this to
+`claimable` or bound a claiming principal to anything. `work_model.md#priority-orders-the-claimable-pool-it-does-not-enter-it`,
+placed immediately after `#what-a-claim-predicate-treats-as-claimable`, settles: **priority is a derived
+read for the everyday ordering question**, argued from principle 11 (a stored value the ascent should track
+but does not is exactly the watchdog-needing field the principle refuses) and from the existing derived
+`next_steps` precedent, applied one level down to the pool a single principal may claim from — read together
+at claim time from the ascent's declared standing, the task's `due_date`, the workflow's declared urgency,
+and blast radius. This does not withdraw or reopen the stored `priority` field `prioritize` sets at intake,
+which stays as a snapshot and remains what a `reprioritization` corrects; the two can disagree, and the
+derived read is authoritative where they do. It is explicitly not the cross-disciplinary rubric
+`principles.md#where-the-human-sits-what-it-protects-and-why-the-record-is-owned` defers to P4 —
+`priority_rubric` is a narrow input the derived read consults, unchanged in scope. **What binds a claimant:
+"may," not "must."** A principal may decline a high-priority task it judges unfit, the same 1:1 fitness
+judgment pull already protects; priority orders what a claim predicate presents, never what it permits,
+because binding "must" would reintroduce the routing-by-inference fallthrough hazard pull was built to
+refuse. The observable that catches a violation is named as a repeated-pattern read over the record —
+a principal repeatedly claiming lower-standing work of the same class while higher-standing work of that
+class sits claimable and undeclined — mirroring the repeated-lapse escalation shape already in this
+document, never a single-instance check. Decision 62 is opened: whether an instance may nonetheless bind
+some class to "must," which this document declines to build unprompted and leaves to the operator.
+`vocabulary.md#priority` gives the term its house-style entry, beside `claimable`.
+
+**What was found already settled, making one framing moot.** The brief's premise that priority "appears as
+prose... with no defined term and no home" was only half right: extensive prose already existed (`data_model.md`,
+`workflows.md#intake`, `authority_model.md`'s decision 52, `planning_model.md`'s `next_steps`), and the real
+gap was narrower than a missing concept — it was the missing connection between that prose and `claimable`,
+and the missing vocabulary entry. No document contradicted; the gap was consolidation, not invention
+(principle 9: grepped before adding, and the grep is why the section reads as extending four existing
+mechanisms rather than proposing a fifth).
+
+**Size.** Measured 2026-09-06 with `wc -c` against revision 45 as the predecessor. `planning_model.md`
++6.4k (the orphan-default section rewritten; decision 61 reframed); `work_model.md` +6.6k (one new section,
+`#priority-orders-the-claimable-pool-it-does-not-enter-it`); `vocabulary.md` +2.3k (the `priority` entry);
+`conformance.md` +1.3k (decision 61's row reframed; decision 62 opened; the register's summary paragraph and
+next-number line updated to 63). Net **+16.6k** across the four files touched; no other foundation document
+was edited.
+
+**Checks, on this tree.** `check_foundation_vocabulary.py`: 100 Never items, 73 Not-for items (unchanged), 0
+Never hits (fifteen hits found and fixed in draft — "claimant" for the pre-claim principal, retired in
+favour of "principal" per the `lease` entry's own Never; "running" inside a quoted example plan statement,
+reworded), 767 Not-for advisory hits (up from 756 at the start of this pass, eleven new hits from the added
+prose, all already-advisory words — `tier`, `command`, `owner` compounds — used in their ordinary sense).
+`check_foundation_anchors.py`: 0 broken links (one dangling self-reference introduced in draft, corrected to
+the real `work_model.md` anchor; one reference to a bolded-but-unheaded sentence in `principles.md`,
+corrected to the enclosing `##` heading). `link_vocabulary_terms.py --check`: 9 unlinked first mentions
+across 2 blocks found and fixed by running the linker (one run introduced a nested-bracket malformed link
+around the word "watchdog" inside a quoted principle title, caught by a post-link diff read and
+hand-corrected); clean on recheck. `test_foundation.py`: 97 passed, 1 xfailed (the budget marker, unchanged). The branch head this pass
+was taken from is the ancestry pass (revision 45, `25aa4a9`), confirmed unchanged on the remote by three
+direct polls 60 seconds apart before the dedicated worktree was created.
+## Revision 48 (2026-09-06): five rulings on the operator's word — planning levels, model tiers, unavailability, stages, and the engine
+
+The operator ruled six open decisions in one pass, on his agreement with the recommended side of each plus
+one correction: *"Agreed on your recommendations for the other decisions generally though strategic
+materials (which perhaps can themselves contain objectives) do seem like an important link between
+projects and missions."* Decisions 40 and 55 were left untouched — 40 is under active reconciliation by a
+concurrent agent and 55 is the operator's own product decision on Neotoma peering. Five of the six rulings
+stand; the sixth, on decision 61, was superseded before landing by the concurrent priority pass (revision
+47) reversing the premise it argued from — see below.
+
+**Decision 57, ruled.** Five planning levels: task → plan → project → strategy → mission. Strategy settles
+as a level because a project's justification jumping straight to a mission is too coarse to derive
+acceptance criteria or relative standing from. Objective is *not* a level — the operator's own correction:
+objective is authored content within a strategy record, never a sixth `amend_<level>` class, on the same
+principle-6 reasoning that kept `decision` an entity under a planning record rather than a level of its
+own. `planning_model.md#which-levels-an-instance-declares-and-what-it-calls-them` carries the ruling; the
+Transitivity section's discussion of decision 57 as still-open was corrected to reflect the ruled count
+while stating the mechanism holds for any count an instance might choose.
+
+**Decision 61, drafted then withdrawn — superseded by revision 47.** This pass drafted a ruling that the
+ancestry expectation is declared on the workflow — a `completion_criteria[]` or `applies_when` entry — on
+the premise the ancestry pass (revision 45) argued from: a permissive default where absence of an ancestor
+matters only where an expectation was declared. Before this pass's commit landed, the concurrent priority
+pass (revision 47) reversed that premise on the operator's own argument that every task should carry an
+ancestor by default, and reframed decision 61 into a different question — where an intake class's *default
+ancestor* is declared, leaning toward `intake_rule`. Ruling on the pre-reversal framing would have ruled a
+question that no longer existed in that shape, so the draft is not applied; decision 61 stays open as
+revision 47 left it, still blocked on decision 57 (now ruled) but otherwise unchanged by this pass.
+
+**Decision 59, ruled in full.** The shape (`min_tier` on `action_policy`, evaluated at the same take as
+blast) was already settled; the operator's values set a floor only for irreversible classes — payments,
+sends, merges, governance writes — leaving every other class unset at whatever the runner's
+`vendor_binding` carries.
+
+**Decision 60, ruled in full.** Unavailability is `capability_unavailable`, a reason class of its own
+distinct from `capability_denied` (denied is a permission answer; unavailable is transient). Lapse timing
+is governed by the existing `lapse_cap`, not a second clock — option 1 of the three named in
+`failure_posture.md`, chosen over a faster-release rule that would have needed a second lapse schedule for
+one cause among several.
+
+**Decision 33, ruled.** The `steps[].phase` field is dropped; the Stages line stays as authored prose, one
+home for the grouping instead of two. The prose's own wording is an editorial matter for the document, not decided
+here. `gates_and_workflows.md`'s `steps[]` field list and `vocabulary.md`'s `stage` entry were both updated
+to drop the field.
+
+**Decision 34, ruled.** `engine` is defined (used in three documents, defined in none before this);
+`pipeline` is retired as the term for the step-path publisher, "GitHub-hosted" having named a fact about
+the checkout rather than a design property. The count of four execution mechanisms is unchanged — this
+renames the third mechanism's publisher only. Every foundation use of `pipeline` in this sense (`adapters.md`,
+`github.md`, `conformance.md`, `conformance_suite.md`, `vocabulary.md`) was updated to `engine`;
+`migration.md`'s unrelated "session pipeline" phrase (the seven-skill digestion sequence, a different sense)
+was renamed to avoid the now-retired word.
+
+**Register.** 57, 59, 60, 33, and 34 moved from open to ruled in
+`conformance.md#the-register-of-open-design-decisions`, 2026-09-06. Decision 61's drafted ruling was not
+applied, superseded by revision 47's reframing before this pass's commit landed; it stays open, as revision
+47 left it. Open rows after this pass and the concurrent priority pass together: 55, 61, and 62.
+
+**Size.** Measured 2026-09-06 with `wc -c` against revision 45 as the predecessor, then reconciled by hand
+against revisions 46 and 47 (the session-reconciliation and priority passes) at rebase, since all four
+passes branched from revision 45 concurrently. `planning_model.md` grew for the levels section and the
+Transitivity section's count-of-57 correction, and separately for revision 47's orphan-default reversal and
+decision 61 reframing — the two sets of edits did not overlap in the file and both stand; `gates_and_workflows.md`
++1.1k for decision 59's values ruling and one `steps[]` field dropped; `failure_posture.md` +1.5k for
+decision 60's shapes-and-values ruling in full; `workflows.md` +1.9k for decision 33's ruling,
+register-row and field-list updates; `work_model.md` +2.3k for decision 34's ruling in full and the
+mechanism list's publisher renamed, beside revision 47's separate `priority` section which did not
+overlap; `vocabulary.md` +1.6k for the `engine` entry replacing `pipeline`, the `stage` entry rewritten,
+one Retired-names row added, beside revision 47's separate `priority` entry; `conformance.md` register
+rows for 57, 59, 60, 33, and 34 corrected to ruled, merged at rebase with revision 47's row for 61
+(reframed, left open) and its new row for 62 (opened); `conformance_suite.md`, `migration.md`,
+`adapters.md`, `github.md` each a one-line correction for the retired term. `link_vocabulary_terms.py` (no
+`--check`) was run once to add first-mention links the new prose introduced; no wording it touched was
+otherwise changed.
+
+**Checks, on this tree.** `check_foundation_vocabulary.py`: 101 Never items (one added: `pipeline` under the
+`engine` entry), 73 Not-for items, 0 Never hits (eleven transient hits found while drafting — mentions of
+the newly retired `pipeline` term, plus two pre-existing Never-pattern collisions in the new
+`capability_unavailable` prose — all rephrased). `check_foundation_anchors.py`: 0 broken links (one
+transient break, `work_model.md`'s link to the now-removed retired-`pipeline` anchor in `vocabulary.md`,
+repointed to the Retired names table). `link_vocabulary_terms.py --check`: clean after running the linker
+once (9 unlinked first mentions across 4 blocks, all fixed). `test_foundation.py`: 97 passed, 1 xfailed (the budget marker,
+unchanged), matching the pre-pass baseline exactly, re-verified after the rebase onto revisions 46 and 47.
+The branch head this pass was taken from is the ancestry pass (revision 45), confirmed unchanged on the
+remote by a direct poll before the dedicated worktree (`~/ateles-wt-rulings4`) was created; the remote head
+moved to `7cad1de` (revisions 46-47, two concurrent passes) during this pass's work, and this pass rebased
+onto it, resolving conflicts by keeping both sides and withdrawing the decision-61 ruling superseded by
+revision 47.
+
+## Revision 49 (2026-09-06): the operator's vocabulary standard, stated as invariant 12
+
+The operator stated a standard for the vocabulary directly, on this PR: *"I agree we should have as few
+terms as needed but no fewer and that no term should overlap in definition with any other term in terms of
+possible redundancy in light of the system's design."* This pass writes that standard into the foundation
+as a principle, so it is the criterion a concurrent adversarial term audit (four passes: Not-for
+violations, a swap test for redundancy, undefined high-frequency words, entries carrying no rule) and the
+reading projection that follows it are both measured against, rather than a standard argued once in a PR
+thread and left unwritten.
+
+**Where it landed, and why not the other home.** `principles.md`, as invariant 12, not `vocabulary.md`'s
+preamble. `vocabulary.md`'s preamble states rules about how that document is written — the linking
+convention, the Never/Not-for syntax — each enforced by `link_vocabulary_terms.py` or
+`check_foundation_vocabulary.py` against that document's own form. The operator's standard is not about
+vocabulary.md's form; it is a stance about the design's language itself, of the same kind
+`principles.md` already states eleven of. It sits beside invariant 9 ("one source, defined once") as the
+same rule applied to a term rather than a value — one name, and the swap test decides when two names are
+one name wearing two spellings.
+
+**What already said part of it, and what this cites rather than restates.** `status.md` revision 29 (the
+simplification pass) applied the standard without naming it: "a term is redundant if every use can be
+replaced by an existing term without a sentence changing meaning," with the `review step` retirement (its
+own revision 19) as the worked example — 64 uses of the retired term, replaced with no loss on owner,
+sequence, verdict, and blocking. Invariant 12 cites revision 29's sentence directly and generalizes it into
+the swap test, rather than restating it in different words. The `hydration` entry, examined and kept in
+the same simplification pass ("the only name for the moment declared reads are resolved"), is cited as the
+floor's precedent — the "no fewer" half revision 29 did not need to argue because nothing proposed removing
+`hydration`, but which the operator's second clause now states as a standing test for any term, not only
+ones under proposal.
+
+**The amendment obligation.** Added to `conformance.md#amending-a-foundation-document`, beside the existing
+rule that a decision opened in a document is registered in the same change. The parallel: a term added to
+`vocabulary.md` states the rule that turns on it and passes the swap test against its neighbours, in the
+same change — cited from invariant 12, argued in `conformance.md`, per the register's own convention that
+an index cites its argument rather than restating it.
+
+**No term was retired or merged by this pass.** The task was to write the standard, not to apply it; the
+concurrent term audit applies it. `scratchpad/term_audit.md` did not exist in this worktree when this pass
+ran (a session-local scratchpad is not shared across concurrent worktrees unless committed), so its
+findings are unverified against the standard as stated here — the audit is judged against this principle
+once its output lands, not the reverse.
+
+**Checks, on this tree.** `check_foundation_vocabulary.py`: 101 Never items, 73 Not-for items, 0 Never hits
+(two transient hits found while drafting — bare mentions of the term retired for `review step`, without
+"retired" on the same line per the checker's own skip rule — both rephrased to name the revision instead of
+the bare word). `check_foundation_anchors.py`: 0 broken links. `link_vocabulary_terms.py --check`: clean, no
+run needed (no vocabulary term was added or renamed; `principles.md` and `conformance.md` are not
+vocabulary.md). `test_foundation.py`: 97 passed, 1 xfailed (the budget marker, unchanged), matching the
+baseline exactly. The branch head this pass was taken from is revision 48 (`5a4a0b4`), confirmed unchanged
+on the remote by a direct poll before the dedicated worktree (`~/ateles-wt-vocab-principle`) was created.
+
+**Size.** Measured 2026-09-06 with `wc -c` against revision 48 as the predecessor: `principles.md` +3.6k
+for invariant 12, the Scope count, the header citation, and the closing "Beyond the sources" line;
+`conformance.md` +1.1k for the amendment-obligation paragraph and its header citation. No decision opened
+or ruled; the register is unchanged.
+
+## Revision 50 (2026-09-06): the minimization-recalibration pass — capture broadened, disclosure given its check, the transcript store registered
+
+The operator's direction: *"We may need to visit gdpr minimization since I sense it may be drafted
+currently in a way that's overly cautious given my general interests in ateles running my personal and
+professional lives with detailed granularity with the presumption that virtually all context may be
+useful for future work."* Approved reading: broaden the stated purpose so capture is generous; keep Art.
+21 objection and the no-external-publication rule untouched; shift the constraint from capture to use;
+leave Art. 9 for third parties narrow.
+
+**What existed before this pass.** Minimization was stated in three places, all pointed at **capture**:
+`gmail.md`'s refusal 1 ("it minimizes at capture, and the minimization is on the write"), the meeting
+workflow's `extract` step (`workflows.md#meeting-processing`), and `data_model.md#record-conventions`'s
+special-category bullet (the F23 mark, revision 36). None of the three stated the purpose the
+minimization test was necessary *for* — Art. 5(1)(c) bounds capture to what is "necessary for the
+purposes," and no purpose was written down for the test to run against. Article 21 objection was already
+correctly settled (revision 34, F6): an observation on the `contact` entity, read at intake's `link`, with
+`route` closing on it and a finding naming the constraint (`workflows.md#intake`) — untouched by this
+pass, cited and not rewritten. The outreach workflow's `review` step judged a draft "for what it
+discloses" with no mechanical check, flagged in the conformance suite as review-only (`WF-16`, R for the
+review's judgement, U-34 unopened until this pass). `conversation`, `conversation_message`, and
+`session_digest` were confirmed, read-only against Neotoma prod (`get_entity_type_counts`,
+`describe_entity_type`), to be exactly as revision 46 found them: 59,283 / 10,797 / 369 rows, none a
+registered type in this design's registry, `session_digest`'s own schema field instructing "summarize,
+never transcribe sensitive content" while sampled rows carry direct quotes and identifying detail. That
+confirms revision 46's finding rather than changing it: the existing minimization rule was never a
+binding constraint on this content to loosen, because no registered-type mechanism reached it — the
+change this pass makes is replacing an unenforced instruction with one that does.
+
+**The purpose, stated (`data_model.md#record-conventions`).** A new bullet, placed beside the
+special-category bullet it makes intelligible, states the purpose captured for: an assistant conducting
+the operator's personal and professional life at granularity, where a piece of context with no use today
+is the input to work not yet conceived. Placed in `data_model.md` rather than `principles.md`: the
+eleven invariants are mechanism classes (a control, a test, a check), not stances on what the record is
+for, and the special-category mark, minimization-at-write, and the RGPD basis already live in record
+conventions — the purpose belongs beside the rule it makes testable, one home rather than two.
+
+**The constraint moved from capture to use.** `gmail.md` refusal 1 rewritten: capture is generous under
+the broadened purpose; what stays minimized at write is Article 9 data about a **third party**, not the
+operator's own record of a relationship or an ordinary incidental detail. What used to bind capture
+generally now binds disclosure: `workflows.md#outreach` gains a `disclosure_lint` step before `review`,
+mirroring `social_content`'s `draft_lint` — a mechanical check that every third party a draft names, or
+every fact about one it states, resolves to an entity `link` attached to this task; an uncredited name or
+detail is a finding, not a judgement call. This closes `conformance_suite.md`'s U-34 (opened and closed in
+the same pass): WF-16 updated, `review`'s remaining judgement (facts, voice, scope) stays R, the
+disclosure half turns M.
+
+**Article 21 and Article 9.** Objection: cited from `workflows.md#intake` and revision 34's F6, untouched
+— it is a right the person holds, not a cost the broadened purpose can outweigh, and the existing
+mechanism (an observation on the entity, read at every future intake) already has nothing to do with how
+useful the data would be. Article 9: the special-category bullet in `data_model.md#record-conventions`
+gained an explicit paragraph stating what the broadened purpose does not reach — a third party's health,
+sex life, or religious or political belief sits on a legal basis the operator's own Art. 6(1)(f) interest
+does not extend to, however broad the stated purpose; the operator's own data in those categories is his
+to hold under the same purpose as everything else. No mechanism changed; the line was drawn explicitly
+where before it was implicit in "about the operator or about a person the record concerns."
+
+**The reach problem (decision 63, ruled; decision 64, opened).** Whether `conversation`,
+`conversation_message`, and `session_digest` should be registered types was argued, not assumed:
+fail-closed wins because a type nobody registered is a type no owner claimed, the same default-deny
+decision 41 already states for a write, applied here to a type, and because registering them is strictly
+a widening of what the existing mechanisms already do — it costs nothing to a type already correctly
+shaped. Decision 63 rules they are registered, and that `conversation_message` and `session_digest`
+(which hold turn content) are eligible for the special-category mark on the same basis as any type whose
+rows may carry Article 9 data about a third party incidentally. What is **not** ruled: the owner, merge
+policy, and field-by-field shape — `conversation`'s 51 fields already show the unowned-type drift this
+document warns of elsewhere (turn-tracking fields beside `cpu_cores`, `applecare_price_eur`, `order_date`
+from unrelated writers), and normalizing that is its own write, opened as decision 64. `migration.md`
+gains a row for `conversation`/`conversation_message` (introduced; none existed before) and the
+`session_digest` row is marked registered, with ~70,000 existing rows named as migration drift a
+registration does not retroactively fix — the same shape every other keep-and-backfill row in that
+document already carries, not an argument against registering.
+
+**Point 6: `session_digest`'s "summarize, never transcribe" instruction is the stale thing.** Under
+minimization-at-capture the instruction made sense — a digest is read more widely than the session it
+compresses. Under the broadened purpose a digest's job is to be future work's input, and a paraphrase
+loses exactly the wording, names, and figures that make a past decision reconstructible; the sampled rows
+already show the instruction under-enforced rather than followed. The design states plainly that verbatim
+retention is now correct for a digest's ordinary content, with the registered type's mechanisms —
+special-category mark, admission by grant, reference-never-value on every surface a digest's fields
+reach — carrying third-party protection instead, the same division of labour refusal 1 now states for
+mail.
+
+**No fabricated field-by-field schema.** This pass does not write `conversation`'s, `conversation_message`'s,
+or `session_digest`'s concepts-table row (entity type, key fields, edges, derived reads, projections,
+deliberately-not-a-field) — that is decision 64's write, owned by whoever the operator names accountable,
+and guessing a 51-field type's shape in this pass would be exactly the unowned-type drift the document
+warns against, done to itself.
+
+**Size.** Measured 2026-09-06 with `wc -c` against the branch head (`5a4a0b4`, `feat/foundation-p1-docs`)
+as the predecessor. `data_model.md` 59.1k → 65.7k (+6.6k: the purpose bullet, the special-category
+not-reached paragraph, the reach-problem bullet with its migration-consequence and point-6 paragraphs).
+`gmail.md` 50.0k → 51.7k (+1.8k: refusal 1 rewritten, the *What this adapter refuses* lead-in narrowed).
+`workflows.md` 70.5k → 72.3k (+1.8k: `disclosure_lint` step and its prose in `outreach`). `conformance_suite.md`
+237.2k → 238.4k (+1.3k: WF-16 updated, U-34 added). `conformance.md` 61.0k → 61.8k (+0.8k: decisions 63
+and 64 registered). `migration.md` 126.6k → 127.9k (+1.3k: the `conversation`/`conversation_message` row
+introduced, the `session_digest` row updated). No other foundation document was edited.
+
+**Checks, on this tree.** `check_foundation_vocabulary.py`: 101 Never items, 73 Not-for items (unchanged),
+0 Never hits (three transient hits found while drafting — "running" for `active`, "side effect" for
+`action`, twice — all rephrased before landing), 791 Not-for advisory hits (up from 772; the new hits are
+"category" in "special-category," the Article 9 term of art already judged acceptable at this sense by
+revision 36, and "owner" in the sense `data_model.md` already uses freely elsewhere for a type's
+accountable principal). `check_foundation_anchors.py`: 0 broken links (one transient break, the em-dash in
+revision 46's heading collapsing to a double-hyphen in its anchor rather than the single hyphen typed by
+hand, fixed by computing the slug programmatically rather than guessing it). `test_foundation.py`: 97
+passed, 1 xfailed (the budget marker, unchanged), matching the pre-pass baseline exactly. The branch head
+this pass was taken from is `5a4a0b4` (`feat/foundation-p1-docs`), confirmed unchanged on the remote by
+three direct polls, 60 seconds apart, before the dedicated worktree (`~/ateles-wt-minimization`) was
+created. The remote head moved to `40a114d` (revisions 38 and 49 above, two concurrent passes — the
+event/signal/delivery settlement and the vocabulary-standard invariant) during this pass's work; this pass
+rebased onto it at push time, resolving conflicts in `conformance.md`, `gmail.md`, and this document's own
+header trails and revision list by keeping both sides' sentences and renumbering this pass from its
+original "revision 49" to 50 to avoid colliding with the concurrent pass that had already taken that
+number.
+
+## Revision 51 (2026-09-06): the transport-and-delivery vocabulary — five terms defined, three left as prose, no gap in the data model
+
+The operator asked whether the adapter design needs more terms and entity types for external systems: eleven
+candidate words the transport and delivery layer leans on without a defined home (`mapping`, `capability`,
+`receiver`, `signature`, `idempotency`, `subscription`, `webhook`, `cursor`, `retry`, `poller`, `backoff`),
+and whether `artifact` and `observation` have data-model rows. Each candidate was decided by one test: does a
+rule in the documents turn on the word. Five did and are defined; the rest are prose or already-forbidden
+shapes, and are stated as such rather than given a heading (principle 9).
+
+**Defined.** `mapping` (`vocabulary.md#mapping`) — an adapter's document, the inbound table plus the
+outbound table, together discharging admission obligation 1; `github.md`'s ~120 rows are one. `receiver`
+(`vocabulary.md#receiver`) — the transport a delivery lands on before the adapter reads it, with webhook and
+poller as its two modes and the record's own subscription named as not a third (decision 16 already ruled
+this; the entry gives it one home instead of adapters.md's prose alone). `signature`
+(`vocabulary.md#signature`) — the per-system authenticity check the receiver hands the adapter and only the
+adapter performs, per decision 16. `idempotency key` (`vocabulary.md#idempotency-key`) — the general
+write-keying convention `data_model.md#record-conventions` already stated without naming, now named and
+reconciled with `effect dedup`: the two are the same mechanism at the inbound boundary (the external
+system's delivery id) and the outbound boundary (the action's `dedup_key`, which is what `effect dedup`
+names the rule for), stated so neither entry overlaps the other. `effect dedup`'s own text was tightened to
+point at the key by name rather than restate it.
+
+**Left as prose.** `capability` — checked for the collision shape found twice already this pass (`record`,
+`subject`): none found. `capability`, `capability_denied`, and `capability_unavailable` all use the one
+sense `authority_model.md#grants` and `vocabulary.md#grant` already state — "a capability is one row of a
+grant" is already the `grant` entry's own Not-for line — so a new heading would restate the `grant` entry
+rather than resolve an ambiguity. `cursor` — every occurrence across `gmail.md`, `payments.md`, and
+`telegram.md` names a **forbidden** last-seen cursor table standing in for coverage, never a permitted one;
+added to the `freshness` entry's Not-for line, which already banned the abstract shape (`last_synced_at`),
+so the concrete one has the same home instead of a new heading for a thing the design has no positive use
+for. `retry` and `backoff` — both fully governed by `failure_posture.md` rule 8, cited correctly everywhere
+they appear (`adapters.md`, `gmail.md`, `payments.md`); the numbered rules of that document get no
+individual vocabulary headings elsewhere either (`halt`, `unknown`, and `escalate` are named states and
+verbs, not rule numbers), so giving retry and backoff one would be the first exception and a second home for
+rule 8's content. `subscription` and `webhook` and `poller` are folded into the `receiver` entry as its
+named modes and exclusion rather than three separate headings, per the operator's "prefer fewer."
+
+**`artifact` and `observation`: one already has a row, the other correctly does not.** `artifact` has a full
+Concepts row (`data_model.md#concepts`) — it was never missing; the operator's framing anticipated a gap
+that a re-read of the current tree does not show. `observation` has no row, and this is not the `finding`
+shape (G15, closed by the testability pass, revision 37): `finding` needed a row because other rows
+referenced it by edge with nothing there to reference; nothing references an observation by edge, because
+observation is not a kind of thing held, it is the write mechanism every field of every held thing is read
+through. A paragraph was added to `data_model.md#concepts` stating this directly, alongside why `delivery`
+is also correctly absent — a transient thing that resolves within the handling write to one of the four
+inbound outcomes or to `dropped`, aggregated per window on the adapter's `agent_session`, never a
+per-delivery row, which the `artifact` row's own Deliberately-not-a-field column already forbade ("the
+delivery log of the events that updated it"). Both arguments are stated once, in the document a reader of
+the Concepts table would consult first, rather than left to be reconstructed from `adapters.md` prose each
+time (principle 9).
+
+**Conformance-suite rows.** None moved from U or P to M: the `AD-*` rows this pass touches (`AD-8`, `AD-8a`)
+were already M, closed by decision 16 and the testability pass; the new vocabulary entries name what those
+rows already test, they do not make a previously-unmechanical row mechanical. `AD-32`'s partial R (whether
+an adapter document's eight parts say anything true) is unchanged — a vocabulary entry does not decide
+truth.
+
+**Decisions opened:** none. Decision 16 was already ruled; this pass gives its ruling vocabulary entries and
+closes an apparent gap in `data_model.md`, and rules nothing new. The register in `conformance.md` is
+unchanged.
+
+**Size and checks, on this tree.** `vocabulary.md` +4.6k (the `mapping`, `receiver`, `signature`, and
+`idempotency key` entries; `effect dedup` tightened; `freshness`'s Not-for line extended for the cursor
+table); `data_model.md` +1.9k (the observation/delivery paragraph under Concepts); no other foundation file
+changed. `check_foundation_anchors.py`: 0 broken links. `check_foundation_vocabulary.py`: 101 Never items,
+78 Not-for items, 0 Never hits (one transient hit while drafting — `signature`'s prose used "returned" in
+its ordinary sense and the linker bound it to the `returned` lease-state entry regardless of Never/Not-for
+status; reworded to avoid the word rather than force an unwanted link). `link_vocabulary_terms.py --check`:
+clean after running the linker twice — the second pass caught an incorrect self-adjacent link of "mapping"
+in the intro prose's "Human Inversion mapping pass" (an ordinary-English use, not this entry's sense), fixed
+by adding `mapping` to the script's own `GENERIC` list beside `delivery`, `coverage`, and `record`, so the
+same ambiguity does not silently mislink again on the next run. `test_foundation.py`: 97 passed, 1 xfailed
+(the budget marker, unchanged), matching the pre-pass baseline exactly, re-verified after each rebase below.
+The branch head this pass was taken from is `5a4a0b4` (the rulings-57-59-60-33-34 pass, revision 48),
+confirmed unchanged on the remote by three polls, 60 seconds apart, before the dedicated worktree
+(`~/ateles-wt-adapter-terms`) was created. Two concurrent passes landed before this one pushed. First, the
+remote head moved to `4755298` (the vocabulary-standard pass, revision 49, invariant 12 in
+`principles.md`); this pass rebased onto it, keeping both revision sections and renumbering this one from
+the 49 both passes had drafted concurrently to 50 — `conformance.md`, `principles.md`, and
+`gates_and_workflows.md` (that pass's files) carried no conflicting edit against this pass's three. Second,
+the remote head moved again to `40a114d` (the event/signal/delivery pass, its own revision 49 in
+`vocabulary.md`'s header only — it added no `status.md` section, so the gap in the log is that pass's, not
+this one's); this pass rebased a second time, merging its new `event` entry and this pass's `mapping` entry
+side by side under `adapter` (both belong there and neither displaces the other), keeping that pass's
+`vocabulary.md#event` link inside this pass's `delivery` entry alongside this pass's own
+`vocabulary.md#idempotency-key` link, and adding `event` to `link_vocabulary_terms.py`'s intro-prose
+mention of the `GENERIC` list beside `mapping` (the frozenset itself merged without conflict, since the two
+passes appended at different points in it). Third, the remote head moved again to `e9b6deb` (the
+minimization-recalibration pass, revision 50 in `data_model.md` and this document); this pass rebased a
+third time, resolving one conflict in `data_model.md`'s header-citation trail by keeping both sentences and
+renumbering this pass's own `data_model.md` citation and this section from 50 to 51 to sit after that
+pass's revision 50, and moving this section physically below it in the file so revision number and file
+position agree, matching the log's existing convention. `status.md` itself auto-merged with no conflict
+markers, so the number collision here was caught only by re-reading the resulting headings, not by git; the
+two prior rebases' renumbering notes above were left as originally written; they are correct for what each
+rebase actually renamed, and only this closing note runs across all three. All rebases were re-verified
+against the same four checks before continuing, and once more, on the final tree, before this pass pushed.
+
+## Revision 52 (2026-09-06): role, domain, and scope settled, and the vocabulary checker's own gap closed
+
+The operator asked whether role, domain, and scope are properly distinguished as terms. None of the three
+had a `vocabulary.md` entry despite heavy load-bearing use: `role` 145 uses across the kernel and keyed
+documents, `scope` 100, `domain` 21, at the head this pass measured from (`5a4a0b4`).
+
+**`role`.** Added, beside `step owner`: a name a declaration carries in place of a principal, resolved to
+one when the declaration is acted on (`swarm_roster` per project, and once for the levels above a project).
+Not-for: an agent (the corpus's most frequent confusion — `owner_role` "holds a role, never an agent name");
+a grant or capability (`authority_model.md#initiative-proposal-reprioritization`: "standing to propose is a
+capability and not a role"); the required seat an `ownership_grant` names (that resolves straight to a
+principal; nothing is looked up by name).
+
+**`domain`.** Confirmed load-bearing rather than defined by usage alone: `authority_model.md#the-tuple`
+already names it as the second of the five tuple terms — "the region the authority covers: entity types,
+repositories, a workflow, a queue" — carried by `agent_grant.capabilities` and `ownership_grant`, distinct
+from `ownership`'s own list ("a workflow, domain, queue, or configuration entity", where domain is one kind
+of owned thing among several, not a synonym for any). Checked against the operator's 2026-09-05 12:48 memo
+and decision 17's institutionalization-routing rule (`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`):
+that rule routes by governance class and by `ownership` — which `agent`, `agent_policy`, or `workflow` a
+change reaches — and never by a stored domain field. `domain` is added as a tuple entry; the
+institutionalization rule's Not-for says so explicitly, so a future reader does not define the word a
+second time because it is used near that rule. Two ordinary/technical senses also found in the corpus and
+left untouched, both correctly scoped already: the anti-corruption-layer "domain model" (Evans), a boilerplate
+phrase repeated verbatim across `adapters.md` and the five per-system adapter documents; and an email
+message's authenticated sending domain (SPF/DKIM), in `adapters.md` and `gmail.md`.
+
+**`scope`.** Four senses found in `vocabulary.md` alone, confirmed genuinely distinct rather than one
+relation at different levels: a finding's reach (one-off versus standing, `undetermined_scope` its
+unknown), a `waived` sign-off's reach (one batch's one unsigned required step), a grant's permitted
+operations (the tuple's third term), and the documents' own `## Scope` section heading. Rather than one
+entry straining across four senses, three qualified compounds were added, each at its rule's home:
+`finding scope` (beside `finding`), `waiver scope` (beside `sign-off`), and `permission scope` (beside
+`grant`, replacing the tuple's bare `scope` as the vocabulary's name for that term — the tuple table itself
+keeps its short spelling with a note pointing at the qualified names). Bare `scope` is left as ordinary
+English, the same posture as the eighteen `GENERIC` terms, with a new paragraph under "Scope" in
+`vocabulary.md` stating the four senses and directing a reader to the qualified compound rather than adding
+`scope` itself to `GENERIC` (it has no entry of its own to protect). The `## Scope` heading is untouched.
+
+**Consistency pass.** Grepped every use of the three words across the foundation; five corrections: `domain`
+linked at its first mention in `workflows.md#feature` and in `authority_model.md`'s ownership paragraph;
+`scope` renamed to the qualified `permission scope` in `migration.md`'s citation of the tuple and in
+`adapters.md`'s per-adapter grant paragraph (both were naming the tuple term under its retired bare
+spelling); `finding scope` linked at its first mention in `gates_and_workflows.md`'s standing-axis
+paragraph. No `role` misuse was found — the corpus already distinguished role from agent, grant, and seat
+correctly everywhere it was checked; it had no name for the distinction, not a wrong one. No heading was
+renamed, so no anchor needed restamping and the six published Neotoma pages are unaffected by this pass.
+
+**The checker gap.** The vocabulary lint only ever checked words that already have an entry — it could not
+have surfaced `role`, `domain`, or `scope` on its own, the same blind spot that let `record`, `subject`,
+`capability`, and `event` go uncaught until read by hand. `check_foundation_vocabulary.py` gained
+`undefined_word_candidates()`: word frequency across the same scanned corpus, excluding words a `### `
+heading already defines (with plurals) and a curated `ALLOWLIST_WORDS` of ordinary English, reported above
+`UNDEFINED_WORD_THRESHOLD` (150, chosen empirically — the corpus needed several allowlist passes to cut a
+first draft of over 400 candidates at a lower threshold down to a readable count). Advisory only: printed
+after the Never/Not-for scan, never affecting the exit code, suppressible with `--no-undefined-words`. At
+threshold 150 the real corpus surfaces 25 candidates: `class` (626), `entity` (460), `swarm` (369), `change`
+(366), `field` (362), `reason` (352), `message` (344), `open` (344), `instance` (335), `declaration` (297),
+`event` (283), `principle` (262), `model` (222), `value` (219), `time` (215), `plan` (214), `rail` (212),
+`governance` (189), `resolution` (169), `host` (162), `chat` (157), `window` (156), `merge` (155),
+`calendar` (152), `standing` (150) — a list itself a finding, since `event` is one of the five collisions
+the operator's read already found and neither `merge` (an action-class name, `vocabulary.md#retired-names`)
+nor `standing` (a finding's axis, `vocabulary.md#finding`) has its own entry despite each being defined in
+prose under another heading. `conformance.md`'s mechanical-checks table gained a row for the new report;
+`test_foundation.py` gained seven tests (the candidate list stays under 60; `role` and `domain` do not
+reappear; ordinary function words never appear; the report never changes the exit code; the report reads
+the real corpus; a missing corpus degrades to empty rather than crashing; `--no-undefined-words` suppresses
+the print).
+
+**Decisions.** None opened — this pass settles vocabulary definitions and closes a checker gap; it resolves
+no open design question and finds none newly ambiguous enough to escalate.
+
+**Size.** Measured 2026-09-06 with `wc -c` against revision 48 as the predecessor. `vocabulary.md` +8.5k
+(the `role`, `domain`, `permission scope`, `finding scope`, and `waiver scope` entries, the four-senses
+paragraph, and the linker's first-mention links); `authority_model.md` +0.2k (the tuple note and one
+ownership link); `workflows.md`, `migration.md`, `adapters.md`, `gates_and_workflows.md` each under 0.1k
+(one link or one rename apiece); `conformance.md` +0.6k (the new checker row). `check_foundation_vocabulary.py`
++9.7k (`undefined_word_candidates`, `ALLOWLIST_WORDS`, the CLI flag, and the docstring section);
+`test_foundation.py` +3.0k (seven new tests). No other foundation document was edited.
+
+**Checks, on this tree.** `check_foundation_vocabulary.py`: 101 Never items, 75 Not-for items (two added:
+`permission scope`'s Not-for and `waiver scope`'s), 0 Never hits, 808 Not-for advisory hits (up from 799 at
+the start of this pass — legitimate pre-existing uses of now-advisory words, mainly `permission` and
+`tier`, unchanged in meaning). `check_foundation_anchors.py`: 0 broken links. `link_vocabulary_terms.py
+--check`: clean, after the linker linked 16 first mentions across 13 blocks (`role`, `domain`, and
+`permission scope` reaching entries — `step owner`, `lease`, `operator-facing agent`, `interactive
+session`, `reconciler`, `planner`, `steward`, `separation of duties`, `ownership`, `action_policy` — that
+used the bare words before either had somewhere to point). `test_foundation.py`: 104 passed, 1 xfailed (97
+plus the seven new undefined-word tests; the budget marker unchanged), matching the pre-pass baseline plus
+the added coverage exactly. The branch head this pass was taken from is the rulings pass (revision 48,
+`5a4a0b4`), confirmed unchanged on the remote across three direct polls, 60 seconds apart, before the
+dedicated worktree (`~/ateles-wt-role-scope`) was created; the remote head had moved to `f670dc6` (the
+vocabulary-standard, minimization-recalibration, and transport-and-delivery passes — revisions 49 to 51 —
+landing in sequence) by the time this pass's commit was ready, and this pass rebased onto it, resolving
+conflicts in `vocabulary.md`'s header (both a bare `revision 49` reference, renumbered here to 52 to sit
+after the transport-and-delivery pass) and `status.md`'s revision series (this section renumbered from 49
+to 52 and moved to the end of the file, after revision 51's) by keeping both sides' content in full.
+
+## Revision 55 (2026-09-06): rulings on decisions 61, 62, and 64 — the default ancestor, "must" priority, and the session types' owner
+
+The operator's standing instruction is to proceed on confident recommendations rather than park them, on
+three open decisions whose homes carried a design's own answer: decision 61 (where an intake class's
+default ancestor is declared), decision 62 (whether an instance may bind a class to "must" take the
+highest-standing claimable task), and decision 64 (the owner, reader, and mark-reach of the three session
+types decision 63 registered). Decisions 40 and 55 were explicitly out of scope — both turn on the
+operator's own judgement (40 on session-persistence practice against the minimization rules a registered
+type carries; 55 on the record's peering as a product) — and are unchanged by this pass.
+
+**Decision 61, ruled, in `planning_model.md#whether-an-orphan-is-a-defect-at-all`.** The default ancestor is
+named on the `intake_rule`: the rule that admits a class of task already knows which standing planning
+record that class serves, and declaring the default there is already a governance write reserved under
+decision 18, so it inherits the right authority without a new mechanism. Confirmed against the shape
+`work_model.md` states for `intake_rule` (subject, predicate, title/description, ceiling): a
+`default_ancestor` value is one more field of the same kind, not a new record; the exact field name is left
+to the schema, per `data_model.md#concepts`'s existing division of labour. A class with no default reaches
+`route` unplanned and takes the `decision_or_attestation` finding — the correct, visible failure, not a
+gap this ruling papers over.
+
+**Decision 62, ruled, in `work_model.md#priority-orders-the-claimable-pool-it-does-not-enter-it`.** Yes, per
+class, as `action_policy` data, default "may". The pull invariant makes a claim a 1:1 fitness judgment, so
+"must" cannot be the global default without breaking it; a class where ordering is part of correctness
+(payments in obligation order, named as the illustration) is exactly what per-class policy is for, on the
+same shape `min_tier` (decision 59) and `metered_resources[]` (53b) already carry — design rules the shape,
+operator writes the values. Fail-closed: absent a value, "may". The repeated-pattern observable already
+defined for "may" tightens, for a class marked "must", to a single-instance check: one deviation from the
+highest-standing claimable task of that class is itself the violation, since a "must" class has already had
+the fitness judgment made once, in the policy.
+
+**Decision 64, ruled in part, in `data_model.md#record-conventions`.** The writer of `conversation`,
+`conversation_message`, and `session_digest` is the runner (`vocabulary.md#runner`) — the process holding
+the lease that produces the turns; the reader is any step that declares the type as a read, under the
+ordinary declared-read discipline every type carries; the special-category mark applies at the type, per
+revision 36's F23, so a session type carrying third-party Article 9 content inherits the mark rather than
+needing a per-row flag. **Not ruled, and kept open as decision 64's remainder:** the field-by-field shape —
+which fields each type declares, `conversation`'s 51 fields normalized, and each type's `reducer_config` —
+is a schema-authoring write for the newly-named owner to make, not a design question this document decides
+in the abstract. The ~70,000 existing rows decision 63 already carries as migration drift are unaffected.
+
+**Register.** 61 and 62 moved from open to ruled, and 64 from open to ruled in part (its shape remainder
+kept open), in `conformance.md#the-register-of-open-design-decisions`, 2026-09-06. Open rows after this
+pass: **40**, **55**, and **64** (in part — the field-by-field shape only).
+
+**Size.** Measured 2026-09-06 with `wc -c` against the branch head this pass started from (`7c4e49c`).
+`planning_model.md` 63.7k → 66.6k (+2.8k, decision 61's ruling); `work_model.md` 116.1k → 119.5k (+3.4k,
+decision 62's ruling); `data_model.md` 68.4k → 72.0k (+3.6k, decision 64's ruling and remainder); `conformance.md`
+63.5k → 65.2k (+1.7k, three register rows and the narrative paragraph). No other foundation document was
+edited.
+
+**Checks, on this tree.** `check_foundation_vocabulary.py`: 101 Never items, 80 Not-for items, 0 Never hits
+(one planted by an early draft's use of the retired term "claimant" for a principal, caught and fixed before
+commit), 956 Not-for advisory hits. `check_foundation_anchors.py`: 0 broken links (one planted by an early
+draft miscitation of the "what `link` attaches" section under the wrong document — the section lives in
+`workflows.md`, not the kernel document — caught and fixed before commit). `link_vocabulary_terms.py --check`: clean,
+every linkable first mention already linked — no new vocabulary term was introduced, per invariant 12; this
+pass reused `intake_rule`, `action_policy`, `runner`, and `ownership_grant` rather than naming anything new.
+`test_foundation.py`: 104 passed, 1 xfailed (the budget marker), matching the pre-pass baseline exactly. The
+branch head this pass was taken from is `7c4e49c` (the term-audit pass), confirmed unchanged on the remote
+across three direct polls, 60 seconds apart, before the dedicated worktree (`~/ateles-wt-rulings5`) was
+created.
+## Revision 56 (2026-09-06): self-awareness — reading the kernel as description, the proposal trigger, its shape, and its limit
+
+The operator's 2026-09-06 11:39 memo: how much the swarm should be self-aware of its own operational
+design and capabilities, and whether it could propose updates to the architecture it runs under — which an
+operator would review and approve before they were implemented. Four questions, each settled by extending
+an existing mechanism; none required a new one, and this pass opens no decision. Numbered 56: two passes
+landed on the remote between this pass's dedicated worktree (`~/ateles-wt-self-aware`) being created and
+this commit being ready — the checker-mechanism pass (`check_foundation_vocabulary.py`'s `record` ban
+rebuilt as a structural check, self-titled revision 54 in `vocabulary.md`'s header with no section of its
+own here) and the rulings-61-62-64 pass immediately above (its own section heading missing the number
+entirely — `## Revision (2026-09-06): rulings on decisions 61, 62, and 64…`, a drift this pass did not
+correct, since renumbering someone else's already-landed section without their sign-off risks the same
+cross-reference breakage the 19-and-22 gap in the decision register was left unrepaired to avoid). Both are
+recorded, not fixed, in this pass's own discrepancy note below. This pass renumbered around both rather
+than colliding, the same courtesy revision 52's own history records doing for revision 49.
+
+**Self-reading, as description and not only for review.** Grep across `docs/foundation/`,
+`execution/daemons/apis/foundation.py`, and `execution/daemons/apis/test_foundation.py` found no statement,
+before this pass, that the swarm may read its own architecture as a description of itself: every existing
+reading path — `conformance.md`'s Always-read kernel, `foundation.py`'s `reading_block()`, `skill_runner`'s
+`SWARM_FOUNDATION_CONTRACT`, `check_design_basis()` — is reading-for-review, framed around a specific
+change and the diff in front of it. `conformance.md#the-kernel-read-as-self-description-not-only-for-review`
+states the missing half: a workflow step may declare a read of the kernel documents the way it declares
+`reads_to_enter` for an entity type, resolved before the step opens and never inlined by default. No new
+mechanism — the declared-read pattern `gates_and_workflows.md#declaration-batch-projection` already states
+is reused, not extended in kind. `conformance_suite.md`'s **U** classification (a rule the suite cannot give
+a failing artefact, `conformance_suite.md#the-method-every-rule-gets-its-failing-artefact`) is cited and
+distinguished, not reused: it answers "can this design-time rule be tested", a different question from an
+agent finding, mid-task, that no declared read, reason class, or policy value lets it say what it needs.
+
+**The trigger.** `workflows.md#postmortem`'s entry condition — three classifications recorded on an
+existing entity — gains a fourth: a checkpoint whose reason is `capability_denied` or
+`capability_unavailable` reaching a terminal resolution that does not clear the gap the task was stopped by
+(the operator declines to grant, or declines to make available, and the task is still unable to do what it
+was trying to do). Named explicitly, because the operator's memo asked for the trigger and a vague one
+raises nothing: `capability_denied` (`authority_model.md#grants`) and `capability_unavailable`
+(`failure_posture.md#a-runners-model-or-harness-going-unavailable-mid-step`, decision 60) are the two reason
+classes that mean "the swarm tried to do something and the architecture, as written, does not let it" — a
+reserved-by-default governance write under decision 18 resolves to `NEVER` at the same gate `capability_denied`
+raises on, so an unwritten governance rule is not a third reason class, it is `capability_denied` with the
+grant's answer already decided. An architecture gap discovered during a halt is the same shape as any other
+postmortem finding — an observation that should have existed and did not — and the workflow's existing
+routing at `merge` carries it exactly like any other finding.
+
+**The proposal's shape.** A finding that carries a proposed architecture change is two acts, not one: the
+proposal, and the implementation. The proposal is `merge`'s existing routing of a decision-or-attestation
+gap to decision 17's institutionalization task, through intake, never a direct write — decision 52's shape,
+proposing as a grant capability distinct from taking the action, what stops or proceeds being the task and
+its checkpoint. What the operator "approves" is that checkpoint; approving it is not the change. The write
+itself is a governance write, reserved by default under decision 18 and, where granted, made only by the
+engine on a permit under decision 56's sole-writer grant. `planning`'s `amend` step
+(`workflows.md#planning`) is named as the closest existing shape — survey, judge, write only through the
+record's own primitives — applied reflexively to the architecture the swarm runs under rather than to a
+plan record; it is not literally reused as an `amend_<level>` action, since `docs/foundation/` carries no
+such class of its own, and no new workflow is declared, since decision 17 already routes the
+institutionalization task through intake.
+
+**The limit.** Revision 21 already states bootstrapping as a limitation, not a mechanism: a workflow too
+broken to open a step cannot repair itself. An architecture gap that prevents the proposal itself from
+being expressed — no `intake_rule` classification fires, or `postmortem` cannot be entered for the shape of
+gap found — is the same class of limitation one level up, and its stated escape is the announcement path of
+last resort (`gates_and_workflows.md#work-is-reviewed-on-the-record-and-a-channel-carries-only-what-awaits-
+the-operator-or-cannot-wait`), a notification and never a write. This is disclosed as a limitation because
+it is one: nothing in this pass closes the recursion, the same honesty revision 21 already applied to a
+workflow that cannot open its own first step.
+
+**Decisions.** None opened. Each of the four questions resolves by naming which existing mechanism already
+answers it — the declared-read pattern, the two existing reason classes, decisions 17/18/52/56 in
+combination, and revision 21's stated limitation — rather than by a value the operator has to choose
+between options. Where a genuine open question would sit — whether a `capability_denied`/`capability_unavailable`
+pair should itself carry a distinguishing flag for "this is architectural, not provisioning" before it
+reaches `postmortem` — the design leans toward reading it at `investigate` (the step already judges what
+was missing) rather than adding a fifth reason class, and that reading is not forced into a ruling here.
+
+**Size.** Measured 2026-09-06 with `wc -c` against `e6a7e92` (the rulings-61-62-64 pass immediately above)
+as the predecessor — the true head this pass rebased onto, not revision 52, since three passes (the
+checker-mechanism pass, the adversarial term audit, and the rulings-61-62-64 pass) landed on the remote
+between this pass starting and finishing (see the discrepancy noted below). `conformance.md` +2.9k (the
+self-description subsection, under *Always read*; the register-table changes above this section are the
+rulings-61-62-64 pass's own, not this pass's); `workflows.md` +7.2k (the extended `postmortem` entry
+condition, the capability-gap paragraph, the proposal-shape paragraph, and the limitation paragraph, all
+within `## postmortem` — the rulings-61-62-64 pass did not touch this file). No other foundation document
+was edited by this pass.
+
+**A register discrepancy found, not fixed.** Three passes now cite revision numbers with real content and
+no properly numbered `## Revision NN` section of their own in this file: 53 (the adversarial term
+audit — the `governance write` entry, ten Not-for/Never fixes, cited only in `vocabulary.md`'s header), 54
+(the checker-mechanism pass — the `record` ban rebuilt as a structural check, 28 further violations fixed,
+cited only in `vocabulary.md`'s header), and the rulings-61-62-64 pass immediately above, whose own section
+heading reads `## Revision (2026-09-06): …` with the number itself never filled in. This pass's own number,
+56, assumes the rulings-61-62-64 pass is 55 by position, though its heading never says so — a gap this pass
+did not correct in place, since editing another pass's already-committed heading without their sign-off
+risks the same cross-reference breakage the register's own 19-and-22 gap was left unrepaired to avoid.
+Separately, `conformance.md#the-register-of-open-design-decisions`'s closing prose ("the next number is
+63") is stale against its own table, which already carries decisions 63 and 64 — the true next-free
+decision number is 65. None of these gaps is this pass's to close: the missing/blank revision numbers are
+a status.md backfill on whoever touches this series next, and the register's closing-prose staleness is a
+one-line correction the same author should make while they are there. All are recorded here so a future pass
+does not rediscover them from a cold read.
+
+**Checks, on this tree.** `check_foundation_vocabulary.py`, on the final rebased head: 104 Never items, 80
+Not-for items (both from the checker-mechanism pass's own additions, unchanged by this one), 0 Never hits
+(two introduced by an early draft of this pass's own prose, before the rebase — "lens" for a review step,
+"stuck" for a task whose blocking condition persists — caught by the checker and rephrased before the
+first commit; see `vocabulary.md#review-step` and `vocabulary.md#lapsed`), 963 Not-for advisory hits (the
+rebase-onto passes' own count plus this pass's few incidental hits; not a claim that any pre-existing
+advisory hit was touched).
+`check_foundation_anchors.py`: 0 broken links on the final commit. An intermediate draft of this pass
+briefly broke 4 links — `conformance_suite.md`, `gates_and_workflows.md`, and `vocabulary.md` (twice), all
+naming `conformance.md`'s "Read when these paths changed" heading — by dropping that heading's own `##`
+line while splicing the new self-description subsection in ahead of it; caught by
+`test_each_keyed_path_selects_its_document`'s and the GitHub- and adapter-keyed reading tests' failures
+(the heading's removal silently changed what `## Read when these paths changed` parsed as, so every path
+keyed under it stopped resolving), and by the anchor checker itself, before this commit; the heading was
+restored in place and both checks are clean on what ships. `link_vocabulary_terms.py --check`: every
+linkable first mention is linked. `test_foundation.py`: 110 passed, 1 xfailed (the reading-budget marker,
+unchanged), confirming this pass rebased onto both intervening passes cleanly, added no test, and broke
+none once the heading was restored.
+
+## Revision 57 (2026-09-06): the close-out pass — decision 64's remainder given a home in `migration.md`, not left in the register
+
+Decision 64's shape remainder — kept open by the previous pass — is not an architecture decision: the
+owner, reader, and mark-reach questions decision 64 could rule are the register's business; naming
+`conversation`'s fields, normalizing them, and writing a `reducer_config` per type is schema authoring for
+the owner that ruling just named, and the register is not where that gets done. This pass closes the row
+rather than answering the question in it.
+
+**`conformance.md`, register row 64.** Moved from **ruled in part** to **ruled**. The ruling text now states
+that the field-by-field shape is schema authoring for the runner, not a register question, and points at
+its new home: `migration.md#the-work-model`, specifically the new subsection *Session types: the
+field-by-field shape decision 64 left to the schema*. No new decision was opened.
+
+This pass was rebased onto two concurrent passes that landed on the remote first — the self-awareness pass
+(revision 55) and the peering pass (revision 56), which ruled decision 55 and opened decision 65 in the same
+file. The rebase kept both sides: row 64's ruling (this pass) and row 65 (the peering pass) both stand in
+the register, and the top revision-history line and closing narrative paragraph were extended, not
+overwritten, to record the peering pass's ruling and opening in sequence rather than re-narrate it. Open
+rows after this pass and its rebase: **40** and **65** only — 55 is no longer open, ruled by the peering
+pass; 64 is closed by this one.
+
+**`migration.md`, the `conversation`/`conversation_message` row.** Repointed from "decision 64, still open,
+is the owner and the field-by-field normalization" to decision 64's actual ruled content (writer, reader,
+mark-reach) and a pointer at the new subsection for the remainder, rather than continuing to cite an open
+decision that no longer exists.
+
+**`migration.md`, new subsection.** *Session types: the field-by-field shape decision 64 left to the
+schema*, placed at the end of *The work model* table, states: what must be authored (one schema row per
+type — `conversation`, `conversation_message`, `session_digest` — with fields and a `reducer_config` each);
+who owns it (the runner, decision 64's ruled writer, under the same `ownership_grant` principle every other
+registration in the table observes); what constrains it (the special-category mark at the type per revision
+36's F23, and decision 41's default-deny admission applied to an undeclared field the same way it applies to
+an undeclared write); and what already exists to carry forward — the ~10,800 `conversation`, ~59,300
+`conversation_message`, and ~369 `session_digest` rows already recorded as migration drift by the rows
+above, cited rather than restated. No field is named and no `reducer_config` is written by this pass: doing
+either here would repeat the mistake decision 64 was opened to avoid, moved from the design document to the
+register.
+
+**`conformance_suite.md`, checked for a pending row.** No row in the matrix cites decision 64 by number
+(grep confirms). WM-38 is the suite's only "P" row citing an open decision, and it cites decision 34
+(the step-path mechanism question), unrelated to 64. No row changed state in `conformance_suite.md`.
+
+**Register.** 64 moved from ruled in part to ruled, in
+`conformance.md#the-register-of-open-design-decisions`, 2026-09-06. Open rows after this pass, rebased onto
+the peering pass: **40** and **65**.
+
+**Size.** Measured 2026-09-06 with `wc -c` on this pass's own edit, before the rebase picked up the
+self-awareness and peering passes' unrelated growth to the same files. Against the branch head this pass
+started from (`e6a7e92`): `conformance.md` 65,166 → 66,840 (+1,674 bytes: three register-adjacent edits —
+the row, the top revision-history line, and the narrative paragraph's closing sentence). `migration.md`
+127,940 → 131,643 (+3,703 bytes: the repointed `conversation`/`conversation_message` row, the top
+revision-history line, and the new subsection). No other foundation document was edited by this pass. The
+rebase onto `9c6295a` (peering) and `19c1095` (self-awareness) then added those passes' own edits to
+`conformance.md`, `adapters.md`, `gates_and_workflows.md`, `vocabulary.md`, `workflows.md`, and `status.md`
+on top, each already sized in its own revision entry above.
+
+**Checks, on this tree.** Run twice — once on this pass's own head, once again on the rebased head after
+`git rebase origin/feat/foundation-p1-docs` picked up `19c1095` and `9c6295a`. Both runs:
+`check_foundation_vocabulary.py`: 104 Never items, 80 Not-for items, 0 Never hits (971 Not-for advisory hits
+on the rebased head, up from 960 on this pass's own head — the difference is the peering and self-awareness
+passes' own text, not this pass's). `check_foundation_anchors.py`: 0 broken links.
+`link_vocabulary_terms.py --check`: clean — no new vocabulary term was introduced by this pass.
+`test_foundation.py`: 110 passed, 1 xfailed (the budget marker) on both heads, matching the pre-pass
+baseline exactly. The branch head this pass was taken from is `e6a7e92` ("docs(foundation): rulings on
+decisions 61, 62, and 64"), confirmed unchanged on the remote across a direct poll before the dedicated
+worktree (`~/ateles-wt-close64`) was created; the rebased head this pass's commit (`1c57f5d`) landed on is
+`9c6295a` (peering pass), the remote tip at push time.
+
+## Revision 58 (2026-09-06): register-reconciliation pass — a mislabeled row and a stale enumeration, bookkeeping only
+
+PR #745 had drifted under roughly a dozen concurrent writers. This pass reconciled the decisions register
+(`conformance.md#the-register-of-open-design-decisions`) row by row against the corpus: every decision
+number 1 to 65 was grepped across every foundation document and checked against the register's table, and
+every row a concurrent pass's report had flagged as possibly stale (53, 54, 61, 62, 63, 64) was spot-checked
+against its pointer's actual argued text. All six carry real rulings with real argument; none needed a
+substance correction. No decision was found argued in a document with no register row — the 13/14 failure
+this register exists to prevent did not recur.
+
+Two genuine defects were found and fixed, both mechanical.
+
+**`conformance.md`, register row 40.** Labeled **ruled**, but the row's own text states a live, unresolved
+question — whether a sign-off gains a `REFERS_TO` edge to the session that produced it — explicitly
+"Proposed, not ruled" in its own sentence, and the row's closing clause pointed at "F27 below," a finding
+that does not exist anywhere in `gates_and_workflows.md` (confirmed by grep: no `F`-numbered item was ever
+written in that document; the only F27 in the corpus is an unrelated proposal-numbering label in this file,
+revision 36, for what became decision 55). Corrected: the label to **ruled in part**, the row marked with
+which half is ruled and which is open, and the dangling pointer repointed at the actual paragraph in
+`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`
+beginning "A sign-off may carry a reference to the session that produced it." This pass's closing narrative
+paragraph and top revision-history line were extended to record the correction and restate the open set,
+not rewritten out from under the close-out pass's own account.
+
+**`conformance_suite.md`, Purpose section.** The enumeration "the open decisions (31 to 36 and 42 to 56)"
+was stale against the register — a programmatic check of every decision 31–56 against the register's status
+column found only 55 still open in that range at the time this document was last revised, and the peering
+and close-out passes have since ruled 55 and 64 as well. Corrected to state the enumeration is as of this
+document's own last revision, with a pointer to the register for the current state, rather than substituting
+a new list — which test-matrix row (WM-38, WF-24, PM-12) changes classification now that 33, 34, and 57 are
+ruled is a test-design judgment for `conformance_suite.md`'s own maintainers, not a numbering fact this pass
+decides. No individual matrix row was changed.
+
+**Two blank `## Revision NN` headings in this file were filled in**, matching what three independent
+passes (this one, the peering pass, and the close-out pass) all assumed by position: the rulings-61-62-64
+pass's heading as **Revision 55**, and the close-out pass's heading as **Revision 57** (self-awareness
+and peering already carry 55 and 56 in their own header prose in `conformance.md`, which this pass left
+as the close-out pass wrote it — self-awareness 55, peering 56 — since that is the numbering all three
+concurrent passes converged on independently). The 53/54 backfill — giving the adversarial term audit and
+the checker-mechanism pass their own `## Revision NN` sections here, beyond the inline citations in
+`vocabulary.md`'s header — remains open; that content is for those passes' own authors to supply, and
+nothing here invents it.
+
+**The true open set at this pass's final head** (`295b025`, the close-out pass's commit, confirmed
+unchanged on the remote before this pass's own commit): **40** (in part — the sign-off session-reference
+question only; its close-recording rule is otherwise ruled) and **65** (what surfaces an inert
+governance-type sync write, opened by the peering pass, unruled). 19 and 22 remain unassigned gaps; 20 and
+21 remain withdrawn, renumbered to 27/28. No other row among 1–65 is open, ruled in part, withdrawn, or
+unassigned.
+
+**Checks, on the final tree.** `check_foundation_anchors.py`: 0 broken links. `check_foundation_vocabulary.py
+--quiet-advisory`: 104 Never items, 80 Not-for items, 0 Never hits, unchanged from the close-out pass's own
+head (this pass's edits touched no prose the vocabulary checker scans for bans). `link_vocabulary_terms.py
+--check`: every linkable first mention linked — no new term introduced. `test_foundation.py`: 110 passed, 1
+xfailed (the reading-budget marker, unchanged), matching the pre-pass baseline exactly. Started from `19c1095`
+(three direct polls, 60 seconds apart, confirmed unchanged before the dedicated worktree,
+`~/ateles-wt-register`, was created); the peering pass (`9c6295a`) and the close-out pass (`295b025`) both
+landed on the remote while this pass was in progress and were rebased onto, in turn, each time re-verifying
+row-by-row against the newly landed content rather than assuming the earlier read still held.
+
+## Revision 59 (2026-09-06): decision 65 ruled — the engine's existing write-back read, extended by one field
+
+Decision 65, opened by the peering pass (revision 56): what surfaces an inert governance-type sync write,
+now that decision 55 makes a peer's replicated `agent_policy`/`workflow`/`agent`/`intake_rule`/… land as a
+recorded observation that never takes effect (decisions 41/56's admission). The opening pass found neither
+a `checkpoint` (subject must be a task or an action; neither exists here) nor a `finding` (tied to a
+batch's judging moment; none may occur) fit without stretching, and leaned toward extending the engine's
+existing write-back read rather than inventing a carrier.
+
+**Ruled: extend the read; invent no carrier.** The engine already reads back what it wrote to a governance
+type (principle 2); this ruling has it check one field further on the same read — whether a newer,
+unreconciled `observation_source: "sync"` row now sits on the type it just confirmed — and record the
+finding in the same shape `adapters.md#the-admission-contract` already gives every delivery: a disposition
+with a reason, not receipt alone. The precedent cited is that adapter disposition rule, not a new one.
+
+1. **Where written.** Aggregated per window on the engine's own `agent_session`, beside the window
+   observation `adapters.md#what-the-adapter-does-with-every-event` already has a daemon write — not a
+   per-observation write on the synced entity, which would be the maintained state the design counsels
+   against on a replication stream.
+2. **What reason.** A new class, `no_credential` — distinct from `capability_denied`, which presumes a
+   principal whose grant was checked and refused; a synced write names no principal's credential to check
+   at all. Named on the same basis decision 60 gave `capability_unavailable` its own class rather than
+   folding it into `capability_denied`.
+3. **Who reads it, when.** Whoever reads the engine's `agent_session` window observations, on the same
+   cadence as any other window's dispositions — readable when looked at, not a queue item owed a clearing.
+   Stated as a cost taken deliberately: a rare inert governance sync could sit unread for a window or
+   several. What would make it loud is the same shape a drop already has — a per-window count crossing a
+   ceiling, announced off-record.
+
+**Where it landed.** `gates_and_workflows.md#a-synced-observation-on-a-governance-type-is-recorded-and-
+never-takes-effect`, appended directly after the opening pass's prose (the ruling, its reasoning, cost, and
+reopening condition, matching the format of the adjacent decision-56 ruling in the same file).
+`conformance.md`, register row 65: moved from **open** to **ruled**, its anchor repointed to the section
+above rather than the opening subsection heading. No other foundation document was edited.
+
+**Decisions.** One ruled (65); none opened. No new term: `no_credential` is a value of the existing reason
+class vocabulary, not a new type or field, and `dropped` itself is deliberately not reused as the
+disposition name here since `vocabulary.md#dropped` scopes it to an adapter's delivery — this ruling
+borrows that shape (per-window, counted, reason-bearing) without renaming or widening the term (principle 6,
+invariant 12). No new mechanism: one read, already the engine's, given one more field to check.
+
+**Register state at this head, before writing.** Re-read at push time per the standing rule, twice: once
+against this worktree's own starting head (`295b025`, the close-out pass), where the open rows were **40**
+and **65**; and again after rebasing onto the register-reconciliation pass (revision 58 above), which landed
+on the remote first and corrected row 40's label from **ruled** to **ruled in part** — a fix to a stale
+label and a dangling pointer, not a change to what row 40's open half asks. That correction is preserved
+here, not re-narrated: this pass touches only row 65. Open rows after this pass: **40** (in part, per
+revision 58's correction) only.
+
+**Checks, on this tree.** `check_foundation_vocabulary.py`: 0 Never hits (one introduced by an early draft's
+use of "aggregation shape" — a noun form `vocabulary.md#batch` retires in favor of attach/detach — rephrased
+to "per-window shape" before this commit). `check_foundation_anchors.py`: 0 broken links.
+`link_vocabulary_terms.py --check`: clean, no new term introduced.
+`pytest execution/daemons/apis/test_foundation.py -v`: 110 passed, 1 xfailed (the budget marker), matching
+the pre-pass baseline exactly. Run twice — once on this pass's own head (`295b025`), once again on the
+rebased head after `git rebase origin/feat/foundation-p1-docs` picked up the register-reconciliation pass's
+commit. The branch head this pass was taken from is `295b025` ("docs(foundation): close decision 64's
+remainder into migration.md"), confirmed unchanged on the remote across two direct polls, 60 seconds apart,
+before the dedicated worktree (`~/ateles-wt-decision65`) was created; the rebased head this pass's commit
+landed on is the register-reconciliation pass's tip, the remote head at push time.
+
+## Revision 60 (2026-09-06): decision 40 ruled in full — the last open row in the register
+
+Numbered 60: this pass's dedicated worktree (`~/ateles-wt-decision40`) was created against `e6a7e92` (the
+rulings-61-62-64 pass), and five more passes landed on the remote before this commit — self-awareness
+(revision 55), peering (revision 56), the close-out pass (revision 57), the register-reconciliation pass
+(revision 58, which fixed a stale label and pointer on decision 40's own row without ruling its open half),
+and the decision-65 pass immediately above (revision 59, which left decision 40 "in part" untouched — its
+own brief was row 65 only). This pass's own number, 60, is the next free position; no further collision is
+introduced by it. The reconciliation pass's account of decision 40 (row **ruled in part**, its F27-pointer
+bug fixed) is superseded, not corrected further, by this pass's full ruling below — the "in part" status
+and the open half it named are exactly what this pass closes. **With decision 65 ruled by the pass
+immediately above and decision 40 ruled here, the register carries zero open rows** — every decision 1
+through 65 is ruled, ruled in part with a stated remainder, or withdrawn/unassigned per the existing gaps
+(19, 20, 21, 22). The 53/54 backfill the reconciliation pass left open — the adversarial term audit and the
+checker-mechanism pass still have no `## Revision NN` section of their own here, only inline citations in
+`vocabulary.md`'s header — is unchanged by this pass and remains for those passes' own authors to supply.
+
+The operator approved both halves of decision 40's remaining question on PR #745: narrow the ruling's
+wording to what it actually governs, and settle whether a sign-off may point at the session that produced
+it. Revision 46's session-reconciliation pass had already established the reading the narrowing makes
+explicit — that decision 40 governs a sign-off's shape at close, and that `conversation`,
+`conversation_message`, and `session_digest` hold turn-level content and are, since decision 63, registered
+types (`data_model.md#record-conventions`) — but had left that reading implicit in a restated register row
+rather than rewritten into the ruling's own text in `gates_and_workflows.md`.
+
+**The ruling's text is corrected, not weakened.** The sentence "the turns of the session, the drafts it
+discarded, the paths it considered are not an entity the design has" was true only of `agent_session` and
+was written as if true of the session generally; decision 63 made the general reading false, so the
+sentence is replaced with one that says what remains true — a sign-off does not itself carry the step's
+reasoning, and reasoning is not re-derived from a sign-off's fields — without touching the part revision 46
+found already correct: a sign-off is not a transcript, and `agent_session` gains no transcript field.
+
+**The edge revision 46 proposed is ruled: `REFERS_TO` → `session_digest`, required where the signer is an
+agent.** Tested against the identity rule in `adapters.md#what-the-adapter-does-with-every-event` — "this is
+also the path by which a human principal signs: an agent step owner writes its sign-off to the record
+directly and needs no event, while a principal whose only interface is the host signs through the host" —
+a required edge on every sign-off would either fabricate a session for a human-through-adapter signer who
+ran none, or block a class of sign-off the design otherwise permits without qualification. The ruling
+settles on **permitted for every signer, required where the signer is an agent and a digest exists for its
+session**: an agent sign-off has no session-free case, so an agent-authored sign-off with a digest and no
+edge is the same incomplete-reference defect `artifact_refs[]` already refuses. **The target is
+`session_digest`**, not `agent_session` (no content to point past) and not the raw `conversation` /
+`conversation_message` turn store (the wrong grain for a reference resolved as of a time) — `session_digest`
+is the type decision 40's own text already named as the licensed path for a session whose content is itself
+work input.
+
+**Consequences checked.** `data_model.md`: the `sign_off` row and the `REFERS_TO` row both gain the new
+target; a note beside decision 64's open remainder states that the edge's existence is settled ahead of
+`session_digest`'s own field-by-field shape, which stays open. `migration.md`: the `session_digest` row
+gains the zero-existing-edges drift note — no sign-off references a digest today, because neither side wrote
+the other before this ruling, carried the same way the row's mark-and-owner gap already is. `conformance_suite.md`:
+GW-52 needed no change (it already stated "reasoning is not written," which the narrowing does not
+disturb); DM-28 is added for the new testable rule — an agent-authored sign-off with a `session_digest` for
+its session and no edge to it is the failing artefact — since this is a rule the suite did not previously
+state at all, not a row moving between U/P and M.
+
+**The essay claim.** The operator's *Human Inversion* series, part 4, claims the reasoning chain is
+available months later. Under this ruling that claim is substantially true and now more precisely so than
+revision 46 left it: the reasoning is on the record (`session_digest`, reachable) and, with the edge,
+reachable *from the work* — a reader can walk from a sign-off to the session that produced it, not only
+find the session separately. What remains true of the claim and what does not: **reasoning is retrievable;
+it is not *re-derived* from a sign-off** — a sign-off's own fields are still only a verdict, findings, and
+references, never a transcript, so "available months later" means walkable to the digest, not present on
+the sign-off itself. Revision 44's contradiction flag is resolved by this ruling, not merely narrowed
+further.
+
+**Register.** Decision 40 moved from ruled in part to fully ruled in
+`conformance.md#the-register-of-open-design-decisions`, 2026-09-06 — the second of the two rows revision 48
+had left as the operator's own judgement (55, the record's peering as a product, was ruled by the peering
+pass). Rebased onto the close-out pass, which closed 64 in full, and the decision-65 pass immediately
+above, which closed the register's last other row. **Open rows after this pass and its rebase: zero** —
+every decision 1 through 65 is now ruled, ruled in part with a stated remainder, or withdrawn/unassigned.
+
+**Size.** This pass's own edits, measured with `wc -c` against the worktree's starting head (`e6a7e92`):
+`gates_and_workflows.md` 116.1k → 119.4k (+3.3k, the narrowed ruling and the settled edge); `data_model.md`
+72.0k → 73.3k (+1.4k, the `sign_off` and `REFERS_TO` rows, and the decision-64 note); `conformance.md`
+65.2k → 65.7k (+0.5k, the register row rewrite); `migration.md` 127.9k → 128.7k (+0.7k, the drift note);
+`conformance_suite.md` 238.5k → 239.6k (+1.1k, DM-28). This pass rebased five times more as further passes
+landed — onto `9c6295a` (self-awareness and peering), `295b025` (the close-out pass), `2049d7a` (the
+register-reconciliation pass), and `88e3521` (the decision-65 pass and its own merge of concurrent writes)
+— each requiring the `data_model.md` decision-64 note, the `conformance.md` register row, or both, to be
+updated again for the same underlying reason: another pass had ruled more of decision 64, decision 65, or
+decision 40's own row in the interval. Measured a final time against `88e3521`, the true base this pass's
+commit landed on: `gates_and_workflows.md` 130.7k → 134.0k; `data_model.md` 72.0k → 73.5k; `conformance.md`
+74.6k → 74.4k (net **smaller** — this pass's tighter final ruling replaced the reconciliation pass's longer
+"ruled in part, F27 pointer fixed" text, which does not survive since this pass fully rules what that text
+left open); `migration.md` 131.6k → 132.4k; `conformance_suite.md` 238.8k → 239.9k. No other foundation
+document was edited by this pass.
+
+**Checks, on this tree.** `check_foundation_vocabulary.py --quiet-advisory`, on the final rebased head: 104
+Never items, 80 Not-for items, 0 Never hits — no new vocabulary term named, per invariant 12; this pass
+reused `sign-off`, `session_digest`, `agent_session`, and `REFERS_TO`, all already-linked terms.
+`check_foundation_anchors.py`: 0 broken links. `link_vocabulary_terms.py --check`: clean, every linkable
+first mention already linked. `pytest execution/daemons/apis/test_foundation.py -v`: 110 passed, 1 xfailed
+(the budget marker), confirming this pass rebased onto all five intervening passes cleanly and broke
+nothing, including through the multi-conflict merges in `migration.md` (the intro trailer and the
+`session_digest`/`conversation` rows) and in `status.md`, `conformance.md`, and `gates_and_workflows.md`
+(each touched by three or more concurrent passes across this pass's several rebases). The branch head this
+pass's worktree was taken from is `e6a7e92` (the rulings-61-62-64 pass), confirmed unchanged on the remote
+across a single direct poll before the dedicated worktree (`~/ateles-wt-decision40`) was created; the final
+rebased head this pass's commit landed on is `88e3521` (the decision-65 pass's merge), the remote tip at
+push time.
+
+## Reading-list budget and keying, as of revision 6 (2026-09-04)
+
+**Read this section as a dated record, not as a standing gap.** Every table below measures the canonical
+documents against `foundation.py`'s `MAX_DOC_CHARS = 12_000` and `MAX_BLOCK_CHARS = 40_000` on the premise
+that those caps were theirs to meet. Decision 66 (2026-09-06,
+`conformance.md#what-a-review-reads-is-a-projection-of-these-documents-not-a-shortened-copy-of-them`) ruled
+that premise wrong: the caps constrain the generated reading projection, and the canonical documents are
+bounded by nothing mechanical. The figures stay because they are true measurements honestly dated; the
+"over the per-document cap" column is retained as it was written and now records a comparison against a cap
+that does not apply to the thing measured. The measurement that matters is the projection's, and revision
+64 below records it: `render_reading_projection.py` landed, and every projected document is under
+`MAX_DOC_CHARS` with every representative block under `MAX_BLOCK_CHARS`.
+
+Measured with `wc -c` on this branch; the caps are `foundation.py`'s `MAX_DOC_CHARS = 12_000` and
+`MAX_BLOCK_CHARS = 40_000`.
+
+| Document | Characters | Reading-list role on this revision | Over the per-document cap |
+|---|---|---|---|
+| `principles.md` | 10.5k | kernel | no |
+| `work_model.md` | 12.1k | kernel | yes, by 0.1k |
+| `gates_and_workflows.md` | 13.2k | kernel | yes |
+| `authority_model.md` | 11.6k | keyed | no |
+| `failure_posture.md` | 10.4k | keyed | no |
+| `conformance.md` | 12.2k | keyed (itself) | yes, by 0.2k |
+| `vocabulary.md` | 51.6k | keyed | yes |
+| `data_model.md` | 12.3k | keyed (new) | yes, by 0.3k |
+| `workflows.md` | 36.1k | **unkeyed** since 641744f | — |
+| `scenarios.md` | 10.4k | **unkeyed** since 641744f | — |
+| `scenarios_extended.md` | 11.2k | **unkeyed** since 641744f (split from `scenarios.md` there) | — |
+
+Revision 7 (2026-09-04) re-measured only the documents it touched, with `wc -c` on this branch:
+
+| Document | Characters | Reading-list role on revision 7 | Over the per-document cap |
+|---|---|---|---|
+| `adapters.md` | 24.2k | keyed (new; also keyed to itself) | yes |
+| `gates_and_workflows.md` | 14.1k | kernel | yes |
+| `work_model.md` | 12.1k | kernel | yes, by 0.1k |
+| `vocabulary.md` | 54.5k | keyed | yes |
+| `data_model.md` | 13.8k | keyed | yes |
+| `conformance.md` | 13.0k | keyed (itself) | yes |
+
+Revision 8 (2026-09-04) re-measured only the documents it touched, with `wc -c` on this branch:
+
+| Document | Characters | Reading-list role on revision 8 | Over the per-document cap |
+|---|---|---|---|
+| `data_model.md` | 26.0k | keyed | yes |
+| `adapters.md` | 26.7k | keyed (also keyed to itself) | yes |
+| `gates_and_workflows.md` | 15.7k | kernel | yes |
+| `vocabulary.md` | 55.6k | keyed | yes |
+| `conformance.md` | 14.8k | keyed (itself) | yes |
+| `authority_model.md` | 14.2k | keyed | yes |
+| `failure_posture.md` | 11.9k | keyed | no |
+| `principles.md` | 11.1k | kernel | no |
+| `workflows.md` | 36.5k | **unkeyed** | — |
+
+Revision 12 (2026-09-04) re-measured every document it touched, with `wc -c` on this branch:
+
+| Document | Characters | Reading-list role on revision 12 | Over the per-document cap |
+|---|---|---|---|
+| `gates_and_workflows.md` | 28.4k | kernel | yes |
+| `work_model.md` | 16.1k | kernel | yes |
+| `principles.md` | 13.4k | kernel | yes, by 1.4k |
+| `vocabulary.md` | 71.2k | keyed | yes |
+| `adapters.md` | 30.7k | keyed (also keyed to itself) | yes |
+| `data_model.md` | 30.5k | keyed | yes |
+| `failure_posture.md` | 20.4k | keyed | yes |
+| `authority_model.md` | 18.5k | keyed | yes |
+| `workflows.md` | 39.3k | **unkeyed** | — |
+
+Revision 13 (2026-09-04) added `github.md` and moved the code host's tables into it:
+
+| Document | Characters | Reading-list role on revision 13 | Over the per-document cap |
+|---|---|---|---|
+| `github.md` | 45.9k | keyed (new; also keyed to itself) | yes |
+| `adapters.md` | 25.1k | keyed (also keyed to itself) | yes; **down from 30.7k**, the GitHub tables having moved |
+| `conformance.md` | 15.1k | keyed (itself) | yes |
+
+The kernel is unchanged by revision 13: `github.md` is keyed, not kernel, so the 57.9k block below is
+neither improved nor worsened by it. `adapters.md` shrank by 5.6k, which is the only budget movement.
+
+**The kernel is 57.9k of the 40k block after revision 12 — over it by 17.9k, and over for the first
+time.** `gates_and_workflows.md` grew most, carrying the step read-declaration, the findings-bind and
+terminal-verdict rules, the waiver scope, and the two action classes. Revision 12 wrote the twelve
+rulings and deliberately did not trim, on the same instruction that governed revisions 6 through 9 —
+content settles before budget, and the budget pass is the operator's, run last and separately. What
+changes with this revision is that the budget decision is no longer deferrable on the kernel: it was
+under the block at every earlier revision and is not now, so the pass that follows is a cut, a split, or
+an amendment of the caps rather than a tidying.
+
+**On revision 20 the kernel is 82.3k** (`principles.md` 13.5k, `work_model.md` 23.6k,
+`gates_and_workflows.md` 45.1k), measured 2026-09-05 with `wc -c` on this branch. It was 67.9k on
+revision 17, 74.3k on revision 18, and 79.1k on revision 19. The growth since revision 12 is
+`gates_and_workflows.md`, which now also carries the hydration phase (revision 14), the standing-finding
+rule (revision 16), the boundary statement and the checkpoint's two-part reading (revision 17), and the
+`applies_when` condition (revision 19); `work_model.md`, which carries batch formation (revision 18); and
+the four diagrams of revision 20, which add 3.1k across the two kernel documents that carry three of them.
+The budget decision above is unchanged and still the operator's;
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure that
+records it.
+
+**On revision 30 the kernel is 134.5k** (`principles.md` 13.5k, `work_model.md` 69.2k,
+`gates_and_workflows.md` 51.7k), measured 2026-09-06 on this branch as the character count of each file
+(`len()` of the decoded text, which is what `foundation.py`'s caps count; `wc -c` counts bytes and reads
+higher on these documents by the multi-byte characters they carry). Every kernel and keyed document is
+over the per-document cap, and the block gap is 94.5k. Revisions 21 to 29 added the four per-system
+adapter documents (`gmail.md`, `calendar.md`, `telegram.md`, `payments.md`), the register of open
+decisions in `conformance.md`, and `migration.md`; revision 29 merged `scenarios_extended.md` back into
+`scenarios.md`, which is unkeyed, so that merge moved no budget. The full table on revision 30:
+
+| Document | Characters | Reading-list role on revision 30 | Over the per-document cap |
+|---|---|---|---|
+| `principles.md` | 13.5k | kernel | yes |
+| `work_model.md` | 69.2k | kernel | yes |
+| `gates_and_workflows.md` | 51.7k | kernel | yes |
+| `authority_model.md` | 18.7k | keyed | yes |
+| `failure_posture.md` | 23.5k | keyed | yes |
+| `data_model.md` | 33.7k | keyed | yes |
+| `vocabulary.md` | 85.2k | keyed | yes |
+| `conformance.md` | 31.6k | keyed (itself) | yes |
+| `adapters.md` | 76.1k | keyed (also keyed to itself) | yes |
+| `github.md` | 46.2k | keyed (also keyed to itself) | yes |
+| `gmail.md` | 49.4k | keyed (also keyed to itself) | yes |
+| `calendar.md` | 43.8k | keyed (also keyed to itself) | yes |
+| `telegram.md` | 79.5k | keyed (also keyed to itself) | yes |
+| `payments.md` | 73.7k | keyed (also keyed to itself) | yes |
+| `scenarios.md` | 21.4k | companion, **unkeyed** | — |
+| `workflows.md` | 43.1k | companion, **unkeyed** | — |
+| `migration.md` | 70.6k | companion, **unkeyed** | — |
+
+The budget decision is unchanged and still the operator's;
+`TestRealDocumentBudget::test_real_documents_fit_reading_block_budget` remains the expected failure
+that records it, `strict=True`, with these figures in its reason.
+
+The kernel was 39.0k of the 40k block after revision 8, still under it and with less room than before;
+`data_model.md` grew most, carrying the record-usage contract's two tables. Revision 8 wrote content the
+mining showed was settled and deliberately did not trim, on the same instruction that governed revisions 6
+and 7 — content settles before budget, and the budget pass is the operator's, run last and separately.
+
+The kernel was 35.7k of the 40k block at revision 7, so no keyed document fits beside it and each is named as omitted on
+a change that keys it. `workflows.md`, `scenarios.md`, and `scenarios_extended.md` are unkeyed because the
+review panel's revision (641744f, "restore #744 reading-list budget after review panel") removed their
+keyed rows and split `scenarios.md` to bring the block under the caps; revision 6 kept that split and the
+unkeying pending the operator's decision, and restored the content the same revision had cut from
+`vocabulary.md` (every term's definition, related terms, and banned words) and from the two kernel
+documents (the reasons under several invariants and both prior-art sections), on the operator's
+instruction that content settles before budget. `test_foundation.py::TestRealDocumentBudget::test_real_documents_fit_reading_block_budget`
+is marked expected-to-fail with that reason until the budget pass; the other two budget tests
+(`status.md` never selected; scenarios and workflows never selected) pass. Whether to key
+`workflows.md`, `scenarios.md`, `scenarios_extended.md`, and `data_model.md`, and how to bring the
+kernel and `vocabulary.md` under the caps (cut, split, or amend the caps), is the operator's budget
+decision.
+
+## Revision (2026-09-06): general defect — a merged hook, checker, or policy is inert in every branch that forked before it
+
+Recorded while merging `origin/main` into `feat/foundation-p1-docs` (PR #745) on the operator's instruction
+to bring the branch current so hooks landed on `main` actually protect the agents working here.
+
+**The defect, stated generally.** A hook, checker, or policy that lands on the default branch protects
+only sessions whose checkout descends from the commit that added it. A long-lived branch forked earlier
+carries neither the file nor the registration that wires it in — `.claude/settings.json`'s hook list is
+data in the tree, not a runtime default — so every worktree cut from that branch runs with the guarantee
+silently absent, and nothing in the session announces the gap: the agent's brief still says the rule
+holds, because the rule is stated as an instruction, not as a checked precondition. The failure surfaces
+only when someone violates the very thing the merged mechanism was built to catch, and it is caught by
+hand instead.
+
+**Instance 1 (this one): `.claude/hooks/git_stash_guard.py`.** Added on `main` and registered in
+`main`'s `.claude/settings.json` by PR #753 (merged 2026-09-05, commit `f75d23a`). `feat/foundation-p1-docs`
+forked at `295b025d`, before that merge: the hook file was absent from every worktree branched off it and
+`.claude/settings.json` there carried zero references to it. Three separate agents working on this branch
+ran `git stash` despite an explicit prohibition in their briefs; each caught and reverted it by hand before
+the merge closed the gap. Verified directly: before the merge, `.claude/hooks/git_stash_guard.py` did not
+exist in a worktree off `origin/feat/foundation-p1-docs`, and `.claude/settings.json` there had no
+`git_stash_guard` reference. After merging `origin/main` (commit `f3008f4`, 19 commits ahead, listed
+below), both are present, and a direct invocation of the hook's PreToolUse contract
+(`{"tool_name": "Bash", "tool_input": {"command": "git stash"}}` on stdin) returns exit code 2 with a
+`permissionDecision: "deny"` refusal naming the shared-stash hazard and the WIP-commit remedy — confirmed
+live, not merely installed. (A raw `cd <worktree> && git stash` run from an unrelated agent process does
+**not** exercise this at all: PreToolUse hooks are dispatched from the invoking Claude Code process's own
+project root, not from a shell's working directory, so testing the guard requires an agent actually rooted
+in the target checkout — a distinction this pass got wrong on the first attempt and caught before
+reporting it.)
+
+**Instance 2 (already documented, different domain): the deployment checkout.** `CLAUDE.md`'s
+"Deployment-checkout freshness (daemons)" section names the same shape one level down the stack: a merged
+fix to a daemon's code does nothing until `~/ateles-rc-src` or `~/neotoma-rc-src` — the dedicated checkout
+that daemon actually runs from — is updated, per `lib/daemon_runtime/checkout_drift.py` and the incidents
+it cites (ateles#339, #361, and the 2026-08-09 `~/ateles-rc-src` case, 3 ahead / 14 behind, that kept
+ateles#401 off the running daemon). That section is about a *deployment* checkout falling behind a merge;
+this one is about a *development* branch forked before a merge that never catches up. Same shape — the
+guarantee lives on the default branch and the branch or checkout doing the work is a snapshot that does
+not automatically inherit it — different axis (interactive branch age vs. deployed checkout freshness) and
+different remedy mechanics (there is no `ATELES_ENFORCE_*` flag for branch staleness; a hook cannot make a
+forked branch retroactively contain itself).
+
+**No mechanism is proposed to fix this.** The remedy that exists today is procedural, not mechanical:
+merge `origin/main` into a long-lived branch on a cadence (not only at close-out), and after any such
+merge, re-verify that a claimed protection actually fires — through the real dispatch path, as above —
+rather than assuming its presence in the tree is sufficient. A `--check` script could assert that a
+branch's `.claude/settings.json` hook list is a superset of `origin/main`'s, but none exists, and this
+revision does not add one; it names the gap so the next long-lived branch does not rediscover it by
+running the prohibited command three times.
+
+**What else `origin/main` carried that this branch lacked**, `git log --oneline
+origin/feat/foundation-p1-docs..origin/main` before the merge (19 commits; oldest first):
+`2305624` feat(app): count the task facets across the backlog, not the loaded page (#691);
+`0c9cdf9` fix(apis): resolve a PR's parent by parentage, not GitHub's auto-close verbs (#690);
+`31ab457` fix(swarm): route review findings to Cicada, not retired Gryllus + add roster lint (#341);
+`e5e163c` fix(apis): route systemic findings to a live agent; canonicalize assigned_to (#682) (#700);
+`b81cd50` fix(app): state the backlog total on every list, not the page size (#701);
+`3e73e46` feat(app): search the whole task backlog from the Tasks page, server-side (#703);
+`6f6870b` fix(tyto): pin the session language from locale_profile; make the VAD layer actually load (#707);
+`8d452aa` fix(turdus): store entity fields flat — a nested "snapshot" is silently dropped (#698);
+`d4c1984` fix(tyto): recover from a stalled transcription socket instead of needing a restart (#713);
+`a9b5187` fix(apis): persist a re-dispatched lens verdict, not just post it (#452);
+`7ca1e7a` fix(apis): resolve the parent issue on /confirm-gates-clear, and find it (#390) (#722);
+`dd46c46` fix(gating): make operator_only never auto-executable (#715) (#724);
+`8f2db88` fix(tyto): degrade the plausible-language set to the spoken set, not to the pin;
+`496bab3` docs: persist session standing instructions where they actually bind (#711);
+`7901425` fix(apis): stop unknown assignees misrouting, and unmapped tags blocking (#732);
+`285a873` docs: persist the session's verification-discipline principles where they bind (#727);
+`ac1ce87` fix(piculet): repair the memo pipeline and gate processing on measured clarity (#746);
+`bef98ed` fix(clarity): measure language and truncation, not their proxies (#748);
+`f75d23a` feat(hooks): block stash-stack mutations, allow read-only inspection (#753).
+PR #751 (`.qta` duration fix) is not in this list because it is not on `origin/main`: its commit
+(`30e7f09`) exists only on its own branch (`fix/piculet-qta-extension`), unmerged as of this pass — this
+branch was not stale with respect to it, and the earlier assumption that #751 had landed was checked and
+found false rather than carried forward. Every commit above touches paths outside `docs/foundation/`
+(hooks, `apis`, `tyto`, `turdus`, the `app` task dashboard, `piculet`/clarity), so this branch's own
+`pytest`/vocabulary/anchor runs before this merge were exercising a stale copy of all of it, though none of
+it intersects the foundation documents themselves.
+
+**Verification after the merge.** `git merge origin/main --no-ff` from `295b025d` (branch head) with
+`f75d23a` (`origin/main` head) produced **zero conflicts** across 116 changed files — the branch's
+`docs/foundation/` work and main's `.claude/hooks/`, `apps/task-dashboard/`, and Piculet/clarity paths are
+disjoint. Merge commit `f3008f45e33dd16a7d7bb66dc738ec3fe19a5345`, pushed to
+`origin/feat/foundation-p1-docs`. Re-running the full foundation verification on the merged head:
+`check_foundation_vocabulary.py` — 0 Never hits (971 Not-for advisory hits, unchanged in kind from
+pre-merge runs); `check_foundation_anchors.py` — 0 broken links; `link_vocabulary_terms.py --check` —
+every linkable first mention linked; `pytest execution/daemons/apis/test_foundation.py -v` — **110
+passed, 1 xfailed**, identical to the pre-merge count. Nothing broke; the merge changed no foundation-doc
+outcome.
+
+## Revision 61 (2026-09-06): the rendered-interface case — checked against the admission contract and found already covered
+
+The operator's 2026-09-06 12:53 memo named a class of external system the foundation had not yet
+addressed by name: one with relatively unstructured data and no proper API, reached only by driving a
+browser and reading what it renders. This revision settles where that case fits, tested against the three
+strains the memo's mechanism raises — identity with no stable id, coverage with no deliveries, and
+read-back against a rendered view rather than an API response — plus freshness and the outbound default.
+Read on this branch at `13d799a` as the predecessor. No vendor is named anywhere in the committed text;
+the case is argued as "a system reached only through a rendered interface," generically, because the repo
+is public and the concrete system the memo names may have terms that forbid this kind of automation.
+
+**Identity and linkage: already answered, extended one step.** Obligation 3 already states that where a
+system issues no stable delivery id, that is a finding the adapter's document states rather than a key the
+adapter invents (`adapters.md#the-admission-contract`). The rendered-interface case needed the same
+reasoning applied to `external_id`, not just the dedup key, because a rendered interface commonly gives
+neither: the answer is the same non-invention, extended from the dedup key to the artifact identifier
+(`adapters.md#a-system-reached-only-through-a-rendered-interface-is-admitted-the-same-way-and-three-of-its-five-rules-were-already-answered-by-the-filesystem-case`).
+The available composite (timestamp, sender, content) is used as a stated, adapter-computed proxy for first
+sight of an item, never asserted as the system's own id, and an edit reading as a new artifact is named as
+the composite's bounded cost rather than hidden as a dedup failure. No decision opened.
+
+**Coverage: revision 34's filesystem finding transfers without change.** That revision settled, for a
+system whose delivery surface is a local filesystem, that "the listing is the coverage." A rendered
+interface is the same shape one level up: a poll asks the interface to render its current view and gets
+back exactly what it rendered, which is coverage under the existing definition
+(`vocabulary.md#coverage`) with no new rule needed. Tested and confirmed to transfer rather than assumed.
+
+**Read-back: argued, not merely cited, because principle 2 had not yet been applied to a view rather than a
+response.** Reading one's own message back in the rendered interface is a real observation of system state
+— stronger than the response code principle 2 exists to reject, because it is a read taken after the write
+rather than a claim the write call made about itself — and weaker than an API confirmation carrying an id,
+because it cannot establish delivery to the other party, only that the sending side rendered the content.
+The document states both halves rather than letting "confirmed" imply the stronger claim. No decision
+opened; this is principle 2 read for a case it did not yet have a worked example for.
+
+**Freshness: the existing derived-read definition already covers a view with no `since` parameter.**
+`freshness` is already defined as a derived read over sourcing and coverage, never a stored field
+(`vocabulary.md#freshness`), and a rendered interface's "as of" is simply the sourced time on the
+observation the last read produced — the same as every other adapter. No new mechanism, because the
+no-maintained-freshness rule was written to cover exactly this shape already.
+
+**Fragility: the one place this case adds something new.** A rendered interface that has changed its
+layout returns a page that renders successfully and simply no longer contains what the mapping looks for
+— a failure with no error and no delivery to drop, which the existing drop counter (`adapters.md#what-the-adapter-does-with-every-event`)
+cannot catch because it counts deliveries received and misplaced, and here nothing was ever delivered. The
+document now requires a second, read-time instrument for this class of adapter: a known-positive element
+the current view is expected to contain regardless of whether anything new arrived, checked on every read
+per invariant 3's planted-positive discipline
+(`principles.md#3-validate-the-instrument-before-believing-the-measurement`); its absence is a failed read
+with its own reason, counted and announced the same way a drop is, distinct from a legitimate empty result.
+This is the answer to "what is the failing artefact for a silently broken interface" — a scraper returning
+zero rows is `principles.md` invariant 1's reporting-without-binding defect in its plainest form, and the
+fix is the same instrument-validation discipline invariant 3 already states, applied to a read instead of a
+delivery.
+
+**Outbound actions: no special case, the existing fail-closed default already argues for caution.** Every
+outbound operation still names its action class under obligation 6, and an unclassified class already
+resolves to `NEVER` (invariant 5). The weaker read-back argued above is a reason an `action_policy` would
+reasonably keep such a class checkpointed or unlisted, not a reason to add a new rule — the document states
+the reason and leaves the tier to the instance's policy, as it already does for every action class. A
+read-only binding needs nothing beyond an ordinary grant that confers no send capability.
+
+**No decision opened.** Every strain the memo raised resolved to an existing rule, extended or transferred
+rather than replaced, except the read-time planted-positive instrument, which is a new requirement stated
+under the existing admission contract's obligation 1 (coverage) and invariant 3 (instrument validation)
+rather than a design decision needing the operator's choice — there was no fork in the road to register.
+Invariant 12 is satisfied by construction: no new term is introduced: "known-positive element" and
+"planted positive" reuse `principles.md` invariant 3's own vocabulary rather than coining one.
+
+**Where this landed.** `docs/foundation/adapters.md`, new section under *Admitting a new adapter* (between
+the merchant paragraph and *The admission contract* heading); `docs/foundation/conformance.md`'s header
+trailer, pointing to it; both headers' `Revised by` trailers updated to name revision 61.
+
+**Size.** Measured 2026-09-06 with `wc -c` against `13d799a` as the predecessor. `adapters.md`: 105.1k →
+115.9k (+10.8k). `conformance.md`: 74.8k → 75.3k (+0.5k). Net **+11.2k** across the two files touched;
+every other foundation document is unchanged by this pass.
+
+**Checks**, on this branch after the pass. `check_foundation_vocabulary.py`: 104 Never items, 80 Not-for
+items, **0 Never hits**, 979 Not-for advisory hits (974 on `13d799a`; the pass introduced 5, all
+pre-existing advisory patterns — `tier`, `available`, `cursor` — already common throughout `adapters.md`
+and not new collisions). `check_foundation_anchors.py`: **0 broken links**. `link_vocabulary_terms.py
+--check`: clean. `pytest execution/daemons/apis/test_foundation.py -v`: **110 passed, 1 xfailed** (the
+budget marker), identical to the pre-pass count.
+
+## Open issues and PRs this document cites
+
+As of 2026-09-03 (`gh api`): open issues #378, #423, #471, #487, #560, #561, #606, #645, #669, #682;
+open PRs #635, #686, #688, #689, #714, #719, #733, #736, #744, #745; closed #285, #698, #702 (2026-09-03,
+by #732), #724, #727. An open issue is not evidence a defect is live; each entry above says what was read.
+
+## How to regenerate
+
+1. Record `git rev-parse --short origin/main` and its date; read every file:line cited above on that
+   commit, and replace each with what is there.
+2. Re-run the greps: `NEVER` and `def write_checkpoint_brief` in `gating.py`; `PRE_IMPL_GATES`,
+   `PRE_IMPL_GATE_NAMES`, `_GATE_ORDER`; `permissive` in `grant_checker.py`; `advisory` in `proxy.py` and
+   `a2a_gateway.py`; `\.is_stub` outside the signer; `EXECUTING =`; `expir|valid_until|ttl` in the grant
+   checker; `delegated via A2A`; `continue-on-error: true` in `.github/workflows/`; `ls-tree` for
+   `task_claim`, `task_lease`, `neotoma_reachability`.
+3. Re-read prod: `workflow_definition` (all; owners named), `checkpoint_brief` (count; count at status
+   `open`; sample confidence on PLAN briefs), a 500-row `task` status sample, `agent_grant` count and
+   wildcard grants, `operator_profile` count; and, for the renames table, whether any entity of type
+   `workflow`, `passage`, `sign-off`, `action`, or `lease` exists, whether `ADDRESSED_BY` is a
+   relationship type in use, and whether task-to-issue and task-to-PR edges exist (the artifact edges);
+   for the `workflows.md` table, whether any `workflow_definition` carries `successors` or `on_fail`,
+   whether `FOLLOWS` is a relationship type in use, whether any passage of type intake exists, and
+   whether `execution/scripts/render_workflow_docs.py` exists (`ls-tree`).
+4. Re-run the single-principal sweep when the notify, approve, or checkpoint paths change; otherwise carry
+   the synthesis figure with its date.
+5. Re-fetch the state of every issue and PR in the list above.
+6. Re-run `wc -c docs/foundation/*.md`, `python3 execution/scripts/check_foundation_anchors.py`, and
+   `python3 execution/scripts/check_foundation_vocabulary.py --quiet-advisory`; re-read the registry for
+   the types in the schemas table (`list_entity_types`, and the relationship types in use); check
+   `ls execution/scripts` for the two renderers.
+7. Replace the as-of line. Never edit a figure without re-measuring it.
+
+## Revision 62 (2026-09-06): condensation ruled to be a projection — the canonical documents keep their argument
+
+The operator corrected a premise this branch had been carrying since the reading-budget work of revision 6.
+His memo of 2026-09-06 12:57, verbatim:
+
+> *"So if we turn on condensation, will we preserve the longer form documentation and just have a version
+> that we need to feed via the kernel? Or are you proposing that we condense the actual canonical
+> foundational materials as well? Because it seems to me best that we have as detailed as possible
+> documentation and only a condensed version for use cases that require it."*
+
+**The premise corrected.** The plan carried a destructive reading — "cut and split, never raise the cap" —
+under which `foundation.py`'s `MAX_BLOCK_CHARS = 40_000` and `MAX_DOC_CHARS = 12_000` were caps on the
+canonical documents, to be met by shortening them until a review prompt fit. That was never what the caps
+measured. They bound what a review prompt costs; the canonical documents are the design.
+
+**The ruling** is decision 66, argued in
+`conformance.md#what-a-review-reads-is-a-projection-of-these-documents-not-a-shortened-copy-of-them`. The
+canonical documents keep the full argument and are bounded by nothing mechanical. What a review inlines is a
+**reading projection**: generated, never authored; one entry per rule, the statement and its anchor, the
+argument left at the anchor.
+
+**The precedent, and why this is not a new mechanism.** Two already in the foundation. The *form* is
+`vocabulary.md#projection` unchanged — a stored copy of a derived read, kept where a decision must be taken
+from one read, proved equal to its source by a reconciler, of which `step_status` is the model; here a
+`--check` stands in the reconciler's place. The *direction of truth* is the render-target row this document's
+own table already holds for `render_plan_docs.py` and `render_agent_docs.py`: a canonical source authored, a
+mirror generated and held equal. Two hand-maintained editions would be principle 9's failure exactly; a
+generated one is not, because the generator is the mechanism and the check is the parity test the invariant
+asks for.
+
+**The extraction key is the conformance matrix.** `conformance_suite.md`'s matrix already pairs each rule
+with the anchor of the heading that owns it — 348 id-bearing rows in the matrix section, 354 corpus-wide as
+this document's revision-33 count records — and `check_foundation_rule_coverage.py` already fails on a
+rule-bearing heading with no row and on a row whose pointer resolves to nothing. The mapping therefore
+exists and is already maintained. Generating from it makes the suite do double duty and gives a forcing
+function worth stating: a rule missing from the matrix is also missing from what agents read.
+
+**The budgets.** Unchanged in value, re-aimed at the projection. The canonical documents' bound is editorial
+— state a rule once, argue it where stated, cite rather than restate — which invariant 12 and principle 9
+already require for reasons unrelated to size.
+
+**`TestRealDocumentBudget`.** Its `strict=True` xfail is re-aimed, not deleted. It measures the projection:
+each projected document at or under `MAX_DOC_CHARS`, each representative `reading_block()` at or under
+`MAX_BLOCK_CHARS`, no `truncated at` or `[omitted:` marker — an ordinary passing test the day
+`render_reading_projection.py` lands. Until then the marker stays, and its reason now records a missing
+generator rather than oversized prose. This is stronger than what it replaces: the old marker asserted the
+canonical documents were over a cap and left the block a reviewer actually receives — already being clipped
+by `_clip` — unmeasured. Deleting it, rather than re-aiming it, is what would have weakened the guarantee.
+
+**The generator and its check.** `execution/scripts/render_reading_projection.py`, a contract, by the naming
+convention of the two renderers it follows: reads the matrix and the anchors it points at, writes under
+`docs/foundation/projection/`, supports `--check`, and runs in `scripts/lint.sh` beside
+`check_foundation_anchors.py` and `link_vocabulary_terms.py --check`. A stale projection fails there and in
+CI, in the run that already catches a broken anchor. It did not exist when this revision was written
+(`ls execution/scripts`, 2026-09-06), which is why the budget test still xfailed at the time; revision 64
+below records it landing and the xfail coming off.
+
+**The name.** No new term. `projection` is reused under invariant 12, qualified as *reading projection* where
+the sense needs narrowing, its `vocabulary.md` entry fitting without amendment. **Condensation** is retired
+as a name for this work: it named the destructive operation the operator ruled against, and keeping the word
+for a non-destructive one would leave a term whose definition had changed under it.
+
+**Sites corrected for the destructive reading: 36** — 35 in the documents, plus the xfail marker in
+`test_foundation.py`. By document: `conformance.md` 6 (the reading-list-budget check row, the keying note,
+the register narration, the decision 33 and 35 rows, the Derived-from header), `status.md` 13 (this section
+aside), `adapters.md` 3, `payments.md` 3, `telegram.md` 3, `conformance_suite.md` 2, `workflows.md` 2,
+`gmail.md` 1, `calendar.md` 1, `authority_model.md` 1. The worst was the reading-list-budget row in
+`conformance.md#mechanical-checks-on-this-directory`: it defined the *only live check* on this question as
+firing when a canonical document exceeds `MAX_DOC_CHARS`, which made the destructive reading not a plan but
+an enforced rule — the one site where an author following the corpus would have been told, mechanically, to
+cut the design. Second worst is the `payments.md` and `telegram.md` pair of "not load-bearing and safe to
+compress" notes, which had already begun nominating specific canonical prose for deletion.
+
+The dated budget tables below are kept as the honest measurements they are, under a note saying what they
+measure and why that is no longer the artefact the caps apply to.
+
+## Revision 63 (2026-09-06): schema drift settled — four failure modes, two substrate, one design, one neither
+
+**Derived from** the operator's 2026-09-06 12:56 memo asking whether Ateles needs a foundational
+capability against schema drift or whether the fix belongs to Neotoma. `conformance.md`'s decision 67
+names four distinct failures the one word covers on this branch — undeclared-field absorption into
+`raw_fragments`, the three diverging hand-kept copies of `relationship_type` (neotoma#1972), a description
+endpoint disagreeing with a snapshot, and a registered type with no `data_model.md` row (`finding`, gap
+G15; `conversation`/`conversation_message`/`session_digest`, decision 63) — and assigns the first two to
+the substrate, the third to neither side, and the fourth to the design. Decision 68 states the
+type-registration amendment obligation the fourth mode was missing, parallel to the existing decision and
+vocabulary-term rules (`conformance.md#amending-a-foundation-document`). Three testable requirements on
+the substrate are stated under `conformance.md#what-the-design-requires-of-the-substrate-regardless-of-who-builds-it`,
+with one new conformance-suite row, DM-10b, added expected-failing (xfail) against any Neotoma checkout
+that still returns 200 on an undeclared field — this branch's own included, unmeasured for this pass since
+DM-10b is designed, not yet wired into `test_foundation.py`. The ~70,000 pre-existing rows and the
+`raw_fragments` content they already deposited are pointed at `migration.md`'s existing carrying rule
+(G25's cross-reference, no new gap number) rather than restated as a fresh requirement.
+
+This pass landed on a branch head three revisions ahead of the one it was drafted against — the
+condensation/projection pass (revision 62, decision 66) and the rendered-interface pass (revision 61)
+both landed first, taking decision 66 for an unrelated topic (the reading projection). Decisions 67 and
+68 are the renumbering after that collision; no content of either concurrent pass is touched by this one.
+
+Verification for this pass, on the rebased head: `check_foundation_vocabulary.py` — 0 Never hits (one
+introduced and fixed in the same pass: a `handoff` use corrected to `pass`, the banned term's registered
+alternative); `check_foundation_anchors.py` — 0 broken links; `link_vocabulary_terms.py --check` — every
+linkable first mention linked; `pytest execution/daemons/apis/test_foundation.py -v` — **110 passed, 1
+xfailed**, unchanged, because DM-10b is a conformance-suite design row and this pass did not add the
+corresponding `pytest` case. No decision was left open by this pass: 67 and 68 are both ruled; the
+register's only open row remains 40 in part, untouched by this pass and not its subject.
+
+## Revision 64 (2026-09-06): the reading projection generated — the measurement decision 66 deferred
+
+**Derived from** decision 66 (revision 62 above), which ruled the reading projection into existence,
+named `execution/scripts/render_reading_projection.py` as its generator, and left the measurement that
+matters untakeable because the generator did not yet exist. It exists now. This revision records what it
+generates and what the artefact measures.
+
+**What it reads.** `conformance_suite.md`'s conformance matrix, as decision 66 specified. The matrix's
+shape, read rather than assumed: rows are grouped under a `### ` heading naming the document that owns
+them; each row's first cell is its id (`WM-5`, `DM-10b`, `GW-3a`), its second the rule as a pointer, then
+setup, action, red-when, and the M/R/U/P/D class. **369 id-bearing rows** parse. Of the second cells,
+210 carry a backticked citation of a document and heading of their own; the remaining 159 are continuations —
+`the same: …`, `rule 2: …`, `obligation 3: …`, or a bare clause — which inherit the nearest preceding
+anchor within their `### ` group, exactly as the matrix reads to a person. Four rows (`VO-1` to `VO-4`)
+carry no anchor at all: they state classes of `vocabulary.md` **Never** item, and take that document as
+their home from their matrix group. **Every anchor resolves**; the generator fails closed on a dangling
+one rather than projecting a pointer to nothing.
+
+**What it writes.** `docs/foundation/projection/`, one file per canonical document plus two indexes:
+
+- `<document>.md` — that document's rules, grouped under the heading that owns each, the heading's own
+  text carried verbatim as the rule statement and linked back to the canonical anchor. The basename
+  matches the canonical document, which is what makes the file substitutable in the reading list:
+  `select_readings()` keys on paths, so a projected document drops into the same slot.
+- `conformance.md` additionally carries the reading list's own **tables**, verbatim (its prose, which
+  argues why the kernel is three documents, stays canonical). That is what makes the directory a
+  foundation root in its own right: `reading_block()` pointed at it selects the same documents and
+  inlines their projections.
+- `lenses.md` — an index by conformance class: row ids and which file holds each. An index and not a
+  second copy; a page repeating all 369 statements under a second key would be principle 9's two copies
+  with nothing holding them equal, and would be the one file over `MAX_DOC_CHARS`.
+- `README.md` — the index, with the per-file sizes against the caps, computed at generation time.
+
+**The measurement.** Taken 2026-09-06 with `render_reading_projection.py --measure` and with
+`reading_block()` over the projection as a foundation root:
+
+| Figure | Value | Cap | Verdict |
+|---|---|---|---|
+| Worst projected document (`gates_and_workflows.md`) | 10,175 | `MAX_DOC_CHARS` = 12,000 | **under** |
+| Second worst (`work_model.md`) | 10,156 | 12,000 | under |
+| Every other projected document | ≤ 8,306 | 12,000 | under |
+| Kernel-only `reading_block()` | 24,185 | `MAX_BLOCK_CHARS` = 40,000 | **under** |
+| Worst representative `reading_block()` (a `docs/foundation/` change) | 32,066 | 40,000 | **under** |
+| `truncated at` / `[omitted:` markers in any representative block | none | — | clean |
+| Whole projection set | 89,488 | — | not a block; no review reads the whole set |
+
+**What this replaces.** The kernel block a reviewer was handed over the canonical documents measured
+37,035 chars and was clipped: the kernel's three documents are 279,307 chars, `_clip` admitted 12,000 of
+each, so **12.9%** of the kernel reached the reviewer, chosen by byte position rather than by relevance —
+the first 12,000 characters of each file, with every rule after that silently gone. The projection carries
+**every rule the matrix holds**, all 369, inside the same budget with 8,000 chars of headroom. That is the
+number decision 66's argument turned on.
+
+**`TestRealDocumentBudget`.** Re-aimed as decision 66 said, and its `strict=True` xfail is **gone** — not
+deleted, discharged. The test now measures the projection: each projected document at or under
+`MAX_DOC_CHARS`, each representative `reading_block()` over the projection root at or under
+`MAX_BLOCK_CHARS`, no `truncated at` or `[omitted:` marker. A second test in the same class asserts the
+projection is *fresh* before the budget assertions read it, because measuring a stale projection measures
+the wrong artefact just as surely as measuring the canonical documents did. `pytest
+execution/daemons/apis/test_foundation.py` — **112 passed, 0 xfailed** (was 110 passed, 1 xfailed).
+
+**Where a stale one is caught.** `render_reading_projection.py --check` is wired into `scripts/lint.sh`,
+beside `check_foundation_anchors.py`, `check_foundation_vocabulary.py`, and
+`link_vocabulary_terms.py --check` — all four of which this revision also wires in, none having been in
+that script before. `--check` was verified to fail (exit 1) on six planted drifts: a hand-edited projected
+file; a canonical heading renamed so a matrix anchor dangles; a canonical heading's text edited with its
+anchor preserved; a matrix rule cell edited; a matrix row added; and a stale file left in the projection
+directory. The last is also pruned by a plain regeneration.
+
+**One finding about the matrix, reported and not papered over.** 60 rows have a rule cell that is *only*
+the anchor, with no statement beside it. For nearly all of them this is not a defect: the foundation's
+headings are written as rule statements ("a mechanism that does not bind is not a control"), so the
+statement is at the far end of the pointer, and the projection carries that heading text verbatim rather
+than a placeholder. Six rows are genuinely too terse to project usefully even so, their whole rule cell
+being a fragment that names a subject without stating a rule: `FP-16` ("reason classes"), `AU-6` ("the
+same: tenant"), `AD-9` ("identity"), `WF-4` ("`link`"), `WF-5` ("`dedupe`"), and `GM-8` ("2–7"). These are
+projected as written — paraphrasing one into a better sentence would be authoring a rule into the
+projection, which is the thing this generator must never do. They are a finding about the matrix's own
+rows, for whoever next edits `conformance_suite.md`.
+
+**No decision opened or ruled.** This revision builds what decision 66 specified; it decides nothing.
+Open rows after this pass: 40 in part.
+
+## Revision 65 (2026-09-06): host configuration ruled an extension of obligations 1 and 6, and the drift measured
+
+The operator's 2026-09-06 14:44 memo asked whether the foundation's plan to implement the GitHub adapter
+should carry a plan to configure the host holistically, so the host is compatible and appropriate for the
+adapter. This revision settles what kind of obligation host configuration is, states the required state in
+`github.md`, and measures both repositories against it. Read on this branch at `73b4c8b` as the
+predecessor; settings read the same day with `gh api` against `repos/{owner}/{repo}`,
+`.../branches/main/protection`, `.../hooks`, `.../environments`, and `.../actions/permissions`. **Read
+only — this pass changed no setting.**
+
+**The ruling: not a seventh obligation.** The argument for one is that the adapter's mapping claims an
+`APPROVE` is a sign-off and a merge is a gated action, and neither holds if the repository lets anything
+merge unreviewed. The design already answered that, and answered it the other way: `github.md`'s
+`branch_protection_rule.*` row states that *a required check configured at the host is not a step, and a
+change here never alters what a batch requires*, and the identity rule resolves an actor through the
+credential binding rather than through the host's approval count. A repository with no protection at all
+still produces sign-offs that are the step owners' own. So the mapping does not rest on host protection
+state and cannot be falsified by it, and a seventh obligation would state a dependency the design
+deliberately does not have. Host configuration extends **obligation 1** inbound and **obligation 6**
+outbound, both of which already have failing artefacts.
+
+**Obligation 1's extension, and why its existing instrument cannot cover this.** Obligation 1 is checked by
+the drop counter — a number that should be zero and rises when the enumeration is wrong. An event the host
+is not configured to send is never delivered, so it is never dropped, so the counter never moves. The
+design already names this shape twice, for `installation` and for `meta` ("an adapter that stops receiving
+looks exactly like a host with nothing happening"), and never carried it back to the contract. The
+extension is a **subscription reconciliation**: the event types the inbound tables mark handled, compared
+against the event types the host's delivery configuration carries, with any handled row whose event is
+unsubscribed reported as a gap. It runs at admission and on every `meta` delivery. This is revision 61's
+read-time planted-positive instrument, applied to a webhook.
+
+**Obligation 6's extension.** The failing artefact already exists and needed nothing added: a merge
+arriving as `pull_request.closed`-merged with no action entity for it, which `github.md`'s pull-request
+table already classes as a defect to surface. What the extension supplies is that this defect is
+*predictable from configuration* — auto-merge, an unreviewed-merge path, or an exemption for the host's
+highest role each produce it — so the check moves from after-the-fact detection to admission.
+
+**And a third thing configuration governs that belongs to neither obligation:** whether a failure can be
+reported at all. A workflow whose token cannot write an issue cannot surface the escalation it exists to
+raise. No adapter is involved, so it is not an adapter obligation, but the design depends on it and there
+was nowhere else that read it.
+
+### The drift, measured 2026-09-06
+
+Required state is `github.md#what-the-host-must-be-configured-to-be-for-this-mapping-to-mean-what-it-says`.
+`ateles` and `neotoma` are both public and both were brought to `1 review + dismiss_stale +
+enforce_admins` earlier the same day; those three rows are recorded as met, and the rest is what remained.
+
+| Setting | Design requires | `ateles` | `neotoma` |
+|---|---|---|---|
+| required approving reviews (default branch) | ≥ 1 | 1 — **met** | 1 — **met** |
+| dismiss stale reviews | on | on — **met** | on — **met** |
+| enforce for the highest role | on | on — **met** | on — **met** |
+| required status checks | every check a sign-off cites as evidence, named | **one** context only, the secret/PII scan; the package, daemon, and agent-config lanes are not required | **none at all** — required status checks are not enabled, while eleven check names run on `main` |
+| strict (up-to-date before merge) | off | off — **met** | n/a (no required checks) |
+| force pushes / branch deletion on default | both blocked | both blocked — **met** | both blocked — **met** |
+| auto-merge at the repository | disabled | disabled — **met** | disabled — **met** |
+| delete branch on merge | off | off — **met** | off — **met** |
+| environment protection admits every ref its workflow runs on | yes, tags included where the trigger is a release | no environments — **n/a** | **gap**: `github-pages` sets `custom_branch_policies` with two branch entries (`dev`, `main`) and **no tag policy**, while its workflow triggers on `release: published`, which runs at a tag ref |
+| environment reviewers | none, where the action gate already gates | n/a | `production` has no protection rules — **met**; `github-pages` has a branch policy only, no reviewers — **met** |
+| webhook subscription = the handled rows | exactly | **six** event types subscribed (`check_suite`, `issues`, `issue_comment`, `pull_request`, `pull_request_review`, `push`); the inbound tables mark rows handled for `check_run`, `status`, `release`, `create`/`delete`, `deployment`, `deployment_status`, `repository`, `branch_protection_rule`, `repository_ruleset`, `installation`, `member`/`membership`/`team`, and **`meta`** — none of which are subscribed | **identical six**, same gap |
+| webhook secret set | yes | set — **met** | set — **met** |
+| webhook content type / SSL | JSON, verification on | JSON, `insecure_ssl` 0 — **met** | JSON, `insecure_ssl` 0 — **met** |
+| `meta` subscribed | always | **not subscribed** | **not subscribed** |
+| default workflow token permissions | read | read — **met** | read — **met** |
+| every workflow declares `permissions` | required | **one of seven does not**: `lanius-stale-issues.yml` declares none at any level and so inherits the repository default of read. It writes through a Neotoma token rather than `GITHUB_TOKEN`, so it is not currently blocked — but it has no route to open an issue about its own failure. The other six declare one, `loxia-pr-review.yml` at job level | not audited this pass; fifteen workflows, recorded as unmeasured rather than as met |
+| repository merge settings | squash, merge, and rebase all permitted | all three permitted; the design does not require squash-only, so **no drift** — but see the finding below | same |
+
+### Three findings this pass turned up that no entry above had recorded
+
+**One: `neotoma/main` requires no status check at all.** The protection endpoint returns HTTP 404 for
+required status checks, while eleven distinct check names run on `main` — including `security_gates`,
+`contract_parity`, and `baseline`. So a `qa` or `security` sign-off citing any of them cites a run the
+branch never required, and a red one blocks nothing at the host. This is the single largest drift measured
+and it is the one obligation 1's own reasoning most directly names: evidence a sign-off cites that the
+host does not require can simply be absent at merge.
+
+**Two: `meta` is subscribed on neither repository, and it is the one event that reports this whole class of
+drift.** `github.md`'s `meta` row exists precisely so an adapter learns that its subscription changed
+underneath it. Not subscribing to `meta` means the instrument for detecting a narrowed subscription is
+itself missing from the subscription — the reporting-without-binding shape applied to the reporting
+mechanism. Whoever narrows the hook next will produce silence, and nothing will say so.
+
+**Three: the subscription gap is larger than the release gap and had not been stated anywhere.** Six event
+types are subscribed against roughly a dozen the inbound tables mark handled. `check_run` and `status` are
+both unsubscribed while `check_suite` is subscribed, so the suite rollup arrives and the finer grain does
+not — which happens to be survivable, since the tables treat the suite as the rollup. `release`,
+`deployment`, and `deployment_status` are not subscribed at all, so `workflows.md`'s `release` step has no
+inbound path on either repository. None of this was measurable before, because the design had never stated
+what the host must be configured to send. That is the memo's real answer: the plan was needed less for the
+settings than for the specification the settings could be measured against.
+
+**The `github-pages` tag gap, confirmed by reading both halves.** `deploy-pages-site.yml` triggers on
+`release: published` and names `environment: github-pages`; the environment's deployment branch policy
+carries `custom_branch_policies: true` with entries for `dev` and `main` and no tag entry. A release
+publishes at `refs/tags/v*`, which matches neither entry, so the job is rejected at the environment gate
+before it runs — the ~1s failure of every release since v0.21.0 (neotoma issue #2146). The design row this
+violates is the deployment row: a deployment that never happened reads as quiet, which is worse than one
+that failed.
+
+**On merge settings, and the branch that was deleted.** The design does not require squash-only, so all
+three merge methods being permitted is not drift. `delete_branch_on_merge` is off on both repositories,
+which is what the standing rule and the design's own "a superseded effect stays readable" both want — so
+the branch deleted by an automated merge earlier today was deleted by the **merging command**, not by the
+repository setting, and the repository setting would not have prevented it. Recorded so the fix is aimed at
+the command rather than at a setting that is already correct.
+
+**Decision opened.** **Decision 69**: whether a difference between the required host state and the host's
+actual state, found at admission, **blocks the grant's governance write** or is an ordinary finding on the
+arch review step that the operator may accept. The section states the two poles — merge-permitting
+configuration blocking, retention not — without ruling the general case, because the choice is a posture
+about how much the operator wants admission to stall on a host they control, and that is theirs. Neither
+side is derivable from the documents: fail-closed (invariant 5) argues for blocking, and principle 6's
+no-second-gate argues that the review step's own finding severity already decides it.
+
+**Invariant 12.** No new term is introduced. "Subscription reconciliation" names an instrument, and
+"required host state" names a specification; both use `vocabulary.md`'s existing words. Four `NEVER` hits
+the first draft produced — `worked`, `admin`, `push`, and `raises an escalation` — were rewritten rather
+than suppressed.
+
+**Where this landed.** `docs/foundation/github.md`, a new section *What the host must be configured to be,
+for this mapping to mean what it says*, placed after the outbound table and before *What this document does
+not decide*, which now points here for the drift. `docs/foundation/adapters.md`, one paragraph inside *The
+admission contract* recording the rejected seventh obligation and where it went, beside the two candidates
+already rejected there. Both headers' trailers updated. It landed in `github.md` rather than
+`migration.md` because it is not migration work: it states what a host must be for an adapter's mapping to
+hold, which is a standing property of the keyed document that maps the host's events, not a one-time
+carrying of a record from one set of names to another.
+
+**Size.** Measured 2026-09-06 with `wc -c`, against `73b4c8b` as the predecessor. `github.md`: 46,628 →
+63,147 (+16.5k). `adapters.md`: 115,919 → 117,966 (+2.0k). Net **+18.6k** across the two design documents
+touched; every other foundation document is unchanged by this pass, and `status.md` grows by this section.
+
+**Checks**, on this branch after the pass. `check_foundation_vocabulary.py`: **0 Never hits**.
+`check_foundation_anchors.py`: **0 broken links**. `link_vocabulary_terms.py --check`: clean.
+`render_reading_projection.py --check`: regenerated and clean.
+`pytest execution/daemons/apis/test_foundation.py -v`: **112 passed, 0 xfailed**.
+
+## Revision 66 (2026-09-06): agent identity across external systems — the credential asymmetry, decision 69, and where the checkout stands
+
+The operator's 2026-09-06 14:44 memo asked how the presumption that every agent gets a GitHub identity
+relates to the adapter work, whether AAuth identities are handled consistently with host-based ones, and how
+the design wants to approach agent identity across every external system it has an adapter for. This
+revision records what the design already answered, what it settled, and what the checkout does. Measured on
+this branch the same day; nothing else was re-measured for it.
+
+**Most of the question was already answered, and the design pass says so rather than restating it.** The
+credential rule — the actor of an inbound event is a credential, never a principal, resolved through the
+binding (`adapters.md#what-the-adapter-does-with-every-event`); a credential binds many-to-one to a
+principal and is never the principal itself (`authority_model.md#principals`) — settles that an agent's
+identity is not something an external system holds. What the pass added is the **asymmetry**: where a
+system issues a per-agent credential the binding is one-to-one and attribution is externally visible; where
+it issues none the swarm acts under a shared credential and attribution is carried only in the record
+(`adapters.md#per-agent-credentials-where-the-system-issues-them-a-shared-credential-where-it-does-not`).
+
+**AAuth needed establishing, not inventing.** It is already one of the credential kinds
+`authority_model.md#principals` enumerates, with its binding stated precisely: the `sub` is an agent's
+credential, binding to the `agent` that presented it and reaching the human principal only through that
+agent's `principal_binding`; grants are matched on `(sub, iss)`. So AAuth is the swarm's own per-agent
+credential and a host account is another system's — two credentials, one identity, consistent by
+construction. No AAuth-to-host mapping exists to maintain, and none was added.
+
+**Decision 69, opened and ruled in this pass.** A per-agent credential is an **obligation** where the
+external system issues one; a shared credential there loses external attribution, makes revocation
+all-or-nothing, and leaves the host unable to carry a sign-off at all — a verdict-shaped delivery from a
+shared credential resolves to no single agent, so its honest disposition is an observation. Where the system
+issues none, the shared credential is admitted and the **outbound artifact carries a mark** disclosing that
+an agent acted, its absence a refusal on the same footing as a credential-less operation, its wording the
+operator's policy rather than the design's.
+
+**The binding needed no new home.** It is a capability slot on the `vendor_binding` for the system's
+instance, on the pattern decision 42 already established for a harness preference and a model tier; the
+grant stays matched on the credential, and the credential's value stays a secret the binding names rather
+than carries.
+
+### What the checkout does, measured on this branch 2026-09-06
+
+| The design's statement | What the checkout does | Instrument |
+|---|---|---|
+| every agent acting on a system that issues per-agent credentials holds its own (decision 69) | **partial, and shared by default.** Seven distinct GitHub credential env names exist across the tree — `ATELES_AGENT_PAT` (57 references), `NEOTOMA_AGENT_PAT` (20), `PAVO_AGENT_PAT` (20), `LANIUS_AGENT_PAT` (4), `VANELLUS_AGENT_PAT` (3), `PHOENICURUS_AGENT_PAT` (2), `CORVUS_AGENT_PAT` (1) — against 18 daemon directories and 94 skill roles, and `ATELES_AGENT_PAT` carries the majority of the references. So a minority of roles have their own host credential and the rest share one | `grep -rhoE "[A-Z0-9_]+_AGENT_PAT" --include="*.py" --include="*.example" \| sort \| uniq -c`; `ls execution/daemons`; `ls .claude/skills` |
+| the swarm's own internal credential is per agent | **yes, and this is the built case.** `lib/daemon_runtime/aauth_signer.py` loads a per-role keypair from `ateles-private/keys/<name>.jwk.json`, and a missing key is a stub rather than a silent fallback to another agent's | `lib/daemon_runtime/aauth_signer.py` |
+| the record's own credential resolves to the writing principal | **no.** `NEOTOMA_BEARER_TOKEN` appears 228 times and is one shared bearer, which is the shape `authority_model.md#attribution` names outright: "a shared bearer that never identifies its caller is not attribution." The signed path exists beside it (`neotoma_signed.py`, `NEOTOMA_AAUTH_PRIVATE_JWK_PATH`) and does not displace it | `grep -rhoE "NEOTOMA_BEARER_TOKEN" --include="*.py" lib execution/daemons \| wc -l` |
+| an outbound effect under a shared credential carries a mark disclosing that an agent acted | **unbuilt.** No adapter composes such a mark and no check refuses an unmarked send; the chat and mail paths send under the operator's own account and address with nothing in the artifact saying so | this branch; no token for such a mark exists |
+| a shared credential's revocation reach is understood as all-or-nothing | **stated nowhere in code.** The reach is a property of the arrangement rather than a thing the checkout records | — |
+
+**One decision opened and ruled (69).** No figure above is carried from an earlier revision; each was
+measured by the instrument in its row on this branch on 2026-09-06.
