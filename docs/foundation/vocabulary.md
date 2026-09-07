@@ -1698,7 +1698,7 @@ the class (the [halt](#halt) is the swarm-wide state, and this is one [step](#st
 lapse clock beside `lapse_cap`.
 
 ### underdetermined_inputs
-**Definition:** the reason class raised when a [step](#step)'s required read resolved to no instance — the
+**Definition:** the [reason class](#reason-class) raised when a [step](#step)'s required read resolved to no instance — the
 record holds none and no [adapter](#adapter) could import one — so the step cannot be entered on what the
 [task](#task) states and what the record holds together.
 Raised at [hydration](#hydration), before the step opens, so no [lease](#lease) is spent on work that was
