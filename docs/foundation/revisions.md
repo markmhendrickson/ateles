@@ -35,8 +35,8 @@ documents adds a row to each document's table, under one number.
 **The next free revision number is established by a sweep, never by reading this file.** The sweep is over
 the remotes — the maximum `revision N` on any open branch's copy of any document here — for the same reason
 `conformance.md`'s decision numbering states it: concurrent branches assign numbers the file on your own
-branch cannot see. As of 2026-09-07 that sweep over all 92 open pull-request branches gives 68, so the next
-free number is 69, which this pass takes.
+branch cannot see. As of 2026-09-07 that sweep over every open pull-request branch gives 70 (PR #784), so the next
+free number is 71, which this pass takes.
 
 ## `authority_model.md`
 
@@ -79,6 +79,7 @@ free number is 69, which this pass takes.
 | 37 | the testability pass of 2026-09-06 | refusal 1's mechanical half, the field allowlist on the grant |
 | 38 | the event/signal/delivery pass of 2026-09-06 | "Every inbound signal, and what it becomes" and its table headers, Linkage, Identity, and the disposition sentence renamed to `event`, matching `github.md`'s and `gmail.md`'s precedent; `signal` kept only in its ordinary-English sense |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
+| 71 | the substrate-lifecycle pass of 2026-09-07 | decision 78 opened here, beside 45 and 55 — whether the instance of the record serving a swarm is an external system when the swarm operates it, and what writes the record of an operation that suspends the record; the four dispositions stated, none chosen, no mechanism proposed and no term introduced |
 
 
 ## `conformance.md`
@@ -118,6 +119,7 @@ free number is 69, which this pass takes.
 | 67 | the naming pass of 2026-09-06 | : decisions 72 and 73 opened and deliberately left **open** — 72, whether `sign-off` names its record neutrally when `signed` is one of its own three verdict values, argued in `vocabulary.md`; 73, whether a term should prefer a single word and what exception admits the qualified compounds invariant 12's no-overlap half depends on, argued under invariant 12 in `principles.md`. Both would execute as a corpus-wide rename of files PRs #766, #767, and #770 are amending, so both are to be ruled and executed as one pass after those merge; 70 and 71 are assigned on those branches and left unused here. The stale "next number" line, wrong on each of the four occasions it has been checked, is corrected to 74 and given a standing caveat to read the table instead. Open rows after this pass: 72 and 73. |
 | 68 | the decision-70 ruling of 2026-09-06 | decision 70 moved from open to ruled — the `project` scoping key on `workflow` and `batch` and the planning level of decision 57 are two concepts sharing one word; the planning level keeps `project`, the key is renamed `declaration_scope`, and **declaration scope** is added to `vocabulary.md` under invariant 12's overlap half, swap-tested against `instance`, `domain`, and `tenant`; a `project` entry added beside it stating the planning sense and its Never for the scoping sense; `migration.md`'s G20 restated — the word collision closed, the remaining question narrowed to whether an instance runs one declaration scope or several; the derivation of a task's scope left as a gap in `conformance_suite.md` with the ascent removed as a candidate answer |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
+| 71 | the substrate-lifecycle pass of 2026-09-07 | decision 78 registered as **open**, argued in `adapters.md`; the number established by a sweep over all open pull-request branches, which gives 77 as the maximum assigned (PR #784) and 78 as the next free |
 
 
 ## `conformance_suite.md`
