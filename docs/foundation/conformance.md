@@ -568,6 +568,26 @@ sequencing behind those PRs bound only 72. **The open row: 72.**
 
 **Decisions 37 to 41 were ruled by derivation on 2026-09-06 and held for the operator's veto; the operator reviewed all five the same day and upheld them.** Nothing in those rows or in their rulings changed; the review is recorded here so that the window is known to have closed by a decision rather than to have lapsed.
 
+**This copy of the register is the assembled union of every branch's, and that is what makes it usable
+as a base.** Before the assembly of 2026-09-07 no branch carried every decision at its newest ruled state:
+the newest rows sat on separate unmerged branches that could not see each other, so a reader picked a branch
+and got whichever subset it happened to hold. Four wrong readings of "what is open" came out of that in one
+day, one of them a brief that would have reversed two researched rulings. The rows below were assembled by
+taking, for each decision, the state written by the commit that last touched that row, over every branch
+carrying a copy — not the branch with the most rows and not the one named for the subject. Where two
+branches held one row in different states the later commit won, and no row was resolved by choosing between
+two rulings: the only pair that looked like a conflict, decision 74's, was one ruling at two points in its
+own rollout, and the completed statement is the one below. Decisions 1 to 12 have no row on any branch and
+never had one; the register has always begun at 13, and the numbers below 13 are not gaps to be filled.
+
+**The rows open as of this assembly are 72, 76, 77, and 78, and nothing else.** 72 is being ruled in its own
+change, which renames the record across the corpus and cannot land as a register edit — until it does, this
+row stays open and its pointer resolves to the section as currently written. 76, 77, and 78 are genuinely
+open and were registered, not ruled, by the passes that opened them. Every other row from 13 to 78 is ruled.
+A document that still defers to any of them as open is stale against this table, and the table is what a
+reviewer reads.
+
+
 **Decisions 31, 33, and 42 are argued under headings of their own in authored companions** — 31 and 42 in
 `migration.md`, where the migration they bear on is designed, and 33 in `workflows.md`, where the Stages
 lines it concerns are written; the register rows above point at them.

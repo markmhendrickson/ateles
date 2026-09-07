@@ -36,8 +36,11 @@ documents adds a row to each document's table, under one number.
 the remotes — the maximum `revision N` on any open branch's copy of any document here — for the same reason
 `conformance.md`'s decision numbering states it: concurrent branches assign numbers the file on your own
 branch cannot see. As of 2026-09-07 that sweep over all 92 open pull-request branches gives 68, so the next
-free number is 69, which the front-matter rollout takes; later sweeps the same day give 69, 70 and 71, and the
-several-instances, substrate-lifecycle and register-assembly passes take 70, 71 and 72 in turn.
+free number is 69, which the front-matter rollout takes. Later sweeps the same day, as each pass was assembled
+onto this base, give the several-instances pass 70 and 73, the substrate-lifecycle pass 71 and 74, the
+decision-73 ruling 72, and this register-assembly pass 75 — so the next free number is **76**. Those numbers
+were assigned on branches that could not see each other, which is the condition the sweep exists for, and the
+decision-72 verdict pass is still unmerged and will take a number this file cannot yet name.
 
 ## `authority_model.md`
 
@@ -124,6 +127,7 @@ several-instances, substrate-lifecycle and register-assembly passes take 70, 71 
 | 72 | the decision-73 ruling of 2026-09-07 | register row 73 moved from **open** to **ruled**, with the rejected single-word preference and the three grounds recorded on the row; the naming-pass narrative's closing count of open rows corrected from 72 and 73 to 72 alone, and its sequencing note narrowed, the ruling having turned out to need no rename |
 | 73 | the several-instances pass of 2026-09-07 | decisions 76 and 77 registered; 77 argued here, in `#scope`'s neighbourhood — a document outside the directory that six documents in it cite and two defer live decisions to |
 | 74 | the substrate-lifecycle pass of 2026-09-07 | decision 78 registered as **open**, argued in `adapters.md`; the number established by a sweep over all open pull-request branches, which gives 77 as the maximum assigned (PR #784) and 78 as the next free |
+| 75 | the register-assembly pass of 2026-09-07 | the register assembled as the union of every branch's copy — decisions 73, 74, 75, 76, 77, and 78 brought onto one base, each row taken at the state written by the commit that last touched it; rows 13 to 78 complete with no gaps, 62 ruled and four open (72, 76, 77, 78); the assembly rule and the current open set stated in `conformance.md`'s register narrative; decision 72's ruling deliberately not carried, because it is a corpus-wide rename whose row points at anchors that rename creates |
 
 
 ## `conformance_suite.md`
