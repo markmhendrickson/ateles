@@ -36,8 +36,8 @@ documents adds a row to each document's table, under one number.
 the remotes — the maximum `revision N` on any open branch's copy of any document here — for the same reason
 `conformance.md`'s decision numbering states it: concurrent branches assign numbers the file on your own
 branch cannot see. As of 2026-09-07 that sweep over all 92 open pull-request branches gives 68, so the next
-free number is 69, which the front-matter rollout takes; a later sweep the same day gives 69, and the
-several-instances pass takes 70.
+free number is 69, which the front-matter rollout takes; later sweeps the same day give 69, 70 and 71, and the
+several-instances, substrate-lifecycle and register-assembly passes take 70, 71 and 72 in turn.
 
 ## `authority_model.md`
 
@@ -81,6 +81,7 @@ several-instances pass takes 70.
 | 37 | the testability pass of 2026-09-06 | refusal 1's mechanical half, the field allowlist on the grant |
 | 38 | the event/signal/delivery pass of 2026-09-06 | "Every inbound signal, and what it becomes" and its table headers, Linkage, Identity, and the disposition sentence renamed to `event`, matching `github.md`'s and `gmail.md`'s precedent; `signal` kept only in its ordinary-English sense |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
+| 71 | the substrate-lifecycle pass of 2026-09-07 | decision 78 opened here, beside 45 and 55 — whether the instance of the record serving a swarm is an external system when the swarm operates it, and what writes the record of an operation that suspends the record; the four dispositions stated, none chosen, no mechanism proposed and no term introduced |
 
 
 ## `conformance.md`
@@ -122,6 +123,7 @@ several-instances pass takes 70.
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
 | 72 | the decision-73 ruling of 2026-09-07 | register row 73 moved from **open** to **ruled**, with the rejected single-word preference and the three grounds recorded on the row; the naming-pass narrative's closing count of open rows corrected from 72 and 73 to 72 alone, and its sequencing note narrowed, the ruling having turned out to need no rename |
 | 73 | the several-instances pass of 2026-09-07 | decisions 76 and 77 registered; 77 argued here, in `#scope`'s neighbourhood — a document outside the directory that six documents in it cite and two defer live decisions to |
+| 74 | the substrate-lifecycle pass of 2026-09-07 | decision 78 registered as **open**, argued in `adapters.md`; the number established by a sweep over all open pull-request branches, which gives 77 as the maximum assigned (PR #784) and 78 as the next free |
 
 
 ## `conformance_suite.md`
