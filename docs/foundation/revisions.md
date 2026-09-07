@@ -39,6 +39,7 @@ branch cannot see. As of 2026-09-07 that sweep over all 92 open pull-request bra
 free number is 69, which the front-matter rollout takes; a later sweep the same day gives 69, and the
 several-instances pass takes 70. A sweep over the remotes on 2026-09-07 gives 72, so the decisions 76
 and 77 pass takes 73 — one number across all four documents it amends, per the rule above.
+A sweep over every remote branch's copy of this file on 2026-09-07 gives 79, so the harness-non-exceedance pass takes 80 — one number across both documents it amends.
 
 ## `authority_model.md`
 
@@ -55,6 +56,7 @@ and 77 pass takes 73 — one number across all four documents it amends, per the
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
 | 70 | the several-instances pass of 2026-09-07 | decision 76 opened here — whether one operator's several instances of the record are one record or several, with the three questions it holds and the dispositions the operator named; no mechanism proposed and no term introduced |
 | 73 | the decisions 76 and 77 pass of 2026-09-07 | decision 76 ruled here — one operator's several instances are several records, not one, on the accountability ground; one identity per instance; an explicit binding whose ambiguity fails closed; the non-merge rule stated rather than left to a component's discipline |
+| 80 | the harness-non-exceedance pass of 2026-09-07 | open decision 87 — whether a harness may provide a principal any capability its grant does not name, argued as a new subsection under Grants; the decision-41 rule paragraph and the section's rule list given a pointer to it |
 
 
 ## `adapters.md`
@@ -127,6 +129,7 @@ and 77 pass takes 73 — one number across all four documents it amends, per the
 | 76 | the task-assembly pass of 2026-09-07 | decision 84 opened and registered as **open** — nothing distinguishes a task with no intake batch because it is being assembled from one intake has not reached; the number established by a sweep over every open pull-request branch, which gives 83 as the maximum assigned (PR #790) and 84 as the next free |
 | 78 | the artifact-homing pass of 2026-09-07 | decision 85 opened and registered as **open** — where an artifact a principal produces about an issue or a pull request lives, its own place on the host or a body several principals rewrite; the number established by a sweep over every open pull-request branch, which gives 84 as the maximum assigned and 85 as the next free |
 | 79 | the tool-grant-grammar pass of 2026-09-07 | decision 86 opened and registered as **open** — by what grammar an `agent_grant` capability names a tool, and therefore what the two sides of decision 42's parity test compare; argued in `authority_model.md#grants` as a subsection, since the grant is where the tool dimension lives and decision 42's own home argues where a skill's mechanics go rather than how a capability is written. Candidate mapping: `docs/tool_grant_grammar.md` (linked from the subsection and the register row; not yet ratified). The number was established by a sweep over every remote branch, which gives 85 as the maximum assigned and 86 as the next free; the same sweep gives 78 as this document's maximum revision for `conformance.md`. Opened rather than ruled because the four questions it carries — the surface half's breadth, the wildcard tier, the meaning of a grant on a non-enumerable provider, and the direction of derivation — each have a cost the design does not settle between |
+| 80 | the harness-non-exceedance pass of 2026-09-07 | decision 87 registered open — the general rule behind decision 41's default-deny and decision 42's parity test, on the operator's principle |
 
 
 ## `conformance_suite.md`

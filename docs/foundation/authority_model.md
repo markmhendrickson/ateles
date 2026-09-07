@@ -251,6 +251,7 @@ registered as decisions 79 and 80 — bear on the credential form and are the op
 
 - A degraded read never synthesizes a value more permissive than success would have returned.
 - Write admission per entity type is default-deny, and the grant is the allowlist (ruled, decision 41, 2026-09-06).
+- Whether a harness may provide a capability the grant does not name is open (decision 87).
 - A parameter constraint on a write capability is a field allowlist.
 - The grant is read at every enforcement point.
 - The decision precedes the effect.
@@ -300,6 +301,9 @@ definition names, within what its grant admits (`data_model.md#what-each-actor-r
 would reopen it:** an instance whose grants prove to be ceremony — every role granted every type on its first
 day — which is the finding decision 18 names for its own default, and would argue for coarser capabilities,
 not for default-allow.
+Whether the same default-deny governs the capability surface a harness provides, rather than entity-type
+writes alone, is open decision 87
+(`#whether-a-harness-may-provide-a-capability-the-grant-does-not-name`).
 
 **A parameter constraint on a write capability is a field allowlist.** The grant that admits a principal's
 writes to a type may name the fields it may write, and a write carrying a field outside them is denied at
@@ -413,6 +417,57 @@ reporting-only; the second lets the grammar stop where enforcement stops, and ac
 a non-enforcing harness attests a prompt and not a reach. Decision 42 leaned toward the first in its cost
 clause — naming the reporting-only case rather than hiding it — without ruling the grammar that would make it
 writable.
+
+### Whether a harness may provide a capability the grant does not name
+
+**Open.** Decision 41 made write admission per entity type default-deny, with the grant as the allowlist
+(`#grants`), and decision 42 made a harness's tool list a copy of the grant's tool dimension, derived from
+it or held equal to it by a parity test. Between them sits a rule neither states: whether a harness may
+put a capability in a principal's hands that no grant named. A parity test detects that a copy has
+diverged; it does not say that the divergence was forbidden, and it reaches only what the two lists
+enumerate. The operator's principle is the stronger form — no principal runs in a harness offering reach
+beyond what its grant confers — and its consequence, that a harness configuration is therefore strict by
+default and opened only by a grant.
+
+The question is not whether the current state conforms. It does not, and the parity measurement said so:
+no agent in the roster holds parity, no grant in the instance names a tool at all, a whole MCP server's
+surface is appended to every restricted allowlist with no grant behind it, and a provider chosen by
+capacity when a runner is started gives the same grant different reach on different days. The question is
+what the design requires, so that the gap is a violation and not a vacancy.
+
+**What "may not exceed" would have to mean for a surface no one can enumerate.** Default-deny over entity
+types is tractable because the types are a finite registered set, and decision 41's allowlist is a list of
+them. A harness's capability surface is not that. Its own tools are enumerable; the shell is not, and
+neither is the filesystem a process can reach because of where it runs. A rule written as "the harness's
+list is a subset of the grant's" holds only over the enumerable part, and leaves the rest — the reach a
+process has by ambient configuration rather than by a named capability — outside the rule while looking
+covered by it. That is the same shape as a wildcard grant: a statement that appears to bound and does not.
+So the rule has to say what it demands of the non-enumerable part: that it be absent by default, that its
+presence be itself a capability a grant names, or that a harness which cannot bound it is not used for
+granted work.
+
+**Dispositions.** *Extend decision 41's default-deny to the whole capability surface*: the harness starts
+closed and the grant is the only thing that opens anything, which is the operator's own statement of it and
+the strongest form. *Make a failed or absent derivation fail closed* rather than yield a wildcard: narrower,
+changing nothing in decision 42's model, and closing only the shape `#grants` already names as fail-open —
+worth noting that this one is already forced by the rule above it, since a degraded read never synthesizes
+a value more permissive than success would have, and the loader that returns a wildcard on a failed load
+is that rule violated rather than a question. *Refuse the non-enumerable harness*: a provider whose reach
+cannot be enumerated cannot be held non-exceeding, so either it does not carry granted work or its use is
+itself a capability a grant must name — which reads the provider-dependent reach above as an authority
+question rather than a routing one. *Status quo*: parity is sufficient and the gap is an implementation
+failure, which is the reading the measurement's own framing invites and which this row exists to test.
+
+**What decides it.** Whether the record is meant to answer "under what reach did this principal execute"
+as a bound or as a report. A bound requires the closed default and makes every ambient capability a defect;
+a report accepts that some reach is recorded and unenforced, which is what decision 42's cost clause
+already contemplated for a non-enforcing harness. The operator's stated intent — to grant any possible
+access, not only tool-mediated access — is on the record as framing for this row and is not a ruling.
+
+**Sequencing.** Not implementable before decision 86. A rule that a harness may not exceed the grant is
+unenforceable while the grant grammar cannot name what the harness provides: today it cannot express the
+shell or the harness's own tools at all, so the reach that most needs bounding is the reach the rule could
+not reach.
 
 ## Attribution
 
