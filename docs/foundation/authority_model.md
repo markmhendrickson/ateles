@@ -44,6 +44,51 @@ point treats `Indeterminate` (unreachable policy source, no policy found, timed-
 for that tool; a policy check that raises is deny. `time` needs no engine: `now < granted_at + duration`
 read by the checker (OpenFGA's form).
 
+### Two examples: the same three decisions, at each of the two decision points
+
+The two decision points are asked different questions, and a reader who has only the paragraph above cannot
+tell which one answers which. The grant checker answers *may this principal do this at all* — the tuple's
+`domain` and `scope` terms, read from the `agent_grant` matched on the credential — and its enforcement
+point is the write, ahead of any effect (`#grants`). The gate answers *may this action be taken* — the
+tuple's `action` and `conditions` terms, read from the `action_policy`
+(`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`) — and its
+enforcement point is the take. A write that is also an action passes both, in that order, and the two
+examples below are one of each.
+
+**One: the grant checker, on a write to a `contact`.** An `agent` bound to an `operator` principal holds the
+`extract` step of a meeting-processing batch, and would write a `contact` the transcript named. It presents
+its AAuth `sub`; the checker matches the `agent_grant` on (`sub`, `iss`), reads `capabilities[]` and
+`param_constraints`, and reads `expires_at` against the clock. The enforcement point is the write itself,
+which is what makes the three answers different things a reader can see:
+
+| The checker returns | Because | What the enforcement point does |
+|---|---|---|
+| `Permit` | a capability names the write operation on `contact`, the fields the write carries are inside the capability's field allowlist, and `now < expires_at` | the write lands, carrying the agent that made it and the principal it acted for (`#attribution`) |
+| `Deny` | no grant matches the credential; or no capability names `contact`; or the write carries a field the allowlist does not (`#grants`) | no write is attempted — the decision precedes the effect — and the refusal names the principal, the capability, and what was refused; the agent raises one checkpoint on the task, reason `capability_denied`, and does not ask another principal to make the write for it |
+| `Indeterminate` | the record holding the grant is unreachable, or the load timed out | the enforcement point treats it as `Deny`. Nothing is written and nothing is guessed: a failed read never synthesizes a wildcard capability set, because that would grant more than success would have (`#grants`). Where the unreachable source is the record itself, this is not one denied write but the halt — no claim, no step opening, no gate decision (`failure_posture.md#the-decision`) |
+
+Two properties of this example are the ones the prose above states abstractly. The grant is read *here*, at
+this write, and not from a cache — which is why revoking the credential reaches this write and not the one
+after a restart (`#grants`). And a `Deny` here is not the end of the matter: the step stays open, and the
+checkpoint is a request the operator resolves, never a grant the agent obtained by raising it.
+
+**Two: the gate, on a `merge_pr` action from the same batch.** The `impl` step's work produced an `action`
+of class `merge_pr`, and a principal asks the gate whether it may be taken. The gate reads the class, the
+action's `confidence`, the `action_policy`, and the class's action series — no repository and no pull
+request (`gates_and_workflows.md#the-action-gate-is-pr-independent`):
+
+| The gate returns | Because | What the enforcement point does |
+|---|---|---|
+| `Permit` | the policy lists the class in `low_blast_action_types[]` and confidence is at `confidence_threshold`, or the series has cleared `recurrence_count` | the adapter takes the action, and the confirmation is the `result_ref` read back from the external system (`data_model.md#concepts`) |
+| `Deny` | the class is `operator_only`, or is listed in neither tier, or is a governance class with no policy value — each resolves to `NEVER` ahead of the confidence axis (`gates_and_workflows.md#confidence-and-three-blast-tiers`) | the action is held, not dropped: a checkpoint is written on the action, reason `gate_hold`, awaiting the principals `AWAITS` names. Resolution is not itself the permit — the gate is asked again at the take (`gates_and_workflows.md#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`) |
+| `Indeterminate` | the `action_policy` cannot be read | deny, and the unreachable source is the record, so the swarm halts rather than falling back to a policy with an empty low-blast set (`failure_posture.md#the-decision`) |
+
+The contrast the two tables are for: the checker's `Deny` and the gate's `Deny` are both refusals, and
+neither ends the work. The checker's leaves an open step and a request for a capability the principal does
+not have; the gate's leaves an action the principal *may* be permitted to take, held for a decision only a
+required approver can make. And on `Indeterminate` both collapse to the same place, because the source they
+could not read is the same record the swarm's every other decision needs.
+
 ## Principals
 
 A principal is any actor authority is attributed to: a human (an operator) or an agent. A principal is an
