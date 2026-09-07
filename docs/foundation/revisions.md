@@ -69,6 +69,7 @@ free number is 71, which this pass takes.
 | 65 | the host-configuration pass of 2026-09-06 | a seventh obligation for an external system's own configuration considered and rejected — the contract judges the mapping, and configuration extends obligations 1 and 6 instead, read at the admission task's arch review step; the case carried through in full is `github.md`'s required host state |
 | 66, **derived from** the operator's 2026-09-06 14:44 memo on agent identities across external systems | the agent-identity pass of 2026-09-06 | the general rule that an agent's identity lives in the record and an external system holds at most a credential that binds to it; the asymmetry between a system that issues a per-agent credential and one that does not; the outbound mark required where attribution cannot be external; decision 69 opened and ruled — a per-agent credential is an obligation where the system issues one; the binding declared on the `vendor_binding` on decision 42's pattern; AAuth established from the corpus as one of the credential kinds `authority_model.md#principals` already enumerates, not a second identity system |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
+| 71 | the substrate-lifecycle pass of 2026-09-07 | decision 78 opened here, beside 45 and 55 — whether the instance of the record serving a swarm is an external system when the swarm operates it, and what writes the record of an operation that suspends the record; the four dispositions stated, none chosen, no mechanism proposed and no term introduced |
 
 
 ## `calendar.md`
@@ -79,7 +80,6 @@ free number is 71, which this pass takes.
 | 37 | the testability pass of 2026-09-06 | refusal 1's mechanical half, the field allowlist on the grant |
 | 38 | the event/signal/delivery pass of 2026-09-06 | "Every inbound signal, and what it becomes" and its table headers, Linkage, Identity, and the disposition sentence renamed to `event`, matching `github.md`'s and `gmail.md`'s precedent; `signal` kept only in its ordinary-English sense |
 | 69 | the front-matter rollout of 2026-09-07 | decision 74 applied to this document — the revision chain moved verbatim into `revisions.md`, and each section stating three or more full-sentence rules opened with the list of them; no argument changed |
-| 71 | the substrate-lifecycle pass of 2026-09-07 | decision 78 opened here, beside 45 and 55 — whether the instance of the record serving a swarm is an external system when the swarm operates it, and what writes the record of an operation that suspends the record; the four dispositions stated, none chosen, no mechanism proposed and no term introduced |
 
 
 ## `conformance.md`
