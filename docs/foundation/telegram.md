@@ -660,8 +660,10 @@ is in the check.
 The general adapter rules are `adapters.md`'s and are cited here, not restated: the four outcomes, the five
 rules, the sourcing and coverage contract, and the rule that a recovery is an outbound operation like any
 other. Where inbound delivery lands is ruled there (decision 16), and *Delivery* above states what this
-channel's two mechanisms give that ruling. Whether adapters live in a repository of their own is **open
-decision 15**, untouched. The steps that take these operations are `workflows.md`'s; the gate's decision
+channel's two mechanisms give that ruling. Where the adapters' own code lives is ruled there too — decision
+15, 2026-09-05: bundled in this repository until a second consumer of them exists
+(`adapters.md#the-adapter-and-the-engine-are-two-roles`), which this channel's mapping does not turn on.
+The steps that take these operations are `workflows.md`'s; the gate's decision
 function and the checkpoint's protocol are `gates_and_workflows.md`'s; whom a checkpoint may await, and
 whether its raiser may resolve it, are `authority_model.md`'s — the second ruled 2026-09-06: the raiser does
 not resolve, the operator's self-resolution excepted and marked (decision 47, `authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`). Which rows have a built path is

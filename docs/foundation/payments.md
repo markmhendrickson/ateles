@@ -606,8 +606,10 @@ the checkpoint's protocol are `gates_and_workflows.md`'s. Whether the raiser of 
 and what quorum a payment might require, are `authority_model.md`'s, ruled 2026-09-06 and bearing directly here:
 the raiser does not resolve, the operator's self-resolution excepted and marked (decision 47, `authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`), and a
 payment class's quorum is a value of its `action_policy`, every awaited principal until written (decision 50).
-Open decision 15 (adapter packaging) is `adapters.md`'s and untouched; decision 16 (where inbound delivery
-lands) is ruled there, and for this system it means the process that receives a rail's notification may be
+Decision 15 (adapter packaging) is ruled there, 2026-09-05: adapters are bundled in this repository until a
+second consumer of them exists (`adapters.md#the-adapter-and-the-engine-are-two-roles`), and this document's
+mapping is unaffected either way. Decision 16 (where inbound delivery
+lands) is ruled there too, and for this system it means the process that receives a rail's notification may be
 shared plumbing while verifying the rail's signature against its published key, and extracting the
 per-delivery identifier, are this adapter's. Which rows have a built path is `status.md`'s. Three decisions
 this document opened are ruled in the three sections that follow.

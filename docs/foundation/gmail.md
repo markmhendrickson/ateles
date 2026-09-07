@@ -507,8 +507,10 @@ to change when the `artifact` and `action` entity types are built.
 The general adapter rules are `adapters.md`'s and are cited here, not restated: the four outcomes, the five
 rules that decide among them, the sourcing and coverage contract, and the rule that a recovery is an
 outbound operation like any other. The step lists that take these operations are `workflows.md`'s. The
-gate's decision function is `gates_and_workflows.md`'s. Whether adapters live in a repository of their own is
-open decision 15 (`adapters.md`). Where inbound deliveries land is ruled (decision 16,
+gate's decision function is `gates_and_workflows.md`'s. Where the adapters' own code lives is ruled
+(decision 15, `adapters.md#the-adapter-and-the-engine-are-two-roles`): bundled in this repository until a
+second consumer of them exists, which leaves this document's mapping unchanged either way. Where inbound
+deliveries land is ruled (decision 16,
 `adapters.md#where-inbound-delivery-lands-the-adapter-verifies-and-identifies-it-and-the-records-own-subscriptions-are-not-it`),
 and for this system it means: the process that receives the mailbox watch's notification may be shared
 plumbing, and verifying its envelope and extracting the history marker from it are this adapter's. Which
