@@ -410,6 +410,8 @@ is to read both before regenerating, never to regenerate reflexively because the
 - 19 and 22 were never assigned, and the numbers stay unused.
 - 20 and 21 were assigned, then renumbered, and two pointers were left behind.
 
+This table is the current decision-state register — ruled rows and open rows together. The heading keeps its historical name so inbound `#the-register-of-open-design-decisions` anchors keep resolving; the assembly narrative below states the single current open set.
+
 Every question the foundation marks **open** is listed here once, with a pointer to where it is argued.
 This is an index and not an argument: each row states the question in one line and names the section that
 holds it, and no row restates the reasoning, the options, or what would decide it — those live in the

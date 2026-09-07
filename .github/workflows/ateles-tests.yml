@@ -89,8 +89,15 @@ jobs:
       # roster-in-lint.sh-only, anthus (#584/#596), execution/scripts (#524/#527).
       - name: Run CLAUDE.md verification-discipline effect tests
         run: uv run --extra dev python -m pytest scripts/linters/test_claude_verification_discipline.py -q
+      # ateles#791 (qa lens): docs/foundation/** now triggers this workflow; name
+      # the foundation regression module so the green artifact is attributable
+      # without relying on it being buried inside the broader apis suite above.
+      - name: Run foundation regression tests (test_foundation.py)
+        run: uv run --extra dev python -m pytest execution/daemons/apis/test_foundation.py -q
       - name: Run foundation document checks
         run: |
+          # Same checker set as scripts/lint.sh foundation block (anchors,
+          # vocabulary Never-hits, term links, front matter, reading projection).
           python3 execution/scripts/check_foundation_anchors.py
           python3 execution/scripts/check_foundation_vocabulary.py
           python3 execution/scripts/link_vocabulary_terms.py --check
