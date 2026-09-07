@@ -17,9 +17,10 @@ connected to the work model: through an adapter that translates in two direction
 Inbound, an external event is a signal about an artifact, never an instruction to a workflow; the adapter
 writes to the record, and the record drives the workflow. Outbound, a step's effect on an external system
 is an action, taken through the action gate, whose result the adapter reads back and confirms on the
-record. Table the mapping for each system; the three largest — the code host's, the mail system's, and
-the calendar's — are their own documents (`github.md`, `gmail.md`, `calendar.md`), which this document
-points to rather than restates.
+record. Table the mapping for each system; the five largest — the code host's, the mail system's, the
+calendar's, the chat channel's, and the payment rail's — are their own documents (`github.md`,
+`gmail.md`, `calendar.md`, `telegram.md`, `payments.md`), which this document points to rather than
+restates.
 
 ## Scope
 
@@ -27,12 +28,13 @@ Every boundary between the record and a system the swarm does not own. In scope:
 the boundary, what an inbound event may become in the record, what an outbound operation is, and the
 identity, linkage, dedup, unknown, and provenance rules every adapter applies, what a new adapter must
 demonstrate before the record trusts it and who admits one, where inbound delivery lands and which part of
-receiving it is the adapter's, and one question marked **open** rather than resolved to make the document
-complete: whether adapters live in a repository of their own. Out of scope: the workflows themselves (`workflows.md`), the
+receiving it is the adapter's, and where the adapters' own code lives, which decision 15 rules: bundled
+in this repository until a second consumer of them exists
+(`#the-relationship-to-decision-15-which-this-section-did-not-resolve`). Out of scope: the workflows themselves (`workflows.md`), the
 gate's decision function (`gates_and_workflows.md`), what an adapter is granted
-(`authority_model.md#grants`), the per-system mapping in full for the three systems that have their own
-documents (`github.md`, `gmail.md`, `calendar.md`, each applying these rules to its system's whole
-surface), and the per-instance binding
+(`authority_model.md#grants`), the per-system mapping in full for the five systems that have their own
+documents (`github.md`, `gmail.md`, `calendar.md`, `telegram.md`, `payments.md`, each applying these
+rules to its system's whole surface), and the per-instance binding
 of a system to an operator, which is one binding context entity per instance — carried in these documents
 under two names, `channel_config` and `vendor_binding`, that decision 35 rules one type
 (`#whether-one-binding-type-or-two-names-an-external-systems-instance`) — resolved at runtime and never
